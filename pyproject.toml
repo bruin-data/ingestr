@@ -1,0 +1,94 @@
+[tool.pylint.master]
+init-hook = 'import sys; sys.path.append(".")'
+disable = [
+    "C0103",
+    "C0114",
+    "C0115",
+    "C0116",
+    "C0301",
+    "R0801",
+    "R0901",
+    "R0903",
+    "R0913",
+    "R1725",
+    "W0104",
+    "W0511",
+    "W0613",
+    "W0703",
+    "W1113",
+]
+max-attributes = 15
+max-branches = 15
+max-locals = 20
+extension-pkg-whitelist = "pydantic"
+jobs = 0
+
+[tool.ruff.lint]
+ignore = ["E501"]
+extend-select = ["I"]
+
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "__pycache__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+]
+
+[tool.pytest.ini_options]
+pythonpath = "."
+testpaths = "ingestr"
+ignore = ["venv"]
+addopts = "-p no:warnings -rP"
+
+[tool.coverage.run]
+omit = ["*_test.py"]
+
+[tool.mypy]
+exclude = ['venv']
+
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ingestr"
+version = "0.0.1"
+authors = [
+  { name="Burak Karakan", email="burak.karakan@getbruin.com" },
+]
+description = "ingestr is a command-line application that ingests data from various sources and stores them in any database."
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/bruin-data/ingestr"
+Issues = "https://github.com/bruin-data/ingestr/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ingestr"]
+
+[project.scripts]
+ingestr = "ingestr.main:main"

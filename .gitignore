@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__
+.env
+venv
+!.gitkeep
+.vscode/*
+.metals/*
+.coverage
+.ruff_cache
+.pytest_cache
+.mypy_cache
+pipeline_data
+dist
