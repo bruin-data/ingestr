@@ -1,8 +1,9 @@
 <div align="center">
-    <h1>ingestr</h1>
+    <img src="./resources/ingestr.svg" width="500" />
     <p>Ingest & copy data from any source to any destination without any code</p>
 </div>
 
+-----
 
 Ingestr is a command-line application that allows you to ingest data from any source into any destination using simple command-line flags, no code necessary.
 
