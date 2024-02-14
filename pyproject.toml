@@ -65,22 +65,27 @@ exclude = ['venv']
 
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-requirements-txt"]
 build-backend = "hatchling.build"
 
 [project]
 name = "ingestr"
-version = "0.0.1"
+version = "0.0.3"
 authors = [
   { name="Burak Karakan", email="burak.karakan@getbruin.com" },
 ]
 description = "ingestr is a command-line application that ingests data from various sources and stores them in any database."
 readme = "README.md"
 requires-python = ">=3.9"
+dynamic = ["dependencies"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Topic :: Database"
 ]
 
 [project.urls]
@@ -92,3 +97,6 @@ packages = ["ingestr"]
 
 [project.scripts]
 ingestr = "ingestr.main:main"
+
+[tool.hatch.metadata.hooks.requirements_txt]
+files = ["requirements.txt"]

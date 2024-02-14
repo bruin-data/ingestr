@@ -4,38 +4,37 @@ import dlt
 import typer
 
 from ingestr.src.factory import SourceDestinationFactory
-from rich import print
+from rich.console import Console
 from dlt.common.pipeline import LoadInfo
 import humanize
+from typing_extensions import Annotated
 
-app = typer.Typer(name="ingestr")
+app = typer.Typer(
+    name="ingestr",
+    help="ingestr is the CLI tool to ingest data from one source to another",
+    rich_markup_mode="rich",
+)
+
+
+console = Console()
+print = console.print
 
 
 @app.command()
 def ingest(
-    source_uri: str = None,  # type: ignore
-    dest_uri: str = None,  # type: ignore
-    source_table: str = None,  # type: ignore
-    dest_table: str = None,  # type: ignore
-    incremental_key: str = None,  # type: ignore
-    incremental_strategy: str = "replace",  # type: ignore
+    source_uri: Annotated[str, typer.Option(help="The URI of the [green]source[/green]")],  # type: ignore
+    dest_uri: Annotated[str, typer.Option(help="The URI of the [cyan]destination[/cyan]")],  # type: ignore
+    source_table: Annotated[str, typer.Option(help="The table name in the [green]source[/green] to fetch")],  # type: ignore
+    dest_table: Annotated[str, typer.Option(help="The table in the [cyan]destination[/cyan] to save the data into")] = None,  # type: ignore
+    incremental_key: Annotated[str, typer.Option(help="The incremental key from the table to be used for incremental strategies")] = None,  # type: ignore
+    incremental_strategy: Annotated[str, typer.Option(help="The incremental strategy to use, must be one of 'replace', 'append' or 'merge'")] = "replace",  # type: ignore
 ):
-    if not source_uri:
-        typer.echo("Please provide a source URI")
-        raise typer.Abort()
-
-    if not dest_uri:
-        typer.echo("Please provide a destination URI")
-        raise typer.Abort()
-
-    if not source_table:
-        print("[bold red]Please provide a source table [\red bold]")
-        raise typer.Abort()
-
     if not dest_table:
-        typer.echo("Please provide a destination table")
-        raise typer.Abort()
-
+        print()
+        print(
+            "[yellow]Destination table is not given, defaulting to the source table.[/yellow]"
+        )
+        dest_table = source_table
 
     factory = SourceDestinationFactory(source_uri, dest_uri)
     source = factory.get_source()
@@ -43,9 +42,11 @@ def ingest(
 
     m = hashlib.sha256()
     m.update(dest_table.encode("utf-8"))
+    pipeline_name = m.hexdigest()
+    short_pipeline_name = pipeline_name[:8]
 
     pipeline = dlt.pipeline(
-        pipeline_name=m.hexdigest(),
+        pipeline_name=pipeline_name,
         destination=destination.dlt_dest(
             uri=dest_uri,
         ),
@@ -54,7 +55,26 @@ def ingest(
     )
 
     print()
-    print(f"[bold green]Initiated pipeline, starting...[/bold green]")
+    print(f"[bold green]Initiated the pipeline with the following:[/bold green]")
+    print(f"[bold yellow]  Pipeline ID:[/bold yellow] {short_pipeline_name}")
+    print(
+        f"[bold yellow]  Source:[/bold yellow] {factory.source_scheme} / {source_table}"
+    )
+    print(
+        f"[bold yellow]  Destination:[/bold yellow] {factory.destination_scheme} / {dest_table}"
+    )
+    print(f"[bold yellow]  Incremental Strategy:[/bold yellow] {incremental_strategy}")
+    print(
+        f"[bold yellow]  Incremental Key:[/bold yellow] {incremental_key if incremental_key else 'None'}"
+    )
+    print()
+
+    continuePipeline = typer.confirm("Are you sure you would like to continue?")
+    if not continuePipeline:
+        raise typer.Abort()
+
+    print()
+    print(f"[bold green]Starting the ingestion...[/bold green]")
     print()
 
     incremental = []
@@ -76,34 +96,37 @@ def ingest(
         primary_key=incremental,
     )
 
-    print()
-    print(f"[bold green]Successfully finished loading data from '{factory.source_scheme}' to '{factory.destination_scheme}'. [/bold green]")
-    # typer.echo(printLoadInfo(run_info))
+    elapsedHuman = ""
+    if run_info.started_at:
+        elapsed = run_info.finished_at - run_info.started_at
+        elapsedHuman = f"in {humanize.precisedelta(elapsed)}"
+
+    print(
+        f"[bold green]Successfully finished loading data from '{factory.source_scheme}' to '{factory.destination_scheme}' {elapsedHuman} [/bold green]"
+    )
+
+    # printLoadInfo(short_pipeline_name, run_info)
 
 
-def printLoadInfo(info: LoadInfo):
-    msg = f"Pipeline {info.pipeline.pipeline_name} load step completed in "
+def printLoadInfo(short_pipeline_name: str, info: LoadInfo):
     if info.started_at:
         elapsed = info.finished_at - info.started_at
-        msg += humanize.precisedelta(elapsed)
-    else:
-        msg += "---"
-    msg += (
-        f"\n{len(info.loads_ids)} load package(s) were loaded to destination"
-        f" {info.destination_name} and into dataset {info.dataset_name}\n"
-    )
-    if info.staging_name:
-        msg += (
-            f"The {info.staging_name} staging destination used"
-            f" {info.staging_displayable_credentials} location to stage data\n"
+        print(
+            f"  ├── Pipeline {short_pipeline_name} load step completed in [bold green]{humanize.precisedelta(elapsed)}[/bold green]"
         )
 
-    msg += (
-        f"The {info.destination_name} destination used"
-        f" {info.destination_displayable_credentials} location to store data"
+    connector = "└──"
+    if info.staging_name:
+        connector = "├──"
+
+    print(
+        f"  {connector} {len(info.loads_ids)} load package{'s were' if len(info.loads_ids) > 1 else ' was'} loaded to destination [bold cyan]{info.destination_name}[/bold cyan] and into dataset [bold cyan]{info.dataset_name}[/bold cyan]",
+        highlight=False,
     )
-    msg += info._load_packages_asstr(info.load_packages, 0)
-    return msg
+    if info.staging_name:
+        print(
+            f"  └── The [bold cyan]{info.staging_name}[/bold cyan] staging destination used [bold cyan]{info.staging_displayable_credentials}[/bold cyan] location to stage data"
+        )
 
 
 @app.command()

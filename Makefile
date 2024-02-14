@@ -1,15 +1,15 @@
 .ONESHELL:
-.PHONY: test lint format ftl test-ci lint-ci build
+.PHONY: test lint format ftl test-ci lint-ci build upload-release
 
 venv: venv/touchfile
 
-venv/touchfile: requirements.txt
+venv/touchfile: requirements-dev.txt
 	test -d venv || python3 -m venv venv
-	. venv/bin/activate; pip install -r requirements.txt
+	. venv/bin/activate; pip install -r requirements-dev.txt
 	touch venv/touchfile
 
-install-deps:
-	pip install -r requirements.txt
+deps:
+	pip install -r requirements-dev.txt
 
 test-ci:
 	pytest -rP -vv --tb=short --cov=ingestr --no-cov-on-fail
@@ -32,5 +32,5 @@ tl: test lint
 build:
 	python3 -m build
 
-install-locally:
-	python3 -m build
+upload-release:
+	twine upload dist/*
