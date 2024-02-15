@@ -22,11 +22,12 @@ class SqlSourceTest(unittest.TestCase):
         table = "schema.table"
 
         # monkey patch the sql_table function
-        def sql_table(credentials, schema, table, incremental):
+        def sql_table(credentials, schema, table, incremental, merge_key):
             self.assertEqual(credentials, uri)
             self.assertEqual(schema, "schema")
             self.assertEqual(table, "table")
             self.assertIsNone(incremental)
+            self.assertIsNone(merge_key)
             return dlt.resource()
 
         source = SqlSource(table_builder=sql_table)
@@ -39,12 +40,13 @@ class SqlSourceTest(unittest.TestCase):
         incremental_key = "id"
 
         # monkey patch the sql_table function
-        def sql_table(credentials, schema, table, incremental):
+        def sql_table(credentials, schema, table, incremental, merge_key):
             self.assertEqual(credentials, uri)
             self.assertEqual(schema, "schema")
             self.assertEqual(table, "table")
             self.assertIsInstance(incremental, dlt.sources.incremental)
             self.assertEqual(incremental.cursor_path, incremental_key)
+            self.assertIsNone(merge_key)
             return dlt.resource()
 
         source = SqlSource(table_builder=sql_table)

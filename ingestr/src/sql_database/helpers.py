@@ -64,13 +64,17 @@ class TableLoader:
         if self.last_value is None:
             return query
 
+        print(">>>>> last value", self.last_value, flush=True)
         return query.where(filter_op(self.cursor_column, self.last_value))
 
     def load_rows(self) -> Iterator[List[TDataItem]]:
         query = self.make_query()
+        print(">>>> gonna run query", query, flush=True)
+
         with self.engine.connect() as conn:
             result = conn.execution_options(yield_per=self.chunk_size).execute(query)
             for partition in result.partitions(size=self.chunk_size):
+                print([dict(row._mapping) for row in partition])
                 yield [dict(row._mapping) for row in partition]
 
 

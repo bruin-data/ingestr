@@ -3,6 +3,7 @@ from urllib.parse import urlparse
 
 from ingestr.src.destinations import (
     BigQueryDestination,
+    DatabricksDestination,
     DuckDBDestination,
     MsSQLDestination,
     PostgresDestination,
@@ -59,12 +60,13 @@ class SourceDestinationFactory:
     def get_destination(self) -> DestinationProtocol:
         match: dict[str, DestinationProtocol] = {
             "bigquery": BigQueryDestination(),
-            "postgres": PostgresDestination(),
-            "postgresql": PostgresDestination(),
-            "snowflake": SnowflakeDestination(),
-            "redshift": RedshiftDestination(),
+            "databricks": DatabricksDestination(),
             "duckdb": DuckDBDestination(),
             "mssql": MsSQLDestination(),
+            "postgres": PostgresDestination(),
+            "postgresql": PostgresDestination(),
+            "redshift": RedshiftDestination(),
+            "snowflake": SnowflakeDestination(),
         }
 
         if self.destination_scheme in match:

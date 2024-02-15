@@ -18,7 +18,7 @@ test: venv
 	. venv/bin/activate; $(MAKE) test-ci
 
 test-specific: venv
-	. venv/bin/activate; pytest -rP -vv --tb=short --cov=ingestr --no-cov-on-fail -k $(test)
+	. venv/bin/activate; pytest -rP -vv --tb=short --cov=ingestr --no-cov-on-fail --capture=no -k $(test)
 
 lint-ci:
 	ruff ingestr --fix && ruff format ingestr
