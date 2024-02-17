@@ -11,3 +11,6 @@ venv
 .mypy_cache
 pipeline_data
 dist
+docs/.vitepress/dist
+docs/.vitepress/cache
+node_modules
