@@ -1,7 +1,7 @@
 <div align="center">
     <img src="./resources/ingestr.svg" width="500" />
     <p>Ingest & copy data from any source to any destination without any code</p>
-    <img src="./resources/demo.gif" width="500" />
+    <img src="./resources/demo.gif" width="750" />
 </div>
 
 
