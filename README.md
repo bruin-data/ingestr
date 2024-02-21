@@ -1,5 +1,5 @@
 <div align="center">
-    <img src="https://github.com/bruin-data/ingestr/blob/main/resources/ingestr.svg" width="500" />
+    <img src="https://github.com/bruin-data/ingestr/blob/main/resources/ingestr.svg$$" width="500" />
     <p>Ingest & copy data from any source to any destination without any code</p>
     <img src="https://github.com/bruin-data/ingestr/blob/main/resources/demo.gif" width="750" />
 </div>

@@ -115,7 +115,8 @@ def ingest(
             formats=DATE_FORMATS,
         ),
     ] = None,  # type: ignore
-    primary_key: Annotated[Optional[list[str]], typer.Option(help="The merge ")] = None,  # type: ignore
+    primary_key: Annotated[Optional[list[str]], typer.Option(help="The key that will be used to deduplicate the resulting table")] = None,  # type: ignore
+    yes: Annotated[Optional[bool], typer.Option(help="Skip the confirmation prompt and ingest right away")] = None,  # type: ignore
 ):
     track(
         "command_triggered",
@@ -170,10 +171,11 @@ def ingest(
         )
         print()
 
-        continuePipeline = typer.confirm("Are you sure you would like to continue?")
-        if not continuePipeline:
-            track("command_finished", {"command": "ingest", "status": "aborted"})
-            raise typer.Abort()
+        if not yes:
+            continuePipeline = typer.confirm("Are you sure you would like to continue?")
+            if not continuePipeline:
+                track("command_finished", {"command": "ingest", "status": "aborted"})
+                raise typer.Abort()
 
         print()
         print("[bold green]Starting the ingestion...[/bold green]")
