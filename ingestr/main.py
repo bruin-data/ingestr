@@ -5,12 +5,13 @@ from typing import Optional
 import dlt
 import humanize
 import typer
+from dlt.common.runtime.collector import Collector
 from rich.console import Console
+from rich.status import Status
 from typing_extensions import Annotated
 
 from ingestr.src.factory import SourceDestinationFactory
 from ingestr.src.telemetry.event import track
-from dlt.common.runtime.collector import Collector
 
 app = typer.Typer(
     name="ingestr",
@@ -34,42 +35,41 @@ DATE_FORMATS = [
 class SpinnerCollector(Collector):
     """A Collector that shows progress with `tqdm` progress bars"""
 
-    def __init__(self, single_bar: bool = False) -> None:
-        self.single_bar = single_bar
-        self._bars: Dict[str, tqdm[None]] = {}
-        self.tqdm_kwargs = tqdm_kwargs or {}
+    status: Status
+    current_step: str
+    started: bool
+
+    def __init__(self) -> None:
+        self.status = Status("Ingesting data...", spinner="dots")
+        self.started = False
 
     def update(
-        self, name: str, inc: int = 1, total: int = None, message: str = None, label: str = ""
+        self,
+        name: str,
+        inc: int = 1,
+        total: int | None = None,
+        message: str | None = None,
+        label: str = "",
     ) -> None:
-        key = f"{name}_{label}"
-        bar = self._bars.get(key)
-        if bar is None:
-            if label:
-                name = f"{name}[{label}]"
-            if len(self._bars) == 0:
-                desc = self.step + ": " + name
-            else:
-                # do not add any more counters
-                if self.single_bar:
-                    return
-                desc = name
-            bar = tqdm(desc=desc, total=total, leave=True, **self.tqdm_kwargs)
-            bar.refresh()
-            self._bars[key] = bar
-        if message:
-            bar.set_postfix_str(message)
-        bar.update(inc)
+        self.status.update(self.current_step)
 
     def _start(self, step: str) -> None:
-        self._bars = {}
+        self.current_step = self.__step_to_label(step)
+        self.status.start()
+
+    def __step_to_label(self, step: str) -> str:
+        verb = step.split(" ")[0].lower()
+        if verb.startswith("normalize"):
+            return "Normalizing the data"
+        elif verb.startswith("load"):
+            return "Loading the data to the destination"
+        elif verb.startswith("extract"):
+            return "Extracting the data from the source"
+
+        return f"{verb.capitalize()} the data"
 
     def _stop(self) -> None:
-        for bar in self._bars.values():
-            bar.refresh()
-            bar.close()
-        self._bars.clear()
-
+        self.status.stop()
 
 
 @app.command()
@@ -149,7 +149,7 @@ def ingest(
             destination=destination.dlt_dest(
                 uri=dest_uri,
             ),
-            progress=dlt.progress.log(dump_system_stats=False),
+            progress=SpinnerCollector(),
             pipelines_dir="pipeline_data",
             dataset_name="testschema",
         )
@@ -177,7 +177,6 @@ def ingest(
 
         print()
         print("[bold green]Starting the ingestion...[/bold green]")
-        print()
 
         run_info = pipeline.run(
             source.dlt_source(
@@ -201,7 +200,6 @@ def ingest(
             elapsed = run_info.finished_at - run_info.started_at
             elapsedHuman = f"in {humanize.precisedelta(elapsed)}"
 
-        print()
         print(
             f"[bold green]Successfully finished loading data from '{factory.source_scheme}' to '{factory.destination_scheme}' {elapsedHuman} [/bold green]"
         )

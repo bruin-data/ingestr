@@ -30,7 +30,7 @@ lint: venv
 tl: test lint
 
 build:
-	python3 -m build
+	rm -rf dist && python3 -m build
 
 upload-release:
 	twine upload dist/*
