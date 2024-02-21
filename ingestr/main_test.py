@@ -66,6 +66,7 @@ def invoke_ingest_command(
         app,
         args,
         input="y\n",
+        env={"DISABLE_TELEMETRY": "true"},
     )
     return result
 

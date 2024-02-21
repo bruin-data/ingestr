@@ -9,13 +9,13 @@ from rich.console import Console
 from typing_extensions import Annotated
 
 from ingestr.src.factory import SourceDestinationFactory
+from ingestr.src.telemetry.event import track
 
 app = typer.Typer(
     name="ingestr",
     help="ingestr is the CLI tool to ingest data from one source to another",
     rich_markup_mode="rich",
 )
-
 
 console = Console()
 print = console.print
@@ -75,87 +75,120 @@ def ingest(
     ] = None,  # type: ignore
     primary_key: Annotated[Optional[list[str]], typer.Option(help="The merge ")] = None,  # type: ignore
 ):
-    if not dest_table:
+    track(
+        "command_triggered",
+        {
+            "command": "ingest",
+        },
+    )
+
+    try:
+        if not dest_table:
+            print()
+            print(
+                "[yellow]Destination table is not given, defaulting to the source table.[/yellow]"
+            )
+            dest_table = source_table
+
+        merge_key = None
+        if incremental_strategy == "delete+insert":
+            merge_key = incremental_key
+            incremental_strategy = "merge"
+
+        factory = SourceDestinationFactory(source_uri, dest_uri)
+        source = factory.get_source()
+        destination = factory.get_destination()
+
+        m = hashlib.sha256()
+        m.update(dest_table.encode("utf-8"))
+
+        pipeline = dlt.pipeline(
+            pipeline_name=m.hexdigest(),
+            destination=destination.dlt_dest(
+                uri=dest_uri,
+            ),
+            progress=dlt.progress.log(dump_system_stats=False),
+            pipelines_dir="pipeline_data",
+            dataset_name="testschema",
+        )
+
+        print()
+        print("[bold green]Initiated the pipeline with the following:[/bold green]")
+        print(
+            f"[bold yellow]  Source:[/bold yellow] {factory.source_scheme} / {source_table}"
+        )
+        print(
+            f"[bold yellow]  Destination:[/bold yellow] {factory.destination_scheme} / {dest_table}"
+        )
+        print(
+            f"[bold yellow]  Incremental Strategy:[/bold yellow] {incremental_strategy}"
+        )
+        print(
+            f"[bold yellow]  Incremental Key:[/bold yellow] {incremental_key if incremental_key else 'None'}"
+        )
+        print()
+
+        continuePipeline = typer.confirm("Are you sure you would like to continue?")
+        if not continuePipeline:
+            track("command_finished", {"command": "ingest", "status": "aborted"})
+            raise typer.Abort()
+
+        print()
+        print("[bold green]Starting the ingestion...[/bold green]")
+        print()
+
+        run_info = pipeline.run(
+            source.dlt_source(
+                uri=source_uri,
+                table=source_table,
+                incremental_key=incremental_key,
+                merge_key=merge_key,
+                interval_start=interval_start,
+                interval_end=interval_end,
+            ),
+            **destination.dlt_run_params(
+                uri=dest_uri,
+                table=dest_table,
+            ),
+            write_disposition=incremental_strategy,  # type: ignore
+            primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
+        )
+
+        elapsedHuman = ""
+        if run_info.started_at:
+            elapsed = run_info.finished_at - run_info.started_at
+            elapsedHuman = f"in {humanize.precisedelta(elapsed)}"
+
         print()
         print(
-            "[yellow]Destination table is not given, defaulting to the source table.[/yellow]"
+            f"[bold green]Successfully finished loading data from '{factory.source_scheme}' to '{factory.destination_scheme}' {elapsedHuman} [/bold green]"
         )
-        dest_table = source_table
+        print()
+        track(
+            "command_finished",
+            {
+                "command": "ingest",
+                "status": "success",
+            },
+        )
 
-    merge_key = None
-    if incremental_strategy == "delete+insert":
-        merge_key = incremental_key
-        incremental_strategy = "merge"
-
-    factory = SourceDestinationFactory(source_uri, dest_uri)
-    source = factory.get_source()
-    destination = factory.get_destination()
-
-    m = hashlib.sha256()
-    m.update(dest_table.encode("utf-8"))
-
-    pipeline = dlt.pipeline(
-        pipeline_name=m.hexdigest(),
-        destination=destination.dlt_dest(
-            uri=dest_uri,
-        ),
-        progress=dlt.progress.log(dump_system_stats=False),
-        pipelines_dir="pipeline_data",
-        dataset_name="testschema",
-    )
-
-    print()
-    print("[bold green]Initiated the pipeline with the following:[/bold green]")
-    print(
-        f"[bold yellow]  Source:[/bold yellow] {factory.source_scheme} / {source_table}"
-    )
-    print(
-        f"[bold yellow]  Destination:[/bold yellow] {factory.destination_scheme} / {dest_table}"
-    )
-    print(f"[bold yellow]  Incremental Strategy:[/bold yellow] {incremental_strategy}")
-    print(
-        f"[bold yellow]  Incremental Key:[/bold yellow] {incremental_key if incremental_key else 'None'}"
-    )
-    print()
-
-    continuePipeline = typer.confirm("Are you sure you would like to continue?")
-    if not continuePipeline:
-        raise typer.Abort()
-
-    print()
-    print("[bold green]Starting the ingestion...[/bold green]")
-    print()
-
-    run_info = pipeline.run(
-        source.dlt_source(
-            uri=source_uri,
-            table=source_table,
-            incremental_key=incremental_key,
-            merge_key=merge_key,
-            interval_start=interval_start,
-            interval_end=interval_end,
-        ),
-        **destination.dlt_run_params(
-            uri=dest_uri,
-            table=dest_table,
-        ),
-        write_disposition=incremental_strategy,  # type: ignore
-        primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
-    )
-
-    elapsedHuman = ""
-    if run_info.started_at:
-        elapsed = run_info.finished_at - run_info.started_at
-        elapsedHuman = f"in {humanize.precisedelta(elapsed)}"
-
-    print()
-    print(
-        f"[bold green]Successfully finished loading data from '{factory.source_scheme}' to '{factory.destination_scheme}' {elapsedHuman} [/bold green]"
-    )
+    except Exception as e:
+        track(
+            "command_finished",
+            {"command": "ingest", "status": "failed", "error": str(e)},
+        )
+        raise
 
 
 @app.command()
 def example_uris():
+    track(
+        "command_triggered",
+        {
+            "command": "example-uris",
+        },
+    )
+
     print()
     typer.echo(
         "Following are some example URI formats for supported sources and destinations:"
@@ -228,6 +261,13 @@ def example_uris():
     print()
     typer.echo(
         "These are all coming from SQLAlchemy's URI format, so they should be familiar to most users."
+    )
+    track(
+        "command_finished",
+        {
+            "command": "example-uris",
+            "status": "success",
+        },
     )
 
 
