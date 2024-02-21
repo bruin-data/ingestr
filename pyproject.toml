@@ -70,7 +70,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ingestr"
-version = "0.0.3"
+version = "0.0.4"
 authors = [
   { name="Burak Karakan", email="burak.karakan@getbruin.com" },
 ]
