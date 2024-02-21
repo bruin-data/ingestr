@@ -5,6 +5,7 @@ duckdb==0.9.2
 google-cloud-bigquery-storage
 pendulum==3.0.0
 psycopg2==2.9.9
+py-machineid==0.5.1
 pyodbc==5.1.0
 rich==13.7.0
 rudder-sdk-python==2.0.2

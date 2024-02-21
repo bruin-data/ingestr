@@ -10,6 +10,7 @@ from typing_extensions import Annotated
 
 from ingestr.src.factory import SourceDestinationFactory
 from ingestr.src.telemetry.event import track
+from dlt.common.runtime.collector import Collector
 
 app = typer.Typer(
     name="ingestr",
@@ -28,6 +29,47 @@ DATE_FORMATS = [
     "%Y-%m-%dT%H:%M:%S.%f",
     "%Y-%m-%dT%H:%M:%S.%f%z",
 ]
+
+
+class SpinnerCollector(Collector):
+    """A Collector that shows progress with `tqdm` progress bars"""
+
+    def __init__(self, single_bar: bool = False) -> None:
+        self.single_bar = single_bar
+        self._bars: Dict[str, tqdm[None]] = {}
+        self.tqdm_kwargs = tqdm_kwargs or {}
+
+    def update(
+        self, name: str, inc: int = 1, total: int = None, message: str = None, label: str = ""
+    ) -> None:
+        key = f"{name}_{label}"
+        bar = self._bars.get(key)
+        if bar is None:
+            if label:
+                name = f"{name}[{label}]"
+            if len(self._bars) == 0:
+                desc = self.step + ": " + name
+            else:
+                # do not add any more counters
+                if self.single_bar:
+                    return
+                desc = name
+            bar = tqdm(desc=desc, total=total, leave=True, **self.tqdm_kwargs)
+            bar.refresh()
+            self._bars[key] = bar
+        if message:
+            bar.set_postfix_str(message)
+        bar.update(inc)
+
+    def _start(self, step: str) -> None:
+        self._bars = {}
+
+    def _stop(self) -> None:
+        for bar in self._bars.values():
+            bar.refresh()
+            bar.close()
+        self._bars.clear()
+
 
 
 @app.command()
