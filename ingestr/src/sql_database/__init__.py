@@ -55,6 +55,6 @@ def sql_table(
         table_rows,
         name=table_obj.name,
         primary_key=get_primary_key(table_obj),
-        columns=table_to_columns(table_obj) if detect_precision_hints else None,
+        columns=table_to_columns(table_obj) if detect_precision_hints else None,  # type: ignore
         merge_key=merge_key,  # type: ignore
     )(engine, table_obj, incremental=incremental)

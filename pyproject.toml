@@ -70,14 +70,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ingestr"
-version = "0.0.5"
 authors = [
   { name="Burak Karakan", email="burak.karakan@getbruin.com" },
 ]
 description = "ingestr is a command-line application that ingests data from various sources and stores them in any database."
 readme = "README.md"
 requires-python = ">=3.9"
-dynamic = ["dependencies"]
+dynamic = ["dependencies", "version"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -91,6 +90,9 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/bruin-data/ingestr"
 Issues = "https://github.com/bruin-data/ingestr/issues"
+
+[tool.hatch.version]
+path = "ingestr/src/version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ingestr"]
