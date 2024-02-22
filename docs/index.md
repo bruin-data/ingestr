@@ -6,6 +6,9 @@ hero:
   name: "ingestr"
   text: Copy data between any source and any destination
   tagline: "ingestr is a command-line application that allows ingesting or copying data from any source into any destination database."
+  image:
+    src: https://github.com/bruin-data/ingestr/blob/main/resources/demo.gif?raw=true
+    alt: ingestr logo
   actions:
     - theme: brand
       text: Getting Started
@@ -15,11 +18,11 @@ hero:
       link: https://github.com/bruin-data/ingestr
 
 features:
-  - title: Feature A
-    details: Lorem ipsum dolor sit amet, consectetur adipiscing elit
-  - title: Feature B
-    details: Lorem ipsum dolor sit amet, consectetur adipiscing elit
-  - title: Feature C
-    details: Lorem ipsum dolor sit amet, consectetur adipiscing elit
+  - title: Single command
+    details: ingestr allows copying & ingesting data from any source to any destination with a single command.
+  - title: Many sources & destinations
+    details: ingestr supports all common source and destination databases.
+  - title: Incremental Loading
+    details: ingestr supports both full-refresh as well as incremental loading modes.
 ---
 

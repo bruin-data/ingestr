@@ -19,6 +19,7 @@ export default defineConfig({
           { text: "Quickstart", link: "/getting-started/quickstart.md" },
           { text: "Core Concepts", link: "/getting-started/core-concepts.md" },
           { text: "Incremental Loading", link: "/getting-started/incremental-loading.md" },
+          { text: "Telemetry", link: "/getting-started/telemetry.md" },
         ],
       },
       {

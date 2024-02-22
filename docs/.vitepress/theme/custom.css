@@ -1,0 +1,27 @@
+/* .vitepress/theme/custom.css */
+:root {
+  --vp-c-brand-1: #d95f5f;
+  --vp-c-brand-2: #e18080;
+  --vp-c-brand-3: #d95f5f;
+}
+
+.VPHero .VPImage {
+    max-width: 760px;
+    position: relative;
+    border-radius: 8px;
+}
+
+.VPHero .image-container {
+    padding: 32px;
+}
+
+/* do the following only for mobile */
+@media (max-width: 768px) {
+    .VPHero .container {
+        flex-direction: column-reverse;
+    }
+
+    .VPHero .image {
+        margin-top: 0;
+    }
+}
