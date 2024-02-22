@@ -38,7 +38,7 @@ This command will:
 - upload this data to your BigQuery warehouse under the schema `ingestr` and table `some_data`.
 
 ## Documentation
-You can see the full documentation [here](https://bruindata.github.com/ingestr).
+You can see the full documentation [here](https://bruin-data.github.io/ingestr/getting-started/quickstart.html).
 
 
 ## Supported Sources & Destinations
