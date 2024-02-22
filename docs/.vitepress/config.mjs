@@ -4,6 +4,7 @@ import { defineConfig } from "vitepress";
 export default defineConfig({
   title: "ingestr",
   description: "Ingest & copy data between any source and any destination",
+  base: '/ingestr/',
   themeConfig: {
     // https://vitepress.dev/reference/default-theme-config
     nav: [
