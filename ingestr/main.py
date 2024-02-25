@@ -75,30 +75,41 @@ class SpinnerCollector(Collector):
 @app.command()
 def ingest(
     source_uri: Annotated[
-        str, typer.Option(help="The URI of the [green]source[/green]")
+        str,
+        typer.Option(help="The URI of the [green]source[/green]", envvar="SOURCE_URI"),
     ],  # type: ignore
     dest_uri: Annotated[
-        str, typer.Option(help="The URI of the [cyan]destination[/cyan]")
+        str,
+        typer.Option(
+            help="The URI of the [cyan]destination[/cyan]", envvar="DESTINATION_URI"
+        ),
     ],  # type: ignore
     source_table: Annotated[
-        str, typer.Option(help="The table name in the [green]source[/green] to fetch")
+        str,
+        typer.Option(
+            help="The table name in the [green]source[/green] to fetch",
+            envvar="SOURCE_TABLE",
+        ),
     ],  # type: ignore
     dest_table: Annotated[
         str,
         typer.Option(
-            help="The table in the [cyan]destination[/cyan] to save the data into"
+            help="The table in the [cyan]destination[/cyan] to save the data into",
+            envvar="DESTINATION_TABLE",
         ),
     ] = None,  # type: ignore
     incremental_key: Annotated[
         str,
         typer.Option(
-            help="The incremental key from the table to be used for incremental strategies"
+            help="The incremental key from the table to be used for incremental strategies",
+            envvar="INCREMENTAL_KEY",
         ),
     ] = None,  # type: ignore
     incremental_strategy: Annotated[
         str,
         typer.Option(
-            help="The incremental strategy to use, must be one of 'replace', 'append', 'delete+insert', or 'merge'"
+            help="The incremental strategy to use, must be one of 'replace', 'append', 'delete+insert', or 'merge'",
+            envvar="INCREMENTAL_STRATEGY",
         ),
     ] = "replace",  # type: ignore
     interval_start: Annotated[
@@ -106,6 +117,7 @@ def ingest(
         typer.Option(
             help="The start of the interval the incremental key will cover",
             formats=DATE_FORMATS,
+            envvar="INTERVAL_START",
         ),
     ] = None,  # type: ignore
     interval_end: Annotated[
@@ -113,17 +125,22 @@ def ingest(
         typer.Option(
             help="The end of the interval the incremental key will cover",
             formats=DATE_FORMATS,
+            envvar="INTERVAL_END",
         ),
     ] = None,  # type: ignore
     primary_key: Annotated[
         Optional[list[str]],
         typer.Option(
-            help="The key that will be used to deduplicate the resulting table"
+            help="The key that will be used to deduplicate the resulting table",
+            envvar="PRIMARY_KEY",
         ),
     ] = None,  # type: ignore
     yes: Annotated[
         Optional[bool],
-        typer.Option(help="Skip the confirmation prompt and ingest right away"),
+        typer.Option(
+            help="Skip the confirmation prompt and ingest right away",
+            envvar="SKIP_CONFIRMATION",
+        ),
     ] = None,  # type: ignore
 ):
     track(
