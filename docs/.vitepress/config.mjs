@@ -5,6 +5,20 @@ export default defineConfig({
   title: "ingestr",
   description: "Ingest & copy data between any source and any destination",
   base: '/ingestr/',
+  head: [
+    [
+      'script',
+      { async: '', src: 'https://www.googletagmanager.com/gtag/js?id=G-MZJ20PP4MJ' }
+    ],
+    [
+      'script',
+      {},
+      `window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-MZJ20PP4MJ');`
+    ]
+  ],
   themeConfig: {
     // https://vitepress.dev/reference/default-theme-config
     nav: [
