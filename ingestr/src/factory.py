@@ -39,6 +39,16 @@ class DestinationProtocol(Protocol):
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
         pass
 
+def parse_scheme_from_uri(uri: str) -> str:
+    parsed = urlparse(uri)
+    if parsed.scheme != "":
+        return parsed.scheme
+    
+    uri_parts = uri.split("://")
+    if len(uri_parts) > 1:
+        return uri_parts[0]
+
+    raise ValueError(f"Could not parse scheme from uri: {uri}")
 
 class SourceDestinationFactory:
     source_scheme: str
@@ -50,8 +60,7 @@ class SourceDestinationFactory:
         self.source_scheme = source_fields.scheme
 
         self.destination_uri = destination_uri
-        dest_fields = urlparse(destination_uri)
-        self.destination_scheme = dest_fields.scheme
+        self.destination_scheme = parse_scheme_from_uri(destination_uri)
 
     def get_source(self) -> SourceProtocol:
         if self.source_scheme in SQL_SOURCE_SCHEMES:
@@ -69,6 +78,7 @@ class SourceDestinationFactory:
             "postgresql": PostgresDestination(),
             "redshift": RedshiftDestination(),
             "redshift+psycopg2": RedshiftDestination(),
+            "redshift+redshift_connector": RedshiftDestination(),
             "snowflake": SnowflakeDestination(),
         }
 

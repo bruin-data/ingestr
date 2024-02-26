@@ -177,7 +177,6 @@ def ingest(
             ),
             progress=SpinnerCollector(),
             pipelines_dir="pipeline_data",
-            dataset_name="testschema",
         )
 
         print()

@@ -68,7 +68,7 @@ class SnowflakeDestination(GenericSqlDestination):
 
 class RedshiftDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.redshift(credentials=uri, **kwargs)
+        return dlt.destinations.redshift(credentials=uri.replace('redshift://', 'postgresql://'), **kwargs)
 
 
 class DuckDBDestination(GenericSqlDestination):
