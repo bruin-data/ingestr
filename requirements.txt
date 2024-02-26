@@ -12,6 +12,7 @@ rich==13.7.0
 rudder-sdk-python==2.0.2
 snowflake-sqlalchemy==1.5.1
 sqlalchemy-bigquery==1.9.0
+sqlalchemy-redshift==0.8.14
 SQLAlchemy==1.4.51
 sqlalchemy2-stubs==0.0.2a38
 tqdm==4.66.2

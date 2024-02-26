@@ -21,6 +21,7 @@ SQL_SOURCE_SCHEMES = [
     "postgres",
     "postgresql",
     "redshift",
+    "redshift+psycopg2",
     "snowflake",
     "sqlite",
 ]
@@ -67,6 +68,7 @@ class SourceDestinationFactory:
             "postgres": PostgresDestination(),
             "postgresql": PostgresDestination(),
             "redshift": RedshiftDestination(),
+            "redshift+psycopg2": RedshiftDestination(),
             "snowflake": SnowflakeDestination(),
         }
 
