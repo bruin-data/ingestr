@@ -17,6 +17,7 @@ SQL_SOURCE_SCHEMES = [
     "duckdb",
     "mssql",
     "mysql",
+    "mysql+pymysql",
     "postgres",
     "postgresql",
     "redshift",
