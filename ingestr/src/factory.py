@@ -24,6 +24,8 @@ SQL_SOURCE_SCHEMES = [
     "redshift+psycopg2",
     "snowflake",
     "sqlite",
+    "oracle",
+    "oracle+cx_oracle",
 ]
 
 
