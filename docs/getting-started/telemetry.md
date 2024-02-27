@@ -12,7 +12,15 @@ ingestr uses a very basic form of **anonymous telemetry** to be able to keep tra
   - command executed
   - success/failure
 
-The information collected here is used to understand the usage of ingestr and to improve the product. We use [Rudderstack](https://www.rudderstack.com/) to collect the events and we do not store any PII.
+The information collected here is used to understand the usage of ingestr and to improve the product. We use [Rudderstack](https://www.rudderstack.com/) to collect the events and we do not store any PII. 
+
+The specific events that are sent are:
+- command triggered
+- command finished
+
+The questions we answer by these simple events are:
+- How many unique users are using ingestr?
+- How many times is ingestr being used?
 
 ## Disabling Telemetry
 If you'd like to disable telemetry, simply set the `INGESTR_DISABLE_TELEMETRY` environment variable to `true`.
