@@ -60,8 +60,10 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
 | Databricks           | ✅      | ✅         |
 | DuckDB               | ✅      | ✅         |
 | Microsoft SQL Server | ✅      | ✅         |
+| Oracle               | ✅      | ❌         |
 | SQLite               | ✅      | ❌         |
 | MySQL                | ✅      | ❌         |
+| Local CSV file       | ❌      | ✅         |
 
 More to come soon!
 
