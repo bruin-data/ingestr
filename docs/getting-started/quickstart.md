@@ -20,7 +20,7 @@ pip install ingestr
 ## Quickstart
 
 ```bash
-ingestr \
+ingestr ingest \
     --source-uri 'postgresql://admin:admin@localhost:8837/web?sslmode=disable' \
     --source-table 'public.some_data' \
     --dest-uri 'bigquery://<your-project-name>?credentials_path=/path/to/service/account.json' \

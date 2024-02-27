@@ -23,7 +23,7 @@ Replace is the default strategy, and it simply replaces the entire destination t
 
 The following example below will replace the entire `my_schema.some_data` table in BigQuery with the `my_schema.some_data` table in Postgres.
 ```bash
-ingestr \
+ingestr ingest \
     --source-uri 'postgresql://admin:admin@localhost:8837/web?sslmode=disable' \
     --source-table 'my_schema.some_data' \
     --dest-uri 'bigquery://<your-project-name>?credentials_path=/path/to/service/account.json' \
@@ -42,7 +42,7 @@ Append will simply append the new rows from the source table to the destination 
 
 The following example below will append the new rows from the `my_schema.some_data` table in Postgres to the `my_schema.some_data` table in BigQuery, only where there's a new table.
 ```bash
-ingestr \
+ingestr ingest \
     --source-uri 'postgresql://admin:admin@localhost:8837/web?sslmode=disable' \
     --source-table 'my_schema.some_data' \
     --dest-uri 'bigquery://<your-project-name>?credentials_path=/path/to/service/account.json' \
@@ -97,7 +97,7 @@ Merge will merge the new rows with the existing rows in the destination table, i
 
 The following example below will merge the new rows from the `my_schema.some_data` table in Postgres to the `my_schema.some_data` table in BigQuery, only where there's a new table.
 ```bash
-ingestr \
+ingestr ingest \
     --source-uri 'postgresql://admin:admin@localhost:8837/web?sslmode=disable' \
     --source-table 'my_schema.some_data' \
     --dest-uri 'bigquery://<your-project-name>?credentials_path=/path/to/service/account.json' \
@@ -159,7 +159,7 @@ Delete+Insert will delete the existing rows in the destination table that match 
 
 The following example below will delete the existing rows in the `my_schema.some_data` table in BigQuery that match the `updated_at` and then insert the new rows from the `my_schema.some_data` table in Postgres.
 ```bash
-ingestr \
+ingestr ingest \
     --source-uri 'postgresql://admin:admin@localhost:8837/web?sslmode=disable' \
     --source-table 'my_schema.some_data' \
     --dest-uri 'bigquery://<your-project-name>?credentials_path=/path/to/service/account.json' \

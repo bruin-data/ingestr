@@ -4,6 +4,11 @@
     <img src="https://github.com/bruin-data/ingestr/blob/main/resources/demo.gif?raw=true" width="750" />
 </div>
 
+<div align="center" style="margin-top: 24px;">
+  <a target="_blank" href="https://join.slack.com/t/bruindatacommunity/shared_invite/zt-2dl2i8foy-bVsuMUauHeN9M2laVm3ZVg" style="background:none">
+    <img src="https://img.shields.io/badge/slack-join-dlt.svg?color=d95f5f&logo=slack" style="width: 180px;"  />
+  </a>
+</div>
 
 -----
 
@@ -39,6 +44,9 @@ This command will:
 
 ## Documentation
 You can see the full documentation [here](https://bruin-data.github.io/ingestr/getting-started/quickstart.html).
+
+## Community
+Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shared_invite/zt-2dl2i8foy-bVsuMUauHeN9M2laVm3ZVg).
 
 
 ## Supported Sources & Destinations
