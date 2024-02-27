@@ -39,16 +39,18 @@ class DestinationProtocol(Protocol):
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
         pass
 
+
 def parse_scheme_from_uri(uri: str) -> str:
     parsed = urlparse(uri)
     if parsed.scheme != "":
         return parsed.scheme
-    
+
     uri_parts = uri.split("://")
     if len(uri_parts) > 1:
         return uri_parts[0]
 
     raise ValueError(f"Could not parse scheme from uri: {uri}")
+
 
 class SourceDestinationFactory:
     source_scheme: str
