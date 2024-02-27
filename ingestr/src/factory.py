@@ -13,7 +13,7 @@ from ingestr.src.destinations import (
     RedshiftDestination,
     SnowflakeDestination,
 )
-from ingestr.src.sources import SqlSource
+from ingestr.src.sources import LocalCsvSource, SqlSource
 
 SQL_SOURCE_SCHEMES = [
     "bigquery",
@@ -75,6 +75,8 @@ class SourceDestinationFactory:
     def get_source(self) -> SourceProtocol:
         if self.source_scheme in SQL_SOURCE_SCHEMES:
             return SqlSource()
+        elif self.source_scheme == "csv":
+            return LocalCsvSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

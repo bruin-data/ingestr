@@ -343,6 +343,7 @@ def example_uris():
 @app.command()
 def version():
     from ingestr.src.version import __version__  # type: ignore
+
     print(f"v{__version__}")
 
 

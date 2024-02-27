@@ -1,3 +1,4 @@
+import csv
 from typing import Callable
 
 import dlt
@@ -37,3 +38,32 @@ class SqlSource:
         )
 
         return table_instance
+
+
+class LocalCsvSource:
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        def csv_file():
+            file_path = uri.split("://")[1]
+            myFile = open(file_path, "r")
+            reader = csv.DictReader(myFile)
+            print("running resource")
+
+            page_size = 100
+            page = []
+            current_items = 0
+            for dictionary in reader:
+                if current_items < page_size:
+                    page.append(dictionary)
+                    current_items += 1
+                else:
+                    yield page
+                    page = []
+                    current_items = 0
+
+            if page:
+                yield page
+
+        return dlt.resource(
+            csv_file,
+            merge_key=kwargs.get("merge_key"),  # type: ignore
+        )
