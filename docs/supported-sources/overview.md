@@ -10,9 +10,9 @@ ingestr supports the following sources and destinations:
 | Databricks           | ✅      | ✅         |
 | DuckDB               | ✅      | ✅         |
 | Microsoft SQL Server | ✅      | ✅         |
+| Local CSV file       | ✅      | ✅         |
 | Oracle               | ✅      | ❌         |
 | SQLite               | ✅      | ❌         |
 | MySQL                | ✅      | ❌         |
-| Local CSV file       | ❌      | ✅         |
 
 More to come soon!

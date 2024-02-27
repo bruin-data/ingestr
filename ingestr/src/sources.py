@@ -48,7 +48,7 @@ class LocalCsvSource:
             reader = csv.DictReader(myFile)
             print("running resource")
 
-            page_size = 100
+            page_size = 1000
             page = []
             current_items = 0
             for dictionary in reader:
