@@ -17,6 +17,7 @@ app = typer.Typer(
     name="ingestr",
     help="ingestr is the CLI tool to ingest data from one source to another",
     rich_markup_mode="rich",
+    pretty_exceptions_enable=False,
 )
 
 console = Console()
@@ -220,6 +221,8 @@ def ingest(
             write_disposition=incremental_strategy,  # type: ignore
             primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
         )
+
+        destination.post_load()
 
         elapsedHuman = ""
         if run_info.started_at:

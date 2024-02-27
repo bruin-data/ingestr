@@ -1,8 +1,11 @@
 from typing import Protocol
 from urllib.parse import urlparse
 
+from dlt.common.destination import Destination
+
 from ingestr.src.destinations import (
     BigQueryDestination,
+    CsvDestination,
     DatabricksDestination,
     DuckDBDestination,
     MsSQLDestination,
@@ -35,10 +38,13 @@ class SourceProtocol(Protocol):
 
 
 class DestinationProtocol(Protocol):
-    def dlt_dest(self, uri: str, **kwargs):
+    def dlt_dest(self, uri: str, **kwargs) -> Destination:
         pass
 
-    def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
+    def dlt_run_params(self, uri: str, table: str, **kwargs):
+        pass
+
+    def post_load(self) -> None:
         pass
 
 
@@ -84,6 +90,7 @@ class SourceDestinationFactory:
             "redshift+psycopg2": RedshiftDestination(),
             "redshift+redshift_connector": RedshiftDestination(),
             "snowflake": SnowflakeDestination(),
+            "csv": CsvDestination(),
         }
 
         if self.destination_scheme in match:
