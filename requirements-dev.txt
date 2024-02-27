@@ -6,3 +6,4 @@ pytest-cov==4.1.0
 pytest==8.0.0
 ruff==0.2.1
 hatchling==1.21.1
+build==1.0.3
