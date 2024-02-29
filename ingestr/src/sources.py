@@ -30,6 +30,9 @@ class SqlSource:
                 end_value=end_value,
             )
 
+        if uri.startswith("mysql://"):
+            uri = uri.replace("mysql://", "mysql+pymysql://")
+
         table_instance = self.table_builder(
             credentials=uri,
             schema=table_fields[-2],
