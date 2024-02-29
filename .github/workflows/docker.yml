@@ -31,8 +31,9 @@ jobs:
         with:
           path: ${{ env.pythonLocation }}
           key: ${{ env.pythonLocation }}-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
-      - name: Install pip dependencies
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: install dependencies
         run: make deps
       - name: run tests
         run: make test-ci
