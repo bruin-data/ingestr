@@ -34,9 +34,9 @@ jobs:
       - name: install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
       - name: run tests
-        run: make test-ci
+        run: make test
       - name: check the formatting
-        run: make lint-ci
+        run: make lint
 
   build-and-push-image:
     needs: tests
