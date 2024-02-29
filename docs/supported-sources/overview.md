@@ -11,6 +11,7 @@ ingestr supports the following sources and destinations:
 | DuckDB               | ✅      | ✅         |
 | Microsoft SQL Server | ✅      | ✅         |
 | Local CSV file       | ✅      | ✅         |
+| MongoDB              | ✅      | ❌         |
 | Oracle               | ✅      | ❌         |
 | SQLite               | ✅      | ❌         |
 | MySQL                | ✅      | ❌         |

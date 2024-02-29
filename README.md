@@ -61,6 +61,7 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
 | DuckDB               | ✅      | ✅         |
 | Microsoft SQL Server | ✅      | ✅         |
 | Local CSV file       | ✅      | ✅         |
+| MongoDB              | ✅      | ❌         |
 | Oracle               | ✅      | ❌         |
 | SQLite               | ✅      | ❌         |
 | MySQL                | ✅      | ❌         |
