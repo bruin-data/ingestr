@@ -142,7 +142,14 @@ def ingest(
             help="Skip the confirmation prompt and ingest right away",
             envvar="SKIP_CONFIRMATION",
         ),
-    ] = None,  # type: ignore
+    ] = False,  # type: ignore
+    full_refresh: Annotated[
+        bool,
+        typer.Option(
+            help="Ignore the state and refresh the destination table completely",
+            envvar="FULL_REFRESH",
+        ),
+    ] = False,  # type: ignore
 ):
     track(
         "command_triggered",
@@ -153,6 +160,12 @@ def ingest(
 
     try:
         if not dest_table:
+            if len(source_table.split(".")) != 2:
+                print(
+                    "[red]Table name must be in the format schema.table for source table when dest-table is not given.[/red]"
+                )
+                raise typer.Abort()
+
             print()
             print(
                 "[yellow]Destination table is not given, defaulting to the source table.[/yellow]"
@@ -178,6 +191,7 @@ def ingest(
             ),
             progress=SpinnerCollector(),
             pipelines_dir="pipeline_data",
+            full_refresh=full_refresh,
         )
 
         print()
@@ -204,6 +218,9 @@ def ingest(
 
         print()
         print("[bold green]Starting the ingestion...[/bold green]")
+
+        if factory.source_scheme == "sqlite":
+            source_table = "main." + source_table.split(".")[-1]
 
         run_info = pipeline.run(
             source.dlt_source(
