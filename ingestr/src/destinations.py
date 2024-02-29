@@ -99,6 +99,11 @@ class DatabricksDestination(GenericSqlDestination):
         return dlt.destinations.databricks(credentials=uri, **kwargs)
 
 
+class SynapseDestination(GenericSqlDestination):
+    def dlt_dest(self, uri: str, **kwargs):
+        return dlt.destinations.synapse(credentials=uri, **kwargs)
+
+
 class CustomCsvDestination(dlt.destinations.filesystem):
     pass
 

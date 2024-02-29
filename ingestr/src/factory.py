@@ -12,6 +12,7 @@ from ingestr.src.destinations import (
     PostgresDestination,
     RedshiftDestination,
     SnowflakeDestination,
+    SynapseDestination,
 )
 from ingestr.src.sources import LocalCsvSource, MongoDbSource, SqlSource
 
@@ -94,6 +95,7 @@ class SourceDestinationFactory:
             "redshift+psycopg2": RedshiftDestination(),
             "redshift+redshift_connector": RedshiftDestination(),
             "snowflake": SnowflakeDestination(),
+            "synapse": SynapseDestination(),
             "csv": CsvDestination(),
         }
 
