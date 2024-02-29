@@ -3,8 +3,8 @@ from typing import Callable
 
 import dlt
 
-from ingestr.src.sql_database import sql_table
 from ingestr.src.mongodb import mongodb_collection
+from ingestr.src.sql_database import sql_table
 
 
 class SqlSource:
@@ -16,7 +16,7 @@ class SqlSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         table_fields = table.split(".")
         if len(table_fields) != 2:
-            raise ValueError("Table name must be in the format schema.<table>")
+            raise ValueError("Table name must be in the format schema.table")
 
         incremental = None
         if kwargs.get("incremental_key"):
@@ -40,6 +40,7 @@ class SqlSource:
 
         return table_instance
 
+
 class MongoDbSource:
     table_builder: Callable
 
@@ -49,7 +50,7 @@ class MongoDbSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         table_fields = table.split(".")
         if len(table_fields) != 2:
-            raise ValueError("Table name must be in the format schema.<table>")
+            raise ValueError("Table name must be in the format schema.table")
 
         incremental = None
         if kwargs.get("incremental_key"):
@@ -63,7 +64,7 @@ class MongoDbSource:
             )
 
         table_instance = self.table_builder(
-            credentials=uri,
+            connection_url=uri,
             database=table_fields[-2],
             collection=table_fields[-1],
             parallel=True,

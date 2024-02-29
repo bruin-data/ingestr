@@ -83,7 +83,7 @@ class CollectionLoaderParallell(CollectionLoader):
     def _get_cursor(self) -> TCursor:
         cursor = self.collection.find(filter=self._filter_op)
         if self._sort_op:
-            cursor = cursor.sort(self._sort_op)
+            cursor = cursor.sort(self._sort_op)  # type: ignore
         return cursor
 
     @dlt.defer

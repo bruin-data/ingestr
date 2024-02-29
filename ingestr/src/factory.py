@@ -13,7 +13,7 @@ from ingestr.src.destinations import (
     RedshiftDestination,
     SnowflakeDestination,
 )
-from ingestr.src.sources import LocalCsvSource, SqlSource
+from ingestr.src.sources import LocalCsvSource, MongoDbSource, SqlSource
 
 SQL_SOURCE_SCHEMES = [
     "bigquery",
@@ -78,7 +78,7 @@ class SourceDestinationFactory:
         elif self.source_scheme == "csv":
             return LocalCsvSource()
         elif self.source_scheme == "mongodb":
-            return LocalCsvSource()
+            return MongoDbSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
