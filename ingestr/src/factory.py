@@ -77,6 +77,8 @@ class SourceDestinationFactory:
             return SqlSource()
         elif self.source_scheme == "csv":
             return LocalCsvSource()
+        elif self.source_scheme == "mongodb":
+            return LocalCsvSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
