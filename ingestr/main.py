@@ -48,8 +48,8 @@ class SpinnerCollector(Collector):
         self,
         name: str,
         inc: int = 1,
-        total: int | None = None,
-        message: str | None = None,
+        total: Optional[int] = None,
+        message: Optional[str] = None,
         label: str = "",
     ) -> None:
         self.status.update(self.current_step)
