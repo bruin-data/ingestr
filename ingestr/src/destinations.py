@@ -1,3 +1,4 @@
+import base64
 import csv
 import gzip
 import json
@@ -32,8 +33,11 @@ class BigQueryDestination:
         source_params = parse_qs(source_fields.query)
 
         cred_path = source_params.get("credentials_path")
-        if not cred_path:
-            raise ValueError("Credentials path is required")
+        credentials_base64 = source_params.get("credentials_base64")
+        if not cred_path and not credentials_base64:
+            raise ValueError(
+                "credentials_path or credentials_base64 is required to connect BigQuery"
+            )
 
         location = None
         if source_params.get("location"):
@@ -42,11 +46,19 @@ class BigQueryDestination:
                 raise ValueError("Only one location is allowed")
             location = loc_params[0]
 
-        with open(cred_path[0], "r") as f:
-            credentials = json.load(f)
+        credentials = {}
+        if cred_path:
+            with open(cred_path[0], "r") as f:
+                credentials = json.load(f)
+        elif credentials_base64:
+            credentials = json.loads(
+                base64.b64decode(credentials_base64[0]).decode("utf-8")
+            )
 
         return dlt.destinations.bigquery(
-            credentials=credentials, location=location, **kwargs
+            credentials=credentials,  # type: ignore
+            location=location,
+            **kwargs,
         )
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
