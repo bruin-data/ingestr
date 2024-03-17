@@ -14,9 +14,9 @@
 
 Ingestr is a command-line application that allows you to ingest data from any source into any destination using simple command-line flags, no code necessary.
 
-- ✨ copy data from your database into any destination
-- ➕ incremental loading: `append`, `merge` or `delete+insert`
-- 🐍 single-command installation
+- ✨ copy data from your database into any destination.
+- ➕ incremental loading: `append`, `merge` or `delete+insert`.
+- 🐍 single-command installation.
 
 ingestr takes away the complexity of managing any backend or writing any code for ingesting data, simply run the command and watch the data land on its destination.
 
