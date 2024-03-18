@@ -4,6 +4,8 @@ on:
       - main
     tags:
       - "*"
+  workflow_dispatch: {}
+
 concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: false
