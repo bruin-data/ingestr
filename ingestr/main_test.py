@@ -104,9 +104,7 @@ def test_create_replace():
     assert res[1] == (2, "val2", "2022-02-01")
 
 
-@pytest.mark.skip(
-    reason="this doesn't work at the moment due to a bug with dlt: https://github.com/dlt-hub/dlt/issues/971"
-)
+
 def test_append():
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
@@ -147,7 +145,7 @@ def test_append():
     def get_output_table():
         conn.execute("CHECKPOINT")
         return conn.sql(
-            "select id, val, strftime(updated_at, '%Y-%m-%d') as updated_at from testschema_append.output"
+            "select id, val, strftime(updated_at, '%Y-%m-%d') as updated_at from testschema_append.output order by id asc"
         ).fetchall()
 
     run()
@@ -163,7 +161,7 @@ def test_append():
     res = get_output_table()
     assert len(res) == 2
     assert res[0] == (1, "val1", "2022-01-01")
-    assert res[1] == (2, "val2", "2022-02-01")
+    assert res[1] == (2, "val2", "2022-01-02")
 
 
 def test_merge_with_primary_key():

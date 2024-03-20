@@ -172,14 +172,17 @@ def ingest(
             )
             dest_table = source_table
 
+        factory = SourceDestinationFactory(source_uri, dest_uri)
+        source = factory.get_source()
+        destination = factory.get_destination()
+
+        original_incremental_strategy = incremental_strategy
+
         merge_key = None
         if incremental_strategy == "delete+insert":
             merge_key = incremental_key
             incremental_strategy = "merge"
-
-        factory = SourceDestinationFactory(source_uri, dest_uri)
-        source = factory.get_source()
-        destination = factory.get_destination()
+            
 
         m = hashlib.sha256()
         m.update(dest_table.encode("utf-8"))
@@ -222,15 +225,20 @@ def ingest(
         if factory.source_scheme == "sqlite":
             source_table = "main." + source_table.split(".")[-1]
 
+        dlt_source = source.dlt_source(
+            uri=source_uri,
+            table=source_table,
+            incremental_key=incremental_key,
+            merge_key=merge_key,
+            interval_start=interval_start,
+            interval_end=interval_end,
+        )
+
+        if original_incremental_strategy == "delete+insert":
+            dlt_source.incremental.primary_key = ()
+
         run_info = pipeline.run(
-            source.dlt_source(
-                uri=source_uri,
-                table=source_table,
-                incremental_key=incremental_key,
-                merge_key=merge_key,
-                interval_start=interval_start,
-                interval_end=interval_end,
-            ),
+            dlt_source,
             **destination.dlt_run_params(
                 uri=dest_uri,
                 table=dest_table,
