@@ -180,7 +180,7 @@ def test_merge_with_primary_key():
     conn.execute("DROP SCHEMA IF EXISTS testschema_merge CASCADE")
     conn.execute("CREATE SCHEMA testschema_merge")
     conn.execute(
-        "CREATE TABLE testschema_merge.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+        "CREATE TABLE testschema_merge.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP WITH TIME ZONE)"
     )
     conn.execute("INSERT INTO testschema_merge.input VALUES (1, 'val1', '2022-01-01')")
     conn.execute("INSERT INTO testschema_merge.input VALUES (2, 'val2', '2022-02-01')")
@@ -334,7 +334,7 @@ def test_delete_insert_without_primary_key():
     conn.execute("DROP SCHEMA IF EXISTS testschema_delete_insert CASCADE")
     conn.execute("CREATE SCHEMA testschema_delete_insert")
     conn.execute(
-        "CREATE TABLE testschema_delete_insert.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+        "CREATE TABLE testschema_delete_insert.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP WITH TIME ZONE)"
     )
     conn.execute(
         "INSERT INTO testschema_delete_insert.input VALUES (1, 'val1', '2022-01-01')"
@@ -436,16 +436,16 @@ def test_delete_insert_with_timerange():
     conn.execute("DROP SCHEMA IF EXISTS testschema_delete_insert_timerange CASCADE")
     conn.execute("CREATE SCHEMA testschema_delete_insert_timerange")
     conn.execute(
-        "CREATE TABLE testschema_delete_insert_timerange.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+        "CREATE TABLE testschema_delete_insert_timerange.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP WITH TIME ZONE)"
     )
     conn.execute(
         """INSERT INTO testschema_delete_insert_timerange.input VALUES 
-            (1, 'val1', '2022-01-01'),
-            (2, 'val2', '2022-01-01'),
-            (3, 'val3', '2022-01-02'),
-            (4, 'val4', '2022-01-02'),
-            (5, 'val5', '2022-01-03'),
-            (6, 'val6', '2022-01-03')
+            (1, 'val1', '2022-01-01T00:00:00Z'),
+            (2, 'val2', '2022-01-01T00:00:00Z'),
+            (3, 'val3', '2022-01-02T00:00:00Z'),
+            (4, 'val4', '2022-01-02T00:00:00Z'),
+            (5, 'val5', '2022-01-03T00:00:00Z'),
+            (6, 'val6', '2022-01-03T00:00:00Z')
         """
     )
 
