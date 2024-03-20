@@ -182,7 +182,6 @@ def ingest(
         if incremental_strategy == "delete+insert":
             merge_key = incremental_key
             incremental_strategy = "merge"
-            
 
         m = hashlib.sha256()
         m.update(dest_table.encode("utf-8"))

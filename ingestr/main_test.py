@@ -2,7 +2,6 @@ import os
 import shutil
 
 import duckdb
-import pytest
 from typer.testing import CliRunner
 
 from ingestr.main import app
@@ -102,7 +101,6 @@ def test_create_replace():
     assert len(res) == 2
     assert res[0] == (1, "val1", "2022-01-01")
     assert res[1] == (2, "val2", "2022-02-01")
-
 
 
 def test_append():

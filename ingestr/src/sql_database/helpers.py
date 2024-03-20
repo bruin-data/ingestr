@@ -106,10 +106,10 @@ def engine_from_credentials(
     return create_engine(credentials)
 
 
-def get_primary_key(table: Table) -> List[str]:
+def get_primary_key(table: Table) -> Optional[List[str]]:
     """Create primary key or return None if no key defined"""
     primary_key = [c.name for c in table.primary_key]
-    return primary_key if len(primary_key) > 0  else None
+    return primary_key if len(primary_key) > 0 else None
 
 
 @configspec

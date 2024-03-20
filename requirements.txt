@@ -1,7 +1,7 @@
 cx_Oracle==8.3.0
 databricks-sql-connector==2.9.3
-dlt==0.4.3
-duckdb_engine==0.11.1
+dlt==0.4.6
+duckdb_engine==0.11.2
 duckdb==0.10.1
 google-cloud-bigquery-storage==2.24.0
 pendulum==3.0.0
@@ -12,11 +12,11 @@ pymysql==1.1.0
 pyodbc==5.1.0
 redshift-connector==2.1.0
 rich==13.7.0
-rudder-sdk-python==2.0.2
+rudder-sdk-python==2.1.0
 snowflake-sqlalchemy==1.5.1
-sqlalchemy-bigquery==1.9.0
+sqlalchemy-bigquery==1.10.0
 sqlalchemy-redshift==0.8.14
-SQLAlchemy==1.4.51
+SQLAlchemy==1.4.52
 sqlalchemy2-stubs==0.0.2a38
 tqdm==4.66.2
 typer==0.9.0

@@ -21,7 +21,7 @@ test-specific: venv
 	. venv/bin/activate; pytest -rP -vv --tb=short --capture=no -k $(test)
 
 lint-ci:
-	ruff ingestr --fix && ruff format ingestr
+	ruff check ingestr --fix && ruff format ingestr
 	mypy  --explicit-package-bases ingestr --config-file pyproject.toml
 
 lint: venv
