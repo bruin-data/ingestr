@@ -13,7 +13,7 @@ snowflake://user:password@account/dbname?warehouse=COMPUTE_WH
 URI parameters:
 - `user`: the user name to connect to the database
 - `password`: the password for the user
-- `account`: your Snowflake account identifier
+- `account`: your Snowflake account identifier (copying from snowflake interface gives you org_name.account_name, modify the "." to "-" in the ingestr command)
 - `dbname`: the name of the database to connect to
 - `warehouse`: the name of the warehouse to use
 
