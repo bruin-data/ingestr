@@ -7,7 +7,7 @@ ingestr supports Snowflake as both a source and destination.
 The URI format for Snowflake is as follows:
 
 ```plaintext
-snowflake://user:password@account/dbname?warehouse=COMPUTE_WH
+snowflake://user:password@account/dbname?warehouse=COMPUTE_WH&role=data_scientist
 ```
 
 URI parameters:
@@ -15,6 +15,7 @@ URI parameters:
 - `password`: the password for the user
 - `account`: your Snowflake account identifier
 - `dbname`: the name of the database to connect to
-- `warehouse`: the name of the warehouse to use
+- `warehouse`: the name of the warehouse to use (optional)
+- `role`: the name of the role to use (optional)
 
 The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's Snowflake dialect [here](https://docs.snowflake.com/en/developer-guide/python-connector/sqlalchemy#connection-parameters).
