@@ -177,7 +177,8 @@ class CsvDestination(GenericSqlDestination):
         )
 
         output_path = self.uri.split("://")[1]
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        if output_path.count("/") > 1:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         with gzip.open(first_file_path, "rt", encoding="utf-8") as jsonl_file:  # type: ignore
             with open(output_path, "w", newline="") as csv_file:
