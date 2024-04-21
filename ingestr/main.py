@@ -5,7 +5,7 @@ from typing import Optional
 import dlt
 import humanize
 import typer
-from dlt.common.runtime.collector import Collector
+from dlt.common.runtime.collector import Collector, LogCollector
 from rich.console import Console
 from rich.status import Status
 from typing_extensions import Annotated
@@ -191,9 +191,9 @@ def ingest(
         m = hashlib.sha256()
         m.update(dest_table.encode("utf-8"))
 
-        progressInstance = SpinnerCollector()
+        progressInstance: Collector = SpinnerCollector()
         if progress == "log":
-            progressInstance = dlt.progress.log()  # type: ignore
+            progressInstance = LogCollector()
 
         pipeline = dlt.pipeline(
             pipeline_name=m.hexdigest(),

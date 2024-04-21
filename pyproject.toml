@@ -64,11 +64,13 @@ omit = ["*_test.py"]
 exclude = [
     'venv',
     'src/sql_database/.*',
+    'src/mongodb/.*',
 ]
 
 [[tool.mypy.overrides]]
 module = [
   "ingestr.src.sql_database.*",
+  "ingestr.src.mongodb.*",
 ]
 follow_imports = "skip"
 

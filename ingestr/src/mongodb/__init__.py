@@ -70,7 +70,7 @@ def mongodb_collection(
     collection: str = dlt.config.value,
     incremental: Optional[dlt.sources.incremental] = None,  # type: ignore[type-arg]
     write_disposition: Optional[str] = dlt.config.value,
-    parallel: Optional[bool] = dlt.config.value,
+    parallel: Optional[bool] = False,
 ) -> Any:
     """
     A DLT source which loads a collection from a mongo database using PyMongo.

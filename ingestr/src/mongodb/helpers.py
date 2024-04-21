@@ -83,7 +83,7 @@ class CollectionLoaderParallell(CollectionLoader):
     def _get_cursor(self) -> TCursor:
         cursor = self.collection.find(filter=self._filter_op)
         if self._sort_op:
-            cursor = cursor.sort(self._sort_op)  # type: ignore
+            cursor = cursor.sort(self._sort_op)
         return cursor
 
     @dlt.defer
@@ -155,11 +155,11 @@ class MongoDbCollectionConfiguration(BaseConfiguration):
 
 @configspec
 class MongoDbCollectionResourceConfiguration(BaseConfiguration):
-    connection_url: str
-    database: Optional[str]
-    collection: str
+    connection_url: str = dlt.secrets.value
+    database: Optional[str] = dlt.config.value
+    collection: str = dlt.config.value
     incremental: Optional[dlt.sources.incremental] = None  # type: ignore[type-arg]
-    write_disposition: Optional[str] = None
+    write_disposition: Optional[str] = dlt.config.value
     parallel: Optional[bool] = False
 
 
