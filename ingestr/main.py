@@ -34,8 +34,6 @@ DATE_FORMATS = [
 
 
 class SpinnerCollector(Collector):
-    """A Collector that shows progress with `tqdm` progress bars"""
-
     status: Status
     current_step: str
     started: bool
@@ -150,6 +148,13 @@ def ingest(
             envvar="FULL_REFRESH",
         ),
     ] = False,  # type: ignore
+    progress: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The progress display type, must be one of 'interactive', 'log'",
+            envvar="PROGRESS",
+        ),
+    ] = 'interactive',  # type: ignore
 ):
     track(
         "command_triggered",
@@ -186,12 +191,17 @@ def ingest(
         m = hashlib.sha256()
         m.update(dest_table.encode("utf-8"))
 
+        progressInstance = SpinnerCollector()
+        if progress == "log":
+            progressInstance = dlt.progress.log()
+        
+
         pipeline = dlt.pipeline(
             pipeline_name=m.hexdigest(),
             destination=destination.dlt_dest(
                 uri=dest_uri,
             ),
-            progress=SpinnerCollector(),
+            progress=progressInstance,
             pipelines_dir="pipeline_data",
             full_refresh=full_refresh,
         )
