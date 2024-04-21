@@ -14,7 +14,7 @@ from ingestr.src.destinations import (
     SnowflakeDestination,
     SynapseDestination,
 )
-from ingestr.src.sources import LocalCsvSource, MongoDbSource, SqlSource
+from ingestr.src.sources import LocalCsvSource, MongoDbSource, NotionSource, SqlSource
 
 SQL_SOURCE_SCHEMES = [
     "bigquery",
@@ -80,6 +80,8 @@ class SourceDestinationFactory:
             return LocalCsvSource()
         elif self.source_scheme == "mongodb":
             return MongoDbSource()
+        elif self.source_scheme == "notion":
+            return NotionSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

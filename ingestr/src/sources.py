@@ -1,9 +1,11 @@
 import csv
 from typing import Callable
+from urllib.parse import parse_qs, urlparse
 
 import dlt
 
 from ingestr.src.mongodb import mongodb_collection
+from ingestr.src.notion import notion_databases
 from ingestr.src.sql_database import sql_table
 
 
@@ -103,4 +105,26 @@ class LocalCsvSource:
         return dlt.resource(
             csv_file,
             merge_key=kwargs.get("merge_key"),  # type: ignore
+        )
+
+
+class NotionSource:
+    table_builder: Callable
+
+    def __init__(self, table_builder=notion_databases) -> None:
+        self.table_builder = table_builder
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError("Incremental loads are not supported for Notion")
+
+        source_fields = urlparse(uri)
+        source_params = parse_qs(source_fields.query)
+        api_key = source_params.get("api_key")
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Notion")
+
+        return self.table_builder(
+            database_ids=[{"id": table}],
+            api_key=api_key[0],
         )
