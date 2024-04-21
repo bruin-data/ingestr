@@ -41,6 +41,7 @@ class SqlSource:
             table=table_fields[-1],
             incremental=incremental,
             merge_key=kwargs.get("merge_key"),
+            backend=kwargs.get("sql_backend", "sqlalchemy"),
         )
 
         return table_instance

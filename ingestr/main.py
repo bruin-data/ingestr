@@ -155,6 +155,13 @@ def ingest(
             envvar="PROGRESS",
         ),
     ] = "interactive",  # type: ignore
+    sql_backend: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The SQL backend to use, must be one of 'sqlalchemy', 'pyarrow'",
+            envvar="SQL_BACKEND",
+        ),
+    ] = "sqlalchemy",  # type: ignore
 ):
     track(
         "command_triggered",
@@ -240,6 +247,7 @@ def ingest(
             merge_key=merge_key,
             interval_start=interval_start,
             interval_end=interval_end,
+            sql_backend=sql_backend,
         )
 
         if original_incremental_strategy == "delete+insert":
