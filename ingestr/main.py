@@ -154,7 +154,7 @@ def ingest(
             help="The progress display type, must be one of 'interactive', 'log'",
             envvar="PROGRESS",
         ),
-    ] = 'interactive',  # type: ignore
+    ] = "interactive",  # type: ignore
 ):
     track(
         "command_triggered",
@@ -193,8 +193,7 @@ def ingest(
 
         progressInstance = SpinnerCollector()
         if progress == "log":
-            progressInstance = dlt.progress.log()
-        
+            progressInstance = dlt.progress.log()  # type: ignore
 
         pipeline = dlt.pipeline(
             pipeline_name=m.hexdigest(),

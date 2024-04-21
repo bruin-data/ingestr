@@ -93,6 +93,7 @@ def test_create_replace():
         "testschema.output",
     )
 
+    print(result.stdout)
     assert result.exit_code == 0
 
     res = conn.sql(
@@ -333,10 +334,10 @@ def test_delete_insert_without_primary_key():
         "CREATE TABLE testschema_delete_insert.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP WITH TIME ZONE)"
     )
     conn.execute(
-        "INSERT INTO testschema_delete_insert.input VALUES (1, 'val1', '2022-01-01')"
+        "INSERT INTO testschema_delete_insert.input VALUES (1, 'val1', '2022-01-01 00:00:00+00:00')"
     )
     conn.execute(
-        "INSERT INTO testschema_delete_insert.input VALUES (2, 'val2', '2022-02-01')"
+        "INSERT INTO testschema_delete_insert.input VALUES (2, 'val2', '2022-02-01 00:00:00+00:00')"
     )
 
     res = conn.sql("select count(*) from testschema_delete_insert.input").fetchall()
@@ -357,7 +358,7 @@ def test_delete_insert_without_primary_key():
     def get_output_rows():
         conn.execute("CHECKPOINT")
         return conn.sql(
-            "select id, val, strftime(updated_at, '%Y-%m-%d') as updated_at from testschema_delete_insert.output order by id asc"
+            "select id, val, strftime(CAST(updated_at AT TIME ZONE 'UTC' AS TIMESTAMP), '%Y-%m-%d %H:%M:%S') from testschema_delete_insert.output order by id asc"
         ).fetchall()
 
     def assert_output_equals(expected):
@@ -367,7 +368,9 @@ def test_delete_insert_without_primary_key():
             assert res[i] == row
 
     run()
-    assert_output_equals([(1, "val1", "2022-01-01"), (2, "val2", "2022-02-01")])
+    assert_output_equals(
+        [(1, "val1", "2022-01-01 00:00:00"), (2, "val2", "2022-02-01 00:00:00")]
+    )
 
     first_run_id = conn.sql(
         "select _dlt_load_id from testschema_delete_insert.output limit 1"
@@ -375,8 +378,10 @@ def test_delete_insert_without_primary_key():
 
     ##############################
     # we'll run again, since this is a delete+insert, we expect the run ID to change for the last one
-    run()
-    assert_output_equals([(1, "val1", "2022-01-01"), (2, "val2", "2022-02-01")])
+    res = run()
+    assert_output_equals(
+        [(1, "val1", "2022-01-01 00:00:00"), (2, "val2", "2022-02-01 00:00:00")]
+    )
 
     # we ensure that one of the rows is updated with a new run
     count_by_run_id = conn.sql(
@@ -392,17 +397,17 @@ def test_delete_insert_without_primary_key():
     ##############################
     # now we'll insert a few more lines for the same day, the new rows should show up
     conn.execute(
-        "INSERT INTO testschema_delete_insert.input VALUES (3, 'val3', '2022-02-01'), (4, 'val4', '2022-02-01')"
+        "INSERT INTO testschema_delete_insert.input VALUES (3, 'val3', '2022-02-01 00:00:00+00:00'), (4, 'val4', '2022-02-01 00:00:00+00:00')"
     )
     conn.execute("CHECKPOINT")
 
     run()
     assert_output_equals(
         [
-            (1, "val1", "2022-01-01"),
-            (2, "val2", "2022-02-01"),
-            (3, "val3", "2022-02-01"),
-            (4, "val4", "2022-02-01"),
+            (1, "val1", "2022-01-01 00:00:00"),
+            (2, "val2", "2022-02-01 00:00:00"),
+            (3, "val3", "2022-02-01 00:00:00"),
+            (4, "val4", "2022-02-01 00:00:00"),
         ]
     )
 

@@ -61,7 +61,16 @@ addopts = "-p no:warnings -rP"
 omit = ["*_test.py"]
 
 [tool.mypy]
-exclude = ['venv']
+exclude = [
+    'venv',
+    'src/sql_database/.*',
+]
+
+[[tool.mypy.overrides]]
+module = [
+  "ingestr.src.sql_database.*",
+]
+follow_imports = "skip"
 
 
 [build-system]

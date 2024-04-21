@@ -22,7 +22,7 @@ test-specific: venv
 
 lint-ci:
 	ruff check ingestr --fix && ruff format ingestr
-	mypy  --explicit-package-bases ingestr --config-file pyproject.toml
+	mypy --config-file pyproject.toml --explicit-package-bases ingestr
 
 lint: venv
 	. venv/bin/activate; $(MAKE) lint-ci
