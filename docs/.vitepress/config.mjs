@@ -4,20 +4,17 @@ import { defineConfig } from "vitepress";
 export default defineConfig({
   title: "ingestr",
   description: "Ingest & copy data between any source and any destination",
-  base: '/ingestr/',
+  base: "/ingestr/",
   head: [
+    ["script", { async: "", src: "https://www.googletagmanager.com/gtag/js?id=G-MZJ20PP4MJ" }],
     [
-      'script',
-      { async: '', src: 'https://www.googletagmanager.com/gtag/js?id=G-MZJ20PP4MJ' }
-    ],
-    [
-      'script',
+      "script",
       {},
       `window.dataLayer = window.dataLayer || [];
       function gtag(){dataLayer.push(arguments);}
       gtag('js', new Date());
-      gtag('config', 'G-MZJ20PP4MJ');`
-    ]
+      gtag('config', 'G-MZJ20PP4MJ');`,
+    ],
   ],
   themeConfig: {
     // https://vitepress.dev/reference/default-theme-config
@@ -46,19 +43,31 @@ export default defineConfig({
       {
         text: "Sources & Destinations",
         items: [
-          { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
-          { text: "Databricks", link: "/supported-sources/databricks.md" },
-          { text: "DuckDB", link: "/supported-sources/duckdb.md" },
-          { text: "Google BigQuery", link: "/supported-sources/bigquery.md" },
-          { text: "Local CSV Files", link: "/supported-sources/csv.md" },
-          { text: "Microsoft SQL Server", link: "/supported-sources/mssql.md" },
-          { text: "MongoDB", link: "/supported-sources/mongodb.md" },
-          { text: "MySQL", link: "/supported-sources/mysql.md" },
-          { text: "Oracle", link: "/supported-sources/oracle.md" },
           { text: "Overview", link: "/supported-sources/overview.md" },
-          { text: "Postgres", link: "/supported-sources/postgres.md" },
-          { text: "Snowflake", link: "/supported-sources/snowflake.md" },
-          { text: "SQLite", link: "/supported-sources/sqlite.md" },
+          {
+            text: "Databases",
+            collapsed: false,
+            items: [
+              { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
+              { text: "Databricks", link: "/supported-sources/databricks.md" },
+              { text: "DuckDB", link: "/supported-sources/duckdb.md" },
+              { text: "Google BigQuery", link: "/supported-sources/bigquery.md" },
+              { text: "Local CSV Files", link: "/supported-sources/csv.md" },
+              { text: "Microsoft SQL Server", link: "/supported-sources/mssql.md" },
+              { text: "MongoDB", link: "/supported-sources/mongodb.md" },
+              { text: "MySQL", link: "/supported-sources/mysql.md" },
+              { text: "Oracle", link: "/supported-sources/oracle.md" },
+              { text: "Postgres", link: "/supported-sources/postgres.md" },
+              { text: "Snowflake", link: "/supported-sources/snowflake.md" },
+              { text: "SQLite", link: "/supported-sources/sqlite.md" },
+            ],
+          },
+
+          {
+            text: "Platforms",
+            collapsed: false,
+            items: [{ text: "Notion", link: "/supported-sources/notion.md" }],
+          },
         ],
       },
     ],
