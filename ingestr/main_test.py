@@ -24,6 +24,8 @@ def invoke_ingest_command(
     merge_key=None,
     interval_start=None,
     interval_end=None,
+    sql_backend=None,
+    loader_file_format=None,
 ):
     args = [
         "ingest",
@@ -61,6 +63,14 @@ def invoke_ingest_command(
         args.append("--interval-end")
         args.append(interval_end)
 
+    if sql_backend:
+        args.append("--sql-backend")
+        args.append(sql_backend)
+
+    if loader_file_format:
+        args.append("--loader-file-format")
+        args.append(loader_file_format)
+
     result = runner.invoke(
         app,
         args,
@@ -93,7 +103,6 @@ def test_create_replace():
         "testschema.output",
     )
 
-    print(result.stdout)
     assert result.exit_code == 0
 
     res = conn.sql(
@@ -138,6 +147,7 @@ def test_append():
             "testschema_append.output",
             "append",
             "updated_at",
+            sql_backend="sqlalchemy",
         )
         assert res.exit_code == 0
 
@@ -194,6 +204,7 @@ def test_merge_with_primary_key():
             "merge",
             "updated_at",
             "id",
+            sql_backend="sqlalchemy",
         )
         assert res.exit_code == 0
         return res
@@ -351,6 +362,8 @@ def test_delete_insert_without_primary_key():
             "testschema_delete_insert.output",
             inc_strategy="delete+insert",
             inc_key="updated_at",
+            sql_backend="sqlalchemy",
+            loader_file_format="jsonl",
         )
         assert res.exit_code == 0
         return res
@@ -465,6 +478,8 @@ def test_delete_insert_with_timerange():
             inc_key="updated_at",
             interval_start=start_date,
             interval_end=end_date,
+            sql_backend="sqlalchemy",
+            loader_file_format="jsonl",
         )
         assert res.exit_code == 0
         return res

@@ -32,6 +32,15 @@ DATE_FORMATS = [
     "%Y-%m-%dT%H:%M:%S.%f%z",
 ]
 
+# https://dlthub.com/docs/dlt-ecosystem/file-formats/parquet#supported-destinations
+PARQUET_SUPPORTED_DESTINATIONS = [
+    "bigquery",
+    "duckdb",
+    "snowflake",
+    "databricks",
+    "synapse",
+]
+
 
 class SpinnerCollector(Collector):
     status: Status
@@ -161,7 +170,14 @@ def ingest(
             help="The SQL backend to use, must be one of 'sqlalchemy', 'pyarrow'",
             envvar="SQL_BACKEND",
         ),
-    ] = "sqlalchemy",  # type: ignore
+    ] = "pyarrow",  # type: ignore
+    loader_file_format: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The file format to use when loading data, must be one of 'jsonl', 'parquet', 'default'",
+            envvar="LOADER_FILE_FORMAT",
+        ),
+    ] = "default",  # type: ignore
 ):
     track(
         "command_triggered",
@@ -253,6 +269,14 @@ def ingest(
         if original_incremental_strategy == "delete+insert":
             dlt_source.incremental.primary_key = ()
 
+        if (
+            factory.destination_scheme in PARQUET_SUPPORTED_DESTINATIONS
+            and loader_file_format == "default"
+        ):
+            loader_file_format = "parquet"
+        elif loader_file_format == "default":
+            loader_file_format = "jsonl"
+
         run_info = pipeline.run(
             dlt_source,
             **destination.dlt_run_params(
@@ -261,6 +285,7 @@ def ingest(
             ),
             write_disposition=incremental_strategy,  # type: ignore
             primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
+            loader_file_format=loader_file_format,  # type: ignore
         )
 
         destination.post_load()
