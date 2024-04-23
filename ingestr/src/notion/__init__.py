@@ -9,7 +9,7 @@ from .helpers.client import NotionClient
 from .helpers.database import NotionDatabase
 
 
-@dlt.source
+@dlt.source(max_table_nesting=1)
 def notion_databases(
     database_ids: Optional[List[Dict[str, str]]] = None,
     api_key: str = dlt.secrets.value,
