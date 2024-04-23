@@ -1,5 +1,6 @@
 import hashlib
 from datetime import datetime
+from enum import Enum
 from typing import Optional
 
 import dlt
@@ -83,6 +84,30 @@ class SpinnerCollector(Collector):
         self.status.stop()
 
 
+class IncrementalStrategy(str, Enum):
+    create_replace = "replace"
+    append = "append"
+    delete_insert = "delete+insert"
+    merge = "merge"
+
+
+class LoaderFileFormat(str, Enum):
+    jsonl = "jsonl"
+    parquet = "parquet"
+    insert_values = "insert_values"
+    csv = "csv"
+
+
+class SqlBackend(str, Enum):
+    sqlalchemy = "sqlalchemy"
+    pyarrow = "pyarrow"
+
+
+class Progress(str, Enum):
+    interactive = "interactive"
+    log = "log"
+
+
 @app.command()
 def ingest(
     source_uri: Annotated[
@@ -117,12 +142,12 @@ def ingest(
         ),
     ] = None,  # type: ignore
     incremental_strategy: Annotated[
-        str,
+        IncrementalStrategy,
         typer.Option(
-            help="The incremental strategy to use, must be one of 'replace', 'append', 'delete+insert', or 'merge'",
+            help="The incremental strategy to use",
             envvar="INCREMENTAL_STRATEGY",
         ),
-    ] = "replace",  # type: ignore
+    ] = IncrementalStrategy.create_replace,  # type: ignore
     interval_start: Annotated[
         Optional[datetime],
         typer.Option(
@@ -161,26 +186,26 @@ def ingest(
         ),
     ] = False,  # type: ignore
     progress: Annotated[
-        Optional[str],
+        Progress,
         typer.Option(
             help="The progress display type, must be one of 'interactive', 'log'",
             envvar="PROGRESS",
         ),
-    ] = "interactive",  # type: ignore
+    ] = Progress.interactive,  # type: ignore
     sql_backend: Annotated[
-        Optional[str],
+        SqlBackend,
         typer.Option(
-            help="The SQL backend to use, must be one of 'sqlalchemy', 'pyarrow'",
+            help="The SQL backend to use",
             envvar="SQL_BACKEND",
         ),
-    ] = "pyarrow",  # type: ignore
+    ] = SqlBackend.pyarrow,  # type: ignore
     loader_file_format: Annotated[
-        Optional[str],
+        Optional[LoaderFileFormat],
         typer.Option(
-            help="The file format to use when loading data, must be one of 'jsonl', 'parquet', 'default'",
+            help="The file format to use when loading data",
             envvar="LOADER_FILE_FORMAT",
         ),
-    ] = "default",  # type: ignore
+    ] = None,  # type: ignore
 ):
     track(
         "command_triggered",
@@ -210,15 +235,15 @@ def ingest(
         original_incremental_strategy = incremental_strategy
 
         merge_key = None
-        if incremental_strategy == "delete+insert":
+        if incremental_strategy == IncrementalStrategy.delete_insert:
             merge_key = incremental_key
-            incremental_strategy = "merge"
+            incremental_strategy = IncrementalStrategy.merge
 
         m = hashlib.sha256()
         m.update(dest_table.encode("utf-8"))
 
         progressInstance: Collector = SpinnerCollector()
-        if progress == "log":
+        if progress == Progress.log:
             progressInstance = LogCollector()
 
         pipeline = dlt.pipeline(
@@ -240,7 +265,7 @@ def ingest(
             f"[bold yellow]  Destination:[/bold yellow] {factory.destination_scheme} / {dest_table}"
         )
         print(
-            f"[bold yellow]  Incremental Strategy:[/bold yellow] {incremental_strategy}"
+            f"[bold yellow]  Incremental Strategy:[/bold yellow] {incremental_strategy.value}"
         )
         print(
             f"[bold yellow]  Incremental Key:[/bold yellow] {incremental_key if incremental_key else 'None'}"
@@ -266,24 +291,24 @@ def ingest(
             merge_key=merge_key,
             interval_start=interval_start,
             interval_end=interval_end,
-            sql_backend=sql_backend,
+            sql_backend=sql_backend.value,
         )
 
-        if original_incremental_strategy == "delete+insert":
+        if original_incremental_strategy == IncrementalStrategy.delete_insert:
             dlt_source.incremental.primary_key = ()
 
         if (
             factory.destination_scheme in PARQUET_SUPPORTED_DESTINATIONS
-            and loader_file_format == "default"
+            and loader_file_format is None
         ):
-            loader_file_format = "parquet"
+            loader_file_format = LoaderFileFormat.parquet
 
             # if the source is a JSON returning source, we cannot use Parquet loader for BigQuery
-            if factory.destination_scheme == 'bigquery' and factory.source_scheme in JSON_RETURNING_SOURCES:
-                loader_file_format = "jsonl"
-            
-        elif loader_file_format == "default":
-            loader_file_format = "jsonl"
+            if (
+                factory.destination_scheme == "bigquery"
+                and factory.source_scheme in JSON_RETURNING_SOURCES
+            ):
+                loader_file_format = None
 
         run_info = pipeline.run(
             dlt_source,
@@ -291,9 +316,11 @@ def ingest(
                 uri=dest_uri,
                 table=dest_table,
             ),
-            write_disposition=incremental_strategy,  # type: ignore
+            write_disposition=incremental_strategy.value,  # type: ignore
             primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
-            loader_file_format=loader_file_format,  # type: ignore
+            loader_file_format=loader_file_format.value
+            if loader_file_format is not None
+            else None,  # type: ignore
         )
 
         destination.post_load()
