@@ -25,24 +25,7 @@ Once you complete the guide, you should have an API key, and the table ID to con
 ingestr ingest --source-uri 'notion://?api_key=secret_12345' --source-table 'bfeaafc0c25f40a9asdasd672a9456f3' --dest-uri duckdb:///notion.duckdb --dest-table 'notion.output'
 ```
 
-The result of this command will be a bunch of tables in the `notion.duckdb` database. The Notion integration creates a bunch of extra tables in the schema to keep track of additional information about every field in a database. You should take some time to play around with the data and understand how it's structured, and take a good look at `_dlt_parent_id` column in the tables to understand the relationships between tables.
-
-Take a look at the following Notion table:
-![an example Notion database](./images/notion_example.png)
-
-Ingesting this table using ingestr will create a bunch of new tables with quite a lot of details in them. The following query is a reconstruction of the table as it looks on Notion:
-
-```sql
-select n.text__content, s.text__content, o.properties__numerical_value__number, r.text__content
-from notion.output o
-         join notion.output__properties__name__title n on n._dlt_parent_id = o._dlt_id
-         join notion.output__properties__another_col__rich_text r on r._dlt_parent_id = o._dlt_id
-         join notion.output__properties__second_value__rich_text s on s._dlt_parent_id = o._dlt_id
-order by 1;
-```
-
-Take this as a starting point and play around with the data.
-
+The result of this command will be a table in the `notion.duckdb` database with JSON columns. 
 
 > [!CAUTION]
 > Notion does not support incremental loading, which means every time you run the command, it will copy the entire table from Notion to the destination. This can be slow for large tables.

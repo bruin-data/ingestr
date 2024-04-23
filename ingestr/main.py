@@ -41,6 +41,9 @@ PARQUET_SUPPORTED_DESTINATIONS = [
     "synapse",
 ]
 
+# these sources would return a JSON for sure, which means they cannot be used with Parquet loader for BigQuery
+JSON_RETURNING_SOURCES = ["notion"]
+
 
 class SpinnerCollector(Collector):
     status: Status
@@ -274,6 +277,11 @@ def ingest(
             and loader_file_format == "default"
         ):
             loader_file_format = "parquet"
+
+            # if the source is a JSON returning source, we cannot use Parquet loader for BigQuery
+            if factory.destination_scheme == 'bigquery' and factory.source_scheme in JSON_RETURNING_SOURCES:
+                loader_file_format = "jsonl"
+            
         elif loader_file_format == "default":
             loader_file_format = "jsonl"
 
