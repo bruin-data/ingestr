@@ -111,6 +111,11 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
         <td>❌</td>
     </tr>
     <tr>
+        <td>SAP Hana</td>
+        <td>✅</td>
+        <td>❌</td>
+    </tr>
+    <tr>
         <td>SQLite</td>
         <td>✅</td>
         <td>❌</td>

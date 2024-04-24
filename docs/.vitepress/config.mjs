@@ -58,6 +58,7 @@ export default defineConfig({
               { text: "MySQL", link: "/supported-sources/mysql.md" },
               { text: "Oracle", link: "/supported-sources/oracle.md" },
               { text: "Postgres", link: "/supported-sources/postgres.md" },
+              { text: "SAP Hana", link: "/supported-sources/sap-hana.md" },
               { text: "Snowflake", link: "/supported-sources/snowflake.md" },
               { text: "SQLite", link: "/supported-sources/sqlite.md" },
             ],
