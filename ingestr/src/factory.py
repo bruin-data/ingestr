@@ -30,6 +30,7 @@ SQL_SOURCE_SCHEMES = [
     "sqlite",
     "oracle",
     "oracle+cx_oracle",
+    "hana",
 ]
 
 
