@@ -62,6 +62,11 @@ ingestr supports the following sources and destinations:
         <td>❌</td>
     </tr>
     <tr>
+        <td>SAP Hana</td>
+        <td>✅</td>
+        <td>❌</td>
+    </tr>
+    <tr>
         <td>SQLite</td>
         <td>✅</td>
         <td>❌</td>
