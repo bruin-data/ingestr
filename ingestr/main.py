@@ -10,6 +10,7 @@ from dlt.common.runtime.collector import Collector, LogCollector
 from rich.console import Console
 from rich.status import Status
 from typing_extensions import Annotated
+from dlt.common.pipeline import LoadInfo
 
 from ingestr.src.factory import SourceDestinationFactory
 from ingestr.src.telemetry.event import track
@@ -310,7 +311,7 @@ def ingest(
             ):
                 loader_file_format = None
 
-        run_info = pipeline.run(
+        run_info: LoadInfo = pipeline.run(
             dlt_source,
             **destination.dlt_run_params(
                 uri=dest_uri,
@@ -322,6 +323,19 @@ def ingest(
             if loader_file_format is not None
             else None,  # type: ignore
         )
+
+        for load_package in run_info.load_packages:
+            failed_jobs = load_package.jobs["failed_jobs"]
+            if len(failed_jobs) > 0:
+                print()
+                print("[bold red]Failed jobs:[/bold red]")
+                print()
+                for job in failed_jobs:
+                    print(f"[bold red]  {job.job_file_info.job_id()}[/bold red]")
+                    print(f"    [bold yellow]Error:[/bold yellow] {job.failed_message}")
+                
+                raise typer.Exit()
+
 
         destination.post_load()
 
