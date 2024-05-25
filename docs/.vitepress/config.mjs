@@ -67,7 +67,10 @@ export default defineConfig({
           {
             text: "Platforms",
             collapsed: false,
-            items: [{ text: "Notion", link: "/supported-sources/notion.md" }],
+            items: [
+              { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
+              { text: "Notion", link: "/supported-sources/notion.md" },
+            ],
           },
         ],
       },
