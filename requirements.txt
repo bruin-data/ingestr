@@ -4,6 +4,7 @@ dlt==0.4.8
 duckdb_engine==0.11.5
 duckdb==0.10.2
 google-cloud-bigquery-storage==2.24.0
+google-api-python-client==2.130.0
 pendulum==3.0.0
 psycopg2-binary==2.9.9
 py-machineid==0.5.1
