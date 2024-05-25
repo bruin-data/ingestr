@@ -6,11 +6,11 @@ from typing import Optional
 import dlt
 import humanize
 import typer
+from dlt.common.pipeline import LoadInfo
 from dlt.common.runtime.collector import Collector, LogCollector
 from rich.console import Console
 from rich.status import Status
 from typing_extensions import Annotated
-from dlt.common.pipeline import LoadInfo
 
 from ingestr.src.factory import SourceDestinationFactory
 from ingestr.src.telemetry.event import track
@@ -333,9 +333,8 @@ def ingest(
                 for job in failed_jobs:
                     print(f"[bold red]  {job.job_file_info.job_id()}[/bold red]")
                     print(f"    [bold yellow]Error:[/bold yellow] {job.failed_message}")
-                
-                raise typer.Exit()
 
+                raise typer.Exit()
 
         destination.post_load()
 

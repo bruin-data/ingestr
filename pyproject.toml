@@ -65,12 +65,14 @@ exclude = [
     'venv',
     'src/sql_database/.*',
     'src/mongodb/.*',
+    'src/google_sheets/.*',
 ]
 
 [[tool.mypy.overrides]]
 module = [
   "ingestr.src.sql_database.*",
   "ingestr.src.mongodb.*",
+  "ingestr.src.google_sheets.*",
 ]
 follow_imports = "skip"
 
