@@ -80,6 +80,11 @@ ingestr supports the following sources and destinations:
         <td colspan="3" style='text-align:center;'><strong>Platforms</strong></td>
     </tr>
     <tr>
+        <td>Google Sheets</td>
+        <td>✅</td>
+        <td>❌</td>
+    </tr>
+    <tr>
         <td>Notion</td>
         <td>✅</td>
         <td>❌</td>
