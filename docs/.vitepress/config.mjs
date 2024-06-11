@@ -70,6 +70,7 @@ export default defineConfig({
             items: [
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
+              { text: "Shopify", link: "/supported-sources/shopify.md" },
             ],
           },
         ],

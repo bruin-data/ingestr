@@ -66,6 +66,7 @@ exclude = [
     'src/sql_database/.*',
     'src/mongodb/.*',
     'src/google_sheets/.*',
+    'src/shopify/.*',
 ]
 
 [[tool.mypy.overrides]]
@@ -73,6 +74,7 @@ module = [
   "ingestr.src.sql_database.*",
   "ingestr.src.mongodb.*",
   "ingestr.src.google_sheets.*",
+  "ingestr.src.shopify.*",
 ]
 follow_imports = "skip"
 
