@@ -9,6 +9,7 @@ import dlt
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
+from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
 
 
@@ -132,6 +133,41 @@ class NotionSource:
             database_ids=[{"id": table}],
             api_key=api_key[0],
         )
+
+
+class ShopifySource:
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Shopify takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        # shopify://shop_url?api_key=private_app_password
+
+        source_fields = urlparse(uri)
+        source_params = parse_qs(source_fields.query)
+        api_key = source_params.get("api_key")
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Shopify")
+
+        date_args = {}
+        if kwargs.get("interval_start"):
+            date_args["start_date"] = kwargs.get("interval_start")
+
+        if kwargs.get("interval_end"):
+            date_args["end_date"] = kwargs.get("interval_end")
+
+        # switch case table
+        if table == "orders":
+            return shopify_source(
+                private_app_password=api_key[0],
+                shop_url=f"https://{source_fields.netloc}",
+                **date_args,
+            ).with_resources("orders")
+        else:
+            raise ValueError(
+                f"Table name '{table}' is not supported for Shopify source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
 
 
 class GoogleSheetsSource:

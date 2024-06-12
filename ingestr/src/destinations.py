@@ -98,7 +98,8 @@ class RedshiftDestination(GenericSqlDestination):
 
 class DuckDBDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.duckdb(credentials=uri, **kwargs)
+        filepath = uri.replace("duckdb://", "")
+        return dlt.destinations.duckdb(filepath, **kwargs)
 
 
 class MsSQLDestination(GenericSqlDestination):

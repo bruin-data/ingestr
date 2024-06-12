@@ -1,0 +1,2 @@
+class ShopifyPartnerApiError(Exception):
+    pass
