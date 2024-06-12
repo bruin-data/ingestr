@@ -27,3 +27,11 @@ ingestr ingest --source-uri 'shopify://my-store.myshopify.com?api_key=shpkey_123
 ```
 
 The result of this command will be a table in the `shopify.duckdb` database with JSON columns.
+
+## Available Tables
+Shopify source allows ingesting the following sources into separate tables:
+- `orders`
+- `customers`
+- `products`
+
+Use these as `--source-table` parameter in the `ingestr ingest` command.
