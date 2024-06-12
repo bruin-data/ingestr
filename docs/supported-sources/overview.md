@@ -89,6 +89,11 @@ ingestr supports the following sources and destinations:
         <td>✅</td>
         <td>❌</td>
     </tr>
+    <tr>
+        <td>Shopify</td>
+        <td>✅</td>
+        <td>❌</td>
+    </tr>
 </table>
 
 More to come soon!
