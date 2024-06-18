@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlparse
 import dlt
 
 from ingestr.src.google_sheets import google_spreadsheet
+from ingestr.src.gorgias import gorgias_source
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
@@ -168,6 +169,45 @@ class ShopifySource:
         return shopify_source(
             private_app_password=api_key[0],
             shop_url=f"https://{source_fields.netloc}",
+            **date_args,
+        ).with_resources(resource)
+
+
+class GorgiasSource:
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Gorgias takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        # gorgias://domain?api_key=<api_key>&email=<email>
+
+        source_fields = urlparse(uri)
+        source_params = parse_qs(source_fields.query)
+        api_key = source_params.get("api_key")
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Gorgias")
+
+        email = source_params.get("email")
+        if not email:
+            raise ValueError("email in the URI is required to connect to Gorgias")
+
+        resource = None
+        if table in ["customers"]:
+            resource = table
+        else:
+            raise ValueError(
+                f"Table name '{table}' is not supported for Gorgias source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        date_args = {}
+        if kwargs.get("interval_start"):
+            date_args["start_date"] = kwargs.get("interval_start")
+
+        return gorgias_source(
+            domain=source_fields.netloc,
+            email=email[0],
+            api_key=api_key[0],
             **date_args,
         ).with_resources(resource)
 

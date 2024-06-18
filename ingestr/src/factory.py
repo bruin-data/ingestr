@@ -16,6 +16,7 @@ from ingestr.src.destinations import (
 )
 from ingestr.src.sources import (
     GoogleSheetsSource,
+    GorgiasSource,
     LocalCsvSource,
     MongoDbSource,
     NotionSource,
@@ -94,6 +95,8 @@ class SourceDestinationFactory:
             return GoogleSheetsSource()
         elif self.source_scheme == "shopify":
             return ShopifySource()
+        elif self.source_scheme == "gorgias":
+            return GorgiasSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
