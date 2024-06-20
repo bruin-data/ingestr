@@ -20,6 +20,9 @@ class SqlSource:
     def __init__(self, table_builder=sql_table) -> None:
         self.table_builder = table_builder
 
+    def handles_incrementality(self) -> bool:
+        return False
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         table_fields = table.split(".")
         if len(table_fields) != 2:
@@ -58,6 +61,9 @@ class MongoDbSource:
     def __init__(self, table_builder=mongodb_collection) -> None:
         self.table_builder = table_builder
 
+    def handles_incrementality(self) -> bool:
+        return False
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         table_fields = table.split(".")
         if len(table_fields) != 2:
@@ -86,6 +92,10 @@ class MongoDbSource:
 
 
 class LocalCsvSource:
+
+    def handles_incrementality(self) -> bool:
+        return False
+    
     def dlt_source(self, uri: str, table: str, **kwargs):
         def csv_file():
             file_path = uri.split("://")[1]
@@ -120,6 +130,10 @@ class NotionSource:
     def __init__(self, table_builder=notion_databases) -> None:
         self.table_builder = table_builder
 
+    def handles_incrementality(self) -> bool:
+        return True
+    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError("Incremental loads are not supported for Notion")
@@ -137,6 +151,9 @@ class NotionSource:
 
 
 class ShopifySource:
+    def handles_incrementality(self) -> bool:
+        return True
+    
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
@@ -174,6 +191,9 @@ class ShopifySource:
 
 
 class GorgiasSource:
+    def handles_incrementality(self) -> bool:
+        return True
+    
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
@@ -193,16 +213,19 @@ class GorgiasSource:
             raise ValueError("email in the URI is required to connect to Gorgias")
 
         resource = None
-        if table in ["customers"]:
+        if table in ["customers", "tickets", "ticket_messages", "satisfaction_surveys"]:
             resource = table
         else:
             raise ValueError(
-                f"Table name '{table}' is not supported for Gorgias source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+                f"Resource '{table}' is not supported for Gorgias source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
         date_args = {}
         if kwargs.get("interval_start"):
             date_args["start_date"] = kwargs.get("interval_start")
+
+        if kwargs.get("interval_end"):
+            date_args["end_date"] = kwargs.get("interval_end")
 
         return gorgias_source(
             domain=source_fields.netloc,
