@@ -10,6 +10,47 @@ from pyrate_limiter import Duration, Limiter, Rate
 from requests.auth import HTTPBasicAuth
 
 
+def get_max_datetime_from_datetime_fields(
+    item: Dict[str, Any],
+) -> Tuple[str, Optional[pendulum.DateTime]]:
+    """Get the maximum datetime from any field that ends with _datetime"""
+
+    max_field_name = None
+    max_field_value = None
+    for field in item:
+        if field.endswith("_datetime") and item[field] is not None:
+            dt = ensure_pendulum_datetime(item[field])
+            if not max_field_name or dt > max_field_value:
+                max_field_name = field
+                max_field_value = dt
+
+    return max_field_name, max_field_value
+
+
+def convert_datetime_fields(item: Dict[str, Any]) -> Dict[str, Any]:
+    for field in item:
+        if field.endswith("_datetime") and item[field] is not None:
+            item[field] = ensure_pendulum_datetime(item[field])
+
+    if "updated_datetime" not in item:
+        _, max_datetime = get_max_datetime_from_datetime_fields(item)
+        item["updated_datetime"] = max_datetime
+
+    return item
+
+
+def find_latest_timestamp_from_page(
+    items: list[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    latest_time = None
+    for item in items:
+        _, max_field_value = get_max_datetime_from_datetime_fields(item)
+        if not latest_time or ensure_pendulum_datetime(max_field_value) > latest_time:
+            latest_time = max_field_value
+
+    return latest_time
+
+
 class GorgiasApi:
     """
     A Gorgias API client that can be used to get pages of data from Gorgias.
@@ -83,34 +124,9 @@ class GorgiasApi:
                 break
 
             if start_date_obj:
-                max_datetime = self.__find_latest_timestamp_from_page(json["data"])
+                max_datetime = find_latest_timestamp_from_page(json["data"])
                 if start_date_obj > ensure_pendulum_datetime(max_datetime):
                     break
-
-    def __find_latest_timestamp_from_page(
-        self, items: list[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
-        latest_time = None
-        for item in items:
-            _, max_field_value = self.__get_max_datetime_from_datetime_fields(item)
-            if (
-                not latest_time
-                or ensure_pendulum_datetime(max_field_value) > latest_time
-            ):
-                latest_time = max_field_value
-
-        return latest_time
-
-    def _convert_datetime_fields(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        for field in item:
-            if field.endswith("_datetime") and item[field] is not None:
-                item[field] = ensure_pendulum_datetime(item[field])
-
-        if "updated_datetime" not in item:
-            _, max_datetime = self.__get_max_datetime_from_datetime_fields(item)
-            item["updated_datetime"] = max_datetime
-
-        return item
 
     def __filter_items_in_range(
         self,
@@ -123,7 +139,7 @@ class GorgiasApi:
 
         filtered = []
         for item in items:
-            converted_item = self._convert_datetime_fields(item)
+            converted_item = convert_datetime_fields(item)
             if start_date_obj and item["updated_datetime"] < start_date_obj:
                 continue
             if end_date_obj and item["updated_datetime"] > end_date_obj:
@@ -131,19 +147,3 @@ class GorgiasApi:
             filtered.append(converted_item)
 
         return filtered
-
-    def __get_max_datetime_from_datetime_fields(
-        self, item: Dict[str, Any]
-    ) -> Tuple[str, Optional[pendulum.DateTime]]:
-        """Get the maximum datetime from any field that ends with _datetime"""
-
-        max_field_name = None
-        max_field_value = None
-        for field in item:
-            if field.endswith("_datetime") and item[field] is not None:
-                dt = ensure_pendulum_datetime(item[field])
-                if not max_field_name or dt > max_field_value:
-                    max_field_name = field
-                    max_field_value = dt
-
-        return max_field_name, max_field_value
