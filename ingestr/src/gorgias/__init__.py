@@ -36,7 +36,85 @@ def gorgias_source(
     start_date_obj = ensure_pendulum_datetime(start_date)
     end_date_obj = ensure_pendulum_datetime(end_date) if end_date else None
 
-    @dlt.resource(primary_key="id", write_disposition="merge")
+    @dlt.resource(
+        primary_key="id",
+        write_disposition="merge",
+        columns={
+            "id": {
+                "data_type": "bigint",
+                "nullable": False,
+                "primary_key": True,
+                "description": "ID of the user.",
+            },
+            "external_id": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "External ID of the user in a foreign system.",
+            },
+            "active": {
+                "data_type": "bool",
+                "nullable": False,
+                "description": "Indicates if the user is active.",
+            },
+            "email": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "Email address of the user.",
+            },
+            "name": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "Full name of the user.",
+            },
+            "firstname": {
+                "data_type": "text",
+                "nullable": False,
+                "description": "First name of the user.",
+            },
+            "lastname": {
+                "data_type": "text",
+                "nullable": False,
+                "description": "Last name of the user.",
+            },
+            "language": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "Preferred language of the user.",
+            },
+            "timezone": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "Time zone of the user.",
+            },
+            "created_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": False,
+                "description": "When the user was created.",
+            },
+            "updated_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": False,
+                "description": "When the user was last updated.",
+            },
+            "meta": {
+                "data_type": "complex",
+                "nullable": True,
+                "description": "Meta information associated with the user.",
+            },
+            "data": {
+                "data_type": "complex",
+                "nullable": True,
+                "description": "Additional data associated with the user.",
+            },
+            "note": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "Notes about the user.",
+            },
+        },
+    )
     def customers(
         updated_datetime=dlt.sources.incremental("updated_datetime", start_date_obj),
     ) -> Iterable[TDataItem]:
@@ -231,7 +309,10 @@ def gorgias_source(
             end_date=end_date_obj,
         )
 
-    @dlt.resource(primary_key="id", write_disposition="merge", columns={
+    @dlt.resource(
+        primary_key="id",
+        write_disposition="merge",
+        columns={
             "id": {
                 "data_type": "bigint",
                 "nullable": False,
@@ -302,7 +383,7 @@ def gorgias_source(
             "receiver": {
                 "data_type": "complex",
                 "nullable": True,
-                "description": "The primary receiver of the message. It can be a user or a customer. Optional when the source type is "internal-note".",
+                "description": "The primary receiver of the message. It can be a user or a customer. Optional when the source type is 'internal-note'.",
             },
             "subject": {
                 "data_type": "text",
@@ -420,7 +501,73 @@ def gorgias_source(
             end_date=end_date_obj,
         )
 
-    @dlt.resource(primary_key="id", write_disposition="merge")
+    @dlt.resource(
+        primary_key="id",
+        write_disposition="merge",
+        columns={
+            "id": {
+                "data_type": "bigint",
+                "nullable": False,
+                "primary_key": True,
+                "description": "ID of the satisfaction survey.",
+            },
+            "body_text": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "Text body of the satisfaction survey.",
+            },
+            "created_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": False,
+                "description": "When the satisfaction survey was created.",
+            },
+            "customer_id": {
+                "data_type": "bigint",
+                "nullable": False,
+                "description": "ID of the customer linked to the survey.",
+            },
+            "meta": {
+                "data_type": "complex",
+                "nullable": True,
+                "description": "Meta information associated with the survey.",
+            },
+            "score": {
+                "data_type": "double",
+                "nullable": True,
+                "description": "Score given in the satisfaction survey.",
+            },
+            "scored_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": True,
+                "description": "When the score was given.",
+            },
+            "sent_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": True,
+                "description": "When the satisfaction survey was sent.",
+            },
+            "should_send_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": False,
+                "description": "When the survey should be sent.",
+            },
+            "ticket_id": {
+                "data_type": "bigint",
+                "nullable": False,
+                "description": "ID of the ticket linked to the survey.",
+            },
+            "uri": {
+                "data_type": "text",
+                "precision": 255,
+                "nullable": False,
+                "description": "URI of the satisfaction survey.",
+            },
+        },
+    )
     def satisfaction_surveys(
         updated_datetime=dlt.sources.incremental("updated_datetime", start_date_obj),
     ) -> Iterable[TDataItem]:

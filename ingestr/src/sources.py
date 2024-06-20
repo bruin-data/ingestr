@@ -92,10 +92,9 @@ class MongoDbSource:
 
 
 class LocalCsvSource:
-
     def handles_incrementality(self) -> bool:
         return False
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         def csv_file():
             file_path = uri.split("://")[1]
@@ -132,7 +131,6 @@ class NotionSource:
 
     def handles_incrementality(self) -> bool:
         return True
-    
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
@@ -153,7 +151,7 @@ class NotionSource:
 class ShopifySource:
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
@@ -193,7 +191,7 @@ class ShopifySource:
 class GorgiasSource:
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
@@ -240,6 +238,9 @@ class GoogleSheetsSource:
 
     def __init__(self, table_builder=google_spreadsheet) -> None:
         self.table_builder = table_builder
+
+    def handles_incrementality(self) -> bool:
+        return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
