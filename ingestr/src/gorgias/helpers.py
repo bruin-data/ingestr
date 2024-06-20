@@ -1,6 +1,5 @@
 """Gorgias source helpers"""
 
-import base64
 from typing import Any, Iterable, Optional, Tuple
 
 from dlt.common.pendulum import pendulum

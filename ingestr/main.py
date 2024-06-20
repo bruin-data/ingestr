@@ -137,7 +137,7 @@ def ingest(
         ),
     ] = None,  # type: ignore
     incremental_key: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             help="The incremental key from the table to be used for incremental strategies",
             envvar="INCREMENTAL_KEY",
@@ -262,7 +262,11 @@ def ingest(
             incremental_strategy = IncrementalStrategy.none
             incremental_key = None
 
-        incremental_strategy_text = incremental_strategy.value if incremental_strategy.value != IncrementalStrategy.none else "Platform-specific"
+        incremental_strategy_text = (
+            incremental_strategy.value
+            if incremental_strategy.value != IncrementalStrategy.none
+            else "Platform-specific"
+        )
 
         print()
         print("[bold green]Initiated the pipeline with the following:[/bold green]")
@@ -324,7 +328,9 @@ def ingest(
                 uri=dest_uri,
                 table=dest_table,
             ),
-            write_disposition=incremental_strategy.value if incremental_strategy.value != IncrementalStrategy.none else None,  # type: ignore
+            write_disposition=incremental_strategy.value
+            if incremental_strategy.value != IncrementalStrategy.none
+            else None,  # type: ignore
             primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
             loader_file_format=loader_file_format.value
             if loader_file_format is not None
