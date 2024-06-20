@@ -231,7 +231,176 @@ def gorgias_source(
             end_date=end_date_obj,
         )
 
-    @dlt.resource(primary_key="id", write_disposition="merge")
+    @dlt.resource(primary_key="id", write_disposition="merge", columns={
+            "id": {
+                "data_type": "bigint",
+                "nullable": False,
+                "primary_key": True,
+                "description": "Primary identifier for the ticket",
+            },
+            "uri": {
+                "data_type": "text",
+                "nullable": False,
+                "description": "API endpoint for the ticket",
+            },
+            "message_id": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "ID of the message on the service that send the message.It can be the ID of an email, a Messenger message, a Facebook comment, etc...",
+            },
+            "ticket_id": {
+                "data_type": "bigint",
+                "nullable": True,
+                "description": "The ID of the ticket the message is associated with.",
+            },
+            "external_id": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "External identifier for the ticket",
+            },
+            "public": {
+                "data_type": "bool",
+                "nullable": False,
+                "description": "Public flag",
+            },
+            "channel": {
+                "data_type": "text",
+                "precision": 20,
+                "nullable": False,
+                "description": "The channel used to initiate the conversation with the customer.",
+            },
+            "via": {
+                "data_type": "text",
+                "nullable": False,
+                "description": "How the message has been received, or sent from Gorgias.",
+            },
+            "sender": {
+                "data_type": "complex",
+                "nullable": False,
+                "description": "The person who sent the message. It can be a user or a customer.",
+            },
+            "integration_id": {
+                "data_type": "bigint",
+                "nullable": True,
+                "description": "ID of the integration that either received or sent the message.",
+            },
+            "intents": {
+                "data_type": "complex",
+                "nullable": True,
+                "description": "",
+            },
+            "rule_id": {
+                "data_type": "bigint",
+                "nullable": True,
+                "description": "ID of the rule which sent the message, if any.",
+            },
+            "from_agent": {
+                "data_type": "bool",
+                "nullable": True,
+                "description": "Whether the message was sent by your company to a customer, or the opposite.",
+            },
+            "receiver": {
+                "data_type": "complex",
+                "nullable": True,
+                "description": "The primary receiver of the message. It can be a user or a customer. Optional when the source type is "internal-note".",
+            },
+            "subject": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "The subject of the message.",
+            },
+            "body_text": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "The full text version of the body of the message, if any.",
+            },
+            "body_html": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "The full HTML version of the body of the message, if any.",
+            },
+            "stripped_text": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "The text version of the body of the message without email signatures and previous replies.",
+            },
+            "stripped_html": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "The HTML version of the body of the message without email signatures and previous replies.",
+            },
+            "stripped_signature": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "",
+            },
+            "headers": {
+                "data_type": "complex",
+                "nullable": True,
+                "description": "Headers of the message",
+            },
+            "attachments": {
+                "data_type": "complex",
+                "nullable": True,
+                "description": "A list of files attached to the message.",
+            },
+            "actions": {
+                "data_type": "complex",
+                "nullable": True,
+                "description": "A list of actions performed on the message.",
+            },
+            "macros": {
+                "data_type": "complex",
+                "nullable": True,
+                "description": "A list of macros",
+            },
+            "meta": {
+                "data_type": "complex",
+                "nullable": True,
+                "description": "Message metadata",
+            },
+            "created_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": False,
+                "description": "When the message was created.",
+            },
+            "sent_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": True,
+                "description": "When the message was sent. If ommited, the message will be sent by Gorgias.",
+            },
+            "failed_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": True,
+                "description": "When the message failed to be sent. Messages that couldn't be sent can be resend.",
+            },
+            "deleted_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": True,
+                "description": "When the message was deleted.",
+            },
+            "opened_datetime": {
+                "data_type": "timestamp",
+                "precision": 6,
+                "nullable": False,
+                "description": "When the message was opened by the receiver.",
+            },
+            "last_sending_error": {
+                "data_type": "string",
+                "nullable": True,
+                "description": "Details of the last error encountered when Gorgias attempted to send the message.",
+            },
+            "is_retriable": {
+                "data_type": "bool",
+                "nullable": True,
+                "description": "Can be retried",
+            },
+        },
+    )
     def ticket_messages(
         updated_datetime=dlt.sources.incremental("updated_datetime", start_date_obj),
     ) -> Iterable[TDataItem]:
