@@ -16,6 +16,7 @@ from ingestr.src.destinations import (
 )
 from ingestr.src.sources import (
     GoogleSheetsSource,
+    GorgiasSource,
     LocalCsvSource,
     MongoDbSource,
     NotionSource,
@@ -43,6 +44,9 @@ SQL_SOURCE_SCHEMES = [
 
 class SourceProtocol(Protocol):
     def dlt_source(self, uri: str, table: str, **kwargs):
+        pass
+
+    def handles_incrementality(self) -> bool:
         pass
 
 
@@ -94,6 +98,8 @@ class SourceDestinationFactory:
             return GoogleSheetsSource()
         elif self.source_scheme == "shopify":
             return ShopifySource()
+        elif self.source_scheme == "gorgias":
+            return GorgiasSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

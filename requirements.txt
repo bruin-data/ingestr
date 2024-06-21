@@ -1,6 +1,6 @@
 cx_Oracle==8.3.0
 databricks-sql-connector==2.9.3
-dlt==0.4.8
+dlt==0.4.12
 duckdb_engine==0.11.5
 duckdb==0.10.2
 google-cloud-bigquery-storage==2.24.0
@@ -11,6 +11,7 @@ py-machineid==0.5.1
 pymongo==4.6.3
 pymysql==1.1.0
 pyodbc==5.1.0
+pyrate-limiter==3.6.1
 redshift-connector==2.1.0
 rich==13.7.1
 rudder-sdk-python==2.1.0

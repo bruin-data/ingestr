@@ -22,6 +22,7 @@ export default defineConfig({
       { text: "Home", link: "/" },
       { text: "Getting started", link: "/getting-started/quickstart.md" },
     ],
+    outline: 'deep',
 
     sidebar: [
       {
@@ -68,6 +69,7 @@ export default defineConfig({
             text: "Platforms",
             collapsed: false,
             items: [
+              { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
