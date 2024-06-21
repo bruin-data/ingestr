@@ -171,7 +171,6 @@ def gorgias_source(
             },
             "channel": {
                 "data_type": "text",
-                "precision": 20,
                 "nullable": False,
                 "description": "The channel used to initiate the conversation with the customer.",
             },
@@ -346,7 +345,6 @@ def gorgias_source(
             },
             "channel": {
                 "data_type": "text",
-                "precision": 20,
                 "nullable": False,
                 "description": "The channel used to initiate the conversation with the customer.",
             },
@@ -467,11 +465,11 @@ def gorgias_source(
             "opened_datetime": {
                 "data_type": "timestamp",
                 "precision": 6,
-                "nullable": False,
+                "nullable": True,
                 "description": "When the message was opened by the receiver.",
             },
             "last_sending_error": {
-                "data_type": "string",
+                "data_type": "text",
                 "nullable": True,
                 "description": "Details of the last error encountered when Gorgias attempted to send the message.",
             },
@@ -552,7 +550,7 @@ def gorgias_source(
             "should_send_datetime": {
                 "data_type": "timestamp",
                 "precision": 6,
-                "nullable": False,
+                "nullable": True,
                 "description": "When the survey should be sent.",
             },
             "ticket_id": {
@@ -562,7 +560,6 @@ def gorgias_source(
             },
             "uri": {
                 "data_type": "text",
-                "precision": 255,
                 "nullable": False,
                 "description": "URI of the satisfaction survey.",
             },
