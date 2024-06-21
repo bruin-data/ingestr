@@ -1,7 +1,7 @@
 import base64
 import csv
 import json
-from typing import Callable
+from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 import dlt
@@ -96,17 +96,39 @@ class LocalCsvSource:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        def csv_file():
+        def csv_file(
+            incremental: Optional[dlt.sources.incremental[Any]] = None,
+        ):
             file_path = uri.split("://")[1]
             myFile = open(file_path, "r")
             reader = csv.DictReader(myFile)
-            print("running resource")
+            if not reader.fieldnames:
+                raise RuntimeError(
+                    "failed to extract headers from the CSV, are you sure the given file contains a header row?"
+                )
+
+            incremental_key = kwargs.get("incremental_key")
+            if incremental_key and incremental_key not in reader.fieldnames:
+                raise ValueError(
+                    f"incremental_key '{incremental_key}' not found in the CSV file"
+                )
 
             page_size = 1000
             page = []
             current_items = 0
             for dictionary in reader:
                 if current_items < page_size:
+                    if incremental_key and incremental and incremental.start_value:
+                        inc_value = dictionary.get(incremental_key)
+                        if inc_value is None:
+                            raise ValueError(
+                                f"incremental_key '{incremental_key}' not found in the CSV file"
+                            )
+
+                        print("BURAYA GELLDIII")
+                        if inc_value < incremental.start_value:
+                            continue
+
                     page.append(dictionary)
                     current_items += 1
                 else:
@@ -120,6 +142,12 @@ class LocalCsvSource:
         return dlt.resource(
             csv_file,
             merge_key=kwargs.get("merge_key"),  # type: ignore
+        )(
+            incremental=dlt.sources.incremental(
+                kwargs.get("incremental_key", ""),
+                initial_value=kwargs.get("interval_start"),
+                end_value=kwargs.get("interval_end"),
+            )
         )
 
 

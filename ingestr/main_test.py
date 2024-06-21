@@ -1,5 +1,8 @@
+import csv
 import os
+import random
 import shutil
+import string
 
 import duckdb
 from typer.testing import CliRunner
@@ -80,9 +83,17 @@ def invoke_ingest_command(
     return result
 
 
-def test_create_replace():
-    abs_db_path = get_abs_path("./testdata/test_create_replace.db")
-    rel_db_path_to_command = "ingestr/testdata/test_create_replace.db"
+### These are DuckDB-to-DuckDB tests
+def test_create_replace_duckdb_to_duckdb():
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    dbname = f"test_create_replace_{get_random_string(5)}.db"
+
+    abs_db_path = get_abs_path(f"./testdata/{dbname}")
+    rel_db_path_to_command = f"ingestr/testdata/{dbname}"
 
     conn = duckdb.connect(abs_db_path)
     conn.execute("DROP SCHEMA IF EXISTS testschema CASCADE")
@@ -103,6 +114,8 @@ def test_create_replace():
         "testschema.output",
     )
 
+    print(result.stdout)
+
     assert result.exit_code == 0
 
     res = conn.sql(
@@ -112,8 +125,13 @@ def test_create_replace():
     assert res[0] == (1, "val1", "2022-01-01")
     assert res[1] == (2, "val2", "2022-02-01")
 
+    try:
+        os.remove(abs_db_path)
+    except Exception:
+        pass
 
-def test_append():
+
+def test_append_duckdb_to_duckdb():
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
@@ -172,8 +190,13 @@ def test_append():
     assert res[0] == (1, "val1", "2022-01-01")
     assert res[1] == (2, "val2", "2022-01-02")
 
+    try:
+        os.remove(abs_db_path)
+    except Exception:
+        pass
 
-def test_merge_with_primary_key():
+
+def test_merge_with_primary_key_duckdb_to_duckdb():
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
@@ -325,8 +348,13 @@ def test_merge_with_primary_key():
     assert count_by_run_id[2][1] == 1
     ##############################
 
+    try:
+        os.remove(abs_db_path)
+    except Exception:
+        pass
 
-def test_delete_insert_without_primary_key():
+
+def test_delete_insert_without_primary_key_duckdb_to_duckdb():
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
@@ -435,8 +463,13 @@ def test_delete_insert_without_primary_key():
     assert count_by_run_id[1][1] == 1
     ##############################
 
+    try:
+        os.remove(abs_db_path)
+    except Exception:
+        pass
 
-def test_delete_insert_with_timerange():
+
+def test_delete_insert_with_timerange_duckdb_to_duckdb():
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
@@ -593,3 +626,250 @@ def test_delete_insert_with_timerange():
     assert count_by_run_id[1][1] == 2
     assert count_by_run_id[2][1] == 2
     ##############################
+
+    try:
+        os.remove(abs_db_path)
+    except Exception:
+        pass
+
+
+### These are CSV-to-DuckDB tests
+def test_create_replace_csv_to_duckdb():
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    abs_db_path = get_abs_path("./testdata/test_create_replace_csv.db")
+    rel_db_path_to_command = "ingestr/testdata/test_create_replace_csv.db"
+    rel_source_path_to_command = "ingestr/testdata/create_replace.csv"
+
+    conn = duckdb.connect(abs_db_path)
+
+    result = invoke_ingest_command(
+        f"csv://{rel_source_path_to_command}",
+        "testschema.input",
+        f"duckdb:///{rel_db_path_to_command}",
+        "testschema.output",
+    )
+
+    assert result.exit_code == 0
+
+    res = conn.sql(
+        "select symbol, date, is_enabled, name from testschema.output"
+    ).fetchall()
+
+    # read CSV file
+    actual_rows = []
+    with open(get_abs_path("./testdata/create_replace.csv"), "r") as f:
+        reader = csv.reader(f, delimiter=",", quotechar='"')
+        next(reader, None)
+        for row in reader:
+            actual_rows.append(row)
+
+    # compare the CSV file with the DuckDB table
+    assert len(res) == len(actual_rows)
+    for i, row in enumerate(actual_rows):
+        assert res[i] == tuple(row)
+
+    try:
+        os.remove(abs_db_path)
+    except Exception:
+        pass
+
+
+def get_random_string(length):
+    letters = string.ascii_lowercase
+    result_str = "".join(random.choice(letters) for i in range(length))
+    return result_str
+
+
+def test_merge_with_primary_key_csv_to_duckdb():
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    dbname = f"test_merge_with_primary_key_csv{get_random_string(5)}.db"
+    abs_db_path = get_abs_path(f"./testdata/{dbname}")
+    rel_db_path_to_command = f"ingestr/testdata/{dbname}"
+    uri = f"duckdb:///{rel_db_path_to_command}"
+
+    conn = duckdb.connect(abs_db_path)
+
+    def run(source: str):
+        res = invoke_ingest_command(
+            source,
+            "whatever",  # table name doesnt matter for CSV
+            uri,
+            "testschema_merge.output",
+            "merge",
+            "date",
+            "symbol",
+        )
+        assert res.exit_code == 0
+        return res
+
+    def get_output_rows():
+        conn.execute("CHECKPOINT")
+        return conn.sql(
+            "select symbol, date, is_enabled, name from testschema_merge.output order by symbol asc"
+        ).fetchall()
+
+    def assert_output_equals_to_csv(path: str):
+        res = get_output_rows()
+        actual_rows = []
+        with open(get_abs_path(path), "r") as f:
+            reader = csv.reader(f, delimiter=",", quotechar='"')
+            next(reader, None)
+            for row in reader:
+                actual_rows.append(row)
+
+        assert len(res) == len(actual_rows)
+        for i, row in enumerate(actual_rows):
+            assert res[i] == tuple(row)
+
+    run("csv://ingestr/testdata/merge_part1.csv")
+    assert_output_equals_to_csv("./testdata/merge_part1.csv")
+
+    first_run_id = conn.sql(
+        "select _dlt_load_id from testschema_merge.output limit 1"
+    ).fetchall()[0][0]
+
+    ##############################
+    # we'll run again, we don't expect any changes since the data hasn't changed
+    run("csv://ingestr/testdata/merge_part1.csv")
+    assert_output_equals_to_csv("./testdata/merge_part1.csv")
+
+    # we also ensure that the other rows were not touched
+    count_by_run_id = conn.sql(
+        "select _dlt_load_id, count(*) from testschema_merge.output group by 1"
+    ).fetchall()
+    assert len(count_by_run_id) == 1
+    assert count_by_run_id[0][1] == 3
+    assert count_by_run_id[0][0] == first_run_id
+    ##############################
+
+    ##############################
+    # now we'll run the same ingestion but with a different file this time
+
+    run("csv://ingestr/testdata/merge_part2.csv")
+    assert_output_equals_to_csv("./testdata/merge_expected.csv")
+
+    # let's check the runs
+    count_by_run_id = conn.sql(
+        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 1 asc"
+    ).fetchall()
+
+    # we expect that there's a new load ID now
+    assert len(count_by_run_id) == 2
+
+    # there should be only one row with the first load ID
+    assert count_by_run_id[0][1] == 1
+    assert count_by_run_id[0][0] == first_run_id
+
+    # there should be a new run with the rest, 2 rows updated + 1 new row
+    assert count_by_run_id[1][1] == 3
+    ##############################
+
+    try:
+        os.remove(abs_db_path)
+    except Exception:
+        pass
+
+
+def test_delete_insert_without_primary_key_csv_to_duckdb():
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    dbname = f"test_merge_with_primary_key_csv{get_random_string(5)}.db"
+    abs_db_path = get_abs_path(f"./testdata/{dbname}")
+    rel_db_path_to_command = f"ingestr/testdata/{dbname}"
+    uri = f"duckdb:///{rel_db_path_to_command}"
+
+    conn = duckdb.connect(abs_db_path)
+
+    def run(source: str):
+        res = invoke_ingest_command(
+            source,
+            "whatever",  # table name doesnt matter for CSV
+            uri,
+            "testschema.output",
+            "delete+insert",
+            "date",
+        )
+        assert res.exit_code == 0
+        return res
+
+    def get_output_rows():
+        conn.execute("CHECKPOINT")
+        return conn.sql(
+            "select symbol, date, is_enabled, name from testschema.output order by symbol asc"
+        ).fetchall()
+
+    def assert_output_equals_to_csv(path: str):
+        res = get_output_rows()
+        actual_rows = []
+        with open(get_abs_path(path), "r") as f:
+            reader = csv.reader(f, delimiter=",", quotechar='"')
+            next(reader, None)
+            for row in reader:
+                actual_rows.append(row)
+
+        assert len(res) == len(actual_rows)
+        for i, row in enumerate(actual_rows):
+            assert res[i] == tuple(row)
+
+    run("csv://ingestr/testdata/delete_insert_part1.csv")
+    assert_output_equals_to_csv("./testdata/delete_insert_part1.csv")
+
+    first_run_id = conn.sql(
+        "select _dlt_load_id from testschema.output limit 1"
+    ).fetchall()[0][0]
+
+    ##############################
+    # we'll run again, we expect the data to be the same, but a new load_id to exist
+    # this is due to the fact that the old data won't be touched, but the ones with the
+    # latest value will be rewritten
+    run("csv://ingestr/testdata/delete_insert_part1.csv")
+    assert_output_equals_to_csv("./testdata/delete_insert_part1.csv")
+
+    # we also ensure that the other rows were not touched
+    count_by_run_id = conn.sql(
+        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+    ).fetchall()
+
+    assert len(count_by_run_id) == 2
+    assert count_by_run_id[0][1] == 1
+    assert count_by_run_id[0][0] == first_run_id
+    assert count_by_run_id[1][1] == 3
+    ##############################
+
+    ##############################
+    # now we'll run the same ingestion but with a different file this time
+
+    run("csv://ingestr/testdata/delete_insert_part2.csv")
+    assert_output_equals_to_csv("./testdata/delete_insert_expected.csv")
+
+    # let's check the runs
+    count_by_run_id = conn.sql(
+        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+    ).fetchall()
+
+    # we expect that there's a new load ID now
+    assert len(count_by_run_id) == 2
+
+    # there should be only one row with the first load ID, oldest date
+    assert count_by_run_id[0][1] == 1
+    assert count_by_run_id[0][0] == first_run_id
+
+    # there should be a new run with the rest, 3 rows updated + 1 new row
+    assert count_by_run_id[1][1] == 4
+    ##############################
+
+    try:
+        os.remove(abs_db_path)
+    except Exception:
+        pass
