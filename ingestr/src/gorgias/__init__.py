@@ -15,7 +15,7 @@ def gorgias_source(
     domain: str = dlt.secrets.value,
     email: str = dlt.config.value,
     api_key: str = dlt.secrets.value,
-    start_date: TAnyDateTime = "2024-06-15",
+    start_date: TAnyDateTime = "2000-01-01",
     end_date: TAnyDateTime = None,
 ) -> Iterable[DltResource]:
     """
