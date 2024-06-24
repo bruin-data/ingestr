@@ -10,7 +10,7 @@ from dlt.sources.helpers import requests
 from pyrate_limiter import Duration, Limiter, Rate
 from requests.auth import HTTPBasicAuth
 
-RETRY_COUNT = 3
+RETRY_COUNT = 10
 
 
 def get_max_datetime_from_datetime_fields(
@@ -110,16 +110,19 @@ class GorgiasApi:
 
             # this is to retry a back-off if we get a 429
             for i in range(RETRY_COUNT):
-                response = requests.get(
-                    url, params=params, auth=HTTPBasicAuth(self.email, self.api_key)
-                )
-
-                if response.status_code == 429:
-                    retry_after = int(response.headers.get("Retry-After", 2))
+                try:
+                    response = requests.get(
+                        url, params=params, auth=HTTPBasicAuth(self.email, self.api_key)
+                    )
+                except Exception as e:
+                    retry_after = int(response.headers.get("Retry-After", 10))
+                    print(
+                        f"Got an error from Gorgias API, retrying after {retry_after} seconds",
+                        e,
+                    )
                     time.sleep(retry_after)
                     continue
 
-                response.raise_for_status()
                 break
 
             if len(response.json()["data"]) == 0:
