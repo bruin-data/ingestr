@@ -129,6 +129,11 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
         <td colspan="3" style='text-align:center;'><strong>Platforms</strong></td>
     </tr>
     <tr>
+        <td>Gorgias</td>
+        <td>✅</td>
+        <td>❌</td>
+    </tr>
+    <tr>
         <td>Google Sheets</td>
         <td>✅</td>
         <td>❌</td>
