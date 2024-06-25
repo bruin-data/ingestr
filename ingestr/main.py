@@ -347,7 +347,7 @@ def ingest(
                     print(f"[bold red]  {job.job_file_info.job_id()}[/bold red]")
                     print(f"    [bold yellow]Error:[/bold yellow] {job.failed_message}")
 
-                raise typer.Exit()
+                raise typer.Exit(1)
 
         destination.post_load()
 
