@@ -181,7 +181,7 @@ def gorgias_source(
             },
             "from_agent": {
                 "data_type": "bool",
-                "nullable": False,
+                "nullable": True,
                 "description": "Indicates if the ticket was created by an agent",
             },
             "customer": {
