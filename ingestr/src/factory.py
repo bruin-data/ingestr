@@ -30,6 +30,7 @@ SQL_SOURCE_SCHEMES = [
     "mssql",
     "mysql",
     "mysql+pymysql",
+    "mysql+mysqlconnector",
     "postgres",
     "postgresql",
     "redshift",

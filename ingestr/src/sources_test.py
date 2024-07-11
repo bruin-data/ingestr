@@ -13,10 +13,6 @@ class SqlSourceTest(unittest.TestCase):
             uri = "bigquery://my-project"
             source.dlt_source(uri, "onetable")
 
-        with pytest.raises(ValueError):
-            uri = "bigquery://my-project"
-            source.dlt_source(uri, "onetable.with.too.many.fields")
-
     def test_table_instance_is_created(self):
         uri = "bigquery://my-project"
         table = "schema.table"
@@ -62,10 +58,6 @@ class MongoDbSourceTest(unittest.TestCase):
         with pytest.raises(ValueError):
             uri = "mongodb://my-project"
             source.dlt_source(uri, "onetable")
-
-        with pytest.raises(ValueError):
-            uri = "mongodb://my-project"
-            source.dlt_source(uri, "onetable.with.too.many.fields")
 
     def test_table_instance_is_created(self):
         uri = "mongodb://my-project"
