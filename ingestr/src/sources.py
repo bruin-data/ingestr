@@ -12,6 +12,7 @@ from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
+from ingestr.src.table_definition import table_string_to_dataclass
 
 
 class SqlSource:
@@ -24,9 +25,7 @@ class SqlSource:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        table_fields = table.split(".")
-        if len(table_fields) != 2:
-            raise ValueError("Table name must be in the format schema.table")
+        table_fields = table_string_to_dataclass(table)
 
         incremental = None
         if kwargs.get("incremental_key"):
@@ -45,8 +44,8 @@ class SqlSource:
 
         table_instance = self.table_builder(
             credentials=uri,
-            schema=table_fields[-2],
-            table=table_fields[-1],
+            schema=table_fields.dataset,
+            table=table_fields.table,
             incremental=incremental,
             merge_key=kwargs.get("merge_key"),
             backend=kwargs.get("sql_backend", "sqlalchemy"),
@@ -65,9 +64,7 @@ class MongoDbSource:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        table_fields = table.split(".")
-        if len(table_fields) != 2:
-            raise ValueError("Table name must be in the format schema.table")
+        table_fields = table_string_to_dataclass(table)
 
         incremental = None
         if kwargs.get("incremental_key"):
@@ -82,8 +79,8 @@ class MongoDbSource:
 
         table_instance = self.table_builder(
             connection_url=uri,
-            database=table_fields[-2],
-            collection=table_fields[-1],
+            database=table_fields.dataset,
+            collection=table_fields.table,
             parallel=True,
             incremental=incremental,
         )
@@ -293,15 +290,10 @@ class GoogleSheetsSource:
                 base64.b64decode(credentials_base64[0]).decode("utf-8")
             )
 
-        table_fields = table.split(".")
-        if len(table_fields) != 2:
-            raise ValueError(
-                "Table name must be in the format <spreadsheet_id>.<sheet_name>"
-            )
-
+        table_fields = table_string_to_dataclass(table)
         return self.table_builder(
             credentials=credentials,
-            spreadsheet_url_or_id=table_fields[0],
-            range_names=[table_fields[1]],
+            spreadsheet_url_or_id=table_fields.table,
+            range_names=[table_fields.dataset],
             get_named_ranges=False,
         )
