@@ -90,6 +90,7 @@ class IncrementalStrategy(str, Enum):
     append = "append"
     delete_insert = "delete+insert"
     merge = "merge"
+    scd2 = "scd2"
     none = "none"
 
 
@@ -208,6 +209,13 @@ def ingest(
             envvar="LOADER_FILE_FORMAT",
         ),
     ] = None,  # type: ignore
+    page_size: Annotated[
+        Optional[int],
+        typer.Option(
+            help="The page size to be used when fetching data from SQL sources",
+            envvar="PAGE_SIZE",
+        ),
+    ] = None,  # type: ignore
 ):
     track(
         "command_triggered",
@@ -215,6 +223,9 @@ def ingest(
             "command": "ingest",
         },
     )
+
+    dlt.config["normalize.parquet_normalizer.add_dlt_load_id"] = True
+    dlt.config["normalize.parquet_normalizer.add_dlt_id"] = True
 
     try:
         if not dest_table:
@@ -255,7 +266,7 @@ def ingest(
             ),
             progress=progressInstance,
             pipelines_dir="pipeline_data",
-            full_refresh=full_refresh,
+            refresh="drop_resources" if full_refresh else None,
         )
 
         if source.handles_incrementality():
@@ -282,6 +293,9 @@ def ingest(
         print(
             f"[bold yellow]  Incremental Key:[/bold yellow] {incremental_key if incremental_key else 'None'}"
         )
+        print(
+            f"[bold yellow]  Primary Key:[/bold yellow] {primary_key if primary_key else 'None'}"
+        )
         print()
 
         if not yes:
@@ -304,6 +318,7 @@ def ingest(
             interval_start=interval_start,
             interval_end=interval_end,
             sql_backend=sql_backend.value,
+            page_size=page_size,
         )
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
@@ -322,15 +337,18 @@ def ingest(
             ):
                 loader_file_format = None
 
+        write_disposition = None
+        if incremental_strategy != IncrementalStrategy.none:
+            write_disposition = incremental_strategy.value
+
+
         run_info: LoadInfo = pipeline.run(
             dlt_source,
             **destination.dlt_run_params(
                 uri=dest_uri,
                 table=dest_table,
             ),
-            write_disposition=incremental_strategy.value
-            if incremental_strategy.value != IncrementalStrategy.none
-            else None,  # type: ignore
+            write_disposition=write_disposition,  # type: ignore
             primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
             loader_file_format=loader_file_format.value
             if loader_file_format is not None

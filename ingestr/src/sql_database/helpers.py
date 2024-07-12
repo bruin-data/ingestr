@@ -1,33 +1,40 @@
 """SQL database source helpers"""
 
-import operator
+import warnings
 from typing import (
-    Any,
     Callable,
+    Any,
     Dict,
-    Iterator,
     List,
     Literal,
     Optional,
+    Iterator,
     Union,
 )
+import operator
 
 import dlt
 from dlt.common.configuration.specs import BaseConfiguration, configspec
 from dlt.common.exceptions import MissingDependencyException
 from dlt.common.schema import TTableSchemaColumns
-from dlt.common.typing import TDataItem
-from dlt.sources.credentials import ConnectionStringCredentials
+from dlt.common.typing import TDataItem, TSortOrder
+
+from .override import IngestrConnectionStringCredentials as ConnectionStringCredentials
+
+from .arrow_helpers import row_tuples_to_arrow
+from .schema_types import (
+    table_to_columns,
+    get_primary_key,
+    Table,
+    SelectAny,
+    ReflectionLevel,
+    TTypeAdapter,
+)
+
 from sqlalchemy import Table, create_engine
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import CompileError
 
-from ingestr.src.sql_database.override import IngestrConnectionStringCredentials
-
-from .schema_types import (
-    SelectAny,
-    row_tuples_to_arrow,
-    table_to_columns,
-)
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 
@@ -57,7 +64,7 @@ class TableLoader:
                 ) from e
             self.last_value = incremental.last_value
             self.end_value = incremental.end_value
-            self.row_order = getattr(self.incremental, "row_order", None)
+            self.row_order: TSortOrder = self.incremental.row_order
         else:
             self.cursor_column = None
             self.last_value = None
@@ -69,6 +76,8 @@ class TableLoader:
         query = table.select()
         if not self.incremental:
             return query
+        
+        print("table is incremental")
         last_value_func = self.incremental.last_value_func
 
         # generate where
@@ -87,12 +96,20 @@ class TableLoader:
             query = query.where(filter_op(self.cursor_column, self.last_value))
             if self.end_value is not None:
                 query = query.where(filter_op_end(self.cursor_column, self.end_value))
+        else:
+            print("Last value is none")
+
+        print("current state of query", query.compile(compile_kwargs={"literal_binds": True}))
 
         # generate order by from declared row order
         order_by = None
-        if self.row_order == "asc":
+        if (self.row_order == "asc" and last_value_func is max) or (
+            self.row_order == "desc" and last_value_func is min
+        ):
             order_by = self.cursor_column.asc()
-        elif self.row_order == "desc":
+        elif (self.row_order == "asc" and last_value_func is min) or (
+            self.row_order == "desc" and last_value_func is max
+        ):
             order_by = self.cursor_column.desc()
         if order_by is not None:
             query = query.order_by(order_by)
@@ -121,14 +138,15 @@ class TableLoader:
                 elif self.backend == "pandas":
                     from dlt.common.libs.pandas_sql import _wrap_result
 
-                    yield _wrap_result(
+                    df = _wrap_result(
                         partition,
                         columns,
                         **{"dtype_backend": "pyarrow", **backend_kwargs},
                     )
+                    yield df
                 elif self.backend == "pyarrow":
                     yield row_tuples_to_arrow(
-                        partition, self.columns, tz=backend_kwargs.get("tz")
+                        partition, self.columns, tz=backend_kwargs.get("tz", "UTC")
                     )
 
     def _load_rows_connectorx(
@@ -153,11 +171,15 @@ class TableLoader:
                 drivername=self.engine.url.get_backend_name()
             ).render_as_string(hide_password=False),
         )
-        df = cx.read_sql(
-            conn,
-            str(query.compile(self.engine, compile_kwargs={"literal_binds": True})),
-            **backend_kwargs,
-        )
+        try:
+            query_str = str(
+                query.compile(self.engine, compile_kwargs={"literal_binds": True})
+            )
+        except CompileError as ex:
+            raise NotImplementedError(
+                f"Query for table {self.table.name} could not be compiled to string to execute it on ConnectorX. If you are on SQLAlchemy 1.4.x the causing exception is due to literals that cannot be rendered, upgrade to 2.x: {str(ex)}"
+            ) from ex
+        df = cx.read_sql(conn, query_str, **backend_kwargs)
         yield df
 
 
@@ -167,10 +189,11 @@ def table_rows(
     chunk_size: int,
     backend: TableBackend,
     incremental: Optional[dlt.sources.incremental[Any]] = None,
-    detect_precision_hints: bool = False,
     defer_table_reflect: bool = False,
     table_adapter_callback: Callable[[Table], None] = None,
+    reflection_level: ReflectionLevel = "minimal",
     backend_kwargs: Dict[str, Any] = None,
+    type_adapter_callback: Optional[TTypeAdapter] = None,
 ) -> Iterator[TDataItem]:
     columns: TTableSchemaColumns = None
     if defer_table_reflect:
@@ -179,7 +202,7 @@ def table_rows(
         )
         if table_adapter_callback:
             table_adapter_callback(table)
-        columns = table_to_columns(table, detect_precision_hints)
+        columns = table_to_columns(table, reflection_level, type_adapter_callback)
 
         # set the primary_key in the incremental
         if incremental and incremental.primary_key is None:
@@ -196,7 +219,7 @@ def table_rows(
         )
     else:
         # table was already reflected
-        columns = table_to_columns(table, detect_precision_hints)
+        columns = table_to_columns(table, reflection_level, type_adapter_callback)
 
     loader = TableLoader(
         engine, backend, table, columns, incremental=incremental, chunk_size=chunk_size
@@ -205,27 +228,21 @@ def table_rows(
 
 
 def engine_from_credentials(
-    credentials: Union[ConnectionStringCredentials, Engine, str],
+    credentials: Union[ConnectionStringCredentials, Engine, str], **backend_kwargs: Any
 ) -> Engine:
     if isinstance(credentials, Engine):
         return credentials
     if isinstance(credentials, ConnectionStringCredentials):
         credentials = credentials.to_native_representation()
-    return create_engine(credentials)
-
-
-def get_primary_key(table: Table) -> List[str]:
-    """Create primary key or return None if no key defined"""
-    primary_key = [c.name for c in table.primary_key]
-    return primary_key if len(primary_key) > 0 else None
+    return create_engine(credentials, **backend_kwargs)
 
 
 def unwrap_json_connector_x(field: str) -> TDataItem:
     """Creates a transform function to be added with `add_map` that will unwrap JSON columns
     ingested via connectorx. Such columns are additionally quoted and translate SQL NULL to json "null"
     """
-    import pyarrow as pa
     import pyarrow.compute as pc
+    import pyarrow as pa
 
     def _unwrap(table: TDataItem) -> TDataItem:
         col_index = table.column_names.index(field)
@@ -242,6 +259,20 @@ def unwrap_json_connector_x(field: str) -> TDataItem:
     return _unwrap
 
 
+def _detect_precision_hints_deprecated(value: Optional[bool]) -> None:
+    if value is None:
+        return
+
+    msg = "`detect_precision_hints` argument is deprecated and will be removed in a future release. "
+    if value:
+        msg += "Use `reflection_level='full_with_precision'` which has the same effect instead."
+
+    warnings.warn(
+        msg,
+        DeprecationWarning,
+    )
+
+
 @configspec
 class SqlDatabaseTableConfiguration(BaseConfiguration):
     incremental: Optional[dlt.sources.incremental] = None  # type: ignore[type-arg]
@@ -249,10 +280,12 @@ class SqlDatabaseTableConfiguration(BaseConfiguration):
 
 @configspec
 class SqlTableResourceConfiguration(BaseConfiguration):
-    credentials: IngestrConnectionStringCredentials = None
+    credentials: Union[ConnectionStringCredentials, Engine, str] = None
     table: str = None
-    incremental: Optional[dlt.sources.incremental] = None  # type: ignore[type-arg]
     schema: Optional[str] = None
-
-
-__source_name__ = "sql_database"
+    incremental: Optional[dlt.sources.incremental] = None  # type: ignore[type-arg]
+    chunk_size: int = 50000
+    backend: TableBackend = "sqlalchemy"
+    detect_precision_hints: Optional[bool] = None
+    defer_table_reflect: Optional[bool] = False
+    reflection_level: Optional[ReflectionLevel] = "full"

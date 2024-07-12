@@ -74,6 +74,7 @@ def invoke_ingest_command(
         args.append("--loader-file-format")
         args.append(loader_file_format)
 
+    print(args)
     result = runner.invoke(
         app,
         args,
@@ -114,7 +115,7 @@ def test_create_replace_duckdb_to_duckdb():
         "testschema.output",
     )
 
-    print(result.stdout)
+    print(result.stdout, result)
 
     assert result.exit_code == 0
 
@@ -244,7 +245,8 @@ def test_merge_with_primary_key_duckdb_to_duckdb():
         for i, row in enumerate(expected):
             assert res[i] == row
 
-    run()
+    res = run()
+    print(res.stdout)
     assert_output_equals([(1, "val1", "2022-01-01"), (2, "val2", "2022-02-01")])
 
     first_run_id = conn.sql(
@@ -253,13 +255,15 @@ def test_merge_with_primary_key_duckdb_to_duckdb():
 
     ##############################
     # we'll run again, we don't expect any changes since the data hasn't changed
-    run()
+    res = run()
+    print(res.stdout)
     assert_output_equals([(1, "val1", "2022-01-01"), (2, "val2", "2022-02-01")])
 
     # we also ensure that the other rows were not touched
     count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1"
+        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 2 desc"
     ).fetchall()
+    print(count_by_run_id)
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][1] == 2
     assert count_by_run_id[0][0] == first_run_id

@@ -49,7 +49,9 @@ class SqlSource:
             incremental=incremental,
             merge_key=kwargs.get("merge_key"),
             backend=kwargs.get("sql_backend", "sqlalchemy"),
+            chunk_size=kwargs.get("page_size", None),
         )
+
 
         return table_instance
 
@@ -122,7 +124,6 @@ class LocalCsvSource:
                                 f"incremental_key '{incremental_key}' not found in the CSV file"
                             )
 
-                        print("BURAYA GELLDIII")
                         if inc_value < incremental.start_value:
                             continue
 
@@ -182,8 +183,6 @@ class ShopifySource:
             raise ValueError(
                 "Shopify takes care of incrementality on its own, you should not provide incremental_key"
             )
-
-        # shopify://shop_url?api_key=private_app_password
 
         source_fields = urlparse(uri)
         source_params = parse_qs(source_fields.query)

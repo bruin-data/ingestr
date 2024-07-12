@@ -1,6 +1,6 @@
 cx_Oracle==8.3.0
 databricks-sql-connector==2.9.3
-dlt==0.4.12
+dlt==0.5.1
 duckdb_engine==0.11.5
 duckdb==0.10.2
 google-cloud-bigquery-storage==2.24.0
