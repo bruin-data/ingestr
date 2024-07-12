@@ -1,21 +1,21 @@
 from typing import (
-    Optional,
-    Any,
-    Type,
     TYPE_CHECKING,
-    Literal,
-    List,
+    Any,
     Callable,
+    List,
+    Literal,
+    Optional,
+    Type,
     Union,
 )
-from typing_extensions import TypeAlias
-from sqlalchemy import Table, Column
-from sqlalchemy.engine import Row
-from sqlalchemy.sql import sqltypes, Select
-from sqlalchemy.sql.sqltypes import TypeEngine
 
 from dlt.common import logger
 from dlt.common.schema.typing import TColumnSchema, TTableSchemaColumns
+from sqlalchemy import Column, Table
+from sqlalchemy.engine import Row
+from sqlalchemy.sql import Select, sqltypes
+from sqlalchemy.sql.sqltypes import TypeEngine
+from typing_extensions import TypeAlias
 
 ReflectionLevel = Literal["minimal", "full", "full_with_precision"]
 
