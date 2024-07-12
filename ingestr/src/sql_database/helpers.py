@@ -1,40 +1,36 @@
 """SQL database source helpers"""
 
+import operator
 import warnings
 from typing import (
-    Callable,
     Any,
+    Callable,
     Dict,
-    List,
+    Iterator,
     Literal,
     Optional,
-    Iterator,
     Union,
 )
-import operator
 
 import dlt
 from dlt.common.configuration.specs import BaseConfiguration, configspec
 from dlt.common.exceptions import MissingDependencyException
 from dlt.common.schema import TTableSchemaColumns
 from dlt.common.typing import TDataItem, TSortOrder
-
-from .override import IngestrConnectionStringCredentials as ConnectionStringCredentials
-
-from .arrow_helpers import row_tuples_to_arrow
-from .schema_types import (
-    table_to_columns,
-    get_primary_key,
-    Table,
-    SelectAny,
-    ReflectionLevel,
-    TTypeAdapter,
-)
-
-from sqlalchemy import Table, create_engine
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import CompileError
 
+from .arrow_helpers import row_tuples_to_arrow
+from .override import IngestrConnectionStringCredentials as ConnectionStringCredentials
+from .schema_types import (
+    ReflectionLevel,
+    SelectAny,
+    Table,
+    TTypeAdapter,
+    get_primary_key,
+    table_to_columns,
+)
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 
@@ -76,7 +72,7 @@ class TableLoader:
         query = table.select()
         if not self.incremental:
             return query
-        
+
         print("table is incremental")
         last_value_func = self.incremental.last_value_func
 
@@ -99,7 +95,10 @@ class TableLoader:
         else:
             print("Last value is none")
 
-        print("current state of query", query.compile(compile_kwargs={"literal_binds": True}))
+        print(
+            "current state of query",
+            query.compile(compile_kwargs={"literal_binds": True}),
+        )
 
         # generate order by from declared row order
         order_by = None
@@ -241,8 +240,8 @@ def unwrap_json_connector_x(field: str) -> TDataItem:
     """Creates a transform function to be added with `add_map` that will unwrap JSON columns
     ingested via connectorx. Such columns are additionally quoted and translate SQL NULL to json "null"
     """
-    import pyarrow.compute as pc
     import pyarrow as pa
+    import pyarrow.compute as pc
 
     def _unwrap(table: TDataItem) -> TDataItem:
         col_index = table.column_names.index(field)

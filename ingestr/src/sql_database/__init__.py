@@ -1,27 +1,27 @@
 """Source that loads tables form any SQLAlchemy supported database, supports batching requests and incremental loads."""
 
-from typing import Callable, Dict, List, Optional, Union, Iterable, Any
-from sqlalchemy import MetaData, Table
-from sqlalchemy.engine import Engine
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 import dlt
 from dlt.sources import DltResource
+from sqlalchemy import MetaData, Table
+from sqlalchemy.engine import Engine
 
 from .helpers import (
-    table_rows,
-    engine_from_credentials,
-    TableBackend,
     SqlDatabaseTableConfiguration,
     SqlTableResourceConfiguration,
+    TableBackend,
     _detect_precision_hints_deprecated,
-)
-from .schema_types import (
-    table_to_columns,
-    get_primary_key,
-    ReflectionLevel,
-    TTypeAdapter,
+    engine_from_credentials,
+    table_rows,
 )
 from .override import IngestrConnectionStringCredentials as ConnectionStringCredentials
+from .schema_types import (
+    ReflectionLevel,
+    TTypeAdapter,
+    get_primary_key,
+    table_to_columns,
+)
 
 
 @dlt.source
@@ -123,7 +123,7 @@ def sql_database(
     name=lambda args: args["table"], standalone=True, spec=SqlTableResourceConfiguration
 )
 def sql_table(
-    credentials: Union[ConnectionStringCredentials, Engine, str] = dlt.secrets.value,
+    credentials: Union[ConnectionStringCredentials, Engine, str] = str,
     table: str = dlt.config.value,
     schema: Optional[str] = dlt.config.value,
     metadata: Optional[MetaData] = None,

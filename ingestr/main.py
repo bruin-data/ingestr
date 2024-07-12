@@ -215,7 +215,14 @@ def ingest(
             help="The page size to be used when fetching data from SQL sources",
             envvar="PAGE_SIZE",
         ),
-    ] = None,  # type: ignore
+    ] = 50000,  # type: ignore
+    loader_file_size: Annotated[
+        Optional[int],
+        typer.Option(
+            help="The file size to be used by the loader to split the data into multiple files. This can be set independent of the page size, since page size is used for fetching the data from the sources whereas this is used for the processing/loading part.",
+            envvar="LOADER_FILE_SIZE",
+        ),
+    ] = 100000,  # type: ignore
 ):
     track(
         "command_triggered",
@@ -226,6 +233,7 @@ def ingest(
 
     dlt.config["normalize.parquet_normalizer.add_dlt_load_id"] = True
     dlt.config["normalize.parquet_normalizer.add_dlt_id"] = True
+    dlt.config["data_writer.file_max_items"] = loader_file_size
 
     try:
         if not dest_table:
@@ -340,7 +348,6 @@ def ingest(
         write_disposition = None
         if incremental_strategy != IncrementalStrategy.none:
             write_disposition = incremental_strategy.value
-
 
         run_info: LoadInfo = pipeline.run(
             dlt_source,

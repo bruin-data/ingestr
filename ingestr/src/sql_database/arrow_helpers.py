@@ -1,10 +1,10 @@
-from typing import Any, Sequence, Optional
+from typing import Any, Optional, Sequence
 
-from dlt.common.schema.typing import TTableSchemaColumns
 from dlt.common import logger
 from dlt.common.configuration import with_config
 from dlt.common.destination import DestinationCapabilitiesContext
 from dlt.common.json import custom_encode, map_nested_in_place
+from dlt.common.schema.typing import TTableSchemaColumns
 
 from .schema_types import RowAny
 
@@ -19,8 +19,9 @@ def columns_to_arrow(
     is always the case if run within the pipeline. This will generate arrow schema compatible with the destination.
     Otherwise generic capabilities are used
     """
-    from dlt.common.libs.pyarrow import pyarrow as pa, get_py_arrow_datatype
     from dlt.common.destination.capabilities import DestinationCapabilitiesContext
+    from dlt.common.libs.pyarrow import get_py_arrow_datatype
+    from dlt.common.libs.pyarrow import pyarrow as pa
 
     return pa.schema(
         [
@@ -46,8 +47,8 @@ def row_tuples_to_arrow(
     Columns missing `data_type` will be inferred from the row data.
     Columns with object types not supported by arrow are excluded from the resulting table.
     """
-    from dlt.common.libs.pyarrow import pyarrow as pa
     import numpy as np
+    from dlt.common.libs.pyarrow import pyarrow as pa
 
     try:
         from pandas._libs import lib

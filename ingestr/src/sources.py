@@ -52,7 +52,6 @@ class SqlSource:
             chunk_size=kwargs.get("page_size", None),
         )
 
-
         return table_instance
 
 
