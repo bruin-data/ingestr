@@ -3,8 +3,12 @@ import os
 import random
 import shutil
 import string
+from datetime import datetime, timezone
 
 import duckdb
+import pytest
+import sqlalchemy
+from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
 from ingestr.main import app
@@ -74,7 +78,7 @@ def invoke_ingest_command(
         args.append("--loader-file-format")
         args.append(loader_file_format)
 
-    print(args)
+    # print(args)
     result = runner.invoke(
         app,
         args,
@@ -82,559 +86,6 @@ def invoke_ingest_command(
         env={"DISABLE_TELEMETRY": "true"},
     )
     return result
-
-
-### These are DuckDB-to-DuckDB tests
-def test_create_replace_duckdb_to_duckdb():
-    try:
-        shutil.rmtree(get_abs_path("../pipeline_data"))
-    except Exception:
-        pass
-
-    dbname = f"test_create_replace_{get_random_string(5)}.db"
-
-    abs_db_path = get_abs_path(f"./testdata/{dbname}")
-    rel_db_path_to_command = f"ingestr/testdata/{dbname}"
-
-    conn = duckdb.connect(abs_db_path)
-    conn.execute("DROP SCHEMA IF EXISTS testschema CASCADE")
-    conn.execute("CREATE SCHEMA testschema")
-    conn.execute(
-        "CREATE TABLE testschema.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
-    )
-    conn.execute("INSERT INTO testschema.input VALUES (1, 'val1', '2022-01-01')")
-    conn.execute("INSERT INTO testschema.input VALUES (2, 'val2', '2022-02-01')")
-
-    res = conn.sql("select count(*) from testschema.input").fetchall()
-    assert res[0][0] == 2
-
-    result = invoke_ingest_command(
-        f"duckdb:///{rel_db_path_to_command}",
-        "testschema.input",
-        f"duckdb:///{rel_db_path_to_command}",
-        "testschema.output",
-    )
-
-    print(result.stdout, result)
-
-    assert result.exit_code == 0
-
-    res = conn.sql(
-        "select id, val, strftime(updated_at, '%Y-%m-%d') as updated_at from testschema.output"
-    ).fetchall()
-    assert len(res) == 2
-    assert res[0] == (1, "val1", "2022-01-01")
-    assert res[1] == (2, "val2", "2022-02-01")
-
-    try:
-        os.remove(abs_db_path)
-    except Exception:
-        pass
-
-
-def test_append_duckdb_to_duckdb():
-    try:
-        shutil.rmtree(get_abs_path("../pipeline_data"))
-    except Exception:
-        pass
-
-    abs_db_path = get_abs_path("./testdata/test_append.db")
-    rel_db_path_to_command = "ingestr/testdata/test_append.db"
-    uri = f"duckdb:///{rel_db_path_to_command}"
-
-    conn = duckdb.connect(abs_db_path)
-    conn.execute("DROP SCHEMA IF EXISTS testschema_append CASCADE")
-    conn.execute("CHECKPOINT")
-
-    conn.execute("CREATE SCHEMA testschema_append")
-    conn.execute(
-        "CREATE TABLE testschema_append.input (id INTEGER, val VARCHAR, updated_at DATE)"
-    )
-    conn.execute(
-        "INSERT INTO testschema_append.input VALUES (1, 'val1', '2022-01-01'), (2, 'val2', '2022-01-02')"
-    )
-    conn.execute("CHECKPOINT")
-
-    res = conn.sql("select count(*) from testschema_append.input").fetchall()
-    assert res[0][0] == 2
-
-    def run():
-        res = invoke_ingest_command(
-            uri,
-            "testschema_append.input",
-            uri,
-            "testschema_append.output",
-            "append",
-            "updated_at",
-            sql_backend="sqlalchemy",
-        )
-        assert res.exit_code == 0
-
-    def get_output_table():
-        conn.execute("CHECKPOINT")
-        return conn.sql(
-            "select id, val, strftime(updated_at, '%Y-%m-%d') as updated_at from testschema_append.output order by id asc"
-        ).fetchall()
-
-    run()
-
-    res = get_output_table()
-    assert len(res) == 2
-    assert res[0] == (1, "val1", "2022-01-01")
-    assert res[1] == (2, "val2", "2022-01-02")
-
-    # # run again, nothing should be inserted into the output table
-    run()
-
-    res = get_output_table()
-    assert len(res) == 2
-    assert res[0] == (1, "val1", "2022-01-01")
-    assert res[1] == (2, "val2", "2022-01-02")
-
-    try:
-        os.remove(abs_db_path)
-    except Exception:
-        pass
-
-
-def test_merge_with_primary_key_duckdb_to_duckdb():
-    try:
-        shutil.rmtree(get_abs_path("../pipeline_data"))
-    except Exception:
-        pass
-
-    abs_db_path = get_abs_path("./testdata/test_merge_with_primary_key.db")
-    rel_db_path_to_command = "ingestr/testdata/test_merge_with_primary_key.db"
-    uri = f"duckdb:///{rel_db_path_to_command}"
-
-    conn = duckdb.connect(abs_db_path)
-    conn.execute("DROP SCHEMA IF EXISTS testschema_merge CASCADE")
-    conn.execute("CREATE SCHEMA testschema_merge")
-    conn.execute(
-        "CREATE TABLE testschema_merge.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP WITH TIME ZONE)"
-    )
-    conn.execute("INSERT INTO testschema_merge.input VALUES (1, 'val1', '2022-01-01')")
-    conn.execute("INSERT INTO testschema_merge.input VALUES (2, 'val2', '2022-02-01')")
-
-    res = conn.sql("select count(*) from testschema_merge.input").fetchall()
-    assert res[0][0] == 2
-
-    def run():
-        res = invoke_ingest_command(
-            uri,
-            "testschema_merge.input",
-            uri,
-            "testschema_merge.output",
-            "merge",
-            "updated_at",
-            "id",
-            sql_backend="sqlalchemy",
-        )
-        assert res.exit_code == 0
-        return res
-
-    def get_output_rows():
-        conn.execute("CHECKPOINT")
-        return conn.sql(
-            "select id, val, strftime(updated_at, '%Y-%m-%d') as updated_at from testschema_merge.output order by id asc"
-        ).fetchall()
-
-    def assert_output_equals(expected):
-        res = get_output_rows()
-        assert len(res) == len(expected)
-        for i, row in enumerate(expected):
-            assert res[i] == row
-
-    res = run()
-    print(res.stdout)
-    assert_output_equals([(1, "val1", "2022-01-01"), (2, "val2", "2022-02-01")])
-
-    first_run_id = conn.sql(
-        "select _dlt_load_id from testschema_merge.output limit 1"
-    ).fetchall()[0][0]
-
-    ##############################
-    # we'll run again, we don't expect any changes since the data hasn't changed
-    res = run()
-    print(res.stdout)
-    assert_output_equals([(1, "val1", "2022-01-01"), (2, "val2", "2022-02-01")])
-
-    # we also ensure that the other rows were not touched
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 2 desc"
-    ).fetchall()
-    print(count_by_run_id)
-    assert len(count_by_run_id) == 1
-    assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[0][0] == first_run_id
-    ##############################
-
-    ##############################
-    # now we'll modify the source data but not the updated at, the output table should not be updated
-    conn.execute("UPDATE testschema_merge.input SET val = 'val1_modified' WHERE id = 2")
-
-    run()
-    assert_output_equals([(1, "val1", "2022-01-01"), (2, "val2", "2022-02-01")])
-
-    # we also ensure that the other rows were not touched
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1"
-    ).fetchall()
-    assert len(count_by_run_id) == 1
-    assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[0][0] == first_run_id
-    ##############################
-
-    ##############################
-    # now we'll insert a new row but with an old date, the new row will not show up
-    conn.execute("INSERT INTO testschema_merge.input VALUES (3, 'val3', '2022-01-01')")
-
-    run()
-    assert_output_equals([(1, "val1", "2022-01-01"), (2, "val2", "2022-02-01")])
-
-    # we also ensure that the other rows were not touched
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1"
-    ).fetchall()
-    assert len(count_by_run_id) == 1
-    assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[0][0] == first_run_id
-    ##############################
-
-    ##############################
-    # now we'll insert a new row but with a new date, the new row will show up
-    conn.execute("INSERT INTO testschema_merge.input VALUES (3, 'val3', '2022-02-02')")
-
-    run()
-    assert_output_equals(
-        [
-            (1, "val1", "2022-01-01"),
-            (2, "val2", "2022-02-01"),
-            (3, "val3", "2022-02-02"),
-        ]
-    )
-
-    # we have a new run that inserted rows to this table, so the run count should be 2
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 2 desc"
-    ).fetchall()
-    assert len(count_by_run_id) == 2
-    assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[0][0] == first_run_id
-    # we don't care about the run ID
-    assert count_by_run_id[1][1] == 1
-    ##############################
-
-    ##############################
-    # lastly, let's try modifying the updated_at of an old column, it should be updated in the output table
-    conn.execute(
-        "UPDATE testschema_merge.input SET val='val2_modified', updated_at = '2022-02-03' WHERE id = 2"
-    )
-
-    run()
-    assert_output_equals(
-        [
-            (1, "val1", "2022-01-01"),
-            (2, "val2_modified", "2022-02-03"),
-            (3, "val3", "2022-02-02"),
-        ]
-    )
-
-    # we have a new run that inserted rows to this table, so the run count should be 2
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 2 desc, 1 asc"
-    ).fetchall()
-    assert len(count_by_run_id) == 3
-    assert count_by_run_id[0][1] == 1
-    assert count_by_run_id[0][0] == first_run_id
-    # we don't care about the rest of the run IDs
-    assert count_by_run_id[1][1] == 1
-    assert count_by_run_id[2][1] == 1
-    ##############################
-
-    try:
-        os.remove(abs_db_path)
-    except Exception:
-        pass
-
-
-def test_delete_insert_without_primary_key_duckdb_to_duckdb():
-    try:
-        shutil.rmtree(get_abs_path("../pipeline_data"))
-    except Exception:
-        pass
-
-    abs_db_path = get_abs_path("./testdata/test_delete_insert_without_primary_key.db")
-    rel_db_path_to_command = (
-        "ingestr/testdata/test_delete_insert_without_primary_key.db"
-    )
-    uri = f"duckdb:///{rel_db_path_to_command}"
-
-    conn = duckdb.connect(abs_db_path)
-    conn.execute("DROP SCHEMA IF EXISTS testschema_delete_insert CASCADE")
-    conn.execute("CREATE SCHEMA testschema_delete_insert")
-    conn.execute(
-        "CREATE TABLE testschema_delete_insert.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP WITH TIME ZONE)"
-    )
-    conn.execute(
-        "INSERT INTO testschema_delete_insert.input VALUES (1, 'val1', '2022-01-01 00:00:00+00:00')"
-    )
-    conn.execute(
-        "INSERT INTO testschema_delete_insert.input VALUES (2, 'val2', '2022-02-01 00:00:00+00:00')"
-    )
-
-    res = conn.sql("select count(*) from testschema_delete_insert.input").fetchall()
-    assert res[0][0] == 2
-
-    def run():
-        res = invoke_ingest_command(
-            uri,
-            "testschema_delete_insert.input",
-            uri,
-            "testschema_delete_insert.output",
-            inc_strategy="delete+insert",
-            inc_key="updated_at",
-            sql_backend="sqlalchemy",
-            loader_file_format="jsonl",
-        )
-        assert res.exit_code == 0
-        return res
-
-    def get_output_rows():
-        conn.execute("CHECKPOINT")
-        return conn.sql(
-            "select id, val, strftime(CAST(updated_at AT TIME ZONE 'UTC' AS TIMESTAMP), '%Y-%m-%d %H:%M:%S') from testschema_delete_insert.output order by id asc"
-        ).fetchall()
-
-    def assert_output_equals(expected):
-        res = get_output_rows()
-        assert len(res) == len(expected)
-        for i, row in enumerate(expected):
-            assert res[i] == row
-
-    run()
-    assert_output_equals(
-        [(1, "val1", "2022-01-01 00:00:00"), (2, "val2", "2022-02-01 00:00:00")]
-    )
-
-    first_run_id = conn.sql(
-        "select _dlt_load_id from testschema_delete_insert.output limit 1"
-    ).fetchall()[0][0]
-
-    ##############################
-    # we'll run again, since this is a delete+insert, we expect the run ID to change for the last one
-    res = run()
-    assert_output_equals(
-        [(1, "val1", "2022-01-01 00:00:00"), (2, "val2", "2022-02-01 00:00:00")]
-    )
-
-    # we ensure that one of the rows is updated with a new run
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_delete_insert.output group by 1 order by 1 asc"
-    ).fetchall()
-    assert len(count_by_run_id) == 2
-    assert count_by_run_id[0][0] == first_run_id
-    assert count_by_run_id[0][1] == 1
-    assert count_by_run_id[1][0] != first_run_id
-    assert count_by_run_id[1][1] == 1
-    ##############################
-
-    ##############################
-    # now we'll insert a few more lines for the same day, the new rows should show up
-    conn.execute(
-        "INSERT INTO testschema_delete_insert.input VALUES (3, 'val3', '2022-02-01 00:00:00+00:00'), (4, 'val4', '2022-02-01 00:00:00+00:00')"
-    )
-    conn.execute("CHECKPOINT")
-
-    run()
-    assert_output_equals(
-        [
-            (1, "val1", "2022-01-01 00:00:00"),
-            (2, "val2", "2022-02-01 00:00:00"),
-            (3, "val3", "2022-02-01 00:00:00"),
-            (4, "val4", "2022-02-01 00:00:00"),
-        ]
-    )
-
-    # the new rows should have a new run ID, there should be 2 distinct runs now
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_delete_insert.output group by 1 order by 2 desc, 1 asc"
-    ).fetchall()
-    assert len(count_by_run_id) == 2
-    assert count_by_run_id[0][0] != first_run_id
-    assert count_by_run_id[0][1] == 3  # 2 new rows + 1 old row
-    assert count_by_run_id[1][0] == first_run_id
-    assert count_by_run_id[1][1] == 1
-    ##############################
-
-    try:
-        os.remove(abs_db_path)
-    except Exception:
-        pass
-
-
-def test_delete_insert_with_timerange_duckdb_to_duckdb():
-    try:
-        shutil.rmtree(get_abs_path("../pipeline_data"))
-    except Exception:
-        pass
-
-    abs_db_path = get_abs_path("./testdata/test_delete_insert_with_timerange.db")
-    rel_db_path_to_command = "ingestr/testdata/test_delete_insert_with_timerange.db"
-    uri = f"duckdb:///{rel_db_path_to_command}"
-
-    conn = duckdb.connect(abs_db_path)
-    conn.execute("DROP SCHEMA IF EXISTS testschema_delete_insert_timerange CASCADE")
-    conn.execute("CREATE SCHEMA testschema_delete_insert_timerange")
-    conn.execute(
-        "CREATE TABLE testschema_delete_insert_timerange.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP WITH TIME ZONE)"
-    )
-    conn.execute(
-        """INSERT INTO testschema_delete_insert_timerange.input VALUES 
-            (1, 'val1', '2022-01-01T00:00:00Z'),
-            (2, 'val2', '2022-01-01T00:00:00Z'),
-            (3, 'val3', '2022-01-02T00:00:00Z'),
-            (4, 'val4', '2022-01-02T00:00:00Z'),
-            (5, 'val5', '2022-01-03T00:00:00Z'),
-            (6, 'val6', '2022-01-03T00:00:00Z')
-        """
-    )
-
-    res = conn.sql(
-        "select count(*) from testschema_delete_insert_timerange.input"
-    ).fetchall()
-    assert res[0][0] == 6
-
-    def run(start_date: str, end_date: str):
-        res = invoke_ingest_command(
-            uri,
-            "testschema_delete_insert_timerange.input",
-            uri,
-            "testschema_delete_insert_timerange.output",
-            inc_strategy="delete+insert",
-            inc_key="updated_at",
-            interval_start=start_date,
-            interval_end=end_date,
-            sql_backend="sqlalchemy",
-            loader_file_format="jsonl",
-        )
-        assert res.exit_code == 0
-        return res
-
-    def get_output_rows():
-        conn.execute("CHECKPOINT")
-        return conn.sql(
-            "select id, val, strftime(updated_at, '%Y-%m-%d') as updated_at from testschema_delete_insert_timerange.output order by id asc"
-        ).fetchall()
-
-    def assert_output_equals(expected):
-        res = get_output_rows()
-        assert len(res) == len(expected)
-        for i, row in enumerate(expected):
-            assert res[i] == row
-
-    run(
-        "2022-01-01T00:00:00Z", "2022-01-02T00:00:00Z"
-    )  # dlt runs them with the end date exclusive
-    assert_output_equals([(1, "val1", "2022-01-01"), (2, "val2", "2022-01-01")])
-
-    first_run_id = conn.sql(
-        "select _dlt_load_id from testschema_delete_insert_timerange.output limit 1"
-    ).fetchall()[0][0]
-
-    ##############################
-    # we'll run again, since this is a delete+insert, we expect the run ID to change for the last one
-    run(
-        "2022-01-01T00:00:00Z", "2022-01-02T00:00:00Z"
-    )  # dlt runs them with the end date exclusive
-    assert_output_equals([(1, "val1", "2022-01-01"), (2, "val2", "2022-01-01")])
-
-    # both rows should have a new run ID
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_delete_insert_timerange.output group by 1 order by 1 asc"
-    ).fetchall()
-    assert len(count_by_run_id) == 1
-    assert count_by_run_id[0][0] != first_run_id
-    assert count_by_run_id[0][1] == 2
-    ##############################
-
-    ##############################
-    # now run for the day after, new rows should land
-    run("2022-01-02T00:00:00Z", "2022-01-03T00:00:00Z")
-    assert_output_equals(
-        [
-            (1, "val1", "2022-01-01"),
-            (2, "val2", "2022-01-01"),
-            (3, "val3", "2022-01-02"),
-            (4, "val4", "2022-01-02"),
-        ]
-    )
-
-    # there should be 4 rows with 2 distinct run IDs
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_delete_insert_timerange.output group by 1 order by 1 asc"
-    ).fetchall()
-    assert len(count_by_run_id) == 2
-    assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[1][1] == 2
-    ##############################
-
-    ##############################
-    # let's bring in the rows for the third day
-    run("2022-01-03T00:00:00Z", "2022-01-04T00:00:00Z")
-    assert_output_equals(
-        [
-            (1, "val1", "2022-01-01"),
-            (2, "val2", "2022-01-01"),
-            (3, "val3", "2022-01-02"),
-            (4, "val4", "2022-01-02"),
-            (5, "val5", "2022-01-03"),
-            (6, "val6", "2022-01-03"),
-        ]
-    )
-
-    # there should be 6 rows with 3 distinct run IDs
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_delete_insert_timerange.output group by 1 order by 1 asc"
-    ).fetchall()
-    assert len(count_by_run_id) == 3
-    assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[1][1] == 2
-    assert count_by_run_id[2][1] == 2
-    ##############################
-
-    ##############################
-    # now let's do a backfill for the first day again, the rows should be updated
-    conn.execute(
-        "UPDATE testschema_delete_insert_timerange.input SET val = 'val1_modified' WHERE id = 1"
-    )
-
-    run("2022-01-01T00:00:00Z", "2022-01-02T00:00:00Z")
-    assert_output_equals(
-        [
-            (1, "val1_modified", "2022-01-01"),
-            (2, "val2", "2022-01-01"),
-            (3, "val3", "2022-01-02"),
-            (4, "val4", "2022-01-02"),
-            (5, "val5", "2022-01-03"),
-            (6, "val6", "2022-01-03"),
-        ]
-    )
-
-    # there should still be 6 rows with 3 distinct run IDs
-    count_by_run_id = conn.sql(
-        "select _dlt_load_id, count(*) from testschema_delete_insert_timerange.output group by 1 order by 1 asc"
-    ).fetchall()
-    assert len(count_by_run_id) == 3
-    assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[1][1] == 2
-    assert count_by_run_id[2][1] == 2
-    ##############################
-
-    try:
-        os.remove(abs_db_path)
-    except Exception:
-        pass
 
 
 ### These are CSV-to-DuckDB tests
@@ -877,3 +328,620 @@ def test_delete_insert_without_primary_key_csv_to_duckdb():
         os.remove(abs_db_path)
     except Exception:
         pass
+
+
+POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
+
+
+class DockerImage:
+    def __init__(self, container_creator) -> None:
+        self.container_creator = container_creator
+
+    def start(self) -> str:
+        self.container = self.container_creator()
+        return self.container.get_connection_url()
+
+    def stop(self):
+        self.container.stop()
+
+
+class DuckDb:
+    def start(self) -> str:
+        self.abs_path = get_abs_path(f"./testdata/duckdb_{get_random_string(5)}.db")
+        return f"duckdb:///{self.abs_path}"
+
+    def stop(self):
+        try:
+            os.remove(self.abs_db_path)
+        except Exception:
+            pass
+
+
+SOURCES = {
+    "postgres": DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()),
+    "duckdb": DuckDb(),
+}
+
+DESTINATIONS = {
+    "postgres": DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()),
+    "duckdb": DuckDb(),
+}
+
+
+@pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
+@pytest.mark.parametrize("dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys()))
+def test_create_replace(source, dest):
+    source_uri = source.start()
+    dest_uri = dest.start()
+    db_to_db_create_replace(source_uri, dest_uri)
+    source.stop()
+    dest.stop()
+
+
+@pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
+@pytest.mark.parametrize("dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys()))
+def test_append(source, dest):
+    source_uri = source.start()
+    dest_uri = dest.start()
+    db_to_db_append(source_uri, dest_uri)
+    source.stop()
+    dest.stop()
+
+
+@pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
+@pytest.mark.parametrize("dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys()))
+def test_merge_with_primary_key(source, dest):
+    source_uri = source.start()
+    dest_uri = dest.start()
+    db_to_db_merge_with_primary_key(source_uri, dest_uri)
+    source.stop()
+    dest.stop()
+
+
+@pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
+@pytest.mark.parametrize("dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys()))
+def test_delete_insert_without_primary_key(source, dest):
+    source_uri = source.start()
+    dest_uri = dest.start()
+    db_to_db_delete_insert_without_primary_key(source_uri, dest_uri)
+    source.stop()
+    dest.stop()
+
+
+@pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
+@pytest.mark.parametrize("dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys()))
+def test_delete_insert_with_time_range(source, dest):
+    source_uri = source.start()
+    dest_uri = dest.start()
+    db_to_db_delete_insert_with_timerange(source_uri, dest_uri)
+    source.stop()
+    dest.stop()
+
+
+def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str):
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    source_engine = sqlalchemy.create_engine(source_connection_url)
+    with source_engine.begin() as conn:
+        conn.execute("DROP SCHEMA IF EXISTS testschema CASCADE")
+        conn.execute("CREATE SCHEMA testschema")
+        conn.execute(
+            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+        )
+        conn.execute("INSERT INTO testschema.input VALUES (1, 'val1', '2022-01-01')")
+        conn.execute("INSERT INTO testschema.input VALUES (2, 'val2', '2022-02-01')")
+        res = conn.execute("select count(*) from testschema.input").fetchall()
+        assert res[0][0] == 2
+
+    result = invoke_ingest_command(
+        source_connection_url,
+        "testschema.input",
+        dest_connection_url,
+        "testschema.output",
+    )
+
+    assert result.exit_code == 0
+
+    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+    res = dest_engine.execute(
+        "select id, val, updated_at from testschema.output"
+    ).fetchall()
+
+    assert len(res) == 2
+    assert res[0] == (1, "val1", as_datetime("2022-01-01"))
+    assert res[1] == (2, "val2", as_datetime("2022-02-01"))
+
+
+def db_to_db_append(source_connection_url: str, dest_connection_url: str):
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    source_engine = sqlalchemy.create_engine(source_connection_url)
+    with source_engine.begin() as conn:
+        conn.execute("DROP SCHEMA IF EXISTS testschema_append CASCADE")
+        conn.execute("CREATE SCHEMA testschema_append")
+        conn.execute(
+            "CREATE TABLE testschema_append.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO testschema_append.input VALUES (1, 'val1', '2022-01-01'), (2, 'val2', '2022-01-02')"
+        )
+        res = conn.execute("select count(*) from testschema_append.input").fetchall()
+        assert res[0][0] == 2
+
+    def run():
+        res = invoke_ingest_command(
+            source_connection_url,
+            "testschema_append.input",
+            dest_connection_url,
+            "testschema_append.output",
+            "append",
+            "updated_at",
+            sql_backend="sqlalchemy",
+        )
+        assert res.exit_code == 0
+
+    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+
+    def get_output_table():
+        return dest_engine.execute(
+            "select id, val, updated_at from testschema_append.output order by id asc"
+        ).fetchall()
+
+    run()
+
+    res = get_output_table()
+    assert len(res) == 2
+    assert res[0] == (1, "val1", as_datetime("2022-01-01"))
+    assert res[1] == (2, "val2", as_datetime("2022-01-02"))
+
+    # # run again, nothing should be inserted into the output table
+    run()
+
+    res = get_output_table()
+    assert len(res) == 2
+    assert res[0] == (1, "val1", as_datetime("2022-01-01"))
+    assert res[1] == (2, "val2", as_datetime("2022-01-02"))
+
+
+def db_to_db_merge_with_primary_key(
+    source_connection_url: str, dest_connection_url: str
+):
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    source_engine = sqlalchemy.create_engine(source_connection_url)
+    with source_engine.begin() as conn:
+        conn.execute("DROP SCHEMA IF EXISTS testschema_merge CASCADE")
+        conn.execute("CREATE SCHEMA testschema_merge")
+        conn.execute(
+            "CREATE TABLE testschema_merge.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO testschema_merge.input VALUES (1, 'val1', '2022-01-01')"
+        )
+        conn.execute(
+            "INSERT INTO testschema_merge.input VALUES (2, 'val2', '2022-02-01')"
+        )
+
+        res = conn.execute("select count(*) from testschema_merge.input").fetchall()
+        assert res[0][0] == 2
+
+    def run():
+        res = invoke_ingest_command(
+            source_connection_url,
+            "testschema_merge.input",
+            dest_connection_url,
+            "testschema_merge.output",
+            "merge",
+            "updated_at",
+            "id",
+            sql_backend="sqlalchemy",
+        )
+        assert res.exit_code == 0
+        return res
+
+    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+
+    def get_output_rows():
+        return dest_engine.execute(
+            "select id, val, updated_at from testschema_merge.output order by id asc"
+        ).fetchall()
+
+    def assert_output_equals(expected):
+        res = get_output_rows()
+        assert len(res) == len(expected)
+        for i, row in enumerate(expected):
+            assert res[i] == row
+
+    res = run()
+    assert_output_equals(
+        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
+    )
+
+    first_run_id = dest_engine.execute(
+        "select _dlt_load_id from testschema_merge.output limit 1"
+    ).fetchall()[0][0]
+
+    ##############################
+    # we'll run again, we don't expect any changes since the data hasn't changed
+    res = run()
+    assert_output_equals(
+        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
+    )
+
+    # we also ensure that the other rows were not touched
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 2 desc"
+    ).fetchall()
+    print(count_by_run_id)
+    assert len(count_by_run_id) == 1
+    assert count_by_run_id[0][1] == 2
+    assert count_by_run_id[0][0] == first_run_id
+    ##############################
+
+    ##############################
+    # now we'll modify the source data but not the updated at, the output table should not be updated
+    source_engine.execute(
+        "UPDATE testschema_merge.input SET val = 'val1_modified' WHERE id = 2"
+    )
+
+    run()
+    assert_output_equals(
+        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
+    )
+
+    # we also ensure that the other rows were not touched
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema_merge.output group by 1"
+    ).fetchall()
+    assert len(count_by_run_id) == 1
+    assert count_by_run_id[0][1] == 2
+    assert count_by_run_id[0][0] == first_run_id
+    ##############################
+
+    ##############################
+    # now we'll insert a new row but with an old date, the new row will not show up
+    source_engine.execute(
+        "INSERT INTO testschema_merge.input VALUES (3, 'val3', '2022-01-01')"
+    )
+
+    run()
+    assert_output_equals(
+        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
+    )
+
+    # we also ensure that the other rows were not touched
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema_merge.output group by 1"
+    ).fetchall()
+    assert len(count_by_run_id) == 1
+    assert count_by_run_id[0][1] == 2
+    assert count_by_run_id[0][0] == first_run_id
+    ##############################
+
+    ##############################
+    # now we'll insert a new row but with a new date, the new row will show up
+    source_engine.execute(
+        "INSERT INTO testschema_merge.input VALUES (3, 'val3', '2022-02-02')"
+    )
+
+    run()
+    assert_output_equals(
+        [
+            (1, "val1", as_datetime("2022-01-01")),
+            (2, "val2", as_datetime("2022-02-01")),
+            (3, "val3", as_datetime("2022-02-02")),
+        ]
+    )
+
+    # we have a new run that inserted rows to this table, so the run count should be 2
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 2 desc"
+    ).fetchall()
+    assert len(count_by_run_id) == 2
+    assert count_by_run_id[0][1] == 2
+    assert count_by_run_id[0][0] == first_run_id
+    # we don't care about the run ID
+    assert count_by_run_id[1][1] == 1
+    ##############################
+
+    ##############################
+    # lastly, let's try modifying the updated_at of an old column, it should be updated in the output table
+    source_engine.execute(
+        "UPDATE testschema_merge.input SET val='val2_modified', updated_at = '2022-02-03' WHERE id = 2"
+    )
+
+    run()
+    assert_output_equals(
+        [
+            (1, "val1", as_datetime("2022-01-01")),
+            (2, "val2_modified", as_datetime("2022-02-03")),
+            (3, "val3", as_datetime("2022-02-02")),
+        ]
+    )
+
+    # we have a new run that inserted rows to this table, so the run count should be 2
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 2 desc, 1 asc"
+    ).fetchall()
+    assert len(count_by_run_id) == 3
+    assert count_by_run_id[0][1] == 1
+    assert count_by_run_id[0][0] == first_run_id
+    # we don't care about the rest of the run IDs
+    assert count_by_run_id[1][1] == 1
+    assert count_by_run_id[2][1] == 1
+    ##############################
+
+
+def db_to_db_delete_insert_without_primary_key(
+    source_connection_url: str, dest_connection_url: str
+):
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    source_engine = sqlalchemy.create_engine(source_connection_url)
+    with source_engine.begin() as conn:
+        conn.execute("DROP SCHEMA IF EXISTS testschema CASCADE")
+        conn.execute("CREATE SCHEMA testschema")
+        conn.execute(
+            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+        )
+        conn.execute("INSERT INTO testschema.input VALUES (1, 'val1', '2022-01-01')")
+        conn.execute("INSERT INTO testschema.input VALUES (2, 'val2', '2022-02-01')")
+
+        res = conn.execute("select count(*) from testschema.input").fetchall()
+        assert res[0][0] == 2
+
+    def run():
+        res = invoke_ingest_command(
+            source_connection_url,
+            "testschema.input",
+            dest_connection_url,
+            "testschema.output",
+            inc_strategy="delete+insert",
+            inc_key="updated_at",
+            sql_backend="sqlalchemy",
+        )
+        assert res.exit_code == 0
+        return res
+
+    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+
+    def get_output_rows():
+        return dest_engine.execute(
+            "select id, val, updated_at from testschema.output order by id asc"
+        ).fetchall()
+
+    def assert_output_equals(expected):
+        res = get_output_rows()
+        assert len(res) == len(expected)
+        for i, row in enumerate(expected):
+            assert res[i] == row
+
+    run()
+    assert_output_equals(
+        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
+    )
+
+    first_run_id = dest_engine.execute(
+        "select _dlt_load_id from testschema.output limit 1"
+    ).fetchall()[0][0]
+
+    ##############################
+    # we'll run again, since this is a delete+insert, we expect the run ID to change for the last one
+    res = run()
+    assert_output_equals(
+        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
+    )
+
+    # we ensure that one of the rows is updated with a new run
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+    ).fetchall()
+    assert len(count_by_run_id) == 2
+    assert count_by_run_id[0][0] == first_run_id
+    assert count_by_run_id[0][1] == 1
+    assert count_by_run_id[1][0] != first_run_id
+    assert count_by_run_id[1][1] == 1
+    ##############################
+
+    ##############################
+    # now we'll insert a few more lines for the same day, the new rows should show up
+    source_engine.execute(
+        "INSERT INTO testschema.input VALUES (3, 'val3', '2022-02-01'), (4, 'val4', '2022-02-01')"
+    )
+
+    run()
+    assert_output_equals(
+        [
+            (1, "val1", as_datetime("2022-01-01")),
+            (2, "val2", as_datetime("2022-02-01")),
+            (3, "val3", as_datetime("2022-02-01")),
+            (4, "val4", as_datetime("2022-02-01")),
+        ]
+    )
+
+    # the new rows should have a new run ID, there should be 2 distinct runs now
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 2 desc, 1 asc"
+    ).fetchall()
+    assert len(count_by_run_id) == 2
+    assert count_by_run_id[0][0] != first_run_id
+    assert count_by_run_id[0][1] == 3  # 2 new rows + 1 old row
+    assert count_by_run_id[1][0] == first_run_id
+    assert count_by_run_id[1][1] == 1
+    ##############################
+
+
+def db_to_db_delete_insert_with_timerange(
+    source_connection_url: str, dest_connection_url: str
+):
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    source_engine = sqlalchemy.create_engine(source_connection_url)
+    with source_engine.begin() as conn:
+        conn.execute("DROP SCHEMA IF EXISTS testschema CASCADE")
+        conn.execute("CREATE SCHEMA testschema")
+        conn.execute(
+            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+        )
+        conn.execute(
+            """INSERT INTO testschema.input VALUES 
+            (1, 'val1', '2022-01-01'),
+            (2, 'val2', '2022-01-01'),
+            (3, 'val3', '2022-01-02'),
+            (4, 'val4', '2022-01-02'),
+            (5, 'val5', '2022-01-03'),
+            (6, 'val6', '2022-01-03')
+        """
+        )
+
+        res = conn.execute("select count(*) from testschema.input").fetchall()
+        assert res[0][0] == 6
+
+    def run(start_date: str, end_date: str):
+        res = invoke_ingest_command(
+            source_connection_url,
+            "testschema.input",
+            dest_connection_url,
+            "testschema.output",
+            inc_strategy="delete+insert",
+            inc_key="updated_at",
+            interval_start=start_date,
+            interval_end=end_date,
+            sql_backend="sqlalchemy",
+        )
+        assert res.exit_code == 0
+        return res
+
+    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+
+    def get_output_rows():
+        return dest_engine.execute(
+            "select id, val, updated_at from testschema.output order by id asc"
+        ).fetchall()
+
+    def assert_output_equals(expected):
+        res = get_output_rows()
+        assert len(res) == len(expected)
+        for i, row in enumerate(expected):
+            assert res[i] == row
+
+    run(
+        "2022-01-01T00:00:00Z", "2022-01-02T00:00:00Z"
+    )  # dlt runs them with the end date exclusive
+    assert_output_equals(
+        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-01-01"))]
+    )
+
+    first_run_id = dest_engine.execute(
+        "select _dlt_load_id from testschema.output limit 1"
+    ).fetchall()[0][0]
+
+    ##############################
+    # we'll run again, since this is a delete+insert, we expect the run ID to change for the last one
+    run(
+        "2022-01-01T00:00:00Z", "2022-01-02T00:00:00Z"
+    )  # dlt runs them with the end date exclusive
+    assert_output_equals(
+        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-01-01"))]
+    )
+
+    # both rows should have a new run ID
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+    ).fetchall()
+    assert len(count_by_run_id) == 1
+    assert count_by_run_id[0][0] != first_run_id
+    assert count_by_run_id[0][1] == 2
+    ##############################
+
+    ##############################
+    # now run for the day after, new rows should land
+    run("2022-01-02T00:00:00Z", "2022-01-03T00:00:00Z")
+    assert_output_equals(
+        [
+            (1, "val1", as_datetime("2022-01-01")),
+            (2, "val2", as_datetime("2022-01-01")),
+            (3, "val3", as_datetime("2022-01-02")),
+            (4, "val4", as_datetime("2022-01-02")),
+        ]
+    )
+
+    # there should be 4 rows with 2 distinct run IDs
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+    ).fetchall()
+    assert len(count_by_run_id) == 2
+    assert count_by_run_id[0][1] == 2
+    assert count_by_run_id[1][1] == 2
+    ##############################
+
+    ##############################
+    # let's bring in the rows for the third day
+    run("2022-01-03T00:00:00Z", "2022-01-04T00:00:00Z")
+    assert_output_equals(
+        [
+            (1, "val1", as_datetime("2022-01-01")),
+            (2, "val2", as_datetime("2022-01-01")),
+            (3, "val3", as_datetime("2022-01-02")),
+            (4, "val4", as_datetime("2022-01-02")),
+            (5, "val5", as_datetime("2022-01-03")),
+            (6, "val6", as_datetime("2022-01-03")),
+        ]
+    )
+
+    # there should be 6 rows with 3 distinct run IDs
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+    ).fetchall()
+    assert len(count_by_run_id) == 3
+    assert count_by_run_id[0][1] == 2
+    assert count_by_run_id[1][1] == 2
+    assert count_by_run_id[2][1] == 2
+    ##############################
+
+    ##############################
+    # now let's do a backfill for the first day again, the rows should be updated
+    source_engine.execute(
+        "UPDATE testschema.input SET val = 'val1_modified' WHERE id = 1"
+    )
+
+    run("2022-01-01T00:00:00Z", "2022-01-02T00:00:00Z")
+    assert_output_equals(
+        [
+            (1, "val1_modified", as_datetime("2022-01-01")),
+            (2, "val2", as_datetime("2022-01-01")),
+            (3, "val3", as_datetime("2022-01-02")),
+            (4, "val4", as_datetime("2022-01-02")),
+            (5, "val5", as_datetime("2022-01-03")),
+            (6, "val6", as_datetime("2022-01-03")),
+        ]
+    )
+
+    # there should still be 6 rows with 3 distinct run IDs
+    count_by_run_id = dest_engine.execute(
+        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+    ).fetchall()
+    assert len(count_by_run_id) == 3
+    assert count_by_run_id[0][1] == 2
+    assert count_by_run_id[1][1] == 2
+    assert count_by_run_id[2][1] == 2
+    ##############################
+
+
+def as_datetime(date_str: str) -> datetime:
+    return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
