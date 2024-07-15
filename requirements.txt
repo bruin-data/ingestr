@@ -24,4 +24,4 @@ tqdm==4.66.2
 typer==0.12.3
 sqlalchemy-hana==2.0.0
 mysql-connector-python==9.0.0
-testcontainers[postgres]==4.7.1
+testcontainers[postgres,mysql]==4.7.1

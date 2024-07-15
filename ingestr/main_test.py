@@ -3,11 +3,13 @@ import os
 import random
 import shutil
 import string
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import duckdb
 import pytest
 import sqlalchemy
+from testcontainers.mssql import SqlServerContainer  # type: ignore
+from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
@@ -330,16 +332,14 @@ def test_delete_insert_without_primary_key_csv_to_duckdb():
         pass
 
 
-POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
-
-
 class DockerImage:
-    def __init__(self, container_creator) -> None:
+    def __init__(self, container_creator, connection_suffix: str = "") -> None:
         self.container_creator = container_creator
+        self.connection_suffix = connection_suffix
 
     def start(self) -> str:
         self.container = self.container_creator()
-        return self.container.get_connection_url()
+        return self.container.get_connection_url() + self.connection_suffix
 
     def stop(self):
         self.container.stop()
@@ -357,19 +357,36 @@ class DuckDb:
             pass
 
 
+POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
+MYSQL8_IMAGE = "mysql:8.4.1"
+MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04"
+
 SOURCES = {
-    "postgres": DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()),
+    "postgres": DockerImage(
+        lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()
+    ),
     "duckdb": DuckDb(),
+    "mysql8": DockerImage(
+        lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
+    ),
+    "sqlserver": DockerImage(
+        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+    ),
 }
 
 DESTINATIONS = {
-    "postgres": DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()),
+    "postgres": DockerImage(
+        lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()
+    ),
     "duckdb": DuckDb(),
 }
 
 
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
-@pytest.mark.parametrize("dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys()))
 def test_create_replace(source, dest):
     source_uri = source.start()
     dest_uri = dest.start()
@@ -378,8 +395,10 @@ def test_create_replace(source, dest):
     dest.stop()
 
 
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
-@pytest.mark.parametrize("dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys()))
 def test_append(source, dest):
     source_uri = source.start()
     dest_uri = dest.start()
@@ -388,8 +407,10 @@ def test_append(source, dest):
     dest.stop()
 
 
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
-@pytest.mark.parametrize("dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys()))
 def test_merge_with_primary_key(source, dest):
     source_uri = source.start()
     dest_uri = dest.start()
@@ -398,8 +419,10 @@ def test_merge_with_primary_key(source, dest):
     dest.stop()
 
 
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
-@pytest.mark.parametrize("dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys()))
 def test_delete_insert_without_primary_key(source, dest):
     source_uri = source.start()
     dest_uri = dest.start()
@@ -408,8 +431,10 @@ def test_delete_insert_without_primary_key(source, dest):
     dest.stop()
 
 
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
-@pytest.mark.parametrize("dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys()))
 def test_delete_insert_with_time_range(source, dest):
     source_uri = source.start()
     dest_uri = dest.start()
@@ -426,10 +451,10 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
 
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
-        conn.execute("DROP SCHEMA IF EXISTS testschema CASCADE")
+        conn.execute("DROP SCHEMA IF EXISTS testschema")
         conn.execute("CREATE SCHEMA testschema")
         conn.execute(
-            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
         )
         conn.execute("INSERT INTO testschema.input VALUES (1, 'val1', '2022-01-01')")
         conn.execute("INSERT INTO testschema.input VALUES (2, 'val2', '2022-02-01')")
@@ -463,10 +488,10 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
 
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
-        conn.execute("DROP SCHEMA IF EXISTS testschema_append CASCADE")
+        conn.execute("DROP SCHEMA IF EXISTS testschema_append")
         conn.execute("CREATE SCHEMA testschema_append")
         conn.execute(
-            "CREATE TABLE testschema_append.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+            "CREATE TABLE testschema_append.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
         )
         conn.execute(
             "INSERT INTO testschema_append.input VALUES (1, 'val1', '2022-01-01'), (2, 'val2', '2022-01-02')"
@@ -519,10 +544,10 @@ def db_to_db_merge_with_primary_key(
 
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
-        conn.execute("DROP SCHEMA IF EXISTS testschema_merge CASCADE")
+        conn.execute("DROP SCHEMA IF EXISTS testschema_merge")
         conn.execute("CREATE SCHEMA testschema_merge")
         conn.execute(
-            "CREATE TABLE testschema_merge.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+            "CREATE TABLE testschema_merge.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
         )
         conn.execute(
             "INSERT INTO testschema_merge.input VALUES (1, 'val1', '2022-01-01')"
@@ -691,10 +716,10 @@ def db_to_db_delete_insert_without_primary_key(
 
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
-        conn.execute("DROP SCHEMA IF EXISTS testschema CASCADE")
+        conn.execute("DROP SCHEMA IF EXISTS testschema")
         conn.execute("CREATE SCHEMA testschema")
         conn.execute(
-            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
         )
         conn.execute("INSERT INTO testschema.input VALUES (1, 'val1', '2022-01-01')")
         conn.execute("INSERT INTO testschema.input VALUES (2, 'val2', '2022-02-01')")
@@ -792,25 +817,32 @@ def db_to_db_delete_insert_with_timerange(
         pass
 
     source_engine = sqlalchemy.create_engine(source_connection_url)
-    with source_engine.begin() as conn:
-        conn.execute("DROP SCHEMA IF EXISTS testschema CASCADE")
-        conn.execute("CREATE SCHEMA testschema")
-        conn.execute(
-            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR, updated_at TIMESTAMP)"
+
+    source_engine.execute("DROP SCHEMA IF EXISTS testschema")
+    source_engine.execute("CREATE SCHEMA testschema")
+    try:
+        source_engine.execute(
+            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR(20), updated_at DATETIME)"
         )
-        conn.execute(
-            """INSERT INTO testschema.input VALUES 
-            (1, 'val1', '2022-01-01'),
-            (2, 'val2', '2022-01-01'),
-            (3, 'val3', '2022-01-02'),
-            (4, 'val4', '2022-01-02'),
-            (5, 'val5', '2022-01-03'),
-            (6, 'val6', '2022-01-03')
-        """
+    except Exception:
+        # hello postgres
+        source_engine.execute(
+            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR(20), updated_at TIMESTAMP)"
         )
 
-        res = conn.execute("select count(*) from testschema.input").fetchall()
-        assert res[0][0] == 6
+    source_engine.execute(
+        """INSERT INTO testschema.input VALUES 
+        (1, 'val1', '2022-01-01T00:00:00'),
+        (2, 'val2', '2022-01-01T00:00:00'),
+        (3, 'val3', '2022-01-02T00:00:00'),
+        (4, 'val4', '2022-01-02T00:00:00'),
+        (5, 'val5', '2022-01-03T00:00:00'),
+        (6, 'val6', '2022-01-03T00:00:00')
+    """
+    )
+
+    res = source_engine.execute("select count(*) from testschema.input").fetchall()
+    assert res[0][0] == 6
 
     def run(start_date: str, end_date: str):
         res = invoke_ingest_command(
@@ -830,9 +862,10 @@ def db_to_db_delete_insert_with_timerange(
     dest_engine = sqlalchemy.create_engine(dest_connection_url)
 
     def get_output_rows():
-        return dest_engine.execute(
+        rows = dest_engine.execute(
             "select id, val, updated_at from testschema.output order by id asc"
         ).fetchall()
+        return [(row[0], row[1], row[2].date()) for row in rows]
 
     def assert_output_equals(expected):
         res = get_output_rows()
@@ -840,9 +873,7 @@ def db_to_db_delete_insert_with_timerange(
         for i, row in enumerate(expected):
             assert res[i] == row
 
-    run(
-        "2022-01-01T00:00:00Z", "2022-01-02T00:00:00Z"
-    )  # dlt runs them with the end date exclusive
+    run("2022-01-01", "2022-01-02")  # dlt runs them with the end date exclusive
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-01-01"))]
     )
@@ -943,5 +974,5 @@ def db_to_db_delete_insert_with_timerange(
     ##############################
 
 
-def as_datetime(date_str: str) -> datetime:
-    return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+def as_datetime(date_str: str) -> date:
+    return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).date()
