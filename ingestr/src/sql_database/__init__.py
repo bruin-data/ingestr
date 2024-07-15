@@ -186,8 +186,6 @@ def sql_table(
     if table_adapter_callback and not defer_table_reflect:
         table_adapter_callback(table_obj)
 
-    print("merge keyyy", merge_key)
-
     return dlt.resource(
         table_rows,
         name=table_obj.name,

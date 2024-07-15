@@ -73,7 +73,6 @@ class TableLoader:
         if not self.incremental:
             return query
 
-        print("table is incremental")
         last_value_func = self.incremental.last_value_func
 
         # generate where
@@ -92,13 +91,6 @@ class TableLoader:
             query = query.where(filter_op(self.cursor_column, self.last_value))
             if self.end_value is not None:
                 query = query.where(filter_op_end(self.cursor_column, self.end_value))
-        else:
-            print("Last value is none")
-
-        print(
-            "current state of query",
-            query.compile(compile_kwargs={"literal_binds": True}),
-        )
 
         # generate order by from declared row order
         order_by = None
