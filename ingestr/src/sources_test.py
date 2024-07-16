@@ -18,7 +18,9 @@ class SqlSourceTest(unittest.TestCase):
         table = "schema.table"
 
         # monkey patch the sql_table function
-        def sql_table(credentials, schema, table, incremental, merge_key, backend):
+        def sql_table(
+            credentials, schema, table, incremental, merge_key, backend, chunk_size
+        ):
             self.assertEqual(credentials, uri)
             self.assertEqual(schema, "schema")
             self.assertEqual(table, "table")
@@ -37,7 +39,9 @@ class SqlSourceTest(unittest.TestCase):
         incremental_key = "id"
 
         # monkey patch the sql_table function
-        def sql_table(credentials, schema, table, incremental, merge_key, backend):
+        def sql_table(
+            credentials, schema, table, incremental, merge_key, backend, chunk_size
+        ):
             self.assertEqual(credentials, uri)
             self.assertEqual(schema, "schema")
             self.assertEqual(table, "table")
