@@ -11,6 +11,9 @@ venv/touchfile: requirements-dev.txt requirements.txt
 deps:
 	uv pip install -r requirements-dev.txt
 
+deps-ci:
+	pip install -r requirements-dev.txt
+
 test-ci:
 	pytest -rP -vv --tb=short --cov=ingestr --no-cov-on-fail
 

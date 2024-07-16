@@ -7,3 +7,4 @@ ruff==0.3.7
 hatchling==1.24.1
 build==1.2.1
 twine==5.0.0
+testcontainers[postgres,mysql]==4.7.1
