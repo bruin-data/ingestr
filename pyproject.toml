@@ -117,5 +117,11 @@ packages = ["ingestr"]
 [project.scripts]
 ingestr = "ingestr.main:main"
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "*_test.py",
+  "*.db"
+]
+
 [tool.hatch.metadata.hooks.requirements_txt]
 files = ["requirements.txt"]

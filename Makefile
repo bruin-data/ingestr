@@ -36,4 +36,4 @@ build:
 	rm -rf dist && python3 -m build
 
 upload-release:
-	twine upload dist/*
+	twine upload --verbose dist/*
