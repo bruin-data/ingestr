@@ -104,11 +104,17 @@ class LoaderFileFormat(str, Enum):
 class SqlBackend(str, Enum):
     sqlalchemy = "sqlalchemy"
     pyarrow = "pyarrow"
+    connectorx = "connectorx"
 
 
 class Progress(str, Enum):
     interactive = "interactive"
     log = "log"
+
+
+class SchemaNaming(str, Enum):
+    default = "default"
+    direct = "direct"
 
 
 @app.command()
@@ -223,6 +229,13 @@ def ingest(
             envvar="LOADER_FILE_SIZE",
         ),
     ] = 100000,  # type: ignore
+    schema_naming: Annotated[
+        SchemaNaming,
+        typer.Option(
+            help="The naming convention to use when moving the tables from source to destination. The default behavior is explained here: https://dlthub.com/docs/general-usage/schema#naming-convention",
+            envvar="SCHEMA_NAMING",
+        ),
+    ] = SchemaNaming.default,  # type: ignore
 ):
     track(
         "command_triggered",
@@ -234,6 +247,8 @@ def ingest(
     dlt.config["normalize.parquet_normalizer.add_dlt_load_id"] = True
     dlt.config["normalize.parquet_normalizer.add_dlt_id"] = True
     dlt.config["data_writer.file_max_items"] = loader_file_size
+    if schema_naming != SchemaNaming.default:
+        dlt.config["schema.naming"] = schema_naming.value
 
     try:
         if not dest_table:
