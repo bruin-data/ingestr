@@ -244,8 +244,6 @@ def ingest(
         },
     )
 
-    dlt.config["normalize.parquet_normalizer.add_dlt_load_id"] = True
-    dlt.config["normalize.parquet_normalizer.add_dlt_id"] = True
     dlt.config["data_writer.file_max_items"] = loader_file_size
     if schema_naming != SchemaNaming.default:
         dlt.config["schema.naming"] = schema_naming.value
@@ -280,7 +278,7 @@ def ingest(
 
         progressInstance: Collector = SpinnerCollector()
         if progress == Progress.log:
-            progressInstance = LogCollector()
+            progressInstance = LogCollector(dump_system_stats=False)
 
         pipeline = dlt.pipeline(
             pipeline_name=m.hexdigest(),
