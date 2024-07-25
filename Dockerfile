@@ -16,7 +16,7 @@ RUN \
 RUN \ 
   # Install pyodbc db drivers for MSSQL and PostgreSQL
   curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/microsoft-prod.gpg && \
-  curl -sSL https://packages.microsoft.com/config/debian/12/prod.list | tee /etc/apt/sources.list.d/mssql-release.list &&
+  curl -sSL https://packages.microsoft.com/config/debian/12/prod.list | tee /etc/apt/sources.list.d/mssql-release.list
   
 RUN \
   # install the rest of them
@@ -24,7 +24,7 @@ RUN \
   ACCEPT_EULA=Y apt-get install -y msodbcsql17 msodbcsql18 odbc-postgresql && \
   # Update odbcinst.ini to make sure full path to driver is listed, and set CommLog to 0. i.e disables any communication logs to be written to files
   sed 's/Driver=psql/Driver=\/usr\/lib\/x86_64-linux-gnu\/odbc\/psql/;s/CommLog=1/CommLog=0/' /etc/odbcinst.ini > /tmp/temp.ini && \
-  mv -f /tmp/temp.ini /etc/odbcinst.ini &&
+  mv -f /tmp/temp.ini /etc/odbcinst.ini
 
 ENV VIRTUAL_ENV=/usr/local
 ADD --chmod=755 https://astral.sh/uv/install.sh /install.sh
