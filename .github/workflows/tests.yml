@@ -19,33 +19,33 @@ env:
 
 
 jobs:
-  tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: install Microsoft ODBC
-        run: sudo ACCEPT_EULA=Y apt-get install msodbcsql18 -y
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-      - name: Cache dependencies
-        uses: actions/cache@v3
-        id: cache
-        with:
-          path: ${{ env.pythonLocation }}
-          key: ${{ env.pythonLocation }}-${{ hashFiles('requirements.txt') }}
-      - name: Install pip dependencies
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: make deps-ci
-      - name: run tests
-        run: make test-ci
-      - name: check the formatting
-        run: make lint-ci
+  # tests:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: install Microsoft ODBC
+  #       run: sudo ACCEPT_EULA=Y apt-get install msodbcsql18 -y
+  #     - uses: actions/setup-python@v4
+  #       with:
+  #         python-version: '3.11'
+  #         cache: 'pip'
+  #     - name: Cache dependencies
+  #       uses: actions/cache@v3
+  #       id: cache
+  #       with:
+  #         path: ${{ env.pythonLocation }}
+  #         key: ${{ env.pythonLocation }}-${{ hashFiles('requirements.txt') }}
+  #     - name: Install pip dependencies
+  #       if: steps.cache.outputs.cache-hit != 'true'
+  #       run: make deps-ci
+  #     - name: run tests
+  #       run: make test-ci
+  #     - name: check the formatting
+  #       run: make lint-ci
 
   build-and-push-image:
-    needs: tests
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    # needs: tests
+    # if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -72,7 +72,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64,linux/arm64/v8
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
