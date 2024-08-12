@@ -319,13 +319,12 @@ class StripeAnalyticsSource:
         endpoint = None
         table = str.capitalize(table)
         
-        if table in ["Subscription", "Account", "Coupon", "Customer", "Product", "Price"]:
+        if table in ["Subscription", "Account", "Coupon", "Customer", "Product", "Price", "BalanceTransaction", "Invoice", "Event"]:
             endpoint = table
         else:
             raise ValueError(
                 f"Resource '{table}' is not supported for stripe source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
-        
 
         date_args = {}
         if kwargs.get("interval_start"):
