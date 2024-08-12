@@ -295,3 +295,7 @@ class GoogleSheetsSource:
             range_names=[table_fields.dataset],
             get_named_ranges=False,
         )
+
+class StripeSource:
+    def handles_incrementality(self) -> bool:
+        return True
