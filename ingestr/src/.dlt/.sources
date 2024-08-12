@@ -1,0 +1,28 @@
+engine_version: 1
+sources:
+  stripe_analytics:
+    is_dirty: false
+    last_commit_sha: 84a4400a0b600cec64058662e17fe2aaae1c6fee
+    last_commit_timestamp: '2024-08-09T18:31:47+02:00'
+    files:
+      stripe_analytics/metrics.py:
+        commit_sha: 84a4400a0b600cec64058662e17fe2aaae1c6fee
+        git_sha: 9829ad232aaf1beb70d36f36f818ced5e11160b9
+        sha3_256: dad5cc121525d2cfeb5290dc45a1fff317a87385bb268e979a49d6e52f053675
+      stripe_analytics/__init__.py:
+        commit_sha: 84a4400a0b600cec64058662e17fe2aaae1c6fee
+        git_sha: 853e58efd6228f5e54872a7bfa0b5c7f5e6e929e
+        sha3_256: 7ca268789cf1bedfbbfae6998a7034922b6010da60be4fbc302f3154d05f37fb
+      stripe_analytics/README.md:
+        commit_sha: 84a4400a0b600cec64058662e17fe2aaae1c6fee
+        git_sha: 6b03e5642edccfe5b14cbc5c3f3ab1e3d60c4146
+        sha3_256: 53601fb163da4f5826024513b56124926c0ccf82616c707b6e8475376ba0cb73
+      stripe_analytics/settings.py:
+        commit_sha: 84a4400a0b600cec64058662e17fe2aaae1c6fee
+        git_sha: e9694cba52fc0b30d8b13ed6f2afc8df78337d8e
+        sha3_256: bb80f8b460ed8884ed212fdfc6b4a6e6367fa8cd6c32a35f8df772aba360ba0b
+      stripe_analytics/helpers.py:
+        commit_sha: 84a4400a0b600cec64058662e17fe2aaae1c6fee
+        git_sha: aceb3da7d038cfcc507d34aaf8316b919d5b14cf
+        sha3_256: 666c09e27d2a514f525d5b17882470473df542b456f306076468e53c0a845484
+    dlt_version_constraint: '>=0.3.5'
