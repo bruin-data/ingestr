@@ -13,6 +13,7 @@ from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.stripe_analytics import stripe_source
 
 
 class SqlSource:
@@ -296,6 +297,46 @@ class GoogleSheetsSource:
             get_named_ranges=False,
         )
 
-class StripeSource:
+
+class StripeAnalyticsSource:
     def handles_incrementality(self) -> bool:
         return True
+    
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Stripe takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        api_key = None   
+        if 'api_key=' in uri:
+            parts= uri.split('api_key=')
+            if len(parts) > 1:
+                api_key = parts[1] 
+        else:
+            raise ValueError("api_key in the URI is required to connect to Stripe")
+
+        endpoint = None
+        table = str.capitalize(table)
+        
+        if table in ["Subscription", "Account", "Coupon", "Customer", "Product", "Price"]:
+            endpoint = table
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for stripe source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+        
+
+        date_args = {}
+        if kwargs.get("interval_start"):
+            date_args["start_date"] = kwargs.get("interval_start")
+
+        if kwargs.get("interval_end"):
+            date_args["end_date"] = kwargs.get("interval_end")
+
+        return stripe_source(
+            endpoints=[endpoint,],
+            stripe_secret_key= api_key,
+            **date_args,
+        ).with_resources(endpoint)
+

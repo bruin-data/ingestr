@@ -22,7 +22,7 @@ from ingestr.src.sources import (
     NotionSource,
     ShopifySource,
     SqlSource,
-    StripeSource,
+    StripeAnalyticsSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -104,7 +104,7 @@ class SourceDestinationFactory:
         elif self.source_scheme == "gorgias":
             return GorgiasSource()
         elif self.source_scheme == "stripe":
-            return StripeSource()
+            return StripeAnalyticsSource()
         
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
