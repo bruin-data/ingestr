@@ -338,4 +338,3 @@ class StripeAnalyticsSource:
             stripe_secret_key= api_key,
             **date_args,
         ).with_resources(endpoint)
-
