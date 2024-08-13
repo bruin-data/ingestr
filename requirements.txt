@@ -24,5 +24,5 @@ SQLAlchemy==1.4.52
 sqlalchemy2-stubs==0.0.2a38
 tqdm==4.66.2
 typer==0.12.3
-stripe>=5.0.0
-dlt[duckdb]>=0.3.5
+stripe==10.7.0
+
