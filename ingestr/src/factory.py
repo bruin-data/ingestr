@@ -105,7 +105,7 @@ class SourceDestinationFactory:
             return GorgiasSource()
         elif self.source_scheme == "stripe":
             return StripeAnalyticsSource()
-        
+
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
