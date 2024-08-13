@@ -308,12 +308,12 @@ class StripeAnalyticsSource:
                 "Stripe takes care of incrementality on its own, you should not provide incremental_key"
             )
 
-        api_key = None   
-        if 'api_key=' in uri:
-            parts= uri.split('api_key=')
-            if len(parts) > 1:
-                api_key = parts[1] 
-        else:
+        api_key = None
+        source_field = urlparse(uri) 
+        source_params = parse_qs(source_field.query)
+        api_key = source_params.get("api_key")
+       
+        if not 'api_key':
             raise ValueError("api_key in the URI is required to connect to Stripe")
 
         endpoint = None
@@ -335,6 +335,6 @@ class StripeAnalyticsSource:
 
         return stripe_source(
             endpoints=[endpoint,],
-            stripe_secret_key= api_key,
+            stripe_secret_key= api_key[0],
             **date_args,
         ).with_resources(endpoint)
