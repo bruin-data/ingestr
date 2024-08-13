@@ -1,4 +1,4 @@
-""" This source uses Stripe API and dlt to load data such as Customer, Subscription, Event etc. to the database and to calculate the MRR and churn rate. """
+"""This source uses Stripe API and dlt to load data such as Customer, Subscription, Event etc. to the database and to calculate the MRR and churn rate."""
 
 from typing import Any, Dict, Generator, Iterable, Optional, Tuple
 
