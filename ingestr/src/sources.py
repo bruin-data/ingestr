@@ -12,8 +12,8 @@ from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
-from ingestr.src.table_definition import table_string_to_dataclass
 from ingestr.src.stripe_analytics import stripe_source
+from ingestr.src.table_definition import table_string_to_dataclass
 
 
 class SqlSource:
@@ -301,7 +301,7 @@ class GoogleSheetsSource:
 class StripeAnalyticsSource:
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
@@ -309,17 +309,27 @@ class StripeAnalyticsSource:
             )
 
         api_key = None
-        source_field = urlparse(uri) 
+        source_field = urlparse(uri)
         source_params = parse_qs(source_field.query)
         api_key = source_params.get("api_key")
-       
-        if not 'api_key':
+
+        if not api_key:
             raise ValueError("api_key in the URI is required to connect to Stripe")
 
         endpoint = None
         table = str.capitalize(table)
-        
-        if table in ["Subscription", "Account", "Coupon", "Customer", "Product", "Price", "BalanceTransaction", "Invoice", "Event"]:
+
+        if table in [
+            "Subscription",
+            "Account",
+            "Coupon",
+            "Customer",
+            "Product",
+            "Price",
+            "BalanceTransaction",
+            "Invoice",
+            "Event",
+        ]:
             endpoint = table
         else:
             raise ValueError(
@@ -334,7 +344,9 @@ class StripeAnalyticsSource:
             date_args["end_date"] = kwargs.get("interval_end")
 
         return stripe_source(
-            endpoints=[endpoint,],
-            stripe_secret_key= api_key[0],
+            endpoints=[
+                endpoint,
+            ],
+            stripe_secret_key=api_key[0],
             **date_args,
         ).with_resources(endpoint)
