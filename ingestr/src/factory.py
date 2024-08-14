@@ -15,6 +15,7 @@ from ingestr.src.destinations import (
     SynapseDestination,
 )
 from ingestr.src.sources import (
+    ChessSource,
     GoogleSheetsSource,
     GorgiasSource,
     LocalCsvSource,
@@ -22,7 +23,6 @@ from ingestr.src.sources import (
     NotionSource,
     ShopifySource,
     SqlSource,
-    ChessSource,
 )
 
 SQL_SOURCE_SCHEMES = [
