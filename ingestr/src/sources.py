@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 import dlt
 
+from ingestr.src.chess import source
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.mongodb import mongodb_collection
@@ -13,7 +14,7 @@ from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.table_definition import table_string_to_dataclass
-from ingestr.src.chess import source
+
 
 class SqlSource:
     table_builder: Callable
@@ -298,6 +299,14 @@ class GoogleSheetsSource:
 
 
 class ChessSource:
+    def handles_incrementality(self) -> bool:
+        return True
 
-    def dlt_source():
-        return source()
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        return source(
+            players=[
+                "Mikasinski",
+            ],
+            start_month="2022/2",
+            end_month="2022/5",
+        ).with_resources("players_profiles")
