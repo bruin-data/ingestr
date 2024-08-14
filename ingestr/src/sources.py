@@ -13,7 +13,7 @@ from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.table_definition import table_string_to_dataclass
-
+from ingestr.src.chess import source
 
 class SqlSource:
     table_builder: Callable
@@ -295,3 +295,9 @@ class GoogleSheetsSource:
             range_names=[table_fields.dataset],
             get_named_ranges=False,
         )
+
+
+class ChessSource:
+
+    def dlt_source():
+        return source()
