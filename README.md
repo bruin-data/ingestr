@@ -131,22 +131,27 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
     <tr>
         <td>Gorgias</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Google Sheets</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Notion</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Shopify</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Stripe</td>
+        <td>✅</td>
+        <td>-</td>
     </tr>
 </table>
 
