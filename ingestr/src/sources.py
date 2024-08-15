@@ -1,6 +1,7 @@
 import base64
 import csv
 import json
+from datetime import date
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -301,8 +302,8 @@ class GoogleSheetsSource:
 class ChessSource:
     def handles_incrementality(self) -> bool:
         return True
-    
-    #chess://?players=john,peter
+
+    # chess://?players=john,peter
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
@@ -312,23 +313,32 @@ class ChessSource:
         source_fields = urlparse(uri)
         source_params = parse_qs(source_fields.query)
         list_players = None
-        if 'players_username' in source_params: 
-            list_players = source_params['players_username'][0].split(',')
+        if "players_username" in source_params:
+            list_players = source_params["players_username"][0].split(",")
         else:
-            raise ValueError("username of player in the URI is required to connect to Chess")
-        
-        resources = None
-        if table in ['players_profiles', 'players_games','players_online_status','players_archives']:
-            resources = table
+            raise ValueError(
+                "Username of player in the URI is required to connect to Chess"
+            )
 
-        date_args ={}
-        if kwargs.get("interval_start"):
-            date_args["start_date"] = kwargs.get("interval_start")
-        if kwargs.get("interval_end"):
-            date_args["start_end"] = kwargs.get("interval_end")
-            print("start_month",date_args["start_date"])
-        return source(
-            players= list_players,
-            start_month=date_args["start_date"],
-            end_month=date_args["start_end"],
-        ).with_resources(resources)
+        date_args = {}
+        start_date = kwargs.get("interval_start")
+        end_date = kwargs.get("interval_end")
+        if start_date and end_date:
+            if isinstance(start_date, date) and isinstance(end_date, date):
+                date_args["start_month"] = start_date.strftime("%Y/%m")
+                date_args["end_month"] = end_date.strftime("%Y/%m")
+
+        resources = None
+        if table in [
+            "players_profiles",
+            "players_games",
+            "players_online_status",
+            "players_archives",
+        ]:
+            resources = table
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Chess source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        return source(players=list_players, **date_args).with_resources(resources)
