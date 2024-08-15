@@ -301,12 +301,34 @@ class GoogleSheetsSource:
 class ChessSource:
     def handles_incrementality(self) -> bool:
         return True
-
+    
+    #chess://?players=john,peter
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Chess takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        source_fields = urlparse(uri)
+        source_params = parse_qs(source_fields.query)
+        list_players = None
+        if 'players_username' in source_params: 
+            list_players = source_params['players_username'][0].split(',')
+        else:
+            raise ValueError("username of player in the URI is required to connect to Chess")
+        
+        resources = None
+        if table in ['players_profiles', 'players_games','players_online_status','players_archives']:
+            resources = table
+
+        date_args ={}
+        if kwargs.get("interval_start"):
+            date_args["start_date"] = kwargs.get("interval_start")
+        if kwargs.get("interval_end"):
+            date_args["start_end"] = kwargs.get("interval_end")
+            print("start_month",date_args["start_date"])
         return source(
-            players=[
-                "Mikasinski",
-            ],
-            start_month="2022/2",
-            end_month="2022/5",
-        ).with_resources("players_profiles")
+            players= list_players,
+            start_month=date_args["start_date"],
+            end_month=date_args["start_end"],
+        ).with_resources(resources)
