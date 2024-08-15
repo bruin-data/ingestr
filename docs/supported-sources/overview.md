@@ -82,22 +82,27 @@ ingestr supports the following sources and destinations:
     <tr>
         <td>Gorgias</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Google Sheets</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Notion</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Shopify</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Stripe</td>
+        <td>✅</td>
+        <td>-</td>
     </tr>
 </table>
 
