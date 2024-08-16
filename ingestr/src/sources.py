@@ -343,7 +343,8 @@ class ChessSource:
             )
 
         return source(players=list_players, **date_args).with_resources(resources)
-      
+
+
 class StripeAnalyticsSource:
     def handles_incrementality(self) -> bool:
         return True
