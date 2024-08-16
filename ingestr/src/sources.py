@@ -401,6 +401,25 @@ class StripeAnalyticsSource:
         ).with_resources(endpoint)
     
 
-class HubSpotSource:
-    def handles_incremental(self)->bool:
+class HubspotSource:
+    def handles_incrementality(self)->bool:
         return True
+    
+     # hubspot://?api_key=<api_key>
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError("Hubspot takes care of incrementality on its own, you should not provide incremental_key")
+        
+        api_key = None
+        source_parts = urlparse(uri)
+        source_parmas= parse_qs(source_parts.query)
+        api_key= source_parmas.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Hubspot")
+        
+        return hubspot(
+            api_key=api_key[0],
+        )
+
+

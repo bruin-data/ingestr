@@ -24,7 +24,7 @@ from ingestr.src.sources import (
     ShopifySource,
     SqlSource,
     StripeAnalyticsSource,
-    HubSpotSource,
+    HubspotSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -110,7 +110,7 @@ class SourceDestinationFactory:
         elif self.source_scheme == "stripe":
             return StripeAnalyticsSource()
         elif self.source_scheme == "hubspot":
-            return HubSpotSource()
+            return HubspotSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
