@@ -16,6 +16,7 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.hubspot import hubspot
 
 
 class SqlSource:
@@ -398,3 +399,8 @@ class StripeAnalyticsSource:
             stripe_secret_key=api_key[0],
             **date_args,
         ).with_resources(endpoint)
+    
+
+class HubSpotSource:
+    def handles_incremental(self)->bool:
+        return True
