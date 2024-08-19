@@ -14,15 +14,13 @@ The URI format for Chess is as follows:
 
 URI parameter:
 
-- `players_username`: List of player usernames for which you want to fetch data.
+- `players_username`: A list of players usernames for which you want to fetch data. If no usernames are provided, then data of 10 different players will be fetched.
 
 The URI is used to connect to the Chess.com API for extracting data. More details on setting up Chess integrations can be found [here](https://www.chess.com/news/view/published-data-api).
 
 ## Setting up a Chess Integration
 
-Chess requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/chess#setup-guide).
-
-Once you complete the guide, you should have a list of player usernames. Let's say your players are `max2 and peter23`; here's a sample command that will copy the data from Chess into a DuckDB database:
+Let's say you have a list of player usernames: max2 and peter23. Here's a sample command that will copy the data from Chess into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'chess://?players_username=max2,peter23' --source-table 'players_profiles' --dest-uri 'duckdb:///chess.duckdb' --dest-table 'players.profiles'
