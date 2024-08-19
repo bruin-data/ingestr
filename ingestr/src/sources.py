@@ -418,6 +418,7 @@ class HubspotSource:
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Hubspot")
         
+
         endpoint = None
         if table in ["contacts","companies","deals","tickets","products","quotes","hubspot_events_for_objects"]:
             endpoint = table
@@ -425,9 +426,9 @@ class HubspotSource:
             raise ValueError(
                 f"Resource '{table}' is not supported for Hubspot source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
- 
+  
         return hubspot(
             api_key=api_key[0],
-        ).with_resources(endpoint)
-
+            ).with_resources(endpoint)
+    
 
