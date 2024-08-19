@@ -25,9 +25,7 @@ features:
   - title: Incremental Loading
     details: ingestr supports both full-refresh as well as incremental loading modes.
 ---
-
 <div style="margin-top: 12px; line-height: 2em; text-align: center;">
 
 <Badge type="info" text="Postgres" /> <Badge type="danger" text="BigQuery" /> <Badge type="tip" text="Snowflake" /> <Badge type="warning" text="Redshift" /> <Badge type="info" text="Databricks" /> <Badge type="danger" text="DuckDB" /> <Badge type="tip" text="Microsoft SQL Server" /> <Badge type="warning" text="Local CSV file" /> <Badge type="info" text="MongoDB" /> <Badge type="danger" text="Oracle" /> <Badge type="tip" text="SAP Hana" /> <Badge type="warning" text="SQLite" /> <Badge type="info" text="MySQL" /> <Badge type="danger" text="Google Sheets" /> <Badge type="tip" text="Notion" /> <Badge type="warning" text="Shopify" />
-
 </div>
