@@ -18,13 +18,13 @@ from ingestr.src.sources import (
     ChessSource,
     GoogleSheetsSource,
     GorgiasSource,
+    HubspotSource,
     LocalCsvSource,
     MongoDbSource,
     NotionSource,
     ShopifySource,
     SqlSource,
     StripeAnalyticsSource,
-    HubspotSource,
 )
 
 SQL_SOURCE_SCHEMES = [
