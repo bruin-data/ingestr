@@ -317,9 +317,18 @@ class ChessSource:
         if "players_username" in source_params:
             list_players = source_params["players_username"][0].split(",")
         else:
-            raise ValueError(
-                "Username of player in the URI is required to connect to Chess"
-            )
+            list_players = [
+                "MagnusCarlsen",
+                "HikaruNakamura",
+                "FabianoCaruana",
+                "ArjunErigaisi",
+                "IanNepomniachtchi",
+                "GukeshDommaraju",
+                "NodirbekAbdusattorov",
+                "WeiYi",
+                "ViswanathanAnand",
+                "WesleySo",
+            ]
 
         date_args = {}
         start_date = kwargs.get("interval_start")
