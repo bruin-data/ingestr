@@ -420,7 +420,7 @@ class HubspotSource:
         
 
         endpoint = None
-        if table in ["contacts","companies","deals","tickets","products","quotes","hubspot_events_for_objects"]:
+        if table in ["contacts","companies","deals","tickets","products","quotes"]:
             endpoint = table
         else:
             raise ValueError(
