@@ -106,7 +106,7 @@ class SourceDestinationFactory:
             return GorgiasSource()
         elif self.source_scheme == "stripe":
             return StripeAnalyticsSource()
-        elif self.source_scheme == "facebook_ads":
+        elif self.source_scheme == "facebookads":
             return FacebookAdsSource()
 
         else:
