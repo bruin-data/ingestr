@@ -1,0 +1,32 @@
+engine_version: 1
+sources:
+  facebook_ads:
+    is_dirty: false
+    last_commit_sha: 7c913bfad9033029a21371cf6c8d90f2b5f2e142
+    last_commit_timestamp: '2024-08-19T14:48:39+02:00'
+    files:
+      facebook_ads/__init__.py:
+        commit_sha: 7c913bfad9033029a21371cf6c8d90f2b5f2e142
+        git_sha: 7cf972c9faf73719d9170d748bf2fb4d73a83508
+        sha3_256: 34ad613bd3944f3689d746522fc418a1090c5e3b3ec4697e7a841ba47ecf40a0
+      facebook_ads/README.md:
+        commit_sha: 7c913bfad9033029a21371cf6c8d90f2b5f2e142
+        git_sha: 520b6068f8d735c674a676e82979464354e34871
+        sha3_256: 7e52cfcfe4e5f5f49fe77ee2d00bd8354c16ec81017a487ca384973b8da09c46
+      facebook_ads/utils.py:
+        commit_sha: 7c913bfad9033029a21371cf6c8d90f2b5f2e142
+        git_sha: 9f962c67ca49fcabd0e2f2abf2e42b2f5c7c09a0
+        sha3_256: 824c34956845bfae67819d5130d93f2feb2ba05de853399e48a3b7c92fe79399
+      facebook_ads/settings.py:
+        commit_sha: 7c913bfad9033029a21371cf6c8d90f2b5f2e142
+        git_sha: 8e71cfb6968aea63e1287cf34788cce187230f42
+        sha3_256: b54baaeb32c8532658691be7d1352ea11a575d7ca684f2498f54c5b217ad0662
+      facebook_ads/exceptions.py:
+        commit_sha: 7c913bfad9033029a21371cf6c8d90f2b5f2e142
+        git_sha: b04d0f2e8957791de079bb8418c9bc77e1e9b0d0
+        sha3_256: 0c512b17e625e84dcbcff5796bd597795d37b09c89ce530de11b0b0e0e0a8fa6
+      facebook_ads/helpers.py:
+        commit_sha: 7c913bfad9033029a21371cf6c8d90f2b5f2e142
+        git_sha: e43cd2be48ac32854912b99b7527e755239aceba
+        sha3_256: 4a01818b37891878bd41c9fb4db0cb217357443899e8f7c89fc1342665f01bec
+    dlt_version_constraint: '>=0.3.5'
