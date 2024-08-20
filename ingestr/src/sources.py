@@ -314,20 +314,14 @@ class ChessSource:
         source_fields = urlparse(uri)
         source_params = parse_qs(source_fields.query)
         list_players = None
-        if "players_username" in source_params:
-            list_players = source_params["players_username"][0].split(",")
+        if "players" in source_params:
+            list_players = source_params["players"][0].split(",")
         else:
             list_players = [
                 "MagnusCarlsen",
                 "HikaruNakamura",
-                "FabianoCaruana",
                 "ArjunErigaisi",
                 "IanNepomniachtchi",
-                "GukeshDommaraju",
-                "NodirbekAbdusattorov",
-                "WeiYi",
-                "ViswanathanAnand",
-                "WesleySo",
             ]
 
         date_args = {}
@@ -338,20 +332,18 @@ class ChessSource:
                 date_args["start_month"] = start_date.strftime("%Y/%m")
                 date_args["end_month"] = end_date.strftime("%Y/%m")
 
-        resources = None
-        if table in [
-            "players_profiles",
-            "players_games",
-            "players_online_status",
-            "players_archives",
-        ]:
-            resources = table
-        else:
+        table_mapping = {
+            "profiles": "players_profiles",
+            "games": "players_games",
+            "archives": "players_archives",
+        }
+
+        if table not in table_mapping:
             raise ValueError(
                 f"Resource '{table}' is not supported for Chess source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
-        return source(players=list_players, **date_args).with_resources(resources)
+        return source(players=list_players, **date_args).with_resources(table_mapping[table])
 
 
 class StripeAnalyticsSource:
