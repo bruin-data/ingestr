@@ -6,7 +6,13 @@ export default defineConfig({
   description: "Ingest & copy data between any source and any destination",
   base: "/ingestr/",
   head: [
-    ["script", { async: "", src: "https://www.googletagmanager.com/gtag/js?id=G-MZJ20PP4MJ" }],
+    [
+      "script",
+      {
+        async: "",
+        src: "https://www.googletagmanager.com/gtag/js?id=G-MZJ20PP4MJ",
+      },
+    ],
     [
       "script",
       {},
@@ -22,7 +28,7 @@ export default defineConfig({
       { text: "Home", link: "/" },
       { text: "Getting started", link: "/getting-started/quickstart.md" },
     ],
-    outline: 'deep',
+    outline: "deep",
 
     sidebar: [
       {
@@ -30,7 +36,10 @@ export default defineConfig({
         items: [
           { text: "Quickstart", link: "/getting-started/quickstart.md" },
           { text: "Core Concepts", link: "/getting-started/core-concepts.md" },
-          { text: "Incremental Loading", link: "/getting-started/incremental-loading.md" },
+          {
+            text: "Incremental Loading",
+            link: "/getting-started/incremental-loading.md",
+          },
           { text: "Telemetry", link: "/getting-started/telemetry.md" },
         ],
       },
@@ -52,9 +61,15 @@ export default defineConfig({
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
               { text: "Databricks", link: "/supported-sources/databricks.md" },
               { text: "DuckDB", link: "/supported-sources/duckdb.md" },
-              { text: "Google BigQuery", link: "/supported-sources/bigquery.md" },
+              {
+                text: "Google BigQuery",
+                link: "/supported-sources/bigquery.md",
+              },
               { text: "Local CSV Files", link: "/supported-sources/csv.md" },
-              { text: "Microsoft SQL Server", link: "/supported-sources/mssql.md" },
+              {
+                text: "Microsoft SQL Server",
+                link: "/supported-sources/mssql.md",
+              },
               { text: "MongoDB", link: "/supported-sources/mongodb.md" },
               { text: "MySQL", link: "/supported-sources/mysql.md" },
               { text: "Oracle", link: "/supported-sources/oracle.md" },
@@ -74,12 +89,15 @@ export default defineConfig({
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
+              { text: "Chess.com", link: "/supported-sources/chess.md" },
             ],
           },
         ],
       },
     ],
 
-    socialLinks: [{ icon: "github", link: "https://github.com/bruin-data/ingestr" }],
+    socialLinks: [
+      { icon: "github", link: "https://github.com/bruin-data/ingestr" },
+    ],
   },
 });
