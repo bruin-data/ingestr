@@ -398,3 +398,8 @@ class StripeAnalyticsSource:
             stripe_secret_key=api_key[0],
             **date_args,
         ).with_resources(endpoint)
+    
+
+class SlackSource:
+   def handles_incrementality(self) -> bool:
+        return True
