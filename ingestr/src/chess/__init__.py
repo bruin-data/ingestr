@@ -101,7 +101,6 @@ def players_games(
     # get archives in parallel by decorating the http request with defer
     @dlt.defer
     def _get_archive(url: str) -> List[TDataItem]:
-        print(f"Getting archive from {url}")
         try:
             games = get_url_with_retry(url).get("games", [])
             return games  # type: ignore
