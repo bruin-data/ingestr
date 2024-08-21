@@ -16,6 +16,7 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.slack import slack_source
 
 
 class SqlSource:
@@ -403,3 +404,7 @@ class StripeAnalyticsSource:
 class SlackSource:
    def handles_incrementality(self) -> bool:
         return True
+   
+   def source_dlt():
+
+       return slack_source()
