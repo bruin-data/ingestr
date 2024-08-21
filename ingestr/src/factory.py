@@ -18,6 +18,7 @@ from ingestr.src.sources import (
     ChessSource,
     GoogleSheetsSource,
     GorgiasSource,
+    HubspotSource,
     LocalCsvSource,
     MongoDbSource,
     NotionSource,
@@ -108,6 +109,8 @@ class SourceDestinationFactory:
             return ChessSource()
         elif self.source_scheme == "stripe":
             return StripeAnalyticsSource()
+        elif self.source_scheme == "hubspot":
+            return HubspotSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
