@@ -405,6 +405,6 @@ class SlackSource:
    def handles_incrementality(self) -> bool:
         return True
    
-   def source_dlt():
+   def source_dlt(self, uri: str, table: str, **kwargs):
 
        return slack_source()
