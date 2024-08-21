@@ -10,6 +10,7 @@ import dlt
 from ingestr.src.chess import source
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
+from ingestr.src.hubspot import hubspot
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
@@ -397,4 +398,36 @@ class StripeAnalyticsSource:
             ],
             stripe_secret_key=api_key[0],
             **date_args,
+        ).with_resources(endpoint)
+
+
+class HubspotSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    # hubspot://?api_key=<api_key>
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Hubspot takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        api_key = None
+        source_parts = urlparse(uri)
+        source_parmas = parse_qs(source_parts.query)
+        api_key = source_parmas.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Hubspot")
+
+        endpoint = None
+        if table in ["contacts", "companies", "deals", "tickets", "products", "quotes"]:
+            endpoint = table
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Hubspot source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        return hubspot(
+            api_key=api_key[0],
         ).with_resources(endpoint)

@@ -69,7 +69,8 @@ exclude = [
     'src/shopify/.*',
     'src/gorgias/.*',
     'src.chess/.*',
-    'src/stripe_analytics/.*'
+    'src/stripe_analytics/.*',
+    'src/hubspot/.*'
 ]
 
 [[tool.mypy.overrides]]
@@ -80,7 +81,8 @@ module = [
   "ingestr.src.shopify.*",
   "ingestr.src.gorgias.*",
   "ingestr.src.chess.*",
-  "ingestr.src.stripe_analytics.*"
+  "ingestr.src.stripe_analytics.*",
+  "ingestr.src.hubspot.*"
 ]
 follow_imports = "skip"
 
