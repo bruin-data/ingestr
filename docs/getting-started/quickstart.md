@@ -36,4 +36,4 @@ This command will:
 
 ## Supported Sources & Destinations
 
-See the [Supported Sources & Destinations](/supported-sources/overview.md) page for a list of all supported sources and destinations. More to come soon!
+See the Supported Sources & Destinations page for a list of all supported sources and destinations. More to come soon!
