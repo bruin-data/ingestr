@@ -389,6 +389,8 @@ class StripeAnalyticsSource:
             )
 
         date_args = {}
+        date_args["start_date"]= None
+        date_args["end_date"]= None
         if kwargs.get("interval_start"):
             date_args["start_date"] = kwargs.get("interval_start")
 
@@ -446,8 +448,7 @@ class SlackSource:
             access_token=api_key[0],
             table_per_channel=False,
             selected_channels=msg_channels,
-            start_date=date_args["start_date"],
-            end_date=date_args["end_date"]).with_resources(endpoint)
+            **date_args).with_resources(endpoint)
           
 class HubspotSource:
     def handles_incrementality(self) -> bool:
