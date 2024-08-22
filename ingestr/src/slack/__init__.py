@@ -1,7 +1,7 @@
 """Fetches Slack Conversations, History and logs."""
 
-from typing import Iterable, List, Optional, Tuple, Dict, Any, Literal
 from functools import partial
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 import dlt
 from dlt.common.typing import TAnyDateTime, TDataItem
