@@ -22,9 +22,9 @@ from ingestr.src.sources import (
     MongoDbSource,
     NotionSource,
     ShopifySource,
+    SlackSource,
     SqlSource,
     StripeAnalyticsSource,
-    SlackSource,
 )
 
 SQL_SOURCE_SCHEMES = [
