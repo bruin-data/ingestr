@@ -53,7 +53,6 @@ export default defineConfig({
       {
         text: "Sources & Destinations",
         items: [
-          { text: "Overview", link: "/supported-sources/overview.md" },
           {
             text: "Databases",
             collapsed: false,
@@ -85,8 +84,9 @@ export default defineConfig({
             collapsed: false,
             items: [
               { text: "Chess.com", link: "/supported-sources/chess.md" },
-              { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
+              { text: "Gorgias", link: "/supported-sources/gorgias.md" },
+              { text: "HubSpot", link: "/supported-sources/hubspot.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
