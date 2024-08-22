@@ -69,7 +69,7 @@ exclude = [
     'src/shopify/.*',
     'src/gorgias/.*',
     'src.chess/.*',
-    'src/stripe_analytics/.*'
+    'src/stripe_analytics/.*',
     'src/slack/.*'
 ]
 
