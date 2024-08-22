@@ -13,10 +13,10 @@ from ingestr.src.gorgias import gorgias_source
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
+from ingestr.src.slack import slack_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
-from ingestr.src.slack import slack_source
 
 
 class SqlSource:
@@ -344,7 +344,9 @@ class ChessSource:
                 f"Resource '{table}' is not supported for Chess source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
-        return source(players=list_players, **date_args).with_resources(table_mapping[table])
+        return source(players=list_players, **date_args).with_resources(
+            table_mapping[table]
+        )
 
 
 class StripeAnalyticsSource:
@@ -399,38 +401,40 @@ class StripeAnalyticsSource:
             stripe_secret_key=api_key[0],
             **date_args,
         ).with_resources(endpoint)
-    
+
 
 class SlackSource:
-   def handles_incrementality(self) -> bool:
+    def handles_incrementality(self) -> bool:
         return True
-   
-   def dlt_source(self, uri: str, table: str, **kwargs):
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
                 "Slack takes care of incrementality on its own, you should not provide incremental_key"
             )
-        #slack://?api_key=<apikey>
+        # slack://?api_key=<apikey>
         api_key = None
         source_field = urlparse(uri)
         source_query = parse_qs(source_field.query)
         api_key = source_query.get("api_key")
 
         if not api_key:
-            raise ValueError ("api_key in the URI is required to connect to Slack")
+            raise ValueError("api_key in the URI is required to connect to Slack")
 
         endpoint = None
         msg_channels = None
-        if table in ["channels","users","messages","access_logs"]:
+        if table in ["channels", "users", "access_logs"]:
             endpoint = table
         elif table.startswith("messages"):
             channles_part = table.split(":")[1]
-            msg_channels =  channles_part.split(',')
+            msg_channels = channles_part.split(",")
             endpoint = "messages"
         else:
-            raise ValueError(f"Resource '{table}' is not supported for slack source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr")
+            raise ValueError(
+                f"Resource '{table}' is not supported for slack source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
 
-        date_args ={}
+        date_args = {}
         if kwargs.get("interval_start"):
             date_args["start_date"] = kwargs.get("interval_start")
 
@@ -440,5 +444,7 @@ class SlackSource:
         return slack_source(
             access_token=api_key[0],
             table_per_channel=False,
-            selected_channels= msg_channels
+            selected_channels=msg_channels,
+            start_date=date_args["start_date"],
+            end_date=date_args["end_date"],
         ).with_resources(endpoint)
