@@ -22,7 +22,7 @@ The URI is used to connect to the Slack API for extracting data.
 
 Slack requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/Slack#setup-guide).
 
-Once you complete the guide, you should have an API key. Let's say your API key is `axb-test-564`, here's a sample command that will copy the data from Slack into a duckdb database:
+Once you complete the guide, you should have an API key with the necessary permissions as mentioned in the guide. Let's say your API key is axb-test-564. Here's a sample command that will copy the data from Slack into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'slack://?api_key=axb-test-564' --source-table 'channels' --dest-uri duckdb:///slack.duckdb --dest-table 'dest.channels'
