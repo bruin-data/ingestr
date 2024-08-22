@@ -114,7 +114,7 @@ class SourceDestinationFactory:
             return SlackSource()
         elif self.source_scheme == "hubspot":
             return HubspotSource()
-          
+
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
