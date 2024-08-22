@@ -110,7 +110,6 @@ class SourceDestinationFactory:
             return ChessSource()
         elif self.source_scheme == "stripe":
             return StripeAnalyticsSource()
-        feature/introduce-slack-source
         elif self.source_scheme == "slack":
             return SlackSource()
         elif self.source_scheme == "hubspot":
