@@ -1,7 +1,7 @@
 import hashlib
+import tempfile
 from datetime import datetime
 from enum import Enum
-import tempfile
 from typing import Optional
 
 import dlt
@@ -413,6 +413,7 @@ def ingest(
         # remove the pipelines_dir folder if it was created by ingestr
         if is_pipelines_dir_temp:
             import shutil
+
             shutil.rmtree(pipelines_dir)
 
         print(
