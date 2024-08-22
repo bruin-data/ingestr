@@ -9,7 +9,7 @@ ingestr supports Slack as a source.
 The URI format for Slack is as follows:
 
 ```plaintext
-Slack://?api_key=<api-key-here>
+slack://?api_key=<api-key-here>
 ```
 
 URI parameters:
@@ -34,9 +34,9 @@ The result of this command will be a table in the `slack.duckdb` database.
 
 Slack source allows ingesting the following sources into separate tables:
 
-- `channels`: Retrieves information about all the channels
-- `users`: Retrieves information about all the users
-- `messages:chan1,chan2`:mesasges from certain channels
-- `access_logs`: Retrieves all the access logs
+- `channels`: Retrieves information about all the channels.
+- `users`: Retrieves information about all the users.
+- `messages:chan1,chan2`: Retrieves messages from specified channels, where chan1 and chan2 represent user-defined channels (e.g: general, memes). Multiple channels can be listed.
+- `access_logs`: Retrieves all the access logs.
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
