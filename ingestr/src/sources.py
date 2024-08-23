@@ -18,6 +18,7 @@ from ingestr.src.slack import slack_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.adjust._init_ import adjust_source
 
 
 class SqlSource:
@@ -480,3 +481,40 @@ class HubspotSource:
         return hubspot(
             api_key=api_key[0],
         ).with_resources(endpoint)
+    
+
+class AdjustSource:
+    def handles_incrementality(self) -> bool:
+        return True
+     
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Adjust takes care of incrementality on its own, you should not provide incremental_key"
+            )
+        
+        api_key = None
+        source_part = urlparse(uri)
+        source_params = parse_qs(source_part.query)
+        api_key = source_params.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Adjust")
+        
+        start_date = None
+        end_date = None
+        if kwargs.get("interval_start"):
+            start_date = kwargs.get("interval_start")
+      
+        if kwargs.get("interval_end"):
+            end_date = kwargs.get("interval_end")
+
+        Endpoint = None
+        if table in ["campaigns"]:
+            Endpoint = table
+
+        return adjust_source(
+            start_date="2024-08-01",
+            end_date="2024-08-10",
+            api_key= ""
+        ).with_resources("campaigns")

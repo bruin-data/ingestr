@@ -26,6 +26,7 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
+    AdjustSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -114,6 +115,8 @@ class SourceDestinationFactory:
             return SlackSource()
         elif self.source_scheme == "hubspot":
             return HubspotSource()
+        elif self.source_scheme == "adjust":
+            return AdjustSource()
 
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
