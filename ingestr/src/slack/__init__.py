@@ -17,7 +17,7 @@ from .settings import (
 )
 
 
-@dlt.source(name="slack", max_table_nesting=2)
+@dlt.source(name="slack", max_table_nesting=0)
 def slack_source(
     page_size: int = MAX_PAGE_SIZE,
     access_token: str = dlt.secrets.value,
