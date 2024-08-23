@@ -14,7 +14,7 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
-from ingestr.src.facebook_ads import facebook_ads_source
+from ingestr.src.facebook_ads import facebook_ads_source,facebook_insights_source
 
 
 class SqlSource:
@@ -368,14 +368,17 @@ class FacebookAdsSource:
         source_params = parse_qs(source_field.query)
         access_token = source_params.get("access_token")
         account_id = source_params.get("account_id")
-        print("source_params",source_params)
        
         if not access_token or not account_id:
             raise ValueError("access_token and accound_id is necessary")
 
         endpoint = None
-        if table in ["campaigns","ad_sets","ads","creatives","ad_leads","facebook_insights"]:
+        if table in ["campaigns","ad_sets","ad_creatives","leads"]:
             endpoint = table
+        elif table in "facebook_insights":
+            return facebook_insights_source( access_token= access_token[0],
+            account_id= account_id[0],).with_resources("facebook_insights")
+        
         else:
             raise ValueError("fResource '{table}' is not supported for Facebook Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr")
 

@@ -96,6 +96,21 @@ DEFAULT_INSIGHT_FIELDS = (
     "action_values",
     "cost_per_action_type",
     "website_ctr",
+    "account_currency", 
+    "ad_click_actions", 
+    "ad_name", 
+    "adset_name",
+    "campaign_name",
+    "country",  
+    "dma", 
+    "full_view_impressions", 
+    "full_view_reach", 
+    "inline_link_click_ctr", 
+    "outbound_clicks", 
+    "reach",  
+    "social_spend", 
+    "spend",
+    "website_ctr"
 )
 
 TInsightsLevels = Literal["account", "campaign", "adset", "ad"]
