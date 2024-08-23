@@ -427,8 +427,8 @@ class SlackSource:
         if table in ["channels", "users", "access_logs"]:
             endpoint = table
         elif table.startswith("messages"):
-            channles_part = table.split(":")[1]
-            msg_channels = channles_part.split(",")
+            channels_part = table.split(":")[1]
+            msg_channels = channels_part.split(",")
             endpoint = "messages"
         else:
             raise ValueError(
