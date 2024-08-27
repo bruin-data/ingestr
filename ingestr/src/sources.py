@@ -17,6 +17,7 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.airtable import airtable_source
 
 
 class SqlSource:
@@ -431,3 +432,15 @@ class HubspotSource:
         return hubspot(
             api_key=api_key[0],
         ).with_resources(endpoint)
+    
+
+class AirtableSource: 
+    def handles_incrementality(self) -> bool:
+        return True
+    
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        return airtable_source(
+            base_id="",
+            access_token="",
+            table_names=["Details"]
+        )
