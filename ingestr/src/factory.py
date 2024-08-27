@@ -25,6 +25,7 @@ from ingestr.src.sources import (
     ShopifySource,
     SqlSource,
     StripeAnalyticsSource,
+    AirtableSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -111,6 +112,8 @@ class SourceDestinationFactory:
             return StripeAnalyticsSource()
         elif self.source_scheme == "hubspot":
             return HubspotSource()
+        elif self.source_scheme == "airtable":
+            return AirtableSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
