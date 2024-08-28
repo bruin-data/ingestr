@@ -15,6 +15,7 @@ from ingestr.src.destinations import (
     SynapseDestination,
 )
 from ingestr.src.sources import (
+    FacebookAdsSource,
     GoogleSheetsSource,
     GorgiasSource,
     LocalCsvSource,
@@ -23,7 +24,6 @@ from ingestr.src.sources import (
     ShopifySource,
     SqlSource,
     StripeAnalyticsSource,
-    FacebookAdsSource,
 )
 
 SQL_SOURCE_SCHEMES = [
