@@ -84,15 +84,15 @@ export default defineConfig({
             text: "Platforms",
             collapsed: false,
             items: [
+              {
+                text: "Facebook Ads",
+                link: "/supported-sources/facebook-ads.md",
+              },
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
-              {
-                text: "Facebook Ads",
-                link: "/supported-sources/facebook-ads.md",
-              },
             ],
           },
         ],
