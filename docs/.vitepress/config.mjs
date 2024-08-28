@@ -83,6 +83,7 @@ export default defineConfig({
             text: "Platforms",
             collapsed: false,
             items: [
+              { text: "Airtable", link: "/supported-sources/airtable.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },
