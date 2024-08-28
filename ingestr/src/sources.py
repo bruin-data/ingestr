@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlparse
 
 import dlt
 
+from ingestr.src.airtable import airtable_source
 from ingestr.src.chess import source
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
@@ -17,7 +18,6 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
-from ingestr.src.airtable import airtable_source
 
 
 class SqlSource:
@@ -345,7 +345,9 @@ class ChessSource:
                 f"Resource '{table}' is not supported for Chess source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
-        return source(players=list_players, **date_args).with_resources(table_mapping[table])
+        return source(players=list_players, **date_args).with_resources(
+            table_mapping[table]
+        )
 
 
 class StripeAnalyticsSource:
@@ -432,15 +434,35 @@ class HubspotSource:
         return hubspot(
             api_key=api_key[0],
         ).with_resources(endpoint)
-    
 
-class AirtableSource: 
+
+class AirtableSource:
     def handles_incrementality(self) -> bool:
         return True
-    
+
+    # airtable://?access_token=<access_token>&base_id=<base_id>
+
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Airtable takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        if not table:
+            raise ValueError("Source table is required to connect to Airtable")
+
+        tables = table.split(",")
+
+        source_parts = urlparse(uri)
+        source_fields = parse_qs(source_parts.query)
+        base_id = source_fields.get("base_id")
+        access_token = source_fields.get("access_token")
+
+        if not base_id or not access_token:
+            raise ValueError(
+                "base_id and access_token in the URI are required to connect to Airtable"
+            )
+
         return airtable_source(
-            base_id="",
-            access_token="",
-            table_names=["Details"]
+            base_id=base_id[0], table_names=tables, access_token=access_token[0]
         )
