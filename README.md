@@ -165,6 +165,11 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
         <td>✅</td>
         <td>-</td>
     </tr>
+     <tr>
+        <td>Slack</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
     <tr>
         <td>Stripe</td>
         <td>✅</td>

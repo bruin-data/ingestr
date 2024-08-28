@@ -24,6 +24,7 @@ from ingestr.src.sources import (
     MongoDbSource,
     NotionSource,
     ShopifySource,
+    SlackSource,
     SqlSource,
     StripeAnalyticsSource,
 )
@@ -110,6 +111,8 @@ class SourceDestinationFactory:
             return ChessSource()
         elif self.source_scheme == "stripe":
             return StripeAnalyticsSource()
+        elif self.source_scheme == "slack":
+            return SlackSource()
         elif self.source_scheme == "hubspot":
             return HubspotSource()
         elif self.source_scheme == "airtable":

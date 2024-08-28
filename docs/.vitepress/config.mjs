@@ -90,6 +90,7 @@ export default defineConfig({
               { text: "HubSpot", link: "/supported-sources/hubspot.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
+              { text: "Slack", link: "/supported-sources/slack.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
             ],
           },
