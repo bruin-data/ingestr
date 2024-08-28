@@ -20,6 +20,8 @@ from facebook_business import FacebookAdsApi
 from facebook_business.adobjects.adaccount import AdAccount
 from facebook_business.adobjects.user import User
 from facebook_business.api import FacebookResponse
+from facebook_business.adobjects.abstractcrudobject import AbstractCrudObject
+from facebook_business.adobjects.abstractobject import AbstractObject
 
 from .exceptions import InsightsJobTimeout
 from .settings import (
@@ -27,7 +29,7 @@ from .settings import (
     INSIGHTS_PRIMARY_KEY,
     TFbMethod,
 )
-from .utils import AbstractCrudObject, AbstractObject
+
 
 
 def get_start_date(

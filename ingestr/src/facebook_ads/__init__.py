@@ -2,50 +2,33 @@
 
 from typing import Iterator, Sequence
 
-from facebook_business import FacebookAdsApi
-from facebook_business.api import FacebookResponse
-
 import dlt
 from dlt.common import pendulum
-from dlt.common.typing import TDataItems, TDataItem, DictStrAny
+from dlt.common.typing import TDataItems
 from dlt.sources import DltResource
+from facebook_business.adobjects.ad import Ad
 
 from .helpers import (
-    get_data_chunked,
-    enrich_ad_objects,
-    get_start_date,
-    process_report_item,
     execute_job,
     get_ads_account,
+    get_data_chunked,
+    get_start_date,
+    process_report_item,
 )
-from .utils import (
-    AbstractObject,
-    AbstractCrudObject,
-    Ad,
-    Campaign,
-    AdSet,
-    AdCreative,
-    Lead,
-)
-from .utils import debug_access_token, get_long_lived_token
 from .settings import (
+    ALL_ACTION_ATTRIBUTION_WINDOWS,
+    ALL_ACTION_BREAKDOWNS,
     DEFAULT_AD_FIELDS,
     DEFAULT_ADCREATIVE_FIELDS,
     DEFAULT_ADSET_FIELDS,
     DEFAULT_CAMPAIGN_FIELDS,
-    DEFAULT_LEAD_FIELDS,
-    TFbMethod,
-    TInsightsBreakdownOptions,
-)
-from .settings import (
-    FACEBOOK_INSIGHTS_RETENTION_PERIOD,
-    ALL_ACTION_BREAKDOWNS,
-    ALL_ACTION_ATTRIBUTION_WINDOWS,
     DEFAULT_INSIGHT_FIELDS,
+    DEFAULT_LEAD_FIELDS,
     INSIGHT_FIELDS_TYPES,
-    INSIGHTS_PRIMARY_KEY,
     INSIGHTS_BREAKDOWNS_OPTIONS,
+    INSIGHTS_PRIMARY_KEY,
     INVALID_INSIGHTS_FIELDS,
+    TInsightsBreakdownOptions,
     TInsightsLevels,
 )
 
@@ -177,7 +160,7 @@ def facebook_insights_source(
     def facebook_insights(
         date_start: dlt.sources.incremental[str] = dlt.sources.incremental(
             "date_start", initial_value=initial_load_start_date_str
-        )
+        ),
     ) -> Iterator[TDataItems]:
         start_date = get_start_date(date_start, attribution_window_days_lag)
         end_date = pendulum.now()
