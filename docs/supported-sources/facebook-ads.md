@@ -14,8 +14,9 @@ facebookads://?access_token=<access_token>&account_id=<account_id>
 
 URI parameters:
 
-- `access_token`
-- `account_id`
+- `access_token` is associated with the Business Facebook App.
+- `account_id` is associated with Ad manager.
+  Both are used for authentication with the Facebook Ads API.
 
 The URI is used to connect to the Facebook Ads API for extracting data.
 
@@ -26,7 +27,7 @@ Facebook Ads requires a few steps to set up an integration, please follow the gu
 Once you complete the guide, you should have an Access_Token and Account ID . Let's say your access_token is `abcdef` and account_id is `1234` , here's a sample command that will copy the data from Facebook Ads into a duckdb database:
 
 ```sh
-ingestr ingest --source-uri 'facebookads://?access_token=easdyh&account_id=1234' --source-table 'campaigns' --dest-uri duckdb:///facebook.duckdb --dest-table 'facebook.campaigns'
+ingestr ingest --source-uri 'facebookads://?access_token=easdyh&account_id=1234' --source-table 'campaigns' --dest-uri duckdb:///facebook.duckdb --dest-table 'dest.campaigns'
 ```
 
 The result of this command will be a table in the `facebook.duckdb` database.
@@ -35,11 +36,10 @@ The result of this command will be a table in the `facebook.duckdb` database.
 
 Facebook Ads source allows ingesting the following sources into separate tables:
 
-- `campaigns`
-- `ad_sets`
-- `ads`
-- `ad_leads`
-- `creatives`
-- `facebook_insights`
+- `campaigns`: Retrieves all DEFAULT_CAMPAIGN_FIELDS.
+- `ad_sets`: Retrieves all DEFAULT_ADSET_FIELDS.
+- `leads`: Retrieves all DEFAULT_LEAD_FIELDS.
+- `ads_creatives`: Retrieves all DEFAULT_ADCREATIVE_FIELDS.
+- `facebook_insights`: Retrieves data on audience demographics,post reach and engagement metrics.
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.

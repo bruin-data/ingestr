@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 import dlt
 
+from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.mongodb import mongodb_collection
@@ -14,7 +15,6 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
-from ingestr.src.facebook_ads import facebook_ads_source,facebook_insights_source
 
 
 class SqlSource:
@@ -356,33 +356,40 @@ class StripeAnalyticsSource:
 class FacebookAdsSource:
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         # facebook_ads://?access_token=abcd&account_id=1234
         if kwargs.get("incremental_key"):
-            raise ValueError("Incremental loads are not supported for Facebook Ads")
-            
+            raise ValueError(
+                "Facebook Ads takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         access_token = None
-        account_id= None
+        account_id = None
         source_field = urlparse(uri)
         source_params = parse_qs(source_field.query)
         access_token = source_params.get("access_token")
         account_id = source_params.get("account_id")
-       
+
         if not access_token or not account_id:
-            raise ValueError("access_token and accound_id is necessary")
+            raise ValueError(
+                "access_token and accound_id is required to connect to Facebook Ads."
+            )
 
         endpoint = None
-        if table in ["campaigns","ad_sets","ad_creatives","leads"]:
+        if table in ["campaigns", "ad_sets", "ad_creatives", "leads"]:
             endpoint = table
         elif table in "facebook_insights":
-            return facebook_insights_source( access_token= access_token[0],
-            account_id= account_id[0],).with_resources("facebook_insights")
-        
+            return facebook_insights_source(
+                access_token=access_token[0],
+                account_id=account_id[0],
+            ).with_resources("facebook_insights")
         else:
-            raise ValueError("fResource '{table}' is not supported for Facebook Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr")
+            raise ValueError(
+                "fResource '{table}' is not supported for Facebook Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
 
         return facebook_ads_source(
-            access_token= access_token[0],
-            account_id= account_id[0],
+            access_token=access_token[0],
+            account_id=account_id[0],
         ).with_resources(endpoint)
