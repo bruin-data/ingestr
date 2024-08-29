@@ -377,7 +377,7 @@ class FacebookAdsSource:
             )
 
         endpoint = None
-        if table in ["campaigns", "ad_sets", "ad_creatives","ads", "leads"]:
+        if table in ["campaigns", "ad_sets", "ad_creatives", "ads", "leads"]:
             endpoint = table
         elif table in "facebook_insights":
             return facebook_insights_source(

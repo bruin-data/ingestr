@@ -8,20 +8,18 @@ from typing import Any, Iterator, Sequence
 import dlt
 import humanize
 import pendulum
-
 from dlt.common import logger
 from dlt.common.configuration.inject import with_config
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import DictStrAny, TDataItem, TDataItems
 from dlt.sources.helpers import requests
 from dlt.sources.helpers.requests import Client
-
 from facebook_business import FacebookAdsApi
+from facebook_business.adobjects.abstractcrudobject import AbstractCrudObject
+from facebook_business.adobjects.abstractobject import AbstractObject
 from facebook_business.adobjects.adaccount import AdAccount
 from facebook_business.adobjects.user import User
 from facebook_business.api import FacebookResponse
-from facebook_business.adobjects.abstractcrudobject import AbstractCrudObject
-from facebook_business.adobjects.abstractobject import AbstractObject
 
 from .exceptions import InsightsJobTimeout
 from .settings import (
@@ -29,7 +27,6 @@ from .settings import (
     INSIGHTS_PRIMARY_KEY,
     TFbMethod,
 )
-
 
 
 def get_start_date(
