@@ -491,9 +491,7 @@ class AirtableSource:
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
-            raise ValueError(
-                "Incremental loads are not supported for Airtable"
-            )
+            raise ValueError("Incremental loads are not supported for Airtable")
 
         if not table:
             raise ValueError("Source table is required to connect to Airtable")
