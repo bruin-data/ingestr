@@ -373,11 +373,11 @@ class FacebookAdsSource:
 
         if not access_token or not account_id:
             raise ValueError(
-                "access_token and accound_id is required to connect to Facebook Ads."
+                "access_token and accound_id are required to connect to Facebook Ads."
             )
 
         endpoint = None
-        if table in ["campaigns", "ad_sets", "ad_creatives", "leads"]:
+        if table in ["campaigns", "ad_sets", "ad_creatives","ads", "leads"]:
             endpoint = table
         elif table in "facebook_insights":
             return facebook_insights_source(
