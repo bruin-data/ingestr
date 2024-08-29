@@ -14,11 +14,12 @@ facebookads://?access_token=<access_token>&account_id=<account_id>
 
 URI parameters:
 
-- `access_token` is associated with the Business Facebook App.
+- `access_token` is associated with Business Facebook App.
 - `account_id` is associated with Ad manager.
-  Both are used for authentication with the Facebook Ads API.
 
-The URI is used to connect to the Facebook Ads API for extracting data.
+Both are used for authentication with Facebook Ads API.
+
+The URI is used to connect to Facebook Ads API for extracting data.
 
 ## Setting up a Facebook Ads Integration
 
@@ -40,6 +41,7 @@ Facebook Ads source allows ingesting the following sources into separate tables:
 - `ad_sets`: Retrieves all DEFAULT_ADSET_FIELDS.
 - `leads`: Retrieves all DEFAULT_LEAD_FIELDS.
 - `ads_creatives`: Retrieves all DEFAULT_ADCREATIVE_FIELDS.
-- `facebook_insights`: Retrieves data on audience demographics,post reach and engagement metrics.
+- `ads`: Retrieves all DEFAULT_ADS_FIELDS.
+- `facebook_insights`: Retrieves all DEFAULT_INSIGHTS_FIELDS.
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
