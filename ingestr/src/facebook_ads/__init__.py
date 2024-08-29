@@ -37,9 +37,9 @@ from .settings import (
 def facebook_ads_source(
     account_id: str = dlt.config.value,
     access_token: str = dlt.secrets.value,
-    chunk_size: int = 50,
+    chunk_size: int = 5000,
     request_timeout: float = 300.0,
-    app_api_version: str = None,
+    app_api_version: str = "v20.0",
 ) -> Sequence[DltResource]:
     """Returns a list of resources to load campaigns, ad sets, ads, creatives and ad leads data from Facebook Marketing API.
 
@@ -105,7 +105,7 @@ def facebook_ads_source(
 def facebook_insights_source(
     account_id: str = dlt.config.value,
     access_token: str = dlt.secrets.value,
-    initial_load_past_days: int = 30,
+    initial_load_past_days: int = 1,
     fields: Sequence[str] = DEFAULT_INSIGHT_FIELDS,
     attribution_window_days_lag: int = 7,
     time_increment_days: int = 1,
