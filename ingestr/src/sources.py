@@ -492,7 +492,7 @@ class AirtableSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
-                "Airtable takes care of incrementality on its own, you should not provide incremental_key"
+                "Incremental loads are not supported for Airtable"
             )
 
         if not table:

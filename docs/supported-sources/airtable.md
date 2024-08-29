@@ -17,7 +17,7 @@ URI parameters:
 - `base_id`: A unique identifier for an Airtable base.
 - `access_token`: A personal access token for authentication with the Airtable API.
 
-The URI is used to connect to the Airtable API for extracting data. More details on setting up Airtable integrations can be found.
+The URI is used to connect to the Airtable API for extracting data. More details on setting up Airtable integrations can be found [here](https://airtable.com/developers/web/api).
 
 ## Setting up a Airtable Integration
 
@@ -32,3 +32,6 @@ ingestr ingest --source-uri 'airtable://?base_id=appXYc&access_token=patr123.abc
 The result of this command will be an `employee` table containing data from the `employee` source in the `Airtable.duckdb` database.
 
 The `source-table` can include multiple table names that share the `same base_id` (e.g.--source-table 'employee,users') but this will merge all the data from the specified tables into a single destination table.
+
+> [!CAUTION]
+> Airtable does not support incremental loading, which means every time you run the command, the entire table will be copied from Airtable to the destination. This can be slow for large tables.
