@@ -15,6 +15,7 @@ from ingestr.src.destinations import (
     SynapseDestination,
 )
 from ingestr.src.sources import (
+    AirtableSource,
     ChessSource,
     GoogleSheetsSource,
     GorgiasSource,
@@ -114,7 +115,8 @@ class SourceDestinationFactory:
             return SlackSource()
         elif self.source_scheme == "hubspot":
             return HubspotSource()
-
+        elif self.source_scheme == "airtable":
+            return AirtableSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

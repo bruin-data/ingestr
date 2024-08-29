@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlparse
 
 import dlt
 
+from ingestr.src.airtable import airtable_source
 from ingestr.src.chess import source
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
@@ -480,3 +481,35 @@ class HubspotSource:
         return hubspot(
             api_key=api_key[0],
         ).with_resources(endpoint)
+
+
+class AirtableSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    # airtable://?access_token=<access_token>&base_id=<base_id>
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Incremental loads are not supported for Airtable"
+            )
+
+        if not table:
+            raise ValueError("Source table is required to connect to Airtable")
+
+        tables = table.split(",")
+
+        source_parts = urlparse(uri)
+        source_fields = parse_qs(source_parts.query)
+        base_id = source_fields.get("base_id")
+        access_token = source_fields.get("access_token")
+
+        if not base_id or not access_token:
+            raise ValueError(
+                "base_id and access_token in the URI are required to connect to Airtable"
+            )
+
+        return airtable_source(
+            base_id=base_id[0], table_names=tables, access_token=access_token[0]
+        )
