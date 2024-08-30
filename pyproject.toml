@@ -73,7 +73,8 @@ exclude = [
     'src/hubspot/.*',
     'src/airtable/.*',
     'src/slack/.*',
-    'src/hubspot/.*'
+    'src/hubspot/.*',
+    'src/facebook_ads/.*'
   ]
 
 [[tool.mypy.overrides]]
