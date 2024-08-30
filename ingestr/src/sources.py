@@ -446,13 +446,13 @@ class FacebookAdsSource:
             access_token=access_token[0],
             account_id=account_id[0],
         ).with_resources(endpoint)
-      
-      
+
+
 class SlackSource:
-   def handles_incrementality(self) -> bool:
+    def handles_incrementality(self) -> bool:
         return True
 
-   def dlt_source(self, uri: str, table: str, **kwargs):
+    def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
                 "Slack takes care of incrementality on its own, you should not provide incremental_key"
