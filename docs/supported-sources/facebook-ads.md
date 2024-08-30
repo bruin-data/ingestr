@@ -28,7 +28,11 @@ Facebook Ads requires a few steps to set up an integration, please follow the gu
 Once you complete the guide, you should have an Access_Token and Account ID . Let's say your access_token is `abcdef` and account_id is `1234` , here's a sample command that will copy the data from Facebook Ads into a duckdb database:
 
 ```sh
-ingestr ingest --source-uri 'facebookads://?access_token=easdyh&account_id=1234' --source-table 'campaigns' --dest-uri duckdb:///facebook.duckdb --dest-table 'dest.campaigns'
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
+  --source-table 'campaigns' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.campaigns'
 ```
 
 The result of this command will be a table in the `facebook.duckdb` database.
