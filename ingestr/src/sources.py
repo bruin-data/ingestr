@@ -1,17 +1,22 @@
 import base64
 import csv
 import json
+from datetime import date
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 import dlt
 
+from ingestr.src.airtable import airtable_source
+from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
+from ingestr.src.hubspot import hubspot
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
+from ingestr.src.slack import slack_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
@@ -299,6 +304,54 @@ class GoogleSheetsSource:
         )
 
 
+class ChessSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    # chess://?players=john,peter
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Chess takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        source_fields = urlparse(uri)
+        source_params = parse_qs(source_fields.query)
+        list_players = None
+        if "players" in source_params:
+            list_players = source_params["players"][0].split(",")
+        else:
+            list_players = [
+                "MagnusCarlsen",
+                "HikaruNakamura",
+                "ArjunErigaisi",
+                "IanNepomniachtchi",
+            ]
+
+        date_args = {}
+        start_date = kwargs.get("interval_start")
+        end_date = kwargs.get("interval_end")
+        if start_date and end_date:
+            if isinstance(start_date, date) and isinstance(end_date, date):
+                date_args["start_month"] = start_date.strftime("%Y/%m")
+                date_args["end_month"] = end_date.strftime("%Y/%m")
+
+        table_mapping = {
+            "profiles": "players_profiles",
+            "games": "players_games",
+            "archives": "players_archives",
+        }
+
+        if table not in table_mapping:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Chess source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        return source(players=list_players, **date_args).with_resources(
+            table_mapping[table]
+        )
+
+
 class StripeAnalyticsSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -393,3 +446,111 @@ class FacebookAdsSource:
             access_token=access_token[0],
             account_id=account_id[0],
         ).with_resources(endpoint)
+      
+      
+class SlackSource:
+   def handles_incrementality(self) -> bool:
+        return True
+
+   def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Slack takes care of incrementality on its own, you should not provide incremental_key"
+            )
+        # slack://?api_key=<apikey>
+        api_key = None
+        source_field = urlparse(uri)
+        source_query = parse_qs(source_field.query)
+        api_key = source_query.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Slack")
+
+        endpoint = None
+        msg_channels = None
+        if table in ["channels", "users", "access_logs"]:
+            endpoint = table
+        elif table.startswith("messages"):
+            channels_part = table.split(":")[1]
+            msg_channels = channels_part.split(",")
+            endpoint = "messages"
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for slack source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        date_args = {}
+        if kwargs.get("interval_start"):
+            date_args["start_date"] = kwargs.get("interval_start")
+
+        if kwargs.get("interval_end"):
+            date_args["end_date"] = kwargs.get("interval_end")
+
+        return slack_source(
+            access_token=api_key[0],
+            table_per_channel=False,
+            selected_channels=msg_channels,
+            **date_args,
+        ).with_resources(endpoint)
+
+
+class HubspotSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    # hubspot://?api_key=<api_key>
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Hubspot takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        api_key = None
+        source_parts = urlparse(uri)
+        source_parmas = parse_qs(source_parts.query)
+        api_key = source_parmas.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Hubspot")
+
+        endpoint = None
+        if table in ["contacts", "companies", "deals", "tickets", "products", "quotes"]:
+            endpoint = table
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Hubspot source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        return hubspot(
+            api_key=api_key[0],
+        ).with_resources(endpoint)
+
+
+class AirtableSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    # airtable://?access_token=<access_token>&base_id=<base_id>
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError("Incremental loads are not supported for Airtable")
+
+        if not table:
+            raise ValueError("Source table is required to connect to Airtable")
+
+        tables = table.split(",")
+
+        source_parts = urlparse(uri)
+        source_fields = parse_qs(source_parts.query)
+        base_id = source_fields.get("base_id")
+        access_token = source_fields.get("access_token")
+
+        if not base_id or not access_token:
+            raise ValueError(
+                "base_id and access_token in the URI are required to connect to Airtable"
+            )
+
+        return airtable_source(
+            base_id=base_id[0], table_names=tables, access_token=access_token[0]
+        )

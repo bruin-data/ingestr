@@ -15,13 +15,17 @@ from ingestr.src.destinations import (
     SynapseDestination,
 )
 from ingestr.src.sources import (
+    AirtableSource,
+    ChessSource,
     FacebookAdsSource,
     GoogleSheetsSource,
     GorgiasSource,
+    HubspotSource,
     LocalCsvSource,
     MongoDbSource,
     NotionSource,
     ShopifySource,
+    SlackSource,
     SqlSource,
     StripeAnalyticsSource,
 )
@@ -104,11 +108,18 @@ class SourceDestinationFactory:
             return ShopifySource()
         elif self.source_scheme == "gorgias":
             return GorgiasSource()
+        elif self.source_scheme == "chess":
+            return ChessSource()
         elif self.source_scheme == "stripe":
             return StripeAnalyticsSource()
         elif self.source_scheme == "facebookads":
             return FacebookAdsSource()
-
+        elif self.source_scheme == "slack":
+            return SlackSource()
+        elif self.source_scheme == "hubspot":
+            return HubspotSource()
+        elif self.source_scheme == "airtable":
+            return AirtableSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

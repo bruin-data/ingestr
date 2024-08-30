@@ -1,4 +1,5 @@
 import hashlib
+import tempfile
 from datetime import datetime
 from enum import Enum
 from typing import Optional
@@ -236,6 +237,13 @@ def ingest(
             envvar="SCHEMA_NAMING",
         ),
     ] = SchemaNaming.default,  # type: ignore
+    pipelines_dir: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The path to store dlt-related pipeline metadata. By default, ingestr will create a temporary directory and delete it after the execution is done in order to make retries stateless.",
+            envvar="PIPELINES_DIR",
+        ),
+    ] = None,  # type: ignore
 ):
     track(
         "command_triggered",
@@ -280,13 +288,18 @@ def ingest(
         if progress == Progress.log:
             progressInstance = LogCollector(dump_system_stats=False)
 
+        is_pipelines_dir_temp = False
+        if pipelines_dir is None:
+            pipelines_dir = tempfile.mkdtemp()
+            is_pipelines_dir_temp = True
+
         pipeline = dlt.pipeline(
             pipeline_name=m.hexdigest(),
             destination=destination.dlt_dest(
                 uri=dest_uri,
             ),
             progress=progressInstance,
-            pipelines_dir="pipeline_data",
+            pipelines_dir=pipelines_dir,
             refresh="drop_resources" if full_refresh else None,
         )
 
@@ -362,6 +375,8 @@ def ingest(
         if incremental_strategy != IncrementalStrategy.none:
             write_disposition = incremental_strategy.value
 
+        start_time = datetime.now()
+
         run_info: LoadInfo = pipeline.run(
             dlt_source,
             **destination.dlt_run_params(
@@ -389,10 +404,17 @@ def ingest(
 
         destination.post_load()
 
+        end_time = datetime.now()
         elapsedHuman = ""
         if run_info.started_at:
-            elapsed = run_info.finished_at - run_info.started_at
+            elapsed = end_time - start_time
             elapsedHuman = f"in {humanize.precisedelta(elapsed)}"
+
+        # remove the pipelines_dir folder if it was created by ingestr
+        if is_pipelines_dir_temp:
+            import shutil
+
+            shutil.rmtree(pipelines_dir)
 
         print(
             f"[bold green]Successfully finished loading data from '{factory.source_scheme}' to '{factory.destination_scheme}' {elapsedHuman} [/bold green]"

@@ -68,9 +68,13 @@ exclude = [
     'src/google_sheets/.*',
     'src/shopify/.*',
     'src/gorgias/.*',
+    'src/chess/.*',
     'src/stripe_analytics/.*',
-    'src/facebook_ads/.*',
-]
+    'src/hubspot/.*',
+    'src/airtable/.*',
+    'src/slack/.*',
+    'src/hubspot/.*'
+  ]
 
 [[tool.mypy.overrides]]
 module = [
@@ -79,8 +83,12 @@ module = [
   "ingestr.src.google_sheets.*",
   "ingestr.src.shopify.*",
   "ingestr.src.gorgias.*",
+  "ingestr.src.chess.*",
   "ingestr.src.stripe_analytics.*",
   "ingestr.src.facebook_ads.*",
+  "ingestr.src.airtable.*",
+  "ingestr.src.slack.*",
+  "ingestr.src.hubspot.*",
 ]
 follow_imports = "skip"
 

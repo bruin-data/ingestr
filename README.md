@@ -136,6 +136,16 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
         <td>-</td>
     </tr>
     <tr>
+        <td>Airtable</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Chess.com</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Gorgias</td>
         <td>✅</td>
         <td>-</td>
@@ -146,12 +156,22 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
         <td>-</td>
     </tr>
     <tr>
+        <td>HubSpot</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Notion</td>
         <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
         <td>Shopify</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+     <tr>
+        <td>Slack</td>
         <td>✅</td>
         <td>-</td>
     </tr>

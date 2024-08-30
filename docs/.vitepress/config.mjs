@@ -53,7 +53,6 @@ export default defineConfig({
       {
         text: "Sources & Destinations",
         items: [
-          { text: "Overview", link: "/supported-sources/overview.md" },
           {
             text: "Databases",
             collapsed: false,
@@ -84,14 +83,18 @@ export default defineConfig({
             text: "Platforms",
             collapsed: false,
             items: [
-              {
+              { text: "Airtable", link: "/supported-sources/airtable.md" },
+              { text: "Chess.com", link: "/supported-sources/chess.md" },
+               {
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
               },
-              { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
+              { text: "Gorgias", link: "/supported-sources/gorgias.md" },
+              { text: "HubSpot", link: "/supported-sources/hubspot.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
+              { text: "Slack", link: "/supported-sources/slack.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
             ],
           },
