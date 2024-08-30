@@ -130,11 +130,6 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
     <tr>
         <td colspan="3" style='text-align:center;'><strong>Platforms</strong></td>
     </tr>
-     <tr>
-        <td>Facebook Ads</td>
-        <td>✅</td>
-        <td>-</td>
-    </tr>
     <tr>
         <td>Airtable</td>
         <td>✅</td>
@@ -142,6 +137,11 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
     </tr>
     <tr>
         <td>Chess.com</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+     <tr>
+        <td>Facebook Ads</td>
         <td>✅</td>
         <td>-</td>
     </tr>
