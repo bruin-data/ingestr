@@ -183,6 +183,7 @@ def get_ads_account(
     account_id: str, access_token: str, request_timeout: float, app_api_version: str
 ) -> AdAccount:
     notify_on_token_expiration()
+
     def retry_on_limit(response: requests.Response, exception: BaseException) -> bool:
         try:
             error = response.json()["error"]
