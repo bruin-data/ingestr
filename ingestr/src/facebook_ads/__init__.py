@@ -37,7 +37,7 @@ from .settings import (
 def facebook_ads_source(
     account_id: str = dlt.config.value,
     access_token: str = dlt.secrets.value,
-    chunk_size: int = 5000,
+    chunk_size: int = 50,
     request_timeout: float = 300.0,
     app_api_version: str = "v20.0",
 ) -> Sequence[DltResource]:
