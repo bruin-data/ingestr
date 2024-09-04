@@ -13,6 +13,7 @@ from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_sour
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
+from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
@@ -554,3 +555,35 @@ class AirtableSource:
         return airtable_source(
             base_id=base_id[0], table_names=tables, access_token=access_token[0]
         )
+
+
+class KlaviyoSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "klaviyo_source takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        source_fields = urlparse(uri)
+        source_params = parse_qs(source_fields.query)
+        api_key = source_params.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to klaviyo")
+
+        resource = None
+        if table in ["events"]:
+            resource = table
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Klaviyo source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+        start_date = kwargs.get("interval_start") or "2001-01-03"
+
+        return klaviyo_source(
+            api_key=api_key[0],
+            start_date=start_date,
+        ).with_resources(resource)
