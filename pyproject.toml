@@ -73,7 +73,8 @@ exclude = [
     'src/hubspot/.*',
     'src/airtable/.*',
     'src/slack/.*',
-    'src/hubspot/.*'
+    'src/hubspot/.*',
+    'src/facebook_ads/.*'
   ]
 
 [[tool.mypy.overrides]]
@@ -85,6 +86,7 @@ module = [
   "ingestr.src.gorgias.*",
   "ingestr.src.chess.*",
   "ingestr.src.stripe_analytics.*",
+  "ingestr.src.facebook_ads.*",
   "ingestr.src.airtable.*",
   "ingestr.src.slack.*",
   "ingestr.src.hubspot.*",

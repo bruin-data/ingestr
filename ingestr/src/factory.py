@@ -17,6 +17,7 @@ from ingestr.src.destinations import (
 from ingestr.src.sources import (
     AirtableSource,
     ChessSource,
+    FacebookAdsSource,
     GoogleSheetsSource,
     GorgiasSource,
     HubspotSource,
@@ -111,6 +112,8 @@ class SourceDestinationFactory:
             return ChessSource()
         elif self.source_scheme == "stripe":
             return StripeAnalyticsSource()
+        elif self.source_scheme == "facebookads":
+            return FacebookAdsSource()
         elif self.source_scheme == "slack":
             return SlackSource()
         elif self.source_scheme == "hubspot":

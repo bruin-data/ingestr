@@ -140,6 +140,11 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
         <td>✅</td>
         <td>-</td>
     </tr>
+     <tr>
+        <td>Facebook Ads</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
     <tr>
         <td>Gorgias</td>
         <td>✅</td>

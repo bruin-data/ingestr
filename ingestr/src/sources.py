@@ -9,6 +9,7 @@ import dlt
 
 from ingestr.src.airtable import airtable_source
 from ingestr.src.chess import source
+from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -402,6 +403,48 @@ class StripeAnalyticsSource:
             ],
             stripe_secret_key=api_key[0],
             **date_args,
+        ).with_resources(endpoint)
+
+
+class FacebookAdsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        # facebook_ads://?access_token=abcd&account_id=1234
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Facebook Ads takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        access_token = None
+        account_id = None
+        source_field = urlparse(uri)
+        source_params = parse_qs(source_field.query)
+        access_token = source_params.get("access_token")
+        account_id = source_params.get("account_id")
+
+        if not access_token or not account_id:
+            raise ValueError(
+                "access_token and accound_id are required to connect to Facebook Ads."
+            )
+
+        endpoint = None
+        if table in ["campaigns", "ad_sets", "ad_creatives", "ads", "leads"]:
+            endpoint = table
+        elif table in "facebook_insights":
+            return facebook_insights_source(
+                access_token=access_token[0],
+                account_id=account_id[0],
+            ).with_resources("facebook_insights")
+        else:
+            raise ValueError(
+                "fResource '{table}' is not supported for Facebook Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        return facebook_ads_source(
+            access_token=access_token[0],
+            account_id=account_id[0],
         ).with_resources(endpoint)
 
 

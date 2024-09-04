@@ -85,6 +85,10 @@ export default defineConfig({
             items: [
               { text: "Airtable", link: "/supported-sources/airtable.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
+               {
+                text: "Facebook Ads",
+                link: "/supported-sources/facebook-ads.md",
+              },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "HubSpot", link: "/supported-sources/hubspot.md" },
