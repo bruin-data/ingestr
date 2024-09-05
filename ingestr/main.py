@@ -244,6 +244,13 @@ def ingest(
             envvar="PIPELINES_DIR",
         ),
     ] = None,  # type: ignore
+    extract_parallelism: Annotated[
+        Optional[int],
+        typer.Option(
+            help="The number of parallel jobs to run for extracting data from the source, only applicable for certain sources",
+            envvar="EXTRACT_PARALLELISM",
+        ),
+    ] = 5,  # type: ignore
 ):
     track(
         "command_triggered",
@@ -253,6 +260,8 @@ def ingest(
     )
 
     dlt.config["data_writer.file_max_items"] = loader_file_size
+    dlt.config["extract.workers"] = extract_parallelism
+    dlt.config["extract.max_parallel_items"] = extract_parallelism
     if schema_naming != SchemaNaming.default:
         dlt.config["schema.naming"] = schema_naming.value
 
