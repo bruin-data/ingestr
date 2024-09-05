@@ -14,3 +14,4 @@ dist
 docs/.vitepress/dist
 docs/.vitepress/cache
 node_modules
+*.duckdb
