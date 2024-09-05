@@ -1,4 +1,4 @@
-from typing import Iterable, List, Tuple
+from typing import Iterable
 
 import dlt
 import pendulum
@@ -8,57 +8,8 @@ from dlt.common.typing import TAnyDateTime, TDataItem
 from dlt.sources import DltResource
 from dlt.sources.helpers.requests import Client
 
-
-def split_date_range(
-    start_date: pendulum.DateTime, end_date: pendulum.DateTime
-) -> List[Tuple[pendulum.DateTime, pendulum.DateTime]]:
-    interval = "days"
-    if (end_date - start_date).days <= 1:
-        interval = "hours"
-
-    intervals = []
-    current = start_date
-    while current < end_date:
-        next_date = min(current.add(**{interval: 1}), end_date)
-        intervals.append((current.isoformat(), next_date.isoformat()))
-        current = next_date
-    return intervals
-
-
-def fetch_data(
-    session: requests.Session,
-    api_key: str,
-    endpoint: str,
-    start_date: str,
-    end_date: str,
-):
-    base_url = "https://a.klaviyo.com/api/"
-    headers = {
-        "Authorization": f"Klaviyo-API-Key {api_key}",
-        "accept": "application/json",
-        "revision": "2024-07-15",
-    }
-    sort_filter = f"/?sort=-datetime&filter=and(greater-or-equal(datetime,{start_date}),less-than(datetime,{end_date}))"
-    url = base_url + endpoint + sort_filter
-
-    all_events = []
-    while True:
-        response = session.get(url=url, headers=headers)
-        result = response.json()
-        events = result.get("data", [])
-
-        for event in events:
-            for attribute_key in event["attributes"]:
-                event[attribute_key] = event["attributes"][attribute_key]
-            del event["attributes"]
-
-        all_events.extend(events)
-
-        url = result["links"]["next"]
-        if url is None:
-            break
-
-    return all_events
+from ingestr.src.klaviyo.client import KlaviyoClient
+from ingestr.src.klaviyo.helpers import split_date_range
 
 
 @dlt.source(max_table_nesting=0)
@@ -87,11 +38,8 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
                 request_backoff_factor=2,
             ).session
 
+        client = KlaviyoClient(api_key)
         for start, end in intervals:
-
-            def fetch_data_wrapper():
-                return fetch_data(create_client(), api_key, "events", start, end)
-
-            yield fetch_data_wrapper
+            yield lambda s=start, e=end: client.fetch_events(create_client(), s, e)
 
     return events
