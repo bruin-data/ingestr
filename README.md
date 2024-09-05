@@ -160,6 +160,11 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
         <td>✅</td>
         <td>-</td>
     </tr>
+     <tr>
+        <td>Klaviyo</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
     <tr>
         <td>Notion</td>
         <td>✅</td>

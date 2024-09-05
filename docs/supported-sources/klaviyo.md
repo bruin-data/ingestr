@@ -1,0 +1,39 @@
+# Klaviyo
+
+[Klaviyo](https://www.klaviyo.com/) is a marketing automation platform that helps businesses build and manage smarter digital relationships with their customers by connecting through personalized email and enhancing customer loyality.
+
+ingestr supports Klaviyo as a source.
+
+## URI Format
+
+The URI format for Klaviyo is as follows:
+
+```plaintext
+klaviyo://?api_key=<api-key>
+```
+
+URI parameters:
+
+- `api_key`: The API key used for authentication with the Klaviyo API.
+
+The URI is used to connect to the Klaviyo API for extracting data.
+
+```bash
+ingestr ingest --source-table 'events' --source-uri 'klaviyo://?api_key=pk_test' --dest-uri duckdb:///klaviyo.duckdb --interval-start 2022-01-01 --dest-table 'klaviyo.events' --yes --extract-parallelism 20
+```
+
+This command fethes all the events that are created/updated since 2022-01-01 and writes them to `klaviyo.events` table on DuckDB, using 20 parallel threads to improve performance and efficiently handle large data .
+
+## Available Tables
+
+Klaviyo source allows ingesting the following sources into separate tables:
+
+[events](https://developers.klaviyo.com/en/reference/events_api_overview): Retrieves all events in an account where each event represents an action taken by a profile such as a password reset or a product order.
+
+[profiles](https://developers.klaviyo.com/en/reference/profiles_api_overview): Retrieves all profiles in an account where each profile includes details like organization, job title, email and other attributes.
+
+[campaigns](https://developers.klaviyo.com/en/reference/campaigns_api_overview): Retrieves all campaigns in an account where each campaign is a targeted message sent to a specific audience.
+
+[metrics](https://developers.klaviyo.com/en/reference/metrics_api_overview): Retrieves all metrics in an account where each metric represents a category of events or actions a person can take.
+
+Use these as `--source-table` parameter in the `ingestr ingest` command.
