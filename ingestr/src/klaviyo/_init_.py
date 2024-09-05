@@ -15,7 +15,7 @@ def fetch_data(endpoint, datetime, api_key):
         "accept": "application/json",
         "revision": "2024-07-15",
     }
-    sort_filter = f"/?sort=-datetime&filter=greater-or-equal(datetime,{datetime})"
+    sort_filter = f"/?sort=-datetime&filter=greater-than(datetime,{datetime})"
     url = base_url + endpoint + sort_filter
 
     def retry_on_limit(response: requests.Response, exception: BaseException) -> bool:
@@ -48,8 +48,9 @@ def fetch_data(endpoint, datetime, api_key):
 @dlt.source(max_table_nesting=0)
 def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResource]:
     start_date_obj = ensure_pendulum_datetime(start_date)
+    print("startdate", start_date_obj)
 
-    @dlt.resource()
+    @dlt.resource(write_disposition="append", primary_key="id")
     def events(
         datetime=dlt.sources.incremental("datetime", start_date_obj.isoformat()),
     ) -> Iterable[TDataItem]:
