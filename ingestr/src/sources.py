@@ -575,14 +575,14 @@ class KlaviyoSource:
             raise ValueError("api_key in the URI is required to connect to klaviyo")
 
         resource = None
-        if table in ["events"]:
+        if table in ["events", "profiles", "campaigns", "metrics"]:
             resource = table
         else:
             raise ValueError(
                 f"Resource '{table}' is not supported for Klaviyo source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
-        start_date = kwargs.get("interval_start") or "2001-01-03"
 
+        start_date = kwargs.get("interval_start") or "2000-01-01"
         return klaviyo_source(
             api_key=api_key[0],
             start_date=start_date,
