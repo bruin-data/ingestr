@@ -42,7 +42,6 @@ class KlaviyoClient:
 
             all_items.extend(items)
             nextURL = result["links"]["next"]
-
             if nextURL is None:
                 break
 
@@ -59,7 +58,7 @@ class KlaviyoClient:
         print(f"Fetching events for {start_date} to {end_date}")
         url = f"{BASE_URL}/events/?sort=-datetime&filter=and(greater-or-equal(datetime,{start_date}),less-than(datetime,{end_date}))"
         return self._fetch_pages(session, url)
-
+    
     def fetch_metrics(
         self,
         session: requests.Session,
@@ -160,3 +159,13 @@ class KlaviyoClient:
             updated_at = pendulum.parse(item["updated"])
             if updated_at > last_updated_obj:
                 yield item
+
+    def fetch_forms(
+            self,
+            session: requests.Session,
+            start_date: str,
+            end_date:str,
+    ):
+        #https://a.klaviyo.com/api/forms/?sort=-updated_at&filter=greater-than(updated_at,2024-04-01 00:00:00+00:00),less-than(updated_at,2024-08-01 00:00:00+00:00)
+        url = f"{BASE_URL}/forms/?sort=-updated_at&filter=and(greater-or-equal(updated_at,{start_date}),less-than(updated_at,{end_date}))"
+        return self._fetch_pages(session, url)

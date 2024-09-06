@@ -46,6 +46,8 @@ Klaviyo source allows ingesting the following sources into separate tables:
 
 [catalog-items](https://developers.klaviyo.com/en/reference/get_catalog_items): Retrieves all catalog items in an account.
 
+[forms](https://developers.klaviyo.com/en/reference/get_forms): Retrieves all forms in an account.
+
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
 > [!WARNING]
