@@ -73,4 +73,42 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
     ) -> Iterable[TDataItem]:
         yield from client.fetch_metrics(create_client(), updated.start_value)
 
-    return events, profiles, campaigns, metrics
+    @dlt.resource(write_disposition="replace", primary_key="id")
+    def tags() -> Iterable[TAnyDateTime]:
+        yield from client.fetch_tag(create_client())
+
+    @dlt.resource(write_disposition="replace", primary_key="id")
+    def coupons() -> Iterable[TAnyDateTime]:
+        yield from client.fetch_coupons(create_client())
+
+    @dlt.resource(write_disposition="merge", primary_key="id", name="catalog-variants")
+    def catalog_variants(
+        updated=dlt.sources.incremental("updated", start_date_obj.isoformat()),
+    ) -> Iterable[TDataItem]:
+        yield from client.fetch_catalog_variant(create_client(), updated.start_value)
+
+    @dlt.resource(
+        write_disposition="merge", primary_key="id", name="catalog-categories"
+    )
+    def catalog_categories(
+        updated=dlt.sources.incremental("updated", start_date_obj.isoformat()),
+    ) -> Iterable[TDataItem]:
+        yield from client.fetch_catalog_categories(create_client(), updated.start_value)
+
+    @dlt.resource(write_disposition="merge", primary_key="id", name="catalog-items")
+    def catalog_items(
+        updated=dlt.sources.incremental("updated", start_date_obj.isoformat()),
+    ) -> Iterable[TDataItem]:
+        yield from client.fetch_catalog_item(create_client(), updated.start_value)
+
+    return (
+        events,
+        profiles,
+        campaigns,
+        metrics,
+        tags,
+        coupons,
+        catalog_variants,
+        catalog_categories,
+        catalog_items,
+    )

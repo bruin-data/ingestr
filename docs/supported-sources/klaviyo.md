@@ -36,4 +36,17 @@ Klaviyo source allows ingesting the following sources into separate tables:
 
 [metrics](https://developers.klaviyo.com/en/reference/metrics_api_overview): Retrieves all metrics in an account where each metric represents a category of events or actions a person can take.
 
+[tags](https://developers.klaviyo.com/en/reference/get_tags): Retrieves all tags in an account.
+
+[coupons](https://developers.klaviyo.com/en/reference/get_coupons): Retrieves all coupons in an account.
+
+[catalog-variants](https://developers.klaviyo.com/en/reference/get_catalog_variants): Retrieves all variants in an account.
+
+[catalog-categories](https://developers.klaviyo.com/en/reference/get_catalog_categories): Retrieves all catalog categories in an account.
+
+[catalog-items](https://developers.klaviyo.com/en/reference/get_catalog_items): Retrieves all catalog items in an account.
+
 Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+> [!WARNING]
+> Klaviyo does not support incremental loading for many endpoints in its APIs, which means ingestr will load endpoints incrementally if they support it, and do a full-refresh if not.

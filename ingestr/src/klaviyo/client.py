@@ -28,20 +28,26 @@ class KlaviyoClient:
             del event["attributes"]
         return items
 
-    def _fetch_pages(self, session: requests.Session, url: str) -> list:
+    def _fetch_pages(
+        self, session: requests.Session, url: str, flat: bool = True
+    ) -> list:
         all_items = []
-
         while True:
             response = session.get(url=url, headers=self.__get_headers())
             result = response.json()
             items = result.get("data", [])
-            items = self._flatten_attributes(items)
-            all_items.extend(items)
+            
+            if flat:
+                items = self._flatten_attributes(items)
 
-            url = result["links"]["next"]
-            if url is None:
+            all_items.extend(items)
+            nextURL = result["links"]["next"]
+
+            if nextURL is None:
                 break
 
+            url = nextURL
+       
         return all_items
 
     def fetch_events(
@@ -101,3 +107,56 @@ class KlaviyoClient:
             page["campaign_type"] = campaign_type
 
         return pages
+
+    def fetch_tag(self, session: requests.Session):
+        url = f"{BASE_URL}/tags"
+        return self._fetch_pages(session, url, False)
+
+    def fetch_catalog_variant(
+        self,
+        session: requests.Session,
+        last_updated: str,
+    ):
+        url = f"{BASE_URL}/catalog-variants"
+        items = self._fetch_pages(session, url)
+        last_updated_obj = pendulum.parse(last_updated)
+        
+        for item in items:
+            updated_at = pendulum.parse(item["updated"])
+            if updated_at > last_updated_obj:
+                yield item
+
+    def fetch_coupons(self, session: requests.Session):
+        url = f"{BASE_URL}/coupons"
+        print("coupons_url:", url)
+        return self._fetch_pages(session, url, False)
+
+    def fetch_catalog_categories(
+        self,
+        session: requests.Session,
+        last_updated: str,
+    ):
+        
+        url = f"{BASE_URL}/catalog-categories"
+        items = self._fetch_pages(session, url)
+        print("items",items)
+        last_updated_obj = pendulum.parse(last_updated)
+        
+        for item in items:
+            updated_at = pendulum.parse(item["updated"])
+            if updated_at > last_updated_obj:
+                yield item
+
+    def fetch_catalog_item(
+        self,
+        session: requests.Session,
+        last_updated: str,
+    ):
+        url = f"{BASE_URL}/catalog-items"
+        items = self._fetch_pages(session, url)
+        last_updated_obj = pendulum.parse(last_updated)
+
+        for item in items:
+            updated_at = pendulum.parse(item["updated"])
+            if updated_at > last_updated_obj:
+                yield item
