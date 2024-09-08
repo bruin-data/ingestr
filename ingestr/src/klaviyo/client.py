@@ -36,17 +36,18 @@ class KlaviyoClient:
             response = session.get(url=url, headers=self.__get_headers())
             result = response.json()
             items = result.get("data", [])
-            
+
             if flat:
                 items = self._flatten_attributes(items)
 
             all_items.extend(items)
-            nextURL = result["links"]["next"]
+            nextURL = result.get("links", {}).get("next")
+            print("nextURL", nextURL)
             if nextURL is None:
                 break
 
             url = nextURL
-       
+
         return all_items
 
     def fetch_events(
@@ -58,7 +59,7 @@ class KlaviyoClient:
         print(f"Fetching events for {start_date} to {end_date}")
         url = f"{BASE_URL}/events/?sort=-datetime&filter=and(greater-or-equal(datetime,{start_date}),less-than(datetime,{end_date}))"
         return self._fetch_pages(session, url)
-    
+
     def fetch_metrics(
         self,
         session: requests.Session,
@@ -119,7 +120,7 @@ class KlaviyoClient:
         url = f"{BASE_URL}/catalog-variants"
         items = self._fetch_pages(session, url)
         last_updated_obj = pendulum.parse(last_updated)
-        
+
         for item in items:
             updated_at = pendulum.parse(item["updated"])
             if updated_at > last_updated_obj:
@@ -135,12 +136,11 @@ class KlaviyoClient:
         session: requests.Session,
         last_updated: str,
     ):
-        
         url = f"{BASE_URL}/catalog-categories"
         items = self._fetch_pages(session, url)
-        print("items",items)
+        print("items", items)
         last_updated_obj = pendulum.parse(last_updated)
-        
+
         for item in items:
             updated_at = pendulum.parse(item["updated"])
             if updated_at > last_updated_obj:
@@ -159,13 +159,23 @@ class KlaviyoClient:
             updated_at = pendulum.parse(item["updated"])
             if updated_at > last_updated_obj:
                 yield item
-
+    
     def fetch_forms(
-            self,
-            session: requests.Session,
-            start_date: str,
-            end_date:str,
+        self,
+        session: requests.Session,
+        start_date: str,
+        end_date: str,
     ):
-        #https://a.klaviyo.com/api/forms/?sort=-updated_at&filter=greater-than(updated_at,2024-04-01 00:00:00+00:00),less-than(updated_at,2024-08-01 00:00:00+00:00)
+        print(f"Fetching forms for {start_date} to {end_date}")
         url = f"{BASE_URL}/forms/?sort=-updated_at&filter=and(greater-or-equal(updated_at,{start_date}),less-than(updated_at,{end_date}))"
+        return self._fetch_pages(session, url)
+    
+    def fetch_lists(
+        self,
+        session: requests.Session,
+        updated_date: str,
+    ):
+        #https://a.klaviyo.com/api/lists/?sort=-updated&filter=greater-than(updated,2024-02-01 00:00:00+00:00)
+        url = f"{BASE_URL}/lists/?sort=-updated&filter=greater-than(updated,{updated_date})"
+        print("url",url)
         return self._fetch_pages(session, url)

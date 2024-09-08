@@ -48,6 +48,8 @@ Klaviyo source allows ingesting the following sources into separate tables:
 
 [forms](https://developers.klaviyo.com/en/reference/get_forms): Retrieves all forms in an account.
 
+[lists](https://developers.klaviyo.com/en/reference/get_lists): Retrieves all lists in an account.
+
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
 > [!WARNING]

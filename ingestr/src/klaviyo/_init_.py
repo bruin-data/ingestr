@@ -103,12 +103,22 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
 
     @dlt.resource(write_disposition="append", primary_key="id", parallelized=True)
     def forms(
-        updated=dlt.sources.incremental("updated_at", start_date_obj.isoformat()),
-    )-> Iterable [TDataItem]:
-        intervals = split_date_range(pendulum.parse(updated.start_value),pendulum.now())
-        print("updated", updated.start_value)
+        updated_at=dlt.sources.incremental("updated_at", start_date_obj.isoformat()),
+    ) -> Iterable[TDataItem]:
+        intervals = split_date_range(
+            pendulum.parse(updated_at.start_value), pendulum.now()
+        )
+
         for start, end in intervals:
             yield lambda s=start, e=end: client.fetch_forms(create_client(), s, e)
+
+
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def lists(
+        updated=dlt.sources.incremental("updated", start_date_obj.isoformat()),
+    ) -> Iterable[TDataItem]:
+
+        yield from client.fetch_lists(create_client(),updated.start_value)
 
     return (
         events,
@@ -121,4 +131,5 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
         catalog_categories,
         catalog_items,
         forms,
+        lists
     )
