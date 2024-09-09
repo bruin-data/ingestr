@@ -19,7 +19,7 @@ URI parameters:
 The URI is used to connect to the Klaviyo API for extracting data.
 
 ```bash
-ingestr ingest --source-table 'events' --source-uri 'klaviyo://?api_key=pk_test' --dest-uri duckdb:///klaviyo.duckdb --interval-start 2022-01-01 --dest-table 'klaviyo.events' --yes --extract-parallelism 20
+ingestr ingest --source-table 'events' --source-uri 'klaviyo://?api_key=pk_test' --dest-uri duckdb:///klaviyo.duckdb --interval-start 2022-01-01 --dest-table 'klaviyo.events' --extract-parallelism 20
 ```
 
 This command fethes all the events that are created/updated since 2022-01-01 and writes them to `klaviyo.events` table on DuckDB, using 20 parallel threads to improve performance and efficiently handle large data .
@@ -46,9 +46,17 @@ Klaviyo source allows ingesting the following sources into separate tables:
 
 [catalog-items](https://developers.klaviyo.com/en/reference/get_catalog_items): Retrieves all catalog items in an account.
 
-[forms](https://developers.klaviyo.com/en/reference/get_forms): Retrieves all forms in an account.
+[flows](https://developers.klaviyo.com/en/reference/get_flows): Retrieves all flows in an account where flow is a sequence of automated actions that is triggered when a person performs a specific action.
 
 [lists](https://developers.klaviyo.com/en/reference/get_lists): Retrieves all lists in an account.
+
+[images](https://developers.klaviyo.com/en/reference/get_images): Retrieves all images in an account..
+
+[segments](https://developers.klaviyo.com/en/reference/get_segments): Retrieves all segments in an account where segment is a dynamic list that contains profiles meeting a certain set of conditions.
+
+[forms](https://developers.klaviyo.com/en/reference/get_forms): Retrieves all forms in an account.
+
+[templates](https://developers.klaviyo.com/en/reference/get_templates): Retrieves all templates in an account.
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 

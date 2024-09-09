@@ -587,6 +587,10 @@ class KlaviyoSource:
             "catalog-items",
             "forms",
             "lists",
+            "images",
+            "segments",
+            "flows",
+            "templates",
         ]:
             resource = table
         else:

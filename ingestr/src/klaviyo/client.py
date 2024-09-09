@@ -42,7 +42,6 @@ class KlaviyoClient:
 
             all_items.extend(items)
             nextURL = result.get("links", {}).get("next")
-            print("nextURL", nextURL)
             if nextURL is None:
                 break
 
@@ -81,7 +80,6 @@ class KlaviyoClient:
         start_date: str,
         end_date: str,
     ):
-        print(f"Fetching profiles for {start_date} to {end_date}")
         pendulum_start_date = pendulum.parse(start_date)
         pendulum_start_date = pendulum_start_date.subtract(seconds=1)
         url = f"{BASE_URL}/profiles/?sort=updated&filter=and(greater-than(updated,{pendulum_start_date.isoformat()}),less-than(updated,{end_date}))"
@@ -128,7 +126,6 @@ class KlaviyoClient:
 
     def fetch_coupons(self, session: requests.Session):
         url = f"{BASE_URL}/coupons"
-        print("coupons_url:", url)
         return self._fetch_pages(session, url, False)
 
     def fetch_catalog_categories(
@@ -138,7 +135,6 @@ class KlaviyoClient:
     ):
         url = f"{BASE_URL}/catalog-categories"
         items = self._fetch_pages(session, url)
-        print("items", items)
         last_updated_obj = pendulum.parse(last_updated)
 
         for item in items:
@@ -159,7 +155,7 @@ class KlaviyoClient:
             updated_at = pendulum.parse(item["updated"])
             if updated_at > last_updated_obj:
                 yield item
-    
+
     def fetch_forms(
         self,
         session: requests.Session,
@@ -169,13 +165,48 @@ class KlaviyoClient:
         print(f"Fetching forms for {start_date} to {end_date}")
         url = f"{BASE_URL}/forms/?sort=-updated_at&filter=and(greater-or-equal(updated_at,{start_date}),less-than(updated_at,{end_date}))"
         return self._fetch_pages(session, url)
-    
+
     def fetch_lists(
         self,
         session: requests.Session,
         updated_date: str,
     ):
-        #https://a.klaviyo.com/api/lists/?sort=-updated&filter=greater-than(updated,2024-02-01 00:00:00+00:00)
+        # https://a.klaviyo.com/api/lists/?sort=-updated&filter=greater-than(updated,2024-02-01 00:00:00+00:00)
         url = f"{BASE_URL}/lists/?sort=-updated&filter=greater-than(updated,{updated_date})"
-        print("url",url)
+        return self._fetch_pages(session, url)
+
+    def fetch_images(self, session: requests.Session, start_date: str, end_date: str):
+        # https://a.klaviyo.com/api/images/?sort=-updated_at&filter=greater-or-equal(updated_at,2024-06-01 00:00:00+00:00),less-than(updated_at,2024-09-01 00:00:00+00:00)
+        url = f"{BASE_URL}/images/?sort=-updated_at&filter=and(greater-or-equal(updated_at,{start_date}),less-than(updated_at,{end_date}))"
+        return self._fetch_pages(session, url)
+
+    def fetch_segments(
+        self,
+        session: requests.Session,
+        updated_date: str,
+    ):
+        # https://a.klaviyo.com/api/segments/?sort=-updated&filter=greater-than(updated,2024-04-01 00:00:00+00:00)
+        url = f"{BASE_URL}/segments/?sort=-updated&filter=greater-than(updated,{updated_date})"
+        print("url", url)
+        return self._fetch_pages(session, url)
+
+    def fetch_flows(
+        self,
+        session: requests.Session,
+        start_date: str,
+        end_date: str,
+    ):
+        print(f"Fetching events for {start_date} to {end_date}")
+        # https://a.klaviyo.com/api/flows/?sort=-updated&filter=and(greater-or-equal(updated,2024-06-01 00:00:00+00:00),less-than(updated,2024-09-01 00:00:00+00:00))
+        url = f"{BASE_URL}/flows/?sort=-updated&filter=and(greater-or-equal(updated,{start_date}),less-than(updated,{end_date}))"
+        return self._fetch_pages(session, url)
+
+    def fetch_templates(
+        self,
+        session: requests.Session,
+        start_date: str,
+        end_date: str,
+    ):
+        # https://a.klaviyo.com/api/templates/?sort=-updated&filter=and(greater-or-equal(updated,2024-06-01 00:00:00+00:00),less-than(updated,2024-09-01 00:00:00+00:00))
+        url = f"{BASE_URL}/templates/?sort=-updated&filter=and(greater-or-equal(updated,{start_date}),less-than(updated,{end_date}))"
         return self._fetch_pages(session, url)

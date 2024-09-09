@@ -112,13 +112,47 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
         for start, end in intervals:
             yield lambda s=start, e=end: client.fetch_forms(create_client(), s, e)
 
-
     @dlt.resource(write_disposition="merge", primary_key="id")
     def lists(
         updated=dlt.sources.incremental("updated", start_date_obj.isoformat()),
     ) -> Iterable[TDataItem]:
+        yield from client.fetch_lists(create_client(), updated.start_value)
 
-        yield from client.fetch_lists(create_client(),updated.start_value)
+    @dlt.resource(write_disposition="append", primary_key="id", parallelized=True)
+    def images(
+        updated_at=dlt.sources.incremental("updated_at", start_date_obj.isoformat()),
+    ) -> Iterable[TDataItem]:
+        intervals = split_date_range(
+            pendulum.parse(updated_at.start_value), pendulum.now()
+        )
+        for start, end in intervals:
+            yield lambda s=start, e=end: client.fetch_images(create_client(), s, e)
+
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def segments(
+        updated=dlt.sources.incremental("updated", start_date_obj.isoformat()),
+    ) -> Iterable[TDataItem]:
+        yield from client.fetch_segments(create_client(), updated.start_value)
+
+    @dlt.resource(write_disposition="append", primary_key="id", parallelized=True)
+    def flows(
+        updated=dlt.sources.incremental("updated", start_date_obj.isoformat()),
+    ) -> Iterable[TDataItem]:
+        intervals = split_date_range(
+            pendulum.parse(updated.start_value), pendulum.now()
+        )
+        for start, end in intervals:
+            yield lambda s=start, e=end: client.fetch_flows(create_client(), s, e)
+
+    @dlt.resource(write_disposition="append", primary_key="id", parallelized=True)
+    def templates(
+        updated=dlt.sources.incremental("updated", start_date_obj.isoformat()),
+    ) -> Iterable[TDataItem]:
+        intervals = split_date_range(
+            pendulum.parse(updated.start_value), pendulum.now()
+        )
+        for start, end in intervals:
+            yield lambda s=start, e=end: client.fetch_templates(create_client(), s, e)
 
     return (
         events,
@@ -131,5 +165,9 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
         catalog_categories,
         catalog_items,
         forms,
-        lists
+        lists,
+        images,
+        segments,
+        flows,
+        templates,
     )
