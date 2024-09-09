@@ -135,6 +135,11 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
         <td>✅</td>
         <td>-</td>
     </tr>
+     <tr>
+        <td>AppsFlyer</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
     <tr>
         <td>Chess.com</td>
         <td>✅</td>

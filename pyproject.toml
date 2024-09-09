@@ -75,7 +75,8 @@ exclude = [
     'src/slack/.*',
     'src/hubspot/.*',
     'src/facebook_ads/.*',
-    'src/klaviyo/.*'
+    'src/klaviyo/.*',
+    'src/appsflyer/.*',
   ]
 
 [[tool.mypy.overrides]]
@@ -92,6 +93,7 @@ module = [
   "ingestr.src.slack.*",
   "ingestr.src.hubspot.*",
   "ingestr.src.klaviyo.*",
+  "ingestr.src.appsflyer",
 ]
 follow_imports = "skip"
 

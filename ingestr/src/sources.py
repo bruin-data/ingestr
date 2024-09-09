@@ -21,6 +21,7 @@ from ingestr.src.slack import slack_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.appsflyer._init_ import appsflyer_source
 
 
 class SqlSource:
@@ -587,3 +588,15 @@ class KlaviyoSource:
             api_key=api_key[0],
             start_date=start_date,
         ).with_resources(resource)
+    
+
+class AppsflyerSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError("Incremental loads are not supported for Appsflyer")
+        
+        return appsflyer_source(
+        ).with_resources()

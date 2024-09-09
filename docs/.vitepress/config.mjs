@@ -84,8 +84,9 @@ export default defineConfig({
             collapsed: false,
             items: [
               { text: "Airtable", link: "/supported-sources/airtable.md" },
+              { text: "AppsFlyer", link: "/supported-sources/appsflyer.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
-               {
+              {
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
               },

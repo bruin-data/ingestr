@@ -29,6 +29,7 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
+    AppsflyerSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -123,6 +124,8 @@ class SourceDestinationFactory:
             return AirtableSource()
         elif self.source_scheme == "klaviyo":
             return KlaviyoSource()
+        elif self.source_scheme == "appsflyer":
+            return AppsflyerSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
