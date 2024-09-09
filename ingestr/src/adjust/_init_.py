@@ -16,9 +16,7 @@ def adjust_source(
        
     @dlt.resource(write_disposition="replace")
     def campaigns():
-
         yield from adjust_api.fetch_report_data()
 
     return campaigns
 
-   

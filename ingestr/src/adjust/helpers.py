@@ -47,10 +47,10 @@ class AdjustAPI:
             ).session
 
         response = request_client.get(self.uri, headers=headers, params=params)
-
+        print("response", response.json())
         if response.status_code == 200:
             result = response.json()
-            res = result.get("rows", [])
-            yield res
+            data = result.get("rows", [])
+            yield from data
         else:
             return 

@@ -71,7 +71,7 @@ exclude = [
     'src/chess/.*',
     'src/stripe_analytics/.*',
     'src/slack/.*',
-    'src/hubspot/.*'
+    'src/hubspot/.*',
     'src/adjust/.*'
 ]
 

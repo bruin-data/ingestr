@@ -4,6 +4,7 @@ import json
 from datetime import date
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
+from datetime import datetime
 
 import dlt
 
@@ -485,12 +486,12 @@ class HubspotSource:
 
 class AdjustSource:
     def handles_incrementality(self) -> bool:
-        return True
+        return False
      
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
-                "Adjust takes care of incrementality on its own, you should not provide incremental_key"
+                "Incremental loads are not supported for Adjust"
             )
         
         api_key = None
@@ -501,20 +502,14 @@ class AdjustSource:
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Adjust")
         
-        start_date = None
-        end_date = None
-        if kwargs.get("interval_start"):
-            start_date = kwargs.get("interval_start")
-      
-        if kwargs.get("interval_end"):
-            end_date = kwargs.get("interval_end")
-
+        start_date = kwargs.get("interval_start") or "2000-01-01"
+        end_date = kwargs.get("interval_start") or datetime.now().strftime('%Y-%m-%d')
         Endpoint = None
         if table in ["campaigns"]:
             Endpoint = table
 
         return adjust_source(
-            start_date="2024-08-01",
-            end_date="2024-08-10",
-            api_key= ""
-        ).with_resources("campaigns")
+            start_date= start_date,
+            end_date= end_date,
+            api_key= api_key[0]
+        ).with_resources(Endpoint)
