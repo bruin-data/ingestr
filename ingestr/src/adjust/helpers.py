@@ -32,7 +32,7 @@ class AdjustAPI:
             "reattributed": "all",
             "sandbox": "false",
         }
-       
+
         def retry_on_limit(
             response: requests.Response, exception: BaseException
         ) -> bool:
@@ -53,7 +53,7 @@ class AdjustAPI:
 
             for item in items:
                 response_days = pendulum.parse(item["day"])
-                incremntal_days =pendulum.parse(self.start_date)
+                incremntal_days = pendulum.parse(self.start_date)
                 if response_days > incremntal_days:
                     yield item
         else:
