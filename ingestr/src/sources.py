@@ -575,7 +575,23 @@ class KlaviyoSource:
             raise ValueError("api_key in the URI is required to connect to klaviyo")
 
         resource = None
-        if table in ["events", "profiles", "campaigns", "metrics"]:
+        if table in [
+            "events",
+            "profiles",
+            "campaigns",
+            "metrics",
+            "tags",
+            "coupons",
+            "catalog-variants",
+            "catalog-categories",
+            "catalog-items",
+            "forms",
+            "lists",
+            "images",
+            "segments",
+            "flows",
+            "templates",
+        ]:
             resource = table
         else:
             raise ValueError(
