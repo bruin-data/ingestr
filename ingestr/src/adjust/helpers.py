@@ -1,7 +1,6 @@
+import requests
 from dlt.sources.helpers.requests import Client
-import requests
 
-import requests
 
 class AdjustAPI:
     def __init__(self, start_date, end_date, api_key):
@@ -30,21 +29,21 @@ class AdjustAPI:
             "attribution_type": "all",
             "cohort_maturity": "immature",
             "reattributed": "all",
-            "sandbox": "false"
+            "sandbox": "false",
         }
 
         def retry_on_limit(
-                response: requests.Response, exception: BaseException
-            ) -> bool:
-                return response.status_code == 429
+            response: requests.Response, exception: BaseException
+        ) -> bool:
+            return response.status_code == 429
 
         request_client = Client(
-                request_timeout=8.0,
-                raise_for_status=False,
-                retry_condition=retry_on_limit,
-                request_max_attempts=12,
-                request_backoff_factor=2,
-            ).session
+            request_timeout=8.0,
+            raise_for_status=False,
+            retry_condition=retry_on_limit,
+            request_max_attempts=12,
+            request_backoff_factor=2,
+        ).session
 
         response = request_client.get(self.uri, headers=headers, params=params)
         print("response", response.json())
@@ -53,4 +52,4 @@ class AdjustAPI:
             data = result.get("rows", [])
             yield from data
         else:
-            return 
+            return

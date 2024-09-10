@@ -15,6 +15,7 @@ from ingestr.src.destinations import (
     SynapseDestination,
 )
 from ingestr.src.sources import (
+    AdjustSource,
     ChessSource,
     GoogleSheetsSource,
     GorgiasSource,
@@ -26,7 +27,6 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
-    AdjustSource,
 )
 
 SQL_SOURCE_SCHEMES = [

@@ -1,13 +1,13 @@
 import base64
 import csv
 import json
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
-from datetime import datetime
 
 import dlt
 
+from ingestr.src.adjust._init_ import adjust_source
 from ingestr.src.chess import source
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
@@ -19,7 +19,6 @@ from ingestr.src.slack import slack_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
-from ingestr.src.adjust._init_ import adjust_source
 
 
 class SqlSource:
@@ -482,18 +481,16 @@ class HubspotSource:
         return hubspot(
             api_key=api_key[0],
         ).with_resources(endpoint)
-    
+
 
 class AdjustSource:
     def handles_incrementality(self) -> bool:
         return False
-     
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
-            raise ValueError(
-                "Incremental loads are not supported for Adjust"
-            )
-        
+            raise ValueError("Incremental loads are not supported for Adjust")
+
         api_key = None
         source_part = urlparse(uri)
         source_params = parse_qs(source_part.query)
@@ -501,15 +498,13 @@ class AdjustSource:
 
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Adjust")
-        
+
         start_date = kwargs.get("interval_start") or "2000-01-01"
-        end_date = kwargs.get("interval_start") or datetime.now().strftime('%Y-%m-%d')
+        end_date = kwargs.get("interval_start") or datetime.now().strftime("%Y-%m-%d")
         Endpoint = None
         if table in ["campaigns"]:
             Endpoint = table
 
         return adjust_source(
-            start_date= start_date,
-            end_date= end_date,
-            api_key= api_key[0]
+            start_date=start_date, end_date=end_date, api_key=api_key[0]
         ).with_resources(Endpoint)
