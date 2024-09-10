@@ -16,6 +16,7 @@ from ingestr.src.destinations import (
 )
 from ingestr.src.sources import (
     AirtableSource,
+    AppsflyerSource,
     ChessSource,
     FacebookAdsSource,
     GoogleSheetsSource,
@@ -29,8 +30,7 @@ from ingestr.src.sources import (
     ShopifySource,
     SlackSource,
     SqlSource,
-    StripeAnalyticsSource,
-    AppsflyerSource,
+    StripeAnalyticsSource, 
 )
 
 SQL_SOURCE_SCHEMES = [

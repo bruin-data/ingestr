@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 import dlt
 
 from ingestr.src.airtable import airtable_source
+from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.google_sheets import google_spreadsheet
@@ -23,7 +24,6 @@ from ingestr.src.slack import slack_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
-from ingestr.src.appsflyer._init_ import appsflyer_source
 
 
 class SqlSource:
@@ -607,12 +607,12 @@ class KlaviyoSource:
             start_date=start_date,
         ).with_resources(resource)
 
+
 class KafkaSource:
     def handles_incrementality(self) -> bool:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-      
         # kafka://?bootstrap_servers=localhost:9092&group_id=test_group&security_protocol=SASL_SSL&sasl_mechanisms=PLAIN&sasl_username=example_username&sasl_password=example_secret
         source_fields = urlparse(uri)
         source_params = parse_qs(source_fields.query)
@@ -653,7 +653,8 @@ class KafkaSource:
             batch_size=int(batch_size[0]),
             batch_timeout=int(batch_timeout[0]),
         )
-      
+
+
 class AppsflyerSource:
     def handles_incrementality(self) -> bool:
         return False
