@@ -1,4 +1,5 @@
 cx_Oracle==8.3.0
+confluent-kafka>=2.3.0
 databricks-sql-connector==2.9.3
 dlt==0.5.1
 duckdb_engine==0.11.5
