@@ -1,12 +1,13 @@
 import base64
 import csv
 import json
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 import dlt
 
+from ingestr.src.adjust._init_ import adjust_source
 from ingestr.src.airtable import airtable_source
 from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
@@ -652,3 +653,36 @@ class KafkaSource:
             batch_size=int(batch_size[0]),
             batch_timeout=int(batch_timeout[0]),
         )
+
+
+class AdjustSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError("Incremental loads are not supported for Adjust")
+
+        api_key = None
+        source_part = urlparse(uri)
+        source_params = parse_qs(source_part.query)
+        api_key = source_params.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Adjust")
+
+        start_date = kwargs.get("interval_start") or "2000-01-01"
+        interval_end = kwargs.get("interval_end")
+
+        if interval_end:
+            end_date = interval_end.strftime("%Y-%m-%d")
+        else:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+
+        Endpoint = None
+        if table in ["campaigns"]:
+            Endpoint = table
+
+        return adjust_source(
+            start_date=start_date, end_date=end_date, api_key=api_key[0]
+        ).with_resources(Endpoint)
