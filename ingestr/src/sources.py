@@ -500,7 +500,8 @@ class AdjustSource:
             raise ValueError("api_key in the URI is required to connect to Adjust")
 
         start_date = kwargs.get("interval_start") or "2000-01-01"
-        end_date = kwargs.get("interval_start") or datetime.now().strftime("%Y-%m-%d")
+        end_date = kwargs.get("interval_end").strftime("%Y-%m-%d") or datetime.now().strftime("%Y-%m-%d")
+     
         Endpoint = None
         if table in ["campaigns"]:
             Endpoint = table

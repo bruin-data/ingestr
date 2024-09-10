@@ -1,3 +1,4 @@
+import pendulum
 import requests
 from dlt.sources.helpers.requests import Client
 
@@ -7,7 +8,7 @@ class AdjustAPI:
         self.start_date = start_date
         self.end_date = end_date
         self.api_key = api_key
-        self.default_dimensions = "day,app,store_type,channel,country"
+        self.default_dimensions = "campaign,day,app,store_type,channel,country"
         self.default_metrics = (
             "network_cost,all_revenue_total_d0,ad_revenue_total_d0,revenue_total_d0,"
             "all_revenue_total_d1,ad_revenue_total_d1,revenue_total_d1,all_revenue_total_d3,"
@@ -31,7 +32,7 @@ class AdjustAPI:
             "reattributed": "all",
             "sandbox": "false",
         }
-
+       
         def retry_on_limit(
             response: requests.Response, exception: BaseException
         ) -> bool:
@@ -46,10 +47,14 @@ class AdjustAPI:
         ).session
 
         response = request_client.get(self.uri, headers=headers, params=params)
-        print("response", response.json())
         if response.status_code == 200:
             result = response.json()
-            data = result.get("rows", [])
-            yield from data
+            items = result.get("rows", [])
+
+            for item in items:
+                response_days = pendulum.parse(item["day"])
+                incremntal_days =pendulum.parse(self.start_date)
+                if response_days > incremntal_days:
+                    yield item
         else:
             return
