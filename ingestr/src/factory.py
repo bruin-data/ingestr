@@ -21,6 +21,7 @@ from ingestr.src.sources import (
     GoogleSheetsSource,
     GorgiasSource,
     HubspotSource,
+    KafkaSource,
     KlaviyoSource,
     LocalCsvSource,
     MongoDbSource,
@@ -123,6 +124,8 @@ class SourceDestinationFactory:
             return AirtableSource()
         elif self.source_scheme == "klaviyo":
             return KlaviyoSource()
+        elif self.source_scheme == "kafka":
+            return KafkaSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

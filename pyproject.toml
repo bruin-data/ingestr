@@ -75,7 +75,8 @@ exclude = [
     'src/slack/.*',
     'src/hubspot/.*',
     'src/facebook_ads/.*',
-    'src/klaviyo/.*'
+    'src/klaviyo/.*',
+    'src/kafka/.*'
   ]
 
 [[tool.mypy.overrides]]

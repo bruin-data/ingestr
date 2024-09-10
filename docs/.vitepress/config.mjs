@@ -64,6 +64,7 @@ export default defineConfig({
                 text: "Google BigQuery",
                 link: "/supported-sources/bigquery.md",
               },
+              { text: "Kafka", link: "/supported-sources/kafka.md" },
               { text: "Local CSV Files", link: "/supported-sources/csv.md" },
               {
                 text: "Microsoft SQL Server",

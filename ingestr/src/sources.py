@@ -13,6 +13,8 @@ from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_sour
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
+from ingestr.src.kafka import kafka_consumer
+from ingestr.src.kafka.helpers import KafkaCredentials
 from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
@@ -603,3 +605,50 @@ class KlaviyoSource:
             api_key=api_key[0],
             start_date=start_date,
         ).with_resources(resource)
+
+
+class KafkaSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        # kafka://?bootstrap_servers=localhost:9092&group_id=test_group&security_protocol=SASL_SSL&sasl_mechanisms=PLAIN&sasl_username=example_username&sasl_password=example_secret
+        source_fields = urlparse(uri)
+        source_params = parse_qs(source_fields.query)
+
+        bootstrap_servers = source_params.get("bootstrap_servers")
+        group_id = source_params.get("group_id")
+        security_protocol = source_params.get("security_protocol", [])
+        sasl_mechanisms = source_params.get("sasl_mechanisms", [])
+        sasl_username = source_params.get("sasl_username", [])
+        sasl_password = source_params.get("sasl_password", [])
+        batch_size = source_params.get("batch_size", [3000])
+        batch_timeout = source_params.get("batch_timeout", [3])
+
+        if not bootstrap_servers:
+            raise ValueError(
+                "bootstrap_servers in the URI is required to connect to kafka"
+            )
+
+        if not group_id:
+            raise ValueError("group_id in the URI is required to connect to kafka")
+
+        start_date = kwargs.get("interval_start")
+        return kafka_consumer(
+            topics=[table],
+            credentials=KafkaCredentials(
+                bootstrap_servers=bootstrap_servers[0],
+                group_id=group_id[0],
+                security_protocol=security_protocol[0]
+                if len(security_protocol) > 0
+                else None,  # type: ignore
+                sasl_mechanisms=sasl_mechanisms[0]
+                if len(sasl_mechanisms) > 0
+                else None,  # type: ignore
+                sasl_username=sasl_username[0] if len(sasl_username) > 0 else None,  # type: ignore
+                sasl_password=sasl_password[0] if len(sasl_password) > 0 else None,  # type: ignore
+            ),
+            start_from=start_date,
+            batch_size=int(batch_size[0]),
+            batch_timeout=int(batch_timeout[0]),
+        )
