@@ -8,6 +8,8 @@ from datetime import date, datetime, timezone
 import duckdb
 import pytest
 import sqlalchemy
+from confluent_kafka import Producer  # type: ignore
+from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
@@ -976,3 +978,71 @@ def db_to_db_delete_insert_with_timerange(
 
 def as_datetime(date_str: str) -> date:
     return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).date()
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_kafka_to_db(dest):
+    dest_uri = dest.start()
+
+    kafka = KafkaContainer("confluentinc/cp-kafka:7.6.0").start(timeout=60)
+
+    # Create Kafka producer
+    producer = Producer({"bootstrap.servers": kafka.get_bootstrap_server()})
+
+    # Create topic and send messages
+    topic = "test_topic"
+    messages = ["message1", "message2", "message3"]
+
+    for message in messages:
+        producer.produce(topic, message.encode("utf-8"))
+    producer.flush()
+
+    def run():
+        res = invoke_ingest_command(
+            f"kafka://?bootstrap_servers={kafka.get_bootstrap_server()}&group_id=test_group",
+            "test_topic",
+            dest_uri,
+            "testschema.output",
+        )
+        assert res.exit_code == 0
+
+    dest_engine = sqlalchemy.create_engine(dest_uri)
+
+    def get_output_table():
+        return dest_engine.execute(
+            "select _kafka__data from testschema.output order by _kafka_msg_id asc"
+        ).fetchall()
+
+    run()
+
+    res = get_output_table()
+    assert len(res) == 3
+    assert res[0] == ("message1",)
+    assert res[1] == ("message2",)
+    assert res[2] == ("message3",)
+
+    # run again, nothing should be inserted into the output table
+    run()
+
+    res = get_output_table()
+    assert len(res) == 3
+    assert res[0] == ("message1",)
+    assert res[1] == ("message2",)
+    assert res[2] == ("message3",)
+
+    # add a new message
+    producer.produce(topic, "message4".encode("utf-8"))
+    producer.flush()
+
+    # run again, the new message should be inserted into the output table
+    run()
+    res = get_output_table()
+    assert len(res) == 4
+    assert res[0] == ("message1",)
+    assert res[1] == ("message2",)
+    assert res[2] == ("message3",)
+    assert res[3] == ("message4",)
+
+    kafka.stop()

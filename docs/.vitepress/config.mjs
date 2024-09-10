@@ -64,6 +64,7 @@ export default defineConfig({
                 text: "Google BigQuery",
                 link: "/supported-sources/bigquery.md",
               },
+              { text: "Kafka", link: "/supported-sources/kafka.md" },
               { text: "Local CSV Files", link: "/supported-sources/csv.md" },
               {
                 text: "Microsoft SQL Server",
@@ -93,6 +94,7 @@ export default defineConfig({
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "HubSpot", link: "/supported-sources/hubspot.md" },
+              { text: "Klaviyo", link: "/supported-sources/klaviyo.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
               { text: "Slack", link: "/supported-sources/slack.md" },

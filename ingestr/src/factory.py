@@ -21,6 +21,7 @@ from ingestr.src.sources import (
     GoogleSheetsSource,
     GorgiasSource,
     HubspotSource,
+    KafkaSource,
     KlaviyoSource,
     LocalCsvSource,
     MongoDbSource,
@@ -126,6 +127,9 @@ class SourceDestinationFactory:
             return KlaviyoSource()
         elif self.source_scheme == "appsflyer":
             return AppsflyerSource()
+        elif self.source_scheme == "kafka":
+            return KafkaSource()
+
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
