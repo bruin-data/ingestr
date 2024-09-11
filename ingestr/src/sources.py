@@ -678,11 +678,11 @@ class AppsflyerSource:
             resource = table
         else:
             raise ValueError(
-                f"Resource '{table}' is not supported for Klaviyo source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+                f"Resource '{table}' is not supported for Appsflyer source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
-        start_date = kwargs.get("interval_start") or "2000-01-01"
-        end_date = kwargs.get("interval_end") or "2000-01-01"
+        start_date = kwargs.get("interval_start") or "2024-09-10 17:00:00"
+        end_date = kwargs.get("interval_end") or "2024-09-10 18:00:00"
 
         return appsflyer_source(
             api_key = api_key[0],

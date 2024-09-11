@@ -24,9 +24,9 @@ class AppsflyerAPI:
         self,
         app_id,
         api_key,
-        from_date="2024-09-10 17:00:00",
-        to_date="2024-09-10 18:00:00",
-        maximum_rows=1000000
+        from_date= "2024-09-10 17:00:00",
+        to_date= "2024-09-10 18:00:00",
+        maximum_rows= 1000000
     ):
         url = f"https://hq1.appsflyer.com/api/raw-data/export/app/{app_id}/installs_report/v5"
         headers = {"accept": "text/csv", "Authorization": f"Bearer {api_key}"}

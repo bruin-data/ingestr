@@ -63,9 +63,8 @@ class AppsflyerClient:
                     print("Failed to fetch data", response.status_code)
                     break
 
-        all_data["event_time"] = pd.to_datetime(all_data["event_time"])
+       
         yield all_data
-
 
     def fetch_installs(
         self,
@@ -76,4 +75,4 @@ class AppsflyerClient:
     ):
         print(f"Fetching installs for {start_date} to {end_date}")
         url = f"{BASE_URL}/{app_id}/installs_report/v5"
-        return self._fetch_pages(session, url)
+        return self._fetch_pages( url,session)
