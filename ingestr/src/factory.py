@@ -30,7 +30,7 @@ from ingestr.src.sources import (
     ShopifySource,
     SlackSource,
     SqlSource,
-    StripeAnalyticsSource, 
+    StripeAnalyticsSource,
 )
 
 SQL_SOURCE_SCHEMES = [
