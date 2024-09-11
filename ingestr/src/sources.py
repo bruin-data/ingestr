@@ -661,6 +661,32 @@ class AppsflyerSource:
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
-            raise ValueError("Incremental loads are not supported for Appsflyer")
+            raise ValueError(
+                "Appsflyer_Source takes care of incrementality on its own, you should not provide incremental_key"
+            )
 
-        return appsflyer_source()
+        source_fields = urlparse(uri)
+        source_params = parse_qs(source_fields.query)
+        app_id = source_params.get("app_id")
+        api_key = source_params.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to klaviyo")
+        
+        resource = None
+        if table in [ "installs"]:
+            resource = table
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Klaviyo source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        start_date = kwargs.get("interval_start") or "2000-01-01"
+        end_date = kwargs.get("interval_end") or "2000-01-01"
+
+        return appsflyer_source(
+            api_key = api_key[0],
+            app_id = app_id[0],
+            start_date = start_date,
+            end_date = end_date
+        ).with_resources(resource)
