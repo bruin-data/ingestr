@@ -663,7 +663,6 @@ class AdjustSource:
         if kwargs.get("incremental_key"):
             raise ValueError("Incremental loads are not supported for Adjust")
 
-        api_key = None
         source_part = urlparse(uri)
         source_params = parse_qs(source_part.query)
         api_key = source_params.get("api_key")
@@ -671,11 +670,11 @@ class AdjustSource:
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Adjust")
 
-        start_date = kwargs.get("interval_start") or "2000-01-01"
-        interval_end = kwargs.get("interval_end")
+        start_date = kwargs.get("interval_start").strftime("%Y-%m-%d") or "2000-01-01"
+        interval_end = kwargs.get("interval_end").strftime("%Y-%m-%d")
 
         if interval_end:
-            end_date = interval_end.strftime("%Y-%m-%d")
+            end_date = interval_end
         else:
             end_date = datetime.now().strftime("%Y-%m-%d")
 

@@ -1,36 +1,61 @@
-import pendulum
 import requests
 from dlt.sources.helpers.requests import Client
 
+DEFAULT_DIMENSIONS = ["campaign", "day", "app", "store_type", "channel", "country"]
+
+DEFAULT_METRICS = [
+    "network_cost",
+    "all_revenue_total_d0",
+    "ad_revenue_total_d0",
+    "revenue_total_d0",
+    "all_revenue_total_d1",
+    "ad_revenue_total_d1",
+    "revenue_total_d1",
+    "all_revenue_total_d3",
+    "ad_revenue_total_d3",
+    "revenue_total_d3",
+    "all_revenue_total_d7",
+    "ad_revenue_total_d7",
+    "revenue_total_d7",
+    "all_revenue_total_d14",
+    "ad_revenue_total_d14",
+    "revenue_total_d14",
+    "all_revenue_total_d21",
+]
 
 class AdjustAPI:
-    def __init__(self, start_date, end_date, api_key):
-        self.start_date = start_date
-        self.end_date = end_date
+    def __init__(self, api_key):
         self.api_key = api_key
-        self.default_dimensions = "campaign,day,app,store_type,channel,country"
-        self.default_metrics = (
-            "network_cost,all_revenue_total_d0,ad_revenue_total_d0,revenue_total_d0,"
-            "all_revenue_total_d1,ad_revenue_total_d1,revenue_total_d1,all_revenue_total_d3,"
-            "ad_revenue_total_d3,revenue_total_d3,all_revenue_total_d7,ad_revenue_total_d7,"
-            "revenue_total_d7,all_revenue_total_d14,ad_revenue_total_d14,revenue_total_d14,"
-            "all_revenue_total_d21"
-        )
         self.uri = "https://automate.adjust.com/reports-service/report"
 
-    def fetch_report_data(self):
+    def fetch_report_data(
+        self,
+        start_date,
+        end_date,
+        dimensions=DEFAULT_DIMENSIONS,
+        metrics=DEFAULT_METRICS,
+        utc_offset="+00:00",
+        ad_spend_mode="network",
+        attribution_source="first",
+        attribution_type="all",
+        cohort_maturity="immature",
+        reattributed="all",
+        sandbox="false",
+    ):
         headers = {"Authorization": f"Bearer {self.api_key}"}
+        comma_separated_dimensions = ",".join(dimensions)
+        comma_separated_metrics = ",".join(metrics)
         params = {
-            "date_period": f"{self.start_date}:{self.end_date}",
-            "dimensions": self.default_dimensions,
-            "metrics": self.default_metrics,
-            "utc_offset": "+00:00",
-            "ad_spend_mode": "network",
-            "attribution_source": "first",
-            "attribution_type": "all",
-            "cohort_maturity": "immature",
-            "reattributed": "all",
-            "sandbox": "false",
+            "date_period": f"{start_date}:{end_date}",
+            "dimensions": comma_separated_dimensions,
+            "metrics": comma_separated_metrics,
+            "utc_offset": utc_offset,
+            "ad_spend_mode": ad_spend_mode,
+            "attribution_source": attribution_source,
+            "attribution_type": attribution_type,
+            "cohort_maturity": cohort_maturity,
+            "reattributed": reattributed,
+            "sandbox": sandbox,
         }
 
         def retry_on_limit(
@@ -50,11 +75,6 @@ class AdjustAPI:
         if response.status_code == 200:
             result = response.json()
             items = result.get("rows", [])
-
-            for item in items:
-                response_days = pendulum.parse(item["day"])
-                incremntal_days = pendulum.parse(self.start_date)
-                if response_days > incremntal_days:
-                    yield item
+            yield items
         else:
             return
