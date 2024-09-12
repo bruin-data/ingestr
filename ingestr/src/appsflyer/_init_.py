@@ -28,13 +28,9 @@ def appsflyer_source( api_key:str,
             end_date:str) -> Iterable[DltResource]:
     client = AppsflyerClient(api_key)
     
-    start_date_obj = ensure_pendulum_datetime(start_date)
     
-    @dlt.resource(write_disposition="merge", merge_key="event_time")
-    def installs(
-        event_date=dlt.sources.incremental("event_time", start_date_obj.isoformat()),
-    ) -> Iterable[TDataItem]:
-
-        yield from client.fetch_installs(create_client(),event_date.start_value,end_date,app_id)
+    @dlt.resource(write_disposition="merge", merge_key="event_date")
+    def installs() -> Iterable[TDataItem]:
+        yield from client.fetch_installs(create_client(),start_date,end_date,app_id)
    
     return installs

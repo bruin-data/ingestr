@@ -1,14 +1,10 @@
-from urllib.parse import urlencode
-
-import pendulum
-import requests
-
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import StringIO
 
+import requests
 import pandas as pd
 
-BASE_URL = "https://hq1.appsflyer.com/api/raw-data/export/app/"
+BASE_URL = "https://hq1.appsflyer.com/api/raw-data/export/app"
 
 class AppsflyerClient:
     def __init__(self, api_key: str):
@@ -19,7 +15,7 @@ class AppsflyerClient:
             "Authorization": f"{self.api_key}",
             "accept": "text/csv",
         }
-
+    
     def _fetch_pages(
         self, 
         url:str,
@@ -40,7 +36,7 @@ class AppsflyerClient:
                     "maximum_rows": maximum_rows,
                 }
 
-                response = session.get(url= url, headers=self.__get_headers(),params=params)
+                response = session.get(url = url, headers = self.__get_headers(),params = params)
 
                 if response.status_code == 200:
                     csv_data = StringIO(response.text)
@@ -53,7 +49,6 @@ class AppsflyerClient:
 
                     if len(df) >= maximum_rows:
                         min_event_time = df["Event Time"].min()
-                        print("Minimum event time found", min_event_time)
                         end = datetime.strptime(
                             min_event_time, "%Y-%m-%d %H:%M:%S"
                         )
@@ -63,7 +58,8 @@ class AppsflyerClient:
                     print("Failed to fetch data", response.status_code)
                     break
 
-       
+        
+        all_data["event_date"] = pd.to_datetime(df["Event Time"])
         yield all_data
 
     def fetch_installs(
@@ -74,5 +70,6 @@ class AppsflyerClient:
         app_id:str
     ):
         print(f"Fetching installs for {start_date} to {end_date}")
-        url = f"{BASE_URL}/{app_id}/installs_report/v5"
-        return self._fetch_pages( url,session)
+        url = f"{BASE_URL}/{app_id}/organic_installs_report/v5"
+        print("url", url)
+        return self._fetch_pages(url,session)
