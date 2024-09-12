@@ -1,5 +1,6 @@
 import requests
 from dlt.sources.helpers.requests import Client
+from requests.exceptions import HTTPError
 
 DEFAULT_DIMENSIONS = ["campaign", "day", "app", "store_type", "channel", "country"]
 
@@ -22,6 +23,7 @@ DEFAULT_METRICS = [
     "revenue_total_d14",
     "all_revenue_total_d21",
 ]
+
 
 class AdjustAPI:
     def __init__(self, api_key):
@@ -77,4 +79,4 @@ class AdjustAPI:
             items = result.get("rows", [])
             yield items
         else:
-            return
+            raise HTTPError(f"Request failed with status code: {response.status_code}")

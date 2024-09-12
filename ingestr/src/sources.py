@@ -657,11 +657,13 @@ class KafkaSource:
 
 class AdjustSource:
     def handles_incrementality(self) -> bool:
-        return False
+        return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
-            raise ValueError("Incremental loads are not supported for Adjust")
+            raise ValueError(
+                "Adjust takes care of incrementality on its own, you should not provide incremental_key"
+            )
 
         source_part = urlparse(uri)
         source_params = parse_qs(source_part.query)
@@ -670,13 +672,17 @@ class AdjustSource:
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Adjust")
 
-        start_date = kwargs.get("interval_start").strftime("%Y-%m-%d") or "2000-01-01"
-        interval_end = kwargs.get("interval_end").strftime("%Y-%m-%d")
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
 
-        if interval_end:
-            end_date = interval_end
-        else:
-            end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (
+            interval_start.strftime("%Y-%m-%d") if interval_start else "2000-01-01"
+        )
+        end_date = (
+            interval_end.strftime("%Y-%m-%d")
+            if interval_end
+            else datetime.now().strftime("%Y-%m-%d")
+        )
 
         Endpoint = None
         if table in ["campaigns"]:
