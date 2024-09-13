@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import StringIO
 
 import pandas as pd
@@ -15,7 +15,7 @@ class AppsflyerAPI:
             request_max_attempts=5,
             request_backoff_factor=10,
         ).session
-      
+
     @staticmethod
     def retry_on_limit(response: requests.Response, exception: BaseException) -> bool:
         return response.status_code == 429
@@ -24,9 +24,9 @@ class AppsflyerAPI:
         self,
         app_id,
         api_key,
-        from_date= "2024-09-10 17:00:00",
-        to_date= "2024-09-10 18:00:00",
-        maximum_rows= 1000000
+        from_date="2024-09-10 17:00:00",
+        to_date="2024-09-10 18:00:00",
+        maximum_rows=1000000,
     ):
         url = f"https://hq1.appsflyer.com/api/raw-data/export/app/{app_id}/installs_report/v5"
         headers = {"accept": "text/csv", "Authorization": f"Bearer {api_key}"}
@@ -67,5 +67,4 @@ class AppsflyerAPI:
                     print("Failed to fetch data", response.status_code)
                     break
 
-        
         yield all_data
