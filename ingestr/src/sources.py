@@ -677,7 +677,7 @@ class AppsflyerSource:
             raise ValueError("api_key in the URI is required to connect to Appsflyer")
 
         resource = None
-        if table in ["installs"]:
+        if table in ["installs", "Organic installs"]:
             resource = table
         else:
             raise ValueError(

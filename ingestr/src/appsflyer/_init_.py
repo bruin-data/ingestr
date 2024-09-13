@@ -33,4 +33,10 @@ def appsflyer_source(
     def installs() -> Iterable[TDataItem]:
         yield from client.fetch_installs(create_client(), start_date, end_date, app_id)
 
-    return installs
+    @dlt.resource(write_disposition="merge", merge_key="touch_time")
+    def organic_installs() -> Iterable[TDataItem]:
+        yield from client.fetch_organic_installs(
+            create_client(), start_date, end_date, app_id
+        )
+
+    return installs, organic_installs

@@ -70,3 +70,11 @@ class AppsflyerClient:
         url = f"{BASE_URL}/{app_id}/installs_report/v5"
         print("url", url)
         return self._fetch_pages(url, session, start_date, end_date)
+
+    def fetch_organic_installs(
+        self, session: requests.Session, start_date: str, end_date: str, app_id: str
+    ):
+        print(f"Fetching organic installs for {start_date} to {end_date}")
+        url = f"{BASE_URL}/{app_id}/organic_installs_report/v5"
+        print("url", url)
+        return self._fetch_pages(url, session, start_date, end_date)
