@@ -667,29 +667,24 @@ class AppsflyerSource:
 
         source_fields = urlparse(uri)
         source_params = parse_qs(source_fields.query)
-        app_id = source_params.get("app_id")
         api_key = source_params.get("api_key")
-
-        if not app_id:
-            raise ValueError("api_id in the URI is required to connect to Appsflyer")
 
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Appsflyer")
 
         resource = None
-        if table in ["installs", "Organic installs"]:
+        if table in ["campaigns"]:
             resource = table
         else:
             raise ValueError(
                 f"Resource '{table}' is not supported for Appsflyer source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
-        start_date = kwargs.get("interval_start") or "2024-09-1 17:00:00"
-        end_date = kwargs.get("interval_end") or "2024-09-10 2:00:00"
+        start_date = kwargs.get("interval_start") or "2024-08-24"
+        end_date = kwargs.get("interval_end") or "2024-08-25"
 
         return appsflyer_source(
             api_key=api_key[0],
-            app_id=app_id[0],
             start_date=start_date,
             end_date=end_date,
         ).with_resources(resource)

@@ -1,10 +1,25 @@
-from datetime import datetime
-from io import StringIO
-
-import pandas as pd
 import requests
+from dlt.sources.helpers.requests import Client
 
-BASE_URL = "https://hq1.appsflyer.com/api/raw-data/export/app"
+BASE_URL = "https://hq1.appsflyer.com/api"
+DEFAULT_GROUPING = ["af_c_id", "geo", "af_adset", "af_channel", "install_time"]
+DEFAULT_KPIS = [
+    "impressions",
+    "clicks",
+    "installs",
+    "cost",
+    "revenue",
+    "roi",
+    "average_ecpi",
+    "loyal_users",
+    "uninstalls",
+    "retention_day_7",
+    "cr",
+    "sessions",
+    "arpu_ltv",
+    "retention_day_7",
+    "retention_rate_day_7",
+]
 
 
 class AppsflyerClient:
@@ -14,67 +29,50 @@ class AppsflyerClient:
     def __get_headers(self):
         return {
             "Authorization": f"{self.api_key}",
-            "accept": "text/csv",
+            "accept": "text/json",
         }
 
-    def _fetch_pages(
+    def _fetch_data(
         self,
         url: str,
-        session: requests.Session,
         from_date: str,
         to_date: str,
         maximum_rows=1000000,
     ):
-        all_data = pd.DataFrame()
-        end = datetime.strptime(to_date, "%Y-%m-%d %H:%M:%S")
-        start = datetime.strptime(from_date, "%Y-%m-%d %H:%M:%S")
+        params = {
+            "from": from_date,
+            "to": to_date,
+            "groupings": ",".join(DEFAULT_GROUPING),
+            "kpis": ",".join(DEFAULT_KPIS),
+            "format": "json",
+            "maximum_rows": maximum_rows,
+        }
 
-        while end > start:
-            while True:
-                params = {
-                    "from": start.strftime("%Y-%m-%d %H:%M"),
-                    "to": end.strftime("%Y-%m-%d %H:%M"),
-                    "timezone": "Europe/Berlin",
-                    "maximum_rows": maximum_rows,
-                }
+        def retry_on_limit(
+            response: requests.Response, exception: BaseException
+        ) -> bool:
+            return response.status_code == 429
 
-                response = session.get(
-                    url=url, headers=self.__get_headers(), params=params
-                )
-                print("response", response)
-                if response.status_code == 200:
-                    csv_data = StringIO(response.text)
-                    df = pd.read_csv(csv_data)
+        request_client = Client(
+            request_timeout=10.0,
+            raise_for_status=False,
+            retry_condition=retry_on_limit,
+            request_max_attempts=12,
+            request_backoff_factor=2,
+        ).session
 
-                    if df.empty:
-                        break
+        response = request_client.get(
+            url=url, headers=self.__get_headers(), params=params
+        )
 
-                    all_data = pd.concat([all_data, df], ignore_index=True)
+        if response.status_code == 200:
+            result = response.json()
+            yield result
 
-                    if len(df) >= maximum_rows:
-                        min_event_time = df["Event Time"].min()
-                        end = datetime.strptime(min_event_time, "%Y-%m-%d %H:%M:%S")
-                    else:
-                        break
-                else:
-                    print("Failed to fetch data", response.status_code)
-                    break
-
-        all_data["event_date"] = pd.to_datetime(df["Event Time"])
-        yield all_data
-
-    def fetch_installs(
-        self, session: requests.Session, start_date: str, end_date: str, app_id: str
+    def fetch_campaigns(
+        self,
+        start_date: str,
+        end_date: str,
     ):
-        print(f"Fetching installs for {start_date} to {end_date}")
-        url = f"{BASE_URL}/{app_id}/installs_report/v5"
-        print("url", url)
-        return self._fetch_pages(url, session, start_date, end_date)
-
-    def fetch_organic_installs(
-        self, session: requests.Session, start_date: str, end_date: str, app_id: str
-    ):
-        print(f"Fetching organic installs for {start_date} to {end_date}")
-        url = f"{BASE_URL}/{app_id}/organic_installs_report/v5"
-        print("url", url)
-        return self._fetch_pages(url, session, start_date, end_date)
+        url = f"{BASE_URL}/master-agg-data/v4/app/all"
+        return self._fetch_data(url, start_date, end_date)
