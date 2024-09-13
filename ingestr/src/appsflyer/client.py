@@ -1,5 +1,6 @@
 import requests
 from dlt.sources.helpers.requests import Client
+from requests.exceptions import HTTPError
 
 BASE_URL = "https://hq1.appsflyer.com/api"
 DEFAULT_GROUPING = ["af_c_id", "geo", "af_adset", "af_channel", "install_time"]
@@ -25,12 +26,27 @@ DEFAULT_KPIS = [
 class AppsflyerClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
+        self.client = self._create_client()
 
     def __get_headers(self):
         return {
             "Authorization": f"{self.api_key}",
             "accept": "text/json",
         }
+
+    def _create_client(self) -> Client:
+        def retry_on_limit(
+            response: requests.Response, exception: BaseException
+        ) -> bool:
+            return response.status_code == 429
+
+        return Client(
+            request_timeout=10.0,
+            raise_for_status=False,
+            retry_condition=retry_on_limit,
+            request_max_attempts=12,
+            request_backoff_factor=2,
+        ).session
 
     def _fetch_data(
         self,
@@ -48,26 +64,21 @@ class AppsflyerClient:
             "maximum_rows": maximum_rows,
         }
 
-        def retry_on_limit(
-            response: requests.Response, exception: BaseException
-        ) -> bool:
-            return response.status_code == 429
+        try:
+            response = self.client.get(
+                url=url, headers=self.__get_headers(), params=params
+            )
 
-        request_client = Client(
-            request_timeout=10.0,
-            raise_for_status=False,
-            retry_condition=retry_on_limit,
-            request_max_attempts=12,
-            request_backoff_factor=2,
-        ).session
+            if response.status_code == 200:
+                result = response.json()
+                yield result
+            else:
+                raise HTTPError(
+                    f"Request failed with status code: {response.status_code}"
+                )
 
-        response = request_client.get(
-            url=url, headers=self.__get_headers(), params=params
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            yield result
+        except requests.RequestException as e:
+            raise HTTPError(f"Request failed: {e}")
 
     def fetch_campaigns(
         self,
