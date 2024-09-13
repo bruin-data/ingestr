@@ -10,7 +10,7 @@ from ingestr.src.appsflyer.client import AppsflyerClient
 
 
 def retry_on_limit(response: requests.Response, exception: BaseException) -> bool:
-    return response.status_code == 429
+    return response.status_code == 429 if response else False
 
 
 def create_client() -> requests.Session:
