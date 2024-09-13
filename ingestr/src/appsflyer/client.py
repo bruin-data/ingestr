@@ -1,3 +1,5 @@
+from typing import Optional
+
 import requests
 from dlt.sources.helpers.requests import Client
 from requests.exceptions import HTTPError
@@ -36,9 +38,11 @@ class AppsflyerClient:
 
     def _create_client(self) -> Client:
         def retry_on_limit(
-            response: requests.Response, exception: BaseException
+            response: Optional[requests.Response], exception: Optional[BaseException]
         ) -> bool:
-            return response.status_code == 429
+            return (
+                isinstance(response, requests.Response) and response.status_code == 429
+            )
 
         return Client(
             request_timeout=10.0,
