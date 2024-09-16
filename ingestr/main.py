@@ -4,6 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
+import re
 import dlt
 import humanize
 import typer
@@ -251,6 +252,10 @@ def ingest(
             envvar="EXTRACT_PARALLELISM",
         ),
     ] = 5,  # type: ignore
+    columns: Annotated[
+        Optional[list[str]],
+        typer.Option(help="The column hints to apply to the resource(s)")
+    ] = None,  # type: ignore
 ):
     track(
         "command_triggered",
@@ -323,6 +328,27 @@ def ingest(
             else "Platform-specific"
         )
 
+        cols = dict()
+        if columns:
+            for col in columns:
+                col = re.sub('[^0-9a-zA-Z_]+', ':', col)
+                properties = col.split(':')
+
+                if len(properties) == 1 or len(properties) > 3:
+                    raise ValueError("Argument format is incorrect. Expected format: <column name>:<column type>:<nullable or not>")
+
+                if len(properties) == 3:
+                    properties[2] = True if properties[2] == 'nullable' else False
+                else:
+                    properties.append(False)  
+
+                col_properties = {
+                    "data_type": properties[1],
+                    "nullable": properties[2]
+                }
+                cols[properties[0]] = col_properties
+
+
         print()
         print("[bold green]Initiated the pipeline with the following:[/bold green]")
         print(
@@ -339,6 +365,9 @@ def ingest(
         )
         print(
             f"[bold yellow]  Primary Key:[/bold yellow] {primary_key if primary_key else 'None'}"
+        )
+        print(
+            f"[bold yellow]  Column Hints:[/bold yellow] {cols if cols else 'None'}"
         )
         print()
 
@@ -364,6 +393,16 @@ def ingest(
             sql_backend=sql_backend.value,
             page_size=page_size,
         )
+
+        if cols:
+            if hasattr(dlt_source, 'selected_resources') and dlt_source.selected_resources:
+                resource_names = list(dlt_source.selected_resources.keys())
+                for res in resource_names:
+                    dlt_source.resources[res].apply_hints(columns=cols)
+            else:
+                # If there are no selected resources or the attribute doesn't exist,
+                # apply hints to the entire source
+                dlt_source.apply_hints(columns=cols)
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
             dlt_source.incremental.primary_key = ()
