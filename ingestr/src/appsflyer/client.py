@@ -50,7 +50,7 @@ class AppsflyerClient:
             retry_condition=retry_on_limit,
             request_max_attempts=12,
             request_backoff_factor=2,
-        ).session
+        )
 
     def _fetch_data(
         self,
