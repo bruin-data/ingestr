@@ -26,3 +26,5 @@ Available Source Table:
 Adjust source allows ingesting the following source into separate tables:
 
 -`Campaigns`: Retrieves data for a campaign, showing the app's revenue and network costs over multiple days.
+
+--`Creatives`: Retrieves data for a creative assest, detailing the app's revenue and network costs across multiple days

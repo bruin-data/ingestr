@@ -685,7 +685,7 @@ class AdjustSource:
         )
 
         Endpoint = None
-        if table in ["campaigns"]:
+        if table in ["campaigns","creatives"]:
             Endpoint = table
 
         return adjust_source(

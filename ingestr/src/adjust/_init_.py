@@ -4,7 +4,7 @@ import dlt
 from dlt.sources import DltResource
 
 from .helpers import AdjustAPI
-
+from .helpers import DEFAULT_DIMENSIONS
 
 @dlt.source(max_table_nesting=0)
 def adjust_source(
@@ -19,5 +19,15 @@ def adjust_source(
             start_date=start_date,
             end_date=end_date,
         )
+    
+    @dlt.resource(write_disposition="merge", merge_key="day")
+    def creatives():
+        dimensions = DEFAULT_DIMENSIONS + ["adgroup", "creative"]
+        adjust_api = AdjustAPI(api_key=api_key)
+        yield from adjust_api.fetch_report_data(
+            start_date=start_date,
+            end_date=end_date,
+            dimensions= dimensions
+        )
 
-    return campaigns
+    return campaigns,creatives
