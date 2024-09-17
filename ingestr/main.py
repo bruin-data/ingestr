@@ -4,7 +4,6 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-import re
 import dlt
 import humanize
 import typer
@@ -16,6 +15,8 @@ from typing_extensions import Annotated
 
 from ingestr.src.factory import SourceDestinationFactory
 from ingestr.src.telemetry.event import track
+
+from ingestr.src.factory import parse_columns
 
 app = typer.Typer(
     name="ingestr",
@@ -316,6 +317,8 @@ def ingest(
             progress=progressInstance,
             pipelines_dir=pipelines_dir,
             refresh="drop_resources" if full_refresh else None,
+            import_schema_path='./schema/import/import_schema.json',
+            export_schema_path='./schema/export/export_schema.json',
         )
 
         if source.handles_incrementality():
@@ -328,27 +331,8 @@ def ingest(
             else "Platform-specific"
         )
 
-        cols = dict()
-        if columns:
-            for col in columns:
-                col = re.sub('[^0-9a-zA-Z_]+', ':', col)
-                properties = col.split(':')
-
-                if len(properties) == 1 or len(properties) > 3:
-                    raise ValueError("Argument format is incorrect. Expected format: <column name>:<column type>:<nullable or not>")
-
-                if len(properties) == 3:
-                    properties[2] = True if properties[2] == 'nullable' else False
-                else:
-                    properties.append(False)  
-
-                col_properties = {
-                    "data_type": properties[1],
-                    "nullable": properties[2]
-                }
-                cols[properties[0]] = col_properties
-
-
+        cols = parse_columns(columns)
+        
         print()
         print("[bold green]Initiated the pipeline with the following:[/bold green]")
         print(

@@ -1,5 +1,6 @@
 from typing import Protocol
 from urllib.parse import urlparse
+import re
 
 from dlt.common.destination import Destination
 
@@ -158,3 +159,40 @@ class SourceDestinationFactory:
             raise ValueError(
                 f"Unsupported destination scheme: {self.destination_scheme}"
             )
+
+def parse_columns(columns: list[str]) -> dict:
+    valid_data_types = ['text', 'double', 'bool', 'timestamp', 'bigint', 'binary', 'complex', 'decimal', 'wei', 'date', 'time']
+    cols = dict()
+    if columns:
+        for col in columns:
+            properties = col.split(':')
+
+            # check the number of properties
+            if len(properties) != 2 and len(properties) != 3:
+                raise ValueError("Argument format is incorrect. Expected format: <column name>:<column type>:<nullable or not (leave empty for not nullable)>")
+
+            # check if the column name is a valid column name
+            column_name = properties[0]
+            if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', column_name):
+                raise ValueError(f"Invalid column name: {column_name}. Column names must start with a letter or underscore and contain only letters, digits, and underscores.")
+
+            # check if the data type is valid
+            data_type = properties[1].lower()
+            if data_type not in valid_data_types:
+                raise ValueError(f"Invalid data type: {data_type}. Please use one of the following: {valid_data_types}")
+
+            # check and set nullability to true if the argument is 'nullable'
+            nullability = False
+            if len(properties) == 3:
+                if properties[2].lower() == 'nullable':
+                    nullability = True
+                else:
+                    raise ValueError("Argument format is incorrect. Please write 'nullable' to set nullability to true, otherwise leave empty (ex: <col_name>:<data_type>).")
+            
+            column_properties = {
+                "data_type": data_type,
+                "nullable": nullability
+            }
+            cols[column_name] = column_properties
+
+    return cols
