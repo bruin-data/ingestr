@@ -30,6 +30,8 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
+    S3Source,
+    
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -126,6 +128,8 @@ class SourceDestinationFactory:
             return KlaviyoSource()
         elif self.source_scheme == "kafka":
             return KafkaSource()
+        elif self.source_scheme == "s3":
+            return S3Source()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

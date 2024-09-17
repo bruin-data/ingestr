@@ -23,6 +23,7 @@ from ingestr.src.slack import slack_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.filesystem import readers
 
 
 class SqlSource:
@@ -652,3 +653,36 @@ class KafkaSource:
             batch_size=int(batch_size[0]),
             batch_timeout=int(batch_timeout[0]),
         )
+    
+
+class S3Source:
+    def handles_incrementality(self) -> bool:
+        return True
+    
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+                raise ValueError(
+                    "S3 takes care of incrementality on its own, you should not provide incremental_key"
+                )
+            
+        #s3://ingestrbucket/book.csv =>
+        #api_key, #secret_key, #bucket_uri,
+        source_parts = urlparse(uri)
+        source_fields = parse_qs(source_parts.query)
+        bucket_uri = source_fields.get("bucket_uri")
+        file_glob = bucket_uri[0].split('/')[-1]
+        file_extension = file_glob.split('.')[-1].lower()
+        bucket_path = bucket_uri[0].rpartition('/')[0]
+       
+        if file_extension == 'csv':
+            endpoint = "read_csv"
+        elif file_extension == 'json':
+            endpoint = "read_jsonl"
+        elif file_extension == 'parquet':
+            endpoint = "read_parquet"
+        else:
+            raise ValueError("S3 Source only supports specific formats files: csv, json, parquet")
+      
+        return readers(bucket_url=bucket_path, file_glob=file_glob).with_resources(
+                   endpoint
+                )
