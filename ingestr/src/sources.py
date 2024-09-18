@@ -1,12 +1,13 @@
 import base64
 import csv
 import json
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 import dlt
 
+from ingestr.src.adjust._init_ import adjust_source
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.chess import source
@@ -653,6 +654,44 @@ class KafkaSource:
             batch_size=int(batch_size[0]),
             batch_timeout=int(batch_timeout[0]),
         )
+
+
+class AdjustSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Adjust takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        source_part = urlparse(uri)
+        source_params = parse_qs(source_part.query)
+        api_key = source_params.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Adjust")
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        start_date = (
+            interval_start.strftime("%Y-%m-%d") if interval_start else "2000-01-01"
+        )
+        end_date = (
+            interval_end.strftime("%Y-%m-%d")
+            if interval_end
+            else datetime.now().strftime("%Y-%m-%d")
+        )
+
+        Endpoint = None
+        if table in ["campaigns", "creatives"]:
+            Endpoint = table
+
+        return adjust_source(
+            start_date=start_date, end_date=end_date, api_key=api_key[0]
+        ).with_resources(Endpoint)
 
 
 class AppsflyerSource:

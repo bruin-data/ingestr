@@ -15,6 +15,7 @@ from ingestr.src.destinations import (
     SynapseDestination,
 )
 from ingestr.src.sources import (
+    AdjustSource,
     AirtableSource,
     AppsflyerSource,
     ChessSource,
@@ -129,7 +130,8 @@ class SourceDestinationFactory:
             return AppsflyerSource()
         elif self.source_scheme == "kafka":
             return KafkaSource()
-
+        elif self.source_scheme == "adjust":
+            return AdjustSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

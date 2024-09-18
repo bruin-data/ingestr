@@ -130,6 +130,9 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
     <tr>
         <td colspan="3" style='text-align:center;'><strong>Platforms</strong></td>
     </tr>
+    <td>Adjust</td>
+        <td>✅</td>
+        <td>-</td>
     <tr>
         <td>Airtable</td>
         <td>✅</td>
