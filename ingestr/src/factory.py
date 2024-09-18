@@ -15,8 +15,8 @@ from ingestr.src.destinations import (
     SynapseDestination,
 )
 from ingestr.src.sources import (
-    AdjustSource,
     AirtableSource,
+    AppsflyerSource,
     ChessSource,
     FacebookAdsSource,
     GoogleSheetsSource,
@@ -125,10 +125,11 @@ class SourceDestinationFactory:
             return AirtableSource()
         elif self.source_scheme == "klaviyo":
             return KlaviyoSource()
+        elif self.source_scheme == "appsflyer":
+            return AppsflyerSource()
         elif self.source_scheme == "kafka":
             return KafkaSource()
-        elif self.source_scheme == "adjust":
-            return AdjustSource()
+
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
