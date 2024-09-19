@@ -39,7 +39,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: make deps-ci
       - name: remove containers
-        run: docker rm -f $(docker ps -a -q)
+        run: "docker rm -f $(docker ps -a -q)"
       - name: run tests
         run: make test-ci
       - name: check the formatting
