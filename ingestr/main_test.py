@@ -371,10 +371,12 @@ SOURCES = {
     "mysql8": DockerImage(
         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
     ),
-    "sqlserver": DockerImage(
-        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
-        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
-    ),
+    
+    # "sqlserver": DockerImage(
+    # lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+    # "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+   # ),
+    
 }
 
 DESTINATIONS = {
