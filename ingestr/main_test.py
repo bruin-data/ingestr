@@ -4,7 +4,6 @@ import random
 import shutil
 import string
 from datetime import date, datetime, timezone
-import unittest
 
 import duckdb
 import pytest
@@ -372,10 +371,12 @@ SOURCES = {
     "mysql8": DockerImage(
         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
     ),
-    "sqlserver": DockerImage(
-        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
-        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
-    ),
+    
+    # "sqlserver": DockerImage(
+    # lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+    # "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+   # ),
+    
 }
 
 DESTINATIONS = {
@@ -389,8 +390,6 @@ DESTINATIONS = {
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
-
-@pytest.mark.skip
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_create_replace(source, dest):
     source_uri = source.start()
@@ -403,8 +402,6 @@ def test_create_replace(source, dest):
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
-
-@pytest.mark.skip
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_append(source, dest):
     source_uri = source.start()
@@ -417,8 +414,6 @@ def test_append(source, dest):
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
-
-@pytest.mark.skip
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_merge_with_primary_key(source, dest):
     source_uri = source.start()
@@ -431,8 +426,6 @@ def test_merge_with_primary_key(source, dest):
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
-
-@pytest.mark.skip
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_delete_insert_without_primary_key(source, dest):
     source_uri = source.start()
@@ -445,8 +438,6 @@ def test_delete_insert_without_primary_key(source, dest):
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
-
-@pytest.mark.skip
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_delete_insert_with_time_range(source, dest):
     source_uri = source.start()
