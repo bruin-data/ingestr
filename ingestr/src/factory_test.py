@@ -38,30 +38,36 @@ def test_parse_columns_all_data_types():
         "col5:bigint", "col6:binary", "col7:complex", "col8:decimal",
         "col9:wei", "col10:date", "col11:time"
     ]
+    expected_output = {
+        "col1": {"data_type": "text", "nullable": False},
+        "col2": {"data_type": "double", "nullable": False},
+        "col3": {"data_type": "bool", "nullable": False},
+        "col4": {"data_type": "timestamp", "nullable": False},
+        "col5": {"data_type": "bigint", "nullable": False},
+        "col6": {"data_type": "binary", "nullable": False},
+        "col7": {"data_type": "complex", "nullable": False},
+        "col8": {"data_type": "decimal", "nullable": False},
+        "col9": {"data_type": "wei", "nullable": False},
+        "col10": {"data_type": "date", "nullable": False},
+        "col11": {"data_type": "time", "nullable": False},
+    }    
+
     result = parse_columns(input_columns)
     assert len(result) == 11
-    for col, props in result.items():
-        assert props["nullable"] == False
+    assert result == expected_output
+
 
 def test_parse_columns_invalid_format():
     with pytest.raises(ValueError, match="Argument format is incorrect"):
         parse_columns(["invalid_column"])
-
-def test_parse_columns_invalid_column_name():
     with pytest.raises(ValueError, match="Invalid column name"):
         parse_columns(["1invalid:text"])
-
     with pytest.raises(ValueError, match="Invalid column name"):
         parse_columns(["-invalid:text"])
-        
     with pytest.raises(ValueError, match="Invalid column name"):
         parse_columns(["invalid@column:text"])
-
-def test_parse_columns_invalid_data_type():
     with pytest.raises(ValueError, match="Invalid data type"):
         parse_columns(["valid_name:invalid_type"])
-
-def test_parse_columns_invalid_nullable():
     with pytest.raises(ValueError, match="Argument format is incorrect"):
         parse_columns(["valid_name:text:invalid"])
 
@@ -77,10 +83,11 @@ def test_parse_columns_mixed_valid_invalid():
 
 def test_parse_columns_case_sensitivity():
     input_columns = ["COL1:TEXT", "Col2:Double:NULLABLE"]
-    result = parse_columns(input_columns)
-    assert "COL1" in result
-    assert result["COL1"]["data_type"] == "text"
-    assert result["Col2"]["nullable"] == True
+    expected_output = {
+        "COL1": {"data_type": "text", "nullable": False},
+        "Col2": {"data_type": "double", "nullable": True}
+    }    
+    assert parse_columns(input_columns) == expected_output
 
 def test_parse_columns_underscore_in_name():
     input_columns = ["valid_column_name:text"]
