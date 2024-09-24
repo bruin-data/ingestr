@@ -189,11 +189,6 @@ class ShopifySource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        if kwargs.get("incremental_key"):
-            raise ValueError(
-                "Shopify takes care of incrementality on its own, you should not provide incremental_key"
-            )
-
         source_fields = urlparse(uri)
         source_params = parse_qs(source_fields.query)
         api_key = source_params.get("api_key")
@@ -208,7 +203,16 @@ class ShopifySource:
             date_args["end_date"] = kwargs.get("interval_end")
 
         resource = None
-        if table in ["products", "orders", "customers"]:
+        if table in [
+            "products",
+            "orders",
+            "customers",
+            "inventory_items",
+            "transactions",
+            "balance",
+            "events",
+            "price_rules"
+        ]:
             resource = table
         else:
             raise ValueError(
