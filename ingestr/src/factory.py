@@ -31,6 +31,7 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
+    GoogleAdsSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -129,6 +130,8 @@ class SourceDestinationFactory:
             return KafkaSource()
         elif self.source_scheme == "adjust":
             return AdjustSource()
+        elif self.source_scheme == "googleads":
+            return GoogleAdsSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

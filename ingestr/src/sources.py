@@ -24,6 +24,7 @@ from ingestr.src.slack import slack_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.google_ads  import google_ads
 
 
 class SqlSource:
@@ -694,4 +695,25 @@ class AdjustSource:
 
         return adjust_source(
             start_date=start_date, end_date=end_date, api_key=api_key[0]
+        ).with_resources(Endpoint)
+
+class GoogleAdsSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Incremental loads are not supported for GoogleAds"
+            )
+        
+        Endpoint = None
+        if table in ["customers", "campaigns", "change_events", "customer_clients"]:
+            Endpoint = table
+        
+        return google_ads(
+            credentials="",
+            impersonated_email="",
+            dev_token=""
+            
         ).with_resources(Endpoint)
