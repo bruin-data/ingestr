@@ -1,0 +1,1443 @@
+(base) caner@caner:~/ingestr$ make test
+. venv/bin/activate; make test-ci
+make[1]: Entering directory '/home/caner/ingestr'
+pytest -rP -vv --tb=short --cov=ingestr --no-cov-on-fail
+=================================================================== test session starts ====================================================================
+platform linux -- Python 3.11.7, pytest-8.1.1, pluggy-1.5.0 -- /home/caner/ingestr/venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/caner/ingestr
+configfile: pyproject.toml
+testpaths: ingestr
+plugins: time-machine-2.15.0, cov-4.1.0
+collected 89 items
+
+ingestr/main_test.py::test_create_replace_csv_to_duckdb PASSED                                                                                       [  1%]
+ingestr/main_test.py::test_merge_with_primary_key_csv_to_duckdb PASSED                                                                               [  2%]
+ingestr/main_test.py::test_delete_insert_without_primary_key_csv_to_duckdb PASSED                                                                    [  3%]
+ingestr/main_test.py::test_create_replace[postgres-postgres] PASSED                                                                                  [  4%]
+ingestr/main_test.py::test_create_replace[postgres-duckdb] PASSED                                                                                    [  5%]
+ingestr/main_test.py::test_create_replace[duckdb-postgres] PASSED                                                                                    [  6%]
+ingestr/main_test.py::test_create_replace[duckdb-duckdb] PASSED                                                                                      [  7%]
+ingestr/main_test.py::test_create_replace[mysql8-postgres] PASSED                                                                                    [  8%]
+ingestr/main_test.py::test_create_replace[mysql8-duckdb] PASSED                                                                                      [ 10%]
+ingestr/main_test.py::test_create_replace[sqlserver-postgres] FAILED                                                                                 [ 11%]
+ingestr/main_test.py::test_create_replace[sqlserver-duckdb] FAILED                                                                                   [ 12%]
+ingestr/main_test.py::test_append[postgres-postgres] FAILED                                                                                          [ 13%]
+ingestr/main_test.py::test_append[postgres-duckdb] FAILED                                                                                            [ 14%]
+ingestr/main_test.py::test_append[duckdb-postgres] FAILED                                                                                            [ 15%]
+ingestr/main_test.py::test_append[duckdb-duckdb] FAILED                                                                                              [ 16%]
+ingestr/main_test.py::test_append[mysql8-postgres] FAILED                                                                                            [ 17%]
+ingestr/main_test.py::test_append[mysql8-duckdb] FAILED                                                                                              [ 19%]
+ingestr/main_test.py::test_append[sqlserver-postgres] FAILED                                                                                         [ 20%]
+ingestr/main_test.py::test_append[sqlserver-duckdb] FAILED                                                                                           [ 21%]
+ingestr/main_test.py::test_merge_with_primary_key[postgres-postgres] PASSED                                                                          [ 22%]
+ingestr/main_test.py::test_merge_with_primary_key[postgres-duckdb] PASSED                                                                            [ 23%]
+ingestr/main_test.py::test_merge_with_primary_key[duckdb-postgres] PASSED                                                                            [ 24%]
+ingestr/main_test.py::test_merge_with_primary_key[duckdb-duckdb] PASSED                                                                              [ 25%]
+ingestr/main_test.py::test_merge_with_primary_key[mysql8-postgres] PASSED                                                                            [ 26%]
+ingestr/main_test.py::test_merge_with_primary_key[mysql8-duckdb] PASSED                                                                              [ 28%]
+ingestr/main_test.py::test_merge_with_primary_key[sqlserver-postgres] FAILED                                                                         [ 29%]
+ingestr/main_test.py::test_merge_with_primary_key[sqlserver-duckdb] FAILED                                                                           [ 30%]
+ingestr/main_test.py::test_delete_insert_without_primary_key[postgres-postgres] PASSED                                                               [ 31%]
+ingestr/main_test.py::test_delete_insert_without_primary_key[postgres-duckdb] PASSED                                                                 [ 32%]
+ingestr/main_test.py::test_delete_insert_without_primary_key[duckdb-postgres] PASSED                                                                 [ 33%]
+ingestr/main_test.py::test_delete_insert_without_primary_key[duckdb-duckdb] PASSED                                                                   [ 34%]
+ingestr/main_test.py::test_delete_insert_without_primary_key[mysql8-postgres] FAILED                                                                 [ 35%]
+ingestr/main_test.py::test_delete_insert_without_primary_key[mysql8-duckdb] PASSED                                                                   [ 37%]
+ingestr/main_test.py::test_delete_insert_without_primary_key[sqlserver-postgres] FAILED                                                              [ 38%]
+ingestr/main_test.py::test_delete_insert_without_primary_key[sqlserver-duckdb] FAILED                                                                [ 39%]
+ingestr/main_test.py::test_delete_insert_with_time_range[postgres-postgres] PASSED                                                                   [ 40%]
+ingestr/main_test.py::test_delete_insert_with_time_range[postgres-duckdb] PASSED                                                                     [ 41%]
+ingestr/main_test.py::test_delete_insert_with_time_range[duckdb-postgres] PASSED                                                                     [ 42%]
+ingestr/main_test.py::test_delete_insert_with_time_range[duckdb-duckdb] PASSED                                                                       [ 43%]
+ingestr/main_test.py::test_delete_insert_with_time_range[mysql8-postgres] PASSED                                                                     [ 44%]
+ingestr/main_test.py::test_delete_insert_with_time_range[mysql8-duckdb] PASSED                                                                       [ 46%]
+ingestr/main_test.py::test_delete_insert_with_time_range[sqlserver-postgres] FAILED                                                                  [ 47%]
+ingestr/main_test.py::test_delete_insert_with_time_range[sqlserver-duckdb] FAILED                                                                    [ 48%]
+ingestr/main_test.py::test_kafka_to_db[postgres] PASSED                                                                                              [ 49%]
+ingestr/main_test.py::test_kafka_to_db[duckdb] PASSED                                                                                                [ 50%]
+ingestr/src/destinations_test.py::BigQueryDestinationTest::test_bq_destination_cred_path_required PASSED                                             [ 51%]
+ingestr/src/destinations_test.py::BigQueryDestinationTest::test_bq_destination_run_params_parse_table_names_correctly PASSED                         [ 52%]
+ingestr/src/destinations_test.py::BigQueryDestinationTest::test_bq_destination_run_params_require_two_or_three_fields PASSED                         [ 53%]
+ingestr/src/destinations_test.py::BigQueryDestinationTest::test_bq_destination_simple_uri PASSED                                                     [ 55%]
+ingestr/src/destinations_test.py::BigQueryDestinationTest::test_bq_destination_with_location PASSED                                                  [ 56%]
+ingestr/src/destinations_test.py::PostgresDestinationTest::test_credentials_are_passed_correctly PASSED                                              [ 57%]
+ingestr/src/destinations_test.py::PostgresDestinationTest::test_destination_run_params_parse_table_names_correctly PASSED                            [ 58%]
+ingestr/src/destinations_test.py::PostgresDestinationTest::test_destination_run_params_require_two_fields PASSED                                     [ 59%]
+ingestr/src/destinations_test.py::SnowflakeDestinationTest::test_credentials_are_passed_correctly PASSED                                             [ 60%]
+ingestr/src/destinations_test.py::SnowflakeDestinationTest::test_destination_run_params_parse_table_names_correctly PASSED                           [ 61%]
+ingestr/src/destinations_test.py::SnowflakeDestinationTest::test_destination_run_params_require_two_fields PASSED                                    [ 62%]
+ingestr/src/destinations_test.py::RedshiftDestinationTest::test_credentials_are_passed_correctly PASSED                                              [ 64%]
+ingestr/src/destinations_test.py::RedshiftDestinationTest::test_destination_run_params_parse_table_names_correctly PASSED                            [ 65%]
+ingestr/src/destinations_test.py::RedshiftDestinationTest::test_destination_run_params_require_two_fields PASSED                                     [ 66%]
+ingestr/src/destinations_test.py::DuckDBDestinationTest::test_credentials_are_passed_correctly PASSED                                                [ 67%]
+ingestr/src/destinations_test.py::DuckDBDestinationTest::test_destination_run_params_parse_table_names_correctly PASSED                              [ 68%]
+ingestr/src/destinations_test.py::DuckDBDestinationTest::test_destination_run_params_require_two_fields PASSED                                       [ 69%]
+ingestr/src/destinations_test.py::MsSQLDestinationTest::test_credentials_are_passed_correctly PASSED                                                 [ 70%]
+ingestr/src/destinations_test.py::MsSQLDestinationTest::test_destination_run_params_parse_table_names_correctly PASSED                               [ 71%]
+ingestr/src/destinations_test.py::MsSQLDestinationTest::test_destination_run_params_require_two_fields PASSED                                        [ 73%]
+ingestr/src/destinations_test.py::DatabricksDestinationTest::test_credentials_are_passed_correctly PASSED                                            [ 74%]
+ingestr/src/destinations_test.py::DatabricksDestinationTest::test_destination_run_params_parse_table_names_correctly PASSED                          [ 75%]
+ingestr/src/destinations_test.py::DatabricksDestinationTest::test_destination_run_params_require_two_fields PASSED                                   [ 76%]
+ingestr/src/factory_test.py::test_scheme_is_parsed_from_uri_correctly PASSED                                                                         [ 77%]
+ingestr/src/factory_test.py::test_parse_columns_valid_input PASSED                                                                                   [ 78%]
+ingestr/src/factory_test.py::test_parse_columns_empty_input PASSED                                                                                   [ 79%]
+ingestr/src/factory_test.py::test_parse_columns_none_input PASSED                                                                                    [ 80%]
+ingestr/src/factory_test.py::test_parse_columns_all_data_types PASSED                                                                                [ 82%]
+ingestr/src/factory_test.py::test_parse_columns_invalid_format PASSED                                                                                [ 83%]
+ingestr/src/factory_test.py::test_parse_columns_mixed_valid_invalid PASSED                                                                           [ 84%]
+ingestr/src/factory_test.py::test_parse_columns_case_sensitivity PASSED                                                                              [ 85%]
+ingestr/src/factory_test.py::test_parse_columns_underscore_in_name PASSED                                                                            [ 86%]
+ingestr/src/factory_test.py::test_parse_columns_duplicate_names PASSED                                                                               [ 87%]
+ingestr/src/factory_test.py::test_parse_columns_empty_column_definition PASSED                                                                       [ 88%]
+ingestr/src/gorgias/helpers_test.py::test_convert_datetime_fields PASSED                                                                             [ 89%]
+ingestr/src/gorgias/helpers_test.py::test_find_latest_timestamp_from_page PASSED                                                                     [ 91%]
+ingestr/src/klaviyo/helpers_test.py::test_split_date_range PASSED                                                                                    [ 92%]
+ingestr/src/klaviyo/helpers_test.py::test_split_date_range_with_hours PASSED                                                                         [ 93%]
+ingestr/src/sources_test.py::SqlSourceTest::test_sql_source_requires_two_fields_in_table PASSED                                                      [ 94%]
+ingestr/src/sources_test.py::SqlSourceTest::test_table_instance_is_created PASSED                                                                    [ 95%]
+ingestr/src/sources_test.py::SqlSourceTest::test_table_instance_is_created_with_incremental PASSED                                                   [ 96%]
+ingestr/src/sources_test.py::MongoDbSourceTest::test_sql_source_requires_two_fields_in_table PASSED                                                  [ 97%]
+ingestr/src/sources_test.py::MongoDbSourceTest::test_table_instance_is_created PASSED                                                                [ 98%]
+ingestr/src/sources_test.py::MongoDbSourceTest::test_table_instance_is_created_with_incremental PASSED                                               [100%]
+
+========================================================================= FAILURES =========================================================================
+_________________________________________________________ test_create_replace[sqlserver-postgres] __________________________________________________________
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   pyodbc.Error: ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+
+The above exception was the direct cause of the following exception:
+ingestr/main_test.py:399: in test_create_replace
+    db_to_db_create_replace(source_uri, dest_uri)
+ingestr/main_test.py:459: in db_to_db_create_replace
+    with source_engine.begin() as conn:
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3153: in begin
+    conn = self.connect(close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3325: in connect
+    return self._connection_cls(self, close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:96: in __init__
+    else engine.raw_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3404: in raw_connection
+    return self._wrap_pool_connect(self.pool.connect, _connection)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3374: in _wrap_pool_connect
+    Connection._handle_dbapi_exception_noconnection(
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:2208: in _handle_dbapi_exception_noconnection
+    util.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   sqlalchemy.exc.DBAPIError: (pyodbc.Error) ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+E   (Background on this error at: https://sqlalche.me/e/14/dbapi)
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+Container started: ca87a29b9a65
+Waiting for container <Container: ca87a29b9a65> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Waiting for container <Container: ca87a29b9a65> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: 2a0aded22c87
+Waiting for container <Container: 2a0aded22c87> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 2a0aded22c87> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+INFO     testcontainers.core.container:container.py:101 Container started: ca87a29b9a65
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: ca87a29b9a65> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: ca87a29b9a65> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 2a0aded22c87
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 2a0aded22c87> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 2a0aded22c87> with image postgres:16.3-alpine3.20 to be ready ...
+__________________________________________________________ test_create_replace[sqlserver-duckdb] ___________________________________________________________
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   pyodbc.Error: ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+
+The above exception was the direct cause of the following exception:
+ingestr/main_test.py:399: in test_create_replace
+    db_to_db_create_replace(source_uri, dest_uri)
+ingestr/main_test.py:459: in db_to_db_create_replace
+    with source_engine.begin() as conn:
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3153: in begin
+    conn = self.connect(close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3325: in connect
+    return self._connection_cls(self, close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:96: in __init__
+    else engine.raw_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3404: in raw_connection
+    return self._wrap_pool_connect(self.pool.connect, _connection)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3374: in _wrap_pool_connect
+    Connection._handle_dbapi_exception_noconnection(
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:2208: in _handle_dbapi_exception_noconnection
+    util.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   sqlalchemy.exc.DBAPIError: (pyodbc.Error) ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+E   (Background on this error at: https://sqlalche.me/e/14/dbapi)
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+Container started: b43f8cfd101a
+Waiting for container <Container: b43f8cfd101a> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Waiting for container <Container: b43f8cfd101a> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+INFO     testcontainers.core.container:container.py:101 Container started: b43f8cfd101a
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: b43f8cfd101a> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: b43f8cfd101a> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+______________________________________________________________ test_append[postgres-postgres] ______________________________________________________________
+ingestr/main_test.py:411: in test_append
+    db_to_db_append(source_uri, dest_uri)
+ingestr/main_test.py:527: in db_to_db_append
+    run()
+ingestr/main_test.py:518: in run
+    assert res.exit_code == 0
+E   assert 1 == 0
+E    +  where 1 = <Result PipelineStepFailed('Pipeline execution failed at stage extract with exception:\n\n<class \'yaml.constructor.ConstructorError\'>\ncould not determine a constructor for the tag \'tag:yaml.org,2002:python/object/apply:sqlalchemy.sql.elements.quoted_name\'\n  in "<unicode string>", line 59, column 15:\n        resource: !!python/object/apply:sqlalchemy ... \n                  ^')>.exit_code
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: fbbd356ee757
+Waiting for container <Container: fbbd356ee757> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: fbbd356ee757> with image postgres:16.3-alpine3.20 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: 06386956dd0d
+Waiting for container <Container: 06386956dd0d> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 06386956dd0d> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: fbbd356ee757
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: fbbd356ee757> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: fbbd356ee757> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 06386956dd0d
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 06386956dd0d> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 06386956dd0d> with image postgres:16.3-alpine3.20 to be ready ...
+_______________________________________________________________ test_append[postgres-duckdb] _______________________________________________________________
+ingestr/main_test.py:411: in test_append
+    db_to_db_append(source_uri, dest_uri)
+ingestr/main_test.py:527: in db_to_db_append
+    run()
+ingestr/main_test.py:518: in run
+    assert res.exit_code == 0
+E   assert 1 == 0
+E    +  where 1 = <Result PipelineStepFailed('Pipeline execution failed at stage extract with exception:\n\n<class \'yaml.constructor.ConstructorError\'>\ncould not determine a constructor for the tag \'tag:yaml.org,2002:python/object/apply:sqlalchemy.sql.elements.quoted_name\'\n  in "<unicode string>", line 59, column 15:\n        resource: !!python/object/apply:sqlalchemy ... \n                  ^')>.exit_code
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: 705e944277c1
+Waiting for container <Container: 705e944277c1> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 705e944277c1> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 705e944277c1
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 705e944277c1> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 705e944277c1> with image postgres:16.3-alpine3.20 to be ready ...
+_______________________________________________________________ test_append[duckdb-postgres] _______________________________________________________________
+ingestr/main_test.py:411: in test_append
+    db_to_db_append(source_uri, dest_uri)
+ingestr/main_test.py:527: in db_to_db_append
+    run()
+ingestr/main_test.py:518: in run
+    assert res.exit_code == 0
+E   assert 1 == 0
+E    +  where 1 = <Result PipelineStepFailed('Pipeline execution failed at stage extract with exception:\n\n<class \'yaml.constructor.ConstructorError\'>\ncould not determine a constructor for the tag \'tag:yaml.org,2002:python/object/apply:sqlalchemy.sql.elements.quoted_name\'\n  in "<unicode string>", line 59, column 15:\n        resource: !!python/object/apply:sqlalchemy ... \n                  ^')>.exit_code
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: 81197979a28c
+Waiting for container <Container: 81197979a28c> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 81197979a28c> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 81197979a28c
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 81197979a28c> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 81197979a28c> with image postgres:16.3-alpine3.20 to be ready ...
+________________________________________________________________ test_append[duckdb-duckdb] ________________________________________________________________
+ingestr/main_test.py:411: in test_append
+    db_to_db_append(source_uri, dest_uri)
+ingestr/main_test.py:527: in db_to_db_append
+    run()
+ingestr/main_test.py:518: in run
+    assert res.exit_code == 0
+E   assert 1 == 0
+E    +  where 1 = <Result PipelineStepFailed('Pipeline execution failed at stage extract with exception:\n\n<class \'yaml.constructor.ConstructorError\'>\ncould not determine a constructor for the tag \'tag:yaml.org,2002:python/object/apply:sqlalchemy.sql.elements.quoted_name\'\n  in "<unicode string>", line 59, column 15:\n        resource: !!python/object/apply:sqlalchemy ... \n                  ^')>.exit_code
+_______________________________________________________________ test_append[mysql8-postgres] _______________________________________________________________
+ingestr/main_test.py:411: in test_append
+    db_to_db_append(source_uri, dest_uri)
+ingestr/main_test.py:527: in db_to_db_append
+    run()
+ingestr/main_test.py:518: in run
+    assert res.exit_code == 0
+E   assert 1 == 0
+E    +  where 1 = <Result PipelineStepFailed('Pipeline execution failed at stage extract with exception:\n\n<class \'yaml.constructor.ConstructorError\'>\ncould not determine a constructor for the tag \'tag:yaml.org,2002:python/object/apply:sqlalchemy.sql.elements.quoted_name\'\n  in "<unicode string>", line 59, column 15:\n        resource: !!python/object/apply:sqlalchemy ... \n                  ^')>.exit_code
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mysql:8.4.1
+Container started: 14e79629d1be
+Waiting for container <Container: 14e79629d1be> with image mysql:8.4.1 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: 704e6c77be2c
+Waiting for container <Container: 704e6c77be2c> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 704e6c77be2c> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mysql:8.4.1
+INFO     testcontainers.core.container:container.py:101 Container started: 14e79629d1be
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 14e79629d1be> with image mysql:8.4.1 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 704e6c77be2c
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 704e6c77be2c> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 704e6c77be2c> with image postgres:16.3-alpine3.20 to be ready ...
+________________________________________________________________ test_append[mysql8-duckdb] ________________________________________________________________
+ingestr/main_test.py:411: in test_append
+    db_to_db_append(source_uri, dest_uri)
+ingestr/main_test.py:527: in db_to_db_append
+    run()
+ingestr/main_test.py:518: in run
+    assert res.exit_code == 0
+E   assert 1 == 0
+E    +  where 1 = <Result PipelineStepFailed('Pipeline execution failed at stage extract with exception:\n\n<class \'yaml.constructor.ConstructorError\'>\ncould not determine a constructor for the tag \'tag:yaml.org,2002:python/object/apply:sqlalchemy.sql.elements.quoted_name\'\n  in "<unicode string>", line 59, column 15:\n        resource: !!python/object/apply:sqlalchemy ... \n                  ^')>.exit_code
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mysql:8.4.1
+Container started: 4244eb061fe0
+Waiting for container <Container: 4244eb061fe0> with image mysql:8.4.1 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mysql:8.4.1
+INFO     testcontainers.core.container:container.py:101 Container started: 4244eb061fe0
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 4244eb061fe0> with image mysql:8.4.1 to be ready ...
+_____________________________________________________________ test_append[sqlserver-postgres] ______________________________________________________________
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   pyodbc.Error: ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+
+The above exception was the direct cause of the following exception:
+ingestr/main_test.py:411: in test_append
+    db_to_db_append(source_uri, dest_uri)
+ingestr/main_test.py:496: in db_to_db_append
+    with source_engine.begin() as conn:
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3153: in begin
+    conn = self.connect(close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3325: in connect
+    return self._connection_cls(self, close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:96: in __init__
+    else engine.raw_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3404: in raw_connection
+    return self._wrap_pool_connect(self.pool.connect, _connection)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3374: in _wrap_pool_connect
+    Connection._handle_dbapi_exception_noconnection(
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:2208: in _handle_dbapi_exception_noconnection
+    util.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   sqlalchemy.exc.DBAPIError: (pyodbc.Error) ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+E   (Background on this error at: https://sqlalche.me/e/14/dbapi)
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+Container started: 9bfee5f0b05a
+Waiting for container <Container: 9bfee5f0b05a> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Waiting for container <Container: 9bfee5f0b05a> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: 93b4b9bb4c0d
+Waiting for container <Container: 93b4b9bb4c0d> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 93b4b9bb4c0d> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+INFO     testcontainers.core.container:container.py:101 Container started: 9bfee5f0b05a
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 9bfee5f0b05a> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 9bfee5f0b05a> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 93b4b9bb4c0d
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 93b4b9bb4c0d> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 93b4b9bb4c0d> with image postgres:16.3-alpine3.20 to be ready ...
+______________________________________________________________ test_append[sqlserver-duckdb] _______________________________________________________________
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   pyodbc.Error: ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+
+The above exception was the direct cause of the following exception:
+ingestr/main_test.py:411: in test_append
+    db_to_db_append(source_uri, dest_uri)
+ingestr/main_test.py:496: in db_to_db_append
+    with source_engine.begin() as conn:
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3153: in begin
+    conn = self.connect(close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3325: in connect
+    return self._connection_cls(self, close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:96: in __init__
+    else engine.raw_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3404: in raw_connection
+    return self._wrap_pool_connect(self.pool.connect, _connection)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3374: in _wrap_pool_connect
+    Connection._handle_dbapi_exception_noconnection(
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:2208: in _handle_dbapi_exception_noconnection
+    util.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   sqlalchemy.exc.DBAPIError: (pyodbc.Error) ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+E   (Background on this error at: https://sqlalche.me/e/14/dbapi)
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+Container started: 97cec23f2bb5
+Waiting for container <Container: 97cec23f2bb5> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Waiting for container <Container: 97cec23f2bb5> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+INFO     testcontainers.core.container:container.py:101 Container started: 97cec23f2bb5
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 97cec23f2bb5> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 97cec23f2bb5> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+_____________________________________________________ test_merge_with_primary_key[sqlserver-postgres] ______________________________________________________
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   pyodbc.Error: ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+
+The above exception was the direct cause of the following exception:
+ingestr/main_test.py:423: in test_merge_with_primary_key
+    db_to_db_merge_with_primary_key(source_uri, dest_uri)
+ingestr/main_test.py:552: in db_to_db_merge_with_primary_key
+    with source_engine.begin() as conn:
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3153: in begin
+    conn = self.connect(close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3325: in connect
+    return self._connection_cls(self, close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:96: in __init__
+    else engine.raw_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3404: in raw_connection
+    return self._wrap_pool_connect(self.pool.connect, _connection)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3374: in _wrap_pool_connect
+    Connection._handle_dbapi_exception_noconnection(
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:2208: in _handle_dbapi_exception_noconnection
+    util.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   sqlalchemy.exc.DBAPIError: (pyodbc.Error) ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+E   (Background on this error at: https://sqlalche.me/e/14/dbapi)
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+Container started: 694cc1c0870d
+Waiting for container <Container: 694cc1c0870d> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Waiting for container <Container: 694cc1c0870d> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: 6515c1a55a71
+Waiting for container <Container: 6515c1a55a71> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 6515c1a55a71> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+INFO     testcontainers.core.container:container.py:101 Container started: 694cc1c0870d
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 694cc1c0870d> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 694cc1c0870d> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 6515c1a55a71
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 6515c1a55a71> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 6515c1a55a71> with image postgres:16.3-alpine3.20 to be ready ...
+______________________________________________________ test_merge_with_primary_key[sqlserver-duckdb] _______________________________________________________
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   pyodbc.Error: ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+
+The above exception was the direct cause of the following exception:
+ingestr/main_test.py:423: in test_merge_with_primary_key
+    db_to_db_merge_with_primary_key(source_uri, dest_uri)
+ingestr/main_test.py:552: in db_to_db_merge_with_primary_key
+    with source_engine.begin() as conn:
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3153: in begin
+    conn = self.connect(close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3325: in connect
+    return self._connection_cls(self, close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:96: in __init__
+    else engine.raw_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3404: in raw_connection
+    return self._wrap_pool_connect(self.pool.connect, _connection)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3374: in _wrap_pool_connect
+    Connection._handle_dbapi_exception_noconnection(
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:2208: in _handle_dbapi_exception_noconnection
+    util.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   sqlalchemy.exc.DBAPIError: (pyodbc.Error) ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+E   (Background on this error at: https://sqlalche.me/e/14/dbapi)
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+Container started: d7aa1aed2de2
+Waiting for container <Container: d7aa1aed2de2> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Waiting for container <Container: d7aa1aed2de2> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+INFO     testcontainers.core.container:container.py:101 Container started: d7aa1aed2de2
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: d7aa1aed2de2> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: d7aa1aed2de2> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+_________________________________________________ test_delete_insert_without_primary_key[mysql8-postgres] __________________________________________________
+venv/lib/python3.11/site-packages/urllib3/connectionpool.py:536: in _make_request
+    response = conn.getresponse()
+venv/lib/python3.11/site-packages/urllib3/connection.py:507: in getresponse
+    httplib_response = super().getresponse()
+../anaconda3/lib/python3.11/http/client.py:1386: in getresponse
+    response.begin()
+../anaconda3/lib/python3.11/http/client.py:325: in begin
+    version, status, reason = self._read_status()
+../anaconda3/lib/python3.11/http/client.py:286: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+../anaconda3/lib/python3.11/socket.py:706: in readinto
+    return self._sock.recv_into(b)
+E   TimeoutError: timed out
+
+The above exception was the direct cause of the following exception:
+venv/lib/python3.11/site-packages/requests/adapters.py:667: in send
+    resp = conn.urlopen(
+venv/lib/python3.11/site-packages/urllib3/connectionpool.py:843: in urlopen
+    retries = retries.increment(
+venv/lib/python3.11/site-packages/urllib3/util/retry.py:474: in increment
+    raise reraise(type(error), error, _stacktrace)
+venv/lib/python3.11/site-packages/urllib3/util/util.py:39: in reraise
+    raise value
+venv/lib/python3.11/site-packages/urllib3/connectionpool.py:789: in urlopen
+    response = self._make_request(
+venv/lib/python3.11/site-packages/urllib3/connectionpool.py:538: in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+venv/lib/python3.11/site-packages/urllib3/connectionpool.py:369: in _raise_timeout
+    raise ReadTimeoutError(
+E   urllib3.exceptions.ReadTimeoutError: UnixHTTPConnectionPool(host='localhost', port=None): Read timed out. (read timeout=60)
+
+During handling of the above exception, another exception occurred:
+ingestr/main_test.py:433: in test_delete_insert_without_primary_key
+    source_uri = source.start()
+ingestr/main_test.py:347: in start
+    self.container = self.container_creator()
+ingestr/main_test.py:376: in <lambda>
+    lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
+venv/lib/python3.11/site-packages/testcontainers/core/generic.py:76: in start
+    self._connect()
+venv/lib/python3.11/site-packages/testcontainers/mysql/__init__.py:101: in _connect
+    wait_for_logs(
+venv/lib/python3.11/site-packages/testcontainers/core/waiting_utils.py:102: in wait_for_logs
+    stdout = container.get_logs()[0].decode()
+venv/lib/python3.11/site-packages/testcontainers/core/container.py:173: in get_logs
+    return self._container.logs(stderr=False), self._container.logs(stdout=False)
+venv/lib/python3.11/site-packages/docker/models/containers.py:322: in logs
+    return self.client.api.logs(self.id, **kwargs)
+venv/lib/python3.11/site-packages/docker/utils/decorators.py:19: in wrapped
+    return f(self, resource_id, *args, **kwargs)
+venv/lib/python3.11/site-packages/docker/api/container.py:895: in logs
+    res = self._get(url, params=params, stream=stream)
+venv/lib/python3.11/site-packages/docker/utils/decorators.py:44: in inner
+    return f(self, *args, **kwargs)
+venv/lib/python3.11/site-packages/docker/api/client.py:246: in _get
+    return self.get(url, **self._set_request_timeout(kwargs))
+venv/lib/python3.11/site-packages/requests/sessions.py:602: in get
+    return self.request("GET", url, **kwargs)
+venv/lib/python3.11/site-packages/requests/sessions.py:589: in request
+    resp = self.send(prep, **send_kwargs)
+venv/lib/python3.11/site-packages/requests/sessions.py:703: in send
+    r = adapter.send(request, **kwargs)
+venv/lib/python3.11/site-packages/requests/adapters.py:713: in send
+    raise ReadTimeout(e, request=request)
+E   requests.exceptions.ReadTimeout: UnixHTTPConnectionPool(host='localhost', port=None): Read timed out. (read timeout=60)
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mysql:8.4.1
+Container started: 82a8fbcad153
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mysql:8.4.1
+INFO     testcontainers.core.container:container.py:101 Container started: 82a8fbcad153
+________________________________________________ test_delete_insert_without_primary_key[sqlserver-postgres] ________________________________________________
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   pyodbc.Error: ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+
+The above exception was the direct cause of the following exception:
+ingestr/main_test.py:435: in test_delete_insert_without_primary_key
+    db_to_db_delete_insert_without_primary_key(source_uri, dest_uri)
+ingestr/main_test.py:724: in db_to_db_delete_insert_without_primary_key
+    with source_engine.begin() as conn:
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3153: in begin
+    conn = self.connect(close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3325: in connect
+    return self._connection_cls(self, close_with_result=close_with_result)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:96: in __init__
+    else engine.raw_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3404: in raw_connection
+    return self._wrap_pool_connect(self.pool.connect, _connection)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3374: in _wrap_pool_connect
+    Connection._handle_dbapi_exception_noconnection(
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:2208: in _handle_dbapi_exception_noconnection
+    util.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/engine/base.py:3371: in _wrap_pool_connect
+    return fn()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:327: in connect
+    return _ConnectionFairy._checkout(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:894: in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:493: in checkout
+    rec = pool._do_get()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:145: in _do_get
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/impl.py:143: in _do_get
+    return self._create_connection()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:273: in _create_connection
+    return _ConnectionRecord(self)
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:388: in __init__
+    self.__connect()
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:690: in __connect
+    with util.safe_reraise():
+venv/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:70: in __exit__
+    compat.raise_(
+venv/lib/python3.11/site-packages/sqlalchemy/util/compat.py:211: in raise_
+    raise exception
+venv/lib/python3.11/site-packages/sqlalchemy/pool/base.py:686: in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/create.py:574: in connect
+    return dialect.connect(*cargs, **cparams)
+venv/lib/python3.11/site-packages/sqlalchemy/engine/default.py:598: in connect
+    return self.dbapi.connect(*cargs, **cparams)
+E   sqlalchemy.exc.DBAPIError: (pyodbc.Error) ('01000', "[01000] [unixODBC][Driver Manager]Can't open lib 'ODBC Driver 18 for SQL Server' : file not found (0) (SQLDriverConnect)")
+E   (Background on this error at: https://sqlalche.me/e/14/dbapi)
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+Container started: d05f785affaf
+Waiting for container <Container: d05f785affaf> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Waiting for container <Container: d05f785affaf> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: 9ebfbef59ac6
+Waiting for container <Container: 9ebfbef59ac6> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 9ebfbef59ac6> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+INFO     testcontainers.core.container:container.py:101 Container started: d05f785affaf
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: d05f785affaf> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: d05f785affaf> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 9ebfbef59ac6
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 9ebfbef59ac6> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 9ebfbef59ac6> with image postgres:16.3-alpine3.20 to be ready ...
+_________________________________________________ test_delete_insert_without_primary_key[sqlserver-duckdb] _________________________________________________
+venv/lib/python3.11/site-packages/docker/api/client.py:275: in _raise_for_status
+    response.raise_for_status()
+venv/lib/python3.11/site-packages/requests/models.py:1024: in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+E   requests.exceptions.HTTPError: 409 Client Error: Conflict for url: http+docker://localhost/v1.47/containers/44c7ccb48cbb66734aa9e168dab355854c5ca052396ee703fa4fce3fc6e9c100/exec
+
+The above exception was the direct cause of the following exception:
+ingestr/main_test.py:433: in test_delete_insert_without_primary_key
+    source_uri = source.start()
+ingestr/main_test.py:347: in start
+    self.container = self.container_creator()
+ingestr/main_test.py:379: in <lambda>
+    lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+venv/lib/python3.11/site-packages/testcontainers/core/generic.py:76: in start
+    self._connect()
+venv/lib/python3.11/site-packages/testcontainers/core/waiting_utils.py:59: in wrapper
+    return wrapped(*args, **kwargs)
+venv/lib/python3.11/site-packages/testcontainers/mssql/__init__.py:55: in _connect
+    status, _ = self.exec(f"/opt/mssql-tools/bin/sqlcmd -U {self.username} -P {self.password} -Q 'SELECT 1'")
+venv/lib/python3.11/site-packages/testcontainers/core/container.py:178: in exec
+    return self._container.exec_run(command)
+venv/lib/python3.11/site-packages/docker/models/containers.py:208: in exec_run
+    resp = self.client.api.exec_create(
+venv/lib/python3.11/site-packages/docker/utils/decorators.py:19: in wrapped
+    return f(self, resource_id, *args, **kwargs)
+venv/lib/python3.11/site-packages/docker/api/exec_api.py:78: in exec_create
+    return self._result(res, True)
+venv/lib/python3.11/site-packages/docker/api/client.py:281: in _result
+    self._raise_for_status(response)
+venv/lib/python3.11/site-packages/docker/api/client.py:277: in _raise_for_status
+    raise create_api_error_from_http_exception(e) from e
+venv/lib/python3.11/site-packages/docker/errors.py:39: in create_api_error_from_http_exception
+    raise cls(e, response=response, explanation=explanation) from e
+E   docker.errors.APIError: 409 Client Error for http+docker://localhost/v1.47/containers/44c7ccb48cbb66734aa9e168dab355854c5ca052396ee703fa4fce3fc6e9c100/exec: Conflict ("container 44c7ccb48cbb66734aa9e168dab355854c5ca052396ee703fa4fce3fc6e9c100 is not running")
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+Container started: 44c7ccb48cbb
+Waiting for container <Container: 44c7ccb48cbb> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+INFO     testcontainers.core.container:container.py:101 Container started: 44c7ccb48cbb
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 44c7ccb48cbb> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+__________________________________________________ test_delete_insert_with_time_range[sqlserver-postgres] __________________________________________________
+venv/lib/python3.11/site-packages/docker/api/client.py:275: in _raise_for_status
+    response.raise_for_status()
+venv/lib/python3.11/site-packages/requests/models.py:1024: in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+E   requests.exceptions.HTTPError: 409 Client Error: Conflict for url: http+docker://localhost/v1.47/containers/c931f59f180834f23540d40eab3df1a6f2762454d3e99cbbeacc313d0001ba05/exec
+
+The above exception was the direct cause of the following exception:
+ingestr/main_test.py:445: in test_delete_insert_with_time_range
+    source_uri = source.start()
+ingestr/main_test.py:347: in start
+    self.container = self.container_creator()
+ingestr/main_test.py:379: in <lambda>
+    lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+venv/lib/python3.11/site-packages/testcontainers/core/generic.py:76: in start
+    self._connect()
+venv/lib/python3.11/site-packages/testcontainers/core/waiting_utils.py:59: in wrapper
+    return wrapped(*args, **kwargs)
+venv/lib/python3.11/site-packages/testcontainers/mssql/__init__.py:55: in _connect
+    status, _ = self.exec(f"/opt/mssql-tools/bin/sqlcmd -U {self.username} -P {self.password} -Q 'SELECT 1'")
+venv/lib/python3.11/site-packages/testcontainers/core/container.py:178: in exec
+    return self._container.exec_run(command)
+venv/lib/python3.11/site-packages/docker/models/containers.py:208: in exec_run
+    resp = self.client.api.exec_create(
+venv/lib/python3.11/site-packages/docker/utils/decorators.py:19: in wrapped
+    return f(self, resource_id, *args, **kwargs)
+venv/lib/python3.11/site-packages/docker/api/exec_api.py:78: in exec_create
+    return self._result(res, True)
+venv/lib/python3.11/site-packages/docker/api/client.py:281: in _result
+    self._raise_for_status(response)
+venv/lib/python3.11/site-packages/docker/api/client.py:277: in _raise_for_status
+    raise create_api_error_from_http_exception(e) from e
+venv/lib/python3.11/site-packages/docker/errors.py:39: in create_api_error_from_http_exception
+    raise cls(e, response=response, explanation=explanation) from e
+E   docker.errors.APIError: 409 Client Error for http+docker://localhost/v1.47/containers/c931f59f180834f23540d40eab3df1a6f2762454d3e99cbbeacc313d0001ba05/exec: Conflict ("container c931f59f180834f23540d40eab3df1a6f2762454d3e99cbbeacc313d0001ba05 is not running")
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+Container started: c931f59f1808
+Waiting for container <Container: c931f59f1808> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+INFO     testcontainers.core.container:container.py:101 Container started: c931f59f1808
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: c931f59f1808> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+___________________________________________________ test_delete_insert_with_time_range[sqlserver-duckdb] ___________________________________________________
+ingestr/main_test.py:445: in test_delete_insert_with_time_range
+    source_uri = source.start()
+ingestr/main_test.py:347: in start
+    self.container = self.container_creator()
+ingestr/main_test.py:379: in <lambda>
+    lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+venv/lib/python3.11/site-packages/testcontainers/core/generic.py:76: in start
+    self._connect()
+venv/lib/python3.11/site-packages/testcontainers/core/waiting_utils.py:67: in wrapper
+    raise TimeoutError(
+E   TimeoutError: Wait time (120s) exceeded for _connect(args: (), kwargs: {}). Exception: Cannot run 'SELECT 1': container is not ready
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+Container started: f4e1ba7c057b
+Waiting for container <Container: f4e1ba7c057b> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+INFO     testcontainers.core.container:container.py:101 Container started: f4e1ba7c057b
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: f4e1ba7c057b> with image mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04 to be ready ...
+========================================================================== PASSES ==========================================================================
+__________________________________________________________ test_create_replace[postgres-postgres] __________________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image testcontainers/ryuk:0.7.0
+Container started: 9c1de0aebe29
+Waiting for container <Container: 9c1de0aebe29> with image testcontainers/ryuk:0.7.0 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: 7605c32cd7dc
+Waiting for container <Container: 7605c32cd7dc> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 7605c32cd7dc> with image postgres:16.3-alpine3.20 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: d9bc37f03292
+Waiting for container <Container: d9bc37f03292> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: d9bc37f03292> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image testcontainers/ryuk:0.7.0
+INFO     testcontainers.core.container:container.py:101 Container started: 9c1de0aebe29
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 9c1de0aebe29> with image testcontainers/ryuk:0.7.0 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 7605c32cd7dc
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 7605c32cd7dc> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 7605c32cd7dc> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: d9bc37f03292
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: d9bc37f03292> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: d9bc37f03292> with image postgres:16.3-alpine3.20 to be ready ...
+___________________________________________________________ test_create_replace[postgres-duckdb] ___________________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: cca289e9f34e
+Waiting for container <Container: cca289e9f34e> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: cca289e9f34e> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: cca289e9f34e
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: cca289e9f34e> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: cca289e9f34e> with image postgres:16.3-alpine3.20 to be ready ...
+___________________________________________________________ test_create_replace[duckdb-postgres] ___________________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: d2ab08a0efae
+Waiting for container <Container: d2ab08a0efae> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: d2ab08a0efae> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: d2ab08a0efae
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: d2ab08a0efae> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: d2ab08a0efae> with image postgres:16.3-alpine3.20 to be ready ...
+___________________________________________________________ test_create_replace[mysql8-postgres] ___________________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mysql:8.4.1
+Container started: 619585ba0ca4
+Waiting for container <Container: 619585ba0ca4> with image mysql:8.4.1 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: a75b833500cf
+Waiting for container <Container: a75b833500cf> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: a75b833500cf> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mysql:8.4.1
+INFO     testcontainers.core.container:container.py:101 Container started: 619585ba0ca4
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 619585ba0ca4> with image mysql:8.4.1 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: a75b833500cf
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: a75b833500cf> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: a75b833500cf> with image postgres:16.3-alpine3.20 to be ready ...
+____________________________________________________________ test_create_replace[mysql8-duckdb] ____________________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mysql:8.4.1
+Container started: e1e327544dc6
+Waiting for container <Container: e1e327544dc6> with image mysql:8.4.1 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mysql:8.4.1
+INFO     testcontainers.core.container:container.py:101 Container started: e1e327544dc6
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: e1e327544dc6> with image mysql:8.4.1 to be ready ...
+______________________________________________________ test_merge_with_primary_key[postgres-postgres] ______________________________________________________
+------------------------------------------------------------------- Captured stdout call -------------------------------------------------------------------
+[('1727879810.8273633', 2)]
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: 2fe2c9c2e1bd
+Waiting for container <Container: 2fe2c9c2e1bd> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 2fe2c9c2e1bd> with image postgres:16.3-alpine3.20 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: a8a5b921175d
+Waiting for container <Container: a8a5b921175d> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: a8a5b921175d> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 2fe2c9c2e1bd
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 2fe2c9c2e1bd> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 2fe2c9c2e1bd> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: a8a5b921175d
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: a8a5b921175d> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: a8a5b921175d> with image postgres:16.3-alpine3.20 to be ready ...
+_______________________________________________________ test_merge_with_primary_key[postgres-duckdb] _______________________________________________________
+------------------------------------------------------------------- Captured stdout call -------------------------------------------------------------------
+[('1727879827.3687305', 2)]
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: 71d484abd2f1
+Waiting for container <Container: 71d484abd2f1> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 71d484abd2f1> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 71d484abd2f1
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 71d484abd2f1> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 71d484abd2f1> with image postgres:16.3-alpine3.20 to be ready ...
+_______________________________________________________ test_merge_with_primary_key[duckdb-postgres] _______________________________________________________
+------------------------------------------------------------------- Captured stdout call -------------------------------------------------------------------
+[('1727879845.131388', 2)]
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: 590abaf143d0
+Waiting for container <Container: 590abaf143d0> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 590abaf143d0> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 590abaf143d0
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 590abaf143d0> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 590abaf143d0> with image postgres:16.3-alpine3.20 to be ready ...
+________________________________________________________ test_merge_with_primary_key[duckdb-duckdb] ________________________________________________________
+------------------------------------------------------------------- Captured stdout call -------------------------------------------------------------------
+[('1727879856.847089', 2)]
+_______________________________________________________ test_merge_with_primary_key[mysql8-postgres] _______________________________________________________
+------------------------------------------------------------------- Captured stdout call -------------------------------------------------------------------
+[('1727879937.7417347', 2)]
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mysql:8.4.1
+Container started: 0f436e4230b1
+Waiting for container <Container: 0f436e4230b1> with image mysql:8.4.1 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: c908399a6cbf
+Waiting for container <Container: c908399a6cbf> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: c908399a6cbf> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mysql:8.4.1
+INFO     testcontainers.core.container:container.py:101 Container started: 0f436e4230b1
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 0f436e4230b1> with image mysql:8.4.1 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: c908399a6cbf
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: c908399a6cbf> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: c908399a6cbf> with image postgres:16.3-alpine3.20 to be ready ...
+________________________________________________________ test_merge_with_primary_key[mysql8-duckdb] ________________________________________________________
+------------------------------------------------------------------- Captured stdout call -------------------------------------------------------------------
+[('1727879981.839512', 2)]
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mysql:8.4.1
+Container started: eec1510c4233
+Waiting for container <Container: eec1510c4233> with image mysql:8.4.1 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mysql:8.4.1
+INFO     testcontainers.core.container:container.py:101 Container started: eec1510c4233
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: eec1510c4233> with image mysql:8.4.1 to be ready ...
+________________________________________________ test_delete_insert_without_primary_key[postgres-postgres] _________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: 30ef9405f771
+Waiting for container <Container: 30ef9405f771> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 30ef9405f771> with image postgres:16.3-alpine3.20 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: 48a58ad20de4
+Waiting for container <Container: 48a58ad20de4> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 48a58ad20de4> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 30ef9405f771
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 30ef9405f771> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 30ef9405f771> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 48a58ad20de4
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 48a58ad20de4> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 48a58ad20de4> with image postgres:16.3-alpine3.20 to be ready ...
+_________________________________________________ test_delete_insert_without_primary_key[postgres-duckdb] __________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: 4e99a8f8c7d5
+Waiting for container <Container: 4e99a8f8c7d5> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 4e99a8f8c7d5> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 4e99a8f8c7d5
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 4e99a8f8c7d5> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 4e99a8f8c7d5> with image postgres:16.3-alpine3.20 to be ready ...
+_________________________________________________ test_delete_insert_without_primary_key[duckdb-postgres] __________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: d281af3b92b2
+Waiting for container <Container: d281af3b92b2> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: d281af3b92b2> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: d281af3b92b2
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: d281af3b92b2> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: d281af3b92b2> with image postgres:16.3-alpine3.20 to be ready ...
+__________________________________________________ test_delete_insert_without_primary_key[mysql8-duckdb] ___________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mysql:8.4.1
+Container started: eecdb18bfaec
+Waiting for container <Container: eecdb18bfaec> with image mysql:8.4.1 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mysql:8.4.1
+INFO     testcontainers.core.container:container.py:101 Container started: eecdb18bfaec
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: eecdb18bfaec> with image mysql:8.4.1 to be ready ...
+__________________________________________________ test_delete_insert_with_time_range[postgres-postgres] ___________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: dbee0fa10a16
+Waiting for container <Container: dbee0fa10a16> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: dbee0fa10a16> with image postgres:16.3-alpine3.20 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: 6bd9d6222eb2
+Waiting for container <Container: 6bd9d6222eb2> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 6bd9d6222eb2> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: dbee0fa10a16
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: dbee0fa10a16> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: dbee0fa10a16> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 6bd9d6222eb2
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 6bd9d6222eb2> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 6bd9d6222eb2> with image postgres:16.3-alpine3.20 to be ready ...
+___________________________________________________ test_delete_insert_with_time_range[postgres-duckdb] ____________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: 1800e2a47cb1
+Waiting for container <Container: 1800e2a47cb1> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 1800e2a47cb1> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 1800e2a47cb1
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 1800e2a47cb1> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 1800e2a47cb1> with image postgres:16.3-alpine3.20 to be ready ...
+___________________________________________________ test_delete_insert_with_time_range[duckdb-postgres] ____________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: 7feba66674a5
+Waiting for container <Container: 7feba66674a5> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 7feba66674a5> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 7feba66674a5
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 7feba66674a5> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 7feba66674a5> with image postgres:16.3-alpine3.20 to be ready ...
+___________________________________________________ test_delete_insert_with_time_range[mysql8-postgres] ____________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mysql:8.4.1
+Container started: 23bf1f969429
+Waiting for container <Container: 23bf1f969429> with image mysql:8.4.1 to be ready ...
+Pulling image postgres:16.3-alpine3.20
+Container started: 46752713cc2d
+Waiting for container <Container: 46752713cc2d> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 46752713cc2d> with image postgres:16.3-alpine3.20 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mysql:8.4.1
+INFO     testcontainers.core.container:container.py:101 Container started: 23bf1f969429
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 23bf1f969429> with image mysql:8.4.1 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 46752713cc2d
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 46752713cc2d> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 46752713cc2d> with image postgres:16.3-alpine3.20 to be ready ...
+____________________________________________________ test_delete_insert_with_time_range[mysql8-duckdb] _____________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image mysql:8.4.1
+Container started: 70e87cdba2fd
+Waiting for container <Container: 70e87cdba2fd> with image mysql:8.4.1 to be ready ...
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image mysql:8.4.1
+INFO     testcontainers.core.container:container.py:101 Container started: 70e87cdba2fd
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 70e87cdba2fd> with image mysql:8.4.1 to be ready ...
+________________________________________________________________ test_kafka_to_db[postgres] ________________________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image postgres:16.3-alpine3.20
+Container started: 614c816741fa
+Waiting for container <Container: 614c816741fa> with image postgres:16.3-alpine3.20 to be ready ...
+Waiting for container <Container: 614c816741fa> with image postgres:16.3-alpine3.20 to be ready ...
+Pulling image confluentinc/cp-kafka:7.6.0
+Container started: bd9074490443
+Waiting for container <Container: bd9074490443> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+Waiting for container <Container: bd9074490443> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+Waiting for container <Container: bd9074490443> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+Waiting for container <Container: bd9074490443> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+Waiting for container <Container: bd9074490443> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+%6|1727882630.737|FAIL|rdkafka#producer-1| [thrd:localhost:57404/bootstrap]: localhost:57404/1: Disconnected (after 19405ms in state UP)
+%6|1727882631.170|FAIL|rdkafka#producer-1| [thrd:localhost:57404/bootstrap]: localhost:57404/1: Disconnected while requesting ApiVersion: might be caused by incorrect security.protocol configuration (connecting to a SSL listener?) or broker version is < 0.10 (see api.version.request) (after 24ms in state APIVERSION_QUERY)
+%3|1727882631.449|FAIL|rdkafka#producer-1| [thrd:localhost:57404/bootstrap]: localhost:57404/1: Connect to ipv4#127.0.0.1:57404 failed: Connection refused (after 3ms in state CONNECT)
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image postgres:16.3-alpine3.20
+INFO     testcontainers.core.container:container.py:101 Container started: 614c816741fa
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 614c816741fa> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 614c816741fa> with image postgres:16.3-alpine3.20 to be ready ...
+INFO     testcontainers.core.container:container.py:88 Pulling image confluentinc/cp-kafka:7.6.0
+INFO     testcontainers.core.container:container.py:101 Container started: bd9074490443
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: bd9074490443> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: bd9074490443> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: bd9074490443> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: bd9074490443> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: bd9074490443> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+_________________________________________________________________ test_kafka_to_db[duckdb] _________________________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+Pulling image confluentinc/cp-kafka:7.6.0
+%3|1727882632.068|FAIL|rdkafka#producer-1| [thrd:localhost:57404/bootstrap]: localhost:57404/1: Connect to ipv4#127.0.0.1:57404 failed: Connection refused (after 0ms in state CONNECT, 1 identical error(s) suppressed)
+Container started: 354f67f709f9
+Waiting for container <Container: 354f67f709f9> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+Waiting for container <Container: 354f67f709f9> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+Waiting for container <Container: 354f67f709f9> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+Waiting for container <Container: 354f67f709f9> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+Waiting for container <Container: 354f67f709f9> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+%6|1727882667.010|FAIL|rdkafka#producer-5| [thrd:localhost:57413/bootstrap]: localhost:57413/1: Disconnected (after 17933ms in state UP)
+%6|1727882667.984|FAIL|rdkafka#producer-5| [thrd:localhost:57413/bootstrap]: localhost:57413/1: Disconnected while requesting ApiVersion: might be caused by incorrect security.protocol configuration (connecting to a SSL listener?) or broker version is < 0.10 (see api.version.request) (after 59ms in state APIVERSION_QUERY)
+%6|1727882668.157|FAIL|rdkafka#producer-5| [thrd:localhost:57413/bootstrap]: localhost:57413/1: Disconnected while requesting ApiVersion: might be caused by incorrect security.protocol configuration (connecting to a SSL listener?) or broker version is < 0.10 (see api.version.request) (after 4ms in state APIVERSION_QUERY, 1 identical error(s) suppressed)
+-------------------------------------------------------------------- Captured log call ---------------------------------------------------------------------
+INFO     testcontainers.core.container:container.py:88 Pulling image confluentinc/cp-kafka:7.6.0
+INFO     testcontainers.core.container:container.py:101 Container started: 354f67f709f9
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 354f67f709f9> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 354f67f709f9> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 354f67f709f9> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 354f67f709f9> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+INFO     testcontainers.core.waiting_utils:waiting_utils.py:52 Waiting for container <Container: 354f67f709f9> with image confluentinc/cp-kafka:7.6.0 to be ready ...
+_______________________________________________________________ test_convert_datetime_fields _______________________________________________________________
+------------------------------------------------------------------- Captured stderr call -------------------------------------------------------------------
+%3|1727882669.036|FAIL|rdkafka#producer-5| [thrd:localhost:57413/bootstrap]: localhost:57413/1: Connect to ipv4#127.0.0.1:57413 failed: Connection refused (after 3ms in state CONNECT)
+======================================================== 17 failed, 72 passed in 3398.57s (0:56:38) ========================================================
+make[1]: *** [Makefile:18: test-ci] Error 1
+make[1]: Leaving directory '/home/caner/ingestr'
+make: *** [Makefile:21: test] Error 2

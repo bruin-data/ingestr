@@ -13,10 +13,8 @@ from rich.console import Console
 from rich.status import Status
 from typing_extensions import Annotated
 
-from ingestr.src.factory import SourceDestinationFactory
+from ingestr.src.factory import SourceDestinationFactory, parse_columns
 from ingestr.src.telemetry.event import track
-
-from ingestr.src.factory import parse_columns
 
 app = typer.Typer(
     name="ingestr",
@@ -255,7 +253,7 @@ def ingest(
     ] = 5,  # type: ignore
     columns: Annotated[
         Optional[list[str]],
-        typer.Option(help="The column hints to apply to the resource(s)")
+        typer.Option(help="The column hints to apply to the resource(s)"),
     ] = None,  # type: ignore
 ):
     track(
@@ -317,8 +315,8 @@ def ingest(
             progress=progressInstance,
             pipelines_dir=pipelines_dir,
             refresh="drop_resources" if full_refresh else None,
-            import_schema_path='./schema/import/import_schema.json',
-            export_schema_path='./schema/export/export_schema.json',
+            import_schema_path="./schema/import/import_schema.json",
+            export_schema_path="./schema/export/export_schema.json",
         )
 
         if source.handles_incrementality():
@@ -332,7 +330,7 @@ def ingest(
         )
 
         cols = parse_columns(columns)
-        
+
         print()
         print("[bold green]Initiated the pipeline with the following:[/bold green]")
         print(
@@ -350,9 +348,7 @@ def ingest(
         print(
             f"[bold yellow]  Primary Key:[/bold yellow] {primary_key if primary_key else 'None'}"
         )
-        print(
-            f"[bold yellow]  Column Hints:[/bold yellow] {cols if cols else 'None'}"
-        )
+        print(f"[bold yellow]  Column Hints:[/bold yellow] {cols if cols else 'None'}")
         print()
 
         if not yes:
@@ -379,7 +375,10 @@ def ingest(
         )
 
         if cols:
-            if hasattr(dlt_source, 'selected_resources') and dlt_source.selected_resources:
+            if (
+                hasattr(dlt_source, "selected_resources")
+                and dlt_source.selected_resources
+            ):
                 resource_names = list(dlt_source.selected_resources.keys())
                 for res in resource_names:
                     dlt_source.resources[res].apply_hints(columns=cols)
