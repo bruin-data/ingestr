@@ -32,6 +32,7 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
+    ZendeskSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -132,6 +133,8 @@ class SourceDestinationFactory:
             return KafkaSource()
         elif self.source_scheme == "adjust":
             return AdjustSource()
+        elif self.source_scheme == "zendesk":
+            return ZendeskSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

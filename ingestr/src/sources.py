@@ -25,6 +25,7 @@ from ingestr.src.slack import slack_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.zendesk import zendesk_chat,zendesk_support,zendesk_talk
 
 
 class SqlSource:
@@ -731,3 +732,37 @@ class AppsflyerSource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(resource)
+class ZendeskSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Zendesk takes care of incrementality on its own, you should not provide incremental_key"
+            )
+        
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        start_date = (
+            interval_start.strftime("%Y-%m-%d") if interval_start else "2000-01-01"
+        )
+        end_date = (
+            interval_end.strftime("%Y-%m-%d")
+            if interval_end
+            else datetime.now().strftime("%Y-%m-%d")
+        )
+        print("into zendesk")
+    
+        if table in ["tickets","ticket_events","ticket_metric_events","ticket_fields","basic_resource"]:
+            
+            return zendesk_support()
+        elif table in ["talk_resource","talk_incremental_resource"]:
+            return zendesk_talk()
+        elif table in ["chats"]:
+            return zendesk_chat()
+        else:
+            raise ValueError(
+                "fResource '{table}' is not supported for Facebook Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
