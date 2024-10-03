@@ -76,6 +76,7 @@ exclude = [
     'src/hubspot/.*',
     'src/facebook_ads/.*',
     'src/klaviyo/.*',
+    'src/appsflyer/.*',
     'src/kafka/.*',
     'src/adjust/.*',
   ]
@@ -95,6 +96,7 @@ module = [
   "ingestr.src.hubspot.*",
   "ingestr.src.klaviyo.*",
   "ingestr.src.adjust.*",
+  "ingestr.src.appsflyer",
 ]
 follow_imports = "skip"
 

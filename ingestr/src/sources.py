@@ -9,6 +9,7 @@ import dlt
 
 from ingestr.src.adjust._init_ import adjust_source
 from ingestr.src.airtable import airtable_source
+from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.google_sheets import google_spreadsheet
@@ -695,3 +696,38 @@ class AdjustSource:
         return adjust_source(
             start_date=start_date, end_date=end_date, api_key=api_key[0]
         ).with_resources(Endpoint)
+
+
+class AppsflyerSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Appsflyer_Source takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        source_fields = urlparse(uri)
+        source_params = parse_qs(source_fields.query)
+        api_key = source_params.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Appsflyer")
+
+        resource = None
+        if table in ["campaigns", "creatives"]:
+            resource = table
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Appsflyer source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        start_date = kwargs.get("interval_start") or "2024-01-02"
+        end_date = kwargs.get("interval_end") or "2024-01-29"
+
+        return appsflyer_source(
+            api_key=api_key[0],
+            start_date=start_date,
+            end_date=end_date,
+        ).with_resources(resource)
