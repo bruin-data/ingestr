@@ -15,3 +15,6 @@ docs/.vitepress/dist
 docs/.vitepress/cache
 node_modules
 *.duckdb
+*.db
+/schema/
+db_test.py
