@@ -2,27 +2,25 @@
 Defines all the sources and resources needed for ZendeskSupport, ZendeskChat and ZendeskTalk
 """
 
-from typing import Iterator, Optional, Iterable, Tuple, List
 from itertools import chain
+from typing import Iterable, Iterator, Optional
 
 import dlt
 from dlt.common import pendulum
 from dlt.common.time import ensure_pendulum_datetime
-from dlt.common.typing import TDataItem, TDataItems, TAnyDateTime
+from dlt.common.typing import TAnyDateTime, TDataItem, TDataItems
 from dlt.sources import DltResource
 
 from .helpers.api_helpers import process_ticket, process_ticket_field
-from .helpers.talk_api import PaginationType, ZendeskAPIClient
 from .helpers.credentials import TZendeskCredentials, ZendeskCredentialsOAuth
-from .helpers import make_date_ranges
-
+from .helpers.talk_api import PaginationType, ZendeskAPIClient
 from .settings import (
-    DEFAULT_START_DATE,
     CUSTOM_FIELDS_STATE_KEY,
-    SUPPORT_ENDPOINTS,
-    TALK_ENDPOINTS,
+    DEFAULT_START_DATE,
     INCREMENTAL_TALK_ENDPOINTS,
+    SUPPORT_ENDPOINTS,
     SUPPORT_EXTRA_ENDPOINTS,
+    TALK_ENDPOINTS,
 )
 
 

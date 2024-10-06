@@ -770,11 +770,11 @@ class ZendeskSource:
             credentials = ZendeskCredentialsOAuth(subdomain=subdomain,oauth_token=oauth_token)
         elif 'email' in source_params:
             email = source_params.get("email")[0]
-            token = source_params.get("token")[0]
-            if not email or not token:
+            api_token = source_params.get("api_token")[0]
+            if not email or not api_token:
                 raise ValueError("Both email and token must be provided to connect to Zendesk")
 
-        if table in ['ticket_metrics', 'users','suspended_tickets', 'ticket_metric_events','ticket_forms', 'tickets', 'targets','activities','brands']:
+        if table in ['ticket_metrics', 'users', 'ticket_metric_events','ticket_forms', 'tickets', 'targets','activities','brands','groups','organizations','sla_policies','automations']:
             return zendesk_support(credentials=credentials,start_date=start_date, end_date=end_date).with_resources(table)
         elif table in ['greetings', 'settings', 'addresses', 'legs_incremental', 'calls', 'phone_numbers', 'lines', 'agents_activity']:
             return zendesk_talk(credentials=credentials,start_date=start_date,end_date=end_date).with_resources(table)

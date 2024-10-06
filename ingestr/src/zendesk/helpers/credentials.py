@@ -1,8 +1,9 @@
 """
 This module handles how credentials are read in dlt sources
 """
-import dlt
 from typing import ClassVar, List, Union
+
+import dlt
 from dlt.common.configuration import configspec
 from dlt.common.configuration.specs import CredentialsConfiguration
 from dlt.common.typing import TSecretValue

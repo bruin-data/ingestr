@@ -1,13 +1,15 @@
 from enum import Enum
-from typing import Dict, Iterator, Optional, Tuple, Any
+from typing import Any, Dict, Iterator, Optional, Tuple
+
 from dlt.common.typing import DictStrStr, TDataItems, TSecretValue
 from dlt.sources.helpers.requests import client
+
 from .. import settings
 from .credentials import (
+    TZendeskCredentials,
     ZendeskCredentialsEmailPass,
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
-    TZendeskCredentials,
 )
 
 

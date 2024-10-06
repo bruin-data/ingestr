@@ -1,9 +1,8 @@
-from typing import Optional, TypedDict, Dict
+from typing import Dict, Optional, TypedDict
 
-from dlt.common import pendulum, logger
+from dlt.common import logger, pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import DictStrAny, DictStrStr, TDataItem
-from dlt.common.time import parse_iso_like_datetime
 
 
 class TCustomFieldInfo(TypedDict):
