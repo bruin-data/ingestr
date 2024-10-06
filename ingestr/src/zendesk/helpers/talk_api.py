@@ -43,7 +43,6 @@ class ZendeskAPIClient:
         # fill headers and auth for every possibility of credentials given, raise error if credentials are of incorrect type
         if isinstance(credentials, ZendeskCredentialsOAuth):
             self.headers = {"Authorization": f"Bearer {credentials.oauth_token}"}
-            print("headers",self.headers)
             self.auth = None
         elif isinstance(credentials, ZendeskCredentialsToken):
             self.headers = None
@@ -93,14 +92,13 @@ class ZendeskAPIClient:
 
         # make request and keep looping until there is no next page
         get_url = f"{self.url}{endpoint}"
+        print("get_url",get_url)
         while get_url:
             response = client.get(
                 get_url, headers=self.headers, auth=self.auth, params=params
             )
-            print("get_url",get_url)
             response.raise_for_status()
             response_json = response.json()
-            print("response_json",response_json)
             result = response_json[data_point_name]
             yield result
 

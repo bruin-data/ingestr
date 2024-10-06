@@ -216,7 +216,7 @@ def chats_table_resource(
 
 @dlt.source(max_table_nesting=0)
 def zendesk_support(
-    credentials: TZendeskCredentials = dlt.secrets.value,
+    credentials: TZendeskCredentials,
     load_all: bool = True,
     pivot_ticket_fields: bool = True,
     start_date: Optional[TAnyDateTime] = DEFAULT_START_DATE,

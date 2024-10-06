@@ -5,6 +5,7 @@ from dlt.common import pendulum
 DEFAULT_START_DATE = pendulum.datetime(year=2024, month=10, day=3)
 
 INCREMENTAL_PAGE_SIZE = 1000
+PAGE_SIZE = 100
 
 
 CUSTOM_FIELDS_STATE_KEY = "ticket_custom_fields_v2"

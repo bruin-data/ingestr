@@ -9,7 +9,7 @@ The Zendesk supports two authentication methods:
 - OAuth Token
 - API Token
 
-All resources supports API Token except "chats resources"
+All resources supports API Token except "chats resources" i.e Zendesk Chat API.
 
 ## URI Format
 
@@ -37,7 +37,7 @@ Zendesk requires a few steps to set up an integration, please follow the guide d
 Once you complete the guide, if you decide to use an OAuth Token, you should have a subdomain and an OAuth token. Let’s say your subdomain is `mycompany` and your OAuth token is `qVsbdiasVt`.
 
 ```sh
-ingestr ingest --source-uri "zendesk://subdomain=mycompany?oauth_token=qVsbdiasVt" \
+ingestr ingest --source-uri "zendesk://mycompany?oauth_token=qVsbdiasVt" \
 --source-table 'tickets' \
 --dest-uri 'duckdb:///zendesk.duckdb' \
 --dest-table 'zendesk.tickets' \
@@ -47,7 +47,7 @@ ingestr ingest --source-uri "zendesk://subdomain=mycompany?oauth_token=qVsbdiasV
 If you decide to use an API Token, you should have a subdomain, email, and API token. Let’s say your subdomain is `mycompany`, your email is `john@get.com`, and your API token is `nbs123`.
 
 ```sh
-ingestr ingest --source-uri "zendesk://subdomain=mycompany?email=john@get.com&api_token=nbs123" \
+ingestr ingest --source-uri "zendesk://mycompany?email=john@get.com&api_token=nbs123" \
 --source-table 'tickets' \
 --dest-uri 'duckdb:///zendesk.duckdb' \
 --dest-table 'zendesk.tickets' \

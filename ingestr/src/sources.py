@@ -28,6 +28,7 @@ from ingestr.src.table_definition import table_string_to_dataclass
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
+    ZendeskCredentialsToken,
 )
 
 
@@ -773,6 +774,7 @@ class ZendeskSource:
             api_token = source_params.get("api_token")[0]
             if not email or not api_token:
                 raise ValueError("Both email and token must be provided to connect to Zendesk")
+            credentials = ZendeskCredentialsToken(subdomain=subdomain,email=email,token=api_token)
 
         if table in ['ticket_metrics', 'users', 'ticket_metric_events','ticket_forms', 'tickets', 'targets','activities','brands','groups','organizations','sla_policies','automations']:
             return zendesk_support(credentials=credentials,start_date=start_date, end_date=end_date).with_resources(table)
