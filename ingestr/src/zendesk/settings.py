@@ -2,9 +2,8 @@
 
 from dlt.common import pendulum
 
-DEFAULT_START_DATE = pendulum.datetime(year=2024, month=10, day=4)
+DEFAULT_START_DATE = pendulum.datetime(year=2024, month=10, day=3)
 
-PAGE_SIZE = 100
 INCREMENTAL_PAGE_SIZE = 1000
 
 

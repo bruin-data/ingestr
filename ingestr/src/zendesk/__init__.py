@@ -26,11 +26,11 @@ from .settings import (
 )
 
 
-@dlt.source(max_table_nesting=2)
+@dlt.source(max_table_nesting=0)
 def zendesk_talk(
     credentials: TZendeskCredentials = dlt.secrets.value,
     start_date: Optional[TAnyDateTime] = DEFAULT_START_DATE,
-    end_date: Optional[TAnyDateTime] = 2024-10-4,
+    end_date: Optional[TAnyDateTime] = None,
 ) -> Iterable[DltResource]:
     """
     Retrieves data from Zendesk Talk for phone calls and voicemails.
@@ -143,13 +143,13 @@ def talk_incremental_resource(
             return
 
 
-@dlt.source(max_table_nesting=2)
+@dlt.source(max_table_nesting=0)
 def zendesk_chat(
-    credentials: ZendeskCredentialsOAuth = dlt.secrets.value,
+    credentials: ZendeskCredentialsOAuth,
     start_date: Optional[TAnyDateTime] = DEFAULT_START_DATE,
     end_date: Optional[TAnyDateTime] = None
 ) -> Iterable[DltResource]:
-    print("end_date",end_date)
+  
     """
     Retrieves data from Zendesk Chat for chat interactions.
    
@@ -206,7 +206,7 @@ def chats_table_resource(
             "start_time": ensure_pendulum_datetime(
                 update_timestamp.last_value
             ).int_timestamp,
-            "fields": "chats(*)",
+            "fields": "chats(*)"
         },
     )
     for page in chat_pages:
@@ -216,7 +216,7 @@ def chats_table_resource(
             return
 
 
-@dlt.source(max_table_nesting=2)
+@dlt.source(max_table_nesting=0)
 def zendesk_support(
     credentials: TZendeskCredentials = dlt.secrets.value,
     load_all: bool = True,

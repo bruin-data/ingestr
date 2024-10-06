@@ -26,6 +26,7 @@ from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
 from ingestr.src.zendesk import zendesk_chat,zendesk_support,zendesk_talk
+from ingestr.src.zendesk.helpers.credentials import ZendeskCredentialsToken,ZendeskCredentialsOAuth
 
 
 class SqlSource:
@@ -732,9 +733,27 @@ class AppsflyerSource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(resource)
+
 class ZendeskSource:
     def handles_incrementality(self) -> bool:
-        return False
+        return True
+    
+    def get_email_token(self, source_params):
+        email = source_params.get("email")
+        if not email:
+                raise ValueError("email in the URI is required to connect to Zendesk")
+        token = source_params.get("token")
+        if not token:
+                raise ValueError("token in the URI is required to connect to Zendesk")
+       
+        return email, token
+    
+    def get_oauth_token(self, source_params):
+        oauth_token = source_params.get("oauth_token")
+        if not oauth_token:
+                raise ValueError("oauth_token in the URI is required to connect to Zendesk")  
+        
+        return oauth_token
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
@@ -742,6 +761,12 @@ class ZendeskSource:
                 "Zendesk takes care of incrementality on its own, you should not provide incremental_key"
             )
         
+        source_fields = urlparse(uri)
+        subdomain = source_fields.netloc
+        if not subdomain:
+            raise ValueError("Subdomain is required to connect with Zendesk")
+        source_params = parse_qs(source_fields.query)
+
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
 
@@ -753,16 +778,23 @@ class ZendeskSource:
             if interval_end
             else datetime.now().strftime("%Y-%m-%d")
         )
-        print("into zendesk")
     
         if table in ["tickets","ticket_events","ticket_metric_events","ticket_fields","basic_resource"]:
-            
-            return zendesk_support()
+            email, token = self.get_email_token(source_params)
+            credentials = ZendeskCredentialsToken(subdomain=subdomain, email=email[0], token=token[0])  
+            return zendesk_support(credentials=credentials,start_date=start_date, end_date=end_date).with_resources(table)
+        
         elif table in ["talk_resource","talk_incremental_resource"]:
-            return zendesk_talk()
+            email, token = self.get_email_token(source_params)
+            credentials = ZendeskCredentialsToken(subdomain=subdomain, email=email[0], token=token[0]) 
+            return zendesk_talk(credentials=credentials,start_date=start_date,end_date=end_date).with_resources(table)
+        
         elif table in ["chats"]:
-            return zendesk_chat()
+            oauth_token = self.get_oauth_token(source_params)
+            credentials = ZendeskCredentialsOAuth(subdomain=subdomain,oauth_token=oauth_token[0])
+            return zendesk_chat(credentials=credentials,start_date=start_date,end_date=end_date).with_resources(table)
+        
         else:
             raise ValueError(
-                "fResource '{table}' is not supported for Facebook Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+                "fResource '{table}' is not supported for Zendesk source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
