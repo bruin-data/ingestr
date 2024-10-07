@@ -753,37 +753,34 @@ class ZendeskSource:
         start_date = (
             interval_start.strftime("%Y-%m-%d") if interval_start else "2000-01-01"
         )
-        end_date = (
-            interval_end.strftime("%Y-%m-%d")
-            if interval_end
-            else datetime.now().strftime("%Y-%m-%d")
-        )
+        end_date = interval_end.strftime("%Y-%m-%d") if interval_end else None
 
         source_fields = urlparse(uri)
-        subdomain = source_fields.netloc
+        subdomain = source_fields.hostname
         if not subdomain:
             raise ValueError("Subdomain is required to connect with Zendesk")
-        source_params = parse_qs(source_fields.query)
 
-        if "oauth_token" in source_params:
-            oauth_token = source_params.get("oauth_token")
+        if not source_fields.username and source_fields.password:
+            oauth_token = source_fields.password
             if not oauth_token:
                 raise ValueError(
                     "oauth_token in the URI is required to connect to Zendesk"
                 )
             credentials = ZendeskCredentialsOAuth(
-                subdomain=subdomain, oauth_token=oauth_token[0]
+                subdomain=subdomain, oauth_token=oauth_token
             )
-        elif "email" in source_params:
-            email = source_params.get("email")
-            api_token = source_params.get("api_token")
+        elif source_fields.username and source_fields.password:
+            email = source_fields.username
+            api_token = source_fields.password
             if not email or not api_token:
                 raise ValueError(
                     "Both email and token must be provided to connect to Zendesk"
                 )
             credentials = ZendeskCredentialsToken(
-                subdomain=subdomain, email=email[0], token=api_token[0]
+                subdomain=subdomain, email=email, token=api_token
             )
+        else:
+            raise ValueError("Invalid URI format")
 
         if table in [
             "ticket_metrics",
