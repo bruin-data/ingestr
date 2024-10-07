@@ -145,12 +145,11 @@ def talk_incremental_resource(
 def zendesk_chat(
     credentials: ZendeskCredentialsOAuth,
     start_date: Optional[TAnyDateTime] = DEFAULT_START_DATE,
-    end_date: Optional[TAnyDateTime] = None
+    end_date: Optional[TAnyDateTime] = None,
 ) -> Iterable[DltResource]:
-  
     """
     Retrieves data from Zendesk Chat for chat interactions.
-   
+
     `start_date` argument can be used on its own or together with `end_date`. When both are provided
     data is limited to items updated in that time range.
     The range is "half-open", meaning elements equal and higher than `start_date` and elements lower than `end_date` are included.
@@ -204,7 +203,7 @@ def chats_table_resource(
             "start_time": ensure_pendulum_datetime(
                 update_timestamp.last_value
             ).int_timestamp,
-            "fields": "chats(*)"
+            "fields": "chats(*)",
         },
     )
     for page in chat_pages:

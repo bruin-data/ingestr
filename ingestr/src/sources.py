@@ -217,7 +217,7 @@ class ShopifySource:
             "transactions",
             "balance",
             "events",
-            "price_rules"
+            "price_rules",
         ]:
             resource = table
         else:
@@ -737,16 +737,17 @@ class AppsflyerSource:
             end_date=end_date,
         ).with_resources(resource)
 
+
 class ZendeskSource:
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
                 "Zendesk takes care of incrementality on its own, you should not provide incremental_key"
             )
-        
+
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
         start_date = (
@@ -764,24 +765,60 @@ class ZendeskSource:
             raise ValueError("Subdomain is required to connect with Zendesk")
         source_params = parse_qs(source_fields.query)
 
-        if 'oauth_token' in source_params:
-            oauth_token = source_params.get('oauth_token')[0]
+        if "oauth_token" in source_params:
+            oauth_token = source_params.get("oauth_token")
             if not oauth_token:
-                raise ValueError("oauth_token in the URI is required to connect to Zendesk") 
-            credentials = ZendeskCredentialsOAuth(subdomain=subdomain,oauth_token=oauth_token)
-        elif 'email' in source_params:
-            email = source_params.get("email")[0]
-            api_token = source_params.get("api_token")[0]
+                raise ValueError(
+                    "oauth_token in the URI is required to connect to Zendesk"
+                )
+            credentials = ZendeskCredentialsOAuth(
+                subdomain=subdomain, oauth_token=oauth_token[0]
+            )
+        elif "email" in source_params:
+            email = source_params.get("email")
+            api_token = source_params.get("api_token")
             if not email or not api_token:
-                raise ValueError("Both email and token must be provided to connect to Zendesk")
-            credentials = ZendeskCredentialsToken(subdomain=subdomain,email=email,token=api_token)
+                raise ValueError(
+                    "Both email and token must be provided to connect to Zendesk"
+                )
+            credentials = ZendeskCredentialsToken(
+                subdomain=subdomain, email=email[0], token=api_token[0]
+            )
 
-        if table in ['ticket_metrics', 'users', 'ticket_metric_events','ticket_forms', 'tickets', 'targets','activities','brands','groups','organizations','sla_policies','automations']:
-            return zendesk_support(credentials=credentials,start_date=start_date, end_date=end_date).with_resources(table)
-        elif table in ['greetings', 'settings', 'addresses', 'legs_incremental', 'calls', 'phone_numbers', 'lines', 'agents_activity']:
-            return zendesk_talk(credentials=credentials,start_date=start_date,end_date=end_date).with_resources(table)
+        if table in [
+            "ticket_metrics",
+            "users",
+            "ticket_metric_events",
+            "ticket_forms",
+            "tickets",
+            "targets",
+            "activities",
+            "brands",
+            "groups",
+            "organizations",
+            "sla_policies",
+            "automations",
+        ]:
+            return zendesk_support(
+                credentials=credentials, start_date=start_date, end_date=end_date
+            ).with_resources(table)
+        elif table in [
+            "greetings",
+            "settings",
+            "addresses",
+            "legs_incremental",
+            "calls",
+            "phone_numbers",
+            "lines",
+            "agents_activity",
+        ]:
+            return zendesk_talk(
+                credentials=credentials, start_date=start_date, end_date=end_date
+            ).with_resources(table)
         elif table in ["chats"]:
-            return zendesk_chat(credentials=credentials,start_date=start_date,end_date=end_date).with_resources(table)
+            return zendesk_chat(
+                credentials=credentials, start_date=start_date, end_date=end_date
+            ).with_resources(table)
         else:
             raise ValueError(
                 "fResource '{table}' is not supported for Zendesk source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"

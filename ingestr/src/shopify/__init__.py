@@ -1,9 +1,9 @@
 """Fetches Shopify Orders and Products."""
 
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional  # noqa: F401
 
 import dlt
-from dlt.common import jsonpath as jp
+from dlt.common import jsonpath as jp  # noqa: F401
 from dlt.common import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TAnyDateTime, TDataItem
@@ -13,7 +13,7 @@ from .helpers import ShopifyApi, ShopifyGraphQLApi, TOrderStatus
 from .settings import (
     DEFAULT_API_VERSION,
     DEFAULT_ITEMS_PER_PAGE,
-    DEFAULT_PARTNER_API_VERSION,
+    DEFAULT_PARTNER_API_VERSION,  # noqa: F401
     FIRST_DAY_OF_MILLENNIUM,
 )
 
@@ -212,7 +212,10 @@ def shopify_source(
             params["since_id"] = since_id.start_value
         yield from client.get_pages("shopify_payments/balance/transactions", params)
 
-    @dlt.resource(primary_key="currency", write_disposition={"disposition": "merge", "strategy": "scd2"})
+    @dlt.resource(
+        primary_key="currency",
+        write_disposition={"disposition": "merge", "strategy": "scd2"},
+    )
     def balance() -> Iterable[TDataItem]:
         yield from client.get_pages("shopify_payments/balance", {})
 
@@ -321,4 +324,13 @@ def shopify_source(
             },
         )
 
-    return (products, orders, customers, inventory_items, transactions, balance, events, price_rules)
+    return (
+        products,
+        orders,
+        customers,
+        inventory_items,
+        transactions,
+        balance,
+        events,
+        price_rules,
+    )

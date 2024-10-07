@@ -92,7 +92,6 @@ class ZendeskAPIClient:
 
         # make request and keep looping until there is no next page
         get_url = f"{self.url}{endpoint}"
-        print("get_url",get_url)
         while get_url:
             response = client.get(
                 get_url, headers=self.headers, auth=self.auth, params=params
