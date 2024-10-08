@@ -1,11 +1,11 @@
 """Reads files in s3, gs or azure buckets using fsspec and provides convenience resources for chunked reading of various file formats"""
+
 from typing import Iterator, List, Optional, Tuple, Union
 
 import dlt
-from dlt.common.typing import copy_sig
 from dlt.sources import DltResource
-from dlt.sources.filesystem import FileItem, FileItemDict, fsspec_filesystem, glob_files
 from dlt.sources.credentials import FileSystemCredentials
+from dlt.sources.filesystem import FileItem, FileItemDict, fsspec_filesystem, glob_files
 
 from .helpers import (
     AbstractFileSystem,
@@ -37,8 +37,8 @@ def readers(
         credentials (FileSystemCredentials | AbstractFilesystem): The credentials to the filesystem of fsspec `AbstractFilesystem` instance.
         file_glob (str, optional): The filter to apply to the files in glob format. by default lists all files in bucket_url non-recursively
     """
-    print("bucket_url:",bucket_url)
-    print("file_glob",file_glob)
+    print("bucket_url:", bucket_url)
+    print("file_glob", file_glob)
     return (
         filesystem(bucket_url, credentials, file_glob=file_glob)
         | dlt.transformer(name="read_csv")(_read_csv),
@@ -75,7 +75,7 @@ def filesystem(
     Returns:
         Iterator[List[FileItem]]: The list of files.
     """
-    
+
     if isinstance(credentials, AbstractFileSystem):
         fs_client = credentials
     else:
@@ -87,7 +87,7 @@ def filesystem(
         if extract_content:
             file_dict["file_content"] = file_dict.read_bytes()
         files_chunk.append(file_dict)  # type: ignore
-        print("files_chunk",files_chunk)
+        print("files_chunk", files_chunk)
         # wait for the chunk to be full
         if len(files_chunk) >= files_per_page:
             yield files_chunk

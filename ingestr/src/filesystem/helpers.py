@@ -1,19 +1,19 @@
 """Helpers for the filesystem resource."""
+
 from typing import Any, Dict, Iterable, List, Optional, Type, Union
-from fsspec import AbstractFileSystem  # type: ignore
 
 import dlt
 from dlt.common.configuration import resolve_type
 from dlt.common.typing import TDataItem
-
 from dlt.sources import DltResource
-from dlt.sources.filesystem import fsspec_filesystem
 from dlt.sources.config import configspec, with_config
 from dlt.sources.credentials import (
     CredentialsConfiguration,
     FilesystemConfiguration,
     FileSystemCredentials,
 )
+from dlt.sources.filesystem import fsspec_filesystem
+from fsspec import AbstractFileSystem  # type: ignore
 
 from .settings import DEFAULT_CHUNK_SIZE
 
@@ -28,7 +28,11 @@ class FilesystemConfigurationResource(FilesystemConfiguration):
     @resolve_type("credentials")
     def resolve_credentials_type(self) -> Type[CredentialsConfiguration]:
         # use known credentials or empty credentials for unknown protocol
-        return Union[self.PROTOCOL_CREDENTIALS.get(self.protocol) or Optional[CredentialsConfiguration], AbstractFileSystem]  # type: ignore[return-value]
+        return Union[
+            self.PROTOCOL_CREDENTIALS.get(self.protocol)
+            or Optional[CredentialsConfiguration],
+            AbstractFileSystem,
+        ]  # type: ignore[return-value]
 
 
 def fsspec_from_resource(filesystem_instance: DltResource) -> AbstractFileSystem:

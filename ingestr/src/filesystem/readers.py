@@ -1,8 +1,8 @@
-from typing import TYPE_CHECKING, Any, Dict, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from dlt.common import json
 from dlt.common.typing import copy_sig
-from dlt.sources import TDataItems, DltResource, DltSource
+from dlt.sources import DltResource, DltSource, TDataItems
 from dlt.sources.filesystem import FileItemDict
 
 from .helpers import fetch_arrow, fetch_json
@@ -80,7 +80,7 @@ def _read_csv_duckdb(
     items: Iterator[FileItemDict],
     chunk_size: Optional[int] = 5000,
     use_pyarrow: bool = False,
-    **duckdb_kwargs: Any
+    **duckdb_kwargs: Any,
 ) -> Iterator[TDataItems]:
     """A resource to extract data from the given CSV files.
 
@@ -116,20 +116,16 @@ if TYPE_CHECKING:
         """This is a typing stub that provides docstrings and signatures to the resources in `readers" source"""
 
         @copy_sig(_read_csv)
-        def read_csv(self) -> DltResource:
-            ...
+        def read_csv(self) -> DltResource: ...
 
         @copy_sig(_read_jsonl)
-        def read_jsonl(self) -> DltResource:
-            ...
+        def read_jsonl(self) -> DltResource: ...
 
         @copy_sig(_read_parquet)
-        def read_parquet(self) -> DltResource:
-            ...
+        def read_parquet(self) -> DltResource: ...
 
         @copy_sig(_read_csv_duckdb)
-        def read_csv_duckdb(self) -> DltResource:
-            ...
+        def read_csv_duckdb(self) -> DltResource: ...
 
 else:
     ReadersSource = DltSource

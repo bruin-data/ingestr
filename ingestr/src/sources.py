@@ -6,10 +6,12 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 import dlt
+from dlt.common.configuration.specs import AwsCredentials
 
 from ingestr.src.airtable import airtable_source
 from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
+from ingestr.src.filesystem import readers
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -23,7 +25,6 @@ from ingestr.src.slack import slack_source
 from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
-from ingestr.src.filesystem import readers
 
 
 class SqlSource:
@@ -653,36 +654,53 @@ class KafkaSource:
             batch_size=int(batch_size[0]),
             batch_timeout=int(batch_timeout[0]),
         )
-    
+
 
 class S3Source:
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
-                raise ValueError(
-                    "S3 takes care of incrementality on its own, you should not provide incremental_key"
-                )
-            
-        #s3://ingestrbucket/book.csv =>
-        #api_key, #secret_key, #bucket_uri,
-        source_parts = urlparse(uri)
-        source_fields = parse_qs(source_parts.query)
-        bucket_uri = source_fields.get("bucket_uri")
-        file_glob = bucket_uri[0].split('/')[-1]
-        file_extension = file_glob.split('.')[-1].lower()
-        bucket_path = bucket_uri[0].rpartition('/')[0]
-       
-        if file_extension == 'csv':
+            raise ValueError(
+                "S3 takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+        access_key_id = source_fields.get("access_key_id")
+        if not access_key_id:
+            raise ValueError("access_key_id is required to connect to S3")
+
+        secret_access_key = source_fields.get("secret_access_key")
+        if not secret_access_key:
+            raise ValueError("access_key_id is required to connect to S3")
+
+        bucket_name = parsed_uri.hostname
+        if not bucket_name:
+            raise ValueError("bucket_name is required to connect to S3")
+        bucket_url = "s3://" + bucket_name
+
+        path_to_file = parsed_uri.path.lstrip("/")
+        if not bucket_name:
+            raise ValueError("path_to_file is required to connect to S3")
+
+        file_extension = path_to_file.split(".")[-1]
+
+        aws_credentials = AwsCredentials(
+            aws_access_key_id="AKIARCCG3YO75DBAZTE", aws_secret_access_key="L6LJPUTD0hAq3avXCtt3xkpL5BhmhuXNYeIKPmvw"
+        )
+        if file_extension == "csv":
             endpoint = "read_csv"
-        elif file_extension == 'json':
+        elif file_extension == "json":
             endpoint = "read_jsonl"
-        elif file_extension == 'parquet':
+        elif file_extension == "parquet":
             endpoint = "read_parquet"
         else:
-            raise ValueError("S3 Source only supports specific formats files: csv, json, parquet")
-      
-        return readers(bucket_url=bucket_path, file_glob=file_glob).with_resources(
-                   endpoint
-                )
+            raise ValueError(
+                "S3 Source only supports specific formats files: csv, json, parquet"
+            )
+
+        return readers(
+            bucket_url=bucket_url,credentials=aws_credentials, file_glob=path_to_file
+        ).with_resources(endpoint)

@@ -3,7 +3,7 @@ sources:
   filesystem:
     is_dirty: false
     last_commit_sha: b304784c92f44582f0214b863232b7c3d28c5962
-    last_commit_timestamp: '2024-08-27T15:40:56+02:00'
+    last_commit_timestamp: "2024-08-27T15:40:56+02:00"
     files:
       filesystem/readers.py:
         commit_sha: b304784c92f44582f0214b863232b7c3d28c5962
@@ -29,4 +29,4 @@ sources:
         commit_sha: b304784c92f44582f0214b863232b7c3d28c5962
         git_sha: df67f999ddd4c46e389eba64f8b57ccef83cc285
         sha3_256: 82d1ecdd13ad84c642da72abae736493ea040e1b50c458859651bfc4ffad4df8
-    dlt_version_constraint: '>=0.4.3a0'
+    dlt_version_constraint: ">=0.4.3a0"

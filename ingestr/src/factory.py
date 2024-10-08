@@ -26,12 +26,11 @@ from ingestr.src.sources import (
     LocalCsvSource,
     MongoDbSource,
     NotionSource,
+    S3Source,
     ShopifySource,
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
-    S3Source,
-    
 )
 
 SQL_SOURCE_SCHEMES = [
