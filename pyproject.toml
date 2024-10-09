@@ -78,7 +78,7 @@ exclude = [
     'src/klaviyo/.*',
     'src/appsflyer/.*',
     'src/kafka/.*',
-    'src/adjust/.*',,
+    'src/adjust/.*',
     'src/filesystem/.*'
   ]
 
