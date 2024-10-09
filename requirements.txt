@@ -29,3 +29,5 @@ stripe==10.7.0
 facebook-business==20.0.0
 pyairtable==2.3.3
 types-requests==2.32.0.20240907
+s3fs==2024.9.0
+
