@@ -683,15 +683,15 @@ class S3Source:
         bucket_url = f"s3://{bucket_name}"
 
         path_to_file = parsed_uri.path.lstrip("/")
-        if not bucket_name:
+        if not path_to_file:
             raise ValueError("path_to_file is required to connect to S3")
-
-        file_extension = path_to_file.split(".")[-1]
 
         aws_credentials = AwsCredentials(
             aws_access_key_id=access_key_id[0],
             aws_secret_access_key=TSecretStrValue(secret_access_key[0]),
         )
+        
+        file_extension = path_to_file.split(".")[-1]
         if file_extension == "csv":
             endpoint = "read_csv"
         elif file_extension == "jsonl":

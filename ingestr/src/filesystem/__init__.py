@@ -35,8 +35,6 @@ def readers(
         credentials (FileSystemCredentials | AbstractFilesystem): The credentials to the filesystem of fsspec `AbstractFilesystem` instance.
         file_glob (str, optional): The filter to apply to the files in glob format. by default lists all files in bucket_url non-recursively
     """
-    print("bucket_url:", bucket_url)
-    print("file_glob", file_glob)
     filesystem_resource = filesystem(bucket_url, credentials, file_glob=file_glob)
     filesystem_resource.apply_hints(
         incremental=dlt.sources.incremental("modification_date")

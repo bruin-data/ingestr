@@ -43,14 +43,11 @@ def _read_jsonl(
     Returns:
         TDataItem: The file content
     """
-    print("inside _read_jsonl")
     for file_obj in items:
         with file_obj.open() as f:
             lines_chunk = []
             for line in f:
-                print("above lines_chunk",line)
                 lines_chunk.append(json.loadb(line))
-                print("lines_chunk", lines_chunk)
                 if len(lines_chunk) >= chunksize:
                     yield lines_chunk
                     lines_chunk = []
