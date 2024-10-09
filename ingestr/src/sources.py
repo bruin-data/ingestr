@@ -215,7 +215,7 @@ class ShopifySource:
             "transactions",
             "balance",
             "events",
-            "price_rules"
+            "price_rules",
         ]:
             resource = table
         else:
@@ -769,7 +769,7 @@ class S3Source:
             aws_access_key_id=access_key_id[0],
             aws_secret_access_key=TSecretStrValue(secret_access_key[0]),
         )
-        
+
         file_extension = path_to_file.split(".")[-1]
         if file_extension == "csv":
             endpoint = "read_csv"
@@ -781,7 +781,7 @@ class S3Source:
             raise ValueError(
                 "S3 Source only supports specific formats files: csv, jsonl, parquet"
             )
-        
+
         return readers(
             bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
         ).with_resources(endpoint)

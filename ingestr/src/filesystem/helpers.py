@@ -15,14 +15,12 @@ from dlt.sources.credentials import (
 from dlt.sources.filesystem import fsspec_filesystem
 from fsspec import AbstractFileSystem  # type: ignore
 
-from .settings import DEFAULT_CHUNK_SIZE
-
 
 @configspec
 class FilesystemConfigurationResource(FilesystemConfiguration):
     credentials: Union[FileSystemCredentials, AbstractFileSystem] = None
     file_glob: Optional[str] = "*"
-    files_per_page: int = DEFAULT_CHUNK_SIZE
+    files_per_page: int = 100
     extract_content: bool = False
 
     @resolve_type("credentials")

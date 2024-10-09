@@ -19,6 +19,7 @@ from .readers import (
     _read_parquet,
 )
 
+
 @dlt.source(_impl_cls=ReadersSource, spec=FilesystemConfigurationResource)
 def readers(
     bucket_url: str,

@@ -53,7 +53,6 @@ def _read_jsonl(
                     lines_chunk = []
         if lines_chunk:
             yield lines_chunk
-            
 
 
 def _read_parquet(
