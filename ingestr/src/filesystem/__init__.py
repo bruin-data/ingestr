@@ -18,8 +18,6 @@ from .readers import (
     _read_jsonl,
     _read_parquet,
 )
-from .settings import DEFAULT_CHUNK_SIZE
-
 
 @dlt.source(_impl_cls=ReadersSource, spec=FilesystemConfigurationResource)
 def readers(
@@ -40,35 +38,30 @@ def readers(
     print("bucket_url:", bucket_url)
     print("file_glob", file_glob)
     filesystem_resource = filesystem(bucket_url, credentials, file_glob=file_glob)
-    filesystem_resource.apply_hints(incremental=dlt.sources.incremental("modification_date"))
+    filesystem_resource.apply_hints(
+        incremental=dlt.sources.incremental("modification_date")
+    )
     return (
-        filesystem_resource
-        | dlt.transformer(name="read_csv")(_read_csv),
-        filesystem_resource
-        | dlt.transformer(name="read_jsonl")(_read_jsonl),
-        filesystem_resource
-        | dlt.transformer(name="read_parquet")(_read_parquet),
-        filesystem_resource
-        | dlt.transformer(name="read_csv_duckdb")(_read_csv_duckdb),
+        filesystem_resource | dlt.transformer(name="read_csv")(_read_csv),
+        filesystem_resource | dlt.transformer(name="read_jsonl")(_read_jsonl),
+        filesystem_resource | dlt.transformer(name="read_parquet")(_read_parquet),
+        filesystem_resource | dlt.transformer(name="read_csv_duckdb")(_read_csv_duckdb),
     )
 
 
 @dlt.resource(
     primary_key="file_url", spec=FilesystemConfigurationResource, standalone=True
-    
-
 )
 def filesystem(
     bucket_url: str = dlt.secrets.value,
     credentials: Union[FileSystemCredentials, AbstractFileSystem] = dlt.secrets.value,
     file_glob: Optional[str] = "*",
-    files_per_page: int = DEFAULT_CHUNK_SIZE,
+    files_per_page: int = 100,
     extract_content: bool = True,
 ) -> Iterator[List[FileItem]]:
-   
     """This resource lists files in `bucket_url` using `file_glob` pattern. The files are yielded as FileItem which also
     provide methods to open and read file data. It should be combined with transformers that further process (ie. load files)
-   
+
     Args:
         bucket_url (str): The url to the bucket.
         credentials (FileSystemCredentials | AbstractFilesystem): The credentials to the filesystem of fsspec `AbstractFilesystem` instance.
@@ -92,7 +85,6 @@ def filesystem(
         if extract_content:
             file_dict["file_content"] = file_dict.read_bytes()
         files_chunk.append(file_dict)  # type: ignore
-        print("files_chunk", files_chunk)
         # wait for the chunk to be full
         if len(files_chunk) >= files_per_page:
             yield files_chunk

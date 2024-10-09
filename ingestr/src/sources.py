@@ -7,11 +7,12 @@ from urllib.parse import parse_qs, urlparse
 
 import dlt
 from dlt.common.configuration.specs import AwsCredentials
+from dlt.common.typing import TSecretStrValue
 
 from ingestr.src.airtable import airtable_source
 from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
-from ingestr.src.filesystem import readers, filesystem
+from ingestr.src.filesystem import readers
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -688,22 +689,20 @@ class S3Source:
         file_extension = path_to_file.split(".")[-1]
 
         aws_credentials = AwsCredentials(
-            aws_access_key_id = access_key_id[0],
-            aws_secret_access_key= secret_access_key[0],
+            aws_access_key_id=access_key_id[0],
+            aws_secret_access_key=TSecretStrValue(secret_access_key[0]),
         )
-        print("aws_access_key_id",aws_credentials.aws_access_key_id)
         if file_extension == "csv":
             endpoint = "read_csv"
-        elif file_extension == "json":
+        elif file_extension == "jsonl":
             endpoint = "read_jsonl"
         elif file_extension == "parquet":
             endpoint = "read_parquet"
         else:
             raise ValueError(
-                "S3 Source only supports specific formats files: csv, json, parquet"
+                "S3 Source only supports specific formats files: csv, jsonl, parquet"
             )
-        print("bucket_url",bucket_url)
-        print("path_to_file",path_to_file)
+        
         return readers(
-            bucket_url=bucket_url, credentials= aws_credentials, file_glob=path_to_file
+            bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
         ).with_resources(endpoint)
