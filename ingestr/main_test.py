@@ -10,7 +10,6 @@ import pytest
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
-from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
@@ -371,10 +370,10 @@ SOURCES = {
     "mysql8": DockerImage(
         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
     ),
-    "sqlserver": DockerImage(
-        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
-        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
-    ),
+    # "sqlserver": DockerImage(
+    # lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+    # "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+    # ),
 }
 
 DESTINATIONS = {

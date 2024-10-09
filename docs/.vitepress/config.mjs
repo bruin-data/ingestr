@@ -84,7 +84,9 @@ export default defineConfig({
             text: "Platforms",
             collapsed: false,
             items: [
+              { text: "Adjust", link: "/supported-sources/adjust.md" },
               { text: "Airtable", link: "/supported-sources/airtable.md" },
+              { text: "AppsFlyer", link: "/supported-sources/appsflyer.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               {
                 text: "Facebook Ads",

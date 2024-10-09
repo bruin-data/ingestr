@@ -33,5 +33,10 @@ Shopify source allows ingesting the following sources into separate tables:
 - `orders`
 - `customers`
 - `products`
+- `inventory_items`
+- `transactions`
+- `balance`
+- `events`
+- `price_rules`
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.

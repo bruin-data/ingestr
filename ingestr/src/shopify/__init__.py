@@ -9,7 +9,7 @@ from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TAnyDateTime, TDataItem
 from dlt.sources import DltResource
 
-from .helpers import ShopifyApi, ShopifyPartnerApi, TOrderStatus
+from .helpers import ShopifyApi, ShopifyGraphQLApi, TOrderStatus
 from .settings import (
     DEFAULT_API_VERSION,
     DEFAULT_ITEMS_PER_PAGE,
@@ -161,67 +161,164 @@ def shopify_source(
             params["updated_at_max"] = updated_at.end_value.isoformat()
         yield from client.get_pages("customers", params)
 
-    return (products, orders, customers)
+    @dlt.resource(primary_key="id", write_disposition="append")
+    def events(
+        created_at: dlt.sources.incremental[
+            pendulum.DateTime
+        ] = dlt.sources.incremental(
+            "created_at",
+            initial_value=start_date_obj,
+            end_value=end_date_obj,
+        ),
+        items_per_page: int = items_per_page,
+    ) -> Iterable[TDataItem]:
+        params = dict(
+            created_at_min=created_at.last_value.isoformat(),
+            limit=items_per_page,
+            order="created_at asc",
+        )
+        yield from client.get_pages("events", params)
 
+    @dlt.resource(primary_key="id", write_disposition="merge")
+    def price_rules(
+        updated_at: dlt.sources.incremental[
+            pendulum.DateTime
+        ] = dlt.sources.incremental(
+            "updated_at",
+            initial_value=start_date_obj,
+            end_value=end_date_obj,
+        ),
+        items_per_page: int = items_per_page,
+    ) -> Iterable[TDataItem]:
+        params = dict(
+            updated_at_min=updated_at.last_value.isoformat(),
+            limit=items_per_page,
+            order="updated_at asc",
+        )
+        yield from client.get_pages("price_rules", params)
 
-@dlt.resource
-def shopify_partner_query(
-    query: str,
-    data_items_path: jp.TJsonPath,
-    pagination_cursor_path: jp.TJsonPath,
-    pagination_variable_name: str = "after",
-    variables: Optional[Dict[str, Any]] = None,
-    access_token: str = dlt.secrets.value,
-    organization_id: str = dlt.config.value,
-    api_version: str = DEFAULT_PARTNER_API_VERSION,
-) -> Iterable[TDataItem]:
-    """
-    Resource for getting paginated results from the Shopify Partner GraphQL API.
+    @dlt.resource(primary_key="id", write_disposition="merge")
+    def transactions(
+        since_id: dlt.sources.incremental[int] = dlt.sources.incremental(
+            "id",
+            initial_value=None,
+        ),
+        items_per_page: int = items_per_page,
+    ) -> Iterable[TDataItem]:
+        params = dict(
+            limit=items_per_page,
+        )
+        if since_id.start_value is not None:
+            params["since_id"] = since_id.start_value
+        yield from client.get_pages("shopify_payments/balance/transactions", params)
 
-    This resource will run the given GraphQL query and extract a list of data items from the result.
-    It will then run the query again with a pagination cursor to get the next page of results.
+    @dlt.resource(primary_key="currency", write_disposition={"disposition": "merge", "strategy": "scd2"})
+    def balance() -> Iterable[TDataItem]:
+        yield from client.get_pages("shopify_payments/balance", {})
 
-    Example:
-        query = '''query Transactions($after: String) {
-            transactions(after: $after, first: 100) {
-                edges {
-                    cursor
-                    node {
-                        id
-                    }
-                }
-            }
-        }'''
-
-        partner_query_pages(
-            query,
-            data_items_path="data.transactions.edges[*].node",
-            pagination_cursor_path="data.transactions.edges[-1].cursor",
-            pagination_variable_name="after",
+    @dlt.resource(primary_key="id", write_disposition="merge")
+    def inventory_items(
+        updated_at: dlt.sources.incremental[
+            pendulum.DateTime
+        ] = dlt.sources.incremental(
+            "updatedAt",
+            initial_value=start_date_obj,
+            end_value=end_date_obj,
+            allow_external_schedulers=True,
+        ),
+        items_per_page: int = items_per_page,
+    ) -> Iterable[TDataItem]:
+        client = ShopifyGraphQLApi(
+            base_url=shop_url,
+            access_token=private_app_password,
+            api_version="2024-07",
         )
 
-    Args:
-        query: The GraphQL query to run.
-        data_items_path: The JSONPath to the data items in the query result. Should resolve to array items.
-        pagination_cursor_path: The JSONPath to the pagination cursor in the query result, will be piped to the next query via variables.
-        pagination_variable_name: The name of the variable to pass the pagination cursor to.
-        variables: Mapping of extra variables used in the query.
-        access_token: The Partner API Client access token, created in the Partner Dashboard.
-        organization_id: Your Organization ID, found in the Partner Dashboard.
-        api_version: The API version to use (e.g. 2024-01). Use `unstable` for the latest version.
-    Returns:
-        Iterable[TDataItem]: A generator of the query results.
-    """
-    client = ShopifyPartnerApi(
-        access_token=access_token,
-        organization_id=organization_id,
-        api_version=api_version,
-    )
+        query = """
+            query inventoryItems($after: String, $query: String, $first: Int) {
+            inventoryItems(after: $after, first: $first, query: $query) {
+                edges {
+                node {
+                    id
+                    countryCodeOfOrigin
+                    createdAt
+                    duplicateSkuCount
+                    harmonizedSystemCode
+                    inventoryHistoryUrl
+                    legacyResourceId
+                    measurement {
+                    id
+                    weight {
+                        unit
+                        value
+                    }
+                    }
 
-    yield from client.get_graphql_pages(
-        query,
-        data_items_path=data_items_path,
-        pagination_cursor_path=pagination_cursor_path,
-        pagination_variable_name=pagination_variable_name,
-        variables=variables,
-    )
+                    provinceCodeOfOrigin
+                    requiresShipping
+                    sku
+                    tracked
+                    trackedEditable {
+                    locked
+                    reason
+                    }
+                    unitCost {
+                    amount
+                    currencyCode
+                    }
+                    updatedAt
+                    variant {
+                    id
+                    availableForSale
+                    barcode
+
+                    compareAtPrice
+                    createdAt
+                    inventoryPolicy
+                    inventoryQuantity
+                    legacyResourceId
+
+                    position
+                    price
+                    product {
+                        id
+                    }
+                    requiresComponents
+
+                    selectedOptions {
+                        name
+                        value
+                    }
+                    sellableOnlineQuantity
+
+                    sellingPlanGroupsCount {
+                        count
+                        precision
+                    }
+                    sku
+
+                    taxCode
+                    taxable
+                    title
+                    updatedAt
+                    }
+                }
+                }
+                pageInfo {
+                    endCursor
+                }
+            }
+        }"""
+
+        yield from client.get_graphql_pages(
+            query,
+            data_items_path="data.inventoryItems.edges[*].node",
+            pagination_cursor_path="data.inventoryItems.pageInfo.endCursor",
+            pagination_variable_name="after",
+            variables={
+                "query": f"updated_at:>'{updated_at.last_value.isoformat()}'",
+                "first": items_per_page,
+            },
+        )
+
+    return (products, orders, customers, inventory_items, transactions, balance, events, price_rules)
