@@ -4,16 +4,14 @@ This verified source easily streams files from AWS S3, GCS, Azure, or local file
 
 Sources and resources that can be used with this verified source are:
 
-
 | Name            | Type                 | Description                                                               |
-|-----------------|----------------------|---------------------------------------------------------------------------|
+| --------------- | -------------------- | ------------------------------------------------------------------------- |
 | readers         | Source               | Lists and reads files with resource `filesystem` and readers transformers |
 | filesystem      | Resource             | Lists files in `bucket_url` using `file_glob` pattern                     |
 | read_csv        | Resource-transformer | Reads CSV file with "Pandas" chunk by chunk                               |
 | read_csv_duckdb | Resource-transformer | Reads CSV file with DuckDB engine chunk by chunk                          |
 | read_jsonl      | Resource-transformer | Reads JSONL file content and extracts the data                            |
 | read_parquet    | Resource-transformer | Reads Parquet file content and extracts the data with "Pyarrow"           |
-
 
 ## Initialize the source
 
@@ -83,7 +81,7 @@ pipeline.run(files)
 ```
 
 Use `readers` source to enumerate and **read** chunked
-`csv`, `jsonl` and `parquet`  bucket files.
+`csv`, `jsonl` and `parquet` bucket files.
 
 ```python
 files = readers(
@@ -99,8 +97,8 @@ want and that each pipeline uses a
 separate state for incremental loading.
 
 > To add a new file reader is straightforward. For demos, see
-[filesystem_pipeline.py](../filesystem_pipeline.py). We welcome contributions for any file types,
-including PDFs and Excel files.
+> [filesystem_pipeline.py](../filesystem_pipeline.py). We welcome contributions for any file types,
+> including PDFs and Excel files.
 
 💡 To explore additional customizations for this pipeline,
 we recommend referring to the official `dlt` [Readers Source & Filesystem verified

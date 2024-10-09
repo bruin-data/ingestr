@@ -23,8 +23,8 @@ from .settings import DEFAULT_CHUNK_SIZE
 
 @dlt.source(_impl_cls=ReadersSource, spec=FilesystemConfigurationResource)
 def readers(
-    bucket_url: str = dlt.secrets.value,
-    credentials: Union[FileSystemCredentials, AbstractFileSystem] = dlt.secrets.value,
+    bucket_url: str,
+    credentials: Union[FileSystemCredentials, AbstractFileSystem],
     file_glob: Optional[str] = "*",
 ) -> Tuple[DltResource, ...]:
     """This source provides a few resources that are chunked file readers. Readers can be further parametrized before use
@@ -39,20 +39,24 @@ def readers(
     """
     print("bucket_url:", bucket_url)
     print("file_glob", file_glob)
+    filesystem_resource = filesystem(bucket_url, credentials, file_glob=file_glob)
+    filesystem_resource.apply_hints(incremental=dlt.sources.incremental("modification_date"))
     return (
-        filesystem(bucket_url, credentials, file_glob=file_glob)
+        filesystem_resource
         | dlt.transformer(name="read_csv")(_read_csv),
-        filesystem(bucket_url, credentials, file_glob=file_glob)
+        filesystem_resource
         | dlt.transformer(name="read_jsonl")(_read_jsonl),
-        filesystem(bucket_url, credentials, file_glob=file_glob)
+        filesystem_resource
         | dlt.transformer(name="read_parquet")(_read_parquet),
-        filesystem(bucket_url, credentials, file_glob=file_glob)
+        filesystem_resource
         | dlt.transformer(name="read_csv_duckdb")(_read_csv_duckdb),
     )
 
 
 @dlt.resource(
     primary_key="file_url", spec=FilesystemConfigurationResource, standalone=True
+    
+
 )
 def filesystem(
     bucket_url: str = dlt.secrets.value,
@@ -61,9 +65,10 @@ def filesystem(
     files_per_page: int = DEFAULT_CHUNK_SIZE,
     extract_content: bool = True,
 ) -> Iterator[List[FileItem]]:
+   
     """This resource lists files in `bucket_url` using `file_glob` pattern. The files are yielded as FileItem which also
     provide methods to open and read file data. It should be combined with transformers that further process (ie. load files)
-
+   
     Args:
         bucket_url (str): The url to the bucket.
         credentials (FileSystemCredentials | AbstractFilesystem): The credentials to the filesystem of fsspec `AbstractFilesystem` instance.
