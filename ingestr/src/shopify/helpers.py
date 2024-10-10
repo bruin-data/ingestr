@@ -75,9 +75,6 @@ class ShopifyApi:
             response = requests.get(url, params=params, headers=headers)
             response.raise_for_status()
             json = response.json()
-            # Get item list from the page
-            if len(json[resource_last]) > 0:
-                print(json[resource_last][0]['created_at'])
             yield [convert_datetime_fields(item) for item in json[resource_last]]
             url = response.links.get("next", {}).get("url")
             # Query params are included in subsequent page URLs
