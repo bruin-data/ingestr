@@ -13,11 +13,10 @@ from .settings import DEFAULT_API_VERSION, DEFAULT_PARTNER_API_VERSION
 
 TOrderStatus = Literal["open", "closed", "cancelled", "any"]
 
-
 def convert_datetime_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     """Convert timestamp fields in the item to pendulum datetime objects
 
-    The item is modified in place.
+    The item is modified in place, including nested items.
 
     Args:
         item: The item to convert
@@ -26,10 +25,19 @@ def convert_datetime_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         The same data item (for convenience)
     """
     fields = ["created_at", "updated_at", "createdAt", "updatedAt"]
-    for field in fields:
-        if field in item:
-            item[field] = ensure_pendulum_datetime(item[field])
-    return item
+
+    def convert_nested(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key in fields and isinstance(value, str):
+                    obj[key] = ensure_pendulum_datetime(value)
+                else:
+                    obj[key] = convert_nested(value)
+        elif isinstance(obj, list):
+            return [convert_nested(elem) for elem in obj]
+        return obj
+
+    return convert_nested(item)
 
 
 class ShopifyApi:
@@ -136,10 +144,12 @@ class ShopifyGraphQLApi:
         while True:
             data = self.run_graphql_query(query, variables)
             data_items = jsonpath.find_values(data_items_path, data)
+
             if not data_items:
                 break
 
             yield [convert_datetime_fields(item) for item in data_items]
+
             cursors = jsonpath.find_values(pagination_cursor_path, data)
             if not cursors:
                 break

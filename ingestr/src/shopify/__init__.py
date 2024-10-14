@@ -321,4 +321,763 @@ def shopify_source(
             },
         )
 
-    return (products, orders, customers, inventory_items, transactions, balance, events, price_rules)
+    @dlt.resource(primary_key="id", write_disposition="merge")
+    def discounts(
+        updated_at: dlt.sources.incremental[
+            pendulum.DateTime
+        ] = dlt.sources.incremental(
+            "discount.updatedAt",
+            initial_value=start_date_obj,
+            end_value=end_date_obj,
+        ),
+        items_per_page: int = items_per_page,
+    ) -> Iterable[TDataItem]:
+        client = ShopifyGraphQLApi(
+            base_url=shop_url,
+            access_token=private_app_password,
+            api_version="2024-07",
+        )
+
+        query = """
+query discountNodes($after: String, $query: String, $first: Int)  {
+  discountNodes(after: $after, first: $first, query: $query) {
+    nodes {
+      id
+      discount {
+        ... on DiscountCodeApp {
+          appDiscountType {
+            app {
+              id
+            }
+            functionId
+            targetType
+          }
+          appliesOncePerCustomer
+          asyncUsageCount
+          combinesWith {
+            orderDiscounts
+            productDiscounts
+            shippingDiscounts
+          }
+          codesCount {
+            count
+            precision
+          }
+          createdAt
+          customerSelection {
+            ... on DiscountCustomerAll {
+              allCustomers
+            }
+            ... on DiscountCustomerSegments {
+              segments {
+                creationDate
+                id
+                lastEditDate
+                name
+                query
+              }
+            }
+            ... on DiscountCustomers {
+              customers {
+                id
+              }
+            }
+          }
+          discountClass
+          discountId
+          endsAt
+          errorHistory {
+            errorsFirstOccurredAt
+            firstOccurredAt
+            hasBeenSharedSinceLastError
+            hasSharedRecentErrors
+          }
+          hasTimelineComment
+          recurringCycleLimit
+          shareableUrls {
+            targetItemImage {
+              id
+              url
+            }
+            targetType
+            title
+            url
+          }
+          startsAt
+          status
+          title
+          totalSales {
+            amount
+            currencyCode
+          }
+          updatedAt
+          usageLimit
+        }
+        ... on DiscountCodeBasic {
+          appliesOncePerCustomer
+          asyncUsageCount
+          codesFirst50: codes(first: 50) {
+            nodes {
+              id
+              code
+            }
+          }
+          codesCount {
+            count
+            precision
+          }
+          combinesWith {
+            orderDiscounts
+            productDiscounts
+            shippingDiscounts
+          }
+          createdAt
+          customerGets {
+            appliesOnOneTimePurchase
+            appliesOnSubscription
+            items {
+              ... on AllDiscountItems {
+                allItems
+              }
+              ... on DiscountCollections {
+                collections(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+              ... on DiscountProducts {
+                productsFirst50: products(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+                productVariantsFirst50: productVariants(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+            }
+            value {
+              ... on DiscountAmount {
+                amount {
+                  amount
+                  currencyCode
+                }
+                appliesOnEachItem
+              }
+              ... on DiscountOnQuantity {
+                effect {
+                  ... on DiscountAmount {
+                    amount {
+                      amount
+                      currencyCode
+                    }
+                    appliesOnEachItem
+                  }
+                  ... on DiscountPercentage {
+                    percentage
+                  }
+                }
+                quantity {
+                  quantity
+                }
+              }
+              ... on DiscountPercentage {
+                percentage
+              }
+            }
+          }
+          customerSelection {
+            ... on DiscountCustomerAll {
+              allCustomers
+            }
+            ... on DiscountCustomerSegments {
+              segments {
+                creationDate
+                id
+                lastEditDate
+                name
+                query
+              }
+            }
+            ... on DiscountCustomers {
+              customers {
+                id
+              }
+            }
+          }
+          discountClass
+          endsAt
+          hasTimelineComment
+          minimumRequirement {
+            ... on DiscountMinimumQuantity {
+              greaterThanOrEqualToQuantity
+            }
+            ... on DiscountMinimumSubtotal {
+              greaterThanOrEqualToSubtotal {
+                amount
+                currencyCode
+              }
+            }
+          }
+          recurringCycleLimit
+          shareableUrls {
+            url
+            title
+          }
+          shortSummary
+          startsAt
+          status
+          summary
+          title
+          totalSales {
+            amount
+            currencyCode
+          }
+          updatedAt
+          usageLimit
+        }
+        ... on DiscountCodeBxgy {
+          appliesOncePerCustomer
+          asyncUsageCount
+          codesFirst50: codes(first: 50) {
+            nodes {
+              id
+              code
+            }
+          }
+          codesCount {
+            count
+            precision
+          }
+          combinesWith {
+            orderDiscounts
+            productDiscounts
+            shippingDiscounts
+          }
+          createdAt
+          customerBuys {
+            items {
+              ... on AllDiscountItems {
+                allItems
+              }
+              ... on DiscountCollections {
+                collections(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+              ... on DiscountProducts {
+                productsFirst50: products(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+                productVariantsFirst50: productVariants(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+            }
+            value {
+              ... on DiscountPurchaseAmount {
+                amount
+              }
+              ... on DiscountQuantity {
+                quantity
+              }
+            }
+          }
+          customerGets {
+            appliesOnOneTimePurchase
+            appliesOnSubscription
+            items {
+              ... on AllDiscountItems {
+                allItems
+              }
+              ... on DiscountCollections {
+                collections(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+              ... on DiscountProducts {
+                productsFirst50: products(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+                productVariantsFirst50: productVariants(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+            }
+            value {
+              ... on DiscountAmount {
+                amount {
+                  amount
+                  currencyCode
+                }
+                appliesOnEachItem
+              }
+              ... on DiscountOnQuantity {
+                effect {
+                  ... on DiscountAmount {
+                    amount {
+                      amount
+                      currencyCode
+                    }
+                    appliesOnEachItem
+                  }
+                  ... on DiscountPercentage {
+                    percentage
+                  }
+                }
+                quantity {
+                  quantity
+                }
+              }
+              ... on DiscountPercentage {
+                percentage
+              }
+            }
+          }
+          customerSelection {
+            ... on DiscountCustomerAll {
+              allCustomers
+            }
+            ... on DiscountCustomerSegments {
+              segments {
+                creationDate
+                id
+                lastEditDate
+                name
+                query
+              }
+            }
+            ... on DiscountCustomers {
+              customers {
+                id
+              }
+            }
+          }
+          discountClass
+          endsAt
+          hasTimelineComment
+          shareableUrls {
+            url
+            title
+          }
+          startsAt
+          status
+          summary
+          title
+          totalSales {
+            amount
+            currencyCode
+          }
+          updatedAt
+          usageLimit
+          usesPerOrderLimit
+        }
+        ... on DiscountCodeFreeShipping {
+          appliesOncePerCustomer
+          appliesOnOneTimePurchase
+          appliesOnSubscription
+          asyncUsageCount
+          codesFirst50: codes(first: 50) {
+            nodes {
+              id
+              code
+            }
+          }
+          codesCount {
+            count
+            precision
+          }
+          combinesWith {
+            orderDiscounts
+            productDiscounts
+            shippingDiscounts
+          }
+          createdAt
+          customerSelection {
+            ... on DiscountCustomerAll {
+              allCustomers
+            }
+            ... on DiscountCustomerSegments {
+              segments {
+                creationDate
+                id
+                lastEditDate
+                name
+                query
+              }
+            }
+            ... on DiscountCustomers {
+              customers {
+                id
+              }
+            }
+          }
+          destinationSelection {
+            ... on DiscountCountries {
+              countries
+              includeRestOfWorld
+            }
+            ... on DiscountCountryAll {
+              allCountries
+            }
+          }
+          discountClass
+          endsAt
+          hasTimelineComment
+          maximumShippingPrice {
+            amount
+            currencyCode
+          }
+          minimumRequirement {
+            ... on DiscountMinimumQuantity {
+              greaterThanOrEqualToQuantity
+            }
+            ... on DiscountMinimumSubtotal {
+              greaterThanOrEqualToSubtotal {
+                amount
+                currencyCode
+              }
+            }
+          }
+          recurringCycleLimit
+          shareableUrls {
+            targetItemImage {
+              id
+              url
+            }
+            targetType
+            title
+            url
+          }
+          shortSummary
+          startsAt
+          status
+          summary
+          title
+          totalSales {
+            amount
+            currencyCode
+          }
+          updatedAt
+          usageLimit
+        }
+        ... on DiscountAutomaticApp {
+          appDiscountType {
+            app {
+              apiKey
+            }
+            appBridge {
+              createPath
+              detailsPath
+            }
+            appKey
+            description
+            discountClass
+            functionId
+            targetType
+            title
+          }
+          asyncUsageCount
+          combinesWith {
+            orderDiscounts
+            productDiscounts
+            shippingDiscounts
+          }
+          createdAt
+          discountClass
+          discountId
+          startsAt
+          endsAt
+          errorHistory {
+            errorsFirstOccurredAt
+            firstOccurredAt
+            hasBeenSharedSinceLastError
+            hasSharedRecentErrors
+          }
+          status
+          title
+          updatedAt
+        }
+        ... on DiscountAutomaticBasic {
+          asyncUsageCount
+          combinesWith {
+            orderDiscounts
+            productDiscounts
+            shippingDiscounts
+          }
+          createdAt
+          customerGets {
+            appliesOnOneTimePurchase
+            appliesOnSubscription
+            items {
+              ... on AllDiscountItems {
+                allItems
+              }
+              ... on DiscountCollections {
+                collections(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+              ... on DiscountProducts {
+                productsFirst50: products(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+                productVariantsFirst50: productVariants(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+            }
+            value {
+              ... on DiscountAmount {
+                amount {
+                  amount
+                  currencyCode
+                }
+                appliesOnEachItem
+              }
+              ... on DiscountOnQuantity {
+                effect {
+                  ... on DiscountAmount {
+                    amount {
+                      amount
+                      currencyCode
+                    }
+                    appliesOnEachItem
+                  }
+                  ... on DiscountPercentage {
+                    percentage
+                  }
+                }
+                quantity {
+                  quantity
+                }
+              }
+              ... on DiscountPercentage {
+                percentage
+              }
+            }
+          }
+          discountClass
+          endsAt
+          minimumRequirement {
+            ... on DiscountMinimumQuantity {
+              greaterThanOrEqualToQuantity
+            }
+            ... on DiscountMinimumSubtotal {
+              greaterThanOrEqualToSubtotal {
+                amount
+                currencyCode
+              }
+            }
+          }
+          recurringCycleLimit
+          shortSummary
+          startsAt
+          status
+          summary
+          title
+          updatedAt
+        }
+        ... on DiscountAutomaticBxgy {
+          asyncUsageCount
+          combinesWith {
+            orderDiscounts
+            productDiscounts
+            shippingDiscounts
+          }
+          createdAt
+          customerBuys {
+            items {
+              ... on AllDiscountItems {
+                allItems
+              }
+              ... on DiscountCollections {
+                collections(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+              ... on DiscountProducts {
+                productsFirst50: products(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+                productVariantsFirst50: productVariants(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+            }
+            value {
+              ... on DiscountPurchaseAmount {
+                amount
+              }
+              ... on DiscountQuantity {
+                quantity
+              }
+            }
+          }
+          customerGets {
+            appliesOnOneTimePurchase
+            appliesOnSubscription
+            items {
+              ... on AllDiscountItems {
+                allItems
+              }
+              ... on DiscountCollections {
+                collections(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+              ... on DiscountProducts {
+                productsFirst50: products(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+                productVariantsFirst50: productVariants(first: 50) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+            }
+            value {
+              ... on DiscountAmount {
+                amount {
+                  amount
+                  currencyCode
+                }
+                appliesOnEachItem
+              }
+              ... on DiscountOnQuantity {
+                effect {
+                  ... on DiscountAmount {
+                    amount {
+                      amount
+                      currencyCode
+                    }
+                    appliesOnEachItem
+                  }
+                  ... on DiscountPercentage {
+                    percentage
+                  }
+                }
+                quantity {
+                  quantity
+                }
+              }
+              ... on DiscountPercentage {
+                percentage
+              }
+            }
+          }
+          discountClass
+          endsAt
+          startsAt
+          status
+          summary
+          title
+          updatedAt
+          usesPerOrderLimit
+        }
+        ... on DiscountAutomaticFreeShipping {
+          appliesOnOneTimePurchase
+          appliesOnSubscription
+          asyncUsageCount
+          combinesWith {
+            orderDiscounts
+            productDiscounts
+            shippingDiscounts
+          }
+          createdAt
+          destinationSelection
+          discountClass
+          endsAt
+          hasTimelineComment
+          maximumShippingPrice {
+            amount
+            currencyCode
+          }
+          minimumRequirement {
+            ... on DiscountMinimumQuantity {
+              greaterThanOrEqualToQuantity
+            }
+            ... on DiscountMinimumSubtotal {
+              greaterThanOrEqualToSubtotal {
+                amount
+                currencyCode
+              }
+            }
+          }
+          recurringCycleLimit
+          shortSummary
+          startsAt
+          status
+          summary
+          title
+          totalSales {
+            amount
+            currencyCode
+          }
+          updatedAt
+        }
+      }
+      eventsFirst50: events(first: 50) {
+        nodes {
+          id
+        }
+      }
+      metafieldsFirst100: metafields(first: 100) {
+        nodes {
+          id
+        }
+      }
+    }
+    pageInfo {
+        endCursor
+        hasNextPage
+        hasPreviousPage
+        startCursor
+    }
+  }
+}
+"""
+
+        yield from client.get_graphql_pages(
+            query,
+            data_items_path="data.discountNodes.nodes[*]",
+            pagination_cursor_path="data.discountNodes.pageInfo.endCursor",
+            pagination_variable_name="after",
+            variables={
+                "first": items_per_page,
+            },
+        )
+
+    return (products, orders, customers, inventory_items, transactions, balance, events, price_rules, discounts)
