@@ -32,11 +32,12 @@ The result of this command will be a table in the `shopify.duckdb` database with
 Shopify source allows ingesting the following sources into separate tables:
 - `orders`
 - `customers`
+- `discounts`: Uses the GraphQL API, `discountNodes` query, take a look at the [Shopify docs](https://shopify.dev/docs/api/admin-graphql/2024-07/queries/discountNodes) for more details.
 - `products`
 - `inventory_items`
 - `transactions`
 - `balance`
 - `events`
-- `price_rules`
+- `price_rules`: this is a deprecated table, please use `discounts` instead.
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
