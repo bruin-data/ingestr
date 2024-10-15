@@ -206,6 +206,7 @@ class ShopifySource:
         resource = None
         if table in [
             "products",
+            "products_legacy",
             "orders",
             "customers",
             "inventory_items",
