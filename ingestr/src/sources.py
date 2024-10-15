@@ -211,6 +211,7 @@ class ShopifySource:
         resource = None
         if table in [
             "products",
+            "products_legacy",
             "orders",
             "customers",
             "inventory_items",
@@ -218,6 +219,8 @@ class ShopifySource:
             "balance",
             "events",
             "price_rules",
+            "discounts",
+            "taxonomy",
         ]:
             resource = table
         else:

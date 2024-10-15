@@ -17,7 +17,7 @@ TOrderStatus = Literal["open", "closed", "cancelled", "any"]
 def convert_datetime_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     """Convert timestamp fields in the item to pendulum datetime objects
 
-    The item is modified in place.
+    The item is modified in place, including nested items.
 
     Args:
         item: The item to convert
@@ -26,10 +26,39 @@ def convert_datetime_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         The same data item (for convenience)
     """
     fields = ["created_at", "updated_at", "createdAt", "updatedAt"]
-    for field in fields:
-        if field in item:
-            item[field] = ensure_pendulum_datetime(item[field])
-    return item
+
+    def convert_nested(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key in fields and isinstance(value, str):
+                    obj[key] = ensure_pendulum_datetime(value)
+                else:
+                    obj[key] = convert_nested(value)
+        elif isinstance(obj, list):
+            return [convert_nested(elem) for elem in obj]
+        return obj
+
+    return convert_nested(item)
+
+
+def remove_nodes_key(item: Any) -> Any:
+    """
+    Recursively remove the 'nodes' key from dictionaries if it's the only key and its value is an array.
+
+    Args:
+        item: The item to process (can be a dict, list, or any other type)
+
+    Returns:
+        The processed item
+    """
+    if isinstance(item, dict):
+        if len(item) == 1 and "nodes" in item and isinstance(item["nodes"], list):
+            return [remove_nodes_key(node) for node in item["nodes"]]
+        return {k: remove_nodes_key(v) for k, v in item.items()}
+    elif isinstance(item, list):
+        return [remove_nodes_key(element) for element in item]
+    else:
+        return item
 
 
 class ShopifyApi:
@@ -75,9 +104,6 @@ class ShopifyApi:
             response = requests.get(url, params=params, headers=headers)
             response.raise_for_status()
             json = response.json()
-            # Get item list from the page
-            if len(json[resource_last]) > 0:
-                print(json[resource_last][0]["created_at"])
             yield [convert_datetime_fields(item) for item in json[resource_last]]
             url = response.links.get("next", {}).get("url")
             # Query params are included in subsequent page URLs
@@ -132,6 +158,7 @@ class ShopifyGraphQLApi:
         query: str,
         data_items_path: jsonpath.TJsonPath,
         pagination_cursor_path: jsonpath.TJsonPath,
+        pagination_cursor_has_next_page_path: jsonpath.TJsonPath,
         pagination_variable_name: str,
         variables: Optional[DictStrAny] = None,
     ) -> Iterable[TDataItems]:
@@ -139,11 +166,23 @@ class ShopifyGraphQLApi:
         while True:
             data = self.run_graphql_query(query, variables)
             data_items = jsonpath.find_values(data_items_path, data)
+
             if not data_items:
                 break
 
-            yield [convert_datetime_fields(item) for item in data_items]
+            yield [
+                remove_nodes_key(convert_datetime_fields(item)) for item in data_items
+            ]
+
             cursors = jsonpath.find_values(pagination_cursor_path, data)
             if not cursors:
                 break
+
+            if pagination_cursor_has_next_page_path:
+                has_next_page = jsonpath.find_values(
+                    pagination_cursor_has_next_page_path, data
+                )
+                if not has_next_page or not has_next_page[0]:
+                    break
+
             variables[pagination_variable_name] = cursors[-1]
