@@ -213,7 +213,8 @@ class ShopifySource:
             "balance",
             "events",
             "price_rules",
-            "discounts"
+            "discounts",
+            "taxonomy",
         ]:
             resource = table
         else:

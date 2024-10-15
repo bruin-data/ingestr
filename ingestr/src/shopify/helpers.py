@@ -13,6 +13,7 @@ from .settings import DEFAULT_API_VERSION, DEFAULT_PARTNER_API_VERSION
 
 TOrderStatus = Literal["open", "closed", "cancelled", "any"]
 
+
 def convert_datetime_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     """Convert timestamp fields in the item to pendulum datetime objects
 
@@ -38,6 +39,26 @@ def convert_datetime_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         return obj
 
     return convert_nested(item)
+
+
+def remove_nodes_key(item: Any) -> Any:
+    """
+    Recursively remove the 'nodes' key from dictionaries if it's the only key and its value is an array.
+
+    Args:
+        item: The item to process (can be a dict, list, or any other type)
+
+    Returns:
+        The processed item
+    """
+    if isinstance(item, dict):
+        if len(item) == 1 and "nodes" in item and isinstance(item["nodes"], list):
+            return [remove_nodes_key(node) for node in item["nodes"]]
+        return {k: remove_nodes_key(v) for k, v in item.items()}
+    elif isinstance(item, list):
+        return [remove_nodes_key(element) for element in item]
+    else:
+        return item
 
 
 class ShopifyApi:
@@ -137,6 +158,7 @@ class ShopifyGraphQLApi:
         query: str,
         data_items_path: jsonpath.TJsonPath,
         pagination_cursor_path: jsonpath.TJsonPath,
+        pagination_cursor_has_next_page_path: jsonpath.TJsonPath,
         pagination_variable_name: str,
         variables: Optional[DictStrAny] = None,
     ) -> Iterable[TDataItems]:
@@ -148,9 +170,19 @@ class ShopifyGraphQLApi:
             if not data_items:
                 break
 
-            yield [convert_datetime_fields(item) for item in data_items]
+            yield [
+                remove_nodes_key(convert_datetime_fields(item)) for item in data_items
+            ]
 
             cursors = jsonpath.find_values(pagination_cursor_path, data)
             if not cursors:
                 break
+
+            if pagination_cursor_has_next_page_path:
+                has_next_page = jsonpath.find_values(
+                    pagination_cursor_has_next_page_path, data
+                )
+                if not has_next_page or not has_next_page[0]:
+                    break
+
             variables[pagination_variable_name] = cursors[-1]
