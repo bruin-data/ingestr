@@ -1666,6 +1666,11 @@ query discountNodes($after: String, $query: String, $first: Int)  {
                 "primary_key": True,
                 "description": "A globally unique ID for the product.",
             },
+            "availablePublicationsCount": {
+                "data_type": "complex",
+                "nullable": False,
+                "description": "The number of publications that a resource is published to",
+            },
             "category": {
                 "data_type": "complex",
                 "nullable": True,
@@ -1736,6 +1741,11 @@ query discountNodes($after: String, $query: String, $first: Int)  {
                 "nullable": True,
                 "description": "The date and time when the product was published.",
             },
+            "requiresSellingPlan": {
+                "data_type": "bool",
+                "nullable": True,
+                "description": "Whether the product can only be purchased with a selling plan.",
+            },
             "status": {
                 "data_type": "text",
                 "nullable": False,
@@ -1761,11 +1771,6 @@ query discountNodes($after: String, $query: String, $first: Int)  {
                 "nullable": False,
                 "description": "The quantity of inventory that's in stock.",
             },
-            "totalVariants": {
-                "data_type": "bigint",
-                "nullable": False,
-                "description": "The number of variants associated with the product.",
-            },
             "tracksInventory": {
                 "data_type": "bool",
                 "nullable": False,
@@ -1775,6 +1780,16 @@ query discountNodes($after: String, $query: String, $first: Int)  {
                 "data_type": "timestamp",
                 "nullable": False,
                 "description": "The date and time when the product was last modified.",
+            },
+            "variantsFirst250": {
+                "data_type": "complex",
+                "nullable": False,
+                "description": "A list of variants associated with the product, first 250.",
+            },
+            "variantsCount": {
+                "data_type": "complex",
+                "nullable": False,
+                "description": "The number of variants associated with the product.",
             },
             "vendor": {
                 "data_type": "text",
@@ -1880,7 +1895,7 @@ query products($after: String, $query: String, $first: Int)  {
         count
         precision
       }
-      variants(first: 250) {
+      variantsFirst250(first: 250) {
         nodes {
           id
           sku
