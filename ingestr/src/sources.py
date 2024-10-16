@@ -1,7 +1,7 @@
 import base64
 import csv
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -736,9 +736,8 @@ class AppsflyerSource:
             if interval_end
             else datetime.now().strftime("%Y-%m-%d")
         )
-
         return appsflyer_source(
             api_key=api_key[0],
             start_date=start_date,
-            end_date= end_date,
+            end_date=end_date,
         ).with_resources(resource)

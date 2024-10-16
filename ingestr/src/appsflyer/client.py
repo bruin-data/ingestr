@@ -95,7 +95,7 @@ class AppsflyerClient:
             "cohort_day_21_revenue_per_user",
             "retention_day_7",
         ]
-        print(start_date,"start_date")
+        print(start_date, "start_date")
         return self._fetch_data(start_date, end_date, metrics=metrics)
 
     def fetch_creatives(
