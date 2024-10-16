@@ -725,20 +725,20 @@ class AppsflyerSource:
             raise ValueError(
                 f"Resource '{table}' is not supported for Appsflyer source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
 
-        start_date = kwargs.get("interval_start") or "2001-01-01"
-        end_date = None
-        print(start_date)
-        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
-        
-        if "interval_end" in kwargs and kwargs["interval_end"]:
-            end_date = kwargs.get("interval_end")
-        else:
-            end_date_obj = start_date_obj + timedelta(days=30)
-            end_date = end_date_obj.strftime("%Y-%m-%d")
+        start_date = (
+            interval_start.strftime("%Y-%m-%d") if interval_start else "2000-01-01"
+        )
+        end_date = (
+            interval_end.strftime("%Y-%m-%d")
+            if interval_end
+            else datetime.now().strftime("%Y-%m-%d")
+        )
 
         return appsflyer_source(
             api_key=api_key[0],
             start_date=start_date,
-            end_date=end_date,
+            end_date= end_date,
         ).with_resources(resource)
