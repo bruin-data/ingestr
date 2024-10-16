@@ -1,7 +1,7 @@
 import base64
 import csv
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -726,8 +726,16 @@ class AppsflyerSource:
                 f"Resource '{table}' is not supported for Appsflyer source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
-        start_date = kwargs.get("interval_start") or "2024-01-02"
-        end_date = kwargs.get("interval_end") or "2024-01-29"
+        start_date = kwargs.get("interval_start") or "2001-01-01"
+        end_date = None
+        print(start_date)
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+        
+        if "interval_end" in kwargs and kwargs["interval_end"]:
+            end_date = kwargs.get("interval_end")
+        else:
+            end_date_obj = start_date_obj + timedelta(days=30)
+            end_date = end_date_obj.strftime("%Y-%m-%d")
 
         return appsflyer_source(
             api_key=api_key[0],
