@@ -1895,11 +1895,10 @@ query products($after: String, $query: String, $first: Int)  {
         count
         precision
       }
-      variantsFirst250(first: 250) {
+      variantsFirst250: variants(first: 250) {
         nodes {
           id
           sku
-          storefrontId
         }
       }
     }

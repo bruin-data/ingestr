@@ -158,8 +158,8 @@ class ShopifyGraphQLApi:
         query: str,
         data_items_path: jsonpath.TJsonPath,
         pagination_cursor_path: jsonpath.TJsonPath,
-        pagination_cursor_has_next_page_path: jsonpath.TJsonPath,
         pagination_variable_name: str,
+        pagination_cursor_has_next_page_path: Optional[jsonpath.TJsonPath] = None,
         variables: Optional[DictStrAny] = None,
     ) -> Iterable[TDataItems]:
         variables = dict(variables or {})
