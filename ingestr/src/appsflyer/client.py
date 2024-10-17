@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
@@ -89,14 +90,12 @@ class AppsflyerClient:
             "cohort_day_3_total_revenue_per_user",
             "cohort_day_7_total_revenue_per_user",
             "cohort_day_7_revenue_per_user",
-            "cohort_day_14_total_revenue_per_user",
-            "cohort_day_14_revenue_per_user",
-            "cohort_day_21_total_revenue_per_user",
-            "cohort_day_21_revenue_per_user",
             "retention_day_7",
         ]
-        print(start_date, "start_date")
-        return self._fetch_data(start_date, end_date, metrics=metrics)
+        max_cohort_duration = 7
+        max_allowed_end_date = (datetime.now() - timedelta(days=max_cohort_duration)).strftime('%Y-%m-%d')
+        adjusted_end_date = min(end_date, max_allowed_end_date)
+        return self._fetch_data(start_date, adjusted_end_date, metrics=metrics)
 
     def fetch_creatives(
         self,
