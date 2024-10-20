@@ -34,16 +34,18 @@ class AppsflyerClient:
         self,
         from_date: str,
         to_date: str,
-        maximum_rows= 1000000,
-        dimensions= DEFAULT_GROUPING,
-        metrics= DEFAULT_KPIS,
+        maximum_rows=1000000,
+        dimensions=DEFAULT_GROUPING,
+        metrics=DEFAULT_KPIS,
     ):
         current_start_time = datetime.fromisoformat(from_date).date()
         end_date_time = datetime.fromisoformat(to_date).date()
 
         while current_start_time < end_date_time:
-            current_end_time = min((current_start_time + timedelta(days=30)), end_date_time)
-            
+            current_end_time = min(
+                (current_start_time + timedelta(days=30)), end_date_time
+            )
+
             params = {
                 "from": current_start_time.isoformat(),
                 "to": current_end_time.isoformat(),
@@ -54,10 +56,12 @@ class AppsflyerClient:
             }
 
             def retry_on_limit(
-                response: Optional[requests.Response], exception: Optional[BaseException]
+                response: Optional[requests.Response],
+                exception: Optional[BaseException],
             ) -> bool:
                 return (
-                    isinstance(response, requests.Response) and response.status_code == 429
+                    isinstance(response, requests.Response)
+                    and response.status_code == 429
                 )
 
             request_client = Client(
@@ -83,7 +87,7 @@ class AppsflyerClient:
 
             except requests.RequestException as e:
                 raise HTTPError(f"Request failed: {e}")
-        
+
             current_start_time = current_end_time
 
     def fetch_campaigns(
@@ -101,9 +105,13 @@ class AppsflyerClient:
             "retention_day_7",
         ]
         max_cohort_duration = 7
-        max_allowed_end_date = (datetime.now() - timedelta(days=max_cohort_duration)).strftime('%Y-%m-%d')
+        max_allowed_end_date = (
+            datetime.now() - timedelta(days=max_cohort_duration)
+        ).strftime("%Y-%m-%d")
         adjusted_end_date = min(end_date, max_allowed_end_date)
-        return self._fetch_data(from_date=start_date, to_date=adjusted_end_date, metrics=metrics)
+        return self._fetch_data(
+            from_date=start_date, to_date=adjusted_end_date, metrics=metrics
+        )
 
     def fetch_creatives(
         self,
@@ -111,4 +119,6 @@ class AppsflyerClient:
         end_date: str,
     ):
         dimensions = DEFAULT_GROUPING + ["af_adset_id", "af_adset", "af_ad_id"]
-        return self._fetch_data(from_date=start_date, to_date=end_date, dimensions=dimensions)
+        return self._fetch_data(
+            from_date=start_date, to_date=end_date, dimensions=dimensions
+        )

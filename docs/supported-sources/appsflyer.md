@@ -14,14 +14,14 @@ An API token is required to retrieve reports from the AppsFlyer API. Please foll
 
 Once you complete the guide, you should have an API key. Let's say your API key is ey123, here's a sample command that will copy the data from AppsFlyer into a duckdb database:
 
-ingestr ingest --source-uri 'appsflyer://?api_key=ey123' --source-table 'campaigns' --dest-uri duckdb:///appsflyer.duckdb --dest-table 'appsflyer.output' --interval-start '2024-08-01' --interval-end '2024-08-28'
+ingestr ingest --source-uri 'appsflyer://?api_key=ey123' --source-table 'campaigns' --dest-uri duckdb:///appsflyer.duckdb --dest-table 'dest.campaigns' --interval-start '2024-08-01' --interval-end '2024-08-28'
 
 The result of this command will be a table in the appsflyer.duckdb database
 
 Available Source Table:
 AppsFlyer source allows ingesting the following source into separate tables:
 
--Campaigns: Retrieves data for campaigns, detailing the app's costs, loyal users, total installs, and revenue over multiple days.
+-Campaigns: Retrieves data for campaigns, detailing the app's costs, loyal users, total installs, and revenue over multiple days. In campaigns, We can only fetch data up to last seven days.
 
 -Creatives: Retrieves data for a creative asset, including revenue and cost.
 

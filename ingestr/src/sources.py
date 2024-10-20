@@ -736,9 +736,9 @@ class AppsflyerSource:
             if interval_end
             else datetime.now().strftime("%Y-%m-%d")
         )
-     
+
         return appsflyer_source(
-            api_key= api_key[0],
-            start_date= start_date,
-            end_date= end_date,
+            api_key=api_key[0],
+            start_date=start_date,
+            end_date=end_date,
         ).with_resources(resource)

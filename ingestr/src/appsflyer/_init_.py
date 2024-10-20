@@ -1,4 +1,3 @@
-from datetime import datetime, timedelta
 from typing import Iterable
 
 import dlt
@@ -21,15 +20,15 @@ def appsflyer_source(
         updated=dlt.sources.incremental('["Install Time"]', start_date_obj.isoformat()),
     ) -> Iterable[TDataItem]:
         yield from client.fetch_campaigns(
-                start_date=updated.start_value, end_date=end_date
-            )
-       
+            start_date=updated.start_value, end_date=end_date
+        )
+
     @dlt.resource(write_disposition="merge", merge_key="Install Time")
     def creatives(
         updated=dlt.sources.incremental('["Install Time"]', start_date_obj.isoformat()),
     ) -> Iterable[TDataItem]:
-       
         yield from client.fetch_creatives(
-                start_date=updated.start_value, end_date=end_date
-            )
+            start_date=updated.start_value, end_date=end_date
+        )
+
     return campaigns, creatives
