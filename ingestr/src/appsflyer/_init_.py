@@ -20,31 +20,16 @@ def appsflyer_source(
     def campaigns(
         updated=dlt.sources.incremental('["Install Time"]', start_date_obj.isoformat()),
     ) -> Iterable[TDataItem]:
-        current_start_time = datetime.fromisoformat(updated.start_value).date()
-        end_date_time = datetime.fromisoformat(end_date).date()
-        
-        while current_start_time < end_date_time:
-            current_end_time = current_start_time + timedelta(days=30)
-            next_end_date = min(current_end_time, end_date_time)
-            yield from client.fetch_campaigns(
-                start_date=current_start_time.isoformat(), end_date=next_end_date.isoformat()
+        yield from client.fetch_campaigns(
+                start_date=updated.start_value, end_date=end_date
             )
-            print(current_start_time, next_end_date)
-            current_start_time = next_end_date
-
+       
     @dlt.resource(write_disposition="merge", merge_key="Install Time")
     def creatives(
         updated=dlt.sources.incremental('["Install Time"]', start_date_obj.isoformat()),
     ) -> Iterable[TDataItem]:
-        current_start_time = datetime.fromisoformat(updated.start_value).date()
-        end_date_time = datetime.fromisoformat(end_date).date()
-
-        while current_start_time < end_date_time:
-            current_end_time = current_start_time + timedelta(days=30)
-            next_end_date = min(current_end_time, end_date_time)
-            yield from client.fetch_creatives(
-                start_date=current_start_time.isoformat(), end_date=next_end_date.isoformat()
+       
+        yield from client.fetch_creatives(
+                start_date=updated.start_value, end_date=end_date
             )
-            current_start_time = next_end_date
-            
     return campaigns, creatives

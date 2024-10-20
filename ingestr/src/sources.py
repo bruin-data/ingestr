@@ -726,7 +726,6 @@ class AppsflyerSource:
                 f"Resource '{table}' is not supported for Appsflyer source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
         interval_start = kwargs.get("interval_start")
-        print("interval_start",interval_start)
         interval_end = kwargs.get("interval_end")
 
         start_date = (
