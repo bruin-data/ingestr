@@ -1,9 +1,9 @@
 """Fetches Shopify Orders and Products."""
 
-from typing import Any, Dict, Iterable, Optional  # noqa: F401
+from typing import Iterable, Optional
 
 import dlt
-from dlt.common import jsonpath as jp  # noqa: F401
+
 from dlt.common import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TAnyDateTime, TDataItem
@@ -13,7 +13,6 @@ from .helpers import ShopifyApi, ShopifyGraphQLApi, TOrderStatus
 from .settings import (
     DEFAULT_API_VERSION,
     DEFAULT_ITEMS_PER_PAGE,
-    DEFAULT_PARTNER_API_VERSION,  # noqa: F401
     FIRST_DAY_OF_MILLENNIUM,
 )
 
