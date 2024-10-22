@@ -13,7 +13,7 @@ from .helpers import ShopifyApi, ShopifyGraphQLApi, TOrderStatus
 from .settings import (
     DEFAULT_API_VERSION,
     DEFAULT_ITEMS_PER_PAGE,
-    DEFAULT_PARTNER_API_VERSION,
+    DEFAULT_PARTNER_API_VERSION,  # noqa: F401
     FIRST_DAY_OF_MILLENNIUM,
 )
 
