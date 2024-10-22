@@ -3,6 +3,7 @@
 from typing import Iterable, Optional
 
 import dlt
+
 from dlt.common import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TAnyDateTime, TDataItem
@@ -14,7 +15,6 @@ from .settings import (
     DEFAULT_ITEMS_PER_PAGE,
     FIRST_DAY_OF_MILLENNIUM,
 )
-
 
 @dlt.source(name="shopify", max_table_nesting=0)
 def shopify_source(

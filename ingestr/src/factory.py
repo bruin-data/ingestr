@@ -28,6 +28,7 @@ from ingestr.src.sources import (
     LocalCsvSource,
     MongoDbSource,
     NotionSource,
+    S3Source,
     ShopifySource,
     SlackSource,
     SqlSource,
@@ -132,6 +133,8 @@ class SourceDestinationFactory:
             return KafkaSource()
         elif self.source_scheme == "adjust":
             return AdjustSource()
+        elif self.source_scheme == "s3":
+            return S3Source()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
