@@ -15,13 +15,15 @@ def appsflyer_source(
     start_date_obj = ensure_pendulum_datetime(start_date)
     client = AppsflyerClient(api_key)
 
-    @dlt.resource(write_disposition="merge", merge_key="Install Time")
+    #disable due to cohort metrics
+    '''@dlt.resource(write_disposition="merge", merge_key="Install Time")
     def campaigns(
         updated=dlt.sources.incremental('["Install Time"]', start_date_obj.isoformat()),
     ) -> Iterable[TDataItem]:
         yield from client.fetch_campaigns(
             start_date=updated.start_value, end_date=end_date
         )
+    '''
 
     @dlt.resource(write_disposition="merge", merge_key="Install Time")
     def creatives(
@@ -31,4 +33,4 @@ def appsflyer_source(
             start_date=updated.start_value, end_date=end_date
         )
 
-    return campaigns, creatives
+    return creatives

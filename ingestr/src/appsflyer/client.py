@@ -89,7 +89,8 @@ class AppsflyerClient:
                 raise HTTPError(f"Request failed: {e}")
 
             current_start_time = current_end_time
-
+    
+    '''
     def fetch_campaigns(
         self,
         start_date: str,
@@ -112,6 +113,7 @@ class AppsflyerClient:
         return self._fetch_data(
             from_date=start_date, to_date=adjusted_end_date, metrics=metrics
         )
+    '''
 
     def fetch_creatives(
         self,
