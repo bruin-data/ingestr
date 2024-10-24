@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.status import Status
 from typing_extensions import Annotated
 
-from ingestr.src.factory import SourceDestinationFactory
+from ingestr.src.factory import SourceDestinationFactory, parse_columns
 from ingestr.src.telemetry.event import track
 
 app = typer.Typer(
@@ -251,6 +251,10 @@ def ingest(
             envvar="EXTRACT_PARALLELISM",
         ),
     ] = 5,  # type: ignore
+    columns: Annotated[
+        Optional[list[str]],
+        typer.Option(help="The column hints to apply to the resource(s)"),
+    ] = None,  # type: ignore
 ):
     track(
         "command_triggered",
@@ -311,6 +315,8 @@ def ingest(
             progress=progressInstance,
             pipelines_dir=pipelines_dir,
             refresh="drop_resources" if full_refresh else None,
+            import_schema_path="./schema/import/import_schema.json",
+            export_schema_path="./schema/export/export_schema.json",
         )
 
         if source.handles_incrementality():
@@ -322,6 +328,8 @@ def ingest(
             if incremental_strategy.value != IncrementalStrategy.none
             else "Platform-specific"
         )
+
+        cols = parse_columns(columns)
 
         print()
         print("[bold green]Initiated the pipeline with the following:[/bold green]")
@@ -340,6 +348,7 @@ def ingest(
         print(
             f"[bold yellow]  Primary Key:[/bold yellow] {primary_key if primary_key else 'None'}"
         )
+        print(f"[bold yellow]  Column Hints:[/bold yellow] {cols if cols else 'None'}")
         print()
 
         if not yes:
@@ -364,6 +373,19 @@ def ingest(
             sql_backend=sql_backend.value,
             page_size=page_size,
         )
+
+        if cols:
+            if (
+                hasattr(dlt_source, "selected_resources")
+                and dlt_source.selected_resources
+            ):
+                resource_names = list(dlt_source.selected_resources.keys())
+                for res in resource_names:
+                    dlt_source.resources[res].apply_hints(columns=cols)
+            else:
+                # If there are no selected resources or the attribute doesn't exist,
+                # apply hints to the entire source
+                dlt_source.apply_hints(columns=cols)
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
             dlt_source.incremental.primary_key = ()
