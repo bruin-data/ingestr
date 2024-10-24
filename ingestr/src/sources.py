@@ -745,6 +745,7 @@ class AppsflyerSource:
         min_diff_90_days = (end_date - start_date).days
         if min_diff_90_days < 90:
             start_date = end_date - timedelta(90)
+      
         return appsflyer_source(
             api_key=api_key[0],
             start_date=start_date.strftime("%Y-%m-%d"),
@@ -768,7 +769,6 @@ class ZendeskSource:
             interval_start.strftime("%Y-%m-%d") if interval_start else "2000-01-01"
         )
         end_date = interval_end.strftime("%Y-%m-%d") if interval_end else None
-
         source_fields = urlparse(uri)
         subdomain = source_fields.hostname
         if not subdomain:
