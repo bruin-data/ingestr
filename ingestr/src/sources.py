@@ -315,8 +315,8 @@ class GoogleSheetsSource:
         table_fields = table_string_to_dataclass(table)
         return self.table_builder(
             credentials=credentials,
-            spreadsheet_url_or_id=table_fields.table,
-            range_names=[table_fields.dataset],
+            spreadsheet_url_or_id=table_fields.dataset,
+            range_names=[table_fields.table],
             get_named_ranges=False,
         )
 
