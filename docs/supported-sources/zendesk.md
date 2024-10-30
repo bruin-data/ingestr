@@ -4,21 +4,20 @@
 
 ingestr supports Zendesk as a source.
 
-The Zendesk supports two authentication methods:
-
-- OAuth Token
+The Zendesk supports two authentication methods when connecting through ingestr:
+- OAuth Token 
 - API Token
 
-All resources supports API Token except "chats resources" i.e Zendesk Chat API. For more information, you can find additional details [here.](https://dlthub.com/docs/dlt-ecosystem/verified-sources/zendesk#grab-credentials)
+For all resources except chat resources, you can use either the [API Token](https://dlthub.com/docs/dlt-ecosystem/verified-sources/zendesk#grab-zendesk-support-api-token) or the Zendesk Support [OAuth Token](https://dlthub.com/docs/dlt-ecosystem/verified-sources/zendesk#zendesk-support-oauth-token) to fetch data. However, for chat resources, you must use the [OAuth Token](https://dlthub.com/docs/dlt-ecosystem/verified-sources/zendesk#zendesk-chat) specific to Zendesk Chat.
 
 ## URI Format
 
-The URI format for Zendesk is as follows:
-
+The URI format for Zendesk based on the authentication method:
+### For OAuth Token Authentication:
 ```plaintext
 zendesk://:<oauth_token>@<sub-domain>
 ```
-
+### For API Token Authentication:
 ```plaintext
 zendesk://<email>:<api_token>@<sub-domain>
 ```
