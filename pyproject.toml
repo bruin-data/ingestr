@@ -80,6 +80,7 @@ exclude = [
     'src/kafka/.*',
     'src/adjust/.*',
     'src/filesystem/.*'
+    'src/zendesk/.*',
   ]
 
 [[tool.mypy.overrides]]
@@ -99,6 +100,7 @@ module = [
   "ingestr.src.adjust.*",
   "ingestr.src.appsflyer",
   "ingestr.src.filesystem.*",
+  "ingestr.src.zendesk.*",
 ]
 follow_imports = "skip"
 

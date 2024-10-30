@@ -33,6 +33,7 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
+    ZendeskSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -133,6 +134,8 @@ class SourceDestinationFactory:
             return KafkaSource()
         elif self.source_scheme == "adjust":
             return AdjustSource()
+        elif self.source_scheme == "zendesk":
+            return ZendeskSource()
         elif self.source_scheme == "s3":
             return S3Source()
         else:
