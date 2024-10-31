@@ -11,8 +11,8 @@ kafka://?bootstrap_servers=localhost:9092&group_id=test_group&security_protocol=
 ```
 
 URI parameters:
-- `bootstrap_servers`: The Kafka server(s) to connect to, typically in the form of a host and port (e.g., `localhost:9092`).
-- `group_id`: The consumer group ID used for identifying the client when consuming messages.
+- `bootstrap_servers`(required): The Kafka server(s) to connect to, typically in the form of a host and port (e.g., `localhost:9092`).
+- `group_id`(required): The consumer group ID used for identifying the client when consuming messages.
 - `security_protocol`: The protocol used to communicate with brokers (e.g., `SASL_SSL` for secure communication).
 - `sasl_mechanisms`: The SASL mechanism to be used for authentication (e.g., `PLAIN`).
 - `sasl_username`: The username for SASL authentication.
@@ -29,7 +29,7 @@ Once you have your Kafka server, credentials, and group ID set up, here's a samp
 
 ```sh
 ingestr ingest \
-    --source-uri 'kafka://?bootstrap_servers=localhost:9092' \
+    --source-uri 'kafka://?bootstrap_servers=localhost:9092&group_id=test_group' \
     --source-table 'my-topic' \
     --dest-uri duckdb:///kafka.duckdb \
     --dest-table 'kafka.my_topic'
