@@ -846,16 +846,17 @@ class S3Source:
 
         secret_access_key = source_fields.get("secret_access_key")
         if not secret_access_key:
-            raise ValueError("access_key_id is required to connect to S3")
+            raise ValueError("secret_access_key is required to connect to S3")
 
         bucket_name = parsed_uri.hostname
         if not bucket_name:
-            raise ValueError("bucket_name is required to connect to S3")
+            raise ValueError("Invalid S3 URI: The bucket name is missing. Ensure your S3 URI follows the format 's3://bucket-name/path/to/file")
         bucket_url = f"s3://{bucket_name}"
+
 
         path_to_file = parsed_uri.path.lstrip("/")
         if not path_to_file:
-            raise ValueError("path_to_file is required to connect to S3")
+            raise ValueError("Invalid S3 URI: The file path is missing. Ensure your S3 URI follows the format 's3://bucket-name/path/to/file")
 
         aws_credentials = AwsCredentials(
             aws_access_key_id=access_key_id[0],
