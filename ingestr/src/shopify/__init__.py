@@ -17,7 +17,6 @@ from .settings import (
     FIRST_DAY_OF_MILLENNIUM,
 )
 
-
 @dlt.source(name="shopify", max_table_nesting=0)
 def shopify_source(
     private_app_password: str = dlt.secrets.value,

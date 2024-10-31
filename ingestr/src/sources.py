@@ -6,12 +6,15 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 import dlt
+from dlt.common.configuration.specs import AwsCredentials
+from dlt.common.typing import TSecretStrValue
 
 from ingestr.src.adjust._init_ import adjust_source
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
+from ingestr.src.filesystem import readers
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -823,3 +826,55 @@ class ZendeskSource:
             raise ValueError(
                 "fResource '{table}' is not supported for Zendesk source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
+
+
+class S3Source:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "S3 takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+        access_key_id = source_fields.get("access_key_id")
+        if not access_key_id:
+            raise ValueError("access_key_id is required to connect to S3")
+
+        secret_access_key = source_fields.get("secret_access_key")
+        if not secret_access_key:
+            raise ValueError("secret_access_key is required to connect to S3")
+
+        bucket_name = parsed_uri.hostname
+        if not bucket_name:
+            raise ValueError("Invalid S3 URI: The bucket name is missing. Ensure your S3 URI follows the format 's3://bucket-name/path/to/file")
+        bucket_url = f"s3://{bucket_name}"
+
+
+        path_to_file = parsed_uri.path.lstrip("/")
+        if not path_to_file:
+            raise ValueError("Invalid S3 URI: The file path is missing. Ensure your S3 URI follows the format 's3://bucket-name/path/to/file")
+
+        aws_credentials = AwsCredentials(
+            aws_access_key_id=access_key_id[0],
+            aws_secret_access_key=TSecretStrValue(secret_access_key[0]),
+        )
+
+        file_extension = path_to_file.split(".")[-1]
+        if file_extension == "csv":
+            endpoint = "read_csv"
+        elif file_extension == "jsonl":
+            endpoint = "read_jsonl"
+        elif file_extension == "parquet":
+            endpoint = "read_parquet"
+        else:
+            raise ValueError(
+                "S3 Source only supports specific formats files: csv, jsonl, parquet"
+            )
+
+        return readers(
+            bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
+        ).with_resources(endpoint)
