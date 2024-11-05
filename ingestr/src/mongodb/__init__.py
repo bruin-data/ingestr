@@ -65,7 +65,7 @@ def mongodb(
     sections=("sources", "mongodb"), spec=MongoDbCollectionResourceConfiguration
 )
 def mongodb_collection(
-    connection_url: str = dlt.secrets.value,
+    connection_url: str = dlt.config.value,
     database: Optional[str] = dlt.config.value,
     collection: str = dlt.config.value,
     incremental: Optional[dlt.sources.incremental] = None,  # type: ignore[type-arg]

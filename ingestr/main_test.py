@@ -3,9 +3,15 @@ import os
 import random
 import shutil
 import string
+import tempfile
 from datetime import date, datetime, timezone
+from typing import Optional
 
 import duckdb
+import numpy as np
+import pandas as pd  # type: ignore
+import pyarrow as pa  # type: ignore
+import pyarrow.ipc as ipc  # type: ignore
 import pytest
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
@@ -979,6 +985,10 @@ def as_datetime(date_str: str) -> date:
     return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).date()
 
 
+def as_datetime2(date_str: str) -> date:
+    return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
@@ -1045,3 +1055,283 @@ def test_kafka_to_db(dest):
     assert res[3] == ("message4",)
 
     kafka.stop()
+
+
+@pytest.mark.parametrize("dest", [DuckDb()], ids=["duckdb"])
+def test_arrow_mmap_to_db_create_replace(dest):
+    def run_command(
+        table: pa.Table,
+        incremental_key: Optional[str] = None,
+        incremental_strategy: Optional[str] = None,
+    ):
+        with tempfile.NamedTemporaryFile(suffix=".arrow", delete=True) as tmp:
+            with pa.OSFile(tmp.name, "wb") as f:
+                writer = ipc.new_file(f, table.schema)
+                writer.write_table(table)
+                writer.close()
+
+            invoke_ingest_command(
+                f"mmap://{tmp.name}",
+                "whatever",
+                dest_uri,
+                "testschema.output",
+                inc_key=incremental_key,
+                inc_strategy=incremental_strategy,
+            )
+
+    dest_uri = dest.start()
+
+    # let's start with a basic dataframe
+    row_count = 1000000
+    df = pd.DataFrame(
+        {
+            "id": range(row_count),
+            "value": np.random.rand(row_count),
+            "category": np.random.choice(["A", "B", "C"], size=row_count),
+            "nested": [{"a": 1, "b": 2, "c": {"d": 3}}] * row_count,
+            "date": [as_datetime("2024-11-05")] * row_count,
+        }
+    )
+
+    table = pa.Table.from_pandas(df)
+    run_command(table)
+
+    dest_engine = sqlalchemy.create_engine(dest_uri)
+    with dest_engine.begin() as conn:
+        res = conn.execute("select count(*) from testschema.output").fetchall()
+        assert res[0][0] == row_count
+
+        res = conn.execute(
+            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == as_datetime("2024-11-05")
+        assert res[0][1] == row_count
+
+    # let's add a new column to the dataframe
+    df["new_col"] = "some value"
+    table = pa.Table.from_pandas(df)
+    run_command(table)
+
+    # there should be no change, just a new column
+    with dest_engine.begin() as conn:
+        res = conn.execute("select count(*) from testschema.output").fetchall()
+        assert res[0][0] == row_count
+
+        res = conn.execute(
+            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == as_datetime("2024-11-05")
+        assert res[0][1] == row_count
+
+        res = conn.execute(
+            "select new_col, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == "some value"
+        assert res[0][1] == row_count
+
+
+@pytest.mark.parametrize("dest", [DuckDb()], ids=["duckdb"])
+def test_arrow_mmap_to_db_delete_insert(dest):
+    def run_command(df: pd.DataFrame, incremental_key: Optional[str] = None):
+        table = pa.Table.from_pandas(df)
+        with tempfile.NamedTemporaryFile(suffix=".arrow", delete=True) as tmp:
+            with pa.OSFile(tmp.name, "wb") as f:
+                writer = ipc.new_file(f, table.schema)
+                writer.write_table(table)
+                writer.close()
+
+            res = invoke_ingest_command(
+                f"mmap://{tmp.name}",
+                "whatever",
+                dest_uri,
+                "testschema.output",
+                inc_key=incremental_key,
+                inc_strategy="delete+insert",
+            )
+
+            assert res.exit_code == 0
+            return res
+
+    dest_uri = dest.start()
+    dest_engine = sqlalchemy.create_engine(dest_uri)
+
+    # let's start with a basic dataframe
+    row_count = 1000000
+    df = pd.DataFrame(
+        {
+            "id": range(row_count),
+            "value": np.random.rand(row_count),
+            "category": np.random.choice(["A", "B", "C"], size=row_count),
+            "date": pd.to_datetime(["2024-11-05"] * row_count),
+        }
+    )
+
+    run_command(df, "date")
+
+    # the first load, it should be loaded correctly
+    with dest_engine.begin() as conn:
+        res = conn.execute("select count(*) from testschema.output").fetchall()
+        assert res[0][0] == row_count
+
+        res = conn.execute(
+            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][1] == row_count
+
+    # run again, it should be deleted and reloaded
+    run_command(df, "date")
+    with dest_engine.begin() as conn:
+        res = conn.execute("select count(*) from testschema.output").fetchall()
+        assert res[0][0] == row_count
+
+        res = conn.execute(
+            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][1] == row_count
+
+    # append 1000 new rows with a different date
+    new_rows = pd.DataFrame(
+        {
+            "id": range(row_count, row_count + 1000),
+            "value": np.random.rand(1000),
+            "category": np.random.choice(["A", "B", "C"], size=1000),
+            "date": pd.to_datetime(["2024-11-06"] * 1000),
+        }
+    )
+    df = pd.concat([df, new_rows], ignore_index=True)
+
+    run_command(df, "date")
+
+    with dest_engine.begin() as conn:
+        res = conn.execute("select count(*) from testschema.output").fetchall()
+        assert res[0][0] == row_count + 1000
+
+        res = conn.execute(
+            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][1] == row_count
+        assert res[1][0] == as_datetime2("2024-11-06")
+        assert res[1][1] == 1000
+
+    # append 1000 old rows for a previous date, these should not be loaded
+    old_rows = pd.DataFrame(
+        {
+            "id": range(row_count, row_count + 1000),
+            "value": np.random.rand(1000),
+            "category": np.random.choice(["A", "B", "C"], size=1000),
+            "date": pd.to_datetime(["2024-11-04"] * 1000),
+        }
+    )
+    df = pd.concat([df, old_rows], ignore_index=True)
+
+    run_command(df, "date")
+    with dest_engine.begin() as conn:
+        res = conn.execute("select count(*) from testschema.output").fetchall()
+        assert res[0][0] == row_count + 1000
+
+        res = conn.execute(
+            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][1] == row_count
+        assert res[1][0] == as_datetime2("2024-11-06")
+        assert res[1][1] == 1000
+
+
+@pytest.mark.parametrize("dest", [DuckDb()], ids=["duckdb"])
+def test_arrow_mmap_to_db_merge_without_incremental(dest):
+    def run_command(df: pd.DataFrame):
+        table = pa.Table.from_pandas(df)
+        with tempfile.NamedTemporaryFile(suffix=".arrow", delete=True) as tmp:
+            with pa.OSFile(tmp.name, "wb") as f:
+                writer = ipc.new_file(f, table.schema)
+                writer.write_table(table)
+                writer.close()
+
+            res = invoke_ingest_command(
+                f"mmap://{tmp.name}",
+                "whatever",
+                dest_uri,
+                "testschema.output",
+                inc_strategy="merge",
+                primary_key="id",
+            )
+
+            assert res.exit_code == 0
+            return res
+
+    dest_uri = dest.start()
+    dest_engine = sqlalchemy.create_engine(dest_uri)
+
+    # let's start with a basic dataframe
+    row_count = 1000000
+    df = pd.DataFrame({"id": range(row_count), "value": ["a"] * row_count})
+
+    run_command(df)
+
+    # the first load, it should be loaded correctly
+    with dest_engine.begin() as conn:
+        res = conn.execute("select count(*) from testschema.output").fetchall()
+        assert res[0][0] == row_count
+
+        res = conn.execute(
+            "select value, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == "a"
+        assert res[0][1] == row_count
+
+    # run again, no change
+    run_command(df)
+    with dest_engine.begin() as conn:
+        res = conn.execute("select count(*) from testschema.output").fetchall()
+        assert res[0][0] == row_count
+
+        res = conn.execute(
+            "select value, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == "a"
+        assert res[0][1] == row_count
+
+    # append 1000 new rows with a different value
+    new_rows = pd.DataFrame(
+        {
+            "id": range(row_count, row_count + 1000),
+            "value": ["b"] * 1000,
+        }
+    )
+    df = pd.concat([df, new_rows], ignore_index=True)
+
+    run_command(df)
+
+    with dest_engine.begin() as conn:
+        res = conn.execute("select count(*) from testschema.output").fetchall()
+        assert res[0][0] == row_count + 1000
+
+        res = conn.execute(
+            "select value, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == "a"
+        assert res[0][1] == row_count
+        assert res[1][0] == "b"
+        assert res[1][1] == 1000
+
+    # append 1000 old rows for previous ids, they should be merged
+    old_rows = pd.DataFrame(
+        {
+            "id": range(row_count, row_count + 1000),
+            "value": ["a"] * 1000,
+        }
+    )
+
+    run_command(old_rows)
+    with dest_engine.begin() as conn:
+        res = conn.execute("select count(*) from testschema.output").fetchall()
+        assert res[0][0] == row_count + 1000
+        res = conn.execute(
+            "select value, count(*) from testschema.output group by 1 order by 1 asc"
+        ).fetchall()
+        assert res[0][0] == "a"
+        assert res[0][1] == row_count + 1000
