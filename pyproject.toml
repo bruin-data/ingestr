@@ -132,6 +132,9 @@ classifiers = [
 oracle = [
     "cx_Oracle==8.3.0",
 ]
+odbc = [
+    "pyodbc==5.1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/bruin-data/ingestr"

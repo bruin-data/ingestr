@@ -11,7 +11,6 @@ psycopg2-binary==2.9.9
 py-machineid==0.5.1
 pymongo==4.6.3
 pymysql==1.1.0
-pyodbc==5.1.0
 pyrate-limiter==3.6.1
 redshift-connector==2.1.0
 rich==13.7.1

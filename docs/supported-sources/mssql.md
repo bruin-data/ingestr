@@ -3,6 +3,14 @@ Microsoft SQL Server is a relational database management system developed by Mic
 
 ingestr supports Microsoft SQL Server as both a source and destination.
 
+## Installation
+
+To use Microsoft SQL Server with ingestr, you need to install the `pyodbc` add-on as well. You can do this by running:
+
+```bash
+pip install ingestr[odbc]
+```
+
 ## URI Format
 The URI format for Microsoft SQL Server is as follows:
 
