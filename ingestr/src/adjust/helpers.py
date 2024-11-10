@@ -1,3 +1,4 @@
+from datetime import datetime
 import requests
 from dlt.sources.helpers.requests import Client
 from requests.exceptions import HTTPError
@@ -44,6 +45,9 @@ class AdjustAPI:
         reattributed="all",
         sandbox="false",
     ):
+        start_date = datetime.fromisoformat(start_date).date()
+        end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+       
         headers = {"Authorization": f"Bearer {self.api_key}"}
         comma_separated_dimensions = ",".join(dimensions)
         comma_separated_metrics = ",".join(metrics)
@@ -60,6 +64,9 @@ class AdjustAPI:
             "sandbox": sandbox,
         }
 
+        if start_date > end_date:
+            raise ValueError(f"Invalid date range: Start date {start_date} must be earlier than end date {end_date}.")
+        
         def retry_on_limit(
             response: requests.Response, exception: BaseException
         ) -> bool:

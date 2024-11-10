@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Sequence
 
 import dlt
@@ -27,6 +28,8 @@ def adjust_source(
     def creatives(updated=dlt.sources.incremental('day', start_date_obj.isoformat())):
         dimensions = DEFAULT_DIMENSIONS + ["adgroup", "creative"]
         adjust_api = AdjustAPI(api_key=api_key)
+    
+        
         yield from adjust_api.fetch_report_data(
             start_date=updated.start_value, end_date=end_date, dimensions=dimensions
         )
