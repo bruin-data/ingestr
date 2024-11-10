@@ -18,6 +18,7 @@ from ingestr.src.sources import (
     AdjustSource,
     AirtableSource,
     AppsflyerSource,
+    ArrowMemoryMappedSource,
     ChessSource,
     FacebookAdsSource,
     GoogleSheetsSource,
@@ -136,6 +137,8 @@ class SourceDestinationFactory:
             return AdjustSource()
         elif self.source_scheme == "zendesk":
             return ZendeskSource()
+        elif self.source_scheme == "mmap":
+            return ArrowMemoryMappedSource()
         elif self.source_scheme == "s3":
             return S3Source()
         else:
