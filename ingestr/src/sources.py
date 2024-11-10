@@ -1,7 +1,7 @@
 import base64
 import csv
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -773,20 +773,32 @@ class AppsflyerSource:
             raise ValueError("api_key in the URI is required to connect to Appsflyer")
 
         resource = None
-        if table in ["campaigns", "creatives"]:
+        if table == "creatives":
             resource = table
         else:
             raise ValueError(
                 f"Resource '{table}' is not supported for Appsflyer source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
 
-        start_date = kwargs.get("interval_start") or "2024-01-02"
-        end_date = kwargs.get("interval_end") or "2024-01-29"
-
+        start_date = (
+            interval_start if interval_start else datetime(2001,1,1)
+        )
+      
+        end_date = (
+            interval_end
+            if interval_end
+            else datetime.now()
+        )
+        min_diff_90_days = (end_date - start_date).days
+        if min_diff_90_days < 90:
+            start_date = end_date - timedelta(90)
+      
         return appsflyer_source(
             api_key=api_key[0],
-            start_date=start_date,
-            end_date=end_date,
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d"),
         ).with_resources(resource)
 
 
@@ -806,7 +818,6 @@ class ZendeskSource:
             interval_start.strftime("%Y-%m-%d") if interval_start else "2000-01-01"
         )
         end_date = interval_end.strftime("%Y-%m-%d") if interval_end else None
-
         source_fields = urlparse(uri)
         subdomain = source_fields.hostname
         if not subdomain:
