@@ -65,7 +65,7 @@ class AdjustAPI:
         }
 
         if start_date > end_date:
-            raise ValueError(f"Invalid date range: Start date {start_date} must be earlier than end date {end_date}.")
+            raise ValueError(f"Invalid date range: Start date ({start_date}) must be earlier than end date ({end_date}).")
         
         def retry_on_limit(
             response: requests.Response, exception: BaseException
