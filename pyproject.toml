@@ -128,6 +128,11 @@ classifiers = [
     "Topic :: Database"
 ]
 
+[project.optional-dependencies]
+oracle = [
+    "cx_Oracle==8.3.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/bruin-data/ingestr"
 Issues = "https://github.com/bruin-data/ingestr/issues"
