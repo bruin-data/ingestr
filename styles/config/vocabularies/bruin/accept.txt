@@ -1,0 +1,51 @@
+ingestr
+URIs
+PostgreSQL
+Postgres
+Databricks
+Hana
+Airtable
+Klaviyo
+Shopify
+Salesforce
+HubSpot
+Zendesk
+dlt
+Google Sheets
+APIs
+OAuth
+SLA
+automations
+datetime
+API
+JSONL
+Microsoft SQL Server
+SQLAlchemy
+ingest
+SAP
+updated_at
+Rudderstack
+deduplicated
+deduplicate
+TIP
+AWS
+helpdesk
+SMS
+PII
+SASL
+INFO
+hostname
+CSV
+[Ll]ookback
+Facebook Ads
+SQLite
+Google BigQuery
+HANA
+MySQL
+Apache Kafka
+Salesforc
+JDBC
+AppsFlyer
+serverless
+ODBC
+DuckDB

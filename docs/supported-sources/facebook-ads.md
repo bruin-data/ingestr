@@ -4,7 +4,7 @@ Facebook Ads is the advertising platform that helps users to create targeted ads
 
 ingestr supports Facebook Ads as a source.
 
-## URI Format
+## URI format
 
 The URI format for Facebook Ads is as follows:
 
@@ -25,7 +25,7 @@ The URI is used to connect to Facebook Ads API for extracting data.
 
 Facebook Ads requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/facebook_ads#setup-guide).
 
-Once you complete the guide, you should have an Access_Token and Account ID . Let's say your access_token is `abcdef` and account_id is `1234` , here's a sample command that will copy the data from Facebook Ads into a duckdb database:
+Once you complete the guide, you should have an access token and an Account ID. Let's say your `access_token` is `abcdef` and `account_id` is `1234`, here's a sample command that will copy the data from Facebook Ads into a DuckDB database:
 
 ```sh
 ingestr ingest \
@@ -37,7 +37,7 @@ ingestr ingest \
 
 The result of this command will be a table in the `facebook.duckdb` database.
 
-## Available Tables
+## Tables
 
 Facebook Ads source allows ingesting the following sources into separate tables:
 

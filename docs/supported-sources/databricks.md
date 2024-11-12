@@ -3,7 +3,7 @@ Databricks is a platform for big data analytics and artificial intelligence.
 
 ingestr supports Databricks as both a source and destination.
 
-## URI Format
+## URI format
 The URI format for Databricks is as follows:
 
 ```plaintext

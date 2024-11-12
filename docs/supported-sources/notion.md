@@ -3,7 +3,7 @@
 
 ingestr supports Notion as a source.
 
-## URI Format
+## URI format
 The URI format for Notion is as follows:
 
 ```plaintext
@@ -19,7 +19,7 @@ The URI is used to connect to the Notion API for extracting data. More details o
 
 Notion requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/notion#setup-guide).
 
-Once you complete the guide, you should have an API key, and the table ID to connect to. Let's say your API token is `secret_12345` and the database you'd like to connect to is `bfeaafc0c25f40a9asdasd672a9456f3`, here's a sample command that will copy the data from the Notion table into a duckdb database:
+Once you complete the guide, you should have an API key, and the table ID to connect to. Let's say your API token is `secret_12345` and the database you'd like to connect to is `bfeaafc0c25f40a9asdasd672a9456f3`, here's a sample command that will copy the data from the Notion table into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'notion://?api_key=secret_12345' --source-table 'bfeaafc0c25f40a9asdasd672a9456f3' --dest-uri duckdb:///notion.duckdb --dest-table 'notion.output'

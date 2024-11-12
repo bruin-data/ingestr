@@ -1,6 +1,6 @@
 <div align="center">
     <img src="https://github.com/bruin-data/ingestr/blob/main/resources/ingestr.svg?raw=true" width="500" />
-    <p>Ingest & copy data from any source to any destination without any code</p>
+    <p>Copy data from any source to any destination without any code</p>
     <img src="https://github.com/bruin-data/ingestr/blob/main/resources/demo.gif?raw=true" width="750" />
 </div>
 
@@ -12,7 +12,7 @@
 
 ---
 
-Ingestr is a command-line application that allows you to ingest data from any source into any destination using simple command-line flags, no code necessary.
+ingestr is a command-line app that allows you to ingest data from any source into any destination using simple command-line flags, no code necessary.
 
 - ✨ copy data from your database into any destination
 - ➕ incremental loading: `append`, `merge` or `delete+insert`
@@ -38,10 +38,10 @@ ingestr ingest \
 
 That's it.
 
-This command will:
+This command:
 
-- get the table `public.some_data` from the Postgres instance.
-- upload this data to your BigQuery warehouse under the schema `ingestr` and table `some_data`.
+- gets the table `public.some_data` from the Postgres instance.
+- uploads this data to your BigQuery warehouse under the schema `ingestr` and table `some_data`.
 
 ## Documentation
 
@@ -51,7 +51,7 @@ You can see the full documentation [here](https://bruin-data.github.io/ingestr/g
 
 Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shared_invite/zt-2dl2i8foy-bVsuMUauHeN9M2laVm3ZVg).
 
-## Supported Sources & Destinations
+## Supported sources & destinations
 
 <table>
     <tr>
@@ -205,7 +205,7 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
     </tr>
 </table>
 
-More to come soon!
+Feel free to create an issue if you'd like to see support for another source or destination.
 
 ## Acknowledgements
 

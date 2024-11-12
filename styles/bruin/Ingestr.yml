@@ -1,0 +1,9 @@
+extends: substitution
+message: "Use '%s' instead of '%s'."
+ignorecase: false
+level: error
+nonword: true
+action:
+  name: replace
+swap:
+  Ingestr: ingestr

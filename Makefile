@@ -30,6 +30,9 @@ lint-ci:
 lint: venv
 	. venv/bin/activate; $(MAKE) lint-ci
 
+lint-docs:
+	vale docs --glob='!**/.vitepress/**'
+
 tl: test lint
 
 build:

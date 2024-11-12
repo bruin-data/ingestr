@@ -3,7 +3,7 @@ DuckDB is an in-memory database designed to be fast and reliable.
 
 ingestr supports DuckDB as both a source and destination.
 
-## URI Format
+## URI format
 The URI format for DuckDB is as follows:
 
 ```plaintext

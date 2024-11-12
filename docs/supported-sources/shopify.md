@@ -3,7 +3,7 @@
 
 ingestr supports Shopify as a source.
 
-## URI Format
+## URI format
 The URI format for Shopify is as follows:
 
 ```plaintext
@@ -20,7 +20,7 @@ The URI is used to connect to the Shopify API for extracting data. More details 
 
 Shopify requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/shopify#setup-guide).
 
-Once you complete the guide, you should have an API key and the store name to connect to. Let's say your API key is `shpkey_12345` and the store you'd like to connect to is `my-store`, here's a sample command that will copy the data from the Shopify store into a duckdb database:
+Once you complete the guide, you should have an API key and the store name to connect to. Let's say your API key is `shpkey_12345` and the store you'd like to connect to is `my-store`, here's a sample command that will copy the data from the Shopify store into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'shopify://my-store.myshopify.com?api_key=shpkey_12345' --source-table 'orders' --dest-uri duckdb:///shopify.duckdb --dest-table 'shopify.orders'
@@ -28,7 +28,7 @@ ingestr ingest --source-uri 'shopify://my-store.myshopify.com?api_key=shpkey_123
 
 The result of this command will be a table in the `shopify.duckdb` database with JSON columns.
 
-## Available Tables
+## Tables
 Shopify source allows ingesting the following sources into separate tables:
 - `orders`
 - `customers`

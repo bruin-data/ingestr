@@ -3,7 +3,7 @@
 
 ingestr supports Gorgias as a source.
 
-## URI Format
+## URI format
 The URI format for Gorgias is as follows:
 
 ```plaintext
@@ -26,7 +26,7 @@ ingestr ingest --source-table 'tickets' --source-uri $GORGIAS_URI --dest-uri $BI
 ingestr ingest --source-table 'customers' --source-uri $GORGIAS_URI --dest-uri duckdb:///gorgias.duckdb --interval-start 2024-01-01  --dest-table 'gorgias.customers'
 ```
 
-## Supported Entities
+## Supported entities
 The Gorgias source supports a growing list of entities, feel free to create an issue if you need more entities to be supported.
 
 ### Customers
@@ -39,12 +39,12 @@ Tickets are the main entity in Gorgias, representing customer inquiries. Each ti
 
 You can retrieve tickets by using `tickets` as the source table.
 
-### Ticket Messages
+### Ticket messages
 Ticket messages are the messages exchanged between the customer and the support agent in a ticket. Each message has a unique ID and contains information such as the sender, content, and timestamp.
 
 You can retrieve ticket messages by using `ticket_messages` as the source table.
 
-### Satisfaction Surveys
+### Satisfaction surveys
 Satisfaction surveys are sent to customers after a ticket is resolved to gather feedback on their experience. Each survey has a unique ID and contains information such as the rating and comments.
 
 You can retrieve satisfaction surveys by using `satisfaction_surveys` as the source table.

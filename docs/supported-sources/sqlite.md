@@ -3,7 +3,7 @@ SQLite is a C-language library that implements a small, fast, self-contained, hi
 
 ingestr supports SQLite as a source.
 
-## URI Format
+## URI format
 The URI format for SQLite is as follows:
 
 ```plaintext

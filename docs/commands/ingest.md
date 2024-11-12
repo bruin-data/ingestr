@@ -1,6 +1,6 @@
 # `ingestr ingest`
 
-The `ingest` command is a core functionality of the `ingestr` tool, allowing users to transfer data from a source to a destination with optional support for incremental updates.
+The `ingest` command is a core feature of the `ingestr` tool, allowing users to transfer data from a source to a destination with optional support for incremental updates.
 
 ## Example
 
@@ -13,13 +13,13 @@ ingestr ingest
    --dest-uri '<your-destination-uri-here>'
 ```
 
-## Required Options
+## Required flags
 
-- `--source-uri TEXT`: Specifies the URI of the data source. This parameter is required.
-- `--dest-uri TEXT`: Specifies the URI of the destination where data will be ingested. This parameter is required.
-- `--source-table TEXT`: Defines the source table to fetch data from. This parameter is required.
+- `--source-uri TEXT`: Required. Specifies the URI of the data source.
+- `--dest-uri TEXT`: Required. Specifies the URI of the destination where data will be ingested.
+- `--source-table TEXT`: Required. Defines the source table to fetch data from.
 
-## Optional Options
+## Optional flags
 
 - `--dest-table TEXT`: Designates the destination table to save the data. If not specified, defaults to the value of `--source-table`.
 - `--incremental-key TEXT`: Identifies the key used for incremental data strategies. Defaults to `None`.
@@ -38,7 +38,7 @@ The `interval-start` and `interval-end` options support various datetime formats
 > [!INFO]
 > For the details around the incremental key and the various strategies, please refer to the [Incremental Loading](../getting-started/incremental-loading.md) section.
 
-## General Options
+## General flags
 
 - `--help`: Displays the help message and exits the command.
 

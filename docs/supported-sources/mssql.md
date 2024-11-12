@@ -11,7 +11,7 @@ To use Microsoft SQL Server with ingestr, you need to install the `pyodbc` add-o
 pip install ingestr[odbc]
 ```
 
-## URI Format
+## URI format
 The URI format for Microsoft SQL Server is as follows:
 
 ```plaintext

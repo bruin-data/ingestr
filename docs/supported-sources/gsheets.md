@@ -4,7 +4,7 @@
 
 ingestr supports Google Sheets as a source.
 
-## URI Format
+## URI format
 
 The URI format for Google Sheets is as follows:
 
@@ -24,7 +24,7 @@ URI parameters:
 
 The URI is used to connect to the Google Sheets API for extracting data.
 
-## Setting up a Google Sheets Integration
+## Setting up a Google Sheets integration
 
 Google Sheets requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/google_sheets#setup-guide).
 
@@ -34,13 +34,13 @@ Once you complete the guide, you should have a service account JSON file and the
 - the spreadsheet you'd like to connect to has the ID `fkdUQ2bjdNfUq2CA`. For example, if your spreadsheet URL is `https://docs.google.com/spreadsheets/d/fkdUQ2bjdNfUq2CA/edit?pli=1&gid=0#gid=0`, then the spreadsheet ID is `fkdUQ2bjdNfUq2CA`.
 - the sheet inside the spreadsheet is `Sheet1`.
 
-Based on this assumption, here's a sample command that will copy the data from the Google Sheets spreadsheet into a duckdb database:
+Based on this assumption, here's a sample command that will copy the data from the Google Sheets spreadsheet into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'gsheets://?credentials_path=/path/to/file.json' --source-table 'fkdUQ2bjdNfUq2CA.Sheet1' --dest-uri duckdb:///gsheets.duckdb --dest-table 'gsheets.output'
 ```
 
-The result of this command will be a table in the \`gsheets.duckdb\` database.
+The result of this command will be a table in the `gsheets.duckdb` database.
 
 > [!CAUTION]
 > Google Sheets does not support incremental loading, which means every time you run the command, it will copy the entire spreadsheet from Google Sheets to the destination. This can be slow for large spreadsheets.

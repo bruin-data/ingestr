@@ -4,7 +4,7 @@
 
 ingestr supports Adjust as a source.
 
-## URI Format
+## URI format
 
 The URI format for Adjust is as follows:
 
@@ -25,7 +25,7 @@ ingestr ingest --source-uri 'adjust://?api_key=nr_123' --source-table 'campaigns
 
 The result of this command will be a table in the `adjust.duckdb` database.
 
-### Lookback Days
+### Lookback days
 
 Adjust data may change going back, which means you'll need to change your start date to get the latest data. The `lookback_days` parameter allows you to specify how many days to go back when calculating the start date, and takes care of automatically updating the start date and getting the past data as well. It defaults to 30 days.
 
@@ -33,10 +33,10 @@ Adjust data may change going back, which means you'll need to change your start 
 Adjust source allows ingesting data from various sources:
 
 - `campaigns`: Retrieves data for a campaign, showing the app's revenue and network costs over multiple days.
-- `creatives`: Retrieves data for a creative assest, detailing the app's revenue and network costs across multiple days.
+- `creatives`: Retrieves data for a creative assets, detailing the app's revenue and network costs across multiple days.
 - `custom`: Retrieves custom data based on the dimensions and metrics specified.
 
-### Custom Table: `custom:<dimensions>:<metrics>[:<filters>]`
+### Custom reports: `custom:<dimensions>:<metrics>[:<filters>]`
 
 The custom table allows you to retrieve data based on specific dimensions and metrics, and apply filters to the data.
 

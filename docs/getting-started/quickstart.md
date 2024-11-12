@@ -3,9 +3,9 @@ outline: deep
 ---
 
 # Quickstart
-ingestr is a command-line application that allows you to ingest data from any source into any destination using simple command-line flags, no code necessary.
+ingestr is a command-line app that allows you to ingest data from any source into any destination using simple command-line flags, no code necessary.
 
-- ✨ copy data from your Postges / Mongo / BigQuery or any other source into any destination
+- ✨ copy data from your Postgres / Mongo / BigQuery or any other source into any destination
 - ➕ incremental loading: `append`, `merge` or `delete+insert`
 - 🐍 single-command installation
 
@@ -29,11 +29,11 @@ ingestr ingest \
 
 That's it.
 
-This command will:
-- get the table `public.some_data` from the Postgres instance.
-- upload this data to your BigQuery warehouse under the schema `ingestr` and table `some_data`.
+This command:
+- gets the table `public.some_data` from the Postgres instance.
+- uploads this data to your BigQuery warehouse under the schema `ingestr` and table `some_data`.
 
 
-## Supported Sources & Destinations
+## Supported sources & destinations
 
-See the Supported Sources & Destinations page for a list of all supported sources and destinations. More to come soon!
+See the Supported Sources & Destinations page for a list of all supported sources and destinations.

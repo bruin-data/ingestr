@@ -4,7 +4,7 @@
 
 ingestr supports Slack as a source.
 
-## URI Format
+## URI format
 
 The URI format for Slack is as follows:
 
@@ -18,7 +18,7 @@ URI parameters:
 
 The URI is used to connect to the Slack API for extracting data.
 
-## Setting up a Slack Integration
+## Setting up a Slack integration
 
 Slack requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/Slack#setup-guide).
 
@@ -30,13 +30,13 @@ ingestr ingest --source-uri 'slack://?api_key=axb-test-564' --source-table 'chan
 
 The result of this command will be a table in the `slack.duckdb` database.
 
-## Available Tables
+## Tables
 
 Slack source allows ingesting the following sources into separate tables:
 
 - `channels`: Retrieves information about all the channels.
 - `users`: Retrieves information about all the users.
-- `messages:chan1,chan2`: Retrieves messages from specified channels, where chan1 and chan2 represent user-defined channels (e.g: general, memes). Multiple channels can be listed.
+- `messages:chan1,chan2`: Retrieves messages from specified channels, where chan1 and chan2 represent user-defined channels, e.g: general, memes. Multiple channels can be listed.
 - `access_logs`: Retrieves all the access logs.
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.

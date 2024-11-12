@@ -4,7 +4,7 @@
 
 ingestr supports Chess.com as a source, primarily to play around with the data of players, games, and more since it doesn't require any authentication.
 
-## URI Format
+## URI format
 
 The URI format for Chess is as follows:
 
@@ -26,12 +26,12 @@ ingestr ingest --source-uri 'chess://?players=max2,peter23' --source-table 'prof
 
 The result of this command will be a table in the `chess.duckdb` database.
 
-## Available Tables
+## Tables
 
 Chess source allows ingesting the following sources into separate tables:
 
-- `profiles`: Retrives player profiles based on a list of player usernames.
-- `games`: Retrives players' games for specified players.
-- `archives`: Retrives url to game archives for specified players.
+- `profiles`: Retrieves player profiles based on a list of player usernames.
+- `games`: Retrieves players' games for specified players.
+- `archives`: Retrieves the URLs to game archives for specified players.
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.

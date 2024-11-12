@@ -4,7 +4,7 @@
 
 ingestr supports Stripe as a source.
 
-## URI Format
+## URI format
 
 The URI format for Stripe is as follows:
 
@@ -22,7 +22,7 @@ The URI is used to connect to the Stripe API for extracting data. More details o
 
 Stripe requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/stripe#setup-guide).
 
-Once you complete the guide, you should have an API key. Let's say your API key is `sk_test_12345`, here's a sample command that will copy the data from Stripe into a duckdb database:
+Once you complete the guide, you should have an API key. Let's say your API key is `sk_test_12345`, here's a sample command that will copy the data from Stripe into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'stripe://?api_key=sk_test_12345' --source-table 'charges' --dest-uri duckdb:///stripe.duckdb --dest-table 'stripe.charges'
@@ -30,7 +30,7 @@ ingestr ingest --source-uri 'stripe://?api_key=sk_test_12345' --source-table 'ch
 
 The result of this command will be a table in the `stripe.duckdb` database with JSON columns.
 
-## Available Tables
+## Tables
 
 Stripe source allows ingesting the following sources into separate tables:
 

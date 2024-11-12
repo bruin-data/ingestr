@@ -4,7 +4,7 @@
 
 ingestr supports HubSpot as a source.
 
-## URI Format
+## URI format
 
 The URI format for HubSpot is as follows:
 
@@ -20,9 +20,9 @@ The URI is used to connect to the HubSpot API for extracting data.
 
 ## Setting up a HubSpot Integration
 
-Hubspot requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/hubspot#setup-guide).
+HubSpot requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/hubspot#setup-guide).
 
-Once you complete the guide, you should have an API key. Let's say your API key is `pat_test_12345`, here's a sample command that will copy the data from HubSpot into a duckdb database:
+Once you complete the guide, you should have an API key. Let's say your API key is `pat_test_12345`, here's a sample command that will copy the data from HubSpot into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'hubspot://?api_key=pat_test_12345' --source-table 'companies' --dest-uri duckdb:///hubspot.duckdb --dest-table 'companies.data'
@@ -30,7 +30,7 @@ ingestr ingest --source-uri 'hubspot://?api_key=pat_test_12345' --source-table '
 
 The result of this command will be a table in the `hubspot.duckdb` database.
 
-## Available Tables
+## Tables
 
 HubSpot source allows ingesting the following sources into separate tables:
 
