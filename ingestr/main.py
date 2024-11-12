@@ -323,10 +323,12 @@ def ingest(
             else "Platform-specific"
         )
 
+        source_table_print = source_table.split(":")[0]
+
         print()
         print("[bold green]Initiated the pipeline with the following:[/bold green]")
         print(
-            f"[bold yellow]  Source:[/bold yellow] {factory.source_scheme} / {source_table}"
+            f"[bold yellow]  Source:[/bold yellow] {factory.source_scheme} / {source_table_print}"
         )
         print(
             f"[bold yellow]  Destination:[/bold yellow] {factory.destination_scheme} / {dest_table}"
