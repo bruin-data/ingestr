@@ -28,7 +28,7 @@ ENV VIRTUAL_ENV=/usr/local
 ADD --chmod=755 https://astral.sh/uv/install.sh /install.sh
 RUN /install.sh && rm /install.sh
 
-RUN /root/.cargo/bin/uv pip install --system --no-cache -r requirements.txt
+RUN $HOME/.local/bin/uv pip install --system --no-cache -r requirements.txt
 
 COPY . /app
 
