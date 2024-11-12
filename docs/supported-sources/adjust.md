@@ -9,15 +9,19 @@ ingestr supports Adjust as a source.
 The URI format for Adjust is as follows:
 
 ```plaintext
-adjust://?api_key=<api-key-here>
+adjust://?api_key=<api-key-here>&utc_offset=<utc-offset>
 ```
+
+URI parameters:
+- `api_key`: Required. The API key used for authentication with the Adjust API
+- `utc_offset`: Optional. The UTC offset for the data in the format "+HH:MM" or "-HH:MM". Defaults to "+00:00" if not provided.
 
 An API token is required to retrieve reports from the Adjust reporting API. please follow the guide to [obtain a API key](https://dev.adjust.com/en/api/rs-api/authentication/).
 
 Once you complete the guide, you should have an API key. Let's say your API key is `nr_123`, here's a sample command that will copy the data from Adjust into a duckdb database:
 
 ```sh
-ingestr ingest --source-uri 'adjust://?api_key=nr_123' --source-table 'campaigns' --dest-uri duckdb:///adjust.duckdb --dest-table 'adjust.output' --interval-start '2024-09-05' --interval-end '2024-09-08'
+ingestr ingest --source-uri 'adjust://?api_key=nr_123&utc_offset=+00:00' --source-table 'campaigns' --dest-uri duckdb:///adjust.duckdb --dest-table 'adjust.output' --interval-start '2024-09-05' --interval-end '2024-09-08'
 ```
 
 The result of this command will be a table in the `adjust.duckdb` database

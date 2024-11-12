@@ -730,6 +730,7 @@ class AdjustSource:
         source_part = urlparse(uri)
         source_params = parse_qs(source_part.query)
         api_key = source_params.get("api_key")
+        utc_offset = source_params.get("utc_offset")
 
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Adjust")
@@ -751,7 +752,10 @@ class AdjustSource:
             Endpoint = table
 
         return adjust_source(
-            start_date=start_date, end_date=end_date, api_key=api_key[0]
+            start_date=start_date,
+            end_date=end_date,
+            api_key=api_key[0],
+            utc_offset=utc_offset[0]
         ).with_resources(Endpoint)
 
 
