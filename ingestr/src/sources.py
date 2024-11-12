@@ -730,7 +730,7 @@ class AdjustSource:
         source_part = urlparse(uri)
         source_params = parse_qs(source_part.query)
         api_key = source_params.get("api_key")
-        utc_offset = source_params.get("utc_offset")
+        utc_offset = source_params.get("utc_offset", ["+00:00"])
 
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Adjust")
