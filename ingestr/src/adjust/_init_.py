@@ -20,7 +20,7 @@ def adjust_source(
     def campaigns(updated=dlt.sources.incremental('day', start_date_obj.isoformat())):
         adjust_api = AdjustAPI(api_key=api_key)
         yield from adjust_api.fetch_report_data(
-            start_date=updated.start_value,
+            start_date=updated.last_value,
             end_date=end_date,
         )
 
@@ -31,7 +31,7 @@ def adjust_source(
     
         
         yield from adjust_api.fetch_report_data(
-            start_date=updated.start_value, end_date=end_date, dimensions=dimensions
+            start_date=updated.last_value, end_date=end_date, dimensions=dimensions
         )
 
     return campaigns, creatives
