@@ -1,4 +1,6 @@
-from datetime import datetime
+from typing import Optional
+
+import pendulum
 import requests
 from dlt.sources.helpers.requests import Client
 from requests.exceptions import HTTPError
@@ -33,40 +35,33 @@ class AdjustAPI:
 
     def fetch_report_data(
         self,
-        start_date,
-        end_date,
+        start_date: pendulum.DateTime,
+        end_date: pendulum.DateTime,
         dimensions=DEFAULT_DIMENSIONS,
         metrics=DEFAULT_METRICS,
-        utc_offset="+00:00",
-        ad_spend_mode="network",
-        attribution_source="first",
-        attribution_type="all",
-        cohort_maturity="immature",
-        reattributed="all",
-        sandbox="false",
+        filters: Optional[dict] = None,
     ):
-        start_date = datetime.fromisoformat(start_date).date()
-        end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
-       
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        comma_separated_dimensions = ",".join(dimensions)
-        comma_separated_metrics = ",".join(metrics)
-        params = {
-            "date_period": f"{start_date}:{end_date}",
-            "dimensions": comma_separated_dimensions,
-            "metrics": comma_separated_metrics,
-            "utc_offset": utc_offset,
-            "ad_spend_mode": ad_spend_mode,
-            "attribution_source": attribution_source,
-            "attribution_type": attribution_type,
-            "cohort_maturity": cohort_maturity,
-            "reattributed": reattributed,
-            "sandbox": sandbox,
-        }
+        params = {}
+
+        if filters:
+            for key, value in filters.items():
+                if isinstance(value, list):
+                    params[key] = ",".join(value)
+                else:
+                    params[key] = value
+
+        params["date_period"] = (
+            f"{start_date.format('YYYY-MM-DD')}:{end_date.format('YYYY-MM-DD')}"
+        )
+        params["dimensions"] = ",".join(dimensions)
+        params["metrics"] = ",".join(metrics)
 
         if start_date > end_date:
-            raise ValueError(f"Invalid date range: Start date ({start_date}) must be earlier than end date ({end_date}).")
-        
+            raise ValueError(
+                f"Invalid date range: Start date ({start_date}) must be earlier than end date ({end_date})."
+            )
+
         def retry_on_limit(
             response: requests.Response, exception: BaseException
         ) -> bool:
@@ -87,3 +82,24 @@ class AdjustAPI:
             yield items
         else:
             raise HTTPError(f"Request failed with status code: {response.status_code}")
+
+
+def parse_filters(filters_raw: str) -> dict:
+    # Parse filter string like "key1=value1,key2=value2,value3,value4"
+    filters = {}
+    current_key = None
+
+    for item in filters_raw.split(","):
+        if "=" in item:
+            # Start of a new key-value pair
+            key, value = item.split("=")
+            filters[key] = [value]  # Always start with a list
+            current_key = key
+        elif current_key is not None:
+            # Additional value for the current key
+            filters[current_key].append(item)
+
+    # Convert single-item lists to simple values
+    filters = {k: v[0] if len(v) == 1 else v for k, v in filters.items()}
+
+    return filters
