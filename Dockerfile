@@ -32,6 +32,6 @@ RUN $HOME/.local/bin/uv pip install --system --no-cache -r requirements.txt
 
 COPY . /app
 
-RUN pip3 install -e .
+RUN pip3 install -e . && pip3 install pyodbc
 
 ENTRYPOINT ["ingestr"]
