@@ -759,7 +759,7 @@ class AdjustSource:
         metrics = None
         filters = []
         if table.startswith("custom:"):
-            fields = table.split(":")
+            fields = table.split(":", 3)
             if len(fields) != 3 and len(fields) != 4:
                 raise ValueError(
                     "Invalid Adjust custom table format. Expected format: custom:<dimensions>,<metrics> or custom:<dimensions>:<metrics>:<filters>"
