@@ -35,6 +35,7 @@ from ingestr.src.sources import (
     SqlSource,
     StripeAnalyticsSource,
     ZendeskSource,
+    GitHubSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -141,7 +142,10 @@ class SourceDestinationFactory:
             return ArrowMemoryMappedSource()
         elif self.source_scheme == "s3":
             return S3Source()
+        elif self.source_scheme == "github":
+            return GitHubSource()
         else:
+            print("github:::")
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
     def get_destination(self) -> DestinationProtocol:
