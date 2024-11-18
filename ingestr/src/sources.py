@@ -19,6 +19,7 @@ from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
+from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -37,7 +38,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
+
 
 class SqlSource:
     table_builder: Callable
@@ -968,37 +969,48 @@ class S3Source:
             bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
         ).with_resources(endpoint)
 
+
 class GitHubSource:
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
                 "Github takes care of incrementality on its own, you should not provide incremental_key"
             )
-        #github://?access_token=<access_token>&owner=<owner>&name=<name>
+        # github://?access_token=<access_token>&owner=<owner>&name=<name>
         parsed_uri = urlparse(uri)
         source_fields = parse_qs(parsed_uri.query)
-        
+
         owner = source_fields.get("owner")
         if not owner:
-            raise ValueError("owner of the repository is required to connect with GitHub")
-        
+            raise ValueError(
+                "owner of the repository is required to connect with GitHub"
+            )
+
         name = source_fields.get("name")
         if not name:
-            raise ValueError("name of the repository is required to connect with GitHub")
-        
+            raise ValueError(
+                "name of the repository is required to connect with GitHub"
+            )
+
         access_token = source_fields.get("access_token")
         if not access_token:
             raise ValueError("access_token is required to connect with GitHub")
-        
+
         if table in ["issues", "pull_requests"]:
-            return github_reactions(owner=owner[0], name=name[0], access_token=access_token[0]).with_resources(table)
+            return github_reactions(
+                owner=owner[0], name=name[0], access_token=access_token[0]
+            ).with_resources(table)
         elif table == "repo_events":
-            return github_repo_events(owner=owner[0], name=name[0], access_token=access_token[0])
+            return github_repo_events(
+                owner=owner[0], name=name[0], access_token=access_token[0]
+            )
         elif table == "stargazers":
-            return github_stargazers(owner=owner[0], name=name[0], access_token=access_token[0])
+            return github_stargazers(
+                owner=owner[0], name=name[0], access_token=access_token[0]
+            )
         else:
             raise ValueError(
                 "fResource '{table}' is not supported for GitHub source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"

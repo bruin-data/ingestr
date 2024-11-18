@@ -21,6 +21,7 @@ from ingestr.src.sources import (
     ArrowMemoryMappedSource,
     ChessSource,
     FacebookAdsSource,
+    GitHubSource,
     GoogleSheetsSource,
     GorgiasSource,
     HubspotSource,
@@ -35,7 +36,6 @@ from ingestr.src.sources import (
     SqlSource,
     StripeAnalyticsSource,
     ZendeskSource,
-    GitHubSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -145,7 +145,6 @@ class SourceDestinationFactory:
         elif self.source_scheme == "github":
             return GitHubSource()
         else:
-            print("github:::")
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
     def get_destination(self) -> DestinationProtocol:
