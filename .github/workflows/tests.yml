@@ -28,15 +28,9 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-          cache: 'pip'
-      - name: Cache dependencies
-        uses: actions/cache@v3
-        id: cache
-        with:
-          path: ${{ env.pythonLocation }}
-          key: ${{ env.pythonLocation }}-${{ hashFiles('requirements.txt') }}
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
       - name: Install pip dependencies
-        if: steps.cache.outputs.cache-hit != 'true'
         run: make deps-ci
       - name: run tests
         run: make test-ci
