@@ -23,13 +23,13 @@ URI parameters:
 
 GitHub requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/github#setup-guide).
 
-Once you complete the guide, you should have an access token. Let's say your access token is `ghp_test_1234` owner is `max` name of repository is `test_example` and here's a sample command that will copy the data from GitHub into a DuckDB database:
+Once you complete the guide, you should have an access token. Let's say your access token is `ghp_test_1234`, the owner is `max`, and the name of the repository is `test_example`. Here is a sample command that will copy the data from GitHub into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'gitHub://?access_token=ghp_test_1234&owner=max&name=test_example' --source-table 'issues' --dest-uri duckdb:///github.duckdb --dest-table 'dest.issues'
+ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=max&name=test_example' --source-table 'issues' --dest-uri duckdb:///github.duckdb --dest-table 'dest.issues'
 ```
 
-The result of this command will be a table in the `dest.issues` database with JSON columns.
+The result of this command will be a table in the `dest.issues` database.
 
 ## Tables
 
