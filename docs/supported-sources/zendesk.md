@@ -38,7 +38,7 @@ Once you complete the guide, if you decide to use an OAuth token, you should hav
 ```sh
 ingestr ingest --source-uri "zendesk://:qVsbdiasVt@mycompany" \
 --source-table 'tickets' \
---dest-uri 'duckdb:///zendesk.duckdb' \
+--dest-uri 'duckdb:///dest.duckdb' \
 --dest-table 'zendesk.tickets' \
 --interval-start '2024-01-01'
 ```
@@ -48,12 +48,12 @@ If you decide to use an API Token, you should have a subdomain, email, and API t
 ```sh
 ingestr ingest --source-uri "zendesk://john@get.com:nbs123@mycompany" \
 --source-table 'tickets' \
---dest-uri 'duckdb:///zendesk.duckdb' \
+--dest-uri 'duckdb:///dest.duckdb' \
 --dest-table 'zendesk.tickets' \
 --interval-start '2024-01-01'
 ```
 
-The result of this command will be a table in the `zendesk.duckdb` database.
+The result of this command will be a table in the `dest.duckdb` database.
 
 ## Tables
 

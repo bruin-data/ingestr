@@ -19,7 +19,7 @@ URI parameters:
 The URI is used to connect to the Klaviyo API for extracting data.
 
 ```bash
-ingestr ingest --source-table 'events' --source-uri 'klaviyo://?api_key=pk_test' --dest-uri duckdb:///klaviyo.duckdb --interval-start 2022-01-01 --dest-table 'klaviyo.events' --extract-parallelism 20
+ingestr ingest --source-table 'events' --source-uri 'klaviyo://?api_key=pk_test' --dest-uri duckdb:///dest.duckdb --interval-start 2022-01-01 --dest-table 'klaviyo.events' --extract-parallelism 20
 ```
 
 This command fetches all the events that are created/updated since 2022-01-01 and writes them to `klaviyo.events` table on DuckDB, using 20 parallel threads to improve performance and efficiently handle large data .

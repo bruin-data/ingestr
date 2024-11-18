@@ -21,10 +21,10 @@ URI parameter:
 Let's say you have a list of player usernames: max2 and peter23. Here's a sample command that will copy the data from Chess into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'chess://?players=max2,peter23' --source-table 'profiles' --dest-uri 'duckdb:///chess.duckdb' --dest-table 'players.profiles'
+ingestr ingest --source-uri 'chess://?players=max2,peter23' --source-table 'profiles' --dest-uri 'duckdb:///dest.duckdb' --dest-table 'players.profiles'
 ```
 
-The result of this command will be a table in the `chess.duckdb` database.
+The result of this command will be a table in the `dest.duckdb` database.
 
 ## Tables
 

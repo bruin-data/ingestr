@@ -22,10 +22,10 @@ Notion requires a few steps to set up an integration, please follow the guide dl
 Once you complete the guide, you should have an API key, and the table ID to connect to. Let's say your API token is `secret_12345` and the database you'd like to connect to is `bfeaafc0c25f40a9asdasd672a9456f3`, here's a sample command that will copy the data from the Notion table into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'notion://?api_key=secret_12345' --source-table 'bfeaafc0c25f40a9asdasd672a9456f3' --dest-uri duckdb:///notion.duckdb --dest-table 'notion.output'
+ingestr ingest --source-uri 'notion://?api_key=secret_12345' --source-table 'bfeaafc0c25f40a9asdasd672a9456f3' --dest-uri duckdb:///dest.duckdb --dest-table 'notion.output'
 ```
 
-The result of this command will be a table in the `notion.duckdb` database with JSON columns. 
+The result of this command will be a table in the `dest.duckdb` database with JSON columns. 
 
 > [!CAUTION]
 > Notion does not support incremental loading, which means every time you run the command, it will copy the entire table from Notion to the destination. This can be slow for large tables.

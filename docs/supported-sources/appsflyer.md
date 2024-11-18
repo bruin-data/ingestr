@@ -18,11 +18,11 @@ Once you complete the guide, you should have an API key. Let's say your API key 
 ingestr ingest 
     --source-uri 'appsflyer://?api_key=ey123' 
     --source-table 'campaigns' 
-    --dest-uri duckdb:///appsflyer.duckdb 
+    --dest-uri duckdb:///dest.duckdb 
     --dest-table 'appsflyer.output'
 ```
 
-The result of this command will be a table in the `appsflyer.duckdb` database.
+The result of this command will be a table in the `dest.duckdb` database.
 
 ## Tables
 AppsFlyer source allows ingesting the following sources into separate tables:
