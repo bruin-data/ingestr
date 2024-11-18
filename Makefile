@@ -12,7 +12,7 @@ deps:
 	uv pip install -r requirements-dev.txt
 
 deps-ci:
-	uv venv && uv pip install -r requirements-dev.txt
+	uv pip install --system -r requirements-dev.txt
 
 test-ci:
 	pytest -x -rP -vv --tb=short --cov=ingestr --no-cov-on-fail
