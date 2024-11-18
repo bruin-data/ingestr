@@ -1,10 +1,11 @@
 -r requirements.txt
 
-mypy==1.9.0
+mypy==1.13.0
 pytest-cov==4.1.0
-pytest==8.1.1
-ruff==0.5.2
+pytest==8.3.3
+ruff==0.7.4
 hatchling==1.25.0
 build==1.2.1
+pyodbc==5.2.0
 twine==5.1.1
 testcontainers[postgres,mysql]==4.7.1
