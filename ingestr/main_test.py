@@ -1073,14 +1073,19 @@ def test_arrow_mmap_to_db_create_replace(dest):
                 writer.write_table(table)
                 writer.close()
 
-            invoke_ingest_command(
+            res = invoke_ingest_command(
                 f"mmap://{tmp.name}",
                 "whatever",
                 dest_uri,
                 "testschema.output",
-                inc_key=incremental_key,
-                inc_strategy=incremental_strategy,
+
+                # we use this because postgres destination fails with nested fields, gonna have to investigate this more
+                loader_file_format="insert_values" if dest_uri.startswith("postgresql") else None,
             )
+
+            assert res.exit_code == 0
+            return res
+
 
     dest_uri = dest.start()
 
