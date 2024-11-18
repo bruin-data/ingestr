@@ -20,11 +20,26 @@ env:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: install Microsoft ODBC
+        if: matrix.os == 'ubuntu-latest'
         run: sudo ACCEPT_EULA=Y apt-get install msodbcsql18 -y
+      - name: install Microsoft ODBC
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
+          brew update
+          ACCEPT_EULA=Y brew install msodbcsql18
+      - name: install Microsoft ODBC
+        if: matrix.os == 'windows-latest'
+        run: |
+          Invoke-WebRequest -Uri https://go.microsoft.com/fwlink/?linkid=2249006 -OutFile msodbcsql.msi
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i msodbcsql.msi /qn /norestart IACCEPTMSODBCSQLLICENSETERMS=YES" -Wait
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
