@@ -16,9 +16,9 @@ import pytest
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
+from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
-from testcontainers.mssql import SqlServerContainer  # type: ignore
 from typer.testing import CliRunner
 
 from ingestr.main import app
