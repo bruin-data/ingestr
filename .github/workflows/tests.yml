@@ -34,7 +34,7 @@ jobs:
         run: |
           brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
           brew update
-          ACCEPT_EULA=Y brew install msodbcsql18
+          HOMEBREW_ACCEPT_EULA=Y brew install msodbcsql18
       - name: install Microsoft ODBC
         if: matrix.os == 'windows-latest'
         run: |
