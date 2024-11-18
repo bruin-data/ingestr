@@ -15,7 +15,7 @@ deps-ci:
 	pip install -r requirements-dev.txt
 
 test-ci:
-	pytest -rPx -vv --tb=short --cov=ingestr --no-cov-on-fail
+	pytest -x -rP -vv --tb=short --cov=ingestr --no-cov-on-fail
 
 test: venv
 	. venv/bin/activate; $(MAKE) test-ci
