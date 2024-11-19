@@ -38,7 +38,7 @@ jobs:
       - name: Install Docker on macOS
         if: matrix.os == 'macos-latest'
         run: |
-          brew install docker colima
+          brew install colima
           colima delete
           colima start --vm-type vz
           while ! docker system info > /dev/null 2>&1; do sleep 1; done
