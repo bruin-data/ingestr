@@ -38,11 +38,9 @@ jobs:
       - name: Install Docker on macOS
         if: matrix.os == 'macos-latest'
         run: |
-          brew install --cask docker
-          sudo /Applications/Docker.app/Contents/MacOS/Docker --unattended
-          sudo ln -sf /Applications/Docker.app/Contents/Resources/bin/docker /usr/local/bin/docker
-          sudo ln -sf /Applications/Docker.app/Contents/Resources/bin/docker-compose /usr/local/bin/docker-compose
-          open -a Docker
+          brew install docker colima
+          colima start
+          # Wait for Docker daemon to be ready
           while ! docker system info > /dev/null 2>&1; do sleep 1; done
       - name: install Microsoft ODBC
         if: matrix.os == 'windows-latest'
