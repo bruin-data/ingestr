@@ -8,4 +8,4 @@ hatchling==1.25.0
 build==1.2.1
 pyodbc==5.2.0
 twine==5.1.1
-testcontainers[postgres,mysql]==4.7.1
+testcontainers[postgres,mysql]==4.8.2
