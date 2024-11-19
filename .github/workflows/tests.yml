@@ -22,7 +22,9 @@ jobs:
   tests:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-13]
+        # I tried running stuff on macOS but it was too slow and unreliable.
+        # I also tried windows runners but couldn't get Docker to work there, so I gave up.
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
