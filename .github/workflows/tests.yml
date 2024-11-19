@@ -30,7 +30,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo ACCEPT_EULA=Y apt-get install msodbcsql18 -y
       - name: install Microsoft ODBC
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-13'
         run: |
           brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
           brew update
