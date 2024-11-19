@@ -9,3 +9,4 @@ build==1.2.1
 pyodbc==5.2.0
 twine==5.1.1
 testcontainers[postgres,mysql]==4.8.2
+pytest-xdist[psutil]==3.6.1
