@@ -36,7 +36,7 @@ jobs:
           brew update
           HOMEBREW_ACCEPT_EULA=Y brew install msodbcsql18
       - name: Install Docker on macOS
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-13'
         run: |
           brew install docker
           brew install docker-compose
