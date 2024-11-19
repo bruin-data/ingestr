@@ -39,9 +39,8 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: |
           brew install docker colima
-          colima start
-          # Wait for Docker daemon to be ready
-          while ! docker system info > /dev/null 2>&1; do sleep 1; done
+          colima delete
+          colima start --vm-type vz
       - name: install Microsoft ODBC
         if: matrix.os == 'windows-latest'
         run: |
