@@ -58,6 +58,9 @@ jobs:
         run: make deps-ci
       - name: run tests
         run: make test-ci
+        env:
+          TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: /var/run/docker.sock
+          DOCKER_HOST: unix://${HOME}/.colima/docker.sock
       - name: check the formatting
         run: make lint-ci
 
