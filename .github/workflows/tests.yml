@@ -56,11 +56,15 @@ jobs:
         uses: astral-sh/setup-uv@v3
       - name: Install pip dependencies
         run: make deps-ci
-      - name: run tests
+      - name: run tests (macOS)
+        if: matrix.os == 'macos-13'
         run: make test-ci
         env:
           TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: /var/run/docker.sock
           DOCKER_HOST: unix:///Users/runner/.colima/docker.sock
+      - name: run tests (other OS)
+        if: matrix.os != 'macos-13'
+        run: make test-ci
       - name: check the formatting
         run: make lint-ci
 
