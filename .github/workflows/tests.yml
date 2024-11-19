@@ -34,7 +34,16 @@ jobs:
         run: |
           brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
           brew update
-          HOMEBREW_ACCEPT_EULA=Y brew install msodbcsql18 docker
+          HOMEBREW_ACCEPT_EULA=Y brew install msodbcsql18
+      - name: Install Docker on macOS
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install --cask docker
+          sudo /Applications/Docker.app/Contents/MacOS/Docker --unattended
+          sudo ln -sf /Applications/Docker.app/Contents/Resources/bin/docker /usr/local/bin/docker
+          sudo ln -sf /Applications/Docker.app/Contents/Resources/bin/docker-compose /usr/local/bin/docker-compose
+          open -a Docker
+          while ! docker system info > /dev/null 2>&1; do sleep 1; done
       - name: install Microsoft ODBC
         if: matrix.os == 'windows-latest'
         run: |
