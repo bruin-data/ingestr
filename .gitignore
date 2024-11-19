@@ -5,6 +5,7 @@ venv
 !.gitkeep
 .vscode/*
 .metals/*
+.coverage.*
 .coverage
 .ruff_cache
 .pytest_cache
@@ -15,4 +16,6 @@ docs/.vitepress/dist
 docs/.vitepress/cache
 node_modules
 *.duckdb
+*.duckdb.wal
 *.db
+*.db.wal

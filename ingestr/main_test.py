@@ -16,6 +16,7 @@ import pytest
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
+from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
@@ -376,10 +377,10 @@ SOURCES = {
     "mysql8": DockerImage(
         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
     ),
-    # "sqlserver": DockerImage(
-    # lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
-    # "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
-    # ),
+    "sqlserver": DockerImage(
+        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+    ),
 }
 
 DESTINATIONS = {
@@ -1057,7 +1058,9 @@ def test_kafka_to_db(dest):
     kafka.stop()
 
 
-@pytest.mark.parametrize("dest", [DuckDb()], ids=["duckdb"])
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
 def test_arrow_mmap_to_db_create_replace(dest):
     def run_command(
         table: pa.Table,
@@ -1070,14 +1073,19 @@ def test_arrow_mmap_to_db_create_replace(dest):
                 writer.write_table(table)
                 writer.close()
 
-            invoke_ingest_command(
+            res = invoke_ingest_command(
                 f"mmap://{tmp.name}",
                 "whatever",
                 dest_uri,
                 "testschema.output",
-                inc_key=incremental_key,
-                inc_strategy=incremental_strategy,
+                # we use this because postgres destination fails with nested fields, gonna have to investigate this more
+                loader_file_format="insert_values"
+                if dest_uri.startswith("postgresql")
+                else None,
             )
+
+            assert res.exit_code == 0
+            return res
 
     dest_uri = dest.start()
 
@@ -1130,7 +1138,9 @@ def test_arrow_mmap_to_db_create_replace(dest):
         assert res[0][1] == row_count
 
 
-@pytest.mark.parametrize("dest", [DuckDb()], ids=["duckdb"])
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
 def test_arrow_mmap_to_db_delete_insert(dest):
     def run_command(df: pd.DataFrame, incremental_key: Optional[str] = None):
         table = pa.Table.from_pandas(df)
@@ -1241,7 +1251,9 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         assert res[1][1] == 1000
 
 
-@pytest.mark.parametrize("dest", [DuckDb()], ids=["duckdb"])
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
 def test_arrow_mmap_to_db_merge_without_incremental(dest):
     def run_command(df: pd.DataFrame):
         table = pa.Table.from_pandas(df)

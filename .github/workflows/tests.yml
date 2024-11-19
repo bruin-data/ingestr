@@ -20,25 +20,52 @@ env:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # I tried running stuff on macOS but it was too slow and unreliable.
+        # I also tried windows runners but couldn't get Docker to work there, so I gave up.
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: install Microsoft ODBC
+        if: matrix.os == 'ubuntu-latest'
         run: sudo ACCEPT_EULA=Y apt-get install msodbcsql18 -y
+      - name: install Microsoft ODBC
+        if: matrix.os == 'macos-13'
+        run: |
+          brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
+          brew update
+          HOMEBREW_ACCEPT_EULA=Y brew install msodbcsql18
+      - name: Install Docker on macOS
+        if: matrix.os == 'macos-13'
+        run: |
+          brew install docker
+          brew install docker-compose
+          brew install colima
+          colima start
+          # Wait for Docker daemon to be ready
+          while ! docker system info > /dev/null 2>&1; do sleep 1; done
+      - name: install Microsoft ODBC
+        if: matrix.os == 'windows-latest'
+        run: |
+          Invoke-WebRequest -Uri https://go.microsoft.com/fwlink/?linkid=2249006 -OutFile msodbcsql.msi
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i msodbcsql.msi /qn /norestart IACCEPTMSODBCSQLLICENSETERMS=YES" -Wait
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-          cache: 'pip'
-      - name: Cache dependencies
-        uses: actions/cache@v3
-        id: cache
-        with:
-          path: ${{ env.pythonLocation }}
-          key: ${{ env.pythonLocation }}-${{ hashFiles('requirements.txt') }}
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
       - name: Install pip dependencies
-        if: steps.cache.outputs.cache-hit != 'true'
         run: make deps-ci
-      - name: run tests
+      - name: run tests (macOS)
+        if: matrix.os == 'macos-13'
+        run: make test-ci
+        env:
+          TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: /var/run/docker.sock
+          DOCKER_HOST: unix:///Users/runner/.colima/docker.sock
+      - name: run tests (other OS)
+        if: matrix.os != 'macos-13'
         run: make test-ci
       - name: check the formatting
         run: make lint-ci
