@@ -41,6 +41,7 @@ jobs:
           brew install docker colima
           colima delete
           colima start --vm-type vz
+          while ! docker system info > /dev/null 2>&1; do sleep 1; done
       - name: install Microsoft ODBC
         if: matrix.os == 'windows-latest'
         run: |
