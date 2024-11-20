@@ -106,7 +106,7 @@ def sqla_col_to_column_schema(
     elif isinstance(sql_t, sqltypes.Time):
         col["data_type"] = "time"
     elif isinstance(sql_t, sqltypes.JSON):
-        col["data_type"] = "complex"
+        col["data_type"] = "json"
     elif isinstance(sql_t, sqltypes.Boolean):
         col["data_type"] = "bool"
     else:

@@ -280,8 +280,8 @@ def zendesk_support(
         primary_key="id",
         write_disposition="merge",
         columns={
-            "tags": {"data_type": "complex"},
-            "custom_fields": {"data_type": "complex"},
+            "tags": {"data_type": "json"},
+            "custom_fields": {"data_type": "json"},
         },
     )
     def ticket_table(

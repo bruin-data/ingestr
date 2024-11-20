@@ -99,12 +99,12 @@ def gorgias_source(
                 "description": "When the user was last updated.",
             },
             "meta": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Meta information associated with the user.",
             },
             "data": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Additional data associated with the user.",
             },
@@ -185,17 +185,17 @@ def gorgias_source(
                 "description": "Indicates if the ticket was created by an agent",
             },
             "customer": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": False,
                 "description": "The customer linked to the ticket.",
             },
             "assignee_user": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "User assigned to the ticket",
             },
             "assignee_team": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Team assigned to the ticket",
             },
@@ -210,17 +210,17 @@ def gorgias_source(
                 "description": "Excerpt of the ticket",
             },
             "integrations": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": False,
                 "description": "Integration information related to the ticket",
             },
             "meta": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Meta information related to the ticket",
             },
             "tags": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": False,
                 "description": "Tags associated with the ticket",
             },
@@ -354,7 +354,7 @@ def gorgias_source(
                 "description": "How the message has been received, or sent from Gorgias.",
             },
             "sender": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": False,
                 "description": "The person who sent the message. It can be a user or a customer.",
             },
@@ -364,7 +364,7 @@ def gorgias_source(
                 "description": "ID of the integration that either received or sent the message.",
             },
             "intents": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "",
             },
@@ -379,7 +379,7 @@ def gorgias_source(
                 "description": "Whether the message was sent by your company to a customer, or the opposite.",
             },
             "receiver": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The primary receiver of the message. It can be a user or a customer. Optional when the source type is 'internal-note'.",
             },
@@ -414,27 +414,27 @@ def gorgias_source(
                 "description": "",
             },
             "headers": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Headers of the message",
             },
             "attachments": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "A list of files attached to the message.",
             },
             "actions": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "A list of actions performed on the message.",
             },
             "macros": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "A list of macros",
             },
             "meta": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Message metadata",
             },
@@ -526,7 +526,7 @@ def gorgias_source(
                 "description": "ID of the customer linked to the survey.",
             },
             "meta": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Meta information associated with the survey.",
             },

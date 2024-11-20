@@ -1006,7 +1006,7 @@ def as_datetime(date_str: str) -> date:
 
 
 def as_datetime2(date_str: str) -> date:
-    return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return datetime.strptime(date_str, "%Y-%m-%d")
 
 
 @pytest.mark.parametrize(
