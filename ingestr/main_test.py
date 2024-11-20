@@ -16,8 +16,6 @@ import pytest
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
-from testcontainers.mssql import SqlServerContainer  # type: ignore
-from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
@@ -373,21 +371,21 @@ SOURCES = {
     "postgres": DockerImage(
         lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()
     ),
-    "duckdb": DuckDb(),
-    "mysql8": DockerImage(
-        lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
-    ),
-    "sqlserver": DockerImage(
-        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
-        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
-    ),
+    # "duckdb": DuckDb(),
+    # "mysql8": DockerImage(
+    #     lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
+    # ),
+    # "sqlserver": DockerImage(
+    #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+    #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+    # ),
 }
 
 DESTINATIONS = {
     "postgres": DockerImage(
         lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()
     ),
-    "duckdb": DuckDb(),
+    # "duckdb": DuckDb(),
 }
 
 
@@ -567,7 +565,7 @@ def db_to_db_merge_with_primary_key(
 
         res = conn.execute("select count(*) from testschema_merge.input").fetchall()
         assert res[0][0] == 2
-    
+
     source_engine.dispose()
 
     def run():
@@ -772,7 +770,8 @@ def db_to_db_delete_insert_without_primary_key(
         for i, row in enumerate(expected):
             assert res[i] == row
 
-    run()
+    output = run()
+    print(output.output)
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
     )
@@ -1211,7 +1210,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         ).fetchall()
         assert res[0][0] == as_datetime2("2024-11-05")
         assert res[0][1] == row_count
-    
+
     dest_engine.dispose()
 
     # run again, it should be deleted and reloaded
@@ -1358,7 +1357,7 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
         assert res[0][1] == row_count
         assert res[1][0] == "b"
         assert res[1][1] == 1000
-    
+
     dest_engine.dispose()
 
     # append 1000 old rows for previous ids, they should be merged

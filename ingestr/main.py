@@ -9,6 +9,7 @@ import humanize
 import typer
 from dlt.common.pipeline import LoadInfo
 from dlt.common.runtime.collector import Collector, LogCollector
+from dlt.common.schema.typing import TColumnSchema
 from rich.console import Console
 from rich.status import Status
 from typing_extensions import Annotated
@@ -286,10 +287,14 @@ def ingest(
 
         original_incremental_strategy = incremental_strategy
 
+        column_hints: dict[str, TColumnSchema] = {}
+
         merge_key = None
         if incremental_strategy == IncrementalStrategy.delete_insert:
             merge_key = incremental_key
             incremental_strategy = IncrementalStrategy.merge
+            if incremental_key:
+                column_hints[incremental_key] = {"merge_key": True}
 
         m = hashlib.sha256()
         m.update(dest_table.encode("utf-8"))
@@ -400,6 +405,7 @@ def ingest(
             loader_file_format=loader_file_format.value
             if loader_file_format is not None
             else None,  # type: ignore
+            columns=column_hints,
         )
 
         for load_package in run_info.load_packages:
