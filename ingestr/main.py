@@ -1,20 +1,13 @@
-import hashlib
-import tempfile
 from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-import dlt
-import humanize
 import typer
-from dlt.common.pipeline import LoadInfo
-from dlt.common.runtime.collector import Collector, LogCollector
-from dlt.common.schema.typing import TColumnSchema
+from dlt.common.runtime.collector import Collector
 from rich.console import Console
 from rich.status import Status
 from typing_extensions import Annotated
 
-from ingestr.src.factory import SourceDestinationFactory
 from ingestr.src.telemetry.event import track
 
 app = typer.Typer(
@@ -182,6 +175,20 @@ def ingest(
             envvar="PRIMARY_KEY",
         ),
     ] = None,  # type: ignore
+    partition_by: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The partition key to be used for partitioning the destination table",
+            envvar="PARTITION_BY",
+        ),
+    ] = None,  # type: ignore
+    cluster_by: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The clustering key to be used for clustering the destination table, not every destination supports clustering.",
+            envvar="CLUSTER_BY",
+        ),
+    ] = None,  # type: ignore
     yes: Annotated[
         Optional[bool],
         typer.Option(
@@ -253,6 +260,66 @@ def ingest(
         ),
     ] = 5,  # type: ignore
 ):
+    import hashlib
+    import tempfile
+    from datetime import datetime
+
+    import dlt
+    import humanize
+    import typer
+    from dlt.common.destination import Destination
+    from dlt.common.pipeline import LoadInfo
+    from dlt.common.runtime.collector import Collector, LogCollector
+    from dlt.common.schema.typing import TColumnSchema
+
+    from ingestr.src.factory import SourceDestinationFactory
+    from ingestr.src.telemetry.event import track
+
+    def report_errors(run_info: LoadInfo):
+        for load_package in run_info.load_packages:
+            failed_jobs = load_package.jobs["failed_jobs"]
+            if len(failed_jobs) == 0:
+                continue
+
+            print()
+            print("[bold red]Failed jobs:[/bold red]")
+            print()
+            for job in failed_jobs:
+                print(f"[bold red]  {job.job_file_info.job_id()}[/bold red]")
+                print(f"    [bold yellow]Error:[/bold yellow] {job.failed_message}")
+
+            raise typer.Exit(1)
+
+    def validate_source_dest_tables(
+        source_table: str, dest_table: str
+    ) -> tuple[str, str]:
+        if not dest_table:
+            if len(source_table.split(".")) != 2:
+                print(
+                    "[red]Table name must be in the format schema.table for source table when dest-table is not given.[/red]"
+                )
+                raise typer.Abort()
+
+            print()
+            print(
+                "[yellow]Destination table is not given, defaulting to the source table.[/yellow]"
+            )
+            dest_table = source_table
+        return (source_table, dest_table)
+
+    def validate_loader_file_format(
+        dlt_dest: Destination, loader_file_format: Optional[LoaderFileFormat]
+    ):
+        if (
+            loader_file_format
+            and loader_file_format.value
+            not in dlt_dest.capabilities().supported_loader_file_formats
+        ):
+            print(
+                f"[red]Loader file format {loader_file_format.value} is not supported by the destination.[/red]"
+            )
+            raise typer.Abort()
+
     track(
         "command_triggered",
         {
@@ -268,26 +335,16 @@ def ingest(
         dlt.config["schema.naming"] = schema_naming.value
 
     try:
-        if not dest_table:
-            if len(source_table.split(".")) != 2:
-                print(
-                    "[red]Table name must be in the format schema.table for source table when dest-table is not given.[/red]"
-                )
-                raise typer.Abort()
-
-            print()
-            print(
-                "[yellow]Destination table is not given, defaulting to the source table.[/yellow]"
-            )
-            dest_table = source_table
+        (source_table, dest_table) = validate_source_dest_tables(
+            source_table, dest_table
+        )
 
         factory = SourceDestinationFactory(source_uri, dest_uri)
         source = factory.get_source()
         destination = factory.get_destination()
 
-        original_incremental_strategy = incremental_strategy
-
         column_hints: dict[str, TColumnSchema] = {}
+        original_incremental_strategy = incremental_strategy
 
         merge_key = None
         if incremental_strategy == IncrementalStrategy.delete_insert:
@@ -308,11 +365,31 @@ def ingest(
             pipelines_dir = tempfile.mkdtemp()
             is_pipelines_dir_temp = True
 
+        dlt_dest = destination.dlt_dest(uri=dest_uri)
+        validate_loader_file_format(dlt_dest, loader_file_format)
+
+        if partition_by:
+            if partition_by not in column_hints:
+                column_hints[partition_by] = {}
+
+            column_hints[partition_by]["partition"] = True
+
+        if cluster_by:
+            if cluster_by not in column_hints:
+                column_hints[cluster_by] = {}
+
+            column_hints[cluster_by]["cluster"] = True
+
+        if primary_key:
+            for key in primary_key:
+                if key not in column_hints:
+                    column_hints[key] = {}
+
+                column_hints[key]["primary_key"] = True
+
         pipeline = dlt.pipeline(
             pipeline_name=m.hexdigest(),
-            destination=destination.dlt_dest(
-                uri=dest_uri,
-            ),
+            destination=dlt_dest,
             progress=progressInstance,
             pipelines_dir=pipelines_dir,
             refresh="drop_resources" if full_refresh else None,
@@ -408,25 +485,14 @@ def ingest(
             columns=column_hints,
         )
 
-        for load_package in run_info.load_packages:
-            failed_jobs = load_package.jobs["failed_jobs"]
-            if len(failed_jobs) > 0:
-                print()
-                print("[bold red]Failed jobs:[/bold red]")
-                print()
-                for job in failed_jobs:
-                    print(f"[bold red]  {job.job_file_info.job_id()}[/bold red]")
-                    print(f"    [bold yellow]Error:[/bold yellow] {job.failed_message}")
-
-                raise typer.Exit(1)
+        report_errors(run_info)
 
         destination.post_load()
 
         end_time = datetime.now()
         elapsedHuman = ""
-        if run_info.started_at:
-            elapsed = end_time - start_time
-            elapsedHuman = f"in {humanize.precisedelta(elapsed)}"
+        elapsed = end_time - start_time
+        elapsedHuman = f"in {humanize.precisedelta(elapsed)}"
 
         # remove the pipelines_dir folder if it was created by ingestr
         if is_pipelines_dir_temp:
