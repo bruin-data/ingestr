@@ -532,6 +532,7 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
     assert len(res) == 2
     assert res[0] == (1, "val1", as_datetime("2022-01-01"))
     assert res[1] == (2, "val2", as_datetime("2022-01-02"))
+    dest_engine.dispose()
 
     # # run again, nothing should be inserted into the output table
     run()
@@ -566,6 +567,8 @@ def db_to_db_merge_with_primary_key(
 
         res = conn.execute("select count(*) from testschema_merge.input").fetchall()
         assert res[0][0] == 2
+    
+    source_engine.dispose()
 
     def run():
         res = invoke_ingest_command(
@@ -594,6 +597,8 @@ def db_to_db_merge_with_primary_key(
         for i, row in enumerate(expected):
             assert res[i] == row
 
+    dest_engine.dispose()
+
     res = run()
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
@@ -602,6 +607,8 @@ def db_to_db_merge_with_primary_key(
     first_run_id = dest_engine.execute(
         "select _dlt_load_id from testschema_merge.output limit 1"
     ).fetchall()[0][0]
+
+    dest_engine.dispose()
 
     ##############################
     # we'll run again, we don't expect any changes since the data hasn't changed
@@ -618,6 +625,7 @@ def db_to_db_merge_with_primary_key(
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][1] == 2
     assert count_by_run_id[0][0] == first_run_id
+    dest_engine.dispose()
     ##############################
 
     ##############################
@@ -638,6 +646,7 @@ def db_to_db_merge_with_primary_key(
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][1] == 2
     assert count_by_run_id[0][0] == first_run_id
+    dest_engine.dispose()
     ##############################
 
     ##############################
@@ -658,6 +667,7 @@ def db_to_db_merge_with_primary_key(
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][1] == 2
     assert count_by_run_id[0][0] == first_run_id
+    dest_engine.dispose()
     ##############################
 
     ##############################
@@ -684,6 +694,7 @@ def db_to_db_merge_with_primary_key(
     assert count_by_run_id[0][0] == first_run_id
     # we don't care about the run ID
     assert count_by_run_id[1][1] == 1
+    dest_engine.dispose()
     ##############################
 
     ##############################
@@ -769,6 +780,7 @@ def db_to_db_delete_insert_without_primary_key(
     first_run_id = dest_engine.execute(
         "select _dlt_load_id from testschema.output limit 1"
     ).fetchall()[0][0]
+    dest_engine.dispose()
 
     ##############################
     # we'll run again, since this is a delete+insert, we expect the run ID to change for the last one
@@ -786,6 +798,7 @@ def db_to_db_delete_insert_without_primary_key(
     assert count_by_run_id[0][1] == 1
     assert count_by_run_id[1][0] != first_run_id
     assert count_by_run_id[1][1] == 1
+    dest_engine.dispose()
     ##############################
 
     ##############################
@@ -813,6 +826,7 @@ def db_to_db_delete_insert_without_primary_key(
     assert count_by_run_id[0][1] == 3  # 2 new rows + 1 old row
     assert count_by_run_id[1][0] == first_run_id
     assert count_by_run_id[1][1] == 1
+    dest_engine.dispose()
     ##############################
 
 
@@ -870,6 +884,7 @@ def db_to_db_delete_insert_with_timerange(
     dest_engine = sqlalchemy.create_engine(dest_connection_url)
 
     def get_output_rows():
+        dest_engine.execute("CHECKPOINT")
         rows = dest_engine.execute(
             "select id, val, updated_at from testschema.output order by id asc"
         ).fetchall()
@@ -889,12 +904,12 @@ def db_to_db_delete_insert_with_timerange(
     first_run_id = dest_engine.execute(
         "select _dlt_load_id from testschema.output limit 1"
     ).fetchall()[0][0]
+    dest_engine.dispose()
 
     ##############################
     # we'll run again, since this is a delete+insert, we expect the run ID to change for the last one
-    run(
-        "2022-01-01T00:00:00Z", "2022-01-02T00:00:00Z"
-    )  # dlt runs them with the end date exclusive
+    res = run("2022-01-01", "2022-01-02")
+
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-01-01"))]
     )
@@ -906,11 +921,12 @@ def db_to_db_delete_insert_with_timerange(
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][0] != first_run_id
     assert count_by_run_id[0][1] == 2
+    dest_engine.dispose()
     ##############################
 
     ##############################
     # now run for the day after, new rows should land
-    run("2022-01-02T00:00:00Z", "2022-01-03T00:00:00Z")
+    run("2022-01-02", "2022-01-03")
     assert_output_equals(
         [
             (1, "val1", as_datetime("2022-01-01")),
@@ -927,11 +943,12 @@ def db_to_db_delete_insert_with_timerange(
     assert len(count_by_run_id) == 2
     assert count_by_run_id[0][1] == 2
     assert count_by_run_id[1][1] == 2
+    dest_engine.dispose()
     ##############################
 
     ##############################
     # let's bring in the rows for the third day
-    run("2022-01-03T00:00:00Z", "2022-01-04T00:00:00Z")
+    run("2022-01-03", "2022-01-04")
     assert_output_equals(
         [
             (1, "val1", as_datetime("2022-01-01")),
@@ -951,6 +968,7 @@ def db_to_db_delete_insert_with_timerange(
     assert count_by_run_id[0][1] == 2
     assert count_by_run_id[1][1] == 2
     assert count_by_run_id[2][1] == 2
+    dest_engine.dispose()
     ##############################
 
     ##############################
@@ -959,7 +977,7 @@ def db_to_db_delete_insert_with_timerange(
         "UPDATE testschema.input SET val = 'val1_modified' WHERE id = 1"
     )
 
-    run("2022-01-01T00:00:00Z", "2022-01-02T00:00:00Z")
+    run("2022-01-01", "2022-01-02")
     assert_output_equals(
         [
             (1, "val1_modified", as_datetime("2022-01-01")),
@@ -979,6 +997,7 @@ def db_to_db_delete_insert_with_timerange(
     assert count_by_run_id[0][1] == 2
     assert count_by_run_id[1][1] == 2
     assert count_by_run_id[2][1] == 2
+    dest_engine.dispose()
     ##############################
 
 
@@ -1032,6 +1051,7 @@ def test_kafka_to_db(dest):
     assert res[0] == ("message1",)
     assert res[1] == ("message2",)
     assert res[2] == ("message3",)
+    dest_engine.dispose()
 
     # run again, nothing should be inserted into the output table
     run()
@@ -1041,6 +1061,7 @@ def test_kafka_to_db(dest):
     assert res[0] == ("message1",)
     assert res[1] == ("message2",)
     assert res[2] == ("message3",)
+    dest_engine.dispose()
 
     # add a new message
     producer.produce(topic, "message4".encode("utf-8"))
@@ -1054,6 +1075,7 @@ def test_kafka_to_db(dest):
     assert res[1] == ("message2",)
     assert res[2] == ("message3",)
     assert res[3] == ("message4",)
+    dest_engine.dispose()
 
     kafka.stop()
 
@@ -1114,6 +1136,7 @@ def test_arrow_mmap_to_db_create_replace(dest):
         ).fetchall()
         assert res[0][0] == as_datetime("2024-11-05")
         assert res[0][1] == row_count
+    dest_engine.dispose()
 
     # let's add a new column to the dataframe
     df["new_col"] = "some value"
@@ -1188,6 +1211,8 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         ).fetchall()
         assert res[0][0] == as_datetime2("2024-11-05")
         assert res[0][1] == row_count
+    
+    dest_engine.dispose()
 
     # run again, it should be deleted and reloaded
     run_command(df, "date")
@@ -1200,6 +1225,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         ).fetchall()
         assert res[0][0] == as_datetime2("2024-11-05")
         assert res[0][1] == row_count
+    dest_engine.dispose()
 
     # append 1000 new rows with a different date
     new_rows = pd.DataFrame(
@@ -1225,6 +1251,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         assert res[0][1] == row_count
         assert res[1][0] == as_datetime2("2024-11-06")
         assert res[1][1] == 1000
+    dest_engine.dispose()
 
     # append 1000 old rows for a previous date, these should not be loaded
     old_rows = pd.DataFrame(
@@ -1294,6 +1321,7 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
         ).fetchall()
         assert res[0][0] == "a"
         assert res[0][1] == row_count
+    dest_engine.dispose()
 
     # run again, no change
     run_command(df)
@@ -1306,6 +1334,7 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
         ).fetchall()
         assert res[0][0] == "a"
         assert res[0][1] == row_count
+    dest_engine.dispose()
 
     # append 1000 new rows with a different value
     new_rows = pd.DataFrame(
@@ -1329,6 +1358,8 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
         assert res[0][1] == row_count
         assert res[1][0] == "b"
         assert res[1][1] == 1000
+    
+    dest_engine.dispose()
 
     # append 1000 old rows for previous ids, they should be merged
     old_rows = pd.DataFrame(
