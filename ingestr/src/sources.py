@@ -10,6 +10,8 @@ import pendulum
 from dlt.common.configuration.specs import AwsCredentials
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TSecretStrValue
+from dlt.sources.credentials import ConnectionStringCredentials
+from dlt.sources.sql_database import sql_table
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
@@ -29,7 +31,6 @@ from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
-from ingestr.src.sql_database import sql_table
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
@@ -67,11 +68,10 @@ class SqlSource:
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
         table_instance = self.table_builder(
-            credentials=uri,
+            credentials=ConnectionStringCredentials(uri),
             schema=table_fields.dataset,
             table=table_fields.table,
             incremental=incremental,
-            merge_key=kwargs.get("merge_key"),
             backend=kwargs.get("sql_backend", "sqlalchemy"),
             chunk_size=kwargs.get("page_size", None),
         )

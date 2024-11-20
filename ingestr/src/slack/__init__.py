@@ -166,7 +166,7 @@ def slack_source(
     @dlt.resource(
         name="messages",
         primary_key=("channel", "ts"),
-        columns={"blocks": {"data_type": "complex"}},
+        columns={"blocks": {"data_type": "json"}},
         write_disposition=write_disposition,
     )
     def messages_resource(
@@ -249,7 +249,7 @@ def slack_source(
                 table_name=table_name,
                 primary_key=("channel", "ts"),
                 write_disposition=write_disposition,
-                columns={"blocks": {"data_type": "complex"}},
+                columns={"blocks": {"data_type": "json"}},
             )(channel)
 
             yield messages_channel

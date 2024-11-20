@@ -3,6 +3,7 @@ import unittest
 import dlt
 import pendulum
 import pytest
+from dlt.sources.credentials import ConnectionStringCredentials
 
 from ingestr.src import sources
 from ingestr.src.sources import AdjustSource, MongoDbSource, SqlSource
@@ -21,14 +22,18 @@ class SqlSourceTest(unittest.TestCase):
 
         # monkey patch the sql_table function
         def sql_table(
-            credentials, schema, table, incremental, merge_key, backend, chunk_size
+            credentials: ConnectionStringCredentials,
+            schema,
+            table,
+            incremental,
+            backend,
+            chunk_size,
         ):
-            self.assertEqual(credentials, uri)
+            self.assertEqual(str(credentials.to_url()), uri)
             self.assertEqual(schema, "schema")
             self.assertEqual(table, "table")
             self.assertEqual(backend, "sqlalchemy")
             self.assertIsNone(incremental)
-            self.assertIsNone(merge_key)
             return dlt.resource()
 
         source = SqlSource(table_builder=sql_table)
@@ -42,15 +47,19 @@ class SqlSourceTest(unittest.TestCase):
 
         # monkey patch the sql_table function
         def sql_table(
-            credentials, schema, table, incremental, merge_key, backend, chunk_size
+            credentials: ConnectionStringCredentials,
+            schema,
+            table,
+            incremental,
+            backend,
+            chunk_size,
         ):
-            self.assertEqual(credentials, uri)
+            self.assertEqual(str(credentials.to_url()), uri)
             self.assertEqual(schema, "schema")
             self.assertEqual(table, "table")
             self.assertEqual(backend, "sqlalchemy")
             self.assertIsInstance(incremental, dlt.sources.incremental)
             self.assertEqual(incremental.cursor_path, incremental_key)
-            self.assertIsNone(merge_key)
             return dlt.resource()
 
         source = SqlSource(table_builder=sql_table)

@@ -89,12 +89,12 @@ def shopify_source(
                 "description": "An unsigned 64-bit integer that's used as a unique identifier for the product.",
             },
             "images": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "A list of product image objects, each one representing an image associated with the product.",
             },
             "options": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The custom product properties. For example, Size, Color, and Material.",
             },
@@ -139,7 +139,7 @@ def shopify_source(
                 "description": "The date and time (ISO 8601 format) when the product was last modified.",
             },
             "variants": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "An array of product variants, each representing a different version of the product.",
             },
@@ -191,7 +191,7 @@ def shopify_source(
                 "description": "The ID of the app that created the order.",
             },
             "billing_address": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The mailing address associated with the payment method.",
             },
@@ -226,7 +226,7 @@ def shopify_source(
                 "description": "A unique value referencing the checkout associated with the order.",
             },
             "client_details": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Information about the browser the customer used when placing the order.",
             },
@@ -236,7 +236,7 @@ def shopify_source(
                 "description": "The date and time when the order was closed.",
             },
             "company": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Information about the purchasing company for the order.",
             },
@@ -261,7 +261,7 @@ def shopify_source(
                 "description": "The three-letter code (ISO 4217 format) for the shop currency.",
             },
             "current_total_additional_fees_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The current total additional fees on the order in shop and presentment currencies.",
             },
@@ -271,12 +271,12 @@ def shopify_source(
                 "description": "The current total discounts on the order in the shop currency.",
             },
             "current_total_discounts_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The current total discounts on the order in shop and presentment currencies.",
             },
             "current_total_duties_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The current total duties charged on the order in shop and presentment currencies.",
             },
@@ -286,7 +286,7 @@ def shopify_source(
                 "description": "The current total price of the order in the shop currency.",
             },
             "current_total_price_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The current total price of the order in shop and presentment currencies.",
             },
@@ -296,7 +296,7 @@ def shopify_source(
                 "description": "The sum of prices for all line items after discounts and returns in the shop currency.",
             },
             "current_subtotal_price_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The sum of the prices for all line items after discounts and returns in shop and presentment currencies.",
             },
@@ -306,12 +306,12 @@ def shopify_source(
                 "description": "The sum of the prices for all tax lines applied to the order in the shop currency.",
             },
             "current_total_tax_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The sum of the prices for all tax lines applied to the order in shop and presentment currencies.",
             },
             "customer": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Information about the customer.",
             },
@@ -321,12 +321,12 @@ def shopify_source(
                 "description": "The two or three-letter language code, optionally followed by a region modifier.",
             },
             "discount_applications": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "An ordered list of stacked discount applications.",
             },
             "discount_codes": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "A list of discounts applied to the order.",
             },
@@ -346,7 +346,7 @@ def shopify_source(
                 "description": "The status of payments associated with the order.",
             },
             "fulfillments": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "An array of fulfillments associated with the order.",
             },
@@ -372,7 +372,7 @@ def shopify_source(
                 "description": "The URL for the page where the buyer landed when they entered the shop.",
             },
             "line_items": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "A list of line item objects containing information about an item in the order.",
             },
@@ -397,7 +397,7 @@ def shopify_source(
                 "description": "An optional note that a shop owner can attach to the order.",
             },
             "note_attributes": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "Extra information added to the order as key-value pairs.",
             },
@@ -412,22 +412,22 @@ def shopify_source(
                 "description": "The order's position in the shop's count of orders, starting at 1001.",
             },
             "original_total_additional_fees_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The original total additional fees on the order in shop and presentment currencies.",
             },
             "original_total_duties_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The original total duties charged on the order in shop and presentment currencies.",
             },
             "payment_terms": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The terms and conditions under which a payment should be processed.",
             },
             "payment_gateway_names": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The list of payment gateways used for the order.",
             },
@@ -457,17 +457,17 @@ def shopify_source(
                 "description": "The website where the customer clicked a link to the shop.",
             },
             "refunds": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "A list of refunds applied to the order.",
             },
             "shipping_address": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The mailing address where the order will be shipped.",
             },
             "shipping_lines": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "An array detailing the shipping methods used.",
             },
@@ -492,7 +492,7 @@ def shopify_source(
                 "description": "The price of the order in the shop currency after discounts but before shipping, duties, taxes, and tips.",
             },
             "subtotal_price_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The subtotal of the order in shop and presentment currencies after discounts but before shipping, duties, taxes, and tips.",
             },
@@ -502,7 +502,7 @@ def shopify_source(
                 "description": "Tags attached to the order, formatted as a string of comma-separated values.",
             },
             "tax_lines": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "An array of tax line objects detailing taxes applied to the order.",
             },
@@ -527,7 +527,7 @@ def shopify_source(
                 "description": "The total discounts applied to the price of the order in the shop currency.",
             },
             "total_discounts_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The total discounts applied to the price of the order in shop and presentment currencies.",
             },
@@ -537,7 +537,7 @@ def shopify_source(
                 "description": "The sum of all line item prices in the shop currency.",
             },
             "total_line_items_price_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The total of all line item prices in shop and presentment currencies.",
             },
@@ -552,12 +552,12 @@ def shopify_source(
                 "description": "The sum of all line item prices, discounts, shipping, taxes, and tips in the shop currency.",
             },
             "total_price_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The total price of the order in shop and presentment currencies.",
             },
             "total_shipping_price_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The total shipping price of the order in shop and presentment currencies.",
             },
@@ -567,7 +567,7 @@ def shopify_source(
                 "description": "The sum of the prices for all tax lines applied to the order in the shop currency.",
             },
             "total_tax_set": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The sum of the prices for all tax lines applied to the order in shop and presentment currencies.",
             },
@@ -1669,27 +1669,27 @@ query discountNodes($after: String, $query: String, $first: Int)  {
                 "description": "A globally unique ID for the product.",
             },
             "availablePublicationsCount": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": False,
                 "description": "The number of publications that a resource is published to",
             },
             "category": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The category of the product from Shopify's Standard Product Taxonomy.",
             },
             "combinedListing": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "A special product type that combines separate products into a single product listing.",
             },
             "combinedListingRole": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The role of the product in a combined listing.",
             },
             "compareAtPriceRange": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "The compare-at price range of the product in the shop's default currency.",
             },
@@ -1719,17 +1719,17 @@ query discountNodes($after: String, $query: String, $first: Int)  {
                 "description": "A unique, human-readable string of the product's title.",
             },
             "metafields": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "A list of custom fields associated with the product.",
             },
             "options": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": True,
                 "description": "A list of product options, e.g., size, color.",
             },
             "priceRangeV2": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": False,
                 "description": "The minimum and maximum prices of a product.",
             },
@@ -1784,12 +1784,12 @@ query discountNodes($after: String, $query: String, $first: Int)  {
                 "description": "The date and time when the product was last modified.",
             },
             "variantsFirst250": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": False,
                 "description": "A list of variants associated with the product, first 250.",
             },
             "variantsCount": {
-                "data_type": "complex",
+                "data_type": "json",
                 "nullable": False,
                 "description": "The number of variants associated with the product.",
             },
