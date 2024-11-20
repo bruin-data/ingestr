@@ -25,7 +25,7 @@ jobs:
         # I tried running stuff on macOS but it was too slow and unreliable.
         # I also tried windows runners but couldn't get Docker to work there, so I gave up.
         os: [ubuntu-latest]
-        python-version: ['3.11', '3.12']
+        python-version: ['3.10', '3.11', '3.12', '3.13']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
