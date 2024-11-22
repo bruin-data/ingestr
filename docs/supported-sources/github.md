@@ -9,14 +9,14 @@ ingestr supports GitHub as a source.
 The URI format for GitHub is as follows:
 
 ```plaintext
-github://?access_token=<access_token>&owner=<owner>&name=<name>
+github://?access_token=<access_token>&owner=<owner>&repo=<repo>
 ```
 
 URI parameters:
 
 - `access_token`: Access Token used for authentication with the GitHub API
 - `owner`: Refers to the owner of the repository
-- `name`: Refers to the name of the repository
+- `repo`: Refers to the name of the repository
 
 
 ## Setting up a GitHub Integration
@@ -26,7 +26,7 @@ GitHub requires a few steps to set up an integration, please follow the guide dl
 Once you complete the guide, you should have an access token. Let's say your access token is `ghp_test_1234`, the owner is `max`, and the name of the repository is `test_example`. Here is a sample command that will copy the data from GitHub into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=max&name=test_example' --source-table 'issues' --dest-uri duckdb:///github.duckdb --dest-table 'dest.issues'
+ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=max&repo=test_example' --source-table 'issues' --dest-uri duckdb:///github.duckdb --dest-table 'dest.issues'
 ```
 
 The result of this command will be a table in the `dest.issues` database.
@@ -44,3 +44,4 @@ Use these as `--source-table` parameter in the `ingestr ingest` command.
 
 > [!WARNING]
 > GitHub does not support incremental loading for many endpoints in its APIs, which means ingestr will load endpoints incrementally if they support it, and do a full-refresh if not.
+ 

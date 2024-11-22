@@ -979,7 +979,7 @@ class GitHubSource:
             raise ValueError(
                 "Github takes care of incrementality on its own, you should not provide incremental_key"
             )
-        # github://?access_token=<access_token>&owner=<owner>&name=<name>
+        #github://?access_token=<access_token>&owner=<owner>&repo=<repo>
         parsed_uri = urlparse(uri)
         source_fields = parse_qs(parsed_uri.query)
 
@@ -989,10 +989,10 @@ class GitHubSource:
                 "owner of the repository is required to connect with GitHub"
             )
 
-        name = source_fields.get("name")
-        if not name:
+        repo = source_fields.get("repo")
+        if not repo:
             raise ValueError(
-                "name of the repository is required to connect with GitHub"
+                "repo: name of the repository is required to connect with GitHub"
             )
 
         access_token = source_fields.get("access_token")
@@ -1001,15 +1001,15 @@ class GitHubSource:
 
         if table in ["issues", "pull_requests"]:
             return github_reactions(
-                owner=owner[0], name=name[0], access_token=access_token[0]
+                owner=owner[0], name=repo[0], access_token=access_token[0]
             ).with_resources(table)
         elif table == "repo_events":
             return github_repo_events(
-                owner=owner[0], name=name[0], access_token=access_token[0]
+                owner=owner[0], name=repo[0], access_token=access_token[0]
             )
         elif table == "stargazers":
             return github_stargazers(
-                owner=owner[0], name=name[0], access_token=access_token[0]
+                owner=owner[0], name=repo[0], access_token=access_token[0]
             )
         else:
             raise ValueError(
