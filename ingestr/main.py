@@ -8,6 +8,7 @@ from rich.console import Console
 from rich.status import Status
 from typing_extensions import Annotated
 
+from ingestr.src.filters import cast_set_to_list
 from ingestr.src.telemetry.event import track
 
 app = typer.Typer(
@@ -471,6 +472,8 @@ def ingest(
             sql_limit=sql_limit,
         )
 
+        dlt_source.add_map(cast_set_to_list)
+
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
             dlt_source.incremental.primary_key = ()
 
@@ -501,9 +504,9 @@ def ingest(
             ),
             write_disposition=write_disposition,  # type: ignore
             primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
-            loader_file_format=loader_file_format.value
-            if loader_file_format is not None
-            else None,  # type: ignore
+            loader_file_format=(
+                loader_file_format.value if loader_file_format is not None else None  # type: ignore
+            ),  # type: ignore
             columns=column_hints,
         )
 

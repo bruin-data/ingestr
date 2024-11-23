@@ -12,6 +12,8 @@ from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TSecretStrValue
 from dlt.sources.credentials import ConnectionStringCredentials
 from dlt.sources.sql_database import sql_table
+from sqlalchemy import types as sa
+from sqlalchemy.dialects import mysql
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
@@ -75,6 +77,11 @@ class SqlSource:
             def query_adapter_callback(query, table):
                 return query.limit(kwargs.get("sql_limit"))
 
+        def type_adapter_callback(sql_type):
+            if isinstance(sql_type, mysql.SET):
+                return sa.JSON
+            return sql_type
+
         table_instance = self.table_builder(
             credentials=ConnectionStringCredentials(uri),
             schema=table_fields.dataset,
@@ -84,6 +91,7 @@ class SqlSource:
             chunk_size=kwargs.get("page_size", None),
             reflection_level=reflection_level,
             query_adapter_callback=query_adapter_callback,
+            type_adapter_callback=type_adapter_callback,
         )
 
         return table_instance
