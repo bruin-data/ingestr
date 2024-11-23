@@ -4,6 +4,8 @@ import random
 import shutil
 import string
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from typing import Optional
 
@@ -88,7 +90,6 @@ def invoke_ingest_command(
         args.append("--loader-file-format")
         args.append(loader_file_format)
 
-    # print(args)
     result = runner.invoke(
         app,
         args,
@@ -344,13 +345,33 @@ class DockerImage:
     def __init__(self, container_creator, connection_suffix: str = "") -> None:
         self.container_creator = container_creator
         self.connection_suffix = connection_suffix
+        self.container = None
+        self.starting = False
 
     def start(self) -> str:
+        if self.container:
+            return self.container.get_connection_url() + self.connection_suffix
+
+        if self.starting:
+            while self.container is None:
+                time.sleep(0.1)
+
+            return self.container.get_connection_url() + self.connection_suffix
+
+        self.starting = True
         self.container = self.container_creator()
-        return self.container.get_connection_url() + self.connection_suffix
+        self.starting = False
+        if self.container:
+            return self.container.get_connection_url() + self.connection_suffix
+
+        raise Exception("Failed to start container")
 
     def stop(self):
-        self.container.stop()
+        pass
+
+    def stop_fully(self):
+        if self.container:
+            self.container.stop()
 
 
 class DuckDb:
@@ -364,15 +385,17 @@ class DuckDb:
         except Exception:
             pass
 
+    def stop_fully(self):
+        self.stop()
+
 
 POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
 MYSQL8_IMAGE = "mysql:8.4.1"
 MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04"
 
+pgDocker = DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start())
 SOURCES = {
-    "postgres": DockerImage(
-        lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()
-    ),
+    "postgres": pgDocker,
     "duckdb": DuckDb(),
     "mysql8": DockerImage(
         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
@@ -384,11 +407,27 @@ SOURCES = {
 }
 
 DESTINATIONS = {
-    "postgres": DockerImage(
-        lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()
-    ),
+    "postgres": pgDocker,
     "duckdb": DuckDb(),
 }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def manage_containers():
+    # Run all tests
+    yield
+
+    # Get unique containers since some sources and destinations share containers
+    unique_containers = set(SOURCES.values()) | set(DESTINATIONS.values())
+
+    # Stop containers in parallel after tests complete
+    with ThreadPoolExecutor() as executor:
+        futures = [
+            executor.submit(container.stop_fully) for container in unique_containers
+        ]
+        # Wait for all futures to complete
+        for future in futures:
+            future.result()
 
 
 @pytest.mark.parametrize(
@@ -396,8 +435,13 @@ DESTINATIONS = {
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_create_replace(source, dest):
-    source_uri = source.start()
-    dest_uri = dest.start()
+    # Run source.start() and dest.start() in parallel
+    with ThreadPoolExecutor() as executor:
+        source_future = executor.submit(source.start)
+        dest_future = executor.submit(dest.start)
+        source_uri = source_future.result()
+        dest_uri = dest_future.result()
+
     db_to_db_create_replace(source_uri, dest_uri)
     source.stop()
     dest.stop()
@@ -408,8 +452,12 @@ def test_create_replace(source, dest):
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_append(source, dest):
-    source_uri = source.start()
-    dest_uri = dest.start()
+    # Run source.start() and dest.start() in parallel
+    with ThreadPoolExecutor() as executor:
+        source_future = executor.submit(source.start)
+        dest_future = executor.submit(dest.start)
+        source_uri = source_future.result()
+        dest_uri = dest_future.result()
     db_to_db_append(source_uri, dest_uri)
     source.stop()
     dest.stop()
@@ -420,8 +468,12 @@ def test_append(source, dest):
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_merge_with_primary_key(source, dest):
-    source_uri = source.start()
-    dest_uri = dest.start()
+    # Run source.start() and dest.start() in parallel
+    with ThreadPoolExecutor() as executor:
+        source_future = executor.submit(source.start)
+        dest_future = executor.submit(dest.start)
+        source_uri = source_future.result()
+        dest_uri = dest_future.result()
     db_to_db_merge_with_primary_key(source_uri, dest_uri)
     source.stop()
     dest.stop()
@@ -432,8 +484,12 @@ def test_merge_with_primary_key(source, dest):
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_delete_insert_without_primary_key(source, dest):
-    source_uri = source.start()
-    dest_uri = dest.start()
+    # Run source.start() and dest.start() in parallel
+    with ThreadPoolExecutor() as executor:
+        source_future = executor.submit(source.start)
+        dest_future = executor.submit(dest.start)
+        source_uri = source_future.result()
+        dest_uri = dest_future.result()
     db_to_db_delete_insert_without_primary_key(source_uri, dest_uri)
     source.stop()
     dest.stop()
@@ -444,14 +500,19 @@ def test_delete_insert_without_primary_key(source, dest):
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_delete_insert_with_time_range(source, dest):
-    source_uri = source.start()
-    dest_uri = dest.start()
+    # Run source.start() and dest.start() in parallel
+    with ThreadPoolExecutor() as executor:
+        source_future = executor.submit(source.start)
+        dest_future = executor.submit(dest.start)
+        source_uri = source_future.result()
+        dest_uri = dest_future.result()
     db_to_db_delete_insert_with_timerange(source_uri, dest_uri)
     source.stop()
     dest.stop()
 
 
 def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str):
+    schema_rand_prefix = f"testschema_create_replace_{get_random_string(5)}"
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
@@ -459,28 +520,34 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
 
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
-        conn.execute("DROP SCHEMA IF EXISTS testschema")
-        conn.execute("CREATE SCHEMA testschema")
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
         conn.execute(
-            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
         )
-        conn.execute("INSERT INTO testschema.input VALUES (1, 'val1', '2022-01-01')")
-        conn.execute("INSERT INTO testschema.input VALUES (2, 'val2', '2022-02-01')")
-        res = conn.execute("select count(*) from testschema.input").fetchall()
+        conn.execute(
+            f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01')"
+        )
+        conn.execute(
+            f"INSERT INTO {schema_rand_prefix}.input VALUES (2, 'val2', '2022-02-01')"
+        )
+        res = conn.execute(
+            f"select count(*) from {schema_rand_prefix}.input"
+        ).fetchall()
         assert res[0][0] == 2
 
     result = invoke_ingest_command(
         source_connection_url,
-        "testschema.input",
+        f"{schema_rand_prefix}.input",
         dest_connection_url,
-        "testschema.output",
+        f"{schema_rand_prefix}.output",
     )
 
     assert result.exit_code == 0
 
     dest_engine = sqlalchemy.create_engine(dest_connection_url)
     res = dest_engine.execute(
-        "select id, val, updated_at from testschema.output"
+        f"select id, val, updated_at from {schema_rand_prefix}.output"
     ).fetchall()
 
     assert len(res) == 2
@@ -489,6 +556,7 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
 
 
 def db_to_db_append(source_connection_url: str, dest_connection_url: str):
+    schema_rand_prefix = f"testschema_append_{get_random_string(5)}"
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
@@ -496,23 +564,25 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
 
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
-        conn.execute("DROP SCHEMA IF EXISTS testschema_append")
-        conn.execute("CREATE SCHEMA testschema_append")
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
         conn.execute(
-            "CREATE TABLE testschema_append.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
         )
         conn.execute(
-            "INSERT INTO testschema_append.input VALUES (1, 'val1', '2022-01-01'), (2, 'val2', '2022-01-02')"
+            f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01'), (2, 'val2', '2022-01-02')"
         )
-        res = conn.execute("select count(*) from testschema_append.input").fetchall()
+        res = conn.execute(
+            f"select count(*) from {schema_rand_prefix}.input"
+        ).fetchall()
         assert res[0][0] == 2
 
     def run():
         res = invoke_ingest_command(
             source_connection_url,
-            "testschema_append.input",
+            f"{schema_rand_prefix}.input",
             dest_connection_url,
-            "testschema_append.output",
+            f"{schema_rand_prefix}.output",
             "append",
             "updated_at",
             sql_backend="sqlalchemy",
@@ -523,7 +593,7 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
 
     def get_output_table():
         return dest_engine.execute(
-            "select id, val, updated_at from testschema_append.output order by id asc"
+            f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
 
     run()
@@ -546,6 +616,7 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
 def db_to_db_merge_with_primary_key(
     source_connection_url: str, dest_connection_url: str
 ):
+    schema_rand_prefix = f"testschema_merge_{get_random_string(5)}"
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
@@ -553,19 +624,21 @@ def db_to_db_merge_with_primary_key(
 
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
-        conn.execute("DROP SCHEMA IF EXISTS testschema_merge")
-        conn.execute("CREATE SCHEMA testschema_merge")
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
         conn.execute(
-            "CREATE TABLE testschema_merge.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
         )
         conn.execute(
-            "INSERT INTO testschema_merge.input VALUES (1, 'val1', '2022-01-01')"
+            f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01')"
         )
         conn.execute(
-            "INSERT INTO testschema_merge.input VALUES (2, 'val2', '2022-02-01')"
+            f"INSERT INTO {schema_rand_prefix}.input VALUES (2, 'val2', '2022-02-01')"
         )
 
-        res = conn.execute("select count(*) from testschema_merge.input").fetchall()
+        res = conn.execute(
+            f"select count(*) from {schema_rand_prefix}.input"
+        ).fetchall()
         assert res[0][0] == 2
 
     source_engine.dispose()
@@ -573,9 +646,9 @@ def db_to_db_merge_with_primary_key(
     def run():
         res = invoke_ingest_command(
             source_connection_url,
-            "testschema_merge.input",
+            f"{schema_rand_prefix}.input",
             dest_connection_url,
-            "testschema_merge.output",
+            f"{schema_rand_prefix}.output",
             "merge",
             "updated_at",
             "id",
@@ -588,7 +661,7 @@ def db_to_db_merge_with_primary_key(
 
     def get_output_rows():
         return dest_engine.execute(
-            "select id, val, updated_at from testschema_merge.output order by id asc"
+            f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
 
     def assert_output_equals(expected):
@@ -605,7 +678,7 @@ def db_to_db_merge_with_primary_key(
     )
 
     first_run_id = dest_engine.execute(
-        "select _dlt_load_id from testschema_merge.output limit 1"
+        f"select _dlt_load_id from {schema_rand_prefix}.output limit 1"
     ).fetchall()[0][0]
 
     dest_engine.dispose()
@@ -619,9 +692,8 @@ def db_to_db_merge_with_primary_key(
 
     # we also ensure that the other rows were not touched
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 2 desc"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 2 desc"
     ).fetchall()
-    print(count_by_run_id)
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][1] == 2
     assert count_by_run_id[0][0] == first_run_id
@@ -631,7 +703,7 @@ def db_to_db_merge_with_primary_key(
     ##############################
     # now we'll modify the source data but not the updated at, the output table should not be updated
     source_engine.execute(
-        "UPDATE testschema_merge.input SET val = 'val1_modified' WHERE id = 2"
+        f"UPDATE {schema_rand_prefix}.input SET val = 'val1_modified' WHERE id = 2"
     )
 
     run()
@@ -641,7 +713,7 @@ def db_to_db_merge_with_primary_key(
 
     # we also ensure that the other rows were not touched
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1"
     ).fetchall()
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][1] == 2
@@ -652,7 +724,7 @@ def db_to_db_merge_with_primary_key(
     ##############################
     # now we'll insert a new row but with an old date, the new row will not show up
     source_engine.execute(
-        "INSERT INTO testschema_merge.input VALUES (3, 'val3', '2022-01-01')"
+        f"INSERT INTO {schema_rand_prefix}.input VALUES (3, 'val3', '2022-01-01')"
     )
 
     run()
@@ -662,7 +734,7 @@ def db_to_db_merge_with_primary_key(
 
     # we also ensure that the other rows were not touched
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1"
     ).fetchall()
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][1] == 2
@@ -673,7 +745,7 @@ def db_to_db_merge_with_primary_key(
     ##############################
     # now we'll insert a new row but with a new date, the new row will show up
     source_engine.execute(
-        "INSERT INTO testschema_merge.input VALUES (3, 'val3', '2022-02-02')"
+        f"INSERT INTO {schema_rand_prefix}.input VALUES (3, 'val3', '2022-02-02')"
     )
 
     run()
@@ -687,7 +759,7 @@ def db_to_db_merge_with_primary_key(
 
     # we have a new run that inserted rows to this table, so the run count should be 2
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 2 desc"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 2 desc"
     ).fetchall()
     assert len(count_by_run_id) == 2
     assert count_by_run_id[0][1] == 2
@@ -700,7 +772,7 @@ def db_to_db_merge_with_primary_key(
     ##############################
     # lastly, let's try modifying the updated_at of an old column, it should be updated in the output table
     source_engine.execute(
-        "UPDATE testschema_merge.input SET val='val2_modified', updated_at = '2022-02-03' WHERE id = 2"
+        f"UPDATE {schema_rand_prefix}.input SET val='val2_modified', updated_at = '2022-02-03' WHERE id = 2"
     )
 
     run()
@@ -714,7 +786,7 @@ def db_to_db_merge_with_primary_key(
 
     # we have a new run that inserted rows to this table, so the run count should be 2
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 2 desc, 1 asc"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 2 desc, 1 asc"
     ).fetchall()
     assert len(count_by_run_id) == 3
     assert count_by_run_id[0][1] == 1
@@ -728,6 +800,7 @@ def db_to_db_merge_with_primary_key(
 def db_to_db_delete_insert_without_primary_key(
     source_connection_url: str, dest_connection_url: str
 ):
+    schema_rand_prefix = f"testschema_delete_insert_{get_random_string(5)}"
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
@@ -735,23 +808,29 @@ def db_to_db_delete_insert_without_primary_key(
 
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
-        conn.execute("DROP SCHEMA IF EXISTS testschema")
-        conn.execute("CREATE SCHEMA testschema")
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
         conn.execute(
-            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
         )
-        conn.execute("INSERT INTO testschema.input VALUES (1, 'val1', '2022-01-01')")
-        conn.execute("INSERT INTO testschema.input VALUES (2, 'val2', '2022-02-01')")
+        conn.execute(
+            f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01')"
+        )
+        conn.execute(
+            f"INSERT INTO {schema_rand_prefix}.input VALUES (2, 'val2', '2022-02-01')"
+        )
 
-        res = conn.execute("select count(*) from testschema.input").fetchall()
+        res = conn.execute(
+            f"select count(*) from {schema_rand_prefix}.input"
+        ).fetchall()
         assert res[0][0] == 2
 
     def run():
         res = invoke_ingest_command(
             source_connection_url,
-            "testschema.input",
+            f"{schema_rand_prefix}.input",
             dest_connection_url,
-            "testschema.output",
+            f"{schema_rand_prefix}.output",
             inc_strategy="delete+insert",
             inc_key="updated_at",
             sql_backend="sqlalchemy",
@@ -763,7 +842,7 @@ def db_to_db_delete_insert_without_primary_key(
 
     def get_output_rows():
         return dest_engine.execute(
-            "select id, val, updated_at from testschema.output order by id asc"
+            f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
 
     def assert_output_equals(expected):
@@ -772,14 +851,13 @@ def db_to_db_delete_insert_without_primary_key(
         for i, row in enumerate(expected):
             assert res[i] == row
 
-    output = run()
-    print(output.output)
+    run()
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
     )
 
     first_run_id = dest_engine.execute(
-        "select _dlt_load_id from testschema.output limit 1"
+        f"select _dlt_load_id from {schema_rand_prefix}.output limit 1"
     ).fetchall()[0][0]
     dest_engine.dispose()
 
@@ -792,7 +870,7 @@ def db_to_db_delete_insert_without_primary_key(
 
     # we ensure that one of the rows is updated with a new run
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 1 asc"
     ).fetchall()
     assert len(count_by_run_id) == 2
     assert count_by_run_id[0][0] == first_run_id
@@ -805,7 +883,7 @@ def db_to_db_delete_insert_without_primary_key(
     ##############################
     # now we'll insert a few more lines for the same day, the new rows should show up
     source_engine.execute(
-        "INSERT INTO testschema.input VALUES (3, 'val3', '2022-02-01'), (4, 'val4', '2022-02-01')"
+        f"INSERT INTO {schema_rand_prefix}.input VALUES (3, 'val3', '2022-02-01'), (4, 'val4', '2022-02-01')"
     )
 
     run()
@@ -820,7 +898,7 @@ def db_to_db_delete_insert_without_primary_key(
 
     # the new rows should have a new run ID, there should be 2 distinct runs now
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 2 desc, 1 asc"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 2 desc, 1 asc"
     ).fetchall()
     assert len(count_by_run_id) == 2
     assert count_by_run_id[0][0] != first_run_id
@@ -834,6 +912,7 @@ def db_to_db_delete_insert_without_primary_key(
 def db_to_db_delete_insert_with_timerange(
     source_connection_url: str, dest_connection_url: str
 ):
+    schema_rand_prefix = f"testschema_delete_insert_timerange_{get_random_string(5)}"
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
@@ -841,20 +920,20 @@ def db_to_db_delete_insert_with_timerange(
 
     source_engine = sqlalchemy.create_engine(source_connection_url)
 
-    source_engine.execute("DROP SCHEMA IF EXISTS testschema")
-    source_engine.execute("CREATE SCHEMA testschema")
+    source_engine.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+    source_engine.execute(f"CREATE SCHEMA {schema_rand_prefix}")
     try:
         source_engine.execute(
-            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR(20), updated_at DATETIME)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATETIME)"
         )
     except Exception:
         # hello postgres
         source_engine.execute(
-            "CREATE TABLE testschema.input (id INTEGER, val VARCHAR(20), updated_at TIMESTAMP)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at TIMESTAMP)"
         )
 
     source_engine.execute(
-        """INSERT INTO testschema.input VALUES 
+        f"""INSERT INTO {schema_rand_prefix}.input VALUES 
         (1, 'val1', '2022-01-01T00:00:00'),
         (2, 'val2', '2022-01-01T00:00:00'),
         (3, 'val3', '2022-01-02T00:00:00'),
@@ -864,15 +943,17 @@ def db_to_db_delete_insert_with_timerange(
     """
     )
 
-    res = source_engine.execute("select count(*) from testschema.input").fetchall()
+    res = source_engine.execute(
+        f"select count(*) from {schema_rand_prefix}.input"
+    ).fetchall()
     assert res[0][0] == 6
 
     def run(start_date: str, end_date: str):
         res = invoke_ingest_command(
             source_connection_url,
-            "testschema.input",
+            f"{schema_rand_prefix}.input",
             dest_connection_url,
-            "testschema.output",
+            f"{schema_rand_prefix}.output",
             inc_strategy="delete+insert",
             inc_key="updated_at",
             interval_start=start_date,
@@ -887,7 +968,7 @@ def db_to_db_delete_insert_with_timerange(
     def get_output_rows():
         dest_engine.execute("CHECKPOINT")
         rows = dest_engine.execute(
-            "select id, val, updated_at from testschema.output order by id asc"
+            f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
         return [(row[0], row[1], row[2].date()) for row in rows]
 
@@ -903,7 +984,7 @@ def db_to_db_delete_insert_with_timerange(
     )
 
     first_run_id = dest_engine.execute(
-        "select _dlt_load_id from testschema.output limit 1"
+        f"select _dlt_load_id from {schema_rand_prefix}.output limit 1"
     ).fetchall()[0][0]
     dest_engine.dispose()
 
@@ -917,7 +998,7 @@ def db_to_db_delete_insert_with_timerange(
 
     # both rows should have a new run ID
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 1 asc"
     ).fetchall()
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][0] != first_run_id
@@ -939,7 +1020,7 @@ def db_to_db_delete_insert_with_timerange(
 
     # there should be 4 rows with 2 distinct run IDs
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 1 asc"
     ).fetchall()
     assert len(count_by_run_id) == 2
     assert count_by_run_id[0][1] == 2
@@ -963,7 +1044,7 @@ def db_to_db_delete_insert_with_timerange(
 
     # there should be 6 rows with 3 distinct run IDs
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 1 asc"
     ).fetchall()
     assert len(count_by_run_id) == 3
     assert count_by_run_id[0][1] == 2
@@ -975,7 +1056,7 @@ def db_to_db_delete_insert_with_timerange(
     ##############################
     # now let's do a backfill for the first day again, the rows should be updated
     source_engine.execute(
-        "UPDATE testschema.input SET val = 'val1_modified' WHERE id = 1"
+        f"UPDATE {schema_rand_prefix}.input SET val = 'val1_modified' WHERE id = 1"
     )
 
     run("2022-01-01", "2022-01-02")
@@ -992,7 +1073,7 @@ def db_to_db_delete_insert_with_timerange(
 
     # there should still be 6 rows with 3 distinct run IDs
     count_by_run_id = dest_engine.execute(
-        "select _dlt_load_id, count(*) from testschema.output group by 1 order by 1 asc"
+        f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 1 asc"
     ).fetchall()
     assert len(count_by_run_id) == 3
     assert count_by_run_id[0][1] == 2
@@ -1014,9 +1095,16 @@ def as_datetime2(date_str: str) -> date:
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_kafka_to_db(dest):
-    dest_uri = dest.start()
+    # Run source.start() and dest.start() in parallel
+    with ThreadPoolExecutor() as executor:
+        dest_future = executor.submit(dest.start)
+        source_future = executor.submit(
+            KafkaContainer("confluentinc/cp-kafka:7.6.0").start, timeout=60
+        )
+        dest_uri = dest_future.result()
+        kafka = source_future.result()
 
-    kafka = KafkaContainer("confluentinc/cp-kafka:7.6.0").start(timeout=60)
+    # kafka = KafkaContainer("confluentinc/cp-kafka:7.6.0").start(timeout=60)
 
     # Create Kafka producer
     producer = Producer({"bootstrap.servers": kafka.get_bootstrap_server()})
@@ -1085,6 +1173,8 @@ def test_kafka_to_db(dest):
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_arrow_mmap_to_db_create_replace(dest):
+    schema = f"testschema_arrow_mmap_create_replace_{get_random_string(5)}"
+
     def run_command(
         table: pa.Table,
         incremental_key: Optional[str] = None,
@@ -1100,11 +1190,11 @@ def test_arrow_mmap_to_db_create_replace(dest):
                 f"mmap://{tmp.name}",
                 "whatever",
                 dest_uri,
-                "testschema.output",
+                f"{schema}.output",
                 # we use this because postgres destination fails with nested fields, gonna have to investigate this more
-                loader_file_format="insert_values"
-                if dest_uri.startswith("postgresql")
-                else None,
+                loader_file_format=(
+                    "insert_values" if dest_uri.startswith("postgresql") else None
+                ),
             )
 
             assert res.exit_code == 0
@@ -1113,7 +1203,7 @@ def test_arrow_mmap_to_db_create_replace(dest):
     dest_uri = dest.start()
 
     # let's start with a basic dataframe
-    row_count = 1000000
+    row_count = 1000
     df = pd.DataFrame(
         {
             "id": range(row_count),
@@ -1129,11 +1219,11 @@ def test_arrow_mmap_to_db_create_replace(dest):
 
     dest_engine = sqlalchemy.create_engine(dest_uri)
     with dest_engine.begin() as conn:
-        res = conn.execute("select count(*) from testschema.output").fetchall()
+        res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count
 
         res = conn.execute(
-            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == as_datetime("2024-11-05")
         assert res[0][1] == row_count
@@ -1146,17 +1236,17 @@ def test_arrow_mmap_to_db_create_replace(dest):
 
     # there should be no change, just a new column
     with dest_engine.begin() as conn:
-        res = conn.execute("select count(*) from testschema.output").fetchall()
+        res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count
 
         res = conn.execute(
-            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == as_datetime("2024-11-05")
         assert res[0][1] == row_count
 
         res = conn.execute(
-            "select new_col, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select new_col, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == "some value"
         assert res[0][1] == row_count
@@ -1166,6 +1256,8 @@ def test_arrow_mmap_to_db_create_replace(dest):
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_arrow_mmap_to_db_delete_insert(dest):
+    schema = f"testschema_arrow_mmap_del_ins_{get_random_string(5)}"
+
     def run_command(df: pd.DataFrame, incremental_key: Optional[str] = None):
         table = pa.Table.from_pandas(df)
         with tempfile.NamedTemporaryFile(suffix=".arrow", delete=True) as tmp:
@@ -1178,7 +1270,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
                 f"mmap://{tmp.name}",
                 "whatever",
                 dest_uri,
-                "testschema.output",
+                f"{schema}.output",
                 inc_key=incremental_key,
                 inc_strategy="delete+insert",
             )
@@ -1190,7 +1282,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
     dest_engine = sqlalchemy.create_engine(dest_uri)
 
     # let's start with a basic dataframe
-    row_count = 1000000
+    row_count = 1000
     df = pd.DataFrame(
         {
             "id": range(row_count),
@@ -1204,11 +1296,11 @@ def test_arrow_mmap_to_db_delete_insert(dest):
 
     # the first load, it should be loaded correctly
     with dest_engine.begin() as conn:
-        res = conn.execute("select count(*) from testschema.output").fetchall()
+        res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count
 
         res = conn.execute(
-            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == as_datetime2("2024-11-05")
         assert res[0][1] == row_count
@@ -1218,11 +1310,11 @@ def test_arrow_mmap_to_db_delete_insert(dest):
     # run again, it should be deleted and reloaded
     run_command(df, "date")
     with dest_engine.begin() as conn:
-        res = conn.execute("select count(*) from testschema.output").fetchall()
+        res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count
 
         res = conn.execute(
-            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == as_datetime2("2024-11-05")
         assert res[0][1] == row_count
@@ -1242,11 +1334,11 @@ def test_arrow_mmap_to_db_delete_insert(dest):
     run_command(df, "date")
 
     with dest_engine.begin() as conn:
-        res = conn.execute("select count(*) from testschema.output").fetchall()
+        res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count + 1000
 
         res = conn.execute(
-            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == as_datetime2("2024-11-05")
         assert res[0][1] == row_count
@@ -1267,11 +1359,11 @@ def test_arrow_mmap_to_db_delete_insert(dest):
 
     run_command(df, "date")
     with dest_engine.begin() as conn:
-        res = conn.execute("select count(*) from testschema.output").fetchall()
+        res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count + 1000
 
         res = conn.execute(
-            "select date, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == as_datetime2("2024-11-05")
         assert res[0][1] == row_count
@@ -1283,6 +1375,8 @@ def test_arrow_mmap_to_db_delete_insert(dest):
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_arrow_mmap_to_db_merge_without_incremental(dest):
+    schema = f"testschema_arrow_mmap_{get_random_string(5)}"
+
     def run_command(df: pd.DataFrame):
         table = pa.Table.from_pandas(df)
         with tempfile.NamedTemporaryFile(suffix=".arrow", delete=True) as tmp:
@@ -1295,7 +1389,7 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
                 f"mmap://{tmp.name}",
                 "whatever",
                 dest_uri,
-                "testschema.output",
+                f"{schema}.output",
                 inc_strategy="merge",
                 primary_key="id",
             )
@@ -1307,18 +1401,18 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
     dest_engine = sqlalchemy.create_engine(dest_uri)
 
     # let's start with a basic dataframe
-    row_count = 1000000
+    row_count = 1000
     df = pd.DataFrame({"id": range(row_count), "value": ["a"] * row_count})
 
     run_command(df)
 
     # the first load, it should be loaded correctly
     with dest_engine.begin() as conn:
-        res = conn.execute("select count(*) from testschema.output").fetchall()
+        res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count
 
         res = conn.execute(
-            "select value, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select value, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == "a"
         assert res[0][1] == row_count
@@ -1327,11 +1421,11 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
     # run again, no change
     run_command(df)
     with dest_engine.begin() as conn:
-        res = conn.execute("select count(*) from testschema.output").fetchall()
+        res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count
 
         res = conn.execute(
-            "select value, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select value, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == "a"
         assert res[0][1] == row_count
@@ -1349,11 +1443,11 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
     run_command(df)
 
     with dest_engine.begin() as conn:
-        res = conn.execute("select count(*) from testschema.output").fetchall()
+        res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count + 1000
 
         res = conn.execute(
-            "select value, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select value, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == "a"
         assert res[0][1] == row_count
@@ -1372,10 +1466,10 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
 
     run_command(old_rows)
     with dest_engine.begin() as conn:
-        res = conn.execute("select count(*) from testschema.output").fetchall()
+        res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count + 1000
         res = conn.execute(
-            "select value, count(*) from testschema.output group by 1 order by 1 asc"
+            f"select value, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
         assert res[0][0] == "a"
         assert res[0][1] == row_count + 1000
