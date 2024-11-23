@@ -112,6 +112,12 @@ class SchemaNaming(str, Enum):
     direct = "direct"
 
 
+class SqlReflectionLevel(str, Enum):
+    minimal = "minimal"
+    full = "full"
+    full_with_precision = "full_with_precision"
+
+
 @app.command()
 def ingest(
     source_uri: Annotated[
@@ -259,6 +265,20 @@ def ingest(
             envvar="EXTRACT_PARALLELISM",
         ),
     ] = 5,  # type: ignore
+    sql_reflection_level: Annotated[
+        SqlReflectionLevel,
+        typer.Option(
+            help="The reflection level to use when reflecting the table schema from the source",
+            envvar="SQL_REFLECTION_LEVEL",
+        ),
+    ] = SqlReflectionLevel.full,  # type: ignore
+    sql_limit: Annotated[
+        Optional[int],
+        typer.Option(
+            help="The limit to use when fetching data from the source",
+            envvar="SQL_LIMIT",
+        ),
+    ] = None,  # type: ignore
 ):
     import hashlib
     import tempfile
@@ -447,6 +467,8 @@ def ingest(
             interval_end=interval_end,
             sql_backend=sql_backend.value,
             page_size=page_size,
+            sql_reflection_level=sql_reflection_level.value,
+            sql_limit=sql_limit,
         )
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
@@ -494,7 +516,6 @@ def ingest(
         elapsed = end_time - start_time
         elapsedHuman = f"in {humanize.precisedelta(elapsed)}"
 
-        # remove the pipelines_dir folder if it was created by ingestr
         if is_pipelines_dir_temp:
             import shutil
 

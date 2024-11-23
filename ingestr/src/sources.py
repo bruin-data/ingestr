@@ -67,6 +67,14 @@ class SqlSource:
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
+        reflection_level = kwargs.get("sql_reflection_level")
+
+        query_adapter_callback = None
+        if kwargs.get("sql_limit"):
+
+            def query_adapter_callback(query, table):
+                return query.limit(kwargs.get("sql_limit"))
+
         table_instance = self.table_builder(
             credentials=ConnectionStringCredentials(uri),
             schema=table_fields.dataset,
@@ -74,6 +82,8 @@ class SqlSource:
             incremental=incremental,
             backend=kwargs.get("sql_backend", "sqlalchemy"),
             chunk_size=kwargs.get("page_size", None),
+            reflection_level=reflection_level,
+            query_adapter_callback=query_adapter_callback,
         )
 
         return table_instance

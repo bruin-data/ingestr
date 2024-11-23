@@ -28,6 +28,7 @@ class SqlSourceTest(unittest.TestCase):
             incremental,
             backend,
             chunk_size,
+            **kwargs,
         ):
             self.assertEqual(str(credentials.to_url()), uri)
             self.assertEqual(schema, "schema")
@@ -53,6 +54,7 @@ class SqlSourceTest(unittest.TestCase):
             incremental,
             backend,
             chunk_size,
+            **kwargs,
         ):
             self.assertEqual(str(credentials.to_url()), uri)
             self.assertEqual(schema, "schema")
