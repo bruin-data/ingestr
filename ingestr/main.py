@@ -459,7 +459,7 @@ def ingest(
         if factory.source_scheme == "sqlite":
             source_table = "main." + source_table.split(".")[-1]
 
-        if factory.destination_scheme == "bigquery":
+        if factory.destination_scheme == "bigquery" and loader_file_format is LoaderFileFormat.parquet:
             dlt.config["destination.bigquery.autodetect_schema"] = True
 
         dlt_source = source.dlt_source(
