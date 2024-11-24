@@ -459,6 +459,9 @@ def ingest(
         if factory.source_scheme == "sqlite":
             source_table = "main." + source_table.split(".")[-1]
 
+        if factory.destination_scheme == "bigquery":
+            dlt.config["destination.bigquery.autodetect_schema"] = True
+
         dlt_source = source.dlt_source(
             uri=source_uri,
             table=source_table,
