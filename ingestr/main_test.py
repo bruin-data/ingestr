@@ -45,6 +45,7 @@ def invoke_ingest_command(
     interval_end=None,
     sql_backend=None,
     loader_file_format=None,
+    sql_exclude_columns=None,
 ):
     args = [
         "ingest",
@@ -89,6 +90,10 @@ def invoke_ingest_command(
     if loader_file_format:
         args.append("--loader-file-format")
         args.append(loader_file_format)
+
+    if sql_exclude_columns:
+        args.append("--sql-exclude-columns")
+        args.append(sql_exclude_columns)
 
     result = runner.invoke(
         app,
@@ -1473,3 +1478,63 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
         ).fetchall()
         assert res[0][0] == "a"
         assert res[0][1] == row_count + 1000
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
+def test_db_to_db_exclude_columns(source, dest):
+    # Run source.start() and dest.start() in parallel
+    with ThreadPoolExecutor() as executor:
+        source_future = executor.submit(source.start)
+        dest_future = executor.submit(dest.start)
+        source_uri = source_future.result()
+        dest_uri = dest_future.result()
+
+    schema_rand_prefix = f"testschema_db_to_db_exclude_columns_{get_random_string(5)}"
+
+    source_engine = sqlalchemy.create_engine(source_uri)
+    with source_engine.begin() as conn:
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+        conn.execute(
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE, col_to_exclude1 VARCHAR(20), col_to_exclude2 VARCHAR(20))"
+        )
+        conn.execute(
+            f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01', 'col1', 'col2')"
+        )
+        conn.execute(
+            f"INSERT INTO {schema_rand_prefix}.input VALUES (2, 'val2', '2022-02-01', 'col1', 'col2')"
+        )
+        res = conn.execute(
+            f"select count(*) from {schema_rand_prefix}.input"
+        ).fetchall()
+        assert res[0][0] == 2
+
+    result = invoke_ingest_command(
+        source_uri,
+        f"{schema_rand_prefix}.input",
+        dest_uri,
+        f"{schema_rand_prefix}.output",
+        sql_exclude_columns="col_to_exclude1,col_to_exclude2",
+    )
+
+    assert result.exit_code == 0
+
+    dest_engine = sqlalchemy.create_engine(dest_uri)
+    res = dest_engine.execute(
+        f"select id, val, updated_at from {schema_rand_prefix}.output"
+    ).fetchall()
+
+    assert len(res) == 2
+    assert res[0] == (1, "val1", as_datetime("2022-01-01"))
+    assert res[1] == (2, "val2", as_datetime("2022-02-01"))
+
+    # Verify excluded columns don't exist in destination schema
+    columns = dest_engine.execute(
+        f"SELECT column_name FROM information_schema.columns WHERE table_schema = '{schema_rand_prefix}' AND table_name = 'output'"
+    ).fetchall()
+    assert columns == [("id",), ("val",), ("updated_at",)]
+    source.stop()
+    dest.stop()

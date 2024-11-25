@@ -280,6 +280,13 @@ def ingest(
             envvar="SQL_LIMIT",
         ),
     ] = None,  # type: ignore
+    sql_exclude_columns: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            help="The columns to exclude from the source table",
+            envvar="SQL_EXCLUDE_COLUMNS",
+        ),
+    ] = [],  # type: ignore
 ):
     import hashlib
     import tempfile
@@ -347,6 +354,13 @@ def ingest(
             "command": "ingest",
         },
     )
+
+    clean_sql_exclude_columns = []
+    if sql_exclude_columns:
+        for col in sql_exclude_columns:
+            for possible_col in col.split(","):
+                clean_sql_exclude_columns.append(possible_col.strip())
+        sql_exclude_columns = clean_sql_exclude_columns
 
     dlt.config["data_writer.buffer_max_items"] = page_size
     dlt.config["data_writer.file_max_items"] = loader_file_size
@@ -459,9 +473,6 @@ def ingest(
         if factory.source_scheme == "sqlite":
             source_table = "main." + source_table.split(".")[-1]
 
-        if factory.destination_scheme == "bigquery" and loader_file_format is LoaderFileFormat.parquet:
-            dlt.config["destination.bigquery.autodetect_schema"] = True
-
         dlt_source = source.dlt_source(
             uri=source_uri,
             table=source_table,
@@ -473,6 +484,7 @@ def ingest(
             page_size=page_size,
             sql_reflection_level=sql_reflection_level.value,
             sql_limit=sql_limit,
+            sql_exclude_columns=sql_exclude_columns,
         )
 
         dlt_source.add_map(cast_set_to_list)

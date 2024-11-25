@@ -23,6 +23,7 @@ from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
+from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -92,6 +93,9 @@ class SqlSource:
             reflection_level=reflection_level,
             query_adapter_callback=query_adapter_callback,
             type_adapter_callback=type_adapter_callback,
+            table_adapter_callback=table_adapter_exclude_columns(
+                kwargs.get("sql_exclude_columns", [])
+            ),
         )
 
         return table_instance
