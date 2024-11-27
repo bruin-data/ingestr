@@ -1,0 +1,3 @@
+[console_scripts]
+dlt=dlt.cli._dlt:_main
+

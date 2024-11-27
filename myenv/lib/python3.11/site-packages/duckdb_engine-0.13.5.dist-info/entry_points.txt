@@ -1,0 +1,3 @@
+[sqlalchemy.dialects]
+duckdb=duckdb_engine:Dialect
+

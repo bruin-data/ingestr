@@ -1,0 +1,71 @@
+Metadata-Version: 2.1
+Name: sqlalchemy2-stubs
+Version: 0.0.2a38
+Summary: Typing Stubs for SQLAlchemy 1.4
+Home-page: http://www.sqlalchemy.org
+Author: Mike Bayer
+Author-email: mike_mp@zzzcomputing.com
+License: MIT
+Project-URL: Issue Tracker, https://github.com/sqlalchemy/sqlalchemy2-stubs/
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.6
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Programming Language :: Python :: Implementation :: PyPy
+Requires-Python: >=3.6
+Description-Content-Type: text/x-rst
+License-File: LICENSE
+Requires-Dist: typing-extensions >=3.7.4
+
+===========================
+SQLAlchemy 2 Stubs (Legacy)
+===========================
+
+These are interim PEP-484 typing stubs for the
+`SQLAlchemy <https://www.sqlalchemy.org>`_ **1.4 release series only**. They
+are released concurrently along with a
+`Mypy extension <https://docs.sqlalchemy.org/en/14/orm/extensions/mypy.html>`_
+which is designed to work with these stubs, which assists primarily in the area
+of ORM mappings.
+
+The stubs replace the use of the "sqlalchemy-stubs" package published by
+Dropbox. Differences include that these stubs are generated against 1.4's API
+as well as some adjustments to the use of generics. The sqlalchemy2-stubs stubs
+package **will not work with SQLAlchemy 2.0, and will need to be explicitly /
+manually uninstalled when upgrading to SQLAlchemy 2.0**.
+
+This project should be considered **alpha level** and is not as mature
+as the Dropbox stubs for the initial release.
+
+See the Mypy plugin documentation at https://docs.sqlalchemy.org/en/14/orm/extensions/mypy.html
+for an overview of how to use PEP-484 annotations with ORM mapped classes.
+
+For SQLAlchemy 2.0, when released, **the sqlalchemy2-stubs project is not
+compatible**.  SQLAlchemy 2.0 will be / is fully pep-484 typed inline and
+will not be compatible with any stubs.  There unfortunately appears to be no
+standard approach in Python for the problem of a library that upgrades to
+include typing annotations inline, as typing tools will still consider
+any installed stubs to take precedence.  Therefore **sqlalchemy2-stubs
+will need to be manually uninstalled when upgrading to SQLAlchemy 2.0**.
+
+
+Code of Conduct
+---------------
+
+Above all, SQLAlchemy places great emphasis on polite, thoughtful, and
+constructive communication between users and developers.
+Please see our current Code of Conduct at
+`Code of Conduct <http://www.sqlalchemy.org/codeofconduct.html>`_.
+
+License
+-------
+
+SQLAlchemy is distributed under the `MIT license
+<http://www.opensource.org/licenses/mit-license.php>`_.
+

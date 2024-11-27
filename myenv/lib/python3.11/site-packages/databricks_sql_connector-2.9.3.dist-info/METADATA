@@ -1,0 +1,106 @@
+Metadata-Version: 2.1
+Name: databricks-sql-connector
+Version: 2.9.3
+Summary: Databricks SQL Connector for Python
+License: Apache-2.0
+Author: Databricks
+Author-email: databricks-sql-connector-maintainers@databricks.com
+Requires-Python: >=3.7.1,<4.0.0
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Dist: alembic (>=1.0.11,<2.0.0)
+Requires-Dist: lz4 (>=4.0.2,<5.0.0)
+Requires-Dist: numpy (>=1.16.6) ; python_version >= "3.7" and python_version < "3.11"
+Requires-Dist: numpy (>=1.23.4) ; python_version >= "3.11"
+Requires-Dist: oauthlib (>=3.1.0,<4.0.0)
+Requires-Dist: openpyxl (>=3.0.10,<4.0.0)
+Requires-Dist: pandas (>=1.2.5,<1.4.0) ; python_version >= "3.7" and python_version < "3.8"
+Requires-Dist: pandas (>=1.2.5,<3.0.0) ; python_version >= "3.8"
+Requires-Dist: pyarrow (>=10.0.1) ; python_version >= "3.11"
+Requires-Dist: pyarrow (>=6.0.0) ; python_version >= "3.7" and python_version < "3.11"
+Requires-Dist: requests (>=2.18.1,<3.0.0)
+Requires-Dist: sqlalchemy (>=1.3.24,<2.0.0)
+Requires-Dist: thrift (>=0.16.0,<0.17.0)
+Requires-Dist: urllib3 (>=1.0)
+Project-URL: Bug Tracker, https://github.com/databricks/databricks-sql-python/issues
+Project-URL: Homepage, https://github.com/databricks/databricks-sql-python
+Description-Content-Type: text/markdown
+
+# Databricks SQL Connector for Python
+
+[![PyPI](https://img.shields.io/pypi/v/databricks-sql-connector?style=flat-square)](https://pypi.org/project/databricks-sql-connector/)
+[![Downloads](https://pepy.tech/badge/databricks-sql-connector)](https://pepy.tech/project/databricks-sql-connector)
+
+The Databricks SQL Connector for Python allows you to develop Python applications that connect to Databricks clusters and SQL warehouses. It is a Thrift-based client with no dependencies on ODBC or JDBC. It conforms to the [Python DB API 2.0 specification](https://www.python.org/dev/peps/pep-0249/) and exposes a [SQLAlchemy](https://www.sqlalchemy.org/) dialect for use with tools like `pandas` and `alembic` which use SQLAlchemy to execute DDL.
+
+This connector uses Arrow as the data-exchange format, and supports APIs to directly fetch Arrow tables. Arrow tables are wrapped in the `ArrowQueue` class to provide a natural API to get several rows at a time.
+
+You are welcome to file an issue here for general use cases. You can also contact Databricks Support [here](help.databricks.com).
+
+## Requirements
+
+Python 3.7 or above is required.
+
+## Documentation
+
+For the latest documentation, see
+
+- [Databricks](https://docs.databricks.com/dev-tools/python-sql-connector.html)
+- [Azure Databricks](https://docs.microsoft.com/en-us/azure/databricks/dev-tools/python-sql-connector)
+
+## Quickstart
+
+Install the library with `pip install databricks-sql-connector`
+
+Note: Don't hard-code authentication secrets into your Python. Use environment variables
+
+```bash
+export DATABRICKS_HOST=********.databricks.com
+export DATABRICKS_HTTP_PATH=/sql/1.0/endpoints/****************
+export DATABRICKS_TOKEN=dapi********************************
+```
+
+Example usage:
+```python
+import os
+from databricks import sql
+
+host = os.getenv("DATABRICKS_HOST")
+http_path = os.getenv("DATABRICKS_HTTP_PATH")
+access_token = os.getenv("DATABRICKS_TOKEN")
+
+connection = sql.connect(
+  server_hostname=host,
+  http_path=http_path,
+  access_token=access_token)
+
+cursor = connection.cursor()
+
+cursor.execute('SELECT * FROM RANGE(10)')
+result = cursor.fetchall()
+for row in result:
+  print(row)
+
+cursor.close()
+connection.close()
+```
+
+In the above example:
+- `server-hostname` is the Databricks instance host name.
+- `http-path` is the HTTP Path either to a Databricks SQL endpoint (e.g. /sql/1.0/endpoints/1234567890abcdef),
+or to a Databricks Runtime interactive cluster (e.g. /sql/protocolv1/o/1234567890123456/1234-123456-slid123)
+- `personal-access-token` is the Databricks Personal Access Token for the account that will execute commands and queries
+
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## License
+
+[Apache License 2.0](LICENSE)
+

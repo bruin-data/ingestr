@@ -13,6 +13,7 @@ from ingestr.src.destinations import (
     RedshiftDestination,
     SnowflakeDestination,
     SynapseDestination,
+    AthenaDestination,
 )
 from ingestr.src.sources import (
     AdjustSource,
@@ -159,6 +160,7 @@ class SourceDestinationFactory:
             "snowflake": SnowflakeDestination(),
             "synapse": SynapseDestination(),
             "csv": CsvDestination(),
+            "athena": AthenaDestination(),
         }
 
         if self.destination_scheme in match:

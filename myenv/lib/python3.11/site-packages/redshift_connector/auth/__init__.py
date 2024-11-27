@@ -1,0 +1,1 @@
+from .aws_credentials_provider import AWSCredentialsProvider

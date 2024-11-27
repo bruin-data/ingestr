@@ -1,0 +1,5 @@
+[sqlalchemy.dialects]
+awsathena = pyathena.sqlalchemy.base:AthenaDialect
+awsathena.arrow = pyathena.sqlalchemy.arrow:AthenaArrowDialect
+awsathena.pandas = pyathena.sqlalchemy.pandas:AthenaPandasDialect
+awsathena.rest = pyathena.sqlalchemy.rest:AthenaRestDialect

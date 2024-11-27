@@ -1,0 +1,21 @@
+# -*- coding: utf-8 -*-
+# File generated from our OpenAPI spec
+from typing_extensions import TYPE_CHECKING
+from warnings import warn
+
+warn(
+    """
+    The stripe.api_resources.billing.meter_event_summary package is deprecated, please change your
+    imports to import from stripe.billing directly.
+    From:
+      from stripe.api_resources.billing.meter_event_summary import MeterEventSummary
+    To:
+      from stripe.billing import MeterEventSummary
+    """,
+    DeprecationWarning,
+    stacklevel=2,
+)
+if not TYPE_CHECKING:
+    from stripe.billing._meter_event_summary import (  # noqa
+        MeterEventSummary,
+    )

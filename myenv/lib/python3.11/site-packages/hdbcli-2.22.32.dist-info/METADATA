@@ -1,0 +1,145 @@
+Metadata-Version: 2.1
+Name: hdbcli
+Version: 2.22.32
+Summary: SAP HANA Python Client
+Home-page: https://www.sap.com/
+Author: SAP SE
+License: SAP DEVELOPER LICENSE AGREEMENT
+Project-URL: Documentation, https://help.sap.com/viewer/f1b440ded6144a54ada97ff95dac7adf/latest/en-US/f3b8fabf34324302b123297cdbe710f0.html
+Keywords: SAP HANA client in-memory database SQL cloud business application intelligent enterprise AI artificial intelligence analytics experience
+Platform: UNKNOWN
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: End Users/Desktop
+Classifier: Intended Audience :: Financial and Insurance Industry
+Classifier: Intended Audience :: Healthcare Industry
+Classifier: Intended Audience :: Information Technology
+Classifier: Intended Audience :: Legal Industry
+Classifier: Intended Audience :: Manufacturing
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: Other/Proprietary License
+Classifier: Operating System :: MacOS
+Classifier: Operating System :: MacOS :: MacOS X
+Classifier: Operating System :: Microsoft :: Windows :: Windows 11
+Classifier: Operating System :: Microsoft :: Windows :: Windows 10
+Classifier: Operating System :: POSIX :: Linux
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Database
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Description-Content-Type: text/x-rst
+
+######################
+SAP HANA Python Client
+######################
+
+Introduction
+------------
+
+The Python Database API Specification v2.0 (PEP 249) defines a set of methods that provides a consistent database interface independent of the actual database being used. The Python extension module for SAP HANA implements PEP 249. Once you install the module, you can access and change the information in SAP HANA databases from Python.
+
+In PEP 249, autocommit is turned off by default. In the SAP HANA Python driver, autocommit is turned on by default.
+
+For information, see: `PEP 249 -- Python Database API Specification v2.0 <https://www.python.org/dev/peps/pep-0249/>`_
+
+Getting Started
+---------------
+
+Install via ``pip install hdbcli`` or install manually via the `HANA Client Install <https://help.sap.com/viewer/f1b440ded6144a54ada97ff95dac7adf/latest/en-US/39eca89d94ca464ca52385ad50fc7dea.html>`_
+
+Quick Start
+-----------
+
+ * For HANA Cloud databases, the port number is 443 and encryption is always enabled by default
+ * For HANA tenant databases, use the port number 3**NN**13 (where **NN** is the SAP instance number - e.g. 30013).
+ * For HANA system databases in a multitenant system, the port number is 3**NN**13.
+ * For HANA single-tenant databases, the port number is 3**NN**15.
+
+::
+
+    from hdbcli import dbapi
+    conn = dbapi.connect(
+        address="<hostname>",
+        port=3<NN>MM,
+        user="<username>",
+        password="<password>"
+    )
+    cursor = conn.cursor()
+
+Execute a single statement that does not return a result set:
+
+::
+
+    cursor.execute("CREATE TABLE T1 (ID INTEGER PRIMARY KEY, C2 VARCHAR(255))")
+    cursor.close()
+
+
+Use question mark parameter binding to insert values into the T1 table created above. The parameter values are supplied as a Python sequence and can be literal values or variable names. This example uses literal values:
+
+::
+
+    sql = 'INSERT INTO T1 (ID, C2) VALUES (?, ?)'
+    cursor = conn.cursor()
+    cursor.execute(sql, (1, 'hello'))
+    # returns True
+    cursor.execute(sql, (2, 'hello again'))
+    # returns True
+    cursor.close()
+
+Use named parameter binding to insert values into the T1 table. The values are supplied as a Python dictionary, and this example uses variable names.
+
+::
+
+    sql = 'INSERT INTO T1 (ID, C2) VALUES (:id, :c2)'
+    cursor = conn.cursor()
+    id = 3
+    c2 = "goodbye"
+    cursor.execute(sql, {"id": id, "c2": c2})
+    # returns True
+    cursor.close()
+
+Loop over the rows of the result set.
+
+::
+
+    sql = 'SELECT * FROM T1'
+    cursor = conn.cursor()
+    cursor.execute(sql)
+    for row in cursor:
+        print(row)
+
+Help
+----
+
+See the `SAP HANA Client Interface Programming Reference <https://help.sap.com/viewer/f1b440ded6144a54ada97ff95dac7adf/latest/en-US/f3b8fabf34324302b123297cdbe710f0.html>`_ for details about developing with the SAP HANA Python Client.
+
+Community
+---------
+
+SAP Community provides a forum where you can ask and answer questions, and comment and vote on the questions of others and their answers.
+
+See `SAP HANA Community Questions <https://answers.sap.com/tags/73554900100700000996>`_ for details.
+
+Limitations of 32-bit Windows driver
+------------------------------------
+
+The maximum length of a LOB column for the 32-bit Python driver on Windows is 2147483647.
+The maximum rowcount that can be returned for the 32-bit Python driver on Windows is 2147483647.
+
+License
+-------
+
+The HANA Python Client is provided via the `SAP Developer License Agreement <https://tools.hana.ondemand.com/developer-license.txt>`_.
+
+By using this software, you agree that the following text is incorporated into the terms of the Developer Agreement:
+
+    If you are an existing SAP customer for On Premise software, your use of this current software is also covered by the
+    terms of your software license agreement with SAP, including the Use Rights, the current version of which can be found at:
+    `https://www.sap.com/about/agreements/product-use-and-support-terms.html?tag=agreements:product-use-support-terms/on-premise-software/software-use-rights <https://www.sap.com/about/agreements/product-use-and-support-terms.html?tag=agreements:product-use-support-terms/on-premise-software/software-use-rights>`_
+
+

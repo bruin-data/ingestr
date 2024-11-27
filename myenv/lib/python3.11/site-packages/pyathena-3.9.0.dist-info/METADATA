@@ -1,0 +1,154 @@
+Metadata-Version: 2.3
+Name: PyAthena
+Version: 3.9.0
+Summary: Python DB API 2.0 (PEP 249) client for Amazon Athena
+Project-URL: homepage, https://github.com/laughingman7743/PyAthena/
+Project-URL: repository, https://github.com/laughingman7743/PyAthena/
+Author-email: laughingman7743 <laughingman7743@gmail.com>
+License: Copyright 2017 laughingman7743
+        
+        Permission is hereby granted, free of charge, to any person obtaining a copy of
+        this software and associated documentation files (the "Software"), to deal in
+        the Software without restriction, including without limitation the rights to
+        use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+        the Software, and to permit persons to whom the Software is furnished to do so,
+        subject to the following conditions:
+        
+        The above copyright notice and this permission notice shall be included in all
+        copies or substantial portions of the Software.
+        
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+        FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+        COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+        AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+        CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+License-File: LICENSE
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Database :: Front-Ends
+Requires-Python: >=3.8.1
+Requires-Dist: boto3>=1.26.4
+Requires-Dist: botocore>=1.29.4
+Requires-Dist: fsspec
+Requires-Dist: python-dateutil
+Requires-Dist: tenacity>=4.1.0
+Provides-Extra: arrow
+Requires-Dist: pyarrow>=7.0.0; extra == 'arrow'
+Provides-Extra: fastparquet
+Requires-Dist: fastparquet>=0.4.0; extra == 'fastparquet'
+Provides-Extra: pandas
+Requires-Dist: pandas>=1.3.0; extra == 'pandas'
+Provides-Extra: sqlalchemy
+Requires-Dist: sqlalchemy>=1.0.0; extra == 'sqlalchemy'
+Description-Content-Type: text/x-rst
+
+.. |badge package| image:: https://badge.fury.io/py/pyathena.svg
+  :target: https://badge.fury.io/py/pyathena
+.. |badge pypi| image:: https://img.shields.io/pypi/pyversions/PyAthena.svg
+  :target: https://pypi.org/project/PyAthena/
+.. |badge test| image:: https://github.com/laughingman7743/PyAthena/actions/workflows/test.yaml/badge.svg
+  :target: https://github.com/laughingman7743/PyAthena/actions/workflows/test.yaml
+.. |badge docs| image:: https://github.com/laughingman7743/PyAthena/actions/workflows/docs.yaml/badge.svg
+  :target: https://github.com/laughingman7743/PyAthena/actions/workflows/docs.yaml
+.. |badge license| image:: https://img.shields.io/pypi/l/PyAthena.svg
+  :target: https://github.com/laughingman7743/PyAthena/blob/master/LICENSE
+.. |badge downloads| image:: https://static.pepy.tech/badge/pyathena/month
+  :target: https://pepy.tech/project/pyathena
+.. |badge ruff| image:: https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json
+  :target: https://github.com/astral-sh/ruff
+  :alt: Ruff
+.. |badge mypy| image:: https://www.mypy-lang.org/static/mypy_badge.svg
+  :target: https://mypy-lang.org/
+  :alt: mypy
+
+PyAthena
+========
+
+PyAthena is a Python `DB API 2.0 (PEP 249)`_ client for `Amazon Athena`_.
+
++---------+------------------------------------------------+
+| Package | |badge package| |badge pypi| |badge downloads| |
++---------+------------------------------------------------+
+| CI/CD   | |badge test| |badge docs|                      |
++---------+------------------------------------------------+
+| Meta    | |badge license| |badge ruff| |badge mypy|      |
++---------+------------------------------------------------+
+
+.. _`DB API 2.0 (PEP 249)`: https://www.python.org/dev/peps/pep-0249/
+.. _`Amazon Athena`: https://docs.aws.amazon.com/athena/latest/APIReference/Welcome.html
+
+.. _requirements:
+
+Requirements
+------------
+
+* Python
+
+  - CPython 3.8 3.9 3.10, 3.11 3.12
+
+.. _installation:
+
+Installation
+------------
+
+.. code:: bash
+
+    $ pip install PyAthena
+
+Extra packages:
+
++---------------+---------------------------------------+------------------+
+| Package       | Install command                       | Version          |
++===============+=======================================+==================+
+| SQLAlchemy    | ``pip install PyAthena[SQLAlchemy]``  | >=1.0.0          |
++---------------+---------------------------------------+------------------+
+| Pandas        | ``pip install PyAthena[Pandas]``      | >=1.3.0          |
++---------------+---------------------------------------+------------------+
+| Arrow         | ``pip install PyAthena[Arrow]``       | >=7.0.0          |
++---------------+---------------------------------------+------------------+
+| fastparquet   | ``pip install PyAthena[fastparquet]`` | >=0.4.0          |
++---------------+---------------------------------------+------------------+
+
+.. _usage:
+
+Usage
+-----
+
+.. code:: python
+
+    from pyathena import connect
+
+    cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                     region_name="us-west-2").cursor()
+    cursor.execute("SELECT * FROM one_row")
+    print(cursor.description)
+    print(cursor.fetchall())
+
+.. _license:
+
+License
+-------
+
+`MIT license`_
+
+Many of the implementations in this library are based on `PyHive`_, thanks for `PyHive`_.
+
+.. _`MIT license`: LICENSE
+.. _`PyHive`: https://github.com/dropbox/PyHive
+
+Links
+-----
+
+- Documentation: https://laughingman7743.github.io/PyAthena/
+- PyPI Releases: https://pypi.org/project/PyAthena/
+- Source Code: https://github.com/laughingman7743/PyAthena/
+- Issue Tracker: https://github.com/laughingman7743/PyAthena/issues

@@ -1,0 +1,41 @@
+Metadata-Version: 2.1
+Name: types-requests
+Version: 2.32.0.20240907
+Summary: Typing stubs for requests
+Home-page: https://github.com/python/typeshed
+License: Apache-2.0
+Project-URL: GitHub, https://github.com/python/typeshed
+Project-URL: Changes, https://github.com/typeshed-internal/stub_uploader/blob/main/data/changelogs/requests.md
+Project-URL: Issue tracker, https://github.com/python/typeshed/issues
+Project-URL: Chat, https://gitter.im/python/typing
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Programming Language :: Python :: 3
+Classifier: Typing :: Stubs Only
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: urllib3>=2
+
+## Typing stubs for requests
+
+This is a [PEP 561](https://peps.python.org/pep-0561/)
+type stub package for the [`requests`](https://github.com/psf/requests) package.
+It can be used by type-checking tools like
+[mypy](https://github.com/python/mypy/),
+[pyright](https://github.com/microsoft/pyright),
+[pytype](https://github.com/google/pytype/),
+PyCharm, etc. to check code that uses
+`requests`.
+
+This version of `types-requests` aims to provide accurate annotations
+for `requests==2.32.*`.
+The source for this package can be found at
+https://github.com/python/typeshed/tree/main/stubs/requests. All fixes for
+types and metadata should be contributed there.
+
+Note: `types-requests` has required `urllib3>=2` since v2.31.0.7. If you need to install `types-requests` into an environment that must also have `urllib3<2` installed into it, you will have to use `types-requests<2.31.0.7`.
+
+See https://github.com/python/typeshed/blob/main/README.md for more details.
+This package was generated from typeshed commit
+[`e8e9291c76f50c3bcde79e7bb61060f5c24c054e`](https://github.com/python/typeshed/commit/e8e9291c76f50c3bcde79e7bb61060f5c24c054e) and was tested
+with mypy 1.11.1, pyright 1.1.379, and
+pytype 2024.4.11.

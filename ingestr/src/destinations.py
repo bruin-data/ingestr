@@ -6,9 +6,9 @@ import os
 import shutil
 import tempfile
 from urllib.parse import parse_qs, urlparse
+from dlt.common.configuration.specs import AwsCredentials
 
 import dlt
-
 
 class GenericSqlDestination:
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
@@ -194,3 +194,28 @@ class CsvDestination(GenericSqlDestination):
                     csv_writer.writerow(json_obj)
 
         shutil.rmtree(self.temp_path)
+
+class AthenaDestination:
+    def dlt_dest(self, uri: str, **kwargs):
+        self.credentials = AwsCredentials(aws_access_key_id="",aws_secret_access_key="+")
+        print("inside athena")
+        return dlt.destinations.athena(
+            credentials= self.credentials,
+            query_result_bucket="s3://ingestrbucket",
+            athena_work_group="my-work",
+            bucket_url = "s3://test"
+        )
+    
+    def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
+        table_fields = table.split(".")
+        if len(table_fields) != 2 and len(table_fields) != 3:
+            raise ValueError(
+                "Table name must be in the format <dataset>.<table> or <project>.<dataset>.<table>"
+            )
+
+        res = {
+            "dataset_name": table_fields[-2],
+            "table_name": table_fields[-1],
+        }
+
+        return res

@@ -1,0 +1,3 @@
+[sqlalchemy.dialects]
+hana = sqlalchemy_hana.dialect:HANAHDBCLIDialect
+hana.hdbcli = sqlalchemy_hana.dialect:HANAHDBCLIDialect

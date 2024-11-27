@@ -1,0 +1,144 @@
+Metadata-Version: 2.1
+Name: google-cloud-bigquery-storage
+Version: 2.24.0
+Summary: Google Cloud Bigquery Storage API client library
+Home-page: https://github.com/googleapis/python-bigquery-storage
+Author: Google LLC
+Author-email: googleapis-packages@google.com
+License: Apache 2.0
+Platform: Posix; MacOS X; Windows
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Internet
+Requires-Python: >=3.7
+License-File: LICENSE
+Requires-Dist: google-api-core[grpc] !=2.0.*,!=2.1.*,!=2.10.*,!=2.2.*,!=2.3.*,!=2.4.*,!=2.5.*,!=2.6.*,!=2.7.*,!=2.8.*,!=2.9.*,<3.0.0dev,>=1.34.0
+Requires-Dist: proto-plus <2.0.0dev,>=1.22.0
+Requires-Dist: protobuf !=3.20.0,!=3.20.1,!=4.21.0,!=4.21.1,!=4.21.2,!=4.21.3,!=4.21.4,!=4.21.5,<5.0.0dev,>=3.19.5
+Requires-Dist: proto-plus <2.0.0dev,>=1.22.2 ; python_version >= "3.11"
+Provides-Extra: fastavro
+Requires-Dist: fastavro >=0.21.2 ; extra == 'fastavro'
+Provides-Extra: pandas
+Requires-Dist: pandas >=0.21.1 ; extra == 'pandas'
+Requires-Dist: importlib-metadata >=1.0.0 ; (python_version < "3.8") and extra == 'pandas'
+Provides-Extra: pyarrow
+Requires-Dist: pyarrow >=0.15.0 ; extra == 'pyarrow'
+
+Python Client for Google BigQuery Storage API
+=============================================
+
+|stable| |pypi| |versions|
+
+`Google BigQuery Storage API`_: 
+
+- `Client Library Documentation`_
+- `Product Documentation`_
+
+.. |stable| image:: https://img.shields.io/badge/support-stable-gold.svg
+   :target: https://github.com/googleapis/google-cloud-python/blob/main/README.rst#stability-levels
+.. |pypi| image:: https://img.shields.io/pypi/v/google-cloud-bigquery-storage.svg
+   :target: https://pypi.org/project/google-cloud-bigquery-storage/
+.. |versions| image:: https://img.shields.io/pypi/pyversions/google-cloud-bigquery-storage.svg
+   :target: https://pypi.org/project/google-cloud-bigquery-storage/
+.. _Google BigQuery Storage API: https://cloud.google.com/bigquery/docs/reference/storage/
+.. _Client Library Documentation: https://cloud.google.com/python/docs/reference/bigquerystorage/latest
+.. _Product Documentation:  https://cloud.google.com/bigquery/docs/reference/storage/
+
+Quick Start
+-----------
+
+In order to use this library, you first need to go through the following steps:
+
+1. `Select or create a Cloud Platform project.`_
+2. `Enable billing for your project.`_
+3. `Enable the Google BigQuery Storage API.`_
+4. `Setup Authentication.`_
+
+.. _Select or create a Cloud Platform project.: https://console.cloud.google.com/project
+.. _Enable billing for your project.: https://cloud.google.com/billing/docs/how-to/modify-project#enable_billing_for_a_project
+.. _Enable the Google BigQuery Storage API.:  https://cloud.google.com/bigquery/docs/reference/storage/
+.. _Setup Authentication.: https://googleapis.dev/python/google-api-core/latest/auth.html
+
+Installation
+~~~~~~~~~~~~
+
+Install this library in a virtual environment using `venv`_. `venv`_ is a tool that
+creates isolated Python environments. These isolated environments can have separate
+versions of Python packages, which allows you to isolate one project's dependencies
+from the dependencies of other projects.
+
+With `venv`_, it's possible to install this library without needing system
+install permissions, and without clashing with the installed system
+dependencies.
+
+.. _`venv`: https://docs.python.org/3/library/venv.html
+
+
+Code samples and snippets
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Code samples and snippets live in the `samples/`_ folder.
+
+.. _samples/: https://github.com/googleapis/python-bigquery-storage/tree/main/samples
+
+
+Supported Python Versions
+^^^^^^^^^^^^^^^^^^^^^^^^^
+Our client libraries are compatible with all current `active`_ and `maintenance`_ versions of
+Python.
+
+Python >= 3.7
+
+.. _active: https://devguide.python.org/devcycle/#in-development-main-branch
+.. _maintenance: https://devguide.python.org/devcycle/#maintenance-branches
+
+Unsupported Python Versions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Python <= 3.6
+
+If you are using an `end-of-life`_
+version of Python, we recommend that you update as soon as possible to an actively supported version.
+
+.. _end-of-life: https://devguide.python.org/devcycle/#end-of-life-branches
+
+Mac/Linux
+^^^^^^^^^
+
+.. code-block:: console
+
+    python3 -m venv <your-env>
+    source <your-env>/bin/activate
+    pip install google-cloud-bigquery-storage
+
+
+Windows
+^^^^^^^
+
+.. code-block:: console
+
+    py -m venv <your-env>
+    .\<your-env>\Scripts\activate
+    pip install google-cloud-bigquery-storage
+
+Next Steps
+~~~~~~~~~~
+
+-  Read the `Client Library Documentation`_ for Google BigQuery Storage API
+   to see other available methods on the client.
+-  Read the `Google BigQuery Storage API Product documentation`_ to learn
+   more about the product and see How-to Guides.
+-  View this `README`_ to see the full list of Cloud
+   APIs that we cover.
+
+.. _Google BigQuery Storage API Product documentation:  https://cloud.google.com/bigquery/docs/reference/storage/
+.. _README: https://github.com/googleapis/google-cloud-python/blob/main/README.rst

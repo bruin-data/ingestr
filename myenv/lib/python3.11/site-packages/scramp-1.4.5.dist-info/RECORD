@@ -1,0 +1,11 @@
+scramp-1.4.5.dist-info/INSTALLER,sha256=zuuue4knoyJ-UwPPXg8fezS7VCrXJQrAP7zeNuwvFQg,4
+scramp-1.4.5.dist-info/METADATA,sha256=DrXO17U66SxjjVAWj8ckxPMSj2LR5SMWACGExD-s_VY,19020
+scramp-1.4.5.dist-info/RECORD,,
+scramp-1.4.5.dist-info/WHEEL,sha256=as-1oFTWSeWBgyzh0O_qF439xqBe6AbBgt4MfYe5zwY,87
+scramp-1.4.5.dist-info/licenses/LICENSE,sha256=JCmmOL2d8ElJXJ8VPcUExMXJ_aWAPZ-IQ-Ibr10rAKM,906
+scramp/__init__.py,sha256=8jiF85TQ9znFsx5dFH09STeqrkXG_aGPB4CJUsGmVtg,263
+scramp/__pycache__/__init__.cpython-311.pyc,,
+scramp/__pycache__/core.cpython-311.pyc,,
+scramp/__pycache__/utils.cpython-311.pyc,,
+scramp/core.py,sha256=BoIPAHV-okpudtQmMQF24wa8cvyAobqvduuyFSX8t_k,22501
+scramp/utils.py,sha256=YH4Yvz03gk89j8zgNllINLkbyyl1ESj70kMKsL_giWI,655
