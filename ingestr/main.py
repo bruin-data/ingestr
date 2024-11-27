@@ -496,7 +496,12 @@ def ingest(
         )
 
         run_on_resource(dlt_source, lambda x: x.add_map(cast_set_to_list))
-        run_on_resource(dlt_source, lambda x: x.apply_hints(columns=column_hints))
+
+        def col_h(x):
+            if column_hints:
+                x.apply_hints(columns=column_hints)
+
+        run_on_resource(dlt_source, col_h)
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
 
