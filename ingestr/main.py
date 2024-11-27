@@ -487,7 +487,12 @@ def ingest(
             sql_exclude_columns=sql_exclude_columns,
         )
 
-        dlt_source.add_map(cast_set_to_list)
+        if hasattr(dlt_source, "selected_resources") and dlt_source.selected_resources:
+            resource_names = list(dlt_source.selected_resources.keys())
+            for res in resource_names:
+                dlt_source.resources[res].add_map(cast_set_to_list)
+        else:
+            dlt_source.add_map(cast_set_to_list)
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
             dlt_source.incremental.primary_key = ()

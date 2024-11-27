@@ -82,7 +82,7 @@ def adjust_source(
             type_hints[metric] = KNOWN_TYPE_HINTS[metric]
 
     @dlt.resource(
-        write_disposition={"disposition": "merge", "strategy": "delete+insert"},
+        write_disposition={"disposition": "merge", "strategy": "delete-insert"},
         merge_key=merge_key,
         primary_key=dimensions,
         columns=type_hints,

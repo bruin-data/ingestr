@@ -76,7 +76,10 @@ class SqlSource:
         if kwargs.get("sql_limit"):
 
             def query_adapter_callback(query, table):
-                return query.limit(kwargs.get("sql_limit"))
+                query = query.limit(kwargs.get("sql_limit"))
+                if kwargs.get("incremental_key"):
+                    query = query.order_by(kwargs.get("incremental_key"))
+                return query
 
         def type_adapter_callback(sql_type):
             if isinstance(sql_type, mysql.SET):
@@ -744,7 +747,7 @@ class KafkaSource:
 
 class AdjustSource:
     def handles_incrementality(self) -> bool:
-        return False
+        return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key") and not table.startswith("custom:"):
@@ -806,7 +809,7 @@ class AdjustSource:
                 filters_raw = fields[3]
                 filters = parse_filters(filters_raw)
 
-        return adjust_source(
+        src = adjust_source(
             start_date=start_date,
             end_date=end_date,
             api_key=api_key[0],
@@ -814,7 +817,9 @@ class AdjustSource:
             metrics=metrics,
             merge_key=kwargs.get("merge_key"),
             filters=filters,
-        ).with_resources(table)
+        )
+
+        return src.with_resources(table)
 
 
 class AppsflyerSource:
