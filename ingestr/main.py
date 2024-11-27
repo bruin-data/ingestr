@@ -348,6 +348,14 @@ def ingest(
             )
             raise typer.Abort()
 
+    def run_on_resource(source, executable):
+        if hasattr(source, "selected_resources") and source.selected_resources:
+            resource_names = list(source.selected_resources.keys())
+            for res in resource_names:
+                executable(source.resources[res])
+        else:
+            executable(source)
+
     track(
         "command_triggered",
         {
@@ -487,15 +495,15 @@ def ingest(
             sql_exclude_columns=sql_exclude_columns,
         )
 
-        if hasattr(dlt_source, "selected_resources") and dlt_source.selected_resources:
-            resource_names = list(dlt_source.selected_resources.keys())
-            for res in resource_names:
-                dlt_source.resources[res].add_map(cast_set_to_list)
-        else:
-            dlt_source.add_map(cast_set_to_list)
+        run_on_resource(dlt_source, lambda x: x.add_map(cast_set_to_list))
+        run_on_resource(dlt_source, lambda x: x.apply_hints(columns=column_hints))
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
-            dlt_source.incremental.primary_key = ()
+
+            def set_primary_key(x):
+                x.incremental.primary_key = ()
+
+            run_on_resource(dlt_source, set_primary_key)
 
         if (
             factory.destination_scheme in PARQUET_SUPPORTED_DESTINATIONS
@@ -527,7 +535,6 @@ def ingest(
             loader_file_format=(
                 loader_file_format.value if loader_file_format is not None else None  # type: ignore
             ),  # type: ignore
-            columns=column_hints,
         )
 
         report_errors(run_info)

@@ -86,7 +86,7 @@ class SqlSource:
                 return sa.JSON
             return sql_type
 
-        table_instance = self.table_builder(
+        builder_res = self.table_builder(
             credentials=ConnectionStringCredentials(uri),
             schema=table_fields.dataset,
             table=table_fields.table,
@@ -101,7 +101,7 @@ class SqlSource:
             ),
         )
 
-        return table_instance
+        return builder_res
 
 
 class ArrowMemoryMappedSource:

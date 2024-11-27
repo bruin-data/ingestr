@@ -11,8 +11,6 @@ def cast_set_to_list(row):
 
 
 def table_adapter_exclude_columns(cols: list[str]):
-    print("given cols", cols)
-
     def excluder(table: Table):
         cols_to_remove = [col for col in table._columns if col.name in cols]  # type: ignore
         for col in cols_to_remove:
