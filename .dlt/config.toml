@@ -1,9 +1,0 @@
-[sources.chess.secret_dict] # please set me up!
-key = "value"
-
-[destination.filesystem]
-bucket_url = "s3://destbucket535"
-
-[destination.athena]
-query_result_bucket = "s3://querybucket535"
-athena_work_group = "my_group"

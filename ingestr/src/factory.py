@@ -55,6 +55,7 @@ SQL_SOURCE_SCHEMES = [
     "oracle",
     "oracle+cx_oracle",
     "hana",
+    "athena",
 ]
 
 
