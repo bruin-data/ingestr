@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 from dlt.common.destination import Destination
 
 from ingestr.src.destinations import (
+    AthenaDestination,
     BigQueryDestination,
     CsvDestination,
     DatabricksDestination,
@@ -13,7 +14,6 @@ from ingestr.src.destinations import (
     RedshiftDestination,
     SnowflakeDestination,
     SynapseDestination,
-    AthenaDestination,
 )
 from ingestr.src.sources import (
     AdjustSource,
