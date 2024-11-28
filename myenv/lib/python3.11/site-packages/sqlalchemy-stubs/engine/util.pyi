@@ -1,3 +1,0 @@
-from typing import Any
-
-def connection_memoize(key: Any) -> Any: ...

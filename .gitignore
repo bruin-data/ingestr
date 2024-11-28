@@ -21,6 +21,3 @@ node_modules
 *.db.wal
 *.sql
 myenv/
-myenv/
-*.so
-*.dylib
