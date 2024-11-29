@@ -210,7 +210,7 @@ class AthenaDestination:
         if not bucket.startswith("s3://"):
             bucket = f"s3://{bucket}"
 
-        query_result_path = source_params.get("query_result_path", [None])[0]
+        query_result_path = source_params.get("query_results_path", [None])[0]
         if query_result_path:
             if not query_result_path.startswith("s3://"):
                 query_result_path = f"s3://{query_result_path}"
@@ -252,18 +252,7 @@ class AthenaDestination:
         )
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
-        table_fields = table.split(".")
-        if len(table_fields) != 2 and len(table_fields) != 3:
-            raise ValueError(
-                "Table name must be in the format <dataset>.<table> or <project>.<dataset>.<table>"
-            )
-
-        res = {
-            "dataset_name": table_fields[-2],
-            "table_name": table_fields[-1],
-        }
-
-        return res
+        return {}
 
     def post_load(self):
         pass
