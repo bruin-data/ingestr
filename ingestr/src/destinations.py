@@ -203,46 +203,53 @@ class AthenaDestination:
         source_fields = urlparse(encoded_uri)
         source_params = parse_qs(source_fields.query)
 
-        bucket_url = source_params.get("bucket_url")
-        if not bucket_url:
-            raise ValueError("bucket_url is required to connect Athena")
+        bucket = source_params.get("bucket")
+        if not bucket:
+            raise ValueError("bucket is required to connect Athena")
+        
+        if not bucket[0].startswith("s3://"):
+            bucket = f"s3://{bucket}"
 
-        query_result_url = source_params.get("query_result_url")
-        if not query_result_url:
-            raise ValueError("query_result_url is required to connect Athena")
+        query_result_path = source_params.get("query_result_path")
+        if query_result_path:
+            
+            if not query_result_path[0].startswith("s3://"):
+                query_result_path = f"s3://{query_result_path}"
+        else:
+            query_result_path = bucket
 
-        aws_access_key_id = source_params.get("aws_access_key_id")
-        if not aws_access_key_id:
-            raise ValueError("aws_access_key_id is required to connect Athena")
+        access_key_id = source_params.get("access_key_id")
+        if not access_key_id:
+            raise ValueError("access_key_id of aws is required to connect Athena")
 
-        aws_secret_access_key = source_params.get("aws_secret_access_key")
-        if not aws_secret_access_key:
-            raise ValueError("aws_secret_access_key are required to connect Athena")
+        secret_access_key = source_params.get("secret_access_key")
+        if not secret_access_key:
+            raise ValueError("secret_access_key of aws is required to connect Athena")
 
-        athena_work_group = source_params.get("athena_work_group")
-        if not athena_work_group:
-            raise ValueError("athena_work_group is required to connect Athena")
+        work_group = source_params.get("work_group")
+        if not work_group:
+            raise ValueError("work_group of athena is required to connect Athena")
 
         region_name = source_params.get("region_name")
         if not region_name:
             raise ValueError("region_name is required to connect Athena")
 
-        os.environ["DESTINATION__BUCKET_URL"] = bucket_url[0]
-        os.environ["DESTINATION__CREDENTIALS__AWS_ACCESS_KEY_ID"] = aws_access_key_id[0]
-        os.environ["DESTINATION__CREDENTIALS__AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key[0]
+        os.environ["DESTINATION__BUCKET_URL"] = bucket[0]
+        os.environ["DESTINATION__CREDENTIALS__AWS_ACCESS_KEY_ID"] = access_key_id[0]
+        os.environ["DESTINATION__CREDENTIALS__AWS_SECRET_ACCESS_KEY"] = secret_access_key[0]
 
         credentials = AwsCredentials(
-            aws_access_key_id=aws_access_key_id[0],
-            aws_secret_access_key=aws_secret_access_key[0],
+            aws_access_key_id=access_key_id[0],
+            aws_secret_access_key=secret_access_key[0],
             region_name=region_name[0],
         )
 
         return dlt.destinations.athena(
-            query_result_bucket=query_result_url[0],
-            athena_work_group=athena_work_group[0],
+            query_result_bucket=query_result_path[0],
+            athena_work_group=work_group[0],
             credentials=credentials,
-            destination_name=bucket_url[0],
-            bucket_url = bucket_url[0]
+            destination_name=bucket[0],
+            bucket_url = bucket[0]
         )
     
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
