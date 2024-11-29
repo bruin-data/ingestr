@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import dlt
 from dlt.common.configuration.specs import AwsCredentials
 
+
 class GenericSqlDestination:
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
         table_fields = table.split(".")
@@ -204,7 +205,7 @@ class AthenaDestination:
 
         bucket = source_params.get("bucket", [None])[0]
         if not bucket:
-            raise ValueError("bucket is required to connect Athena")
+            raise ValueError("A bucket is required to connect to Athena.")
 
         if not bucket.startswith("s3://"):
             bucket = f"s3://{bucket}"
@@ -218,24 +219,26 @@ class AthenaDestination:
 
         access_key_id = source_params.get("access_key_id", [None])[0]
         if not access_key_id:
-            raise ValueError("access_key_id of aws is required to connect Athena")
+            raise ValueError("The AWS access_key_id is required to connect to Athena.")
 
         secret_access_key = source_params.get("secret_access_key", [None])[0]
         if not secret_access_key:
-            raise ValueError("secret_access_key of aws is required to connect Athena")
+            raise ValueError("The AWS secret_access_key is required to connect Athena")
 
         work_group = source_params.get("work_group", [None])[0]
         if not work_group:
-            raise ValueError("work_group of athena is required to connect Athena")
+            raise ValueError("An Athena work_group is required to connect Athena")
 
-        region_name = source_params.get("region_name",[None])[0]
+        region_name = source_params.get("region_name", [None])[0]
         if not region_name:
-            raise ValueError("region_name is required to connect Athena")
+            raise ValueError("The region_name is required to connect to Athena.")
 
         os.environ["DESTINATION__BUCKET_URL"] = bucket
         os.environ["DESTINATION__CREDENTIALS__AWS_ACCESS_KEY_ID"] = access_key_id
-        os.environ["DESTINATION__CREDENTIALS__AWS_SECRET_ACCESS_KEY"] = secret_access_key
-        
+        os.environ["DESTINATION__CREDENTIALS__AWS_SECRET_ACCESS_KEY"] = (
+            secret_access_key
+        )
+
         credentials = AwsCredentials(
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
