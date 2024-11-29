@@ -197,7 +197,7 @@ class CsvDestination(GenericSqlDestination):
         shutil.rmtree(self.temp_path)
 
 
-class AthenaDestination(GenericSqlDestination):
+class AthenaDestination:
     def dlt_dest(self, uri: str, **kwargs):
         encoded_uri = quote(uri, safe=":/?&=")
         source_fields = urlparse(encoded_uri)
@@ -227,9 +227,9 @@ class AthenaDestination(GenericSqlDestination):
         if not region_name:
             raise ValueError("region_name is required to connect Athena")
 
-        os.environ["BUCKET_URL"] = bucket_url[0]
-        os.environ["AWS_ACCESS_KEY_ID"] = aws_access_key_id[0]
-        os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key[0]
+        os.environ["DESTINATION__BUCKET_URL"] = bucket_url[0]
+        os.environ["DESTINATION__CREDENTIALS__AWS_ACCESS_KEY_ID"] = aws_access_key_id[0]
+        os.environ["DESTINATION__CREDENTIALS__AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key[0]
 
         credentials = AwsCredentials(
             aws_access_key_id=aws_access_key_id[0],
@@ -242,4 +242,22 @@ class AthenaDestination(GenericSqlDestination):
             athena_work_group=athena_work_group[0],
             credentials=credentials,
             destination_name=bucket_url[0],
+            bucket_url = bucket_url[0]
         )
+    
+    def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
+        table_fields = table.split(".")
+        if len(table_fields) != 2 and len(table_fields) != 3:
+            raise ValueError(
+                "Table name must be in the format <dataset>.<table> or <project>.<dataset>.<table>"
+            )
+
+        res = {
+            "dataset_name": table_fields[-2],
+            "table_name": table_fields[-1],
+        }
+
+        return res
+
+    def post_load(self):
+        pass
