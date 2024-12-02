@@ -29,7 +29,9 @@ Once you complete the guide, you should have an access token. Let's say your acc
 ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=max&repo=test_example' --source-table 'issues' --dest-uri duckdb:///github.duckdb --dest-table 'dest.issues'
 ```
 
-The result of this command will be a table in the `dest.issues` database.
+This is a sample command that will copy the data from the GitHub source to DuckDB.
+
+<img alt="athena_img" src="../media/github.png" />
 
 ## Tables
 

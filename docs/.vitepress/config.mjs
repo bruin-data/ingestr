@@ -92,6 +92,7 @@ export default defineConfig({
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
               },
+              { text: "GitHub", link: "/supported-sources/github.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "HubSpot", link: "/supported-sources/hubspot.md" },
