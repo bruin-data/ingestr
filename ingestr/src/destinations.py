@@ -225,9 +225,7 @@ class AthenaDestination:
         if not secret_access_key:
             raise ValueError("The AWS secret_access_key is required to connect Athena")
 
-        work_group = source_params.get("work_group", [None])[0]
-        if not work_group:
-            raise ValueError("An Athena work_group is required to connect Athena")
+        work_group = source_params.get("workgroup", [None])[0]
 
         region_name = source_params.get("region_name", [None])[0]
         if not region_name:
