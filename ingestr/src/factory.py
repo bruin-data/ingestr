@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 from dlt.common.destination import Destination
 
 from ingestr.src.destinations import (
+    AthenaDestination,
     BigQueryDestination,
     CsvDestination,
     DatabricksDestination,
@@ -159,6 +160,7 @@ class SourceDestinationFactory:
             "snowflake": SnowflakeDestination(),
             "synapse": SynapseDestination(),
             "csv": CsvDestination(),
+            "athena": AthenaDestination(),
         }
 
         if self.destination_scheme in match:

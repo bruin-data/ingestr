@@ -5,9 +5,10 @@ import json
 import os
 import shutil
 import tempfile
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
+from dlt.common.configuration.specs import AwsCredentials
 
 
 class GenericSqlDestination:
@@ -194,3 +195,62 @@ class CsvDestination(GenericSqlDestination):
                     csv_writer.writerow(json_obj)
 
         shutil.rmtree(self.temp_path)
+
+
+class AthenaDestination:
+    def dlt_dest(self, uri: str, **kwargs):
+        encoded_uri = quote(uri, safe=":/?&=")
+        source_fields = urlparse(encoded_uri)
+        source_params = parse_qs(source_fields.query)
+
+        bucket = source_params.get("bucket", [None])[0]
+        if not bucket:
+            raise ValueError("A bucket is required to connect to Athena.")
+
+        if not bucket.startswith("s3://"):
+            bucket = f"s3://{bucket}"
+
+        query_result_path = source_params.get("query_results_path", [None])[0]
+        if query_result_path:
+            if not query_result_path.startswith("s3://"):
+                query_result_path = f"s3://{query_result_path}"
+        else:
+            query_result_path = bucket
+
+        access_key_id = source_params.get("access_key_id", [None])[0]
+        if not access_key_id:
+            raise ValueError("The AWS access_key_id is required to connect to Athena.")
+
+        secret_access_key = source_params.get("secret_access_key", [None])[0]
+        if not secret_access_key:
+            raise ValueError("The AWS secret_access_key is required to connect Athena")
+
+        work_group = source_params.get("workgroup", [None])[0]
+
+        region_name = source_params.get("region_name", [None])[0]
+        if not region_name:
+            raise ValueError("The region_name is required to connect to Athena.")
+
+        os.environ["DESTINATION__BUCKET_URL"] = bucket
+        os.environ["DESTINATION__CREDENTIALS__AWS_ACCESS_KEY_ID"] = access_key_id
+        os.environ["DESTINATION__CREDENTIALS__AWS_SECRET_ACCESS_KEY"] = (
+            secret_access_key
+        )
+
+        credentials = AwsCredentials(
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
+            region_name=region_name,
+        )
+        return dlt.destinations.athena(
+            query_result_bucket=query_result_path,
+            athena_work_group=work_group,
+            credentials=credentials,
+            destination_name=bucket,
+        )
+
+    def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
+        return {}
+
+    def post_load(self):
+        pass
