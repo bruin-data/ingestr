@@ -24,6 +24,7 @@ from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
+from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -41,7 +42,6 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 
 
 class SqlSource:
@@ -1006,7 +1006,7 @@ class GitHubSource:
             raise ValueError(
                 "Github takes care of incrementality on its own, you should not provide incremental_key"
             )
-        #github://?access_token=<access_token>&owner=<owner>&repo=<repo>
+        # github://?access_token=<access_token>&owner=<owner>&repo=<repo>
         parsed_uri = urlparse(uri)
         source_fields = parse_qs(parsed_uri.query)
 

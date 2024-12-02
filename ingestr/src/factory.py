@@ -21,6 +21,7 @@ from ingestr.src.sources import (
     ArrowMemoryMappedSource,
     ChessSource,
     FacebookAdsSource,
+    GitHubSource,
     GoogleSheetsSource,
     GorgiasSource,
     HubspotSource,
@@ -35,7 +36,6 @@ from ingestr.src.sources import (
     SqlSource,
     StripeAnalyticsSource,
     ZendeskSource,
-    GitHubSource,
 )
 
 SQL_SOURCE_SCHEMES = [

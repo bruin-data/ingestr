@@ -4,7 +4,7 @@ from dlt.common.typing import DictStrAny, StrAny
 from dlt.common.utils import chunks
 from dlt.sources.helpers import requests
 
-from .queries import COMMENT_REACTIONS_QUERY, ISSUES_QUERY, STARGAZERS_QUERY, RATE_LIMIT
+from .queries import COMMENT_REACTIONS_QUERY, ISSUES_QUERY, RATE_LIMIT, STARGAZERS_QUERY
 from .settings import GRAPHQL_API_BASE_URL, REST_API_BASE_URL
 
 
