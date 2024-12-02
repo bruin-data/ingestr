@@ -41,6 +41,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 
 
 class SqlSource:
