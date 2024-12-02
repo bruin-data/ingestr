@@ -31,7 +31,7 @@ Once you complete the guide, you should have an access token and an Account ID. 
 ingestr ingest \
   --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
   --source-table 'campaigns' \
-  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-uri 'duckdb:///dest.duckdb' \
   --dest-table 'dest.campaigns'
 ```
 

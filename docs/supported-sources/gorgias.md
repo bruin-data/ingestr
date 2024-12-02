@@ -20,10 +20,10 @@ The URI is used to connect to the Gorgias API for extracting data.
 ## Examples
 ```bash
 # get all the tickets that are created/updated since 2024-06-19 and write them to `gorgias.ticket_messages` table on BigQuery
-ingestr ingest --source-table 'tickets' --source-uri $GORGIAS_URI --dest-uri $BIGQUERY_URI --interval-start 2024-06-19  --dest-table 'gorgias.ticket_messages' --loader-file-format jsonl
+ingestr ingest --source-table 'tickets' --source-uri $GORGIAS_URI --dest-uri $BIGQUERY_URI --interval-start 2024-06-19  --dest-table 'dest.ticket_messages' --loader-file-format jsonl
 
 # get all the customers and write them to `gorgias.customers` table on DuckDB
-ingestr ingest --source-table 'customers' --source-uri $GORGIAS_URI --dest-uri duckdb:///gorgias.duckdb --interval-start 2024-01-01  --dest-table 'gorgias.customers'
+ingestr ingest --source-table 'customers' --source-uri $GORGIAS_URI --dest-uri duckdb:///dest.duckdb --interval-start 2024-01-01  --dest-table 'gorgias.customers'
 ```
 
 ## Supported entities

@@ -25,10 +25,10 @@ Slack requires a few steps to set up an integration, please follow the guide dlt
 Once you complete the guide, you should have an API key with the necessary permissions as mentioned in the guide. Let's say your API key is axb-test-564. Here's a sample command that will copy the data from Slack into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'slack://?api_key=axb-test-564' --source-table 'channels' --dest-uri duckdb:///slack.duckdb --dest-table 'dest.channels'
+ingestr ingest --source-uri 'slack://?api_key=axb-test-564' --source-table 'channels' --dest-uri duckdb:///dest.duckdb --dest-table 'dest.channels'
 ```
 
-The result of this command will be a table in the `slack.duckdb` database.
+The result of this command will be a table in the `dest.duckdb` database.
 
 ## Tables
 

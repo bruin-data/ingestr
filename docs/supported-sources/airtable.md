@@ -26,10 +26,10 @@ Airtable requires a few steps to set up an integration, please follow the guide 
 Once you complete the guide, you should have an Access Token and Base Id. Let's say your Access Token is `patr123.abc` and Base Id is `appXYZ`, here's a sample command that will copy the data from Airtable into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'airtable://?base_id=appXYc&access_token=patr123.abc' --source-table 'employee' --dest-uri 'duckdb:///airtable.duckdb' --dest-table 'des.employee'
+ingestr ingest --source-uri 'airtable://?base_id=appXYc&access_token=patr123.abc' --source-table 'employee' --dest-uri 'duckdb:///dest.duckdb' --dest-table 'des.employee'
 ```
 
-The result of this command will be an `employee` table containing data from the `employee` source in the `Airtable.duckdb` database.
+The result of this command will be an `employee` table containing data from the `employee` source in the `dest.duckdb` database.
 
 The `source-table` can include multiple table names that share the same `base_id`, e.g. `--source-table 'employee,users'`, but this will merge all the data from the specified tables into a single destination table.
 

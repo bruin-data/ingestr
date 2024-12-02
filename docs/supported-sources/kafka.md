@@ -31,8 +31,8 @@ Once you have your Kafka server, credentials, and group ID set up, here's a samp
 ingestr ingest \
     --source-uri 'kafka://?bootstrap_servers=localhost:9092&group_id=test_group' \
     --source-table 'my-topic' \
-    --dest-uri duckdb:///kafka.duckdb \
+    --dest-uri duckdb:///dest.duckdb \
     --dest-table 'kafka.my_topic'
 ```
 
-The result of this command will be a table in the `kafka.duckdb` database with JSON columns.
+The result of this command will be a table in the `dest.duckdb` database with JSON columns.

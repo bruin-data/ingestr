@@ -25,10 +25,10 @@ HubSpot requires a few steps to set up an integration, please follow the guide d
 Once you complete the guide, you should have an API key. Let's say your API key is `pat_test_12345`, here's a sample command that will copy the data from HubSpot into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'hubspot://?api_key=pat_test_12345' --source-table 'companies' --dest-uri duckdb:///hubspot.duckdb --dest-table 'companies.data'
+ingestr ingest --source-uri 'hubspot://?api_key=pat_test_12345' --source-table 'companies' --dest-uri duckdb:///dest.duckdb --dest-table 'companies.data'
 ```
 
-The result of this command will be a table in the `hubspot.duckdb` database.
+The result of this command will be a table in the `dest.duckdb` database.
 
 ## Tables
 

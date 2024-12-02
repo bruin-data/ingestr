@@ -37,10 +37,10 @@ Once you complete the guide, you should have a service account JSON file and the
 Based on this assumption, here's a sample command that will copy the data from the Google Sheets spreadsheet into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'gsheets://?credentials_path=/path/to/file.json' --source-table 'fkdUQ2bjdNfUq2CA.Sheet1' --dest-uri duckdb:///gsheets.duckdb --dest-table 'gsheets.output'
+ingestr ingest --source-uri 'gsheets://?credentials_path=/path/to/file.json' --source-table 'fkdUQ2bjdNfUq2CA.Sheet1' --dest-uri duckdb:///dest.duckdb --dest-table 'gsheets.output'
 ```
 
-The result of this command will be a table in the `gsheets.duckdb` database.
+The result of this command will be a table in the `dest.duckdb` database.
 
 > [!CAUTION]
 > Google Sheets does not support incremental loading, which means every time you run the command, it will copy the entire spreadsheet from Google Sheets to the destination. This can be slow for large spreadsheets.

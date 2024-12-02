@@ -25,10 +25,10 @@ Stripe requires a few steps to set up an integration, please follow the guide dl
 Once you complete the guide, you should have an API key. Let's say your API key is `sk_test_12345`, here's a sample command that will copy the data from Stripe into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'stripe://?api_key=sk_test_12345' --source-table 'charges' --dest-uri duckdb:///stripe.duckdb --dest-table 'stripe.charges'
+ingestr ingest --source-uri 'stripe://?api_key=sk_test_12345' --source-table 'charges' --dest-uri duckdb:///dest.duckdb --dest-table 'stripe.charges'
 ```
 
-The result of this command will be a table in the `stripe.duckdb` database with JSON columns.
+The result of this command will be a table in the `dest.duckdb` database with JSON columns.
 
 ## Tables
 

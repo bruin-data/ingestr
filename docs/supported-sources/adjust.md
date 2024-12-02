@@ -20,10 +20,10 @@ An API token is required to retrieve reports from the Adjust reporting API. plea
 Once you complete the guide, you should have an API key. Let's say your API key is `nr_123`, here's a sample command that will copy the data from Adjust into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'adjust://?api_key=nr_123' --source-table 'campaigns' --dest-uri duckdb:///adjust.duckdb --dest-table 'adjust.output'
+ingestr ingest --source-uri 'adjust://?api_key=nr_123' --source-table 'campaigns' --dest-uri duckdb:///dest.duckdb --dest-table 'adjust.output'
 ```
 
-The result of this command will be a table in the `adjust.duckdb` database.
+The result of this command will be a table in the `dest.duckdb` database.
 
 ### Lookback days
 
