@@ -21,10 +21,14 @@ ingestr is a command-line app that allows you to ingest data from any source int
 ingestr takes away the complexity of managing any backend or writing any code for ingesting data, simply run the command and watch the data land on its destination.
 
 ## Installation
+We recommend using [uv](https://github.com/astral-sh/uv) to install `ingestr`.
 
 ```
-pip install ingestr
+pip install uv
+uv pip install ingestr
 ```
+
+While installation with vanilla `pip` is possible, it's an order of magnitude slower.
 
 ## Quickstart
 
