@@ -25,7 +25,7 @@ We recommend using [uv](https://github.com/astral-sh/uv) to install `ingestr`.
 
 ```
 pip install uv
-uv pip install ingestr
+uv pip install --system ingestr
 ```
 
 While installation with vanilla `pip` is possible, it's an order of magnitude slower.
