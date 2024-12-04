@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+echo "scanning for secrets ..."
+
 WORK_DIR="/root/code"
 
 secret_detected() {
@@ -14,7 +16,7 @@ secret_detected() {
 CMD="gitleaks dir -v"
 
 if [[ ! `which gitleaks`  ]]; then
-    which docker > /dev/null || (echo "gitleaks or docker is required for running secrets scan" && exit 1)
+    which docker > /dev/null || (echo "gitleaks or docker is required for running secrets scan." && exit 1)
     CMD="docker run -v $PWD:$WORK_DIR -w $WORK_DIR ghcr.io/gitleaks/gitleaks:latest dir -v"
 fi
 
