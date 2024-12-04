@@ -1,0 +1,3 @@
+ingestr/src/telemetry/event.py:generic-api-key:9
+ingestr/src/testdata/fakebqcredentials.json:private-key:5
+docs/supported-sources/shopify.md:generic-api-key:26

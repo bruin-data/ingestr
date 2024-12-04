@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+set -euo pipefail
+
 WORK_DIR="/root/code"
 
 
@@ -13,7 +16,7 @@ docker run \
     -w "$WORK_DIR" \
     ghcr.io/gitleaks/gitleaks:latest dir -v
 
-if [[ $? ]]; then
+if [[ $? -ne 0 ]]; then
     echo "secrets detected in source code. commit aborted."
     exit 1
 fi
