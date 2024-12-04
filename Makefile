@@ -1,5 +1,5 @@
 .ONESHELL:
-.PHONY: test lint format ftl test-ci lint-ci build upload-release
+.PHONY: test lint format test-ci lint-ci build upload-release setup
 
 venv: venv/touchfile
 
@@ -40,3 +40,7 @@ build:
 
 upload-release:
 	twine upload --verbose dist/*
+
+setup:
+	@echo "installing git hooks ..."
+	@install -m 755 .githooks/pre-commit-hook.sh .git/hooks/pre-commit
