@@ -51,6 +51,13 @@ You can see the full documentation [here](https://bruin-data.github.io/ingestr/g
 
 Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shared_invite/zt-2dl2i8foy-bVsuMUauHeN9M2laVm3ZVg).
 
+## Contributing
+
+Pull requests are welcome. However, please open an issue first to discuss what you would like to change. We maybe able to offer you help and feedback regarding any changes you would like to make.
+
+> [!NOTE]
+> After cloning `ingestr` make sure to run `make setup` to install githooks.
+
 ## Supported sources & destinations
 
 <table>
