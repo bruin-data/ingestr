@@ -5,7 +5,7 @@ venv: venv/touchfile
 
 venv/touchfile: requirements-dev.txt requirements.txt
 	test -d venv || python3 -m venv venv
-	. venv/bin/activate; $(MAKE) deps
+	. venv/bin/activate; pip install uv; $(MAKE) deps
 	touch venv/touchfile
 
 deps:
