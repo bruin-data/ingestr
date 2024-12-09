@@ -1,4 +1,4 @@
-# Athena
+# AWS Athena
 [Athena](https://aws.amazon.com/athena/) is an interactive query service that allows users to analyze data directly in Amazon S3 using standard SQL.
 
 The Athena destination stores data as Parquet files in S3 buckets and creates external tables in AWS Glue Catalog.
