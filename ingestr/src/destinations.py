@@ -250,7 +250,14 @@ class AthenaDestination:
         )
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
-        return {}
+        table_fields = table.split(".")
+        if len(table_fields) != 2:
+            raise ValueError("Table name must be in the format <schema>.<table>")
+        return {
+            "table_format": "iceberg",
+            "dataset_name": table_fields[-2],
+            "table_name": table_fields[-1],
+        }
 
     def post_load(self):
         pass
