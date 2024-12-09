@@ -41,6 +41,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+from ingestr.src.tiktok_ads._init_ import tiktok_source
 
 
 class SqlSource:
@@ -994,3 +995,16 @@ class S3Source:
         return readers(
             bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
         ).with_resources(endpoint)
+
+class TikTokSource:
+    #tittok://?access_token=<access_token>&advertiser_id=<advertiser_id>
+    def handles_incrementality(self) -> bool:
+        return True
+    
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        start_date="2000-01-01",
+        end_date="", #now
+        endpoint = "campaigns",
+        access_token = "",
+        advertiser_id="",
+        return tiktok_source(start_date=start_date, end_date=end_date,access_token=access_token, advertiser_id=advertiser_id).with_resources(endpoint)

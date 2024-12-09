@@ -65,5 +65,6 @@ class TikTokAPI:
         advertiser_id: str,
     ):
         url = f"{BASE_URL}/campaign/get/"
+        
         return self._fetch_pages(url,start_time,end_time,advertiser_id)
     
