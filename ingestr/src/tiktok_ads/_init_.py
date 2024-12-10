@@ -35,6 +35,6 @@ def tiktok_source(start_date: str,end_date: str, access_token:str,advertiser_id:
             for campaign in titkok_api.fetch_campaigns(start_time=start_time, end_time=end_date, advertiser_id=advertiser_id):
                 yield campaign 
 
-            start_time = interval_end + timedelta(seconds=1)
+            start_time = interval_end
 
     return campaigns
