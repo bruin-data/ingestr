@@ -15,8 +15,6 @@ from dlt.sources.sql_database import sql_table
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
 
-import ingestr.src.asana as asana_sources
-
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
@@ -1001,26 +999,33 @@ class S3Source:
 
 class AsanaSource:
 
-    resources =  {
-        "workspaces": asana_sources.workspaces,
-        "projects": asana_sources.projects,
-        "sections": asana_sources.sections,
-        "tags": asana_sources.tags,
-        "tasks": asana_sources.tasks,
-        "stories": asana_sources.stories,
-        "teams": asana_sources.teams,
-        "users": asana_sources.users,
-    }
+    resources =  [
+        "workspaces",
+        "projects",
+        "sections",
+        "tags",
+        "tasks",
+        "stories",
+        "teams",
+        "users",
+    ]
 
     def handles_incrementality(self) -> bool:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        params = parse_qs(urlparse(uri).query)
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        workspace = parsed_uri.hostname
         access_token = params.get("access_token")
+
+        if not workspace:
+            raise ValueError("workspace ID must be specified in the URI")
 
         if not access_token:
             raise ValueError("access_token is required for connecting to Asana")
+
 
         if table not in self.resources:
             raise ValueError(
@@ -1028,4 +1033,6 @@ class AsanaSource:
             )
         
         dlt.secrets["sources.asana.access_token"] = access_token[0]
-        return asana_source().with_resources(table)
+        src = asana_source()
+        src.workspaces.add_filter(lambda w: w["gid"] == workspace)
+        return src.with_resources(table)
