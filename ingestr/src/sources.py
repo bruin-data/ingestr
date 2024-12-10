@@ -15,6 +15,8 @@ from dlt.sources.sql_database import sql_table
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
 
+import ingestr.src.asana as asana_sources
+
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
@@ -37,6 +39,7 @@ from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
+from ingestr.src.asana import asana_source
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
@@ -994,3 +997,35 @@ class S3Source:
         return readers(
             bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
         ).with_resources(endpoint)
+
+
+class AsanaSource:
+
+    resources =  {
+        "workspaces": asana_sources.workspaces,
+        "projects": asana_sources.projects,
+        "sections": asana_sources.sections,
+        "tags": asana_sources.tags,
+        "tasks": asana_sources.tasks,
+        "stories": asana_sources.stories,
+        "teams": asana_sources.teams,
+        "users": asana_sources.users,
+    }
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        params = parse_qs(urlparse(uri).query)
+        access_token = params.get("access_token")
+
+        if not access_token:
+            raise ValueError("access_token is required for connecting to Asana")
+        access_token = access_token[0]
+
+        if table not in self.resources:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Asana source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+        
+        return self.resources[table](access_token)
