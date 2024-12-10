@@ -1021,11 +1021,11 @@ class AsanaSource:
 
         if not access_token:
             raise ValueError("access_token is required for connecting to Asana")
-        access_token = access_token[0]
 
         if table not in self.resources:
             raise ValueError(
                 f"Resource '{table}' is not supported for Asana source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
         
-        return self.resources[table](access_token)
+        dlt.secrets["sources.asana.access_token"] = access_token[0]
+        return asana_source().with_resources(table)
