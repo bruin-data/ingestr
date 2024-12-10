@@ -288,7 +288,6 @@ def ingest(
         ),
     ] = [],  # type: ignore
 ):
-
     # TODO(turtledev): can't we move this to the top of this file?
     import hashlib
     import tempfile
@@ -386,7 +385,7 @@ def ingest(
 
         factory = SourceDestinationFactory(source_uri, dest_uri)
         track(
-            "command_running", 
+            "command_running",
             {
                 "command": "ingest",
                 "source_type": factory.source_scheme,
