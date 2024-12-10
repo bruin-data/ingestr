@@ -39,7 +39,7 @@ Once you complete the guide, if you decide to use an OAuth token, you should hav
 ingestr ingest --source-uri "zendesk://:qVsbdiasVt@mycompany" \
 --source-table 'tickets' \
 --dest-uri 'duckdb:///zendesk.duckdb' \
---dest-table 'zendesk.tickets' \
+--dest-table 'dest.tickets' \
 --interval-start '2024-01-01'
 ```
 
@@ -49,7 +49,7 @@ If you decide to use an API Token, you should have a subdomain, email, and API t
 ingestr ingest --source-uri "zendesk://john@get.com:nbs123@mycompany" \
 --source-table 'tickets' \
 --dest-uri 'duckdb:///zendesk.duckdb' \
---dest-table 'zendesk.tickets' \
+--dest-table 'dest.tickets' \
 --interval-start '2024-01-01'
 ```
 

@@ -50,7 +50,7 @@ from .settings import (
 THubspotObjectType = Literal["company", "contact", "deal", "ticket", "product", "quote"]
 
 
-@dlt.source(name="hubspot")
+@dlt.source(name="hubspot", max_table_nesting=0)
 def hubspot(
     api_key: str = dlt.secrets.value,
     include_history: bool = False,

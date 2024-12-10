@@ -23,7 +23,7 @@ Shopify requires a few steps to set up an integration, please follow the guide d
 Once you complete the guide, you should have an API key and the store name to connect to. Let's say your API key is `shpkey_12345` and the store you'd like to connect to is `my-store`, here's a sample command that will copy the data from the Shopify store into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'shopify://my-store.myshopify.com?api_key=shpkey_12345' --source-table 'orders' --dest-uri duckdb:///shopify.duckdb --dest-table 'shopify.orders'
+ingestr ingest --source-uri 'shopify://my-store.myshopify.com?api_key=shpkey_12345' --source-table 'orders' --dest-uri duckdb:///shopify.duckdb --dest-table 'dest.orders'
 ```
 
 The result of this command will be a table in the `shopify.duckdb` database with JSON columns.

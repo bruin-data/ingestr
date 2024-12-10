@@ -23,7 +23,6 @@ from .settings import (
     TALK_ENDPOINTS,
 )
 
-
 @dlt.source(max_table_nesting=0)
 def zendesk_talk(
     credentials: TZendeskCredentials = dlt.secrets.value,
