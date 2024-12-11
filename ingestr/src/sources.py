@@ -20,6 +20,7 @@ from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.arrow import memory_mapped_arrow
+from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
@@ -37,7 +38,6 @@ from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
-from ingestr.src.asana_source import asana_source
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
@@ -998,8 +998,7 @@ class S3Source:
 
 
 class AsanaSource:
-
-    resources =  [
+    resources = [
         "workspaces",
         "projects",
         "sections",
@@ -1026,12 +1025,11 @@ class AsanaSource:
         if not access_token:
             raise ValueError("access_token is required for connecting to Asana")
 
-
         if table not in self.resources:
             raise ValueError(
                 f"Resource '{table}' is not supported for Asana source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
-        
+
         dlt.secrets["sources.asana.access_token"] = access_token[0]
         src = asana_source()
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)

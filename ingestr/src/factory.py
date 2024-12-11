@@ -20,6 +20,7 @@ from ingestr.src.sources import (
     AirtableSource,
     AppsflyerSource,
     ArrowMemoryMappedSource,
+    AsanaSource,
     ChessSource,
     FacebookAdsSource,
     GoogleSheetsSource,
@@ -36,7 +37,6 @@ from ingestr.src.sources import (
     SqlSource,
     StripeAnalyticsSource,
     ZendeskSource,
-    AsanaSource
 )
 
 SQL_SOURCE_SCHEMES = [
