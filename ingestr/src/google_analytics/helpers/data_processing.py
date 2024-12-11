@@ -2,24 +2,25 @@
 This module contains helpers that process data and make it ready for loading into the database
 """
 
-from typing import Any, Iterator, List, Union
-from dlt.common.pendulum import pendulum
-from dlt.common.exceptions import MissingDependencyException
-from dlt.common.typing import DictStrAny, TDataItem, TDataItems
-import proto
 import json
+from typing import Any, Iterator, List, Union
+
+import proto
+from dlt.common.exceptions import MissingDependencyException
+from dlt.common.pendulum import pendulum
+from dlt.common.typing import DictStrAny, TDataItem, TDataItems
 
 try:
-    from google.analytics.data_v1beta import BetaAnalyticsDataClient
+    from google.analytics.data_v1beta import BetaAnalyticsDataClient  # noqa: F401
     from google.analytics.data_v1beta.types import (
         DateRange,
         Dimension,
-        DimensionExpression,
-        DimensionMetadata,
-        GetMetadataRequest,
-        Metadata,
+        DimensionExpression,  # noqa: F401
+        DimensionMetadata,  # noqa: F401
+        GetMetadataRequest,  # noqa: F401
+        Metadata,  # noqa: F401
         Metric,
-        MetricMetadata,
+        MetricMetadata,  # noqa: F401
         MetricType,
         RunReportRequest,
         RunReportResponse,
@@ -29,7 +30,7 @@ except ImportError:
         "Google Analytics API Client", ["google-analytics-data"]
     )
 try:
-    from apiclient.discovery import build, Resource
+    from apiclient.discovery import Resource, build  # noqa: F401
 except ImportError:
     raise MissingDependencyException("Google API Client", ["google-api-python-client"])
 
@@ -131,9 +132,9 @@ def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
             metric_value = process_metric_value(
                 metric_type=metric_type, value=row.metric_values[i].value
             )
-            response_dict[
-                f"{metrics_headers[i]}_{metric_type.name.split('_')[1]}"
-            ] = metric_value
+            response_dict[f"{metrics_headers[i]}_{metric_type.name.split('_')[1]}"] = (
+                metric_value
+            )
         yield response_dict
 
 

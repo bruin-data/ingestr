@@ -1,6 +1,7 @@
 """
 Defines all the sources and resources needed for Google Analytics V4
 """
+
 from typing import Iterator, List, Optional, Union
 
 import dlt

@@ -24,6 +24,7 @@ from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
+from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -41,7 +42,6 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-from ingestr.src.google_analytics import google_analytics
 
 
 class SqlSource:
@@ -996,6 +996,10 @@ class S3Source:
             bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
         ).with_resources(endpoint)
 
+
 class GoogleAnalyticsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         return google_analytics().with_resources("basic_report")

@@ -22,6 +22,7 @@ from ingestr.src.sources import (
     ArrowMemoryMappedSource,
     ChessSource,
     FacebookAdsSource,
+    GoogleAnalyticsSource,
     GoogleSheetsSource,
     GorgiasSource,
     HubspotSource,
@@ -36,7 +37,6 @@ from ingestr.src.sources import (
     SqlSource,
     StripeAnalyticsSource,
     ZendeskSource,
-    GoogleAnalyticsSource,
 )
 
 SQL_SOURCE_SCHEMES = [

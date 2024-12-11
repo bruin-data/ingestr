@@ -1,19 +1,19 @@
 """Google analytics source helpers"""
 
 from typing import Iterator, List
-from pendulum.datetime import DateTime
 
 import dlt
 from apiclient.discovery import Resource
 from dlt.common import logger, pendulum
 from dlt.common.typing import TDataItem
-
-from ..settings import START_DATE
-from .data_processing import get_report
 from google.analytics.data_v1beta.types import (
     Dimension,
     Metric,
 )
+from pendulum.datetime import DateTime
+
+from ..settings import START_DATE
+from .data_processing import get_report
 
 
 def basic_report(
