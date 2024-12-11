@@ -32,7 +32,7 @@ You can run the following to achieve this:
 ingestr ingest \
   --source-uri "asana://workspace-1337?access_token=fake_token" \
   --source-table "tasks" \
-  --dest-uri "duckdb://work.db" \
+  --dest-uri "duckdb://./work.db" \
   --dest-table "public.tasks"
 ```
 
