@@ -45,7 +45,8 @@ Asana source allows ingesting the following sources into separate tables:
 |---------------|---------------------------------------------------------------------------------|
 | `workspaces`  | Information about people, materials, or assets required to complete a task or project successfully. |
 | `projects`    | Collections of tasks and related information.                                   |
-| `sections`    | Used to organize tasks within a project into smaller groups or categories.      |
+| `tasks`    | Tasks within a project. Only tasks that belong to a project can be ingested. Users private tasks are not ingested, for example.      |
+| `projects`    | Collections of tasks and related information.                                   |
 | `tags`        | Labels that can be attached to tasks, projects, or conversations to help categorize and organize them. |
 | `stories`     | Updates or comments that team members can add to a task or project.             |
 | `teams`       | Groups of individuals who work together to complete projects and tasks.         |
