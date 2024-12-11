@@ -55,10 +55,6 @@ class SqlSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         table_fields = table_string_to_dataclass(table)
 
-        if uri.startswith("dynamodb://"):
-            # schema as a concept doesn't exist in dynamodb
-            table_fields.dataset = None
-
         incremental = None
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
