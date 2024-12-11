@@ -81,6 +81,7 @@ exclude = [
     'src/adjust/.*',
     'src/filesystem/.*',
     'src/zendesk/.*',
+    'src/asana_source/.*',
   ]
 
 [[tool.mypy.overrides]]
