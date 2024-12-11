@@ -85,6 +85,7 @@ export default defineConfig({
             text: "Platforms",
             collapsed: false,
             items: [
+              { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Adjust", link: "/supported-sources/adjust.md" },
               { text: "Airtable", link: "/supported-sources/airtable.md" },
               { text: "AppsFlyer", link: "/supported-sources/appsflyer.md" },
