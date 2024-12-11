@@ -4,9 +4,10 @@ from typing import Optional, Sequence, Iterable
 import dlt
 import pendulum
 from dlt.sources import DltResource
-from tiktok_helpers import TikTokAPI
 from dlt.common.typing import TAnyDateTime, TDataItem
 from dlt.common.time import ensure_pendulum_datetime
+
+from .tiktok_helpers import TikTokAPI
 
 #endpoint https://business-api.tiktok.com/open_api/v1.3/campaign/get/
 #filter {gap <= 6 months
@@ -19,22 +20,25 @@ from dlt.common.time import ensure_pendulum_datetime
 #modify_time 
 
 @dlt.source(max_table_nesting=0)
-def tiktok_source(start_date: str,end_date: str, access_token:str,advertiser_id:str)->Sequence[DltResource]:
+def tiktok_source(start_date,end_date, access_token:str,advertiser_id:str)->Sequence[DltResource]:
     start_date_obj = ensure_pendulum_datetime(start_date)
+    end_date = ensure_pendulum_datetime(end_date)
     titkok_api = TikTokAPI(access_token)
 
-    @dlt.resource(write_disposition="merge", primary_key="campaign_id")
-    def campaigns(
-        datetime=dlt.sources.incremental("modify_time", start_date_obj.isoformat()),
+    @dlt.resource(write_disposition="merge", primary_key="stat_time_day")
+    def advertisersreportsdaily(
+        datetime=dlt.sources.incremental("stat_time_day", start_date_obj.isoformat()),
     ) -> Iterable[TDataItem]:
-        start_time = datetime.end_value
+        datetime_str = datetime.last_value
+        start_time = ensure_pendulum_datetime(datetime_str)
+        end_date = ensure_pendulum_datetime("2024-12-06")
 
         while start_time < end_date:
-            interval_end = min(start_time + timedelta(days=180), end_date)
+            interval_end = min(start_time + timedelta(days=30), end_date)
 
-            for campaign in titkok_api.fetch_campaigns(start_time=start_time, end_time=end_date, advertiser_id=advertiser_id):
-                yield campaign 
+            for report in titkok_api.fetch_advertisers_reports_daily(start_time=start_time, end_time=end_date, advertiser_id=advertiser_id):
+                yield report 
 
             start_time = interval_end
 
-    return campaigns
+    return advertisersreportsdaily

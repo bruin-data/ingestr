@@ -2,6 +2,7 @@ import base64
 import csv
 import json
 from datetime import date
+import os
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -1002,9 +1003,10 @@ class TikTokSource:
         return True
     
     def dlt_source(self, uri: str, table: str, **kwargs):
-        start_date="2000-01-01",
-        end_date="", #now
-        endpoint = "campaigns",
-        access_token = "",
-        advertiser_id="",
+        start_date= '2024-10-20'
+        end_date= '2024-12-06'
+        endpoint = "advertisersreportsdaily"
+        access_token = os.getenv("TIKTOK_ACCESS_TOKEN")
+        advertiser_id= os.getenv("TIKTOK_ADVERTISER_ID")
+        
         return tiktok_source(start_date=start_date, end_date=end_date,access_token=access_token, advertiser_id=advertiser_id).with_resources(endpoint)
