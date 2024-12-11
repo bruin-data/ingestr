@@ -41,6 +41,7 @@ from ingestr.src.sources import (
 SQL_SOURCE_SCHEMES = [
     "bigquery",
     "duckdb",
+    "dynamodb",
     "mssql",
     "mysql",
     "mysql+pymysql",
