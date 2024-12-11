@@ -41,6 +41,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+from ingestr.src.google_analytics import google_analytics
 
 
 class SqlSource:
@@ -994,3 +995,7 @@ class S3Source:
         return readers(
             bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
         ).with_resources(endpoint)
+
+class GoogleAnalyticsSource:
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        return google_analytics().with_resources("basic_report")
