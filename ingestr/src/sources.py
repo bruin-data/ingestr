@@ -37,7 +37,7 @@ from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
-from ingestr.src.asana import asana_source
+from ingestr.src.asana_source import asana_source
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
