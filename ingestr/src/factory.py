@@ -22,6 +22,7 @@ from ingestr.src.sources import (
     ArrowMemoryMappedSource,
     ChessSource,
     FacebookAdsSource,
+    GoogleAnalyticsSource,
     GoogleSheetsSource,
     GorgiasSource,
     HubspotSource,
@@ -142,6 +143,8 @@ class SourceDestinationFactory:
             return ArrowMemoryMappedSource()
         elif self.source_scheme == "s3":
             return S3Source()
+        elif self.source_scheme == "googleanalytics":
+            return GoogleAnalyticsSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

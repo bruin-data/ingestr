@@ -14,6 +14,7 @@ from dlt.sources.credentials import ConnectionStringCredentials
 from dlt.sources.sql_database import sql_table
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
+from dlt.sources.credentials import GcpServiceAccountCredentials
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
@@ -24,6 +25,7 @@ from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
+from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -821,7 +823,6 @@ class AdjustSource:
 
         return src.with_resources(table)
 
-
 class AppsflyerSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -994,3 +995,53 @@ class S3Source:
         return readers(
             bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
         ).with_resources(endpoint)
+
+
+class GoogleAnalyticsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+   
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parse_uri = urlparse(uri)
+        source_fields = parse_qs(parse_uri.query)
+        project_id= source_fields.get("project_id")
+        if not project_id:
+           raise ValueError("project_id is required to connect to Google Analytics")
+
+        private_key = source_fields.get("private_key")
+        if not private_key:
+           raise ValueError("private_key is required to connect to Google Analytics")
+        
+        client_email = source_fields.get("email")
+        if not client_email:
+           raise ValueError("client email is required to connect to Google Analytics")
+
+        credentials = GcpServiceAccountCredentials(
+        project_id= project_id[0],
+        private_key= private_key[0],
+        client_email= client_email[0]
+    )
+        property_id = source_fields.get("property_id")
+        if not property_id:
+           raise ValueError("property_id is required to connect to Google Analytics")
+        
+        interval_start = kwargs.get("interval_start")
+        start_date = (
+            interval_start.strftime("%Y-%m-%d") if interval_start else "2000-01-01"
+        )
+        fields = table.split(":")
+        if len(fields) != 2:
+                raise ValueError(
+                    "Invalid table format. Expected format: <dimensions>:<metrics>"
+                )
+      
+        dimensions = fields[0].split(",")
+        metrics = fields[1].split(",")
+        queries = [{"resource_name": "custom", "dimensions": dimensions, "metrics": metrics }]
+
+        return google_analytics(
+            property_id = property_id[0],
+            start_date = start_date[0],
+            queries = queries,
+            credentials = credentials,
+        )
