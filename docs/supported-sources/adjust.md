@@ -62,7 +62,7 @@ ingestr ingest \
     --source-uri 'adjust://?api_key=nr_123' \
     --source-table 'campaigns' \
     --dest-uri duckdb:///adjust.duckdb \
-    --dest-table 'adjust.output'
+    --dest-table 'dest.output'
 ```
 
 Copy creatives data from Adjust into a DuckDB database:
@@ -71,7 +71,7 @@ ingestr ingest \
     --source-uri 'adjust://?api_key=nr_123' \
     --source-table 'creatives' \
     --dest-uri duckdb:///adjust.duckdb \
-    --dest-table 'adjust.output'
+    --dest-table 'dest.output'
 ```
 
 Copy custom data from Adjust into a DuckDB database:

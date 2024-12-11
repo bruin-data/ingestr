@@ -623,7 +623,7 @@ class HubspotSource:
 
 class AirtableSource:
     def handles_incrementality(self) -> bool:
-        return True
+        return False
 
     # airtable://?access_token=<access_token>&base_id=<base_id>
 

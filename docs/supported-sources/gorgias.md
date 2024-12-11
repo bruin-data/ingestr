@@ -23,7 +23,7 @@ The URI is used to connect to the Gorgias API for extracting data.
 ingestr ingest --source-table 'tickets' --source-uri $GORGIAS_URI --dest-uri $BIGQUERY_URI --interval-start 2024-06-19  --dest-table 'gorgias.ticket_messages' --loader-file-format jsonl
 
 # get all the customers and write them to `gorgias.customers` table on DuckDB
-ingestr ingest --source-table 'customers' --source-uri $GORGIAS_URI --dest-uri duckdb:///gorgias.duckdb --interval-start 2024-01-01  --dest-table 'gorgias.customers'
+ingestr ingest --source-table 'customers' --source-uri $GORGIAS_URI --dest-uri duckdb:///gorgias.duckdb --interval-start 2024-01-01  --dest-table 'dest.customers'
 ```
 
 ## Supported entities

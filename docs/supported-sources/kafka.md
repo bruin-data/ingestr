@@ -32,7 +32,7 @@ ingestr ingest \
     --source-uri 'kafka://?bootstrap_servers=localhost:9092&group_id=test_group' \
     --source-table 'my-topic' \
     --dest-uri duckdb:///kafka.duckdb \
-    --dest-table 'kafka.my_topic'
+    --dest-table 'dest.my_topic'
 ```
 
 The result of this command will be a table in the `kafka.duckdb` database with JSON columns.

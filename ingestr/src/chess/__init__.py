@@ -12,7 +12,7 @@ from .helpers import get_path_with_retry, get_url_with_retry, validate_month_str
 from .settings import UNOFFICIAL_CHESS_API_URL
 
 
-@dlt.source(name="chess")
+@dlt.source(name="chess", max_table_nesting=0)
 def source(
     players: List[str], start_month: str = None, end_month: str = None
 ) -> Sequence[DltResource]:

@@ -11,7 +11,7 @@ from .helpers import pagination, transform_date
 from .settings import ENDPOINTS, INCREMENTAL_ENDPOINTS
 
 
-@dlt.source
+@dlt.source(max_table_nesting=0)
 def stripe_source(
     endpoints: Tuple[str, ...] = ENDPOINTS,
     stripe_secret_key: str = dlt.secrets.value,
