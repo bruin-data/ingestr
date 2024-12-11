@@ -6,7 +6,7 @@ log_level="WARNING"  # the system log level of dlt
 dlthub_telemetry = true
 
 [sources.google_analytics]
-property_id =  
+property_id =  ""
 queries = [
     {"resource_name"= "", "dimensions"= ["browser", "city"], "metrics"= []}
 ]
