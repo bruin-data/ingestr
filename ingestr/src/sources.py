@@ -1018,7 +1018,7 @@ class AsanaSource:
 
         workspace = parsed_uri.hostname
         access_token = params.get("access_token")
-
+        
         if not workspace:
             raise ValueError("workspace ID must be specified in the URI")
 
@@ -1030,7 +1030,7 @@ class AsanaSource:
                 f"Resource '{table}' is not supported for Asana source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
-        dlt.secrets["sources.asana.access_token"] = access_token[0]
+        dlt.secrets["sources.asana_source.access_token"] = access_token[0]
         src = asana_source()
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)
         return src.with_resources(table)
