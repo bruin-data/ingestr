@@ -1,44 +1,52 @@
 from datetime import timedelta
-from typing import Optional, Sequence, Iterable
+from typing import Iterable
 
 import dlt
 import pendulum
-from dlt.sources import DltResource
-from dlt.common.typing import TAnyDateTime, TDataItem
 from dlt.common.time import ensure_pendulum_datetime
+from dlt.common.typing import TDataItem
+from dlt.sources import DltResource
 
 from .tiktok_helpers import TikTokAPI
 
-#endpoint https://business-api.tiktok.com/open_api/v1.3/campaign/get/
-#filter {gap <= 6 months
-#   "creation_filter_start_time": "2023-01-01 00:00:00",
-#   "creation_filter_end_time": "2023-06-30 23:59:59"
-#Access-Token: header
-#advertiser_id
-# }
-# pagination - page
-#modify_time 
 
 @dlt.source(max_table_nesting=0)
-def tiktok_source(start_date,end_date, access_token:str,advertiser_id:str)->Sequence[DltResource]:
-    start_date_obj = ensure_pendulum_datetime(start_date)
-    end_date = ensure_pendulum_datetime(end_date)
+def tiktok_source(
+    start_date: pendulum.DateTime,
+    end_date: pendulum.DateTime,
+    access_token,
+    advertiser_id,
+    dimensions,
+    metrics,
+) -> DltResource:
     titkok_api = TikTokAPI(access_token)
 
-    @dlt.resource(write_disposition="merge", primary_key="stat_time_day")
-    def advertisersreportsdaily(
-        datetime=dlt.sources.incremental("stat_time_day", start_date_obj.isoformat()),
+    @dlt.resource(write_disposition="merge", primary_key="dimensions")
+    def reports(
+        datetime=dlt.sources.incremental("stat_time_day", start_date.isoformat())
+        if "stat_time_day" in dimensions
+        else None,
     ) -> Iterable[TDataItem]:
-        datetime_str = datetime.last_value
-        start_time = ensure_pendulum_datetime(datetime_str)
-        end_date = ensure_pendulum_datetime("2024-12-06")
+        days = 365
+
+        if datetime is not None:
+            datetime_str = datetime.last_value
+            start_time = ensure_pendulum_datetime(datetime_str)
+            days = 30
+        else:
+            start_time = start_date
 
         while start_time < end_date:
-            interval_end = min(start_time + timedelta(days=30), end_date)
+            interval_end = min(start_time + timedelta(days=days), end_date)
 
-            for report in titkok_api.fetch_advertisers_reports_daily(start_time=start_time, end_time=end_date, advertiser_id=advertiser_id):
-                yield report 
-
+            for report in titkok_api.fetch_reports(
+                start_time=start_time,
+                end_time=end_date,
+                advertiser_id=advertiser_id,
+                dimensions=dimensions,
+                metrics=metrics,
+            ):
+                yield report
             start_time = interval_end
 
-    return advertisersreportsdaily
+    return reports
