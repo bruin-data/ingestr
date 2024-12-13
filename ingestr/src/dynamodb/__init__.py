@@ -3,6 +3,8 @@ import boto3
 
 from dlt.common.configuration.specs import AwsCredentials
 
+PAGINATION_KEY = "LastEvaluatedKey"
+
 @dlt.source
 def dynamodb_source(table: str, credentials: AwsCredentials):
     sesh = boto3.Session(
@@ -13,7 +15,12 @@ def dynamodb_source(table: str, credentials: AwsCredentials):
     db = sesh.resource("dynamodb")
     yield scan_table(db.Table(table))
 
-@dlt.resource
+@dlt.resource(write_disposition="merge")
 def scan_table(table):
-    yield table.scan()["Items"]
+    scan = table.scan()
+    while True:
+        yield scan["Items"]
+        if PAGINATION_KEY not in scan:
+            break
+        scan = table.scan(ExclusiveStartKey=scan[PAGINATION_KEY])
     
