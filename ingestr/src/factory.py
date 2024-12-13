@@ -35,8 +35,8 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
-    ZendeskSource,
     TikTokSource,
+    ZendeskSource,
 )
 
 SQL_SOURCE_SCHEMES = [
