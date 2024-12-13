@@ -21,6 +21,7 @@ from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.chess import source
+from ingestr.src.dynamodb import dynamodb_source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
@@ -1000,4 +1001,28 @@ class DynamoDBSource():
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        pass
+        parsed_uri = urlparse(uri)
+
+        endpoint = parsed_uri.hostname
+        if not endpoint:
+            raise ValueError(
+                "Endpoint URL is required to connect to Dynamodb"
+            )
+
+        qs = parse_qs(parsed_uri.query)
+        access_key = qs.get('access_key_id')
+
+        if not access_key:
+            raise ValueError("access_key_id is required to connect to Dynamodb")
+
+        secret_key = qs.get('secret_access_key')
+        if not secret_key:
+            raise ValueError("secret_access_key is required to connect to Dynamodb")
+        
+        creds = AwsCredentials(
+            aws_access_key_id=access_key[0],
+            aws_secret_access_key=TSecretStrValue(secret_key[0]),
+            endpoint_url=endpoint, # region is inferred from endpoint url
+        )
+
+        return dynamodb_source()
