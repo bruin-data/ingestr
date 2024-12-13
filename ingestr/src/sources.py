@@ -1,9 +1,10 @@
+import re
 import base64
 import csv
 import json
 from datetime import date
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote
 
 import dlt
 import pendulum
@@ -1003,26 +1004,26 @@ class DynamoDBSource():
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
 
-        endpoint = parsed_uri.hostname
-        if not endpoint:
+        region = parsed_uri.hostname
+        if not region:
             raise ValueError(
-                "Endpoint URL is required to connect to Dynamodb"
+                "Region is required to connect to Dynamodb"
             )
 
-        qs = parse_qs(parsed_uri.query)
-        access_key = qs.get('access_key_id')
+        qs = parse_qs(quote(parsed_uri.query, safe="=&"))
+        access_key = qs.get("access_key_id")
 
         if not access_key:
             raise ValueError("access_key_id is required to connect to Dynamodb")
 
-        secret_key = qs.get('secret_access_key')
+        secret_key = qs.get("secret_access_key")
         if not secret_key:
             raise ValueError("secret_access_key is required to connect to Dynamodb")
-        
+
         creds = AwsCredentials(
             aws_access_key_id=access_key[0],
             aws_secret_access_key=TSecretStrValue(secret_key[0]),
-            endpoint_url=endpoint, # region is inferred from endpoint url
+            region_name=region,
         )
 
-        return dynamodb_source()
+        return dynamodb_source(table, creds)
