@@ -1,8 +1,8 @@
 import base64
 import csv
 import json
-from datetime import date
 import os
+from datetime import date
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -37,12 +37,12 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.tiktok_ads._init_ import tiktok_source
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-from ingestr.src.tiktok_ads._init_ import tiktok_source
 
 
 class SqlSource:
@@ -997,16 +997,34 @@ class S3Source:
             bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
         ).with_resources(endpoint)
 
+
 class TikTokSource:
-    #tittok://?access_token=<access_token>&advertiser_id=<advertiser_id>
+    # tittok://?access_token=<access_token>&advertiser_id=<advertiser_id>
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
-        start_date= '2024-10-20'
-        end_date= '2024-12-06'
-        endpoint = "advertisersreportsdaily"
+        endpoint = "reports"
         access_token = os.getenv("TIKTOK_ACCESS_TOKEN")
-        advertiser_id= os.getenv("TIKTOK_ADVERTISER_ID")
-        
-        return tiktok_source(start_date=start_date, end_date=end_date,access_token=access_token, advertiser_id=advertiser_id).with_resources(endpoint)
+        advertiser_id = os.getenv("TIKTOK_ADVERTISER_ID")
+        dimensions = ["campaign_id", "country_code", "stat_time_day"]
+        metrics = ["impressions", "clicks", "ctr", "cpc", "cpm"]
+
+        if kwargs.get("interval_start"):
+            start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
+        else:
+            start_date = ensure_pendulum_datetime("2024-01-07")
+
+        if kwargs.get("interval_end"):
+            end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
+        else:
+            end_date = ensure_pendulum_datetime("2024-12-13")
+
+        return tiktok_source(
+            start_date=start_date,
+            end_date=end_date,
+            access_token=access_token,
+            advertiser_id=advertiser_id,
+            dimensions=dimensions,
+            metrics=metrics,
+        ).with_resources(endpoint)
