@@ -21,6 +21,7 @@ from ingestr.src.sources import (
     AppsflyerSource,
     ArrowMemoryMappedSource,
     ChessSource,
+    DynamoDBSource,
     FacebookAdsSource,
     GoogleSheetsSource,
     GorgiasSource,
@@ -104,6 +105,8 @@ class SourceDestinationFactory:
     def get_source(self) -> SourceProtocol:
         if self.source_scheme in SQL_SOURCE_SCHEMES:
             return SqlSource()
+        
+        # TODO: use a dict instead of if-else chain
         elif self.source_scheme == "csv":
             return LocalCsvSource()
         elif self.source_scheme == "mongodb":
@@ -142,6 +145,8 @@ class SourceDestinationFactory:
             return ArrowMemoryMappedSource()
         elif self.source_scheme == "s3":
             return S3Source()
+        elif self.source_scheme == "dynamodb":
+            return DynamoDBSource()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
