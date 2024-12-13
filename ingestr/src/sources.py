@@ -954,7 +954,7 @@ class S3Source:
             )
 
         parsed_uri = urlparse(uri)
-        source_fields = parse_qs(parsed_uri.query)
+        source_fields = parse_qs(quote(parsed_uri.query, safe="=&"))
         access_key_id = source_fields.get("access_key_id")
         if not access_key_id:
             raise ValueError("access_key_id is required to connect to S3")
