@@ -73,20 +73,21 @@ class TikTokAPI:
             result_data = result.get("data", {})
             items = result_data.get("list", [])
             
+            
             if "stat_time_day" in dimensions:
                 for item in items:
                     if "dimensions" in item:
-                        item["stat_time_day"] = item["dimensions"]["stat_time_day"]
-
+                        item["stat_time_flat"] = item["dimensions"]["stat_time_day"]
+                        
             if "stat_time_hour" in dimensions:
                 for item in items:
                     if "dimensions" in item:
-                        item["stat_time_hour"] = item["dimensions"]["stat_time_hour"]
+                        item["stat_time_flat"] = item["dimensions"]["stat_time_hour"]
 
             all_items.extend(items)
             page_info = result_data.get("page_info", {})
             total_pages = page_info.get("total_page")
-      
+
             if current_page >= total_pages:
                 break
 
@@ -103,14 +104,15 @@ class TikTokAPI:
         metrics,
         filters
     ):
-        return self.fetch_pages(
+        for item in self.fetch_pages(
             advertiser_id=advertiser_id,
             start_time=start_time,
             end_time=end_time,
             dimensions=dimensions,
             metrics=metrics,
             filters=filters,
-        )
+        ):
+            yield item
 
 
   

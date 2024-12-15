@@ -1058,5 +1058,5 @@ class TikTokSource:
             metrics=metrics,
             filters=filters,
             incremental_loading_param=incremental_loading_param,
-            days = days
+            interval_days = days
         ).with_resources(endpoint)
