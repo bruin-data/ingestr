@@ -1004,12 +1004,12 @@ class TikTokSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        endpoint = "custom_reports" 
+        endpoint = "custom_reports"
         access_token = os.getenv("TIKTOK_ACCESS_TOKEN")
         advertiser_id = os.getenv("TIKTOK_ADVERTISER_ID")
         days = 365
         incremental_loading_param = None
-       
+
         if kwargs.get("interval_start"):
             start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
         else:
@@ -1024,18 +1024,25 @@ class TikTokSource:
             end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
         else:
             end_date = ensure_pendulum_datetime(pendulum.now())
-            
+
         if table.startswith("custom:"):
             fields = table.split(":", 3)
             if len(fields) != 3 and len(fields) != 4:
                 raise ValueError(
                     "Invalid TikTok custom table format. Expected format: custom:<dimensions>,<metrics> or custom:<dimensions>:<metrics>:<filters>"
                 )
-            
+
             dimensions = fields[1].split(",")
-            if "campaign_id" not in dimensions and "advertiser_id" not in dimensions and "adgroup_id" not in dimensions and "ad_id" not in dimensions:
-             raise ValueError("You must provide one ID dimension. Please use one ID dimension from the following options: [AUCTION_ADVERTISER, AUCTION_AD, AUCTION_CAMPAIGN, AUCTION_ADGROUP]")
-            metrics = fields[2].split(",")   
+            if (
+                "campaign_id" not in dimensions
+                and "advertiser_id" not in dimensions
+                and "adgroup_id" not in dimensions
+                and "ad_id" not in dimensions
+            ):
+                raise ValueError(
+                    "You must provide one ID dimension. Please use one ID dimension from the following options: [AUCTION_ADVERTISER, AUCTION_AD, AUCTION_CAMPAIGN, AUCTION_ADGROUP]"
+                )
+            metrics = fields[2].split(",")
 
             filters = []
             if len(fields) == 4:
@@ -1044,7 +1051,7 @@ class TikTokSource:
             if "stat_time_day" in dimensions:
                 incremental_loading_param = "stat_time_day"
                 days = 30
-        
+
             if "stat_time_hour" in dimensions:
                 incremental_loading_param = "stat_time_hour"
                 days = 1
@@ -1058,5 +1065,5 @@ class TikTokSource:
             metrics=metrics,
             filters=filters,
             incremental_loading_param=incremental_loading_param,
-            interval_days = days
+            interval_days=days,
         ).with_resources(endpoint)

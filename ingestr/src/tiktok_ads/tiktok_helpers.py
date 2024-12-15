@@ -32,15 +32,14 @@ class TikTokAPI:
         }
 
     def fetch_pages(
-        self, advertiser_id: str, start_time, end_time, dimensions, metrics,filters
+        self, advertiser_id: str, start_time, end_time, dimensions, metrics, filters
     ) -> list:
-        
         data_level_mapping = {
             "advertiser_id": "AUCTION_ADVERTISER",
             "campaign_id": "AUCTION_CAMPAIGN",
-            "adgroup_id": "AUCTION_ADGROUP"
-            }
-        
+            "adgroup_id": "AUCTION_ADGROUP",
+        }
+
         data_level = "AUCTION_AD"
         for id_dimension in dimensions:
             if id_dimension in data_level_mapping:
@@ -62,23 +61,22 @@ class TikTokAPI:
             "dimensions": json.dumps(dimensions),
             "metrics": json.dumps(metrics),
         }
-    
+
         while True:
             self.params["page"] = current_page
             response = create_client().get(
                 url=BASE_URL, headers=self.headers, params=self.params
             )
-           
+
             result = response.json()
             result_data = result.get("data", {})
             items = result_data.get("list", [])
-            
-            
+
             if "stat_time_day" in dimensions:
                 for item in items:
                     if "dimensions" in item:
                         item["stat_time_flat"] = item["dimensions"]["stat_time_day"]
-                        
+
             if "stat_time_hour" in dimensions:
                 for item in items:
                     if "dimensions" in item:
@@ -92,17 +90,11 @@ class TikTokAPI:
                 break
 
             current_page += 1
-        print("fetched item",len(all_items))
+        print("fetched item", len(all_items))
         return all_items
 
     def fetch_reports(
-        self,
-        start_time,
-        end_time,
-        advertiser_id,
-        dimensions,
-        metrics,
-        filters
+        self, start_time, end_time, advertiser_id, dimensions, metrics, filters
     ):
         for item in self.fetch_pages(
             advertiser_id=advertiser_id,
@@ -110,9 +102,6 @@ class TikTokAPI:
             end_time=end_time,
             dimensions=dimensions,
             metrics=metrics,
-            filters=filters,
+            filters=None,
         ):
             yield item
-
-
-  
