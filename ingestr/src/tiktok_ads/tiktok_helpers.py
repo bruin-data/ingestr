@@ -32,57 +32,66 @@ class TikTokAPI:
         }
 
     def fetch_pages(
-        self, advertiser_id: str, start_time, end_time, dimensions, metrics
+        self, advertiser_id: str, start_time, end_time, dimensions, metrics,filters
     ) -> list:
-        if advertiser_id in dimensions:
-            data_level = "AUCTION_ADVERTISER"
-
-        if "campaign_id" in dimensions:
-            data_level = "AUCTION_CAMPAIGN"
-
-        if "adgroup_id" in dimensions:
-            data_level = "AUCTION_ADGROUP"
-
-        if "ad_id" in dimensions:
-            data_level = "AUCTION_AD"
+        
+        data_level_mapping = {
+            "advertiser_id": "AUCTION_ADVERTISER",
+            "campaign_id": "AUCTION_CAMPAIGN",
+            "adgroup_id": "AUCTION_ADGROUP"
+            }
+        
+        data_level = "AUCTION_AD"
+        for id_dimension in dimensions:
+            if id_dimension in data_level_mapping:
+                data_level = data_level_mapping[id_dimension]
+                break
 
         all_items = []
         current_page = 1
         start_time = ensure_pendulum_datetime(start_time).to_date_string()
         end_time = ensure_pendulum_datetime(end_time).to_date_string()
+
         self.params = {
             "advertiser_id": advertiser_id,
             "report_type": "BASIC",
             "data_level": data_level,
             "start_date": start_time,
             "end_date": end_time,
-            "page_size": 100,
+            "page_size": 1000,
             "dimensions": json.dumps(dimensions),
             "metrics": json.dumps(metrics),
         }
-
+    
         while True:
             self.params["page"] = current_page
             response = create_client().get(
                 url=BASE_URL, headers=self.headers, params=self.params
             )
-            print("response", response.json())
+           
             result = response.json()
-            items = result.get("data", {}).get("list", [])
-
+            result_data = result.get("data", {})
+            items = result_data.get("list", [])
+            
             if "stat_time_day" in dimensions:
                 for item in items:
                     if "dimensions" in item:
                         item["stat_time_day"] = item["dimensions"]["stat_time_day"]
 
+            if "stat_time_hour" in dimensions:
+                for item in items:
+                    if "dimensions" in item:
+                        item["stat_time_hour"] = item["dimensions"]["stat_time_hour"]
+
             all_items.extend(items)
-            page_info = result.get("page_info", {})
-            total_pages = page_info.get("total_page", 1)
+            page_info = result_data.get("page_info", {})
+            total_pages = page_info.get("total_page")
+      
             if current_page >= total_pages:
                 break
 
             current_page += 1
-
+        print("fetched item",len(all_items))
         return all_items
 
     def fetch_reports(
@@ -92,6 +101,7 @@ class TikTokAPI:
         advertiser_id,
         dimensions,
         metrics,
+        filters
     ):
         return self.fetch_pages(
             advertiser_id=advertiser_id,
@@ -99,4 +109,8 @@ class TikTokAPI:
             end_time=end_time,
             dimensions=dimensions,
             metrics=metrics,
+            filters=filters,
         )
+
+
+  
