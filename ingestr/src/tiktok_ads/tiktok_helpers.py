@@ -37,14 +37,6 @@ def flat_structure(items):
                 else:
                     item[key] = value
 
-            del item["dimensions"]
-
-        if "metrics" in item:
-            for key, value in item["metrics"].items():
-                item[key] = value
-
-            del item["metrics"]
-
     return items
 
 
