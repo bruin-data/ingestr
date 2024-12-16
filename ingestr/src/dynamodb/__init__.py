@@ -1,20 +1,21 @@
 from dataclasses import dataclass
-import dlt
-import boto3
-from boto3.dynamodb.conditions import Attr
-
 from typing import Optional
-from dlt.common.configuration.specs import AwsCredentials
 
+import boto3
+import dlt
+from boto3.dynamodb.conditions import Attr
+from dlt.common.configuration.specs import AwsCredentials
 
 PAGINATION_KEY = "LastEvaluatedKey"
 FILTER_KEY = "FilterExpression"
 DATA_KEY = "Items"
 
+
 @dataclass
 class TableSchema:
-    primary_key: str
-    sort_key: str
+    primary_key: Optional[str]
+    sort_key: Optional[str]
+
 
 def parseSchema(table) -> TableSchema:
     schema = TableSchema(None, None)
@@ -30,11 +31,12 @@ def parseSchema(table) -> TableSchema:
 
     return schema
 
+
 @dlt.source(name="dynamodb")
 def dynamodb_source(
     table_name: str,
     credentials: AwsCredentials,
-    incremental: Optional[dlt.sources.incremental] = None
+    incremental: Optional[dlt.sources.incremental] = None,
 ):
     sesh = boto3.Session(
         aws_access_key_id=credentials.aws_access_key_id,
@@ -52,10 +54,11 @@ def dynamodb_source(
 
     yield resource(table, incremental)
 
+
 def dynamodb_table(table, incremental: Optional[dlt.sources.incremental] = None):
     scan_args = {}
     if incremental and incremental.last_value:
-        scan_args[FILTER_KEY] =  Attr(incremental.cursor_path).gt(incremental.last_value)
+        scan_args[FILTER_KEY] = Attr(incremental.cursor_path).gt(incremental.last_value)
 
     scan = table.scan(**scan_args)
     while True:

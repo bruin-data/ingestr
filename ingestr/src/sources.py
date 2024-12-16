@@ -1,10 +1,9 @@
-import re
 import base64
 import csv
 import json
 from datetime import date
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlparse, quote
+from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
 import pendulum
@@ -997,7 +996,8 @@ class S3Source:
             bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
         ).with_resources(endpoint)
 
-class DynamoDBSource():
+
+class DynamoDBSource:
     def handles_incrementality(self) -> bool:
         return False
 
@@ -1005,9 +1005,7 @@ class DynamoDBSource():
         parsed_uri = urlparse(uri)
         region = parsed_uri.hostname
         if not region:
-            raise ValueError(
-                "Region is required to connect to Dynamodb"
-            )
+            raise ValueError("Region is required to connect to Dynamodb")
 
         qs = parse_qs(quote(parsed_uri.query, safe="=&"))
         access_key = qs.get("access_key_id")
@@ -1027,7 +1025,7 @@ class DynamoDBSource():
 
         incremental = None
         incremental_key = kwargs.get("incremental_key", "").strip()
-        
+
         if incremental_key:
             incremental = dlt.sources.incremental(incremental_key)
 

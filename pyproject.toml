@@ -81,6 +81,7 @@ exclude = [
     'src/adjust/.*',
     'src/filesystem/.*',
     'src/zendesk/.*',
+    'src/dynamodb/.*',
   ]
 
 [[tool.mypy.overrides]]
@@ -101,6 +102,7 @@ module = [
   "ingestr.src.appsflyer",
   "ingestr.src.filesystem.*",
   "ingestr.src.zendesk.*",
+  "ingestr.src.dynamodb.*",
 ]
 follow_imports = "skip"
 

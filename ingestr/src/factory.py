@@ -1,4 +1,4 @@
-from typing import Protocol, Type, Dict
+from typing import Dict, Protocol, Type
 from urllib.parse import urlparse
 
 from dlt.common.destination import Destination
@@ -115,7 +115,7 @@ class SourceDestinationFactory:
         "s3": S3Source,
         "dynamodb": DynamoDBSource,
     }
-    destinations: dict[str, DestinationProtocol] = {
+    destinations: dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
         "databricks": DatabricksDestination,
         "duckdb": DuckDBDestination,
@@ -149,7 +149,6 @@ class SourceDestinationFactory:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
     def get_destination(self) -> DestinationProtocol:
-
         if self.destination_scheme in self.destinations:
             return self.destinations[self.destination_scheme]()
         else:
