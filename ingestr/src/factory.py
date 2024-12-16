@@ -20,6 +20,7 @@ from ingestr.src.sources import (
     AirtableSource,
     AppsflyerSource,
     ArrowMemoryMappedSource,
+    AsanaSource,
     ChessSource,
     DynamoDBSource,
     FacebookAdsSource,
