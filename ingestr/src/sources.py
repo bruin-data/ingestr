@@ -1003,7 +1003,6 @@ class DynamoDBSource():
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
-
         region = parsed_uri.hostname
         if not region:
             raise ValueError(
@@ -1026,4 +1025,10 @@ class DynamoDBSource():
             region_name=region,
         )
 
-        return dynamodb_source(table, creds)
+        incremental = None
+        incremental_key = kwargs.get("incremental_key", "").strip()
+        
+        if incremental_key:
+            incremental = dlt.sources.incremental(incremental_key)
+
+        return dynamodb_source(table, creds, incremental)
