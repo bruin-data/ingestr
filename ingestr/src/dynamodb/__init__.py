@@ -48,7 +48,6 @@ def dynamodb_source(
     schema = parseSchema(table)
     resource = dlt.resource(
         dynamodb_table,
-        write_disposition="merge",
         primary_key=schema.primary_key,
     )
 
