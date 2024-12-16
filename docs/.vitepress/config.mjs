@@ -57,7 +57,7 @@ export default defineConfig({
             text: "Databases",
             collapsed: false,
             items: [
-              { text: "Athena", link: "/supported-sources/athena.md" },
+              { text: "AWS Athena", link: "/supported-sources/athena.md" },
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
               { text: "Databricks", link: "/supported-sources/databricks.md" },
               { text: "DuckDB", link: "/supported-sources/duckdb.md" },
@@ -88,6 +88,7 @@ export default defineConfig({
               { text: "Adjust", link: "/supported-sources/adjust.md" },
               { text: "Airtable", link: "/supported-sources/airtable.md" },
               { text: "AppsFlyer", link: "/supported-sources/appsflyer.md" },
+              { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               {
                 text: "Facebook Ads",

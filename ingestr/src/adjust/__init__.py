@@ -67,13 +67,16 @@ def adjust_source(
             filters=filters,
         )
 
+    if not dimensions:
+        return campaigns, creatives
+
     merge_key = merge_key
+    type_hints = {}
     for dimension in REQUIRED_CUSTOM_DIMENSIONS:
         if dimension in dimensions:
             merge_key = dimension
             break
 
-    type_hints = {}
     for dimension in dimensions:
         if dimension in KNOWN_TYPE_HINTS:
             type_hints[dimension] = KNOWN_TYPE_HINTS[dimension]

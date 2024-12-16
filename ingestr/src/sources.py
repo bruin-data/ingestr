@@ -21,6 +21,7 @@ from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.arrow import memory_mapped_arrow
+from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
@@ -622,7 +623,7 @@ class HubspotSource:
 
 class AirtableSource:
     def handles_incrementality(self) -> bool:
-        return True
+        return False
 
     # airtable://?access_token=<access_token>&base_id=<base_id>
 
@@ -996,6 +997,7 @@ class S3Source:
         ).with_resources(endpoint)
 
 
+
 class TikTokSource:
     # tittok://?access_token=<access_token>&advertiser_id=<advertiser_id>
     def handles_incrementality(self) -> bool:
@@ -1059,3 +1061,42 @@ class TikTokSource:
             metrics=metrics,
             filters=filters,
         ).with_resources(endpoint)
+
+class AsanaSource:
+    resources = [
+        "workspaces",
+        "projects",
+        "sections",
+        "tags",
+        "tasks",
+        "stories",
+        "teams",
+        "users",
+    ]
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        workspace = parsed_uri.hostname
+        access_token = params.get("access_token")
+        
+        if not workspace:
+            raise ValueError("workspace ID must be specified in the URI")
+
+        if not access_token:
+            raise ValueError("access_token is required for connecting to Asana")
+
+        if table not in self.resources:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Asana source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        dlt.secrets["sources.asana_source.access_token"] = access_token[0]
+        src = asana_source()
+        src.workspaces.add_filter(lambda w: w["gid"] == workspace)
+        return src.with_resources(table)
+

@@ -37,7 +37,7 @@ Once you complete the guide, you should have a service account JSON file and the
 Based on this assumption, here's a sample command that will copy the data from the Google Sheets spreadsheet into a DuckDB database:
 
 ```sh
-ingestr ingest --source-uri 'gsheets://?credentials_path=/path/to/file.json' --source-table 'fkdUQ2bjdNfUq2CA.Sheet1' --dest-uri duckdb:///gsheets.duckdb --dest-table 'gsheets.output'
+ingestr ingest --source-uri 'gsheets://?credentials_path=/path/to/file.json' --source-table 'fkdUQ2bjdNfUq2CA.Sheet1' --dest-uri duckdb:///gsheets.duckdb --dest-table 'dest.output'
 ```
 
 The result of this command will be a table in the `gsheets.duckdb` database.
