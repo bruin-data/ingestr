@@ -1,5 +1,6 @@
 import json
 
+from pendulum import parse
 import requests
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.sources.helpers.requests import Client
@@ -24,6 +25,28 @@ def create_client() -> requests.Session:
         request_backoff_factor=2,
     ).session
 
+def flat_structure(items):
+  
+    for item in items:
+                
+        if "dimensions" in item:
+            for key in item["dimensions"]:
+                item[key] = item["dimensions"][key]
+
+                if "stat_time_day" in item["dimensions"]:
+                 item["stat_time_day"] = parse(item["dimensions"]["stat_time_day"]).isoformat()
+
+                if "stat_time_hour" in item["dimensions"]:
+                 item["stat_time_hour"] = parse(item["dimensions"]["stat_time_hour"]).isoformat()
+                
+            del item["dimensions"]
+
+        if "metrics" in item:
+            for key in item["metrics"]:
+                    item[key] = item["metrics"][key]
+
+            del item["metrics"]
+    return items
 
 class TikTokAPI:
     def __init__(self, access_token):
@@ -71,20 +94,12 @@ class TikTokAPI:
             result = response.json()
             result_data = result.get("data", {})
             items = result_data.get("list", [])
-
-            if "stat_time_day" in dimensions:
-                for item in items:
-                    if "dimensions" in item:
-                        item["stat_time_flat"] = item["dimensions"]["stat_time_day"]
-
-            if "stat_time_hour" in dimensions:
-                for item in items:
-                    if "dimensions" in item:
-                        item["stat_time_flat"] = item["dimensions"]["stat_time_hour"]
-
+            
+            flat_structure(items=items)
+           
             all_items.extend(items)
             page_info = result_data.get("page_info", {})
-            total_pages = page_info.get("total_page")
+            total_pages = page_info.get("total_page",1)
 
             if current_page >= total_pages:
                 break
@@ -105,3 +120,6 @@ class TikTokAPI:
             filters=None,
         ):
             yield item
+
+
+    
