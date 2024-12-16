@@ -85,6 +85,9 @@ class TikTokAPI:
             )
 
             result = response.json()
+            if result.get("message") != "OK":
+                raise ValueError(result.get("message", ""))
+
             result_data = result.get("data", {})
             items = result_data.get("list", [])
 

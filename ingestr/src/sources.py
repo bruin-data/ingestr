@@ -997,7 +997,6 @@ class S3Source:
         ).with_resources(endpoint)
 
 
-
 class TikTokSource:
     # tittok://?access_token=<access_token>&advertiser_id=<advertiser_id>
     def handles_incrementality(self) -> bool:
@@ -1062,6 +1061,7 @@ class TikTokSource:
             filters=filters,
         ).with_resources(endpoint)
 
+
 class AsanaSource:
     resources = [
         "workspaces",
@@ -1083,7 +1083,7 @@ class AsanaSource:
 
         workspace = parsed_uri.hostname
         access_token = params.get("access_token")
-        
+
         if not workspace:
             raise ValueError("workspace ID must be specified in the URI")
 
@@ -1099,4 +1099,3 @@ class AsanaSource:
         src = asana_source()
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)
         return src.with_resources(table)
-

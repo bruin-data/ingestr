@@ -94,7 +94,7 @@ def fetch_tiktok_reports(
         ):
             yield report
     except Exception as e:
-        print(f"Got error while fetching tiktok basic report: {e}")
+        raise RuntimeError(f"Error fetching TikTok report: {e}")
 
 
 @dlt.source(max_table_nesting=0)
