@@ -1,9 +1,9 @@
 import json
 
-from pendulum import parse
 import requests
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.sources.helpers.requests import Client
+from pendulum import parse
 
 BASE_URL = "https://business-api.tiktok.com/open_api/v1.3/report/integrated/get/"
 
@@ -25,28 +25,28 @@ def create_client() -> requests.Session:
         request_backoff_factor=2,
     ).session
 
+
 def flat_structure(items):
-  
     for item in items:
-                
         if "dimensions" in item:
-            for key in item["dimensions"]:
-                item[key] = item["dimensions"][key]
+            for key, value in item["dimensions"].items():
+                if key == "stat_time_day":
+                    item["stat_time_day"] = parse(value).isoformat()
+                elif key == "stat_time_hour":
+                    item["stat_time_hour"] = parse(value).isoformat()
+                else:
+                    item[key] = value
 
-                if "stat_time_day" in item["dimensions"]:
-                 item["stat_time_day"] = parse(item["dimensions"]["stat_time_day"]).isoformat()
-
-                if "stat_time_hour" in item["dimensions"]:
-                 item["stat_time_hour"] = parse(item["dimensions"]["stat_time_hour"]).isoformat()
-                
             del item["dimensions"]
 
         if "metrics" in item:
-            for key in item["metrics"]:
-                    item[key] = item["metrics"][key]
+            for key, value in item["metrics"].items():
+                item[key] = value
 
             del item["metrics"]
+
     return items
+
 
 class TikTokAPI:
     def __init__(self, access_token):
@@ -72,6 +72,7 @@ class TikTokAPI:
         all_items = []
         current_page = 1
         start_time = ensure_pendulum_datetime(start_time).to_date_string()
+
         end_time = ensure_pendulum_datetime(end_time).to_date_string()
 
         self.params = {
@@ -94,18 +95,17 @@ class TikTokAPI:
             result = response.json()
             result_data = result.get("data", {})
             items = result_data.get("list", [])
-            
+
             flat_structure(items=items)
-           
+
             all_items.extend(items)
             page_info = result_data.get("page_info", {})
-            total_pages = page_info.get("total_page",1)
+            total_pages = page_info.get("total_page", 1)
 
             if current_page >= total_pages:
                 break
 
             current_page += 1
-        print("fetched item", len(all_items))
         return all_items
 
     def fetch_reports(
@@ -120,6 +120,3 @@ class TikTokAPI:
             filters=None,
         ):
             yield item
-
-
-    

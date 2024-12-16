@@ -116,8 +116,6 @@ class ArrowMemoryMappedSource:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        import os
-
         incremental = None
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
@@ -1005,19 +1003,22 @@ class TikTokSource:
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         endpoint = "custom_reports"
-        access_token = os.getenv("TIKTOK_ACCESS_TOKEN")
-        advertiser_id = os.getenv("TIKTOK_ADVERTISER_ID")
-        days = 365
-        incremental_loading_param = None
+
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        access_token = source_fields.get("access_token")
+        if not access_token:
+            raise ValueError("access_token is required to connect to TikTok")
+
+        advertiser_id = source_fields.get("advertiser_id")
+        if not advertiser_id:
+            raise ValueError("advertiser_id is required to connect to TikTok")
 
         if kwargs.get("interval_start"):
             start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
         else:
-            Default_date = (
-                pendulum.now()
-                .replace(hour=0, minute=0, second=0, microsecond=0)
-                .subtract(days=90)
-            )
+            Default_date = pendulum.now().subtract(days=90)
             start_date = ensure_pendulum_datetime(Default_date)
 
         if kwargs.get("interval_end"):
@@ -1042,28 +1043,19 @@ class TikTokSource:
                 raise ValueError(
                     "You must provide one ID dimension. Please use one ID dimension from the following options: [AUCTION_ADVERTISER, AUCTION_AD, AUCTION_CAMPAIGN, AUCTION_ADGROUP]"
                 )
+
             metrics = fields[2].split(",")
 
             filters = []
             if len(fields) == 4:
                 filters = fields[3].split(",")
 
-            if "stat_time_day" in dimensions:
-                incremental_loading_param = "stat_time_day"
-                days = 30
-
-            if "stat_time_hour" in dimensions:
-                incremental_loading_param = "stat_time_hour"
-                days = 1
-
         return tiktok_source(
             start_date=start_date,
             end_date=end_date,
-            access_token=access_token,
-            advertiser_id=advertiser_id,
+            access_token=access_token[0],
+            advertiser_id=advertiser_id[0],
             dimensions=dimensions,
             metrics=metrics,
             filters=filters,
-            incremental_loading_param=incremental_loading_param,
-            interval_days=days,
         ).with_resources(endpoint)
