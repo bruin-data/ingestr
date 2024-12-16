@@ -115,6 +115,22 @@ class SourceDestinationFactory:
         "s3": S3Source,
         "dynamodb": DynamoDBSource,
     }
+    destinations: dict[str, DestinationProtocol] = {
+        "bigquery": BigQueryDestination,
+        "databricks": DatabricksDestination,
+        "duckdb": DuckDBDestination,
+        "mssql": MsSQLDestination,
+        "postgres": PostgresDestination,
+        "postgresql": PostgresDestination,
+        "postgresql+psycopg2": PostgresDestination,
+        "redshift": RedshiftDestination,
+        "redshift+psycopg2": RedshiftDestination,
+        "redshift+redshift_connector": RedshiftDestination,
+        "snowflake": SnowflakeDestination,
+        "synapse": SynapseDestination,
+        "csv": CsvDestination,
+        "athena": AthenaDestination,
+    }
 
     def __init__(self, source_uri: str, destination_uri: str):
         self.source_uri = source_uri
@@ -133,25 +149,9 @@ class SourceDestinationFactory:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
     def get_destination(self) -> DestinationProtocol:
-        match: dict[str, DestinationProtocol] = {
-            "bigquery": BigQueryDestination(),
-            "databricks": DatabricksDestination(),
-            "duckdb": DuckDBDestination(),
-            "mssql": MsSQLDestination(),
-            "postgres": PostgresDestination(),
-            "postgresql": PostgresDestination(),
-            "postgresql+psycopg2": PostgresDestination(),
-            "redshift": RedshiftDestination(),
-            "redshift+psycopg2": RedshiftDestination(),
-            "redshift+redshift_connector": RedshiftDestination(),
-            "snowflake": SnowflakeDestination(),
-            "synapse": SynapseDestination(),
-            "csv": CsvDestination(),
-            "athena": AthenaDestination(),
-        }
 
-        if self.destination_scheme in match:
-            return match[self.destination_scheme]
+        if self.destination_scheme in self.destinations:
+            return self.destinations[self.destination_scheme]()
         else:
             raise ValueError(
                 f"Unsupported destination scheme: {self.destination_scheme}"
