@@ -17,12 +17,12 @@ import pyarrow.ipc as ipc  # type: ignore
 import pytest
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
+from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
+from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
-from testcontainers.localstack import LocalStackContainer
-from testcontainers.core.waiting_utils import wait_for_logs
 from typer.testing import CliRunner
 
 from ingestr.main import app
@@ -1541,13 +1541,14 @@ def test_db_to_db_exclude_columns(source, dest):
     source.stop()
     dest.stop()
 
+
 def test_dynamodb_to_duckdb():
     db_name = f"dynamodb_test_{get_random_string(5)}"
 
     def load_test_data(ls):
         client = ls.get_client("dynamodb")
-        table_cfg = { 
-            "TableName": db_name, 
+        table_cfg = {
+            "TableName": db_name,
             "KeySchema": [
                 {
                     "AttributeName": "id",
@@ -1555,41 +1556,27 @@ def test_dynamodb_to_duckdb():
                 }
             ],
             "AttributeDefinitions": [
-                {
-                    "AttributeName": "id",
-                    "AttributeType": "S"
-                },
+                {"AttributeName": "id", "AttributeType": "S"},
             ],
             "ProvisionedThroughput": {
                 "ReadCapacityUnits": 35000,
                 "WriteCapacityUnits": 35000,
-            }
+            },
         }
         client.create_table(**table_cfg)
         items = [
-            {
-                "id": {"S": "1"},
-                "updated_at": {"S": "2024-01-01T00:00:00"}
-            },
-            {
-                "id": {"S": "2"},
-                "updated_at": {"S": "2024-02-01T00:00:00"}
-            },
-            {
-                "id": {"S": "3"},
-                "updated_at": {"S": "2024-02-01T00:00:00"}
-            }
+            {"id": {"S": "1"}, "updated_at": {"S": "2024-01-01T00:00:00"}},
+            {"id": {"S": "2"}, "updated_at": {"S": "2024-02-01T00:00:00"}},
+            {"id": {"S": "3"}, "updated_at": {"S": "2024-02-01T00:00:00"}},
         ]
         for item in items:
             client.put_item(TableName=db_name, Item=item)
 
-    local_stack = (
-        LocalStackContainer(image="localstack/localstack:4.0.3")
-        .with_services("dynamodb")
-    )
+    local_stack = LocalStackContainer(
+        image="localstack/localstack:4.0.3"
+    ).with_services("dynamodb")
     local_stack.start()
     wait_for_logs(local_stack, "Ready.")
     load_test_data(local_stack)
 
-    import pdb; pdb.set_trace()
     local_stack.stop()

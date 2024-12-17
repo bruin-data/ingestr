@@ -2,7 +2,7 @@ import re
 from typing import Optional
 from urllib.parse import ParseResult, parse_qs
 
-AWS_ENDPOINT_PATTERN = re.compile("dynamodb\.(.+)\.amazonaws\.com:443")
+AWS_ENDPOINT_PATTERN = re.compile(".*\.(.+)\.amazonaws\.com:443")
 
 
 def infer_aws_region(uri: ParseResult) -> Optional[str]:
