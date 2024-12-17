@@ -1,9 +1,10 @@
+import re
 import base64
 import csv
 import json
 from datetime import date
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse, ParseResult
 
 import dlt
 import pendulum
@@ -45,6 +46,7 @@ from ingestr.src.zendesk.helpers.credentials import (
 )
 
 from ingestr.src.time import isotime
+from ingestr.src.cloud import infer_aws_region
 
 
 class SqlSource:
@@ -1038,6 +1040,8 @@ class AsanaSource:
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)
         return src.with_resources(table)
 
+    
+
 class DynamoDBSource:
     def handles_incrementality(self) -> bool:
         return False
@@ -1045,7 +1049,7 @@ class DynamoDBSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
 
-        region = parsed_uri.hostname
+        region = infer_aws_region(parsed_uri)
         if not region:
             raise ValueError("Region is required to connect to Dynamodb")
 
