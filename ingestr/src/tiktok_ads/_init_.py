@@ -16,9 +16,10 @@ def find_intervals(
     by_hour=False,
 ):
     intervals = []
+    print("start_day",current_date)
+    print("end_date",end_date)
     while current_date <= end_date:
         if by_hour:
-            # Single day intervals
             interval_end = current_date.end_of("day")
             if interval_end > end_date:
                 interval_end = end_date
@@ -86,15 +87,14 @@ def tiktok_source(
         if is_incremental
         else None,
     ) -> Iterable[TDataItem]:
-        current_date = start_date
+        current_date = start_date.in_tz(time_zone)
 
         if datetime is not None:
             datetime_str = datetime.last_value
-            current_date = ensure_pendulum_datetime(datetime_str)
+            current_date = ensure_pendulum_datetime(datetime_str).in_tz(time_zone)
         
         list_of_interval = find_intervals(current_date=current_date,end_date=end_date,interval_days=interval_days)
         
-        #test
         for start, end in list_of_interval:
             print(f"Start: {start}, End: {end}")
     

@@ -59,7 +59,7 @@ class TikTokAPI:
             "campaign_id": "AUCTION_CAMPAIGN",
             "adgroup_id": "AUCTION_ADGROUP",
         }
-        
+
         data_level = "AUCTION_AD"
         for id_dimension in dimensions:
             if id_dimension in data_level_mapping:
@@ -105,6 +105,7 @@ class TikTokAPI:
                 break
 
             current_page += 1
+        print("len of all items", len(items))
         return all_items
 
     def fetch_reports(
