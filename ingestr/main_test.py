@@ -5,10 +5,13 @@ import shutil
 import string
 import tempfile
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
+import pendulum
 import duckdb
 import numpy as np
 import pandas as pd  # type: ignore
@@ -1544,33 +1547,44 @@ def test_db_to_db_exclude_columns(source, dest):
 
 def test_dynamodb_to_duckdb():
     db_name = f"dynamodb_test_{get_random_string(5)}"
+    table_cfg = {
+        "TableName": db_name,
+        "KeySchema": [
+            {
+                "AttributeName": "id",
+                "KeyType": "HASH",
+            }
+        ],
+        "AttributeDefinitions": [
+            {"AttributeName": "id", "AttributeType": "S"},
+        ],
+        "ProvisionedThroughput": {
+            "ReadCapacityUnits": 35000,
+            "WriteCapacityUnits": 35000,
+        },
+    }
+
+    items = [
+        {"id": {"S": "1"}, "updated_at": {"S": "2024-01-01T00:00:00"}},
+        {"id": {"S": "2"}, "updated_at": {"S": "2024-02-01T00:00:00"}},
+        {"id": {"S": "3"}, "updated_at": {"S": "2024-03-01T00:00:00"}},
+    ]
 
     def load_test_data(ls):
         client = ls.get_client("dynamodb")
-        table_cfg = {
-            "TableName": db_name,
-            "KeySchema": [
-                {
-                    "AttributeName": "id",
-                    "KeyType": "HASH",
-                }
-            ],
-            "AttributeDefinitions": [
-                {"AttributeName": "id", "AttributeType": "S"},
-            ],
-            "ProvisionedThroughput": {
-                "ReadCapacityUnits": 35000,
-                "WriteCapacityUnits": 35000,
-            },
-        }
         client.create_table(**table_cfg)
-        items = [
-            {"id": {"S": "1"}, "updated_at": {"S": "2024-01-01T00:00:00"}},
-            {"id": {"S": "2"}, "updated_at": {"S": "2024-02-01T00:00:00"}},
-            {"id": {"S": "3"}, "updated_at": {"S": "2024-02-01T00:00:00"}},
-        ]
         for item in items:
             client.put_item(TableName=db_name, Item=item)
+    
+    def items_to_list(items):
+        """converts dynamodb item list to list of dics"""
+        result = []
+        for i in items:
+            entry = {}
+            for key, val in i.items():
+                entry[key] = list(val.values())[0]
+            result.append(entry)
+        return result
 
     local_stack = LocalStackContainer(
         image="localstack/localstack:4.0.3"
@@ -1579,4 +1593,34 @@ def test_dynamodb_to_duckdb():
     wait_for_logs(local_stack, "Ready.")
     load_test_data(local_stack)
 
+    dynamodb_url = urlparse(local_stack.get_url())
+    src_uri = (
+        f"dynamodb://{dynamodb_url.netloc}?" +
+        f"region={local_stack.env['AWS_DEFAULT_REGION']}&" +
+        f"access_key_id={local_stack.env['AWS_ACCESS_KEY_ID']}&" +
+        f"secret_access_key={local_stack.env['AWS_SECRET_ACCESS_KEY']}"
+    )
+
+    # generate a temporary file to write to.
+    # we delete the file post creation so that duckdb
+    # doesn't complain that it's not a valid db file.
+    (fd, dest) = tempfile.mkstemp(prefix="ingestr-dynamodb-test-", suffix=".db")
+    os.close(fd)
+    os.remove(dest)
+
+    dest_uri = f"duckdb:///{dest}"
+    dest_table = f"public.{db_name}"
+    result = invoke_ingest_command(src_uri, db_name, dest_uri, dest_table)
+    if result.exception is not None:
+        traceback.print_exception(*result.exc_info)
+        raise AssertionError(result.exception)
+    dest_engine = sqlalchemy.create_engine(dest_uri)
+    with dest_engine.begin() as conn:
+        result = conn.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
+        expect = items_to_list(items)
+        for i in range(len(result)):
+            assert result[i][0] == expect[i]["id"]
+            assert result[i][1] == pendulum.parse(expect[i]["updated_at"])
+
+    os.remove(dest)
     local_stack.stop()

@@ -1058,7 +1058,7 @@ class DynamoDBSource:
     def get_endpoint_url(self, url: ParseResult) -> str:
         if self.AWS_ENDPOINT_PATTERN.match(url.netloc) is not None:
             return f"https://{url.netloc}"
-        return url.netloc
+        return f"http://{url.netloc}"
 
     def handles_incrementality(self) -> bool:
         return False
@@ -1068,7 +1068,7 @@ class DynamoDBSource:
 
         region = self.infer_aws_region(parsed_uri)
         if not region:
-            raise ValueError("Region is required to connect to Dynamodb")
+            raise ValueError("region is required to connect to Dynamodb")
 
         qs = parse_qs(quote(parsed_uri.query, safe="=&"))
         access_key = qs.get("access_key_id")
@@ -1088,11 +1088,11 @@ class DynamoDBSource:
         )
 
         incremental = None
-        incremental_key = kwargs.get("incremental_key", "").strip()
+        incremental_key = kwargs.get("incremental_key")
 
         if incremental_key:
             incremental = dlt.sources.incremental(
-                incremental_key,
+                incremental_key.strip(),
                 initial_value=isotime(kwargs.get("interval_start")),
                 end_value=isotime(kwargs.get("interval_end")),
             )
