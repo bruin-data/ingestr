@@ -1,6 +1,5 @@
 from datetime import timedelta
 from typing import Iterable, Optional
-from zoneinfo import ZoneInfo
 
 import dlt
 import pendulum
@@ -10,84 +9,27 @@ from dlt.sources import DltResource
 
 from .tiktok_helpers import TikTokAPI
 
-
-def fetch_data_by_interval(
-    tiktok_api,
-    advertiser_id: str,
-    dimensions: list[str],
-    metrics: list[str],
-    current_date: pendulum.DateTime,
-    end_date: pendulum.DateTime,
-    interval_days: int,
-    filters=None,
-) -> Iterable[TDataItem]:
-    # The API allows fetching data for the same date (e.g., 2024-01-01 to 2024-01-01),
-    # and its side effect is that it will fetch data atleast one time by default
-    # if the incremental load date matches the start date
-    print("current_date",current_date)
-    print("end_date",end_date)
-    while current_date <= end_date:
-        interval_end = min(current_date + timedelta(days=interval_days), end_date)
-
-        print(f"Fetching data for interval: {current_date} - {interval_end}")
-
-        for report in fetch_tiktok_reports(
-            tiktok_api=tiktok_api,
-            current_date=current_date,
-            interval_end=interval_end,
-            advertiser_id=advertiser_id,
-            dimensions=dimensions,
-            metrics=metrics,
-            filters=filters,
-        ):
-            yield report
-
-        current_date = interval_end + timedelta(seconds=1)
-
 def find_intervals(
     current_date: pendulum.DateTime,
     end_date: pendulum.DateTime,
     interval_days: int,
-    deltaTime: int,
-) :
-    intervals = []
-
-    while current_date <= end_date:
-        interval_end = min(current_date + timedelta(days=interval_days), end_date)
-        intervals.append((current_date, interval_end))
-        current_date = interval_end + timedelta(days=deltaTime)
-    
-    return intervals
-
-
-# The API allows fetching data only if date is less than 24 hours and also
-# it should be of same day,
-def fetch_data_hourly(
-    dimensions,
-    end_date: pendulum.DateTime,
-    start_date: pendulum.DateTime,
-    tiktok_api,
-    advertiser_id,
-    metrics,
+    by_hour=False,
 ):
-    #12-12-13-13
-    current_date = start_date
+    intervals = []
     while current_date <= end_date:
-        interval_end = current_date
-        print(f"Fetching data for interval: {current_date} - {interval_end}")
-        for report in fetch_tiktok_reports(
-            tiktok_api=tiktok_api,
-            current_date=current_date,
-            interval_end=interval_end,
-            advertiser_id=advertiser_id,
-            dimensions=dimensions,
-            metrics=metrics,
-            filters=None,
-        ):
-            yield report
+        if by_hour:
+            # Single day intervals
+            interval_end = current_date.end_of("day")
+            if interval_end > end_date:
+                interval_end = end_date
+            intervals.append((current_date.start_of("day"), interval_end))
+            current_date = current_date.add(days=1)
+        else:
+            interval_end = min(current_date.add(days=interval_days), end_date)
+            intervals.append((current_date, interval_end))
+            current_date = interval_end.add(days=1)
 
-        current_date = current_date.add(days=1)
-
+    return intervals
 
 def fetch_tiktok_reports(
     tiktok_api: TikTokAPI,
@@ -99,15 +41,14 @@ def fetch_tiktok_reports(
     filters: Optional[dict] | None,
 ) -> Iterable[TDataItem]:
     try:
-        for report in tiktok_api.fetch_reports(
+        yield from tiktok_api.fetch_reports(
             start_time=current_date,
             end_time=interval_end,
             advertiser_id=advertiser_id,
             dimensions=dimensions,
             metrics=metrics,
             filters=filters,
-        ):
-            yield report
+        )
     except Exception as e:
         raise RuntimeError(f"Error fetching TikTok report: {e}")
 
@@ -118,11 +59,12 @@ def tiktok_source(
     end_date: pendulum.DateTime,
     access_token: str,
     advertiser_id: str,
+    time_zone:str,
     dimensions: list[str],
     metrics: list[str],
     filters=None,
 ) -> DltResource:
-    tiktok_api = TikTokAPI(access_token)
+    tiktok_api = TikTokAPI(access_token=access_token,time_zone=time_zone)
     incremental_loading_param = ""
     is_incremental = False
     interval_days = 365
@@ -134,8 +76,9 @@ def tiktok_source(
     if "stat_time_hour" in dimensions:
         incremental_loading_param = "stat_time_hour"
         is_incremental = True
+        interval_days = 0
+
     @dlt.resource(write_disposition="merge", primary_key=dimensions)
-    
     def custom_reports(
         datetime=dlt.sources.incremental(
             incremental_loading_param, start_date
@@ -144,32 +87,26 @@ def tiktok_source(
         else None,
     ) -> Iterable[TDataItem]:
         current_date = start_date
-        print("start_date",start_date)
-        print("end_date",end_date)
 
         if datetime is not None:
             datetime_str = datetime.last_value
-            current_date = ensure_pendulum_datetime(datetime_str).in_tz('Asia/Kathmandu')
-
-        if "stat_time_hour" in dimensions:
-            yield from fetch_data_hourly(
-                dimensions=dimensions,
-                end_date=end_date,
-                start_date=current_date,
+            current_date = ensure_pendulum_datetime(datetime_str)
+        
+        list_of_interval = find_intervals(current_date=current_date,end_date=end_date,interval_days=interval_days)
+        
+        #test
+        for start, end in list_of_interval:
+            print(f"Start: {start}, End: {end}")
+    
+        for start, end in list_of_interval:
+            yield from fetch_tiktok_reports(
                 tiktok_api=tiktok_api,
+                current_date=start,
+                interval_end=end,
                 advertiser_id=advertiser_id,
-                metrics=metrics,
-            )
-        else:
-            yield from fetch_data_by_interval(
                 dimensions=dimensions,
-                tiktok_api=tiktok_api,
                 metrics=metrics,
-                current_date=current_date,
-                interval_days=interval_days,
-                end_date=end_date,
-                advertiser_id=advertiser_id,
-                filters=filters,
-            )
+                filters=None,
+            )         
 
     return custom_reports
