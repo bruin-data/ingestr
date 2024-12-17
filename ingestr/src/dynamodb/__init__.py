@@ -32,8 +32,8 @@ def parseSchema(table) -> TableSchema:
     return schema
 
 
-@dlt.source(name="dynamodb")
-def dynamodb_source(
+@dlt.source
+def dynamodb(
     table_name: str,
     credentials: AwsCredentials,
     incremental: Optional[dlt.sources.incremental] = None,
@@ -54,7 +54,10 @@ def dynamodb_source(
     yield resource(table, incremental)
 
 
-def dynamodb_table(table, incremental: Optional[dlt.sources.incremental] = None):
+def dynamodb_table(
+        table,
+        incremental: Optional[dlt.sources.incremental] = None,
+):
     scan_args = {}
     if incremental and incremental.last_value:
         scan_args[FILTER_KEY] = Attr(incremental.cursor_path).gt(incremental.last_value)

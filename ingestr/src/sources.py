@@ -22,7 +22,7 @@ from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
-from ingestr.src.dynamodb import dynamodb_source
+from ingestr.src.dynamodb import dynamodb
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
@@ -1067,6 +1067,10 @@ class DynamoDBSource:
         incremental_key = kwargs.get("incremental_key", "").strip()
 
         if incremental_key:
-            incremental = dlt.sources.incremental(incremental_key)
+            incremental = dlt.sources.incremental(
+                incremental_key,
+                initial_value=kwargs.get("interval_start"),
+                end_value=kwargs.get("interval_end")
+            )
 
-        return dynamodb_source(table, creds, incremental)
+        return dynamodb(table, creds, incremental)
