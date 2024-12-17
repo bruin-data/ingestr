@@ -1017,13 +1017,14 @@ class TikTokSource:
             raise ValueError("advertiser_id is required to connect to TikTok")
 
         if kwargs.get("interval_start"):
-            start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
+            start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start"))).in_tz('Asia/Kathmandu')
         else:
             Default_date = pendulum.now().subtract(days=90)
             start_date = ensure_pendulum_datetime(Default_date)
+            
 
         if kwargs.get("interval_end"):
-            end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
+            end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end"))).in_tz('Asia/Kathmandu')
         else:
             end_date = ensure_pendulum_datetime(pendulum.now())
 

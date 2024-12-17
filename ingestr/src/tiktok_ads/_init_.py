@@ -1,5 +1,6 @@
 from datetime import timedelta
 from typing import Iterable, Optional
+from zoneinfo import ZoneInfo
 
 import dlt
 import pendulum
@@ -23,6 +24,8 @@ def fetch_data_by_interval(
     # The API allows fetching data for the same date (e.g., 2024-01-01 to 2024-01-01),
     # and its side effect is that it will fetch data atleast one time by default
     # if the incremental load date matches the start date
+    print("current_date",current_date)
+    print("end_date",end_date)
     while current_date <= end_date:
         interval_end = min(current_date + timedelta(days=interval_days), end_date)
 
@@ -41,6 +44,21 @@ def fetch_data_by_interval(
 
         current_date = interval_end + timedelta(seconds=1)
 
+def find_intervals(
+    current_date: pendulum.DateTime,
+    end_date: pendulum.DateTime,
+    interval_days: int,
+    deltaTime: int,
+) :
+    intervals = []
+
+    while current_date <= end_date:
+        interval_end = min(current_date + timedelta(days=interval_days), end_date)
+        intervals.append((current_date, interval_end))
+        current_date = interval_end + timedelta(days=deltaTime)
+    
+    return intervals
+
 
 # The API allows fetching data only if date is less than 24 hours and also
 # it should be of same day,
@@ -52,17 +70,14 @@ def fetch_data_hourly(
     advertiser_id,
     metrics,
 ):
-    end_date = end_date.end_of("day")
+    #12-12-13-13
     current_date = start_date
     while current_date <= end_date:
-        day_start = current_date.start_of("day")
-        day_end = current_date.end_of("day")
-
-        interval_end = min(day_end, end_date)
-        print(f"Fetching data for interval: {day_start} - {interval_end}")
+        interval_end = current_date
+        print(f"Fetching data for interval: {current_date} - {interval_end}")
         for report in fetch_tiktok_reports(
             tiktok_api=tiktok_api,
-            current_date=day_start,
+            current_date=current_date,
             interval_end=interval_end,
             advertiser_id=advertiser_id,
             dimensions=dimensions,
@@ -119,20 +134,22 @@ def tiktok_source(
     if "stat_time_hour" in dimensions:
         incremental_loading_param = "stat_time_hour"
         is_incremental = True
-
     @dlt.resource(write_disposition="merge", primary_key=dimensions)
+    
     def custom_reports(
         datetime=dlt.sources.incremental(
-            incremental_loading_param, start_date.isoformat()
+            incremental_loading_param, start_date
         )
         if is_incremental
         else None,
     ) -> Iterable[TDataItem]:
         current_date = start_date
+        print("start_date",start_date)
+        print("end_date",end_date)
 
         if datetime is not None:
             datetime_str = datetime.last_value
-            current_date = ensure_pendulum_datetime(datetime_str)
+            current_date = ensure_pendulum_datetime(datetime_str).in_tz('Asia/Kathmandu')
 
         if "stat_time_hour" in dimensions:
             yield from fetch_data_hourly(

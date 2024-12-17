@@ -3,7 +3,6 @@ import json
 import requests
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.sources.helpers.requests import Client
-from pendulum import parse
 
 BASE_URL = "https://business-api.tiktok.com/open_api/v1.3/report/integrated/get/"
 
@@ -31,14 +30,13 @@ def flat_structure(items):
         if "dimensions" in item:
             for key, value in item["dimensions"].items():
                 if key == "stat_time_day":
-                    item["stat_time_day"] = parse(value).isoformat()
+                    item["stat_time_day"] = ensure_pendulum_datetime(value).in_tz('Asia/Kathmandu')
+                    print("stat_time_day:", item["stat_time_day"])
                 elif key == "stat_time_hour":
-                    item["stat_time_hour"] = parse(value).isoformat()
+                    item["stat_time_hour"] = ensure_pendulum_datetime(value).in_tz('Asia/Kathmandu')
                 else:
                     item[key] = value
-
     return items
-
 
 class TikTokAPI:
     def __init__(self, access_token):
