@@ -44,6 +44,8 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsToken,
 )
 
+from ingestr.src.time import isotime
+
 
 class SqlSource:
     table_builder: Callable
@@ -1069,8 +1071,8 @@ class DynamoDBSource:
         if incremental_key:
             incremental = dlt.sources.incremental(
                 incremental_key,
-                initial_value=kwargs.get("interval_start"),
-                end_value=kwargs.get("interval_end")
+                initial_value=isotime(kwargs.get("interval_start")),
+                end_value=isotime(kwargs.get("interval_end")),
             )
 
         return dynamodb(table, creds, incremental)
