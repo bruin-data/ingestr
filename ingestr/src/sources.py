@@ -1,9 +1,10 @@
+import re
 import base64
 import csv
 import json
 from datetime import date
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse, ParseResult
 
 import dlt
 import pendulum
@@ -22,7 +23,6 @@ from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
-from ingestr.src.cloud import infer_aws_region
 from ingestr.src.dynamodb import dynamodb
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
@@ -1040,13 +1040,33 @@ class AsanaSource:
 
 
 class DynamoDBSource:
+
+    AWS_ENDPOINT_PATTERN = re.compile(".*\.(.+)\.amazonaws\.com:443")
+
+    def infer_aws_region(self, uri: ParseResult) -> Optional[str]:
+        # try to infer from URI
+        matches = self.AWS_ENDPOINT_PATTERN.match(uri.netloc)
+        if matches is not None:
+            return matches[1]
+
+        # else obtain region from query string
+        region = parse_qs(uri.query).get("region")
+        if region is None:
+            return None
+        return region[0]
+    
+    def get_endpoint_url(self, url: ParseResult) -> str:
+        if self.AWS_ENDPOINT_PATTERN.match(url.netloc) is not None:
+            return f"https://{url.netloc}"
+        return url.netloc
+
     def handles_incrementality(self) -> bool:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
 
-        region = infer_aws_region(parsed_uri)
+        region = self.infer_aws_region(parsed_uri)
         if not region:
             raise ValueError("Region is required to connect to Dynamodb")
 
@@ -1064,6 +1084,7 @@ class DynamoDBSource:
             aws_access_key_id=access_key[0],
             aws_secret_access_key=TSecretStrValue(secret_key[0]),
             region_name=region,
+            endpoint_url=self.get_endpoint_url(parsed_uri),
         )
 
         incremental = None

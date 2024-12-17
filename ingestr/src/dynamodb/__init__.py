@@ -43,7 +43,7 @@ def dynamodb(
         aws_secret_access_key=credentials.aws_secret_access_key,
         region_name=credentials.region_name,
     )
-    db = sesh.resource("dynamodb")
+    db = sesh.resource("dynamodb", endpoint_url=credentials.endpoint_url)
     table = db.Table(table_name)
     schema = parseSchema(table)
     resource = dlt.resource(
