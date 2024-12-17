@@ -16,8 +16,6 @@ def find_intervals(
     by_hour=False,
 ):
     intervals = []
-    print("start_day",current_date)
-    print("end_date",end_date)
     while current_date <= end_date:
         if by_hour:
             interval_end = current_date.end_of("day")
@@ -95,8 +93,6 @@ def tiktok_source(
         
         list_of_interval = find_intervals(current_date=current_date,end_date=end_date,interval_days=interval_days)
         
-        for start, end in list_of_interval:
-            print(f"Start: {start}, End: {end}")
     
         for start, end in list_of_interval:
             yield from fetch_tiktok_reports(

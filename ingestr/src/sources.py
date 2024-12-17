@@ -1013,7 +1013,6 @@ class TikTokSource:
             raise ValueError("access_token is required to connect to TikTok")
         
         time_zone =  source_fields.get("time_zone", "UTC")
-        print("time_zone",time_zone[0])
 
         advertiser_id = source_fields.get("advertiser_id")
         if not advertiser_id:

@@ -105,7 +105,6 @@ class TikTokAPI:
                 break
 
             current_page += 1
-        print("len of all items", len(items))
         return all_items
 
     def fetch_reports(
