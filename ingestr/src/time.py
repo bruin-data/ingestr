@@ -1,5 +1,6 @@
-from typing import Optional
 import datetime
+from typing import Optional
+
 
 def isotime(dt: Optional[datetime.datetime]) -> Optional[str]:
     """

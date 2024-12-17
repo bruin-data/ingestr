@@ -55,8 +55,8 @@ def dynamodb(
 
 
 def dynamodb_table(
-        table,
-        incremental: Optional[dlt.sources.incremental] = None,
+    table,
+    incremental: Optional[dlt.sources.incremental] = None,
 ):
     scan_args = {}
     if incremental and incremental.last_value:

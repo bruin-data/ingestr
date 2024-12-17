@@ -1,10 +1,9 @@
-import re
 import base64
 import csv
 import json
 from datetime import date
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, quote, urlparse, ParseResult
+from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
 import pendulum
@@ -23,6 +22,7 @@ from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
+from ingestr.src.cloud import infer_aws_region
 from ingestr.src.dynamodb import dynamodb
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
@@ -39,14 +39,12 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.time import isotime
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-
-from ingestr.src.time import isotime
-from ingestr.src.cloud import infer_aws_region
 
 
 class SqlSource:
@@ -1023,7 +1021,7 @@ class AsanaSource:
 
         workspace = parsed_uri.hostname
         access_token = params.get("access_token")
-        
+
         if not workspace:
             raise ValueError("workspace ID must be specified in the URI")
 
@@ -1040,7 +1038,6 @@ class AsanaSource:
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)
         return src.with_resources(table)
 
-    
 
 class DynamoDBSource:
     def handles_incrementality(self) -> bool:
