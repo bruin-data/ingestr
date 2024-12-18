@@ -88,7 +88,6 @@ class TikTokAPI:
         client = create_client()
         while True:
             self.params["page"] = current_page
-            print("page size", self.page_size)
             response = client.get(
                 url=BASE_URL, headers=self.headers, params=self.params
             )

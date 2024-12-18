@@ -1031,7 +1031,9 @@ class TikTokSource:
 
         page_size = kwargs.get("page_size")
         if page_size is None:
-            raise ValueError("The 'page_size' flag is required and must be less than or equal to 1000.")
+            raise ValueError(
+                "The 'page_size' flag is required and must be less than or equal to 1000."
+            )
 
         if table.startswith("custom:"):
             fields = table.split(":", 3)

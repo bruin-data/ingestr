@@ -8,6 +8,7 @@ from dlt.sources import DltResource
 
 from .tiktok_helpers import TikTokAPI
 
+
 def find_intervals(
     current_date: pendulum.DateTime,
     end_date: pendulum.DateTime,
