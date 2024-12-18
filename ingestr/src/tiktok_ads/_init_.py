@@ -52,12 +52,14 @@ def tiktok_source(
     access_token: str,
     advertiser_id: str,
     time_zone: str,
-    page_size:int,
+    page_size: int,
     dimensions: list[str],
     metrics: list[str],
     filters=None,
 ) -> DltResource:
-    tiktok_api = TikTokAPI(access_token=access_token, time_zone=time_zone, page_size=page_size)
+    tiktok_api = TikTokAPI(
+        access_token=access_token, time_zone=time_zone, page_size=page_size
+    )
     incremental_loading_param = ""
     is_incremental = False
     interval_days = 365

@@ -88,7 +88,7 @@ class TikTokAPI:
         client = create_client()
         while True:
             self.params["page"] = current_page
-            print("page size",self.page_size)
+            print("page size", self.page_size)
             response = client.get(
                 url=BASE_URL, headers=self.headers, params=self.params
             )
@@ -104,7 +104,7 @@ class TikTokAPI:
 
             for item in items:
                 yield item
-            
+
             page_info = result_data.get("page_info", {})
             total_pages = page_info.get("total_page", 1)
 
@@ -112,7 +112,6 @@ class TikTokAPI:
                 break
 
             current_page += 1
-        
 
     def fetch_reports(
         self, start_time, end_time, advertiser_id, dimensions, metrics, filters

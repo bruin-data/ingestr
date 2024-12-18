@@ -1020,19 +1020,19 @@ class TikTokSource:
 
         start_date = pendulum.now().subtract(days=90).in_tz(time_zone[0])
         end_date = ensure_pendulum_datetime(pendulum.now()).in_tz(time_zone[0])
-        page_size = 1000
 
-        if kwargs.get("interval_start"):
-            start_date = ensure_pendulum_datetime(kwargs.get("interval_start")).in_tz(time_zone[0])
-            
-        if kwargs.get("interval_end"):
-            end_date = ensure_pendulum_datetime(kwargs.get("interval_end")).in_tz(
-                time_zone[0]
-            )
+        interval_start = kwargs.get("interval_start")
+        if interval_start is not None:
+            start_date = ensure_pendulum_datetime(interval_start).in_tz(time_zone[0])
 
-        if kwargs.get("page_size"):
-            page_size = kwargs.get("page_size")
-        
+        interval_end = kwargs.get("interval_end")
+        if interval_end is not None:
+            end_date = ensure_pendulum_datetime(interval_end).in_tz(time_zone[0])
+
+        page_size = kwargs.get("page_size")
+        if page_size is None:
+            raise ValueError("must provide page_size")
+
         if table.startswith("custom:"):
             fields = table.split(":", 3)
             if len(fields) != 3 and len(fields) != 4:
@@ -1040,7 +1040,7 @@ class TikTokSource:
                     "Invalid TikTok custom table format. Expected format: custom:<dimensions>,<metrics> or custom:<dimensions>:<metrics>:<filters>"
                 )
 
-            dimensions = fields[1].replace(" ","").split(",")
+            dimensions = fields[1].replace(" ", "").split(",")
             if (
                 "campaign_id" not in dimensions
                 and "advertiser_id" not in dimensions
@@ -1050,12 +1050,11 @@ class TikTokSource:
                 raise ValueError(
                     "You must provide one ID dimension. Please use one ID dimension from the following options: [campaign_id, advertiser_id, adgroup_id, ad_id]"
                 )
-            
-            metrics = fields[2].replace(" ","").split(",")
+
+            metrics = fields[2].replace(" ", "").split(",")
             filters = []
             if len(fields) == 4:
-                filters = fields[3].replace(" ","").split(",")
-
+                filters = fields[3].replace(" ", "").split(",")
         return tiktok_source(
             start_date=start_date,
             end_date=end_date,
@@ -1065,7 +1064,7 @@ class TikTokSource:
             dimensions=dimensions,
             metrics=metrics,
             filters=filters,
-            page_size=page_size
+            page_size=page_size,
         ).with_resources(endpoint)
 
 
