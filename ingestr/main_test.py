@@ -1,4 +1,5 @@
 import csv
+from dataclasses import dataclass
 import os
 import random
 import shutil
@@ -8,7 +9,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import pendulum
@@ -1544,10 +1545,15 @@ def test_db_to_db_exclude_columns(source, dest):
     source.stop()
     dest.stop()
 
-@pytest.mark.parametrize(
-    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
-)
-def test_dynamodb_to_sql(dest):
+
+@dataclass
+class DynamoDBTestConfig:
+    db_name: str
+    uri: str
+    data: List[Dict]
+
+@pytest.fixture(scope="session")
+def dynamodb():
     db_name = f"dynamodb_test_{get_random_string(5)}"
     table_cfg = {
         "TableName": db_name,
@@ -1602,20 +1608,33 @@ def test_dynamodb_to_sql(dest):
         f"access_key_id={local_stack.env['AWS_ACCESS_KEY_ID']}&" +
         f"secret_access_key={local_stack.env['AWS_SECRET_ACCESS_KEY']}"
     )
+    yield DynamoDBTestConfig(
+        db_name,
+        src_uri,
+        items_to_list(items),
+    )
 
+    local_stack.stop()
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_dynamodb(dest, dynamodb):
     dest_uri = dest.start()
-    dest_table = f"public.{db_name}"
-    result = invoke_ingest_command(src_uri, db_name, dest_uri, dest_table)
+    dest_table = f"public.dynamodb_{get_random_string(7)}"
+    result = invoke_ingest_command(
+        dynamodb.uri,
+        dynamodb.db_name,
+        dest_uri,
+        dest_table,
+    )
     if result.exception is not None:
         traceback.print_exception(*result.exc_info)
         raise AssertionError(result.exception)
     dest_engine = sqlalchemy.create_engine(dest_uri)
     with dest_engine.begin() as conn:
         result = conn.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
-        expect = items_to_list(items)
         for i in range(len(result)):
-            assert result[i][0] == expect[i]["id"]
-            assert result[i][1] == pendulum.parse(expect[i]["updated_at"])
+            assert result[i][0] == dynamodb.data[i]["id"]
+            assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
 
-    dest.stop()
-    local_stack.stop()
