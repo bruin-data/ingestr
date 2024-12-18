@@ -38,7 +38,7 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
-from ingestr.src.tiktok_ads._init_ import tiktok_source
+from ingestr.src.tiktok_ads import tiktok_source
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
@@ -1031,7 +1031,7 @@ class TikTokSource:
 
         page_size = kwargs.get("page_size")
         if page_size is None:
-            raise ValueError("must provide page_size")
+            raise ValueError("The 'page_size' flag is required and must be less than or equal to 1000.")
 
         if table.startswith("custom:"):
             fields = table.split(":", 3)
