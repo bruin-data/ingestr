@@ -1058,7 +1058,7 @@ class DynamoDBSource:
     def get_endpoint_url(self, url: ParseResult) -> str:
         if self.AWS_ENDPOINT_PATTERN.match(url.netloc) is not None:
             return f"https://{url.hostname}"
-        return f"http://{url.hostname}"
+        return f"http://{url.netloc}"
 
     def handles_incrementality(self) -> bool:
         return False
