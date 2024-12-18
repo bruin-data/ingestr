@@ -1059,8 +1059,15 @@ class TikTokSource:
 
             metrics = fields[2].replace(" ", "").split(",")
             filters = []
+            filtering_param = False
             if len(fields) == 4:
+                filtering_param = True
                 filters = fields[3].replace(" ", "").split(",")
+                filter_name = filters[0].split(",")
+                field_value = filters[1:]
+                filter_value = list(map(int, field_value))
+                
+
         return tiktok_source(
             start_date=start_date,
             end_date=end_date,
@@ -1071,6 +1078,9 @@ class TikTokSource:
             metrics=metrics,
             filters=filters,
             page_size=page_size,
+            filter_name=filter_name[0],
+            filter_value= filter_value,
+            filtering_param = filtering_param
         ).with_resources(endpoint)
 
 
