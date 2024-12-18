@@ -60,7 +60,7 @@ def dynamodb_table(
 ):
     scan_args = {}
     if incremental and incremental.last_value:
-        scan_args[FILTER_KEY] = Attr(incremental.cursor_path).gt(incremental.last_value)
+        scan_args[FILTER_KEY] = Attr(incremental.cursor_path).gte(incremental.last_value)
 
     scan = table.scan(**scan_args)
     while True:

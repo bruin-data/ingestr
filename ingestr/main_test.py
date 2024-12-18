@@ -1675,9 +1675,52 @@ def dynamodb_tests() -> Iterable[Callable]:
             
         dest.stop()
 
+    def incremental_test(dest, dynamodb):
+        dest_uri = dest.start()
+        dest_table = f"public.dynamodb_{get_random_string(5)}"
+        dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+
+        result = invoke_ingest_command(
+            dynamodb.uri,
+            dynamodb.db_name,
+            dest_uri,
+            dest_table,
+            inc_strategy="merge",
+            inc_key="updated_at",
+            interval_start="2024-01-01T00:00:00",
+            interval_end="2024-02-01T00:01:00" # upto the second entry
+        )
+        assert_success(result)
+        rows = dest_engine.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
+        assert len(rows) == 2
+        for i in range(len(rows)):
+            assert rows[i][0] == dynamodb.data[i]["id"]
+            assert rows[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+
+        # ingest the rest
+        result = invoke_ingest_command(
+            dynamodb.uri,
+            dynamodb.db_name,
+            dest_uri,
+            dest_table,
+            inc_strategy="merge",
+            inc_key="updated_at",
+            interval_start="2024-02-01T00:00:00", # second entry onwards
+        )
+        assert_success(result)
+        rows = dest_engine.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
+        assert len(rows) == 3
+        for i in range(len(rows)):
+            assert rows[i][0] == dynamodb.data[i]["id"]
+            assert rows[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+            
+        dest.stop()
+        
+
     return [
         smoke_test,
         append_test,
+        incremental_test,
     ]
 
 @pytest.mark.parametrize(
