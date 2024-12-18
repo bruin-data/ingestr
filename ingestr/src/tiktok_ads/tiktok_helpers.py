@@ -49,12 +49,15 @@ def flat_structure(items, time_zone="UTC"):
 
 
 class TikTokAPI:
-    def __init__(self, access_token, time_zone, page_size):
+    def __init__(self, access_token, time_zone, page_size,filtering_param,filter_name, filter_value):
         self.headers = {
             "Access-Token": access_token,
         }
         self.time_zone = time_zone
         self.page_size = page_size
+        self.filtering_param = filtering_param
+        self.filter_name = filter_name
+        self.filter_value = filter_value
 
     def fetch_pages(
         self, advertiser_id: str, start_time, end_time, dimensions, metrics, filters
@@ -74,7 +77,13 @@ class TikTokAPI:
         current_page = 1
         start_time = ensure_pendulum_datetime(start_time).to_date_string()
         end_time = ensure_pendulum_datetime(end_time).to_date_string()
-
+        
+        filtering = [{
+                "field_name": self.filter_name,
+                "filter_type": "IN",
+                "filter_value": json.dumps(self.filter_value)
+                }]
+                 
         self.params = {
             "advertiser_id": advertiser_id,
             "report_type": "BASIC",
@@ -85,6 +94,8 @@ class TikTokAPI:
             "dimensions": json.dumps(dimensions),
             "metrics": json.dumps(metrics),
         }
+        if self.filtering_param:
+            self.params["filtering"] = json.dumps(filtering)
         client = create_client()
         while True:
             self.params["page"] = current_page
