@@ -36,6 +36,7 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
+    TikTokSource,
     ZendeskSource,
 )
 
@@ -143,8 +144,13 @@ class SourceDestinationFactory:
             return ArrowMemoryMappedSource()
         elif self.source_scheme == "s3":
             return S3Source()
+
+        elif self.source_scheme == "tiktok":
+            return TikTokSource()
+
         elif self.source_scheme == "asana":
             return AsanaSource()
+
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 

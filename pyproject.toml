@@ -82,6 +82,7 @@ exclude = [
     'src/filesystem/.*',
     'src/zendesk/.*',
     'src/asana_source/.*',
+    'src/tiktok_ads/.*',
   ]
 
 [[tool.mypy.overrides]]
@@ -103,6 +104,7 @@ module = [
   "ingestr.src.filesystem.*",
   "ingestr.src.zendesk.*",
   "ingestr.src.asana_source.*",
+  "ingestr.src.tiktok_ads.*",
 ]
 follow_imports = "skip"
 

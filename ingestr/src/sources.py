@@ -1,6 +1,7 @@
 import base64
 import csv
 import json
+import os
 from datetime import date
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
@@ -37,6 +38,7 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.tiktok_ads import tiktok_source
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
@@ -115,8 +117,6 @@ class ArrowMemoryMappedSource:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        import os
-
         incremental = None
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
@@ -997,6 +997,80 @@ class S3Source:
         ).with_resources(endpoint)
 
 
+class TikTokSource:
+    # tittok://?access_token=<access_token>&advertiser_id=<advertiser_id>
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        endpoint = "custom_reports"
+
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        access_token = source_fields.get("access_token")
+        if not access_token:
+            raise ValueError("access_token is required to connect to TikTok")
+
+        time_zone = source_fields.get("time_zone", "UTC")
+
+        advertiser_id = source_fields.get("advertiser_id")
+        if not advertiser_id:
+            raise ValueError("advertiser_id is required to connect to TikTok")
+
+        start_date = pendulum.now().subtract(days=90).in_tz(time_zone[0])
+        end_date = ensure_pendulum_datetime(pendulum.now()).in_tz(time_zone[0])
+
+        interval_start = kwargs.get("interval_start")
+        if interval_start is not None:
+            start_date = ensure_pendulum_datetime(interval_start).in_tz(time_zone[0])
+
+        interval_end = kwargs.get("interval_end")
+        if interval_end is not None:
+            end_date = ensure_pendulum_datetime(interval_end).in_tz(time_zone[0])
+
+        page_size = kwargs.get("page_size")
+        if page_size is not None and not isinstance(page_size, int):
+            page_size = int(page_size)
+
+        if page_size > 1000:
+            page_size = 1000
+
+        if table.startswith("custom:"):
+            fields = table.split(":", 3)
+            if len(fields) != 3 and len(fields) != 4:
+                raise ValueError(
+                    "Invalid TikTok custom table format. Expected format: custom:<dimensions>,<metrics> or custom:<dimensions>:<metrics>:<filters>"
+                )
+
+            dimensions = fields[1].replace(" ", "").split(",")
+            if (
+                "campaign_id" not in dimensions
+                and "advertiser_id" not in dimensions
+                and "adgroup_id" not in dimensions
+                and "ad_id" not in dimensions
+            ):
+                raise ValueError(
+                    "You must provide one ID dimension. Please use one ID dimension from the following options: [campaign_id, advertiser_id, adgroup_id, ad_id]"
+                )
+
+            metrics = fields[2].replace(" ", "").split(",")
+            filters = []
+            if len(fields) == 4:
+                filters = fields[3].replace(" ", "").split(",")
+        return tiktok_source(
+            start_date=start_date,
+            end_date=end_date,
+            access_token=access_token[0],
+            advertiser_id=advertiser_id[0],
+            time_zone=time_zone[0],
+            dimensions=dimensions,
+            metrics=metrics,
+            filters=filters,
+            page_size=page_size,
+        ).with_resources(endpoint)
+
+
 class AsanaSource:
     resources = [
         "workspaces",
@@ -1018,7 +1092,7 @@ class AsanaSource:
 
         workspace = parsed_uri.hostname
         access_token = params.get("access_token")
-        
+
         if not workspace:
             raise ValueError("workspace ID must be specified in the URI")
 
