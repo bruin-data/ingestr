@@ -13,22 +13,12 @@ def find_intervals(
     current_date: pendulum.DateTime,
     end_date: pendulum.DateTime,
     interval_days: int,
-    by_hour=False,
 ):
     intervals = []
     while current_date <= end_date:
-        if by_hour:
-            interval_end = min(current_date.add(days=interval_days), end_date)
-            intervals.append((current_date, interval_end))
-            current_date = interval_end.add(days=1)
-        else:
-            interval_end = min(current_date.add(days=interval_days - 1), end_date)
-            intervals.append((current_date, interval_end))
-
-            if interval_end == end_date:
-                break
-
-            current_date = interval_end
+        interval_end = min(current_date.add(days=interval_days), end_date)
+        intervals.append((current_date, interval_end))
+        current_date = interval_end.add(days=1)
 
     return intervals
 
@@ -70,7 +60,7 @@ def tiktok_source(
     incremental_loading_param = ""
     is_incremental = False
     interval_days = 365
-    by_hour = False
+
     if "stat_time_day" in dimensions:
         incremental_loading_param = "stat_time_day"
         is_incremental = True
@@ -80,7 +70,6 @@ def tiktok_source(
         incremental_loading_param = "stat_time_hour"
         is_incremental = True
         interval_days = 0
-        by_hour = True
 
     @dlt.resource(write_disposition="merge", primary_key=dimensions)
     def custom_reports(
@@ -98,7 +87,6 @@ def tiktok_source(
             current_date=current_date,
             end_date=end_date,
             interval_days=interval_days,
-            by_hour=by_hour,
         )
 
         for start, end in list_of_interval:
