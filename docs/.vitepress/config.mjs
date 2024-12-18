@@ -90,6 +90,7 @@ export default defineConfig({
               { text: "AppsFlyer", link: "/supported-sources/appsflyer.md" },
               { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
+              { text: "DynamoDB", link: "/supported-sources/dynamodb.md" },
               {
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
