@@ -1544,8 +1544,10 @@ def test_db_to_db_exclude_columns(source, dest):
     source.stop()
     dest.stop()
 
-
-def test_dynamodb_to_duckdb():
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_dynamodb_to_sql(dest):
     db_name = f"dynamodb_test_{get_random_string(5)}"
     table_cfg = {
         "TableName": db_name,
@@ -1601,14 +1603,7 @@ def test_dynamodb_to_duckdb():
         f"secret_access_key={local_stack.env['AWS_SECRET_ACCESS_KEY']}"
     )
 
-    # generate a temporary file to write to.
-    # we delete the file post creation so that duckdb
-    # doesn't complain that it's not a valid db file.
-    (fd, dest) = tempfile.mkstemp(prefix="ingestr-dynamodb-test-", suffix=".db")
-    os.close(fd)
-    os.remove(dest)
-
-    dest_uri = f"duckdb:///{dest}"
+    dest_uri = dest.start()
     dest_table = f"public.{db_name}"
     result = invoke_ingest_command(src_uri, db_name, dest_uri, dest_table)
     if result.exception is not None:
@@ -1622,5 +1617,5 @@ def test_dynamodb_to_duckdb():
             assert result[i][0] == expect[i]["id"]
             assert result[i][1] == pendulum.parse(expect[i]["updated_at"])
 
-    os.remove(dest)
+    dest.stop()
     local_stack.stop()
