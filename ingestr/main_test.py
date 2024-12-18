@@ -20,6 +20,7 @@ import pyarrow as pa  # type: ignore
 import pyarrow.ipc as ipc  # type: ignore
 import pytest
 import sqlalchemy
+from sqlalchemy.pool import NullPool
 from confluent_kafka import Producer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
@@ -1618,32 +1619,72 @@ def dynamodb():
 
 @pytest.fixture
 def dynamodb_tests() -> Iterable[Callable]:
-    def test_append(dest_uri, dynamodb):
-        dest_table = f"public.dynamodb_{get_random_string(7)}"
+    def assert_success(result):
+        if result.exception is not None:
+            traceback.print_exception(*result.exc_info)
+            raise AssertionError(result.exception)
+
+
+    def smoke_test(dest, dynamodb):
+        dest_uri = dest.start()
+        dest_table = f"public.dynamodb_{get_random_string(5)}"
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+
         result = invoke_ingest_command(
             dynamodb.uri,
             dynamodb.db_name,
             dest_uri,
             dest_table,
             "append",
+            "updated_at"
         )
-        if result.exception is not None:
-            traceback.print_exception(*result.exc_info)
-            raise AssertionError(result.exception)
-        dest_engine = sqlalchemy.create_engine(dest_uri)
-        with dest_engine.begin() as conn:
-            result = conn.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
+
+        assert_success(result)
+        result = dest_engine.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
+        assert len(result) == 3
+        for i in range(len(result)):
+            assert result[i][0] == dynamodb.data[i]["id"]
+            assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+            
+        dest.stop()
+
+    def append_test(dest, dynamodb):
+        dest_uri = dest.start()
+        dest_table = f"public.dynamodb_{get_random_string(5)}"
+
+        # connection pooling causes issues with duckdb, when the connection
+        # is reused below, so we disable pooling.
+        dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+
+        # we run it twice to assert that the data in destination doesn't change
+        for i in range(2):
+            result = invoke_ingest_command(
+                dynamodb.uri,
+                dynamodb.db_name,
+                dest_uri,
+                dest_table,
+                "append",
+                "updated_at"
+            )
+
+            assert_success(result)
+            result = dest_engine.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
+            assert len(result) == 3
             for i in range(len(result)):
                 assert result[i][0] == dynamodb.data[i]["id"]
                 assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+            
+        dest.stop()
 
-    return [test_append]
+    return [
+        smoke_test,
+        append_test,
+    ]
 
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_dynamodb(dest, dynamodb, dynamodb_tests):
-    dest_uri = dest.start()
     for test in dynamodb_tests:
-        test(dest_uri, dynamodb)
+        test(dest, dynamodb)
 
