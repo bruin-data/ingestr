@@ -1617,7 +1617,6 @@ def dynamodb():
     local_stack.stop()
 
 
-@pytest.fixture
 def dynamodb_tests() -> Iterable[Callable]:
     def assert_success(result):
         if result.exception is not None:
@@ -1684,7 +1683,7 @@ def dynamodb_tests() -> Iterable[Callable]:
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
-def test_dynamodb(dest, dynamodb, dynamodb_tests):
-    for test in dynamodb_tests:
-        test(dest, dynamodb)
+@pytest.mark.parametrize("testcase", dynamodb_tests())
+def test_dynamodb(dest, dynamodb, testcase):
+    testcase(dest, dynamodb)
 
