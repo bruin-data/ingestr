@@ -1041,7 +1041,7 @@ class AsanaSource:
 
 class DynamoDBSource:
 
-    AWS_ENDPOINT_PATTERN = re.compile(".*\.(.+)\.amazonaws\.com:443")
+    AWS_ENDPOINT_PATTERN = re.compile(".*\.(.+)\.amazonaws\.com")
 
     def infer_aws_region(self, uri: ParseResult) -> Optional[str]:
         # try to infer from URI
@@ -1057,8 +1057,8 @@ class DynamoDBSource:
     
     def get_endpoint_url(self, url: ParseResult) -> str:
         if self.AWS_ENDPOINT_PATTERN.match(url.netloc) is not None:
-            return f"https://{url.netloc}"
-        return f"http://{url.netloc}"
+            return f"https://{url.hostname}"
+        return f"http://{url.hostname}"
 
     def handles_incrementality(self) -> bool:
         return False
