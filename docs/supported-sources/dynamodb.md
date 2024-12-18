@@ -21,18 +21,18 @@ URI parameters:
 * AWS IAM access key pair.
 * A DynamoDB Table that you will to load data from
 
-To obtain access key, use the IAM console on AWS. See [IAM Documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html) for more information.
+To obtain the access keys, use the IAM console on AWS. See [IAM Documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html) for more information.
 
 ### Example
 
 For this example, we'll assume the value of `access_key_id` and `secret_access_key` are `user` and `pass` respectively.
 
-Say you have a table called `absolute-armadillo` in the region `ap-south-1`. You want to load this data to a duckdb database called `animal.db`.
+Say you have a table called `absolute-armadillo` in the region `ap-south-1` and you want to load this data to a duckdb database called `animal.db`.
 
 You run the following to achieve this:
 ```sh
 ingestr ingest \
-    --source-uri "dynamodb://dynamodb.ap-south-1.amazonaws.com" \
+    --source-uri "dynamodb://dynamodb.ap-south-1.amazonaws.com?access_key_id=user&secret_access_key=pass" \
     --source-table "absolute-armadillo" \
     --dest-uri "duckdb://./animal.db"
     --dest-table "public.armadillo"
