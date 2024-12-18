@@ -1034,7 +1034,7 @@ class TikTokSource:
             page_size = int(page_size)
 
         if page_size > 1000:
-            raise ValueError("The 'page_size' flag must be less than or equal to 1000.")
+            page_size = 1000
 
         if table.startswith("custom:"):
             fields = table.split(":", 3)

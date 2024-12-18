@@ -101,8 +101,7 @@ class TikTokAPI:
 
             flat_structure(items=items, time_zone=self.time_zone)
 
-            for item in items:
-                yield item
+            yield items
 
             page_info = result_data.get("page_info", {})
             total_pages = page_info.get("total_page", 1)
@@ -111,16 +110,3 @@ class TikTokAPI:
                 break
 
             current_page += 1
-
-    def fetch_reports(
-        self, start_time, end_time, advertiser_id, dimensions, metrics, filters
-    ):
-        for item in self.fetch_pages(
-            advertiser_id=advertiser_id,
-            start_time=start_time,
-            end_time=end_time,
-            dimensions=dimensions,
-            metrics=metrics,
-            filters=None,
-        ):
-            yield item

@@ -33,13 +33,13 @@ def fetch_tiktok_reports(
     filters: Optional[dict] | None,
 ) -> Iterable[TDataItem]:
     try:
-        yield from tiktok_api.fetch_reports(
+        yield from tiktok_api.fetch_pages(
+            advertiser_id=advertiser_id,
             start_time=current_date,
             end_time=interval_end,
-            advertiser_id=advertiser_id,
             dimensions=dimensions,
             metrics=metrics,
-            filters=filters,
+            filters=None,
         )
     except Exception as e:
         raise RuntimeError(f"Error fetching TikTok report: {e}")
