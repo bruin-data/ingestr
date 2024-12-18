@@ -9,7 +9,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
-from typing import Dict, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
 import pendulum
@@ -1545,13 +1545,12 @@ def test_db_to_db_exclude_columns(source, dest):
     source.stop()
     dest.stop()
 
-
 @dataclass
 class DynamoDBTestConfig:
     db_name: str
     uri: str
     data: List[Dict]
-
+ 
 @pytest.fixture(scope="session")
 def dynamodb():
     db_name = f"dynamodb_test_{get_random_string(5)}"
@@ -1616,25 +1615,35 @@ def dynamodb():
 
     local_stack.stop()
 
+
+@pytest.fixture
+def dynamodb_tests() -> Iterable[Callable]:
+    def test_append(dest_uri, dynamodb):
+        dest_table = f"public.dynamodb_{get_random_string(7)}"
+        result = invoke_ingest_command(
+            dynamodb.uri,
+            dynamodb.db_name,
+            dest_uri,
+            dest_table,
+            "append",
+        )
+        if result.exception is not None:
+            traceback.print_exception(*result.exc_info)
+            raise AssertionError(result.exception)
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+        with dest_engine.begin() as conn:
+            result = conn.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
+            for i in range(len(result)):
+                assert result[i][0] == dynamodb.data[i]["id"]
+                assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+
+    return [test_append]
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
-def test_dynamodb(dest, dynamodb):
+def test_dynamodb(dest, dynamodb, dynamodb_tests):
     dest_uri = dest.start()
-    dest_table = f"public.dynamodb_{get_random_string(7)}"
-    result = invoke_ingest_command(
-        dynamodb.uri,
-        dynamodb.db_name,
-        dest_uri,
-        dest_table,
-    )
-    if result.exception is not None:
-        traceback.print_exception(*result.exc_info)
-        raise AssertionError(result.exception)
-    dest_engine = sqlalchemy.create_engine(dest_uri)
-    with dest_engine.begin() as conn:
-        result = conn.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
-        for i in range(len(result)):
-            assert result[i][0] == dynamodb.data[i]["id"]
-            assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+    for test in dynamodb_tests:
+        test(dest_uri, dynamodb)
 
