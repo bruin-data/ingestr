@@ -146,7 +146,7 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     <tr>
         <td colspan="3" style='text-align:center;'><strong>Platforms</strong></td>
     </tr>
-    <td>Adjust</td>
+        <td>Adjust</td>
         <td>✅</td>
         <td>-</td>
     <tr>
@@ -154,8 +154,13 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
         <td>-</td>
     </tr>
-     <tr>
+    <tr>
         <td>AppsFlyer</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Asana</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -164,7 +169,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
         <td>-</td>
     </tr>
-     <tr>
+    <tr>
+        <td>DynamoDB</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Facebook Ads</td>
         <td>✅</td>
         <td>-</td>
