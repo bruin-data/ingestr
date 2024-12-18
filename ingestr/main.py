@@ -237,7 +237,7 @@ def ingest(
             help="The page size to be used when fetching data from SQL sources",
             envvar="PAGE_SIZE",
         ),
-    ] = 50000,  # type: ignore
+    ] = 1000,  # type: ignore
     loader_file_size: Annotated[
         Optional[int],
         typer.Option(

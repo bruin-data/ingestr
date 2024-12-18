@@ -1030,10 +1030,11 @@ class TikTokSource:
             end_date = ensure_pendulum_datetime(interval_end).in_tz(time_zone[0])
 
         page_size = kwargs.get("page_size")
-        if page_size is None:
-            raise ValueError(
-                "The 'page_size' flag is required and must be less than or equal to 1000."
-            )
+        if page_size is not None and not isinstance(page_size, int):
+            page_size = int(page_size)
+
+        if page_size > 1000:
+            raise ValueError("The 'page_size' flag must be less than or equal to 1000.")
 
         if table.startswith("custom:"):
             fields = table.split(":", 3)
