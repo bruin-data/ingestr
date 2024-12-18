@@ -1011,21 +1011,25 @@ class TikTokSource:
         access_token = source_fields.get("access_token")
         if not access_token:
             raise ValueError("access_token is required to connect to TikTok")
-        
-        time_zone =  source_fields.get("time_zone", "UTC")
+
+        time_zone = source_fields.get("time_zone", "UTC")
 
         advertiser_id = source_fields.get("advertiser_id")
         if not advertiser_id:
             raise ValueError("advertiser_id is required to connect to TikTok")
 
         if kwargs.get("interval_start"):
-            start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start"))).in_tz(time_zone[0])
+            start_date = ensure_pendulum_datetime(
+                str(kwargs.get("interval_start"))
+            ).in_tz(time_zone[0])
         else:
             Default_date = pendulum.now().subtract(days=90)
             start_date = ensure_pendulum_datetime(Default_date).in_tz(time_zone[0])
-            
+
         if kwargs.get("interval_end"):
-            end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end"))).in_tz(time_zone[0])
+            end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end"))).in_tz(
+                time_zone[0]
+            )
         else:
             end_date = ensure_pendulum_datetime(pendulum.now()).in_tz(time_zone[0])
 

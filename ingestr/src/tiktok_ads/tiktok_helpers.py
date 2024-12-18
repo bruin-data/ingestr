@@ -25,18 +25,22 @@ def create_client() -> requests.Session:
     ).session
 
 
-def flat_structure(items,time_zone="UTC"):
+def flat_structure(items, time_zone="UTC"):
     for item in items:
         if "dimensions" in item:
             for key, value in item["dimensions"].items():
                 if key == "stat_time_day":
-                    item["stat_time_day"] = ensure_pendulum_datetime(value).in_tz(time_zone)
+                    item["stat_time_day"] = ensure_pendulum_datetime(value).in_tz(
+                        time_zone
+                    )
                 elif key == "stat_time_hour":
-                    item["stat_time_hour"] = ensure_pendulum_datetime(value).in_tz(time_zone)
+                    item["stat_time_hour"] = ensure_pendulum_datetime(value).in_tz(
+                        time_zone
+                    )
                 else:
                     item[key] = value
             del item["dimensions"]
-           
+
             for key, value in item["metrics"].items():
                 item[key] = value
             del item["metrics"]
@@ -47,7 +51,7 @@ def flat_structure(items,time_zone="UTC"):
 class TikTokAPI:
     def __init__(self, access_token, time_zone):
         self.headers = {
-            "Access-Token": access_token, 
+            "Access-Token": access_token,
         }
         self.time_zone = time_zone
 
@@ -94,8 +98,8 @@ class TikTokAPI:
 
             result_data = result.get("data", {})
             items = result_data.get("list", [])
-            
-            flat_structure(items=items,time_zone= self.time_zone)
+
+            flat_structure(items=items, time_zone=self.time_zone)
 
             all_items.extend(items)
             page_info = result_data.get("page_info", {})
@@ -111,11 +115,11 @@ class TikTokAPI:
         self, start_time, end_time, advertiser_id, dimensions, metrics, filters
     ):
         for item in self.fetch_pages(
-            advertiser_id = advertiser_id,
-            start_time = start_time,
-            end_time = end_time,
-            dimensions = dimensions,
-            metrics = metrics,
-            filters = None,
+            advertiser_id=advertiser_id,
+            start_time=start_time,
+            end_time=end_time,
+            dimensions=dimensions,
+            metrics=metrics,
+            filters=None,
         ):
             yield item
