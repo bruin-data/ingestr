@@ -49,15 +49,16 @@ def flat_structure(items, time_zone="UTC"):
 
 
 class TikTokAPI:
-    def __init__(self, access_token, time_zone):
+    def __init__(self, access_token, time_zone, page_size):
         self.headers = {
             "Access-Token": access_token,
         }
         self.time_zone = time_zone
+        self.page_size = page_size
 
     def fetch_pages(
         self, advertiser_id: str, start_time, end_time, dimensions, metrics, filters
-    ) -> list:
+    ):
         data_level_mapping = {
             "advertiser_id": "AUCTION_ADVERTISER",
             "campaign_id": "AUCTION_CAMPAIGN",
@@ -70,7 +71,6 @@ class TikTokAPI:
                 data_level = data_level_mapping[id_dimension]
                 break
 
-        all_items = []
         current_page = 1
         start_time = ensure_pendulum_datetime(start_time).to_date_string()
         end_time = ensure_pendulum_datetime(end_time).to_date_string()
@@ -81,14 +81,15 @@ class TikTokAPI:
             "data_level": data_level,
             "start_date": start_time,
             "end_date": end_time,
-            "page_size": 1000,
+            "page_size": self.page_size,
             "dimensions": json.dumps(dimensions),
             "metrics": json.dumps(metrics),
         }
-
+        client = create_client()
         while True:
             self.params["page"] = current_page
-            response = create_client().get(
+            print("page size",self.page_size)
+            response = client.get(
                 url=BASE_URL, headers=self.headers, params=self.params
             )
 
@@ -101,7 +102,9 @@ class TikTokAPI:
 
             flat_structure(items=items, time_zone=self.time_zone)
 
-            all_items.extend(items)
+            for item in items:
+                yield item
+            
             page_info = result_data.get("page_info", {})
             total_pages = page_info.get("total_page", 1)
 
@@ -109,7 +112,7 @@ class TikTokAPI:
                 break
 
             current_page += 1
-        return all_items
+        
 
     def fetch_reports(
         self, start_time, end_time, advertiser_id, dimensions, metrics, filters
