@@ -13,14 +13,13 @@ tiktok://?access_token=<ACCESS_TOKEN>&advertiser_id=<ADVERTISER_ID>
 - `access_token` (required): Used for authentication and is necessary to access reports through the TikTok Marketing API.
 - `advertiser_id` (required): The unique identifier for the advertiser's account, required to retrieve campaign and ad data for a specific advertiser.
 
-## Setting up an TikTok Integration
-TikTok requires an `access_token` and `advertiser_id` to access its TikTok Ads data. For more information, please follow this [guide](https://business-api.tiktok.com/portal/docs?id=1738373141733378).
+TikTok requires an `access_token` and `advertiser_id` to retrieve reports from the TikTok marketing API. Please follow the guide to obtain the [credentials](https://business-api.tiktok.com/portal/docs?id=1738373141733378).
 
 ## Table: Custom Reports
 Custom reports allow you to retrieve data based on specific `dimensions`, `metrics`, and `filters`.
 
 Custom Table Format:
-```plaintext
+```
 custom:<dimensions>:<metrics>:<filter_name,filter_values>
 ```
 ### Parameters:
@@ -52,7 +51,7 @@ You can optionally specify the following parameters:
 
 If these `flags` are not provided, Ingestr will fetch data for the `last 90 days` and use the default page size of `1000`.
 
-```
+```sh
 ingestr ingest \
     --source-uri "tiktok://?access_token=token_123&advertiser_id=0594720014" \
     --source-table "custom:campaign_id,stat_time_day:clicks,cpc" \
@@ -63,7 +62,7 @@ ingestr ingest \
 ```
 This command will retrieve data for the specified date range and save it to the `dest.clicks` table in the DuckDB database.
 
-
+<img alt="titok_ads_img" src="../media/tiktok.png" />
 
 
 

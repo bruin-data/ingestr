@@ -119,7 +119,7 @@ class TikTokAPI:
             result_data = result.get("data", {})
             items = result_data.get("list", [])
 
-            flat_structure(items=items,timezone=self.timezone)
+            flat_structure(items=items, timezone=self.timezone)
 
             yield items
 
