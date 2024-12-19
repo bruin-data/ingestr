@@ -83,7 +83,6 @@ class TikTokAPI:
                 "filter_type": "IN",
                 "filter_value": json.dumps(self.filter_value)
                 }]
-                 
         self.params = {
             "advertiser_id": advertiser_id,
             "report_type": "BASIC",

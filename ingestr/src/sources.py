@@ -1066,7 +1066,6 @@ class TikTokSource:
                 filter_name = filters[0].split(",")
                 field_value = filters[1:]
                 filter_value = list(map(int, field_value))
-                
 
         return tiktok_source(
             start_date=start_date,
