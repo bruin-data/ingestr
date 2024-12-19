@@ -1015,22 +1015,22 @@ class TikTokSource:
         if not access_token:
             raise ValueError("access_token is required to connect to TikTok")
 
-        time_zone = source_fields.get("time_zone", "UTC")
+        timezone = "UTC"
 
         advertiser_id = source_fields.get("advertiser_id")
         if not advertiser_id:
             raise ValueError("advertiser_id is required to connect to TikTok")
 
-        start_date = pendulum.now().subtract(days=90).in_tz(time_zone[0])
-        end_date = ensure_pendulum_datetime(pendulum.now()).in_tz(time_zone[0])
+        start_date = pendulum.now().subtract(days=90).in_tz(timezone)
+        end_date = ensure_pendulum_datetime(pendulum.now()).in_tz(timezone)
 
         interval_start = kwargs.get("interval_start")
         if interval_start is not None:
-            start_date = ensure_pendulum_datetime(interval_start).in_tz(time_zone[0])
+            start_date = ensure_pendulum_datetime(interval_start).in_tz(timezone)
 
         interval_end = kwargs.get("interval_end")
         if interval_end is not None:
-            end_date = ensure_pendulum_datetime(interval_end).in_tz(time_zone[0])
+            end_date = ensure_pendulum_datetime(interval_end).in_tz(timezone)
 
         page_size = kwargs.get("page_size")
         if page_size is not None and not isinstance(page_size, int):
@@ -1058,19 +1058,28 @@ class TikTokSource:
                 )
 
             metrics = fields[2].replace(" ", "").split(",")
-            filters = []
+            filtering_param = False
+            filter_name = ""
+            filter_value = []
             if len(fields) == 4:
+                filtering_param = True
                 filters = fields[3].replace(" ", "").split(",")
+                filter_name = filters[0].split(",")[0]
+                field_value = filters[1:]
+                filter_value = list(map(int, field_value))
+
         return tiktok_source(
             start_date=start_date,
             end_date=end_date,
             access_token=access_token[0],
             advertiser_id=advertiser_id[0],
-            time_zone=time_zone[0],
+            timezone=timezone,
             dimensions=dimensions,
             metrics=metrics,
-            filters=filters,
             page_size=page_size,
+            filter_name=filter_name,
+            filter_value=filter_value,
+            filtering_param=filtering_param,
         ).with_resources(endpoint)
 
 
