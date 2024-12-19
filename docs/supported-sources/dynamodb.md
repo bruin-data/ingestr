@@ -50,7 +50,7 @@ Below is a sample policy:
 }
 ```
 
-Replace `TABLE_ARN` with the DynamoDB [Amazon Resource Name](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference-arns.html) of your Table. You can add as many tables you want in the `Resource` field. Alternatively, if you'd like to give access to all tables that you own, you can set `Resource` to `["*"]`.
+Replace `TABLE_ARN` with the DynamoDB [Amazon Resource Name](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference-arns.html) of your Table. You can find the ARN for your table in the [DynamoDB console](https://console.aws.amazon.com/dynamodb/home). You can add as many tables you want in the `Resource` field. Alternatively, if you'd like to give access to all tables that you own, you can set `Resource` to `["*"]`.
 
 ### Example: Simple load
 
