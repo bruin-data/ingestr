@@ -23,6 +23,35 @@ URI parameters:
 
 To obtain the access keys, use the IAM console on AWS. See [IAM Documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html) for more information.
 
+
+### Configuring Permissions
+To use DynamoDB source, the user account must have the following IAM permissions:
+* `dynamodb:DescribeTable`
+* `dynamodb:Scan`
+
+Following AWS Best practices, you can create an IAM policy that you can assign to the user account you wish to use with `ingestr`.
+Below is a sample policy:
+```json
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Sid": "Statement1",
+			"Effect": "Allow",
+			"Action": [
+				"dynamodb:DescribeTable",
+				"dynamodb:Scan"
+			],
+			"Resource": [
+				"<TABLE_ARN>"
+			]
+		}
+	]
+}
+```
+
+Replace `TABLE_ARN` with the DynamoDB [Amazon Resource Name](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference-arns.html) of your Table. You can add as many tables you want in the `Resource` field. Alternatively, if you'd like to give access to all tables that you own, you can set `Resource` to `["*"]`.
+
 ### Example
 
 For this example, we'll assume the value of `access_key_id` and `secret_access_key` are `user` and `pass` respectively.
