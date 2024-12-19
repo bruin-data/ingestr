@@ -1624,8 +1624,7 @@ def dynamodb_tests() -> Iterable[Callable]:
             raise AssertionError(result.exception)
 
 
-    def smoke_test(dest, dynamodb):
-        dest_uri = dest.start()
+    def smoke_test(dest_uri, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
         dest_engine = sqlalchemy.create_engine(dest_uri)
 
@@ -1645,10 +1644,7 @@ def dynamodb_tests() -> Iterable[Callable]:
             assert result[i][0] == dynamodb.data[i]["id"]
             assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
             
-        dest.stop()
-
-    def append_test(dest, dynamodb):
-        dest_uri = dest.start()
+    def append_test(dest_uri, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
 
         # connection pooling causes issues with duckdb, when the connection
@@ -1673,56 +1669,72 @@ def dynamodb_tests() -> Iterable[Callable]:
                 assert result[i][0] == dynamodb.data[i]["id"]
                 assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
             
-        dest.stop()
+    def incremental_test_factory(strategy):
+        def incremental_test(dest_uri, dynamodb):
+            dest_table = f"public.dynamodb_{get_random_string(5)}"
+            dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
 
-    def incremental_test(dest, dynamodb):
-        dest_uri = dest.start()
-        dest_table = f"public.dynamodb_{get_random_string(5)}"
-        dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
-
-        result = invoke_ingest_command(
-            dynamodb.uri,
-            dynamodb.db_name,
-            dest_uri,
-            dest_table,
-            inc_strategy="merge",
-            inc_key="updated_at",
-            interval_start="2024-01-01T00:00:00",
-            interval_end="2024-02-01T00:01:00" # upto the second entry
-        )
-        assert_success(result)
-        rows = dest_engine.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
-        assert len(rows) == 2
-        for i in range(len(rows)):
-            assert rows[i][0] == dynamodb.data[i]["id"]
-            assert rows[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
-
-        # ingest the rest
-        # run it twice to test idempotency
-        for _ in range(2):
             result = invoke_ingest_command(
                 dynamodb.uri,
                 dynamodb.db_name,
                 dest_uri,
                 dest_table,
-                inc_strategy="merge",
+                inc_strategy=strategy,
                 inc_key="updated_at",
-                interval_start="2024-02-01T00:00:00", # second entry onwards
+                interval_start="2024-01-01T00:00:00",
+                interval_end="2024-02-01T00:01:00" # upto the second entry
             )
             assert_success(result)
             rows = dest_engine.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
-            assert len(rows) == 3
+            assert len(rows) == 2
             for i in range(len(rows)):
                 assert rows[i][0] == dynamodb.data[i]["id"]
                 assert rows[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
-            
-        dest.stop()
-        
+
+            # ingest the rest
+            # run it twice to test idempotency
+            for _ in range(2):
+                result = invoke_ingest_command(
+                    dynamodb.uri,
+                    dynamodb.db_name,
+                    dest_uri,
+                    dest_table,
+                    inc_strategy=strategy,
+                    inc_key="updated_at",
+                    interval_start="2024-02-01T00:00:00", # second entry onwards
+                )
+                assert_success(result)
+
+                rows = dest_engine.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
+                rows_expected = 3
+                if strategy is "replace":
+                    # old rows are removed in replace
+                    rows_expected = 2 
+
+                assert len(rows) == rows_expected
+                for row in rows:
+                    id = int(row[0]) - 1
+                    assert row[0] == dynamodb.data[id]["id"]
+                    assert row[1] == pendulum.parse(dynamodb.data[id]["updated_at"])
+                
+        # for easier debugging
+        incremental_test.__name__ += f"_{strategy}"
+        return incremental_test
+
+    strategies = [
+        "replace",
+        "delete+insert",
+        "merge",
+    ]
+    incremental_tests = [
+        incremental_test_factory(strat) 
+        for strat in strategies
+    ]
 
     return [
         smoke_test,
         append_test,
-        incremental_test,
+        *incremental_tests,
     ]
 
 @pytest.mark.parametrize(
@@ -1730,5 +1742,6 @@ def dynamodb_tests() -> Iterable[Callable]:
 )
 @pytest.mark.parametrize("testcase", dynamodb_tests())
 def test_dynamodb(dest, dynamodb, testcase):
-    testcase(dest, dynamodb)
+    testcase(dest.start(), dynamodb)
+    dest.stop()
 
