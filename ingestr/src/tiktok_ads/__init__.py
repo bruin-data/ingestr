@@ -58,15 +58,19 @@ def tiktok_source(
     filter_value: list[int],
     dimensions: list[str],
     metrics: list[str],
-    filters=None,
 ) -> DltResource:
     tiktok_api = TikTokAPI(
-        access_token=access_token, time_zone=time_zone, page_size=page_size, filtering_param=filtering_param,filter_name=filter_name,filter_value=filter_value
+        access_token=access_token,
+        time_zone=time_zone,
+        page_size=page_size,
+        filtering_param=filtering_param,
+        filter_name=filter_name,
+        filter_value=filter_value,
     )
     incremental_loading_param = ""
     is_incremental = False
     interval_days = 365
-    
+
     if "stat_time_day" in dimensions:
         incremental_loading_param = "stat_time_day"
         is_incremental = True
