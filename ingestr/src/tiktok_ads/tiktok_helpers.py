@@ -25,17 +25,17 @@ def create_client() -> requests.Session:
     ).session
 
 
-def flat_structure(items, time_zone="UTC"):
+def flat_structure(items, timezone):
     for item in items:
         if "dimensions" in item:
             for key, value in item["dimensions"].items():
                 if key == "stat_time_day":
                     item["stat_time_day"] = ensure_pendulum_datetime(value).in_tz(
-                        time_zone
+                        timezone
                     )
                 elif key == "stat_time_hour":
                     item["stat_time_hour"] = ensure_pendulum_datetime(value).in_tz(
-                        time_zone
+                        timezone
                     )
                 else:
                     item[key] = value
@@ -52,7 +52,7 @@ class TikTokAPI:
     def __init__(
         self,
         access_token,
-        time_zone,
+        timezone,
         page_size,
         filtering_param,
         filter_name,
@@ -61,14 +61,14 @@ class TikTokAPI:
         self.headers = {
             "Access-Token": access_token,
         }
-        self.time_zone = time_zone
+        self.timezone = timezone
         self.page_size = page_size
         self.filtering_param = filtering_param
         self.filter_name = filter_name
         self.filter_value = filter_value
 
     def fetch_pages(
-        self, advertiser_id: str, start_time, end_time, dimensions, metrics, filters
+        self, advertiser_id: str, start_time, end_time, dimensions, metrics
     ):
         data_level_mapping = {
             "advertiser_id": "AUCTION_ADVERTISER",
@@ -119,7 +119,7 @@ class TikTokAPI:
             result_data = result.get("data", {})
             items = result_data.get("list", [])
 
-            flat_structure(items=items, time_zone=self.time_zone)
+            flat_structure(items=items,timezone=self.timezone)
 
             yield items
 
