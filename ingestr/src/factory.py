@@ -36,6 +36,7 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
+    TikTokSource,
     ZendeskSource,
 )
 
@@ -114,6 +115,7 @@ class SourceDestinationFactory:
         "mmap": ArrowMemoryMappedSource,
         "s3": S3Source,
         "dynamodb": DynamoDBSource,
+        "tiktok": TikTokSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
