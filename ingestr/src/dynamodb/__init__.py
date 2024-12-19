@@ -58,13 +58,29 @@ def dynamodb_table(
     table,
     incremental: Optional[dlt.sources.incremental] = None,
 ):
-    scan_args = {}
-    if incremental and incremental.last_value:
-        scan_args[FILTER_KEY] = Attr(incremental.cursor_path).gte(incremental.last_value)
-
-    scan = table.scan(**scan_args)
+    args = build_scan_args(incremental)
+    scan = table.scan(**args)
     while True:
         yield from scan[DATA_KEY]
         if PAGINATION_KEY not in scan:
             break
-        scan = table.scan(ExclusiveStartKey=scan[PAGINATION_KEY], **scan_args)
+        scan = table.scan(ExclusiveStartKey=scan[PAGINATION_KEY], **args)
+
+def build_scan_args(
+    incremental: Optional[dlt.sources.incremental] = None,
+):
+    scan_args = {}
+
+    if incremental is None:
+        return scan_args
+
+    if incremental.last_value:
+        criteria =  Attr(incremental.cursor_path).gte(incremental.last_value)
+        if incremental.end_value:
+            criteria = (
+                Attr(incremental.cursor_path)
+                .between(incremental.last_value, incremental.end_value) 
+            )
+        scan_args[FILTER_KEY] = criteria
+
+    return scan_args
