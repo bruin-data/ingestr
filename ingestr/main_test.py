@@ -1698,21 +1698,23 @@ def dynamodb_tests() -> Iterable[Callable]:
             assert rows[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
 
         # ingest the rest
-        result = invoke_ingest_command(
-            dynamodb.uri,
-            dynamodb.db_name,
-            dest_uri,
-            dest_table,
-            inc_strategy="merge",
-            inc_key="updated_at",
-            interval_start="2024-02-01T00:00:00", # second entry onwards
-        )
-        assert_success(result)
-        rows = dest_engine.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
-        assert len(rows) == 3
-        for i in range(len(rows)):
-            assert rows[i][0] == dynamodb.data[i]["id"]
-            assert rows[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+        # run it twice to test idempotency
+        for _ in range(2):
+            result = invoke_ingest_command(
+                dynamodb.uri,
+                dynamodb.db_name,
+                dest_uri,
+                dest_table,
+                inc_strategy="merge",
+                inc_key="updated_at",
+                interval_start="2024-02-01T00:00:00", # second entry onwards
+            )
+            assert_success(result)
+            rows = dest_engine.execute(f"SELECT id, updated_at from {dest_table} ORDER BY id").fetchall()
+            assert len(rows) == 3
+            for i in range(len(rows)):
+                assert rows[i][0] == dynamodb.data[i]["id"]
+                assert rows[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
             
         dest.stop()
         
