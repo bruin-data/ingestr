@@ -1058,12 +1058,13 @@ class TikTokSource:
                 )
 
             metrics = fields[2].replace(" ", "").split(",")
-            filters = []
             filtering_param = False
+            filter_name = ""
+            filter_value = []
             if len(fields) == 4:
                 filtering_param = True
                 filters = fields[3].replace(" ", "").split(",")
-                filter_name = filters[0].split(",")
+                filter_name = filters[0].split(",")[0]
                 field_value = filters[1:]
                 filter_value = list(map(int, field_value))
 
@@ -1075,11 +1076,10 @@ class TikTokSource:
             time_zone=time_zone[0],
             dimensions=dimensions,
             metrics=metrics,
-            filters=filters,
             page_size=page_size,
-            filter_name=filter_name[0],
-            filter_value= filter_value,
-            filtering_param = filtering_param
+            filter_name=filter_name,
+            filter_value=filter_value,
+            filtering_param=filtering_param,
         ).with_resources(endpoint)
 
 
