@@ -25,7 +25,7 @@ def create_client() -> requests.Session:
     ).session
 
 
-def flat_structure(items, timezone):
+def flat_structure(items, timezone="UTC"):
     for item in items:
         if "dimensions" in item:
             for key, value in item["dimensions"].items():
