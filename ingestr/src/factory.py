@@ -115,7 +115,7 @@ class SourceDestinationFactory:
         "s3": S3Source,
         "dynamodb": DynamoDBSource,
     }
-    destinations: dict[str, Type[DestinationProtocol]] = {
+    destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
         "databricks": DatabricksDestination,
         "duckdb": DuckDBDestination,
