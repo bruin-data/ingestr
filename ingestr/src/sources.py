@@ -1,10 +1,11 @@
+import re
 import base64
 import csv
 import json
 import os
 from datetime import date
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse, ParseResult
 
 import dlt
 import pendulum
@@ -23,6 +24,7 @@ from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
+from ingestr.src.dynamodb import dynamodb
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
@@ -38,6 +40,7 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.time import isotime
 from ingestr.src.tiktok_ads import tiktok_source
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
 from ingestr.src.zendesk.helpers.credentials import (
@@ -953,7 +956,7 @@ class S3Source:
             )
 
         parsed_uri = urlparse(uri)
-        source_fields = parse_qs(parsed_uri.query)
+        source_fields = parse_qs(quote(parsed_uri.query, safe="=&"))
         access_key_id = source_fields.get("access_key_id")
         if not access_key_id:
             raise ValueError("access_key_id is required to connect to S3")
@@ -1108,3 +1111,64 @@ class AsanaSource:
         src = asana_source()
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)
         return src.with_resources(table)
+
+
+class DynamoDBSource:
+
+    AWS_ENDPOINT_PATTERN = re.compile(".*\.(.+)\.amazonaws\.com")
+
+    def infer_aws_region(self, uri: ParseResult) -> Optional[str]:
+        # try to infer from URI
+        matches = self.AWS_ENDPOINT_PATTERN.match(uri.netloc)
+        if matches is not None:
+            return matches[1]
+
+        # else obtain region from query string
+        region = parse_qs(uri.query).get("region")
+        if region is None:
+            return None
+        return region[0]
+    
+    def get_endpoint_url(self, url: ParseResult) -> str:
+        if self.AWS_ENDPOINT_PATTERN.match(url.netloc) is not None:
+            return f"https://{url.hostname}"
+        return f"http://{url.netloc}"
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+
+        region = self.infer_aws_region(parsed_uri)
+        if not region:
+            raise ValueError("region is required to connect to Dynamodb")
+
+        qs = parse_qs(quote(parsed_uri.query, safe="=&"))
+        access_key = qs.get("access_key_id")
+
+        if not access_key:
+            raise ValueError("access_key_id is required to connect to Dynamodb")
+
+        secret_key = qs.get("secret_access_key")
+        if not secret_key:
+            raise ValueError("secret_access_key is required to connect to Dynamodb")
+
+        creds = AwsCredentials(
+            aws_access_key_id=access_key[0],
+            aws_secret_access_key=TSecretStrValue(secret_key[0]),
+            region_name=region,
+            endpoint_url=self.get_endpoint_url(parsed_uri),
+        )
+
+        incremental = None
+        incremental_key = kwargs.get("incremental_key")
+
+        if incremental_key:
+            incremental = dlt.sources.incremental(
+                incremental_key.strip(),
+                initial_value=isotime(kwargs.get("interval_start")),
+                end_value=isotime(kwargs.get("interval_end")),
+            )
+
+        return dynamodb(table, creds, incremental)
