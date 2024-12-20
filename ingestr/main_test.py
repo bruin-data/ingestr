@@ -1746,3 +1746,202 @@ def dynamodb_tests() -> Iterable[Callable]:
 def test_dynamodb(dest, dynamodb, testcase):
     testcase(dest.start(), dynamodb)
     dest.stop()
+
+
+def custom_query_tests():
+    def replace(source_connection_url, dest_connection_url):
+        schema_rand_prefix = f"testschema_create_replace_cust_{get_random_string(5)}"
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
+
+        source_engine = sqlalchemy.create_engine(source_connection_url)
+        with source_engine.begin() as conn:
+            conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+            conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+            conn.execute(
+                f"CREATE TABLE {schema_rand_prefix}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at DATE)"
+            )
+            conn.execute(
+                f"CREATE TABLE {schema_rand_prefix}.order_items (id INTEGER, order_id INTEGER NOT NULL, subname VARCHAR(255) NOT NULL)"
+            )
+            conn.execute(
+                f"INSERT INTO {schema_rand_prefix}.orders (id, name, updated_at) VALUES (1, 'First Order', '2024-01-01'), (2, 'Second Order', '2024-01-01'), (3, 'Third Order', '2024-01-01'), (4, 'Fourth Order', '2024-01-01')"
+            )
+            conn.execute(
+                f"INSERT INTO {schema_rand_prefix}.order_items (id, order_id, subname) VALUES (1, 1, 'Item 1 for First Order'), (2, 1, 'Item 2 for First Order'), (3, 2, 'Item 1 for Second Order'), (4, 3, 'Item 1 for Third Order')"
+            )
+            res = conn.execute(
+                f"select count(*) from {schema_rand_prefix}.orders"
+            ).fetchall()
+            assert res[0][0] == 4
+            res = conn.execute(
+                f"select count(*) from {schema_rand_prefix}.order_items"
+            ).fetchall()
+            assert res[0][0] == 4
+
+        result = invoke_ingest_command(
+            source_connection_url,
+            f"query:select oi.*, o.updated_at from {schema_rand_prefix}.order_items oi join {schema_rand_prefix}.orders o on oi.order_id = o.id",
+            dest_connection_url,
+            f"{schema_rand_prefix}.output",
+        )
+
+        assert result.exit_code == 0
+
+        dest_engine = sqlalchemy.create_engine(dest_connection_url)
+        res = dest_engine.execute(
+            f"select id, order_id, subname, updated_at from {schema_rand_prefix}.output order by id asc"
+        ).fetchall()
+
+        assert len(res) == 4
+        assert res[0] == (1, 1, "Item 1 for First Order", as_datetime("2024-01-01"))
+        assert res[1] == (2, 1, "Item 2 for First Order", as_datetime("2024-01-01"))
+        assert res[2] == (3, 2, "Item 1 for Second Order", as_datetime("2024-01-01"))
+        assert res[3] == (4, 3, "Item 1 for Third Order", as_datetime("2024-01-01"))
+
+    def merge(source_connection_url, dest_connection_url):
+        schema_rand_prefix = f"testschema_merge_{get_random_string(5)}"
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
+
+        source_engine = sqlalchemy.create_engine(
+            source_connection_url, poolclass=NullPool
+        )
+        with source_engine.begin() as conn:
+            conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+            conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+            conn.execute(
+                f"CREATE TABLE {schema_rand_prefix}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at DATE)"
+            )
+            conn.execute(
+                f"CREATE TABLE {schema_rand_prefix}.order_items (id INTEGER, order_id INTEGER NOT NULL, subname VARCHAR(255) NOT NULL)"
+            )
+            conn.execute(
+                f"INSERT INTO {schema_rand_prefix}.orders (id, name, updated_at) VALUES (1, 'First Order', '2024-01-01'), (2, 'Second Order', '2024-01-01'), (3, 'Third Order', '2024-01-01'), (4, 'Fourth Order', '2024-01-01')"
+            )
+            conn.execute(
+                f"INSERT INTO {schema_rand_prefix}.order_items (id, order_id, subname) VALUES (1, 1, 'Item 1 for First Order'), (2, 1, 'Item 2 for First Order'), (3, 2, 'Item 1 for Second Order'), (4, 3, 'Item 1 for Third Order')"
+            )
+
+        def run():
+            result = invoke_ingest_command(
+                source_connection_url,
+                f"query:select oi.*, o.updated_at from {schema_rand_prefix}.order_items oi join {schema_rand_prefix}.orders o on oi.order_id = o.id where o.updated_at > :interval_start",
+                dest_connection_url,
+                f"{schema_rand_prefix}.output",
+                inc_strategy="merge",
+                inc_key="updated_at",
+                primary_key="id",
+            )
+            assert result.exit_code == 0
+
+        # Initial run to get all data
+        run()
+
+        dest_engine = sqlalchemy.create_engine(dest_connection_url, poolclass=NullPool)
+        res = dest_engine.execute(
+            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema_rand_prefix}.output order by id asc"
+        ).fetchall()
+
+        assert len(res) == 4
+        initial_load_id = res[0][4]
+        assert all(r[4] == initial_load_id for r in res)
+        assert res[0] == (
+            1,
+            1,
+            "Item 1 for First Order",
+            as_datetime("2024-01-01"),
+            initial_load_id,
+        )
+        assert res[1] == (
+            2,
+            1,
+            "Item 2 for First Order",
+            as_datetime("2024-01-01"),
+            initial_load_id,
+        )
+        assert res[2] == (
+            3,
+            2,
+            "Item 1 for Second Order",
+            as_datetime("2024-01-01"),
+            initial_load_id,
+        )
+        assert res[3] == (
+            4,
+            3,
+            "Item 1 for Third Order",
+            as_datetime("2024-01-01"),
+            initial_load_id,
+        )
+
+        # Run again - should get same load_id since no changes
+        run()
+        res = dest_engine.execute(
+            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema_rand_prefix}.output order by id asc"
+        ).fetchall()
+        assert len(res) == 4
+        assert all(r[4] == initial_load_id for r in res)
+
+        # Update an order item and its order's updated_at
+        with source_engine.begin() as conn:
+            conn.execute(
+                f"UPDATE {schema_rand_prefix}.order_items SET subname = 'Item 1 for Second Order - new' WHERE id = 3"
+            )
+            conn.execute(
+                f"UPDATE {schema_rand_prefix}.orders SET updated_at = '2024-01-02' WHERE id = 2"
+            )
+
+        # Run again - should see updated data with new load_id
+        run()
+        res = dest_engine.execute(
+            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema_rand_prefix}.output order by id asc"
+        ).fetchall()
+
+        assert len(res) == 4
+        assert res[0] == (
+            1,
+            1,
+            "Item 1 for First Order",
+            as_datetime("2024-01-01"),
+            res[0][4],
+        )
+        assert res[1] == (
+            2,
+            1,
+            "Item 2 for First Order",
+            as_datetime("2024-01-01"),
+            res[1][4],
+        )
+        assert res[2] == (
+            3,
+            2,
+            "Item 1 for Second Order - new",
+            as_datetime("2024-01-02"),
+            res[2][4],
+        )
+        assert res[3] == (
+            4,
+            3,
+            "Item 1 for Third Order",
+            as_datetime("2024-01-01"),
+            res[3][4],
+        )
+
+    return [
+        replace,
+        merge,
+    ]
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
+@pytest.mark.parametrize("testcase", custom_query_tests())
+def test_custom_query(testcase, source, dest):
+    testcase(source.start(), dest.start())
