@@ -78,6 +78,12 @@ export default defineConfig({
               { text: "SAP Hana", link: "/supported-sources/sap-hana.md" },
               { text: "Snowflake", link: "/supported-sources/snowflake.md" },
               { text: "SQLite", link: "/supported-sources/sqlite.md" },
+              {
+                text: "Experimental",
+                items: [
+                  { text: "Custom Queries", link: "/supported-sources/custom_queries.md" },
+                ],
+              },
             ],
           },
 

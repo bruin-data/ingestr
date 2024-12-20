@@ -3,17 +3,42 @@ import csv
 import json
 import os
 import re
-from datetime import date
-from typing import Any, Callable, Optional
+from datetime import date, datetime
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Union,
+)
 from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
 import pendulum
-from dlt.common.configuration.specs import AwsCredentials
+import sqlalchemy
+from dlt.common.configuration.specs import (
+    AwsCredentials,
+)
+from dlt.common.libs.sql_alchemy import (
+    Engine,
+    MetaData,
+)
 from dlt.common.time import ensure_pendulum_datetime
-from dlt.common.typing import TSecretStrValue
+from dlt.common.typing import TDataItem, TSecretStrValue
+from dlt.extract import Incremental
 from dlt.sources.credentials import ConnectionStringCredentials
 from dlt.sources.sql_database import sql_table
+from dlt.sources.sql_database.helpers import TableLoader
+from dlt.sources.sql_database.schema_types import (
+    ReflectionLevel,
+    SelectAny,
+    Table,
+    TTypeAdapter,
+)
+from sqlalchemy import Column
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
 
@@ -39,7 +64,7 @@ from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
-from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
 from ingestr.src.tiktok_ads import tiktok_source
 from ingestr.src.time import isotime
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
@@ -47,6 +72,9 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+
+TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
+TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
 
 
 class SqlSource:
@@ -59,7 +87,9 @@ class SqlSource:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        table_fields = table_string_to_dataclass(table)
+        table_fields = TableDefinition(dataset="custom", table="custom")
+        if not table.startswith("query:"):
+            table_fields = table_string_to_dataclass(table)
 
         incremental = None
         if kwargs.get("incremental_key"):
@@ -87,6 +117,110 @@ class SqlSource:
                     query = query.order_by(kwargs.get("incremental_key"))
                 return query
 
+        defer_table_reflect = False
+        sql_backend = kwargs.get("sql_backend", "sqlalchemy")
+        if table.startswith("query:"):
+            if kwargs.get("sql_limit"):
+                raise ValueError(
+                    "sql_limit is not supported for custom queries, please apply the limit in the query instead"
+                )
+
+            sql_backend = "sqlalchemy"
+            defer_table_reflect = True
+            query_value = table.split(":", 1)[1]
+
+            # this is a very hacky version of the table_rows function. it is built this way to go around the dlt's table loader.
+            # I didn't want to write a full fledged sqlalchemy source for now, and wanted to benefit from the existing stuff to begin with.
+            # this is by no means a production ready solution, but it works for now.
+            # the core idea behind this implementation is to create a mock table instance with the columns that are absolutely necessary for the incremental load to work.
+            # the table loader will then use the query adapter callback to apply the actual query and load the rows.
+            def table_rows(
+                engine: Engine,
+                table: Union[Table, str],
+                metadata: MetaData,
+                chunk_size: int,
+                backend: TableBackend,
+                incremental: Optional[Incremental[Any]] = None,
+                table_adapter_callback: Callable[[Table], None] = None,  # type: ignore
+                reflection_level: ReflectionLevel = "minimal",
+                backend_kwargs: Dict[str, Any] = None,  # type: ignore
+                type_adapter_callback: Optional[TTypeAdapter] = None,
+                included_columns: Optional[List[str]] = None,
+                query_adapter_callback: Optional[TQueryAdapter] = None,
+                resolve_foreign_keys: bool = False,
+            ) -> Iterator[TDataItem]:
+                hints = {  # type: ignore
+                    "columns": [],
+                }
+                cols = []  # type: ignore
+
+                if incremental:
+                    switchDict = {
+                        int: sa.INTEGER,
+                        datetime: sa.TIMESTAMP,
+                        pendulum.Date: sa.DATE,
+                        pendulum.DateTime: sa.TIMESTAMP,
+                    }
+
+                    if incremental.last_value is not None:
+                        cols.append(
+                            Column(
+                                incremental.cursor_path,
+                                switchDict[type(incremental.last_value)],  # type: ignore
+                            )
+                        )
+                    else:
+                        cols.append(Column(incremental.cursor_path, sa.TIMESTAMP))  # type: ignore
+
+                table = Table(
+                    "query_result",
+                    metadata,
+                    *cols,
+                )
+
+                loader = TableLoader(
+                    engine,
+                    backend,
+                    table,
+                    hints["columns"],  # type: ignore
+                    incremental=incremental,
+                    chunk_size=chunk_size,
+                    query_adapter_callback=query_adapter_callback,
+                )
+                try:
+                    yield from loader.load_rows(backend_kwargs)
+                finally:
+                    if getattr(engine, "may_dispose_after_use", False):
+                        engine.dispose()
+
+            dlt.sources.sql_database.table_rows = table_rows
+
+            def query_adapter_callback(query, table, incremental=None, engine=None):
+                params = {}
+                if incremental:
+                    params["interval_start"] = (
+                        incremental.last_value
+                        if incremental.last_value is not None
+                        else datetime(year=1, month=1, day=1)
+                    )
+                    if incremental.end_value is not None:
+                        params["interval_end"] = incremental.end_value
+                else:
+                    if ":interval_start" in query_value:
+                        params["interval_start"] = (
+                            datetime.min
+                            if kwargs.get("interval_start") is None
+                            else kwargs.get("interval_start")
+                        )
+                    if ":interval_end" in query_value:
+                        params["interval_end"] = (
+                            datetime.max
+                            if kwargs.get("interval_end") is None
+                            else kwargs.get("interval_end")
+                        )
+
+                return sqlalchemy.text(query_value).bindparams(**params)
+
         def type_adapter_callback(sql_type):
             if isinstance(sql_type, mysql.SET):
                 return sa.JSON
@@ -97,7 +231,7 @@ class SqlSource:
             schema=table_fields.dataset,
             table=table_fields.table,
             incremental=incremental,
-            backend=kwargs.get("sql_backend", "sqlalchemy"),
+            backend=sql_backend,
             chunk_size=kwargs.get("page_size", None),
             reflection_level=reflection_level,
             query_adapter_callback=query_adapter_callback,
@@ -105,6 +239,7 @@ class SqlSource:
             table_adapter_callback=table_adapter_exclude_columns(
                 kwargs.get("sql_exclude_columns", [])
             ),
+            defer_table_reflect=defer_table_reflect,
         )
 
         return builder_res
