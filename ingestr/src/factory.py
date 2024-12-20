@@ -20,6 +20,7 @@ from ingestr.src.sources import (
     AirtableSource,
     AppsflyerSource,
     ArrowMemoryMappedSource,
+    AsanaSource,
     ChessSource,
     DynamoDBSource,
     FacebookAdsSource,
@@ -115,6 +116,7 @@ class SourceDestinationFactory:
         "mmap": ArrowMemoryMappedSource,
         "s3": S3Source,
         "dynamodb": DynamoDBSource,
+        "asana": AsanaSource,
         "tiktok": TikTokSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
