@@ -104,6 +104,7 @@ export default defineConfig({
               { text: "Shopify", link: "/supported-sources/shopify.md" },
               { text: "Slack", link: "/supported-sources/slack.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
+              { text: "TikTok Ads", link: "/supported-sources/tiktok-ads.md" },
               { text: "Zendesk", link: "/supported-sources/zendesk.md" },
             ],
           },

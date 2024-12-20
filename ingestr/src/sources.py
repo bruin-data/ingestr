@@ -1015,29 +1015,28 @@ class TikTokSource:
         if not access_token:
             raise ValueError("access_token is required to connect to TikTok")
 
-        time_zone = source_fields.get("time_zone", "UTC")
+        timezone = "UTC"
+        if source_fields.get("timezone") is not None:
+            timezone = source_fields.get("timezone")[0]  # type: ignore
 
-        advertiser_id = source_fields.get("advertiser_id")
-        if not advertiser_id:
-            raise ValueError("advertiser_id is required to connect to TikTok")
+        advertiser_ids = source_fields.get("advertiser_ids")
+        if not advertiser_ids:
+            raise ValueError("advertiser_ids is required to connect to TikTok")
 
-        start_date = pendulum.now().subtract(days=90).in_tz(time_zone[0])
-        end_date = ensure_pendulum_datetime(pendulum.now()).in_tz(time_zone[0])
+        advertiser_ids = advertiser_ids[0].replace(" ", "").split(",")
+
+        start_date = pendulum.now().subtract(days=30).in_tz(timezone)
+        end_date = ensure_pendulum_datetime(pendulum.now()).in_tz(timezone)
 
         interval_start = kwargs.get("interval_start")
         if interval_start is not None:
-            start_date = ensure_pendulum_datetime(interval_start).in_tz(time_zone[0])
+            start_date = ensure_pendulum_datetime(interval_start).in_tz(timezone)
 
         interval_end = kwargs.get("interval_end")
         if interval_end is not None:
-            end_date = ensure_pendulum_datetime(interval_end).in_tz(time_zone[0])
+            end_date = ensure_pendulum_datetime(interval_end).in_tz(timezone)
 
-        page_size = kwargs.get("page_size")
-        if page_size is not None and not isinstance(page_size, int):
-            page_size = int(page_size)
-
-        if page_size > 1000:
-            page_size = 1000
+        page_size = min(1000, kwargs.get("page_size", 1000))
 
         if table.startswith("custom:"):
             fields = table.split(":", 3)
@@ -1049,28 +1048,61 @@ class TikTokSource:
             dimensions = fields[1].replace(" ", "").split(",")
             if (
                 "campaign_id" not in dimensions
-                and "advertiser_id" not in dimensions
                 and "adgroup_id" not in dimensions
                 and "ad_id" not in dimensions
             ):
                 raise ValueError(
-                    "You must provide one ID dimension. Please use one ID dimension from the following options: [campaign_id, advertiser_id, adgroup_id, ad_id]"
+                    "TikTok API requires at least one ID dimension, please use one of the following dimensions: [campaign_id, adgroup_id, ad_id]"
                 )
 
+            if "advertiser_id" in dimensions:
+                dimensions.remove("advertiser_id")
+
             metrics = fields[2].replace(" ", "").split(",")
-            filters = []
+            filtering_param = False
+            filter_name = ""
+            filter_value = []
             if len(fields) == 4:
-                filters = fields[3].replace(" ", "").split(",")
+
+                def parse_filters(filters_raw: str) -> dict:
+                    # Parse filter string like "key1=value1,key2=value2,value3,value4"
+                    filters = {}
+                    current_key = None
+
+                    for item in filters_raw.split(","):
+                        if "=" in item:
+                            # Start of a new key-value pair
+                            key, value = item.split("=")
+                            filters[key] = [value]  # Always start with a list
+                            current_key = key
+                        elif current_key is not None:
+                            # Additional value for the current key
+                            filters[current_key].append(item)
+
+                    # Convert single-item lists to simple values
+                    return {k: v[0] if len(v) == 1 else v for k, v in filters.items()}
+
+                filtering_param = True
+                filters = parse_filters(fields[3])
+                if len(filters) > 1:
+                    raise ValueError(
+                        "Only one filter is allowed for TikTok custom reports"
+                    )
+                filter_name = list(filters.keys())[0]
+                filter_value = list(map(int, filters[list(filters.keys())[0]]))
+
         return tiktok_source(
             start_date=start_date,
             end_date=end_date,
             access_token=access_token[0],
-            advertiser_id=advertiser_id[0],
-            time_zone=time_zone[0],
+            advertiser_ids=advertiser_ids,
+            timezone=timezone,
             dimensions=dimensions,
             metrics=metrics,
-            filters=filters,
             page_size=page_size,
+            filter_name=filter_name,
+            filter_value=filter_value,
+            filtering_param=filtering_param,
         ).with_resources(endpoint)
 
 

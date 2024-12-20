@@ -25,17 +25,17 @@ def create_client() -> requests.Session:
     ).session
 
 
-def flat_structure(items, time_zone="UTC"):
+def flat_structure(items, timezone="UTC"):
     for item in items:
         if "dimensions" in item:
             for key, value in item["dimensions"].items():
                 if key == "stat_time_day":
                     item["stat_time_day"] = ensure_pendulum_datetime(value).in_tz(
-                        time_zone
+                        timezone
                     )
                 elif key == "stat_time_hour":
                     item["stat_time_hour"] = ensure_pendulum_datetime(value).in_tz(
-                        time_zone
+                        timezone
                     )
                 else:
                     item[key] = value
@@ -49,15 +49,26 @@ def flat_structure(items, time_zone="UTC"):
 
 
 class TikTokAPI:
-    def __init__(self, access_token, time_zone, page_size):
+    def __init__(
+        self,
+        access_token,
+        timezone,
+        page_size,
+        filtering_param,
+        filter_name,
+        filter_value,
+    ):
         self.headers = {
             "Access-Token": access_token,
         }
-        self.time_zone = time_zone
+        self.timezone = timezone
         self.page_size = page_size
+        self.filtering_param = filtering_param
+        self.filter_name = filter_name
+        self.filter_value = filter_value
 
     def fetch_pages(
-        self, advertiser_id: str, start_time, end_time, dimensions, metrics, filters
+        self, advertiser_ids: list[str], start_time, end_time, dimensions, metrics
     ):
         data_level_mapping = {
             "advertiser_id": "AUCTION_ADVERTISER",
@@ -75,8 +86,15 @@ class TikTokAPI:
         start_time = ensure_pendulum_datetime(start_time).to_date_string()
         end_time = ensure_pendulum_datetime(end_time).to_date_string()
 
-        self.params = {
-            "advertiser_id": advertiser_id,
+        filtering = [
+            {
+                "field_name": self.filter_name,
+                "filter_type": "IN",
+                "filter_value": json.dumps(self.filter_value),
+            }
+        ]
+        params = {
+            "advertiser_ids": json.dumps(advertiser_ids),
             "report_type": "BASIC",
             "data_level": data_level,
             "start_date": start_time,
@@ -85,12 +103,13 @@ class TikTokAPI:
             "dimensions": json.dumps(dimensions),
             "metrics": json.dumps(metrics),
         }
+
+        if self.filtering_param:
+            params["filtering"] = json.dumps(filtering)
         client = create_client()
         while True:
-            self.params["page"] = current_page
-            response = client.get(
-                url=BASE_URL, headers=self.headers, params=self.params
-            )
+            params["page"] = current_page
+            response = client.get(url=BASE_URL, headers=self.headers, params=params)
 
             result = response.json()
             if result.get("message") != "OK":
@@ -99,7 +118,7 @@ class TikTokAPI:
             result_data = result.get("data", {})
             items = result_data.get("list", [])
 
-            flat_structure(items=items, time_zone=self.time_zone)
+            flat_structure(items=items, timezone=self.timezone)
 
             yield items
 
