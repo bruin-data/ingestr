@@ -108,11 +108,8 @@ class TikTokAPI:
             params["filtering"] = json.dumps(filtering)
         client = create_client()
         while True:
-            print("-- fetching page", start_time, end_time, current_page)
             params["page"] = current_page
-            response = client.get(
-                url=BASE_URL, headers=self.headers, params=params
-            )
+            response = client.get(url=BASE_URL, headers=self.headers, params=params)
 
             result = response.json()
             if result.get("message") != "OK":

@@ -1016,6 +1016,8 @@ class TikTokSource:
             raise ValueError("access_token is required to connect to TikTok")
 
         timezone = "UTC"
+        if source_fields.get("timezone") is not None:
+            timezone = source_fields.get("timezone")[0]  # type: ignore
 
         advertiser_ids = source_fields.get("advertiser_ids")
         if not advertiser_ids:
@@ -1023,7 +1025,7 @@ class TikTokSource:
 
         advertiser_ids = advertiser_ids[0].replace(" ", "").split(",")
 
-        start_date = pendulum.now().subtract(days=90).in_tz(timezone)
+        start_date = pendulum.now().subtract(days=30).in_tz(timezone)
         end_date = ensure_pendulum_datetime(pendulum.now()).in_tz(timezone)
 
         interval_start = kwargs.get("interval_start")
@@ -1034,12 +1036,7 @@ class TikTokSource:
         if interval_end is not None:
             end_date = ensure_pendulum_datetime(interval_end).in_tz(timezone)
 
-        page_size = kwargs.get("page_size")
-        if page_size is not None and not isinstance(page_size, int):
-            page_size = int(page_size)
-
-        if page_size > 1000:
-            page_size = 1000
+        page_size = min(1000, kwargs.get("page_size", 1000))
 
         if table.startswith("custom:"):
             fields = table.split(":", 3)
@@ -1051,13 +1048,15 @@ class TikTokSource:
             dimensions = fields[1].replace(" ", "").split(",")
             if (
                 "campaign_id" not in dimensions
-                and "advertiser_id" not in dimensions
                 and "adgroup_id" not in dimensions
                 and "ad_id" not in dimensions
             ):
                 raise ValueError(
-                    "You must provide one ID dimension. Please use one ID dimension from the following options: [campaign_id, advertiser_id, adgroup_id, ad_id]"
+                    "TikTok API requires at least one ID dimension, please use one of the following dimensions: [campaign_id, adgroup_id, ad_id]"
                 )
+
+            if "advertiser_id" in dimensions:
+                dimensions.remove("advertiser_id")
 
             metrics = fields[2].replace(" ", "").split(",")
             filtering_param = False
@@ -1091,8 +1090,6 @@ class TikTokSource:
                     )
                 filter_name = list(filters.keys())[0]
                 filter_value = list(map(int, filters[list(filters.keys())[0]]))
-
-        print("got advertiser ids", advertiser_ids)
 
         return tiktok_source(
             start_date=start_date,

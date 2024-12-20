@@ -127,25 +127,13 @@ def tiktok_source(
             interval_days=interval_days,
         )
 
-        # for start, end in list_of_interval:
-        #     yield tiktok_api.fetch_pages(
-        #         advertiser_ids=advertiser_ids,
-        #         start_time=start,
-        #         end_time=end,
-        #         dimensions=dimensions,
-        #         metrics=metrics,
-        #     )
-
-        # Yield all intervals at once instead of one by one
-        return (
-            tiktok_api.fetch_pages(
+        for start, end in list_of_interval:
+            yield tiktok_api.fetch_pages(
                 advertiser_ids=advertiser_ids,
                 start_time=start,
                 end_time=end,
                 dimensions=dimensions,
                 metrics=metrics,
             )
-            for start, end in list_of_interval
-        )
 
     return custom_reports
