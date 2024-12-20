@@ -1,11 +1,11 @@
-import re
 import base64
 import csv
 import json
 import os
+import re
 from datetime import date
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, quote, urlparse, ParseResult
+from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
 import pendulum
@@ -40,8 +40,8 @@ from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import table_string_to_dataclass
-from ingestr.src.time import isotime
 from ingestr.src.tiktok_ads import tiktok_source
+from ingestr.src.time import isotime
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
@@ -1114,7 +1114,6 @@ class AsanaSource:
 
 
 class DynamoDBSource:
-
     AWS_ENDPOINT_PATTERN = re.compile(".*\.(.+)\.amazonaws\.com")
 
     def infer_aws_region(self, uri: ParseResult) -> Optional[str]:
@@ -1128,7 +1127,7 @@ class DynamoDBSource:
         if region is None:
             return None
         return region[0]
-    
+
     def get_endpoint_url(self, url: ParseResult) -> str:
         if self.AWS_ENDPOINT_PATTERN.match(url.netloc) is not None:
             return f"https://{url.hostname}"
