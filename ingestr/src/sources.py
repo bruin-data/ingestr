@@ -1017,9 +1017,11 @@ class TikTokSource:
 
         timezone = "UTC"
 
-        advertiser_id = source_fields.get("advertiser_id")
-        if not advertiser_id:
-            raise ValueError("advertiser_id is required to connect to TikTok")
+        advertiser_ids = source_fields.get("advertiser_ids")
+        if not advertiser_ids:
+            raise ValueError("advertiser_ids is required to connect to TikTok")
+
+        advertiser_ids = advertiser_ids[0].replace(" ", "").split(",")
 
         start_date = pendulum.now().subtract(days=90).in_tz(timezone)
         end_date = ensure_pendulum_datetime(pendulum.now()).in_tz(timezone)
@@ -1062,17 +1064,41 @@ class TikTokSource:
             filter_name = ""
             filter_value = []
             if len(fields) == 4:
+
+                def parse_filters(filters_raw: str) -> dict:
+                    # Parse filter string like "key1=value1,key2=value2,value3,value4"
+                    filters = {}
+                    current_key = None
+
+                    for item in filters_raw.split(","):
+                        if "=" in item:
+                            # Start of a new key-value pair
+                            key, value = item.split("=")
+                            filters[key] = [value]  # Always start with a list
+                            current_key = key
+                        elif current_key is not None:
+                            # Additional value for the current key
+                            filters[current_key].append(item)
+
+                    # Convert single-item lists to simple values
+                    return {k: v[0] if len(v) == 1 else v for k, v in filters.items()}
+
                 filtering_param = True
-                filters = fields[3].replace(" ", "").split(",")
-                filter_name = filters[0].split(",")[0]
-                field_value = filters[1:]
-                filter_value = list(map(int, field_value))
+                filters = parse_filters(fields[3])
+                if len(filters) > 1:
+                    raise ValueError(
+                        "Only one filter is allowed for TikTok custom reports"
+                    )
+                filter_name = list(filters.keys())[0]
+                filter_value = list(map(int, filters[list(filters.keys())[0]]))
+
+        print("got advertiser ids", advertiser_ids)
 
         return tiktok_source(
             start_date=start_date,
             end_date=end_date,
             access_token=access_token[0],
-            advertiser_id=advertiser_id[0],
+            advertiser_ids=advertiser_ids,
             timezone=timezone,
             dimensions=dimensions,
             metrics=metrics,

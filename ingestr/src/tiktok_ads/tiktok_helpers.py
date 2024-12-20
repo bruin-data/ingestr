@@ -68,7 +68,7 @@ class TikTokAPI:
         self.filter_value = filter_value
 
     def fetch_pages(
-        self, advertiser_id: str, start_time, end_time, dimensions, metrics
+        self, advertiser_ids: list[str], start_time, end_time, dimensions, metrics
     ):
         data_level_mapping = {
             "advertiser_id": "AUCTION_ADVERTISER",
@@ -93,8 +93,8 @@ class TikTokAPI:
                 "filter_value": json.dumps(self.filter_value),
             }
         ]
-        self.params = {
-            "advertiser_id": advertiser_id,
+        params = {
+            "advertiser_ids": json.dumps(advertiser_ids),
             "report_type": "BASIC",
             "data_level": data_level,
             "start_date": start_time,
@@ -103,13 +103,15 @@ class TikTokAPI:
             "dimensions": json.dumps(dimensions),
             "metrics": json.dumps(metrics),
         }
+
         if self.filtering_param:
-            self.params["filtering"] = json.dumps(filtering)
+            params["filtering"] = json.dumps(filtering)
         client = create_client()
         while True:
-            self.params["page"] = current_page
+            print("-- fetching page", start_time, end_time, current_page)
+            params["page"] = current_page
             response = client.get(
-                url=BASE_URL, headers=self.headers, params=self.params
+                url=BASE_URL, headers=self.headers, params=params
             )
 
             result = response.json()
