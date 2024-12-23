@@ -1,17 +1,44 @@
 import base64
 import csv
 import json
-from datetime import date
-from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlparse
+import os
+import re
+from datetime import date, datetime
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Union,
+)
+from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
 import pendulum
-from dlt.common.configuration.specs import AwsCredentials
+import sqlalchemy
+from dlt.common.configuration.specs import (
+    AwsCredentials,
+)
+from dlt.common.libs.sql_alchemy import (
+    Engine,
+    MetaData,
+)
 from dlt.common.time import ensure_pendulum_datetime
-from dlt.common.typing import TSecretStrValue
+from dlt.common.typing import TDataItem, TSecretStrValue
+from dlt.extract import Incremental
 from dlt.sources.credentials import ConnectionStringCredentials
 from dlt.sources.sql_database import sql_table
+from dlt.sources.sql_database.helpers import TableLoader
+from dlt.sources.sql_database.schema_types import (
+    ReflectionLevel,
+    SelectAny,
+    Table,
+    TTypeAdapter,
+)
+from sqlalchemy import Column
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
 from dlt.sources.credentials import GcpServiceAccountCredentials
@@ -21,7 +48,9 @@ from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.arrow import memory_mapped_arrow
+from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
+from ingestr.src.dynamodb import dynamodb
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
@@ -37,12 +66,17 @@ from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.stripe_analytics import stripe_source
-from ingestr.src.table_definition import table_string_to_dataclass
+from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
+from ingestr.src.tiktok_ads import tiktok_source
+from ingestr.src.time import isotime
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+
+TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
+TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
 
 
 class SqlSource:
@@ -55,7 +89,9 @@ class SqlSource:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        table_fields = table_string_to_dataclass(table)
+        table_fields = TableDefinition(dataset="custom", table="custom")
+        if not table.startswith("query:"):
+            table_fields = table_string_to_dataclass(table)
 
         incremental = None
         if kwargs.get("incremental_key"):
@@ -83,6 +119,110 @@ class SqlSource:
                     query = query.order_by(kwargs.get("incremental_key"))
                 return query
 
+        defer_table_reflect = False
+        sql_backend = kwargs.get("sql_backend", "sqlalchemy")
+        if table.startswith("query:"):
+            if kwargs.get("sql_limit"):
+                raise ValueError(
+                    "sql_limit is not supported for custom queries, please apply the limit in the query instead"
+                )
+
+            sql_backend = "sqlalchemy"
+            defer_table_reflect = True
+            query_value = table.split(":", 1)[1]
+
+            # this is a very hacky version of the table_rows function. it is built this way to go around the dlt's table loader.
+            # I didn't want to write a full fledged sqlalchemy source for now, and wanted to benefit from the existing stuff to begin with.
+            # this is by no means a production ready solution, but it works for now.
+            # the core idea behind this implementation is to create a mock table instance with the columns that are absolutely necessary for the incremental load to work.
+            # the table loader will then use the query adapter callback to apply the actual query and load the rows.
+            def table_rows(
+                engine: Engine,
+                table: Union[Table, str],
+                metadata: MetaData,
+                chunk_size: int,
+                backend: TableBackend,
+                incremental: Optional[Incremental[Any]] = None,
+                table_adapter_callback: Callable[[Table], None] = None,  # type: ignore
+                reflection_level: ReflectionLevel = "minimal",
+                backend_kwargs: Dict[str, Any] = None,  # type: ignore
+                type_adapter_callback: Optional[TTypeAdapter] = None,
+                included_columns: Optional[List[str]] = None,
+                query_adapter_callback: Optional[TQueryAdapter] = None,
+                resolve_foreign_keys: bool = False,
+            ) -> Iterator[TDataItem]:
+                hints = {  # type: ignore
+                    "columns": [],
+                }
+                cols = []  # type: ignore
+
+                if incremental:
+                    switchDict = {
+                        int: sa.INTEGER,
+                        datetime: sa.TIMESTAMP,
+                        pendulum.Date: sa.DATE,
+                        pendulum.DateTime: sa.TIMESTAMP,
+                    }
+
+                    if incremental.last_value is not None:
+                        cols.append(
+                            Column(
+                                incremental.cursor_path,
+                                switchDict[type(incremental.last_value)],  # type: ignore
+                            )
+                        )
+                    else:
+                        cols.append(Column(incremental.cursor_path, sa.TIMESTAMP))  # type: ignore
+
+                table = Table(
+                    "query_result",
+                    metadata,
+                    *cols,
+                )
+
+                loader = TableLoader(
+                    engine,
+                    backend,
+                    table,
+                    hints["columns"],  # type: ignore
+                    incremental=incremental,
+                    chunk_size=chunk_size,
+                    query_adapter_callback=query_adapter_callback,
+                )
+                try:
+                    yield from loader.load_rows(backend_kwargs)
+                finally:
+                    if getattr(engine, "may_dispose_after_use", False):
+                        engine.dispose()
+
+            dlt.sources.sql_database.table_rows = table_rows
+
+            def query_adapter_callback(query, table, incremental=None, engine=None):
+                params = {}
+                if incremental:
+                    params["interval_start"] = (
+                        incremental.last_value
+                        if incremental.last_value is not None
+                        else datetime(year=1, month=1, day=1)
+                    )
+                    if incremental.end_value is not None:
+                        params["interval_end"] = incremental.end_value
+                else:
+                    if ":interval_start" in query_value:
+                        params["interval_start"] = (
+                            datetime.min
+                            if kwargs.get("interval_start") is None
+                            else kwargs.get("interval_start")
+                        )
+                    if ":interval_end" in query_value:
+                        params["interval_end"] = (
+                            datetime.max
+                            if kwargs.get("interval_end") is None
+                            else kwargs.get("interval_end")
+                        )
+
+                return sqlalchemy.text(query_value).bindparams(**params)
+
         def type_adapter_callback(sql_type):
             if isinstance(sql_type, mysql.SET):
                 return sa.JSON
@@ -93,7 +233,7 @@ class SqlSource:
             schema=table_fields.dataset,
             table=table_fields.table,
             incremental=incremental,
-            backend=kwargs.get("sql_backend", "sqlalchemy"),
+            backend=sql_backend,
             chunk_size=kwargs.get("page_size", None),
             reflection_level=reflection_level,
             query_adapter_callback=query_adapter_callback,
@@ -101,6 +241,7 @@ class SqlSource:
             table_adapter_callback=table_adapter_exclude_columns(
                 kwargs.get("sql_exclude_columns", [])
             ),
+            defer_table_reflect=defer_table_reflect,
         )
 
         return builder_res
@@ -116,8 +257,6 @@ class ArrowMemoryMappedSource:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        import os
-
         incremental = None
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
@@ -823,6 +962,7 @@ class AdjustSource:
 
         return src.with_resources(table)
 
+
 class AppsflyerSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -997,10 +1137,215 @@ class S3Source:
         ).with_resources(endpoint)
 
 
+class TikTokSource:
+    # tittok://?access_token=<access_token>&advertiser_id=<advertiser_id>
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        endpoint = "custom_reports"
+
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        access_token = source_fields.get("access_token")
+        if not access_token:
+            raise ValueError("access_token is required to connect to TikTok")
+
+        timezone = "UTC"
+        if source_fields.get("timezone") is not None:
+            timezone = source_fields.get("timezone")[0]  # type: ignore
+
+        advertiser_ids = source_fields.get("advertiser_ids")
+        if not advertiser_ids:
+            raise ValueError("advertiser_ids is required to connect to TikTok")
+
+        advertiser_ids = advertiser_ids[0].replace(" ", "").split(",")
+
+        start_date = pendulum.now().subtract(days=30).in_tz(timezone)
+        end_date = ensure_pendulum_datetime(pendulum.now()).in_tz(timezone)
+
+        interval_start = kwargs.get("interval_start")
+        if interval_start is not None:
+            start_date = ensure_pendulum_datetime(interval_start).in_tz(timezone)
+
+        interval_end = kwargs.get("interval_end")
+        if interval_end is not None:
+            end_date = ensure_pendulum_datetime(interval_end).in_tz(timezone)
+
+        page_size = min(1000, kwargs.get("page_size", 1000))
+
+        if table.startswith("custom:"):
+            fields = table.split(":", 3)
+            if len(fields) != 3 and len(fields) != 4:
+                raise ValueError(
+                    "Invalid TikTok custom table format. Expected format: custom:<dimensions>,<metrics> or custom:<dimensions>:<metrics>:<filters>"
+                )
+
+            dimensions = fields[1].replace(" ", "").split(",")
+            if (
+                "campaign_id" not in dimensions
+                and "adgroup_id" not in dimensions
+                and "ad_id" not in dimensions
+            ):
+                raise ValueError(
+                    "TikTok API requires at least one ID dimension, please use one of the following dimensions: [campaign_id, adgroup_id, ad_id]"
+                )
+
+            if "advertiser_id" in dimensions:
+                dimensions.remove("advertiser_id")
+
+            metrics = fields[2].replace(" ", "").split(",")
+            filtering_param = False
+            filter_name = ""
+            filter_value = []
+            if len(fields) == 4:
+
+                def parse_filters(filters_raw: str) -> dict:
+                    # Parse filter string like "key1=value1,key2=value2,value3,value4"
+                    filters = {}
+                    current_key = None
+
+                    for item in filters_raw.split(","):
+                        if "=" in item:
+                            # Start of a new key-value pair
+                            key, value = item.split("=")
+                            filters[key] = [value]  # Always start with a list
+                            current_key = key
+                        elif current_key is not None:
+                            # Additional value for the current key
+                            filters[current_key].append(item)
+
+                    # Convert single-item lists to simple values
+                    return {k: v[0] if len(v) == 1 else v for k, v in filters.items()}
+
+                filtering_param = True
+                filters = parse_filters(fields[3])
+                if len(filters) > 1:
+                    raise ValueError(
+                        "Only one filter is allowed for TikTok custom reports"
+                    )
+                filter_name = list(filters.keys())[0]
+                filter_value = list(map(int, filters[list(filters.keys())[0]]))
+
+        return tiktok_source(
+            start_date=start_date,
+            end_date=end_date,
+            access_token=access_token[0],
+            advertiser_ids=advertiser_ids,
+            timezone=timezone,
+            dimensions=dimensions,
+            metrics=metrics,
+            page_size=page_size,
+            filter_name=filter_name,
+            filter_value=filter_value,
+            filtering_param=filtering_param,
+        ).with_resources(endpoint)
+
+
+class AsanaSource:
+    resources = [
+        "workspaces",
+        "projects",
+        "sections",
+        "tags",
+        "tasks",
+        "stories",
+        "teams",
+        "users",
+    ]
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        workspace = parsed_uri.hostname
+        access_token = params.get("access_token")
+
+        if not workspace:
+            raise ValueError("workspace ID must be specified in the URI")
+
+        if not access_token:
+            raise ValueError("access_token is required for connecting to Asana")
+
+        if table not in self.resources:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Asana source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        dlt.secrets["sources.asana_source.access_token"] = access_token[0]
+        src = asana_source()
+        src.workspaces.add_filter(lambda w: w["gid"] == workspace)
+        return src.with_resources(table)
+
+
+class DynamoDBSource:
+    AWS_ENDPOINT_PATTERN = re.compile(".*\.(.+)\.amazonaws\.com")
+
+    def infer_aws_region(self, uri: ParseResult) -> Optional[str]:
+        # try to infer from URI
+        matches = self.AWS_ENDPOINT_PATTERN.match(uri.netloc)
+        if matches is not None:
+            return matches[1]
+
+        # else obtain region from query string
+        region = parse_qs(uri.query).get("region")
+        if region is None:
+            return None
+        return region[0]
+
+    def get_endpoint_url(self, url: ParseResult) -> str:
+        if self.AWS_ENDPOINT_PATTERN.match(url.netloc) is not None:
+            return f"https://{url.hostname}"
+        return f"http://{url.netloc}"
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+
+        region = self.infer_aws_region(parsed_uri)
+        if not region:
+            raise ValueError("region is required to connect to Dynamodb")
+
+        qs = parse_qs(quote(parsed_uri.query, safe="=&"))
+        access_key = qs.get("access_key_id")
+
+        if not access_key:
+            raise ValueError("access_key_id is required to connect to Dynamodb")
+
+        secret_key = qs.get("secret_access_key")
+        if not secret_key:
+            raise ValueError("secret_access_key is required to connect to Dynamodb")
+
+        creds = AwsCredentials(
+            aws_access_key_id=access_key[0],
+            aws_secret_access_key=TSecretStrValue(secret_key[0]),
+            region_name=region,
+            endpoint_url=self.get_endpoint_url(parsed_uri),
+        )
+
+        incremental = None
+        incremental_key = kwargs.get("incremental_key")
+
+        if incremental_key:
+            incremental = dlt.sources.incremental(
+                incremental_key.strip(),
+                initial_value=isotime(kwargs.get("interval_start")),
+                end_value=isotime(kwargs.get("interval_end")),
+            )
+
+        return dynamodb(table, creds, incremental)
+
+
 class GoogleAnalyticsSource:
     def handles_incrementality(self) -> bool:
         return True
-   
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         parse_uri = urlparse(uri)
         source_fields = parse_qs(parse_uri.query)
@@ -1011,7 +1356,7 @@ class GoogleAnalyticsSource:
         private_key = source_fields.get("private_key")
         if not private_key:
            raise ValueError("private_key is required to connect to Google Analytics")
-        
+
         client_email = source_fields.get("email")
         if not client_email:
            raise ValueError("client email is required to connect to Google Analytics")
@@ -1024,7 +1369,7 @@ class GoogleAnalyticsSource:
         property_id = source_fields.get("property_id")
         if not property_id:
            raise ValueError("property_id is required to connect to Google Analytics")
-        
+
         interval_start = kwargs.get("interval_start")
         start_date = (
             interval_start.strftime("%Y-%m-%d") if interval_start else "2000-01-01"
@@ -1034,7 +1379,7 @@ class GoogleAnalyticsSource:
                 raise ValueError(
                     "Invalid table format. Expected format: <dimensions>:<metrics>"
                 )
-      
+
         dimensions = fields[0].split(",")
         metrics = fields[1].split(",")
         queries = [{"resource_name": "custom", "dimensions": dimensions, "metrics": metrics }]
