@@ -44,6 +44,7 @@ from dlt.sources.sql_database.schema_types import (
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
+import urllib
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
@@ -1351,46 +1352,39 @@ class GoogleAnalyticsSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         parse_uri = urlparse(uri)
         source_fields = parse_qs(parse_uri.query)
-        project_id = source_fields.get("project_id")
-        if not project_id:
-            raise ValueError("project_id is required to connect to Google Analytics")
+        cred_path = source_fields.get("credentials_path")
+   
+        if not cred_path:
+            raise ValueError(
+                "credentials_path is required to connect Google Analytics"
+            )
+        credentials = {}
+        with open(cred_path[0], "r") as f:
+            credentials = json.load(f)
 
-        private_key = source_fields.get("private_key")
-        if not private_key:
-            raise ValueError("private_key is required to connect to Google Analytics")
-
-        client_email = source_fields.get("email")
-        if not client_email:
-            raise ValueError("client email is required to connect to Google Analytics")
-
-        credentials = GcpServiceAccountCredentials(
-            project_id=project_id[0],
-            private_key=private_key[0],
-            client_email=client_email[0],
-        )
         property_id = source_fields.get("property_id")
         if not property_id:
             raise ValueError("property_id is required to connect to Google Analytics")
 
         interval_start = kwargs.get("interval_start")
         start_date = (
-            interval_start.strftime("%Y-%m-%d") if interval_start else "2000-01-01"
+            interval_start.strftime("%Y-%m-%d") if interval_start else "2015-08-14"
         )
         fields = table.split(":")
-        if len(fields) != 2:
+        if len(fields) != 3:
             raise ValueError(
-                "Invalid table format. Expected format: <dimensions>:<metrics>"
+                "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
             )
 
-        dimensions = fields[0].split(",")
-        metrics = fields[1].split(",")
+        dimensions = fields[1].split(",")
+        metrics = fields[2].split(",")
         queries = [
             {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
         ]
-
+        print("dimensions",dimensions)
         return google_analytics(
             property_id=property_id[0],
-            start_date=start_date[0],
+            start_date=start_date,
             queries=queries,
             credentials=credentials,
-        )
+        ).with_resources('basic_report')

@@ -39,6 +39,7 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
+    GoogleAnalyticsSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -118,6 +119,7 @@ class SourceDestinationFactory:
         "dynamodb": DynamoDBSource,
         "asana": AsanaSource,
         "tiktok": TikTokSource,
+        "googleanalytics":GoogleAnalyticsSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

@@ -49,7 +49,6 @@ def to_dict(item: Any) -> Iterator[TDataItem]:
             including_default_value_fields=False,
         )
     )
-    print(item)
     yield item
 
 
@@ -80,29 +79,17 @@ def get_report(
         Generator of all rows of data in the report.
     """
 
-    # loop through all the pages
-    # the total number of rows is received after the first request, for the first request to be sent through, initializing the row_count to 1 would suffice
-    offset = 0
-    row_count = 1
-    limit = limit
-    while offset < row_count:
-        # make request to get the particular page
-        request = RunReportRequest(
-            property=f"properties/{property_id}",
-            dimensions=dimension_list,
-            metrics=metric_list,
-            offset=offset,
-            limit=limit,
-            date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
-        )
-        # process request
-        response = client.run_report(request)
-        processed_response_generator = process_report(response=response)
-        yield from processed_response_generator
-        # update
-        row_count = response.row_count
-        offset += limit
-
+    request = RunReportRequest(
+        property=f"properties/{property_id}",
+        dimensions=dimension_list,
+        metrics=metric_list,
+        limit=limit,
+        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+    )
+    # process request
+    response = client.run_report(request)
+    processed_response_generator = process_report(response=response)
+    yield from processed_response_generator
 
 def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
     """
@@ -117,6 +104,9 @@ def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
 
     metrics_headers = [header.name for header in response.metric_headers]
     dimensions_headers = [header.name for header in response.dimension_headers]
+
+    distinct_key_combinations = {}
+
     for row in response.rows:
         response_dict: DictStrAny = {
             dimension_header: _resolve_dimension_value(
@@ -126,15 +116,20 @@ def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
                 dimensions_headers, row.dimension_values
             )
         }
+
         for i in range(len(metrics_headers)):
             # get metric type and process the value depending on type. Save metric name including type as well for the columns
             metric_type = response.metric_headers[i].type_
             metric_value = process_metric_value(
                 metric_type=metric_type, value=row.metric_values[i].value
             )
-            response_dict[f"{metrics_headers[i]}_{metric_type.name.split('_')[1]}"] = (
-                metric_value
-            )
+            response_dict[metrics_headers[i]] = metric_value
+
+        unique_key = "-".join(list(response_dict.keys()))
+        if unique_key not in distinct_key_combinations:
+            print("found some new keys", unique_key)
+            distinct_key_combinations[unique_key] = True
+
         yield response_dict
 
 
@@ -171,7 +166,6 @@ def _resolve_dimension_value(dimension_name: str, dimension_value: str) -> Any:
     Returns:
         The value of the dimension with the correct data type.
     """
-
     if dimension_name == "date":
         return pendulum.from_format(dimension_value, "YYYYMMDD", tz="UTC")
     elif dimension_name == "dateHour":

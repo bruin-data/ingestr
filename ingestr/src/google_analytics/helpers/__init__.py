@@ -3,7 +3,7 @@
 from typing import Iterator, List
 
 import dlt
-from apiclient.discovery import Resource
+from apiclient.discovery import Resource # type: ignore
 from dlt.common import logger, pendulum
 from dlt.common.typing import TDataItem
 from google.analytics.data_v1beta.types import (
@@ -12,9 +12,7 @@ from google.analytics.data_v1beta.types import (
 )
 from pendulum.datetime import DateTime
 
-from ..settings import START_DATE
 from .data_processing import get_report
-
 
 def basic_report(
     client: Resource,
@@ -49,14 +47,14 @@ def basic_report(
 
     # grab the start time from last dlt load if not filled, if that is also empty then use the first day of the millennium as the start time instead
     if last_date.last_value:
-        if start_date != START_DATE:
+        if start_date != "2015-08-14":
             logger.warning(
                 f"Using the starting date: {last_date.last_value} for incremental report: {resource_name} and ignoring start date passed as argument {start_date}"
             )
         # take next day after yesterday to avoid double loads
-        start_date = last_date.last_value.add(days=1).to_date_string()
+        start_date = last_date.last_value.to_date_string()
     else:
-        start_date = start_date or START_DATE
+        start_date = start_date or "2015-08-14"
 
     processed_response = get_report(
         client=client,
@@ -67,6 +65,9 @@ def basic_report(
         limit=rows_per_page,
         start_date=start_date,
         # configure end_date to yesterday as a date string
-        end_date=pendulum.yesterday().to_date_string(),
+        end_date=pendulum.now().to_date_string(),
     )
+    # import json
+    # with open('/Users/sanju/test/ingestr/dump.json', 'w+') as f:
+    #     json.dump(list(processed_response), f, sort_keys=True, default=str)
     yield from processed_response
