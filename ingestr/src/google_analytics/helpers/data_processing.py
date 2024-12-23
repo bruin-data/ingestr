@@ -91,6 +91,7 @@ def get_report(
     processed_response_generator = process_report(response=response)
     yield from processed_response_generator
 
+
 def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
     """
     Receives a single page for a report response, processes it, and returns a generator for every row of data in the report page.

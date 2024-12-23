@@ -31,7 +31,6 @@ from dlt.common.typing import TDataItem, TSecretStrValue
 from dlt.extract import Incremental
 from dlt.sources.credentials import (
     ConnectionStringCredentials,
-    GcpServiceAccountCredentials,
 )
 from dlt.sources.sql_database import sql_table
 from dlt.sources.sql_database.helpers import TableLoader
@@ -44,7 +43,6 @@ from dlt.sources.sql_database.schema_types import (
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
-import urllib
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
@@ -1096,7 +1094,7 @@ class S3Source:
             )
 
         parsed_uri = urlparse(uri)
-        source_fields = parse_qs(parsed_uri.query)
+        source_fields = parse_qs(quote(parsed_uri.query, safe="=&"))
         access_key_id = source_fields.get("access_key_id")
         if not access_key_id:
             raise ValueError("access_key_id is required to connect to S3")
@@ -1353,11 +1351,9 @@ class GoogleAnalyticsSource:
         parse_uri = urlparse(uri)
         source_fields = parse_qs(parse_uri.query)
         cred_path = source_fields.get("credentials_path")
-   
+
         if not cred_path:
-            raise ValueError(
-                "credentials_path is required to connect Google Analytics"
-            )
+            raise ValueError("credentials_path is required to connect Google Analytics")
         credentials = {}
 
         with open(cred_path[0], "r") as f:
@@ -1379,15 +1375,17 @@ class GoogleAnalyticsSource:
             )
 
         dimensions = fields[1].split(",")
-        
+
         datetime = ""
         for dimension_datetime in ["date", "dateHourMinute", "dateHour"]:
             if dimension_datetime in dimensions:
                 datetime = dimension_datetime
                 break
         else:
-            raise ValueError("You must provide at least one dimension: [dateHour, dateHourMinute, date]")
-                    
+            raise ValueError(
+                "You must provide at least one dimension: [dateHour, dateHourMinute, date]"
+            )
+
         metrics = fields[2].split(",")
         queries = [
             {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
@@ -1396,7 +1394,8 @@ class GoogleAnalyticsSource:
         return google_analytics(
             property_id=property_id[0],
             start_date=start_date,
-            datetime = datetime,
+            datetime=datetime,
             queries=queries,
             credentials=credentials,
-        ).with_resources('basic_report')
+        ).with_resources("basic_report")
+    

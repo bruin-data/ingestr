@@ -3,7 +3,7 @@
 from typing import Iterator, List
 
 import dlt
-from apiclient.discovery import Resource # type: ignore
+from apiclient.discovery import Resource  # type: ignore
 from dlt.common import logger, pendulum
 from dlt.common.typing import TDataItem
 from google.analytics.data_v1beta.types import (
@@ -13,6 +13,7 @@ from google.analytics.data_v1beta.types import (
 from pendulum.datetime import DateTime
 
 from .data_processing import get_report
+
 
 def basic_report(
     client: Resource,

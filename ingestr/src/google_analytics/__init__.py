@@ -2,23 +2,20 @@
 Defines all the sources and resources needed for Google Analytics V4
 """
 
-from typing import Iterator, List, Optional, Union
+from typing import List, Optional, Union
 
 import dlt
-from apiclient.discovery import Resource  # type: ignore
-from dlt.common.typing import DictStrAny, TDataItem
+from dlt.common.typing import DictStrAny
 from dlt.sources import DltResource
 from dlt.sources.credentials import GcpOAuthCredentials, GcpServiceAccountCredentials
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
-from google.analytics.data_v1beta.types import GetMetadataRequest, Metadata
 
 from .helpers import basic_report
-from .helpers.data_processing import to_dict
 
 
 @dlt.source(max_table_nesting=0)
 def google_analytics(
-    datetime:str,
+    datetime: str,
     credentials: Union[
         GcpOAuthCredentials, GcpServiceAccountCredentials
     ] = dlt.secrets.value,
@@ -54,8 +51,10 @@ def google_analytics(
     # always add "date" to dimensions so we are able to track the last day of a report
     dimensions = query["dimensions"]
     resource_name = query["resource_name"]
-    
-    res = dlt.resource(basic_report, name="basic_report", merge_key=datetime, write_disposition="merge")(
+
+    res = dlt.resource(
+        basic_report, name="basic_report", merge_key=datetime, write_disposition="merge"
+    )(
         client=client,
         rows_per_page=rows_per_page,
         property_id=property_id,
