@@ -1374,7 +1374,7 @@ class GoogleAnalyticsSource:
                 "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
             )
 
-        dimensions = fields[1].split(",")
+        dimensions = fields[1].replace(" ", "").split(",")
 
         datetime = ""
         for dimension_datetime in ["date", "dateHourMinute", "dateHour"]:
@@ -1386,7 +1386,7 @@ class GoogleAnalyticsSource:
                 "You must provide at least one dimension: [dateHour, dateHourMinute, date]"
             )
 
-        metrics = fields[2].split(",")
+        metrics = fields[2].replace(" ", "").split(",")
         queries = [
             {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
         ]
