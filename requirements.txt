@@ -33,4 +33,4 @@ pyathena==3.9.0
 google-analytics-data==0.18.15
 google-auth-oauthlib==1.2.1
 requests_oauthlib==2.0.0
-asana==3.2.3
+asana==5.0.10

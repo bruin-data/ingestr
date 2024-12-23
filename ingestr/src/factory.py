@@ -1,4 +1,4 @@
-from typing import Protocol
+from typing import Dict, Protocol, Type
 from urllib.parse import urlparse
 
 from dlt.common.destination import Destination
@@ -24,7 +24,6 @@ from ingestr.src.sources import (
     ChessSource,
     DynamoDBSource,
     FacebookAdsSource,
-    GoogleAnalyticsSource,
     GoogleSheetsSource,
     GorgiasSource,
     HubspotSource,
