@@ -30,7 +30,7 @@ except ImportError:
         "Google Analytics API Client", ["google-analytics-data"]
     )
 try:
-    from apiclient.discovery import Resource, build  # noqa: F401
+    from apiclient.discovery import Resource, build  # type: ignore # noqa: F401
 except ImportError:
     raise MissingDependencyException("Google API Client", ["google-api-python-client"])
 
@@ -127,7 +127,6 @@ def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
 
         unique_key = "-".join(list(response_dict.keys()))
         if unique_key not in distinct_key_combinations:
-            print("found some new keys", unique_key)
             distinct_key_combinations[unique_key] = True
 
         yield response_dict

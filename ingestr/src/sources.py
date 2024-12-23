@@ -1359,6 +1359,7 @@ class GoogleAnalyticsSource:
                 "credentials_path is required to connect Google Analytics"
             )
         credentials = {}
+
         with open(cred_path[0], "r") as f:
             credentials = json.load(f)
 
@@ -1370,6 +1371,7 @@ class GoogleAnalyticsSource:
         start_date = (
             interval_start.strftime("%Y-%m-%d") if interval_start else "2015-08-14"
         )
+
         fields = table.split(":")
         if len(fields) != 3:
             raise ValueError(
@@ -1377,14 +1379,24 @@ class GoogleAnalyticsSource:
             )
 
         dimensions = fields[1].split(",")
+        
+        datetime = ""
+        for dimension_datetime in ["date", "dateHourMinute", "dateHour"]:
+            if dimension_datetime in dimensions:
+                datetime = dimension_datetime
+                break
+        else:
+            raise ValueError("You must provide at least one dimension: [dateHour, dateHourMinute, date]")
+                    
         metrics = fields[2].split(",")
         queries = [
             {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
         ]
-        print("dimensions",dimensions)
+
         return google_analytics(
             property_id=property_id[0],
             start_date=start_date,
+            datetime = datetime,
             queries=queries,
             credentials=credentials,
         ).with_resources('basic_report')

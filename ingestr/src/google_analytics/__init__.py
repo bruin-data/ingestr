@@ -18,6 +18,7 @@ from .helpers.data_processing import to_dict
 
 @dlt.source(max_table_nesting=0)
 def google_analytics(
+    datetime:str,
     credentials: Union[
         GcpOAuthCredentials, GcpServiceAccountCredentials
     ] = dlt.secrets.value,
@@ -49,14 +50,12 @@ def google_analytics(
             "Google Analytics supports a single query ingestion at a time, please give only one query"
         )
     query = queries[0]
+
     # always add "date" to dimensions so we are able to track the last day of a report
     dimensions = query["dimensions"]
-    if "date" not in dimensions:
-        # make a copy of dimensions
-        dimensions = dimensions + ["dateHour"]
     resource_name = query["resource_name"]
     
-    res = dlt.resource(basic_report, name="basic_report", merge_key="dateHour", write_disposition="merge")(
+    res = dlt.resource(basic_report, name="basic_report", merge_key=datetime, write_disposition="merge")(
         client=client,
         rows_per_page=rows_per_page,
         property_id=property_id,
@@ -65,7 +64,7 @@ def google_analytics(
         resource_name=resource_name,
         start_date=start_date,
         last_date=dlt.sources.incremental(
-            "dateHour"
+            datetime
         ),  # pass empty primary key to avoid unique checks, a primary key defined by the resource will be used
     )
 

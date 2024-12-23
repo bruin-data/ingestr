@@ -51,7 +51,6 @@ def basic_report(
             logger.warning(
                 f"Using the starting date: {last_date.last_value} for incremental report: {resource_name} and ignoring start date passed as argument {start_date}"
             )
-        # take next day after yesterday to avoid double loads
         start_date = last_date.last_value.to_date_string()
     else:
         start_date = start_date or "2015-08-14"
@@ -67,7 +66,4 @@ def basic_report(
         # configure end_date to yesterday as a date string
         end_date=pendulum.now().to_date_string(),
     )
-    # import json
-    # with open('/Users/sanju/test/ingestr/dump.json', 'w+') as f:
-    #     json.dump(list(processed_response), f, sort_keys=True, default=str)
     yield from processed_response
