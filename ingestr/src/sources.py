@@ -1398,4 +1398,3 @@ class GoogleAnalyticsSource:
             queries=queries,
             credentials=credentials,
         ).with_resources("basic_report")
-    
