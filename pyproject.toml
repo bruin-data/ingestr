@@ -81,6 +81,7 @@ exclude = [
     'src/adjust/.*',
     'src/filesystem/.*',
     'src/zendesk/.*',
+    'src/google_analytics/.*',
 
     'src/dynamodb/.*',
 
@@ -106,6 +107,7 @@ module = [
   "ingestr.src.appsflyer",
   "ingestr.src.filesystem.*",
   "ingestr.src.zendesk.*",
+  "ingestr.src.google_analytics.*",
   "ingestr.src.dynamodb.*",
   "ingestr.src.asana_source.*",
   "ingestr.src.tiktok_ads.*",

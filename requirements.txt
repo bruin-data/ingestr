@@ -30,4 +30,5 @@ types-requests==2.32.0.20240907
 s3fs==2024.10.0
 pyarrow==18.1.0
 pyathena==3.9.0
+google-analytics-data==0.18.15
 asana==3.2.3

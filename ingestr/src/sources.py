@@ -29,7 +29,9 @@ from dlt.common.libs.sql_alchemy import (
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TDataItem, TSecretStrValue
 from dlt.extract import Incremental
-from dlt.sources.credentials import ConnectionStringCredentials
+from dlt.sources.credentials import (
+    ConnectionStringCredentials,
+)
 from dlt.sources.sql_database import sql_table
 from dlt.sources.sql_database.helpers import TableLoader
 from dlt.sources.sql_database.schema_types import (
@@ -53,6 +55,7 @@ from ingestr.src.dynamodb import dynamodb
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
+from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -1338,3 +1341,60 @@ class DynamoDBSource:
             )
 
         return dynamodb(table, creds, incremental)
+
+
+class GoogleAnalyticsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parse_uri = urlparse(uri)
+        source_fields = parse_qs(parse_uri.query)
+        cred_path = source_fields.get("credentials_path")
+
+        if not cred_path:
+            raise ValueError("credentials_path is required to connect Google Analytics")
+        credentials = {}
+
+        with open(cred_path[0], "r") as f:
+            credentials = json.load(f)
+
+        property_id = source_fields.get("property_id")
+        if not property_id:
+            raise ValueError("property_id is required to connect to Google Analytics")
+
+        interval_start = kwargs.get("interval_start")
+        start_date = (
+            interval_start.strftime("%Y-%m-%d") if interval_start else "2015-08-14"
+        )
+
+        fields = table.split(":")
+        if len(fields) != 3:
+            raise ValueError(
+                "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
+            )
+
+        dimensions = fields[1].replace(" ", "").split(",")
+
+        datetime = ""
+        for dimension_datetime in ["date", "dateHourMinute", "dateHour"]:
+            if dimension_datetime in dimensions:
+                datetime = dimension_datetime
+                break
+        else:
+            raise ValueError(
+                "You must provide at least one dimension: [dateHour, dateHourMinute, date]"
+            )
+
+        metrics = fields[2].replace(" ", "").split(",")
+        queries = [
+            {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
+        ]
+
+        return google_analytics(
+            property_id=property_id[0],
+            start_date=start_date,
+            datetime=datetime,
+            queries=queries,
+            credentials=credentials,
+        ).with_resources("basic_report")
