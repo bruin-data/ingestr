@@ -31,7 +31,7 @@ ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=max&repo
 
 This is a sample command that will copy the data from the GitHub source to DuckDB.
 
-<img alt="athena_img" src="../media/github.png" />
+<img alt="github_img" src="../media/github.png" />
 
 ## Tables
 
