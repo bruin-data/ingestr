@@ -4,9 +4,10 @@ mypy==1.13.0
 pytest-cov==4.1.0
 pytest==8.3.3
 ruff==0.7.4
-hatchling==1.25.0
+hatchling==1.27.0
 build==1.2.1
 pyodbc==5.2.0
-twine==5.1.1
+twine==6.0.1
 testcontainers[postgres,mysql]==4.8.2
 pytest-xdist[psutil]==3.6.1
+pkginfo==1.12.0

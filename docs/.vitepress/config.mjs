@@ -57,6 +57,7 @@ export default defineConfig({
             text: "Databases",
             collapsed: false,
             items: [
+              { text: "AWS Athena", link: "/supported-sources/athena.md" },
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
               { text: "Databricks", link: "/supported-sources/databricks.md" },
               { text: "DuckDB", link: "/supported-sources/duckdb.md" },
@@ -77,6 +78,12 @@ export default defineConfig({
               { text: "SAP Hana", link: "/supported-sources/sap-hana.md" },
               { text: "Snowflake", link: "/supported-sources/snowflake.md" },
               { text: "SQLite", link: "/supported-sources/sqlite.md" },
+              {
+                text: "Experimental",
+                items: [
+                  { text: "Custom Queries", link: "/supported-sources/custom_queries.md" },
+                ],
+              },
             ],
           },
 
@@ -87,11 +94,14 @@ export default defineConfig({
               { text: "Adjust", link: "/supported-sources/adjust.md" },
               { text: "Airtable", link: "/supported-sources/airtable.md" },
               { text: "AppsFlyer", link: "/supported-sources/appsflyer.md" },
+              { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
+              { text: "DynamoDB", link: "/supported-sources/dynamodb.md" },
               {
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
               },
+              { text: "Google Analytics", link: "/supported-sources/google_analytics.md" },
               { text: "GitHub", link: "/supported-sources/github.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },
@@ -102,6 +112,7 @@ export default defineConfig({
               { text: "Shopify", link: "/supported-sources/shopify.md" },
               { text: "Slack", link: "/supported-sources/slack.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
+              { text: "TikTok Ads", link: "/supported-sources/tiktok-ads.md" },
               { text: "Zendesk", link: "/supported-sources/zendesk.md" },
             ],
           },

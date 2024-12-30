@@ -1,11 +1,11 @@
 .ONESHELL:
-.PHONY: test lint format ftl test-ci lint-ci build upload-release
+.PHONY: test lint format test-ci lint-ci build upload-release setup docker-shell
 
 venv: venv/touchfile
 
 venv/touchfile: requirements-dev.txt requirements.txt
 	test -d venv || python3 -m venv venv
-	. venv/bin/activate; $(MAKE) deps
+	. venv/bin/activate; pip install uv; $(MAKE) deps
 	touch venv/touchfile
 
 deps:
@@ -40,3 +40,11 @@ build:
 
 upload-release:
 	twine upload --verbose dist/*
+
+setup:
+	@echo "installing git hooks ..."
+	@install -m 755 .githooks/pre-commit-hook.sh .git/hooks/pre-commit
+
+docker-shell:
+	# run a docker container to build and run ingestr
+	@docker run -v $(PWD):/root/code -w /root/code -it --rm --entrypoint /bin/bash python:3.11

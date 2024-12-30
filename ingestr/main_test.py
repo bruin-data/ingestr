@@ -5,19 +5,26 @@ import shutil
 import string
 import tempfile
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Callable, Dict, Iterable, List, Optional
+from urllib.parse import urlparse
 
 import duckdb
 import numpy as np
 import pandas as pd  # type: ignore
+import pendulum
 import pyarrow as pa  # type: ignore
 import pyarrow.ipc as ipc  # type: ignore
 import pytest
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
+from sqlalchemy.pool import NullPool
+from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
+from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
@@ -1538,3 +1545,403 @@ def test_db_to_db_exclude_columns(source, dest):
     assert columns == [("id",), ("val",), ("updated_at",)]
     source.stop()
     dest.stop()
+
+
+@dataclass
+class DynamoDBTestConfig:
+    db_name: str
+    uri: str
+    data: List[Dict]
+
+
+@pytest.fixture(scope="session")
+def dynamodb():
+    db_name = f"dynamodb_test_{get_random_string(5)}"
+    table_cfg = {
+        "TableName": db_name,
+        "KeySchema": [
+            {
+                "AttributeName": "id",
+                "KeyType": "HASH",
+            }
+        ],
+        "AttributeDefinitions": [
+            {"AttributeName": "id", "AttributeType": "S"},
+        ],
+        "ProvisionedThroughput": {
+            "ReadCapacityUnits": 35000,
+            "WriteCapacityUnits": 35000,
+        },
+    }
+
+    items = [
+        {"id": {"S": "1"}, "updated_at": {"S": "2024-01-01T00:00:00"}},
+        {"id": {"S": "2"}, "updated_at": {"S": "2024-02-01T00:00:00"}},
+        {"id": {"S": "3"}, "updated_at": {"S": "2024-03-01T00:00:00"}},
+    ]
+
+    def load_test_data(ls):
+        client = ls.get_client("dynamodb")
+        client.create_table(**table_cfg)
+        for item in items:
+            client.put_item(TableName=db_name, Item=item)
+
+    def items_to_list(items):
+        """converts dynamodb item list to list of dics"""
+        result = []
+        for i in items:
+            entry = {}
+            for key, val in i.items():
+                entry[key] = list(val.values())[0]
+            result.append(entry)
+        return result
+
+    local_stack = LocalStackContainer(
+        image="localstack/localstack:4.0.3"
+    ).with_services("dynamodb")
+    local_stack.start()
+    wait_for_logs(local_stack, "Ready.")
+    load_test_data(local_stack)
+
+    dynamodb_url = urlparse(local_stack.get_url())
+    src_uri = (
+        f"dynamodb://{dynamodb_url.netloc}?"
+        + f"region={local_stack.env['AWS_DEFAULT_REGION']}&"
+        + f"access_key_id={local_stack.env['AWS_ACCESS_KEY_ID']}&"
+        + f"secret_access_key={local_stack.env['AWS_SECRET_ACCESS_KEY']}"
+    )
+    yield DynamoDBTestConfig(
+        db_name,
+        src_uri,
+        items_to_list(items),
+    )
+
+    local_stack.stop()
+
+
+def dynamodb_tests() -> Iterable[Callable]:
+    def assert_success(result):
+        if result.exception is not None:
+            traceback.print_exception(*result.exc_info)
+            raise AssertionError(result.exception)
+
+    def smoke_test(dest_uri, dynamodb):
+        dest_table = f"public.dynamodb_{get_random_string(5)}"
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+
+        result = invoke_ingest_command(
+            dynamodb.uri, dynamodb.db_name, dest_uri, dest_table, "append", "updated_at"
+        )
+
+        assert_success(result)
+        result = dest_engine.execute(
+            f"SELECT id, updated_at from {dest_table} ORDER BY id"
+        ).fetchall()
+        assert len(result) == 3
+        for i in range(len(result)):
+            assert result[i][0] == dynamodb.data[i]["id"]
+            assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+
+    def append_test(dest_uri, dynamodb):
+        dest_table = f"public.dynamodb_{get_random_string(5)}"
+
+        # connection pooling causes issues with duckdb, when the connection
+        # is reused below, so we disable pooling.
+        dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+
+        # we run it twice to assert that the data in destination doesn't change
+        for i in range(2):
+            result = invoke_ingest_command(
+                dynamodb.uri,
+                dynamodb.db_name,
+                dest_uri,
+                dest_table,
+                "append",
+                "updated_at",
+            )
+
+            assert_success(result)
+            result = dest_engine.execute(
+                f"SELECT id, updated_at from {dest_table} ORDER BY id"
+            ).fetchall()
+            assert len(result) == 3
+            for i in range(len(result)):
+                assert result[i][0] == dynamodb.data[i]["id"]
+                assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+
+    def incremental_test_factory(strategy):
+        def incremental_test(dest_uri, dynamodb):
+            dest_table = f"public.dynamodb_{get_random_string(5)}"
+            dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+
+            result = invoke_ingest_command(
+                dynamodb.uri,
+                dynamodb.db_name,
+                dest_uri,
+                dest_table,
+                inc_strategy=strategy,
+                inc_key="updated_at",
+                interval_start="2024-01-01T00:00:00",
+                interval_end="2024-02-01T00:01:00",  # upto the second entry
+            )
+            assert_success(result)
+            rows = dest_engine.execute(
+                f"SELECT id, updated_at from {dest_table} ORDER BY id"
+            ).fetchall()
+            assert len(rows) == 2
+            for i in range(len(rows)):
+                assert rows[i][0] == dynamodb.data[i]["id"]
+                assert rows[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+
+            # ingest the rest
+            # run it twice to test idempotency
+            for _ in range(2):
+                result = invoke_ingest_command(
+                    dynamodb.uri,
+                    dynamodb.db_name,
+                    dest_uri,
+                    dest_table,
+                    inc_strategy=strategy,
+                    inc_key="updated_at",
+                    interval_start="2024-02-01T00:00:00",  # second entry onwards
+                )
+                assert_success(result)
+
+                rows = dest_engine.execute(
+                    f"SELECT id, updated_at from {dest_table} ORDER BY id"
+                ).fetchall()
+                rows_expected = 3
+                if strategy == "replace":
+                    # old rows are removed in replace
+                    rows_expected = 2
+
+                assert len(rows) == rows_expected
+                for row in rows:
+                    id = int(row[0]) - 1
+                    assert row[0] == dynamodb.data[id]["id"]
+                    assert row[1] == pendulum.parse(dynamodb.data[id]["updated_at"])
+
+        # for easier debugging
+        incremental_test.__name__ += f"_{strategy}"
+        return incremental_test
+
+    strategies = [
+        "replace",
+        "delete+insert",
+        "merge",
+    ]
+    incremental_tests = [incremental_test_factory(strat) for strat in strategies]
+
+    return [
+        smoke_test,
+        append_test,
+        *incremental_tests,
+    ]
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize("testcase", dynamodb_tests())
+def test_dynamodb(dest, dynamodb, testcase):
+    testcase(dest.start(), dynamodb)
+    dest.stop()
+
+
+def custom_query_tests():
+    def replace(source_connection_url, dest_connection_url):
+        schema_rand_prefix = f"testschema_create_replace_cust_{get_random_string(5)}"
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
+
+        source_engine = sqlalchemy.create_engine(source_connection_url)
+        with source_engine.begin() as conn:
+            conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+            conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+            conn.execute(
+                f"CREATE TABLE {schema_rand_prefix}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at DATE)"
+            )
+            conn.execute(
+                f"CREATE TABLE {schema_rand_prefix}.order_items (id INTEGER, order_id INTEGER NOT NULL, subname VARCHAR(255) NOT NULL)"
+            )
+            conn.execute(
+                f"INSERT INTO {schema_rand_prefix}.orders (id, name, updated_at) VALUES (1, 'First Order', '2024-01-01'), (2, 'Second Order', '2024-01-01'), (3, 'Third Order', '2024-01-01'), (4, 'Fourth Order', '2024-01-01')"
+            )
+            conn.execute(
+                f"INSERT INTO {schema_rand_prefix}.order_items (id, order_id, subname) VALUES (1, 1, 'Item 1 for First Order'), (2, 1, 'Item 2 for First Order'), (3, 2, 'Item 1 for Second Order'), (4, 3, 'Item 1 for Third Order')"
+            )
+            res = conn.execute(
+                f"select count(*) from {schema_rand_prefix}.orders"
+            ).fetchall()
+            assert res[0][0] == 4
+            res = conn.execute(
+                f"select count(*) from {schema_rand_prefix}.order_items"
+            ).fetchall()
+            assert res[0][0] == 4
+
+        result = invoke_ingest_command(
+            source_connection_url,
+            f"query:select oi.*, o.updated_at from {schema_rand_prefix}.order_items oi join {schema_rand_prefix}.orders o on oi.order_id = o.id",
+            dest_connection_url,
+            f"{schema_rand_prefix}.output",
+        )
+
+        assert result.exit_code == 0
+
+        dest_engine = sqlalchemy.create_engine(dest_connection_url)
+        res = dest_engine.execute(
+            f"select id, order_id, subname, updated_at from {schema_rand_prefix}.output order by id asc"
+        ).fetchall()
+
+        assert len(res) == 4
+        assert res[0] == (1, 1, "Item 1 for First Order", as_datetime("2024-01-01"))
+        assert res[1] == (2, 1, "Item 2 for First Order", as_datetime("2024-01-01"))
+        assert res[2] == (3, 2, "Item 1 for Second Order", as_datetime("2024-01-01"))
+        assert res[3] == (4, 3, "Item 1 for Third Order", as_datetime("2024-01-01"))
+
+    def merge(source_connection_url, dest_connection_url):
+        schema_rand_prefix = f"testschema_merge_{get_random_string(5)}"
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
+
+        source_engine = sqlalchemy.create_engine(
+            source_connection_url, poolclass=NullPool
+        )
+        with source_engine.begin() as conn:
+            conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+            conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+            conn.execute(
+                f"CREATE TABLE {schema_rand_prefix}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at DATE)"
+            )
+            conn.execute(
+                f"CREATE TABLE {schema_rand_prefix}.order_items (id INTEGER, order_id INTEGER NOT NULL, subname VARCHAR(255) NOT NULL)"
+            )
+            conn.execute(
+                f"INSERT INTO {schema_rand_prefix}.orders (id, name, updated_at) VALUES (1, 'First Order', '2024-01-01'), (2, 'Second Order', '2024-01-01'), (3, 'Third Order', '2024-01-01'), (4, 'Fourth Order', '2024-01-01')"
+            )
+            conn.execute(
+                f"INSERT INTO {schema_rand_prefix}.order_items (id, order_id, subname) VALUES (1, 1, 'Item 1 for First Order'), (2, 1, 'Item 2 for First Order'), (3, 2, 'Item 1 for Second Order'), (4, 3, 'Item 1 for Third Order')"
+            )
+
+        def run():
+            result = invoke_ingest_command(
+                source_connection_url,
+                f"query:select oi.*, o.updated_at from {schema_rand_prefix}.order_items oi join {schema_rand_prefix}.orders o on oi.order_id = o.id where o.updated_at > :interval_start",
+                dest_connection_url,
+                f"{schema_rand_prefix}.output",
+                inc_strategy="merge",
+                inc_key="updated_at",
+                primary_key="id",
+            )
+            assert result.exit_code == 0
+
+        # Initial run to get all data
+        run()
+
+        dest_engine = sqlalchemy.create_engine(dest_connection_url, poolclass=NullPool)
+        res = dest_engine.execute(
+            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema_rand_prefix}.output order by id asc"
+        ).fetchall()
+
+        assert len(res) == 4
+        initial_load_id = res[0][4]
+        assert all(r[4] == initial_load_id for r in res)
+        assert res[0] == (
+            1,
+            1,
+            "Item 1 for First Order",
+            as_datetime("2024-01-01"),
+            initial_load_id,
+        )
+        assert res[1] == (
+            2,
+            1,
+            "Item 2 for First Order",
+            as_datetime("2024-01-01"),
+            initial_load_id,
+        )
+        assert res[2] == (
+            3,
+            2,
+            "Item 1 for Second Order",
+            as_datetime("2024-01-01"),
+            initial_load_id,
+        )
+        assert res[3] == (
+            4,
+            3,
+            "Item 1 for Third Order",
+            as_datetime("2024-01-01"),
+            initial_load_id,
+        )
+
+        # Run again - should get same load_id since no changes
+        run()
+        res = dest_engine.execute(
+            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema_rand_prefix}.output order by id asc"
+        ).fetchall()
+        assert len(res) == 4
+        assert all(r[4] == initial_load_id for r in res)
+
+        # Update an order item and its order's updated_at
+        with source_engine.begin() as conn:
+            conn.execute(
+                f"UPDATE {schema_rand_prefix}.order_items SET subname = 'Item 1 for Second Order - new' WHERE id = 3"
+            )
+            conn.execute(
+                f"UPDATE {schema_rand_prefix}.orders SET updated_at = '2024-01-02' WHERE id = 2"
+            )
+
+        # Run again - should see updated data with new load_id
+        run()
+        res = dest_engine.execute(
+            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema_rand_prefix}.output order by id asc"
+        ).fetchall()
+
+        assert len(res) == 4
+        assert res[0] == (
+            1,
+            1,
+            "Item 1 for First Order",
+            as_datetime("2024-01-01"),
+            res[0][4],
+        )
+        assert res[1] == (
+            2,
+            1,
+            "Item 2 for First Order",
+            as_datetime("2024-01-01"),
+            res[1][4],
+        )
+        assert res[2] == (
+            3,
+            2,
+            "Item 1 for Second Order - new",
+            as_datetime("2024-01-02"),
+            res[2][4],
+        )
+        assert res[3] == (
+            4,
+            3,
+            "Item 1 for Third Order",
+            as_datetime("2024-01-01"),
+            res[3][4],
+        )
+
+    return [
+        replace,
+        merge,
+    ]
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
+@pytest.mark.parametrize("testcase", custom_query_tests())
+def test_custom_query(testcase, source, dest):
+    testcase(source.start(), dest.start())

@@ -1,9 +1,10 @@
-from typing import Protocol
+from typing import Dict, Protocol, Type
 from urllib.parse import urlparse
 
 from dlt.common.destination import Destination
 
 from ingestr.src.destinations import (
+    AthenaDestination,
     BigQueryDestination,
     CsvDestination,
     DatabricksDestination,
@@ -19,8 +20,11 @@ from ingestr.src.sources import (
     AirtableSource,
     AppsflyerSource,
     ArrowMemoryMappedSource,
+    AsanaSource,
     ChessSource,
+    DynamoDBSource,
     FacebookAdsSource,
+    GoogleAnalyticsSource,
     GitHubSource,
     GoogleSheetsSource,
     GorgiasSource,
@@ -35,6 +39,7 @@ from ingestr.src.sources import (
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
+    TikTokSource,
     ZendeskSource,
 )
 
@@ -92,6 +97,47 @@ def parse_scheme_from_uri(uri: str) -> str:
 class SourceDestinationFactory:
     source_scheme: str
     destination_scheme: str
+    sources: Dict[str, Type[SourceProtocol]] = {
+        "csv": LocalCsvSource,
+        "mongodb": MongoDbSource,
+        "notion": NotionSource,
+        "gsheets": GoogleSheetsSource,
+        "shopify": ShopifySource,
+        "gorgias": GorgiasSource,
+        "chess": ChessSource,
+        "stripe": StripeAnalyticsSource,
+        "facebookads": FacebookAdsSource,
+        "slack": SlackSource,
+        "hubspot": HubspotSource,
+        "airtable": AirtableSource,
+        "klaviyo": KlaviyoSource,
+        "appsflyer": AppsflyerSource,
+        "kafka": KafkaSource,
+        "adjust": AdjustSource,
+        "zendesk": ZendeskSource,
+        "mmap": ArrowMemoryMappedSource,
+        "s3": S3Source,
+        "dynamodb": DynamoDBSource,
+        "asana": AsanaSource,
+        "tiktok": TikTokSource,
+        "googleanalytics": GoogleAnalyticsSource,
+    }
+    destinations: Dict[str, Type[DestinationProtocol]] = {
+        "bigquery": BigQueryDestination,
+        "databricks": DatabricksDestination,
+        "duckdb": DuckDBDestination,
+        "mssql": MsSQLDestination,
+        "postgres": PostgresDestination,
+        "postgresql": PostgresDestination,
+        "postgresql+psycopg2": PostgresDestination,
+        "redshift": RedshiftDestination,
+        "redshift+psycopg2": RedshiftDestination,
+        "redshift+redshift_connector": RedshiftDestination,
+        "snowflake": SnowflakeDestination,
+        "synapse": SynapseDestination,
+        "csv": CsvDestination,
+        "athena": AthenaDestination,
+    }
 
     def __init__(self, source_uri: str, destination_uri: str):
         self.source_uri = source_uri
@@ -104,68 +150,14 @@ class SourceDestinationFactory:
     def get_source(self) -> SourceProtocol:
         if self.source_scheme in SQL_SOURCE_SCHEMES:
             return SqlSource()
-        elif self.source_scheme == "csv":
-            return LocalCsvSource()
-        elif self.source_scheme == "mongodb":
-            return MongoDbSource()
-        elif self.source_scheme == "notion":
-            return NotionSource()
-        elif self.source_scheme == "gsheets":
-            return GoogleSheetsSource()
-        elif self.source_scheme == "shopify":
-            return ShopifySource()
-        elif self.source_scheme == "gorgias":
-            return GorgiasSource()
-        elif self.source_scheme == "chess":
-            return ChessSource()
-        elif self.source_scheme == "stripe":
-            return StripeAnalyticsSource()
-        elif self.source_scheme == "facebookads":
-            return FacebookAdsSource()
-        elif self.source_scheme == "slack":
-            return SlackSource()
-        elif self.source_scheme == "hubspot":
-            return HubspotSource()
-        elif self.source_scheme == "airtable":
-            return AirtableSource()
-        elif self.source_scheme == "klaviyo":
-            return KlaviyoSource()
-        elif self.source_scheme == "appsflyer":
-            return AppsflyerSource()
-        elif self.source_scheme == "kafka":
-            return KafkaSource()
-        elif self.source_scheme == "adjust":
-            return AdjustSource()
-        elif self.source_scheme == "zendesk":
-            return ZendeskSource()
-        elif self.source_scheme == "mmap":
-            return ArrowMemoryMappedSource()
-        elif self.source_scheme == "s3":
-            return S3Source()
-        elif self.source_scheme == "github":
-            return GitHubSource()
+        elif self.source_scheme in self.sources:
+            return self.sources[self.source_scheme]()
         else:
             raise ValueError(f"Unsupported source scheme: {self.source_scheme}")
 
     def get_destination(self) -> DestinationProtocol:
-        match: dict[str, DestinationProtocol] = {
-            "bigquery": BigQueryDestination(),
-            "databricks": DatabricksDestination(),
-            "duckdb": DuckDBDestination(),
-            "mssql": MsSQLDestination(),
-            "postgres": PostgresDestination(),
-            "postgresql": PostgresDestination(),
-            "postgresql+psycopg2": PostgresDestination(),
-            "redshift": RedshiftDestination(),
-            "redshift+psycopg2": RedshiftDestination(),
-            "redshift+redshift_connector": RedshiftDestination(),
-            "snowflake": SnowflakeDestination(),
-            "synapse": SynapseDestination(),
-            "csv": CsvDestination(),
-        }
-
-        if self.destination_scheme in match:
-            return match[self.destination_scheme]
+        if self.destination_scheme in self.destinations:
+            return self.destinations[self.destination_scheme]()
         else:
             raise ValueError(
                 f"Unsupported destination scheme: {self.destination_scheme}"

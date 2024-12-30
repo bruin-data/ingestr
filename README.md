@@ -21,10 +21,19 @@ ingestr is a command-line app that allows you to ingest data from any source int
 ingestr takes away the complexity of managing any backend or writing any code for ingesting data, simply run the command and watch the data land on its destination.
 
 ## Installation
+We recommend using [uv](https://github.com/astral-sh/uv) to run `ingestr`.
 
 ```
-pip install ingestr
+pip install uv
+uvx ingestr
 ```
+
+Alternatively, if you'd like to install it globally:
+```
+uv pip install --system ingestr
+```
+
+While installation with vanilla `pip` is possible, it's an order of magnitude slower.
 
 ## Quickstart
 
@@ -50,6 +59,13 @@ You can see the full documentation [here](https://bruin-data.github.io/ingestr/g
 ## Community
 
 Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shared_invite/zt-2dl2i8foy-bVsuMUauHeN9M2laVm3ZVg).
+
+## Contributing
+
+Pull requests are welcome. However, please open an issue first to discuss what you would like to change. We maybe able to offer you help and feedback regarding any changes you would like to make.
+
+> [!NOTE]
+> After cloning `ingestr` make sure to run `make setup` to install githooks.
 
 ## Supported sources & destinations
 
@@ -130,7 +146,7 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
     <tr>
         <td colspan="3" style='text-align:center;'><strong>Platforms</strong></td>
     </tr>
-    <td>Adjust</td>
+        <td>Adjust</td>
         <td>✅</td>
         <td>-</td>
     <tr>
@@ -138,8 +154,13 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
         <td>✅</td>
         <td>-</td>
     </tr>
-     <tr>
+    <tr>
         <td>AppsFlyer</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Asana</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -148,7 +169,12 @@ Join our Slack community [here](https://join.slack.com/t/bruindatacommunity/shar
         <td>✅</td>
         <td>-</td>
     </tr>
-     <tr>
+    <tr>
+        <td>DynamoDB</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Facebook Ads</td>
         <td>✅</td>
         <td>-</td>
