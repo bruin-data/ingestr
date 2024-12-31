@@ -10,7 +10,6 @@ import dlt
 from dlt.common.exceptions import MissingDependencyException
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
-from dlt.sources.credentials import GcpOAuthCredentials, GcpServiceAccountCredentials
 from googleapiclient.discovery import Resource  # type: ignore
 
 from .helpers.data_processing import to_dict
@@ -21,6 +20,7 @@ except ImportError:
     raise MissingDependencyException("Requests-OAuthlib", ["google-ads"])
 
 
+# what is this for? 
 DIMENSION_TABLES = [
     "accounts",
     "ad_group",
@@ -36,71 +36,43 @@ DIMENSION_TABLES = [
 
 
 def get_client(
-    credentials: Union[GcpOAuthCredentials, GcpServiceAccountCredentials],
+    credentials_path: str ,
     dev_token: str,
     impersonated_email: str,
 ) -> GoogleAdsClient:
-    # generate access token for credentials if we are using OAuth2.0
-    if isinstance(credentials, GcpOAuthCredentials):
-        credentials.auth("https://www.googleapis.com/auth/adwords")
         conf = {
-            "developer_token": dev_token,
+            "json_key_file_path": credentials_path,
+            "impersonated_email": impersonated_email,
             "use_proto_plus": True,
-            **json.loads(credentials.to_native_representation()),
+            "developer_token": dev_token,
         }
-        return GoogleAdsClient.load_from_dict(config_dict=conf)
-    # use service account to authenticate if not using OAuth2.0
-    else:
-        # google ads client requires the key to be in a file on the disc..
-        with tempfile.NamedTemporaryFile() as f:
-            f.write(credentials.to_native_representation().encode())
-            f.seek(0)
-            return GoogleAdsClient.load_from_dict(
-                config_dict={
-                    "json_key_file_path": f.name,
-                    "impersonated_email": impersonated_email,
-                    "use_proto_plus": True,
-                    "developer_token": dev_token,
-                }
-            )
+        return GoogleAdsClient.load_from_dict(conf)
 
 
 @dlt.source(max_table_nesting=2)
 def google_ads(
-    credentials: Union[
-        GcpOAuthCredentials, GcpServiceAccountCredentials
-    ] = dlt.secrets.value,
-    impersonated_email: str = dlt.secrets.value,
-    dev_token: str = dlt.secrets.value,
+    customer_id: str = None,
+    credentials_path: str = None,
+    impersonated_email: str = None,
+    dev_token: str = None,
 ) -> List[DltResource]:
-    """
-    Loads default tables for google ads in the database.
-    :param credentials:
-    :param dev_token:
-    :return:
-    """
     client = get_client(
-        credentials=credentials,
+        credentials_path=credentials_path,
         dev_token=dev_token,
         impersonated_email=impersonated_email,
     )
     return [
-        customers(client=client),
-        campaigns(client=client),
-        change_events(client=client),
-        customer_clients(client=client),
+        customers(client=client, customer_id=customer_id),
+        campaigns(client=client, customer_id=customer_id),
+        change_events(client=client, customer_id=customer_id),
+        customer_clients(client=client, customer_id=customer_id),
     ]
 
 
 @dlt.resource(write_disposition="replace")
 def customers(
-    client: Resource, customer_id: str = dlt.secrets.value
+    client: Resource, customer_id: str
 ) -> Iterator[TDataItem]:
-    """
-    Dlt resource which loads dimensions.
-    :param client:
-    :return:
-    """
     # Issues a search request using streaming.
     ga_service = client.get_service("GoogleAdsService")
     query = "SELECT customer.id, customer.descriptive_name FROM customer"
@@ -112,13 +84,8 @@ def customers(
 
 @dlt.resource(write_disposition="replace")
 def campaigns(
-    client: Resource, customer_id: str = dlt.secrets.value
+    client: Resource, customer_id: str
 ) -> Iterator[TDataItem]:
-    """
-    Dlt resource which loads dimensions.
-    :param client:
-    :return:
-    """
     # Issues a search request using streaming.
     ga_service = client.get_service("GoogleAdsService")
     query = "SELECT campaign.id, campaign.labels FROM campaign"
@@ -130,13 +97,8 @@ def campaigns(
 
 @dlt.resource(write_disposition="replace")
 def change_events(
-    client: Resource, customer_id: str = dlt.secrets.value
+    client: Resource, customer_id: str
 ) -> Iterator[TDataItem]:
-    """
-    Dlt resource which loads dimensions.
-    :param client:
-    :return:
-    """
     # Issues a search request using streaming.
     ga_service = client.get_service("GoogleAdsService")
     query = "SELECT change_event.change_date_time FROM change_event WHERE change_event.change_date_time during LAST_14_DAYS LIMIT 1000"
@@ -148,13 +110,8 @@ def change_events(
 
 @dlt.resource(write_disposition="replace")
 def customer_clients(
-    client: Resource, customer_id: str = dlt.secrets.value
+    client: Resource, customer_id: str
 ) -> Iterator[TDataItem]:
-    """
-    Dlt resource which loads dimensions.
-    :param client:
-    :return:
-    """
     # Issues a search request using streaming.
     ga_service = client.get_service("GoogleAdsService")
     query = "SELECT customer_client.status FROM customer_client"

@@ -40,10 +40,12 @@ from dlt.sources.sql_database.schema_types import (
     Table,
     TTypeAdapter,
 )
-from google.oauth2 import service_account
+from dlt.sources.credentials import GcpServiceAccountCredentials
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
+
+from google.oauth2 import service_account
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
@@ -1425,9 +1427,17 @@ class GoogleAdsSource:
         credentials = service_account.Credentials.from_service_account_file(
             credentials_path[0]
         )
-        # todo: convert credentials to GcpServiceAccountCredentials
+        customer_id = parsed_uri.hostname
+        if not customer_id:
+            raise ValueError("Customer ID is required to connect to Google Ads")
+
         if table not in self.resources:
             raise ValueError(
                 f"Resource '{table}' is not supported for Google Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
-        return google_ads(credentials).with_resources(table)
+        return google_ads(
+            customer_id,
+            credentials_path[0],
+            credentials.service_account_email,
+            "ingestr-dev-token",  # todo
+        ).with_resources(table)
