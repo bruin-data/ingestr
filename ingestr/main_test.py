@@ -1961,5 +1961,4 @@ def test_github_to_duckdb():
     assert res.exit_code == 0
     with duckdb.connect(dest_file) as conn:
         res = conn.execute(f"select count(*) from {dest_table}").fetchall()
-        print(res)
         assert len(res) > 0
