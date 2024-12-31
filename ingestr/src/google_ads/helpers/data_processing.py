@@ -1,7 +1,8 @@
-from typing import Any, Iterator
-from dlt.common.typing import TDataItem
-import proto
 import json
+from typing import Any, Iterator
+
+import proto  # type: ignore
+from dlt.common.typing import TDataItem
 
 
 def to_dict(item: Any) -> Iterator[TDataItem]:

@@ -40,6 +40,7 @@ from dlt.sources.sql_database.schema_types import (
     Table,
     TTypeAdapter,
 )
+from google.oauth2 import service_account
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
@@ -55,6 +56,7 @@ from ingestr.src.dynamodb import dynamodb
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
+from ingestr.src.google_ads import google_ads
 from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
@@ -1340,6 +1342,7 @@ class DynamoDBSource:
                 end_value=isotime(kwargs.get("interval_end")),
             )
 
+        # bug: we never validate table.
         return dynamodb(table, creds, incremental)
 
 
@@ -1399,9 +1402,32 @@ class GoogleAnalyticsSource:
             credentials=credentials,
         ).with_resources("basic_report")
 
+
 class GoogleAdsSource:
+    resources = [
+        "customers",
+        "campaigns",
+        "change_events",
+        "customer_clients",
+    ]
+
     def handles_incrementality(self) -> bool:
-        return True
+        return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        pass
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        credentials_path = params.get("credentials_path")
+        if credentials_path is None or len(credentials_path) == 0:
+            raise ValueError("credentials_path is required to connect Google Ads")
+
+        credentials = service_account.Credentials.from_service_account_file(
+            credentials_path[0]
+        )
+        # todo: convert credentials to GcpServiceAccountCredentials
+        if table not in self.resources:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Google Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+        return google_ads(credentials).with_resources(table)
