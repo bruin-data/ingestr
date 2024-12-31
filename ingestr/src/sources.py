@@ -1398,3 +1398,10 @@ class GoogleAnalyticsSource:
             queries=queries,
             credentials=credentials,
         ).with_resources("basic_report")
+
+class GoogleAdsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        pass
