@@ -40,12 +40,10 @@ from dlt.sources.sql_database.schema_types import (
     Table,
     TTypeAdapter,
 )
-from dlt.sources.credentials import GcpServiceAccountCredentials
+from google.oauth2 import service_account
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
-
-from google.oauth2 import service_account
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters

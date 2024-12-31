@@ -2,9 +2,7 @@
 Preliminary implementation of Google Ads pipeline.
 """
 
-import json
-import tempfile
-from typing import Iterator, List, Union
+from typing import Iterator, List
 
 import dlt
 from dlt.common.exceptions import MissingDependencyException
@@ -20,7 +18,7 @@ except ImportError:
     raise MissingDependencyException("Requests-OAuthlib", ["google-ads"])
 
 
-# what is this for? 
+# what is this for?
 DIMENSION_TABLES = [
     "accounts",
     "ad_group",
@@ -36,25 +34,25 @@ DIMENSION_TABLES = [
 
 
 def get_client(
-    credentials_path: str ,
+    credentials_path: str,
     dev_token: str,
     impersonated_email: str,
 ) -> GoogleAdsClient:
-        conf = {
-            "json_key_file_path": credentials_path,
-            "impersonated_email": impersonated_email,
-            "use_proto_plus": True,
-            "developer_token": dev_token,
-        }
-        return GoogleAdsClient.load_from_dict(conf)
+    conf = {
+        "json_key_file_path": credentials_path,
+        "impersonated_email": impersonated_email,
+        "use_proto_plus": True,
+        "developer_token": dev_token,
+    }
+    return GoogleAdsClient.load_from_dict(conf)
 
 
 @dlt.source(max_table_nesting=2)
 def google_ads(
-    customer_id: str = None,
-    credentials_path: str = None,
-    impersonated_email: str = None,
-    dev_token: str = None,
+    customer_id: str,
+    credentials_path: str,
+    impersonated_email: str,
+    dev_token: str,
 ) -> List[DltResource]:
     client = get_client(
         credentials_path=credentials_path,
@@ -70,9 +68,7 @@ def google_ads(
 
 
 @dlt.resource(write_disposition="replace")
-def customers(
-    client: Resource, customer_id: str
-) -> Iterator[TDataItem]:
+def customers(client: Resource, customer_id: str) -> Iterator[TDataItem]:
     # Issues a search request using streaming.
     ga_service = client.get_service("GoogleAdsService")
     query = "SELECT customer.id, customer.descriptive_name FROM customer"
@@ -83,9 +79,7 @@ def customers(
 
 
 @dlt.resource(write_disposition="replace")
-def campaigns(
-    client: Resource, customer_id: str
-) -> Iterator[TDataItem]:
+def campaigns(client: Resource, customer_id: str) -> Iterator[TDataItem]:
     # Issues a search request using streaming.
     ga_service = client.get_service("GoogleAdsService")
     query = "SELECT campaign.id, campaign.labels FROM campaign"
@@ -96,9 +90,7 @@ def campaigns(
 
 
 @dlt.resource(write_disposition="replace")
-def change_events(
-    client: Resource, customer_id: str
-) -> Iterator[TDataItem]:
+def change_events(client: Resource, customer_id: str) -> Iterator[TDataItem]:
     # Issues a search request using streaming.
     ga_service = client.get_service("GoogleAdsService")
     query = "SELECT change_event.change_date_time FROM change_event WHERE change_event.change_date_time during LAST_14_DAYS LIMIT 1000"
@@ -109,9 +101,7 @@ def change_events(
 
 
 @dlt.resource(write_disposition="replace")
-def customer_clients(
-    client: Resource, customer_id: str
-) -> Iterator[TDataItem]:
+def customer_clients(client: Resource, customer_id: str) -> Iterator[TDataItem]:
     # Issues a search request using streaming.
     ga_service = client.get_service("GoogleAdsService")
     query = "SELECT customer_client.status FROM customer_client"
