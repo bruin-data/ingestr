@@ -65,7 +65,7 @@ def github_reactions(
     )
 
 
-@dlt.source(max_table_nesting=2)
+@dlt.source(max_table_nesting=0)
 def github_repo_events(
     owner: str, name: str, access_token: Optional[str] = None
 ) -> DltResource:
