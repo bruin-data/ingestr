@@ -1422,9 +1422,6 @@ class GoogleAdsSource:
         if credentials_path is None or len(credentials_path) == 0:
             raise ValueError("credentials_path is required to connect Google Ads")
 
-        credentials = service_account.Credentials.from_service_account_file(
-            credentials_path[0]
-        )
         customer_id = parsed_uri.hostname
         if not customer_id:
             raise ValueError("Customer ID is required to connect to Google Ads")
@@ -1433,9 +1430,17 @@ class GoogleAdsSource:
             raise ValueError(
                 f"Resource '{table}' is not supported for Google Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
+
+        dev_token = params.get("dev_token")
+        if dev_token is None or len(dev_token) == 0:
+            raise ValueError("dev_token is required to connect to Google Ads")
+
+        credentials = service_account.Credentials.from_service_account_file(
+            credentials_path[0]
+        )
         return google_ads(
             customer_id,
             credentials_path[0],
             credentials.service_account_email,
-            "ingestr-dev-token",  # todo
+            dev_token[0],
         ).with_resources(table)
