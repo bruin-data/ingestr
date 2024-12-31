@@ -1948,17 +1948,20 @@ def test_custom_query(testcase, source, dest):
 
 
 # Integration testing when the access token is not provided, and it is only for the resource "repo_events
-def test_github_to_duckdb():
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_github_to_duckdb(dest):
+    dest_uri = dest.start()
     source_uri = "github://?owner=bruin-data&repo=ingestr"
     source_table = "repo_events"
 
-    dest_file = "github.duckdb"
-    dest_uri = f"duckdb:///{dest_file}"
     dest_table = "dest.github_repo_events"
 
     res = invoke_ingest_command(source_uri, source_table, dest_uri, dest_table)
 
     assert res.exit_code == 0
-    with duckdb.connect(dest_file) as conn:
-        res = conn.execute(f"select count(*) from {dest_table}").fetchall()
-        assert len(res) > 0
+    dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+    res = dest_engine.execute(f"select count(*) from {dest_table}").fetchall()
+    assert len(res) > 0
+   
