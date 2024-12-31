@@ -1414,35 +1414,31 @@ class GitHubSource:
         parsed_uri = urlparse(uri)
         source_fields = parse_qs(parsed_uri.query)
 
-        owner = source_fields.get("owner")
+        owner = source_fields.get("owner", [None])[0]
         if not owner:
             raise ValueError(
                 "owner of the repository is required to connect with GitHub"
             )
 
-        repo = source_fields.get("repo")
+        repo = source_fields.get("repo", [None])[0]
         if not repo:
             raise ValueError(
-                "repo: name of the repository is required to connect with GitHub"
+                "repo variable is required to retrieve data for a specific repository from GitHub."
             )
 
-        access_token = source_fields.get("access_token")
-        if not access_token:
+        access_token = source_fields.get("access_token", [None])[0]
+        if not access_token and table not in ["repo_events"]:
             raise ValueError("access_token is required to connect with GitHub")
 
         if table in ["issues", "pull_requests"]:
             return github_reactions(
-                owner=owner[0], name=repo[0], access_token=access_token[0]
+                owner=owner, name=repo, access_token=access_token
             ).with_resources(table)
         elif table == "repo_events":
-            return github_repo_events(
-                owner=owner[0], name=repo[0], access_token=access_token[0]
-            )
+            return github_repo_events(owner=owner, name=repo, access_token=access_token)
         elif table == "stargazers":
-            return github_stargazers(
-                owner=owner[0], name=repo[0], access_token=access_token[0]
-            )
+            return github_stargazers(owner=owner, name=repo, access_token=access_token)
         else:
             raise ValueError(
-                "fResource '{table}' is not supported for GitHub source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+                f"Resource '{table}' is not supported for GitHub source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
