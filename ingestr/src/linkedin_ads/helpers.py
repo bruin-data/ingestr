@@ -1,5 +1,5 @@
-from datetime import datetime
 from urllib.parse import quote
+from dateutil.relativedelta import relativedelta
 
 import requests
 from dlt.sources.helpers.requests import Client
@@ -52,6 +52,32 @@ def flat_structure(items, pivot, time_granularity):
     return items
 
 
+def find_intervals(current_date, end_date, time_granularity):
+    intervals = []
+    print("current_date", current_date)
+    print("end_date", end_date)
+    print("time_granularity", time_granularity)
+    while current_date < end_date:
+        if time_granularity == "DAILY":
+           
+            next_date = min(
+                current_date + relativedelta(months=6),
+                end_date
+            )
+        else:  # MONTHLY
+            # For monthly data, move forward 2 years
+            next_date = min(
+                current_date + relativedelta(years=2),
+                end_date
+            )
+        
+        intervals.append((current_date, next_date))
+        
+        # Start next interval from the next day
+        current_date = next_date + relativedelta(days=1)
+
+    return intervals
+
 class LinkedInAdsAPI:
     def __init__(
         self,
@@ -60,29 +86,21 @@ class LinkedInAdsAPI:
         account_ids,
         dimension,
         metrics,
-        interval_start,
-        interval_end=None,
     ):
         self.time_granularity: str = time_granularity
         self.account_ids: list[str] = account_ids
         self.dimension: str = dimension.upper()
         self.metrics: str = metrics
-        self.interval_start: datetime = interval_start
-        self.interval_end: datetime = interval_end
         self.headers = {
             "Authorization": f"Bearer {access_token}",
             "Linkedin-Version": "202411",
             "X-Restli-Protocol-Version": "2.0.0",
         }
-        # interval start is compulsory but end is optional
-        self.start = self.interval_start
-        self.end = self.interval_end
-
-    def construct_url(self):
-        date_range = f"(start:(year:{self.start.year},month:{self.start.month},day:{self.start.day})"
-        if self.end is not None:
-            date_range += (
-                f",end:(year:{self.end.year},month:{self.end.month},day:{self.end.day})"
+       
+    def construct_url(self, start, end):
+        date_range = f"(start:(year:{start.year},month:{start.month},day:{start.day})"
+        date_range += (
+                f",end:(year:{end.year},month:{end.month},day:{end.day})"
             )
         date_range += ")"
 
@@ -104,9 +122,9 @@ class LinkedInAdsAPI:
         )
         return url
 
-    def fetch_pages(self):
+    def fetch_pages(self, start, end):
         client = create_client()
-        url = self.construct_url()
+        url = self.construct_url(start, end)
         # base_url = "https://api.linkedin.com"
         # while url:
         response = client.get(url=url, headers=self.headers)
