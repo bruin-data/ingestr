@@ -62,6 +62,7 @@ from ingestr.src.hubspot import hubspot
 from ingestr.src.kafka import kafka_consumer
 from ingestr.src.kafka.helpers import KafkaCredentials
 from ingestr.src.klaviyo._init_ import klaviyo_source
+from ingestr.src.linkedin_ads import linkedin_source
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
@@ -75,7 +76,6 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-from ingestr.src.linkedin_ads import linkedin_source
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1400,6 +1400,7 @@ class GoogleAnalyticsSource:
             credentials=credentials,
         ).with_resources("basic_report")
 
+
 class LinkedInAdsSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -1407,24 +1408,47 @@ class LinkedInAdsSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
         source_fields = parse_qs(parsed_uri.query)
-        access_token = source_fields.get("access_token")
-        dimension = source_fields.get("dimension")
-        metrics = source_fields.get("metrics")
-        timegranularity = source_fields.get("time_granularity",None)[0].upper()
+        access_token = source_fields.get("access_token", [None])[0]
+
+        if not access_token:
+            raise ValueError("access_token is required to connect to LinkedIn Ads")
+
+        timegranularity = source_fields.get("time_granularity", [None])[0]
+        if not timegranularity:
+            raise ValueError(
+                "time_granularity is required to connect to LinkedIn Ads. Please use one of the following: [DAILY, MONTHLY]"
+            )
+
+        timegranularity = timegranularity.upper()
+
         account_ids = source_fields.get("account_ids")
-      
+        if not account_ids:
+            raise ValueError("account_ids is required to connect to LinkedIn Ads")
+
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
-        start_date = datetime.strptime(interval_start, "%Y-%m-%d") if interval_start else datetime(2024, 11, 1)
-        end_date = datetime.strptime(interval_end, "%Y-%m-%d") if interval_end else datetime(2024, 12, 31)
-       
+        start_date = (
+            datetime.strptime(interval_start, "%Y-%m-%d")
+            if interval_start
+            else datetime(2024, 12, 30)
+        )
+        end_date = datetime.strptime(interval_end, "%Y-%m-%d") if interval_end else None
+
         fields = table.split(":")
         if len(fields) != 3:
-            raise ValueError("Invalid table format. Expected format: custom:<dimensions>:<metrics>")
-        dimension = fields[1].upper()
-        print(dimension)
+            raise ValueError(
+                "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
+            )
+        dimension = fields[1].replace(" ", "")
         metrics = fields[2].replace(" ", "").split(",")
         metrics.extend(["dateRange", "pivotValues"])
-        print(metrics)
-    
-        return linkedin_source(start_date= start_date, end_date= end_date, access_token= access_token[0], account_ids= account_ids, dimension= dimension, metrics= metrics,time_granularity=timegranularity).with_resources("custom_reports")
+
+        return linkedin_source(
+            start_date=start_date,
+            end_date=end_date,
+            access_token=access_token,
+            account_ids=account_ids,
+            dimension=dimension,
+            metrics=metrics,
+            time_granularity=timegranularity,
+        ).with_resources("custom_reports")

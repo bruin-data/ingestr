@@ -1,8 +1,9 @@
-import json
-import requests
-from dlt.sources.helpers.requests import Client
 from datetime import datetime
 from urllib.parse import quote
+
+import requests
+from dlt.sources.helpers.requests import Client
+
 
 def retry_on_limit(
     response: requests.Response | None, exception: BaseException | None
@@ -11,6 +12,7 @@ def retry_on_limit(
         return False
     return response.status_code == 429
 
+
 def create_client() -> requests.Session:
     return Client(
         request_timeout=10.0,
@@ -18,6 +20,7 @@ def create_client() -> requests.Session:
         retry_condition=retry_on_limit,
         request_max_attempts=12,
     ).session
+
 
 def flat_structure(items, pivot, time_granularity):
     for item in items:
@@ -29,18 +32,19 @@ def flat_structure(items, pivot, time_granularity):
         if "dateRange" in item:
             start_date = item["dateRange"]["start"]
             formatted_start_date = f"{start_date['year']}-{start_date['month']:02d}-{start_date['day']:02d}"
-            
+
             if time_granularity == "DAILY":
                 item["date"] = formatted_start_date
             elif time_granularity == "MONTHLY":
                 end_date = item["dateRange"]["end"]
-                formatted_end_date = f"{end_date['year']}-{end_date['month']:02d}-{end_date['day']:02d}"
+                formatted_end_date = (
+                    f"{end_date['year']}-{end_date['month']:02d}-{end_date['day']:02d}"
+                )
                 item["start_date"] = formatted_start_date
                 item["end_date"] = formatted_end_date
             else:
                 raise ValueError(f"Invalid time_granularity: {time_granularity}")
 
-    
         del item["dateRange"]
         del item["pivotValues"]
 
@@ -56,34 +60,41 @@ class LinkedInAdsAPI:
         dimension,
         metrics,
         interval_start,
-        interval_end = None
+        interval_end=None,
     ):
-        self.time_granularity:str = time_granularity
-        self.account_ids:list[str] = account_ids
-        self.dimension:str = dimension
-        self.metrics:str =metrics
-        self.interval_start:datetime = interval_start
-        self.interval_end:datetime = interval_end
+        self.time_granularity: str = time_granularity
+        self.account_ids: list[str] = account_ids
+        self.dimension: str = dimension.upper()
+        self.metrics: str = metrics
+        self.interval_start: datetime = interval_start
+        self.interval_end: datetime = interval_end
         self.headers = {
             "Authorization": f"Bearer {access_token}",
             "Linkedin-Version": "202411",
-            "X-Restli-Protocol-Version": "2.0.0"
+            "X-Restli-Protocol-Version": "2.0.0",
         }
-        #interval start is compulsory but end is optional
+        # interval start is compulsory but end is optional
         self.start = self.interval_start
         self.end = self.interval_end
-    
+
     def construct_url(self):
         date_range = f"(start:(year:{self.start.year},month:{self.start.month},day:{self.start.day})"
         if self.end is not None:
-            date_range += f",end:(year:{self.end.year},month:{self.end.month},day:{self.end.day})"
+            date_range += (
+                f",end:(year:{self.end.year},month:{self.end.month},day:{self.end.day})"
+            )
         date_range += ")"
 
-        accounts = ",".join([quote(f"urn:li:sponsoredAccount:{account_id}") for account_id in self.account_ids])
+        accounts = ",".join(
+            [
+                quote(f"urn:li:sponsoredAccount:{account_id}")
+                for account_id in self.account_ids
+            ]
+        )
         encoded_accounts = f"List({accounts})"
 
         metrics_str = ",".join(self.metrics)
-    
+
         url = (
             f"https://api.linkedin.com/rest/adAnalytics?"
             f"q=analytics&timeGranularity={self.time_granularity}&"
@@ -95,7 +106,7 @@ class LinkedInAdsAPI:
     def fetch_pages(self):
         client = create_client()
         url = self.construct_url()
-        
+        base_url = "https://api.linkedin.com"
         while url:
             response = client.get(url=url, headers=self.headers)
             print(f"Request URL: {response.url}")
@@ -103,13 +114,17 @@ class LinkedInAdsAPI:
             print(f"Response Content: {response.text}")
 
             result = response.json()
-            print("result",result)
+            print("result", result)
             items = result.get("elements", [])
-            
+
             if not items:
                 raise ValueError("No items found")
 
-            flat_structure(items=items, pivot=self.dimension, time_granularity=self.time_granularity)
+            flat_structure(
+                items=items,
+                pivot=self.dimension,
+                time_granularity=self.time_granularity,
+            )
 
             yield items
 
@@ -119,10 +134,6 @@ class LinkedInAdsAPI:
                     next_link = link.get("href")
                     break
             print(next_link)
-            
-            url = next_link
-            params = None
-            if not url:
+            if not next_link:
                 break
-
-           
+            url = base_url + next_link
