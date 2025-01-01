@@ -75,6 +75,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+from ingestr.src.linkedin_ads import linkedin_source
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1398,3 +1399,32 @@ class GoogleAnalyticsSource:
             queries=queries,
             credentials=credentials,
         ).with_resources("basic_report")
+
+class LinkedInAdsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+        access_token = source_fields.get("access_token")
+        dimension = source_fields.get("dimension")
+        metrics = source_fields.get("metrics")
+        timegranularity = source_fields.get("time_granularity",None)[0].upper()
+        account_ids = source_fields.get("account_ids")
+      
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+        start_date = datetime.strptime(interval_start, "%Y-%m-%d") if interval_start else datetime(2024, 11, 1)
+        end_date = datetime.strptime(interval_end, "%Y-%m-%d") if interval_end else datetime(2024, 12, 31)
+       
+        fields = table.split(":")
+        if len(fields) != 3:
+            raise ValueError("Invalid table format. Expected format: custom:<dimensions>:<metrics>")
+        dimension = fields[1].upper()
+        print(dimension)
+        metrics = fields[2].replace(" ", "").split(",")
+        metrics.extend(["dateRange", "pivotValues"])
+        print(metrics)
+    
+        return linkedin_source(start_date= start_date, end_date= end_date, access_token= access_token[0], account_ids= account_ids, dimension= dimension, metrics= metrics,time_granularity=timegranularity).with_resources("custom_reports")
