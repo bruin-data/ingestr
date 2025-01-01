@@ -31,7 +31,7 @@ def linkedin_source(
     else:
         primary_key = [dimension] + ["start_date"] + ["end_date"]
 
-    @dlt.resource(write_disposition="merge", primary_key= primary_key)
+    @dlt.resource(write_disposition="merge", primary_key=primary_key)
     def custom_reports() -> Iterable[TDataItem]:
         yield linkedin_api.fetch_pages()
 

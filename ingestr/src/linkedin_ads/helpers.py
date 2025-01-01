@@ -107,8 +107,8 @@ class LinkedInAdsAPI:
     def fetch_pages(self):
         client = create_client()
         url = self.construct_url()
-        base_url = "https://api.linkedin.com"
-        #while url:
+        # base_url = "https://api.linkedin.com"
+        # while url:
         response = client.get(url=url, headers=self.headers)
         result = response.json()
         items = result.get("elements", [])
@@ -123,7 +123,7 @@ class LinkedInAdsAPI:
         )
         print("items::", items)
         yield items
-    
+
         # next_link = None
         # for link in result.get("paging", {}).get("links", []):
         #     if link.get("rel") == "next":
