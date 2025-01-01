@@ -108,33 +108,28 @@ class LinkedInAdsAPI:
         client = create_client()
         url = self.construct_url()
         base_url = "https://api.linkedin.com"
-        while url:
-            response = client.get(url=url, headers=self.headers)
-            print(f"Request URL: {response.url}")
-            print(f"Response Status Code: {response.status_code}")
-            print(f"Response Content: {response.text}")
+        #while url:
+        response = client.get(url=url, headers=self.headers)
+        result = response.json()
+        items = result.get("elements", [])
 
-            result = response.json()
-            print("result", result)
-            items = result.get("elements", [])
+        if not items:
+            raise ValueError("No items found")
 
-            if not items:
-                raise ValueError("No items found")
-
-            flat_structure(
-                items=items,
-                pivot=self.dimension,
-                time_granularity=self.time_granularity,
-            )
-
-            yield items
-
-            next_link = None
-            for link in result.get("paging", {}).get("links", []):
-                if link.get("rel") == "next":
-                    next_link = link.get("href")
-                    break
-            print(next_link)
-            if not next_link:
-                break
-            url = base_url + next_link
+        items = flat_structure(
+            items=items,
+            pivot=self.dimension,
+            time_granularity=self.time_granularity,
+        )
+        print("items::", items)
+        yield items
+    
+        # next_link = None
+        # for link in result.get("paging", {}).get("links", []):
+        #     if link.get("rel") == "next":
+        #         next_link = link.get("href")
+        #         break
+        # print(next_link)
+        # if not next_link:
+        #     break
+        # url = base_url + next_link

@@ -26,9 +26,13 @@ def linkedin_source(
         interval_start=start_date,
         interval_end=end_date,
     )
+    if time_granularity == "DAILY":
+        primary_key = [dimension] + ["date"]
+    else:
+        primary_key = [dimension] + ["start_date"] + ["end_date"]
 
-    @dlt.resource(write_disposition="merge", primary_key=dimension)
+    @dlt.resource(write_disposition="merge", primary_key= primary_key)
     def custom_reports() -> Iterable[TDataItem]:
-        yield from linkedin_api.fetch_pages()
+        yield linkedin_api.fetch_pages()
 
     return custom_reports
