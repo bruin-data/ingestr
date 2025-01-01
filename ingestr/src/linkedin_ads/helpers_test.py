@@ -26,7 +26,7 @@ def test_flat_structure_linkedin_ads():
             "likes": 0,
         }
     ]
-    assert flat_structure(items_daily, "campaign", "daily") == expected_output_daily
+    assert flat_structure(items_daily, "CAMPAIGN", "DAILY") == expected_output_daily
 
     items_monthly = [
         {
@@ -55,5 +55,5 @@ def test_flat_structure_linkedin_ads():
     ]
 
     assert (
-        flat_structure(items_monthly, "campaign", "monthly") == expected_output_monthly
+        flat_structure(items_monthly, "CAMPAIGN", "MONTHLY") == expected_output_monthly
     )

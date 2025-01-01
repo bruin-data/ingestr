@@ -23,6 +23,7 @@ def create_client() -> requests.Session:
 
 
 def flat_structure(items, pivot, time_granularity):
+    pivot = pivot.lower()
     for item in items:
         # Process pivotValues
         if "pivotValues" in item and item["pivotValues"]:
