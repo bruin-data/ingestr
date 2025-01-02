@@ -1432,7 +1432,11 @@ class LinkedInAdsSource:
             if interval_start
             else pendulum.date(2024, 9, 1)
         )
-        end_date = pendulum.parse(interval_end).date() if interval_end else pendulum.today().date()
+        end_date = (
+            pendulum.parse(interval_end).date()
+            if interval_end
+            else pendulum.today().date()
+        )
 
         fields = table.split(":")
         if len(fields) != 3:

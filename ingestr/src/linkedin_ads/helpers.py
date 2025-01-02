@@ -1,7 +1,7 @@
 from urllib.parse import quote
-from dateutil.relativedelta import relativedelta
 
 import requests
+from dateutil.relativedelta import relativedelta
 from dlt.sources.helpers.requests import Client
 
 
@@ -57,26 +57,20 @@ def find_intervals(current_date, end_date, time_granularity):
     print("current_date", current_date)
     print("end_date", end_date)
     print("time_granularity", time_granularity)
-    while current_date < end_date:
+    while current_date <= end_date:
         if time_granularity == "DAILY":
-           
-            next_date = min(
-                current_date + relativedelta(months=6),
-                end_date
-            )
+            next_date = min(current_date + relativedelta(months=6), end_date)
         else:  # MONTHLY
             # For monthly data, move forward 2 years
-            next_date = min(
-                current_date + relativedelta(years=2),
-                end_date
-            )
-        
+            next_date = min(current_date + relativedelta(years=2), end_date)
+
         intervals.append((current_date, next_date))
-        
+
         # Start next interval from the next day
         current_date = next_date + relativedelta(days=1)
 
     return intervals
+
 
 class LinkedInAdsAPI:
     def __init__(
@@ -96,12 +90,10 @@ class LinkedInAdsAPI:
             "Linkedin-Version": "202411",
             "X-Restli-Protocol-Version": "2.0.0",
         }
-       
+
     def construct_url(self, start, end):
         date_range = f"(start:(year:{start.year},month:{start.month},day:{start.day})"
-        date_range += (
-                f",end:(year:{end.year},month:{end.month},day:{end.day})"
-            )
+        date_range += f",end:(year:{end.year},month:{end.month},day:{end.day})"
         date_range += ")"
 
         accounts = ",".join(
