@@ -3,8 +3,10 @@ from typing import Iterable
 import dlt
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
+import pendulum
 
 from .helpers import LinkedInAdsAPI, find_intervals
+from dlt.common.time import ensure_pendulum_datetime
 
 
 @dlt.source(max_table_nesting=0)
@@ -26,19 +28,28 @@ def linkedin_source(
     )
     if time_granularity == "DAILY":
         primary_key = [dimension] + ["date"]
+        incremental_loading_param = "date"
     else:
         primary_key = [dimension] + ["start_date"] + ["end_date"]
+        incremental_loading_param = "start_date"
 
     @dlt.resource(write_disposition="merge", primary_key=primary_key)
-    def custom_reports() -> Iterable[TDataItem]:
+    def custom_reports(
+        dateTime=(
+            dlt.sources.incremental(incremental_loading_param, start_date)
+        ),
+    ) -> Iterable[TDataItem]:
+        datetime_value = dateTime.last_value
+        current_date = datetime_value
+
         list_of_interval = find_intervals(
-            current_date=start_date,
+            current_date=current_date,
             end_date=end_date,
             time_granularity=time_granularity,
         )
-        print("list_of_interval", list_of_interval)
 
         for start, end in list_of_interval:
+            print(f"{start} -  {end}")
             yield linkedin_api.fetch_pages(start, end)
 
     return custom_reports
