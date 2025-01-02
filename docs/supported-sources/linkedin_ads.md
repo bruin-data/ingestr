@@ -12,7 +12,7 @@ linkedinads://?access_token=<access_token>&account_ids=<account_ids>&time_granul
 ## URI parameters:
 - `access_token`(required): Used for authentication and is necessary to access reports through the LinkedIn Ads API.
 - `account_ids`(required): The comma-separated list of account IDs to retrieve data for.
-- `time_granularity`(optional): The granularity of the data to retrieve. Can be `daily` or `monthly`. By default, the data is retrieved daily.
+
 
 [LinkedIn Ads](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder) requires an `access_token`, `account_ids` and `time_granularity` to retrieve reports from the LinkedIn Ads API. Please follow the guide to obtain the [credentials](https://docs.microsoft.com/en-us/linkedin/shared/authentication/authentication).
 
@@ -24,7 +24,7 @@ Custom Table Format:
 custom:<dimension>:<metrics>
 ```
 ### Parameters:
-- `dimension`(required): The dimension to retrieve. Can be `campaign`, `account`, `creative`.
+- `dimension`(required): A comma-separated list of [dimensions]. Must be `campaign`, `account`, `creative` and from time dimension i.e date or month.
 - `metrics`(required): A comma-separated list of [metrics](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#metrics-available) to retrieve.
  
 
@@ -37,14 +37,15 @@ Retrieve data for campaigns with `account_ids` id_123 and id_456:
 ```sh
 ingestr ingest \                         
     --source-uri "linkedinads://?access_token=token_123&account_ids=id_123,id_456" \
-    --source-table 'custom:campaign:impressions,clicks,likes' \
+    --source-table 'custom:campaign,date:impressions,clicks,likes' \
     --dest-uri 'duckdb:///linkedin.duckdb' \
     --dest-table 'dest.campaign'
 ```
 
 The applied parameters for the report are:
-- dimension: `campaign`
+- dimension: `campaign,date`
 - metrics: `impressions`, `clicks` and `likes`
+
 
 This command will retrieve data and save it to the `dest.campaign` table in the DuckDB database.
 

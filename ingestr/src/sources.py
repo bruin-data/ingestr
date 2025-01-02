@@ -1408,8 +1408,8 @@ class LinkedInAdsSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
         source_fields = parse_qs(parsed_uri.query)
+        
         access_token = source_fields.get("access_token", [None])[0]
-
         if not access_token:
             raise ValueError("access_token is required to connect to LinkedIn Ads")
 
@@ -1435,8 +1435,12 @@ class LinkedInAdsSource:
             raise ValueError(
                 "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
             )
+        
         dimensions = fields[1].replace(" ", "").split(",")
-        print(dimensions)
+        if "campaign" not in dimensions and "creatives" not in dimensions and "account" not in dimensions:
+            raise ValueError(
+                "campaign, creatives or account is required to connect to LinkedIn Ads. Please provide at least one of the dimensions"
+            )
         if "date" not in dimensions and "month" not in dimensions:
             raise ValueError(
                 "date or month is required to connect to LinkedIn Ads. Please provide at least one of the time dimensions"
@@ -1448,16 +1452,11 @@ class LinkedInAdsSource:
         else:
             time_granularity = "MONTHLY"
             dimensions.remove("month")
-            
+
         dimension = dimensions[0]
-        if "campaign" not in dimensions and "creatives" not in dimensions and "account" not in dimensions:
-            raise ValueError(
-                "campaign, creatives or account is required to connect to LinkedIn Ads. Please provide at least one of the dimensions"
-            )
         metrics = fields[2].replace(" ", "").split(",")
         metrics.extend(["dateRange", "pivotValues"])
-        print(time_granularity)
-        print(dimensions)
+       
         return linkedin_source(
             start_date=start_date,
             end_date=end_date,
