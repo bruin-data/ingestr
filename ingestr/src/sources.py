@@ -1429,7 +1429,7 @@ class LinkedInAdsSource:
         start_date = (
             pendulum.parse(interval_start).date()  # type: ignore
             if interval_start
-            else pendulum.date(2015, 12, 8)
+            else pendulum.date(2018, 1, 1)
         )
         end_date = (
             pendulum.parse(interval_end).date()  # type: ignore
