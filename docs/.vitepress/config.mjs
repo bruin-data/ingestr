@@ -106,6 +106,7 @@ export default defineConfig({
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "HubSpot", link: "/supported-sources/hubspot.md" },
               { text: "Klaviyo", link: "/supported-sources/klaviyo.md" },
+              { text: "LinkedIn Ads", link: "/supported-sources/linkedin_ads.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "S3", link: "/supported-sources/s3.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
