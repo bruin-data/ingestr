@@ -4,6 +4,7 @@ import pendulum
 import requests
 from dateutil.relativedelta import relativedelta
 from dlt.sources.helpers.requests import Client
+from pendulum import Date
 
 
 def retry_on_limit(
@@ -53,31 +54,36 @@ def flat_structure(items, pivot, time_granularity):
     return items
 
 
-def find_intervals(current_date, end_date, time_granularity):
+def find_intervals(start_date: Date, end_date: Date, time_granularity: str):
     intervals = []
 
-    while current_date <= end_date:
+    while start_date <= end_date:
         if time_granularity == "DAILY":
-            next_date = min(current_date + relativedelta(months=6), end_date)
+            next_date = min(start_date + relativedelta(months=6), end_date)
         else:
-            next_date = min(current_date + relativedelta(years=2), end_date)
+            next_date = min(start_date + relativedelta(years=2), end_date)
 
-        intervals.append((current_date, next_date))
+        intervals.append((start_date, next_date))
 
-        current_date = next_date + relativedelta(days=1)
+        start_date = next_date + relativedelta(days=1)
 
     return intervals
 
-def construct_url(start, end, account_ids, metrics, dimension, time_granularity):
+
+def construct_url(
+    start: Date,
+    end: Date,
+    account_ids: list[str],
+    metrics: list[str],
+    dimension: str,
+    time_granularity: str,
+):
     date_range = f"(start:(year:{start.year},month:{start.month},day:{start.day})"
     date_range += f",end:(year:{end.year},month:{end.month},day:{end.day})"
     date_range += ")"
 
     accounts = ",".join(
-        [
-            quote(f"urn:li:sponsoredAccount:{account_id}")
-            for account_id in account_ids
-        ]
+        [quote(f"urn:li:sponsoredAccount:{account_id}") for account_id in account_ids]
     )
     encoded_accounts = f"List({accounts})"
     metrics_str = ",".join(metrics)
@@ -89,6 +95,7 @@ def construct_url(start, end, account_ids, metrics, dimension, time_granularity)
         f"pivot={dimension}&fields={metrics_str}"
     )
     return url
+
 
 class LinkedInAdsAPI:
     def __init__(
@@ -102,21 +109,28 @@ class LinkedInAdsAPI:
         self.time_granularity: str = time_granularity
         self.account_ids: list[str] = account_ids
         self.dimension: str = dimension.upper()
-        self.metrics: str = metrics
+        self.metrics: list[str] = metrics
         self.headers = {
             "Authorization": f"Bearer {access_token}",
             "Linkedin-Version": "202411",
             "X-Restli-Protocol-Version": "2.0.0",
         }
 
-    def fetch_pages(self, start, end):
+    def fetch_pages(self, start: Date, end: Date):
         client = create_client()
-        url = construct_url(start, end, self.account_ids, self.metrics, self.dimension, self.time_granularity)
+        url = construct_url(
+            start=start,
+            end=end,
+            account_ids=self.account_ids,
+            metrics=self.metrics,
+            dimension=self.dimension,
+            time_granularity=self.time_granularity,
+        )
         response = client.get(url=url, headers=self.headers)
         result = response.json()
         items = result.get("elements", [])
         print("items::", items)
-        
+
         items = flat_structure(
             items=items,
             pivot=self.dimension,

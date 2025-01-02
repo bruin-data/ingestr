@@ -1,6 +1,10 @@
 import pendulum
 
-from ingestr.src.linkedin_ads.helpers import find_intervals, flat_structure, construct_url
+from ingestr.src.linkedin_ads.helpers import (
+    construct_url,
+    find_intervals,
+    flat_structure,
+)
 
 
 def test_flat_structure_linkedin_ads():
@@ -100,6 +104,19 @@ def test_construct_url_linkedin_ads():
     metrics = ["impressions", "clicks", "likes"]
     dimension = "CAMPAIGN"
     time_granularity = "MONTHLY"
-    
-    assert construct_url(start, end, account_ids, metrics, dimension, time_granularity) == "https://api.linkedin.com/rest/adAnalytics?q=analytics&timeGranularity=MONTHLY&dateRange=(start:(year:2024,month:1,day:1),end:(year:2024,month:12,day:31))&accounts=List(urn%3Ali%3AsponsoredAccount%3A123456,urn%3Ali%3AsponsoredAccount%3A456789)&pivot=CAMPAIGN&fields=impressions,clicks,likes"
-    assert construct_url(start=pendulum.date(2019, 1, 1),end=pendulum.date(2024, 12, 31), account_ids=["123456"], dimension="CREATIVE", metrics=["impressions", "clicks", "likes"], time_granularity="MONTHLY") == "https://api.linkedin.com/rest/adAnalytics?q=analytics&timeGranularity=MONTHLY&dateRange=(start:(year:2019,month:1,day:1),end:(year:2024,month:12,day:31))&accounts=List(urn%3Ali%3AsponsoredAccount%3A123456)&pivot=CREATIVE&fields=impressions,clicks,likes"
+
+    assert (
+        construct_url(start, end, account_ids, metrics, dimension, time_granularity)
+        == "https://api.linkedin.com/rest/adAnalytics?q=analytics&timeGranularity=MONTHLY&dateRange=(start:(year:2024,month:1,day:1),end:(year:2024,month:12,day:31))&accounts=List(urn%3Ali%3AsponsoredAccount%3A123456,urn%3Ali%3AsponsoredAccount%3A456789)&pivot=CAMPAIGN&fields=impressions,clicks,likes"
+    )
+    assert (
+        construct_url(
+            start=pendulum.date(2019, 1, 1),
+            end=pendulum.date(2024, 12, 31),
+            account_ids=["123456"],
+            dimension="CREATIVE",
+            metrics=["impressions", "clicks", "likes"],
+            time_granularity="MONTHLY",
+        )
+        == "https://api.linkedin.com/rest/adAnalytics?q=analytics&timeGranularity=MONTHLY&dateRange=(start:(year:2019,month:1,day:1),end:(year:2024,month:12,day:31))&accounts=List(urn%3Ali%3AsponsoredAccount%3A123456)&pivot=CREATIVE&fields=impressions,clicks,likes"
+    )

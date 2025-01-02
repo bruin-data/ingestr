@@ -1408,7 +1408,7 @@ class LinkedInAdsSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
         source_fields = parse_qs(parsed_uri.query)
-        
+
         access_token = source_fields.get("access_token", [None])[0]
         if not access_token:
             raise ValueError("access_token is required to connect to LinkedIn Ads")
@@ -1420,24 +1420,26 @@ class LinkedInAdsSource:
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
         start_date = (
-            pendulum.parse(interval_start).date()  # type: ignore
+            ensure_pendulum_datetime(interval_start)
             if interval_start
-            else pendulum.date(2018, 1, 1)
-        )
+            else pendulum.datetime(2018, 1, 1)
+        ).date()
         end_date = (
-            pendulum.parse(interval_end).date()  # type: ignore
-            if interval_end
-            else pendulum.today().date()
-        )
+            ensure_pendulum_datetime(interval_end) if interval_end else pendulum.today()
+        ).date()
 
         fields = table.split(":")
         if len(fields) != 3:
             raise ValueError(
                 "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
             )
-        
+
         dimensions = fields[1].replace(" ", "").split(",")
-        if "campaign" not in dimensions and "creatives" not in dimensions and "account" not in dimensions:
+        if (
+            "campaign" not in dimensions
+            and "creatives" not in dimensions
+            and "account" not in dimensions
+        ):
             raise ValueError(
                 "campaign, creatives or account is required to connect to LinkedIn Ads. Please provide at least one of the dimensions"
             )
@@ -1445,7 +1447,7 @@ class LinkedInAdsSource:
             raise ValueError(
                 "date or month is required to connect to LinkedIn Ads. Please provide at least one of the time dimensions"
             )
-        
+
         if "date" in dimensions:
             time_granularity = "DAILY"
             dimensions.remove("date")
@@ -1456,7 +1458,9 @@ class LinkedInAdsSource:
         dimension = dimensions[0]
         metrics = fields[2].replace(" ", "").split(",")
         metrics.extend(["dateRange", "pivotValues"])
-       
+        print(type(start_date))
+        print(type(end_date))
+
         return linked_in_ads_source(
             start_date=start_date,
             end_date=end_date,

@@ -3,19 +3,20 @@ from typing import Iterable
 import dlt
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
+from pendulum import Date
 
 from .helpers import LinkedInAdsAPI, find_intervals
 
 
 @dlt.source(max_table_nesting=0)
 def linked_in_ads_source(
-    start_date,
-    end_date,
-    access_token,
-    account_ids,
-    dimension,
-    metrics,
-    time_granularity,
+    start_date: Date,
+    end_date: Date,
+    access_token: str,
+    account_ids: list[str],
+    dimension: str,
+    metrics: list[str],
+    time_granularity: str,
 ) -> DltResource:
     linkedin_api = LinkedInAdsAPI(
         access_token=access_token,
@@ -36,10 +37,10 @@ def linked_in_ads_source(
         dateTime=(dlt.sources.incremental(incremental_loading_param, start_date)),
     ) -> Iterable[TDataItem]:
         datetime_value = dateTime.last_value
-        current_date = datetime_value
+        start_date = datetime_value
 
         list_of_interval = find_intervals(
-            current_date=current_date,
+            start_date=start_date,
             end_date=end_date,
             time_granularity=time_granularity,
         )
