@@ -53,9 +53,12 @@ def test_flat_structure_linkedin_ads():
         {
             "clicks": 0,
             "impressions": 43,
-            "campaign": "urn:li:sponsoredCampaign:123456, urn:li:sponsoredCampaign:7891011",
+            "campaign": [
+                "urn:li:sponsoredCampaign:123456",
+                "urn:li:sponsoredCampaign:7891011",
+            ],
             "start_date": pendulum.Date(2024, 12, 10),
-            "end_date": "2024-12-30",
+            "end_date": pendulum.Date(2024, 12, 30),
             "likes": 0,
         }
     ]

@@ -27,8 +27,11 @@ def create_client() -> requests.Session:
 def flat_structure(items, pivot, time_granularity):
     pivot = pivot.lower()
     for item in items:
-        if "pivotValues" in item and item["pivotValues"]:
-            item[pivot] = ", ".join(item["pivotValues"])
+        if "pivotValues" in item:
+            if len(item["pivotValues"]) > 1:
+                item[pivot] = item["pivotValues"]
+            else:
+                item[pivot] = item["pivotValues"][0]
 
         if "dateRange" in item:
             start_date = item["dateRange"]["start"]
@@ -42,11 +45,13 @@ def flat_structure(items, pivot, time_granularity):
                 item["date"] = start_dt
             elif time_granularity == "MONTHLY":
                 end_date = item["dateRange"]["end"]
-                formatted_end_date = (
-                    f"{end_date['year']}-{end_date['month']:02d}-{end_date['day']:02d}"
+                end_dt = pendulum.date(
+                    year=end_date["year"],
+                    month=end_date["month"],
+                    day=end_date["day"],
                 )
                 item["start_date"] = start_dt
-                item["end_date"] = formatted_end_date
+                item["end_date"] = end_dt
 
         del item["dateRange"]
         del item["pivotValues"]
