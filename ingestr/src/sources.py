@@ -1413,11 +1413,6 @@ class LinkedInAdsSource:
         if not access_token:
             raise ValueError("access_token is required to connect to LinkedIn Ads")
 
-        timegranularity = source_fields.get("time_granularity", [None])[0]
-        if not timegranularity:
-            timegranularity = "DAILY"
-        timegranularity = timegranularity.upper()
-
         account_ids = source_fields.get("account_ids")
         if not account_ids:
             raise ValueError("account_ids is required to connect to LinkedIn Ads")
@@ -1440,10 +1435,29 @@ class LinkedInAdsSource:
             raise ValueError(
                 "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
             )
-        dimension = fields[1].replace(" ", "")
+        dimensions = fields[1].replace(" ", "").split(",")
+        print(dimensions)
+        if "date" not in dimensions and "month" not in dimensions:
+            raise ValueError(
+                "date or month is required to connect to LinkedIn Ads. Please provide at least one of the time dimensions"
+            )
+        
+        if "date" in dimensions:
+            time_granularity = "DAILY"
+            dimensions.remove("date")
+        else:
+            time_granularity = "MONTHLY"
+            dimensions.remove("month")
+            
+        dimension = dimensions[0]
+        if "campaign" not in dimensions and "creatives" not in dimensions and "account" not in dimensions:
+            raise ValueError(
+                "campaign, creatives or account is required to connect to LinkedIn Ads. Please provide at least one of the dimensions"
+            )
         metrics = fields[2].replace(" ", "").split(",")
         metrics.extend(["dateRange", "pivotValues"])
-
+        print(time_granularity)
+        print(dimensions)
         return linkedin_source(
             start_date=start_date,
             end_date=end_date,
@@ -1451,5 +1465,5 @@ class LinkedInAdsSource:
             account_ids=account_ids,
             dimension=dimension,
             metrics=metrics,
-            time_granularity=timegranularity,
+            time_granularity=time_granularity,
         ).with_resources("custom_reports")

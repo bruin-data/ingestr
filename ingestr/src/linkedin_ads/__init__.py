@@ -25,10 +25,10 @@ def linkedin_source(
         time_granularity=time_granularity,
     )
     if time_granularity == "DAILY":
-        primary_key = [dimension] + ["date"]
+        primary_key = [dimension, "date"]
         incremental_loading_param = "date"
     else:
-        primary_key = [dimension] + ["start_date"] + ["end_date"]
+        primary_key = [dimension, "start_date", "end_date"]
         incremental_loading_param = "start_date"
 
     @dlt.resource(write_disposition="merge", primary_key=primary_key)

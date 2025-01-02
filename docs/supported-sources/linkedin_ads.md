@@ -1,10 +1,10 @@
 # LinkedIn Ads
 LinkedIn Ads is a platform that allows businesses and marketers to create, manage, and analyze advertising campaigns.
 
-Ingestr supportsLinkedIn Ads as a Source.
+Ingestr supports LinkedIn Ads as a source.
 
 ## URI format
-The URI format for LinkedIn Ads as a Source is as follows:
+The URI format for LinkedIn Ads as a source is as follows:
 
 ```plaintext
 linkedinads://?access_token=<access_token>&account_ids=<account_ids>&time_granularity=<time_granularity>"
@@ -24,7 +24,7 @@ Custom Table Format:
 custom:<dimension>:<metrics>
 ```
 ### Parameters:
-- `dimension`(required): The dimension to retrieve. Can be Campaign, Account, Creative.
+- `dimension`(required): The dimension to retrieve. Can be `campaign`, `account`, `creative`.
 - `metrics`(required): A comma-separated list of [metrics](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#metrics-available) to retrieve.
  
 
@@ -36,7 +36,7 @@ custom:<dimension>:<metrics>
 Retrieve data for campaigns with `account_ids` id_123 and id_456:
 ```sh
 ingestr ingest \                         
-    --source-uri "linkedinads://?access_token=token_123&account_ids=id_123,id_456&time_granularity=DAILY" \
+    --source-uri "linkedinads://?access_token=token_123&account_ids=id_123,id_456" \
     --source-table 'custom:campaign:impressions,clicks,likes' \
     --dest-uri 'duckdb:///linkedin.duckdb' \
     --dest-table 'dest.campaign'
