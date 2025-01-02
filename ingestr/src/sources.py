@@ -1435,6 +1435,7 @@ class LinkedInAdsSource:
             )
 
         dimensions = fields[1].replace(" ", "").split(",")
+        dimensions = [item for item in dimensions if item.strip()]
         if (
             "campaign" not in dimensions
             and "creative" not in dimensions
@@ -1457,7 +1458,12 @@ class LinkedInAdsSource:
 
         dimension = dimensions[0]
         metrics = fields[2].replace(" ", "").split(",")
-        metrics.extend(["dateRange", "pivotValues"])
+        metrics = [item for item in metrics if item.strip()]
+
+        if "dateRange" not in metrics:
+            metrics.append("dateRange")
+        if "pivotValues" not in metrics:
+            metrics.append("pivotValues")
 
         return linked_in_ads_source(
             start_date=start_date,
