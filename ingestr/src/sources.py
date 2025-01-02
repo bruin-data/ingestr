@@ -1415,9 +1415,7 @@ class LinkedInAdsSource:
 
         timegranularity = source_fields.get("time_granularity", [None])[0]
         if not timegranularity:
-            raise ValueError(
-                "time_granularity is required to connect to LinkedIn Ads. Please use one of the following: [DAILY, MONTHLY]"
-            )
+            timegranularity = "DAILY"
         timegranularity = timegranularity.upper()
 
         account_ids = source_fields.get("account_ids")
