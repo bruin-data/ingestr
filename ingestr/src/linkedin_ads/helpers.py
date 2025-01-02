@@ -68,6 +68,27 @@ def find_intervals(current_date, end_date, time_granularity):
 
     return intervals
 
+def construct_url(start, end, account_ids, metrics, dimension, time_granularity):
+    date_range = f"(start:(year:{start.year},month:{start.month},day:{start.day})"
+    date_range += f",end:(year:{end.year},month:{end.month},day:{end.day})"
+    date_range += ")"
+
+    accounts = ",".join(
+        [
+            quote(f"urn:li:sponsoredAccount:{account_id}")
+            for account_id in account_ids
+        ]
+    )
+    encoded_accounts = f"List({accounts})"
+    metrics_str = ",".join(metrics)
+
+    url = (
+        f"https://api.linkedin.com/rest/adAnalytics?"
+        f"q=analytics&timeGranularity={time_granularity}&"
+        f"dateRange={date_range}&accounts={encoded_accounts}&"
+        f"pivot={dimension}&fields={metrics_str}"
+    )
+    return url
 
 class LinkedInAdsAPI:
     def __init__(
@@ -88,36 +109,14 @@ class LinkedInAdsAPI:
             "X-Restli-Protocol-Version": "2.0.0",
         }
 
-    def construct_url(self, start, end):
-        date_range = f"(start:(year:{start.year},month:{start.month},day:{start.day})"
-        date_range += f",end:(year:{end.year},month:{end.month},day:{end.day})"
-        date_range += ")"
-
-        accounts = ",".join(
-            [
-                quote(f"urn:li:sponsoredAccount:{account_id}")
-                for account_id in self.account_ids
-            ]
-        )
-        encoded_accounts = f"List({accounts})"
-        metrics_str = ",".join(self.metrics)
-
-        url = (
-            f"https://api.linkedin.com/rest/adAnalytics?"
-            f"q=analytics&timeGranularity={self.time_granularity}&"
-            f"dateRange={date_range}&accounts={encoded_accounts}&"
-            f"pivot={self.dimension}&fields={metrics_str}"
-        )
-        return url
-
     def fetch_pages(self, start, end):
         client = create_client()
-        url = self.construct_url(start, end)
+        url = construct_url(start, end, self.account_ids, self.metrics, self.dimension, self.time_granularity)
         response = client.get(url=url, headers=self.headers)
         result = response.json()
         items = result.get("elements", [])
         print("items::", items)
-
+        
         items = flat_structure(
             items=items,
             pivot=self.dimension,

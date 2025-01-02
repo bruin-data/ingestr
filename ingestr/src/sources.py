@@ -62,7 +62,7 @@ from ingestr.src.hubspot import hubspot
 from ingestr.src.kafka import kafka_consumer
 from ingestr.src.kafka.helpers import KafkaCredentials
 from ingestr.src.klaviyo._init_ import klaviyo_source
-from ingestr.src.linkedin_ads import linkedin_source
+from ingestr.src.linkedin_ads import linked_in_ads_source
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
@@ -1457,7 +1457,7 @@ class LinkedInAdsSource:
         metrics = fields[2].replace(" ", "").split(",")
         metrics.extend(["dateRange", "pivotValues"])
        
-        return linkedin_source(
+        return linked_in_ads_source(
             start_date=start_date,
             end_date=end_date,
             access_token=access_token,

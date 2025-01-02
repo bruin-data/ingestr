@@ -8,7 +8,7 @@ from .helpers import LinkedInAdsAPI, find_intervals
 
 
 @dlt.source(max_table_nesting=0)
-def linkedin_source(
+def linked_in_ads_source(
     start_date,
     end_date,
     access_token,
