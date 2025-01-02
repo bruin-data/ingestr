@@ -1,5 +1,6 @@
 from urllib.parse import quote
 
+import pendulum
 import requests
 from dateutil.relativedelta import relativedelta
 from dlt.sources.helpers.requests import Client
@@ -25,26 +26,26 @@ def create_client() -> requests.Session:
 def flat_structure(items, pivot, time_granularity):
     pivot = pivot.lower()
     for item in items:
-        # Process pivotValues
         if "pivotValues" in item and item["pivotValues"]:
             item[pivot] = ", ".join(item["pivotValues"])
 
-        # Process dateRange based on time granularity
         if "dateRange" in item:
             start_date = item["dateRange"]["start"]
-            formatted_start_date = f"{start_date['year']}-{start_date['month']:02d}-{start_date['day']:02d}"
+            start_dt = pendulum.date(
+                        year=start_date['year'],
+                        month=start_date['month'],
+                        day=start_date['day']
+                    )
 
             if time_granularity == "DAILY":
-                item["date"] = formatted_start_date
+                item["date"] = start_dt
             elif time_granularity == "MONTHLY":
                 end_date = item["dateRange"]["end"]
                 formatted_end_date = (
                     f"{end_date['year']}-{end_date['month']:02d}-{end_date['day']:02d}"
                 )
-                item["start_date"] = formatted_start_date
+                item["start_date"] = start_dt
                 item["end_date"] = formatted_end_date
-            else:
-                raise ValueError(f"Invalid time_granularity: {time_granularity}")
 
         del item["dateRange"]
         del item["pivotValues"]
@@ -54,23 +55,18 @@ def flat_structure(items, pivot, time_granularity):
 
 def find_intervals(current_date, end_date, time_granularity):
     intervals = []
-    print("current_date", current_date)
-    print("end_date", end_date)
-    print("time_granularity", time_granularity)
+    
     while current_date <= end_date:
         if time_granularity == "DAILY":
             next_date = min(current_date + relativedelta(months=6), end_date)
-        else:  # MONTHLY
-            # For monthly data, move forward 2 years
+        else: 
             next_date = min(current_date + relativedelta(years=2), end_date)
 
         intervals.append((current_date, next_date))
 
-        # Start next interval from the next day
         current_date = next_date + relativedelta(days=1)
 
     return intervals
-
 
 class LinkedInAdsAPI:
     def __init__(
@@ -103,7 +99,6 @@ class LinkedInAdsAPI:
             ]
         )
         encoded_accounts = f"List({accounts})"
-
         metrics_str = ",".join(self.metrics)
 
         url = (
@@ -117,29 +112,14 @@ class LinkedInAdsAPI:
     def fetch_pages(self, start, end):
         client = create_client()
         url = self.construct_url(start, end)
-        # base_url = "https://api.linkedin.com"
-        # while url:
         response = client.get(url=url, headers=self.headers)
         result = response.json()
         items = result.get("elements", [])
-
-        if not items:
-            raise ValueError("No items found")
+        print("items::", items)
 
         items = flat_structure(
             items=items,
             pivot=self.dimension,
             time_granularity=self.time_granularity,
         )
-        print("items::", items)
         yield items
-
-        # next_link = None
-        # for link in result.get("paging", {}).get("links", []):
-        #     if link.get("rel") == "next":
-        #         next_link = link.get("href")
-        #         break
-        # print(next_link)
-        # if not next_link:
-        #     break
-        # url = base_url + next_link
