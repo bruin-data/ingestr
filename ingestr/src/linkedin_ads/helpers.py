@@ -32,10 +32,10 @@ def flat_structure(items, pivot, time_granularity):
         if "dateRange" in item:
             start_date = item["dateRange"]["start"]
             start_dt = pendulum.date(
-                        year=start_date['year'],
-                        month=start_date['month'],
-                        day=start_date['day']
-                    )
+                year=start_date["year"],
+                month=start_date["month"],
+                day=start_date["day"],
+            )
 
             if time_granularity == "DAILY":
                 item["date"] = start_dt
@@ -55,11 +55,11 @@ def flat_structure(items, pivot, time_granularity):
 
 def find_intervals(current_date, end_date, time_granularity):
     intervals = []
-    
+
     while current_date <= end_date:
         if time_granularity == "DAILY":
             next_date = min(current_date + relativedelta(months=6), end_date)
-        else: 
+        else:
             next_date = min(current_date + relativedelta(years=2), end_date)
 
         intervals.append((current_date, next_date))
@@ -67,6 +67,7 @@ def find_intervals(current_date, end_date, time_granularity):
         current_date = next_date + relativedelta(days=1)
 
     return intervals
+
 
 class LinkedInAdsAPI:
     def __init__(

@@ -1418,7 +1418,6 @@ class LinkedInAdsSource:
             raise ValueError(
                 "time_granularity is required to connect to LinkedIn Ads. Please use one of the following: [DAILY, MONTHLY]"
             )
-
         timegranularity = timegranularity.upper()
 
         account_ids = source_fields.get("account_ids")
@@ -1428,12 +1427,12 @@ class LinkedInAdsSource:
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
         start_date = (
-            pendulum.parse(interval_start).date()
+            pendulum.parse(interval_start).date()  # type: ignore
             if interval_start
-            else pendulum.date(2024, 9, 1)
+            else pendulum.date(2015, 12, 8)
         )
         end_date = (
-            pendulum.parse(interval_end).date()
+            pendulum.parse(interval_end).date()  # type: ignore
             if interval_end
             else pendulum.today().date()
         )

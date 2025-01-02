@@ -3,10 +3,8 @@ from typing import Iterable
 import dlt
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
-import pendulum
 
 from .helpers import LinkedInAdsAPI, find_intervals
-from dlt.common.time import ensure_pendulum_datetime
 
 
 @dlt.source(max_table_nesting=0)
@@ -35,9 +33,7 @@ def linkedin_source(
 
     @dlt.resource(write_disposition="merge", primary_key=primary_key)
     def custom_reports(
-        dateTime=(
-            dlt.sources.incremental(incremental_loading_param, start_date)
-        ),
+        dateTime=(dlt.sources.incremental(incremental_loading_param, start_date)),
     ) -> Iterable[TDataItem]:
         datetime_value = dateTime.last_value
         current_date = datetime_value
