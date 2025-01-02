@@ -132,10 +132,13 @@ class LinkedInAdsAPI:
             time_granularity=self.time_granularity,
         )
         response = client.get(url=url, headers=self.headers)
+        
+        if response.status_code != 200:
+            error_data = response.json()
+            raise ValueError(f"LinkedIn API Error: {error_data.get('message')}")
+        
         result = response.json()
         items = result.get("elements", [])
-        print("items::", items)
-
         items = flat_structure(
             items=items,
             pivot=self.dimension,

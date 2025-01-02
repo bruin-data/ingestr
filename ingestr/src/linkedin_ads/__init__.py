@@ -46,7 +46,6 @@ def linked_in_ads_source(
         )
 
         for start, end in list_of_interval:
-            print(f"{start} -  {end}")
             yield linkedin_api.fetch_pages(start, end)
 
     return custom_reports

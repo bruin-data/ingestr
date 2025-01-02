@@ -1409,7 +1409,7 @@ class LinkedInAdsSource:
         parsed_uri = urlparse(uri)
         source_fields = parse_qs(parsed_uri.query)
 
-        access_token = source_fields.get("access_token", [None])[0]
+        access_token = source_fields.get("access_token")
         if not access_token:
             raise ValueError("access_token is required to connect to LinkedIn Ads")
 
@@ -1437,11 +1437,11 @@ class LinkedInAdsSource:
         dimensions = fields[1].replace(" ", "").split(",")
         if (
             "campaign" not in dimensions
-            and "creatives" not in dimensions
+            and "creative" not in dimensions
             and "account" not in dimensions
         ):
             raise ValueError(
-                "campaign, creatives or account is required to connect to LinkedIn Ads. Please provide at least one of the dimensions"
+                "campaign, creative or account is required to connect to LinkedIn Ads. Please provide at least one of the dimensions"
             )
         if "date" not in dimensions and "month" not in dimensions:
             raise ValueError(
@@ -1458,13 +1458,11 @@ class LinkedInAdsSource:
         dimension = dimensions[0]
         metrics = fields[2].replace(" ", "").split(",")
         metrics.extend(["dateRange", "pivotValues"])
-        print(type(start_date))
-        print(type(end_date))
 
         return linked_in_ads_source(
             start_date=start_date,
             end_date=end_date,
-            access_token=access_token,
+            access_token=access_token[0],
             account_ids=account_ids,
             dimension=dimension,
             metrics=metrics,
