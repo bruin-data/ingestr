@@ -32,6 +32,7 @@ DIMENSION_TABLES = [
     "geographic_view",
 ]
 
+
 @dlt.source(max_table_nesting=2)
 def google_ads(
     client: GoogleAdsClient,
