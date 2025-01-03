@@ -1414,8 +1414,10 @@ class LinkedInAdsSource:
             raise ValueError("access_token is required to connect to LinkedIn Ads")
 
         account_ids = source_fields.get("account_ids")
+
         if not account_ids:
             raise ValueError("account_ids is required to connect to LinkedIn Ads")
+        account_ids = account_ids[0].replace(" ", "").split(",")
 
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")

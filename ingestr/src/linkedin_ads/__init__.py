@@ -38,13 +38,13 @@ def linked_in_ads_source(
     ) -> Iterable[TDataItem]:
         datetime_value = dateTime.last_value
         start_date = datetime_value
-      
+
         list_of_interval = find_intervals(
             start_date=start_date,
             end_date=end_date,
             time_granularity=time_granularity,
         )
-        
+
         for start, end in list_of_interval:
             yield linkedin_api.fetch_pages(start, end)
 

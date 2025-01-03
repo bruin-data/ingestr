@@ -64,7 +64,7 @@ def find_intervals(start_date: Date, end_date: Date, time_granularity: str):
 
     if start_date > end_date:
         raise ValueError("Start date must be less than end date")
-    
+
     while start_date <= end_date:
         if time_granularity == "DAILY":
             next_date = min(start_date + relativedelta(months=6), end_date)
@@ -78,7 +78,6 @@ def find_intervals(start_date: Date, end_date: Date, time_granularity: str):
     return intervals
 
 
-
 def construct_url(
     start: Date,
     end: Date,
@@ -90,11 +89,11 @@ def construct_url(
     date_range = f"(start:(year:{start.year},month:{start.month},day:{start.day})"
     date_range += f",end:(year:{end.year},month:{end.month},day:{end.day})"
     date_range += ")"
-
     accounts = ",".join(
         [quote(f"urn:li:sponsoredAccount:{account_id}") for account_id in account_ids]
     )
     encoded_accounts = f"List({accounts})"
+
     metrics_str = ",".join(metrics)
 
     url = (
@@ -136,7 +135,7 @@ class LinkedInAdsAPI:
             time_granularity=self.time_granularity,
         )
         response = client.get(url=url, headers=self.headers)
-        
+
         if response.status_code != 200:
             error_data = response.json()
             raise ValueError(f"LinkedIn API Error: {error_data.get('message')}")
