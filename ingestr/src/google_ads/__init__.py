@@ -32,29 +32,11 @@ DIMENSION_TABLES = [
     "geographic_view",
 ]
 
-
-def get_client(
-    credentials_path: str,
-    dev_token: str,
-) -> GoogleAdsClient:
-    conf = {
-        "json_key_file_path": credentials_path,
-        "use_proto_plus": True,
-        "developer_token": dev_token,
-    }
-    return GoogleAdsClient.load_from_dict(conf)
-
-
 @dlt.source(max_table_nesting=2)
 def google_ads(
+    client: GoogleAdsClient,
     customer_id: str,
-    credentials_path: str,
-    dev_token: str,
 ) -> List[DltResource]:
-    client = get_client(
-        credentials_path=credentials_path,
-        dev_token=dev_token,
-    )
     return [
         customers(client=client, customer_id=customer_id),
         campaigns(client=client, customer_id=customer_id),

@@ -1,8 +1,10 @@
 import base64
 import csv
 import json
+import tempfile
 import os
 import re
+
 from datetime import date, datetime
 from typing import (
     Any,
@@ -40,7 +42,7 @@ from dlt.sources.sql_database.schema_types import (
     Table,
     TTypeAdapter,
 )
-from google.oauth2 import service_account
+from google.ads.googleads.client import GoogleAdsClient
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
@@ -1414,13 +1416,50 @@ class GoogleAdsSource:
     def handles_incrementality(self) -> bool:
         return False
 
-    def dlt_source(self, uri: str, table: str, **kwargs):
-        parsed_uri = urlparse(uri)
-        params = parse_qs(parsed_uri.query)
+    def init_client(self, params: Dict[str, List[str]]) -> GoogleAdsClient:
+
+        dev_token = params.get("dev_token")
+        if dev_token is None or len(dev_token) == 0:
+            raise ValueError("dev_token is required to connect to Google Ads")
 
         credentials_path = params.get("credentials_path")
-        if credentials_path is None or len(credentials_path) == 0:
-            raise ValueError("credentials_path is required to connect Google Ads")
+        credentials_base64 = params.get("credentials_base64")
+        credentials_available = any(
+            map(
+                lambda x: x != None,
+                [credentials_path, credentials_base64],
+            )
+        )
+        if credentials_available is False:
+            raise ValueError("credentials_path (or credentials_base64) is required to connect Google Ads")
+
+        path = None
+        fd = None
+        if credentials_path:
+            path = credentials_path[0]
+        else:
+            (fd, path) = tempfile.mkstemp(prefix="secret-")
+            secret = base64.b64decode(credentials_base64[0])
+            os.write(fd, secret)
+            os.close(fd)
+
+
+        conf = {
+            "json_key_file_path": path,
+            "use_proto_plus": True,
+            "developer_token": dev_token[0],
+        }
+        try:
+            client = GoogleAdsClient.load_from_dict(conf)
+        finally:
+            if fd is not None:
+                os.remove(path)
+
+        return client
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+
 
         customer_id = parsed_uri.hostname
         if not customer_id:
@@ -1430,13 +1469,10 @@ class GoogleAdsSource:
             raise ValueError(
                 f"Resource '{table}' is not supported for Google Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
-
-        dev_token = params.get("dev_token")
-        if dev_token is None or len(dev_token) == 0:
-            raise ValueError("dev_token is required to connect to Google Ads")
+        params = parse_qs(parsed_uri.query)
+        client = self.init_client(params)
 
         return google_ads(
+            client,
             customer_id,
-            credentials_path[0],
-            dev_token[0],
         ).with_resources(table)
