@@ -62,6 +62,9 @@ def flat_structure(items, pivot, time_granularity):
 def find_intervals(start_date: Date, end_date: Date, time_granularity: str):
     intervals = []
 
+    if start_date > end_date:
+        raise ValueError("Start date must be less than end date")
+    
     while start_date <= end_date:
         if time_granularity == "DAILY":
             next_date = min(start_date + relativedelta(months=6), end_date)
@@ -73,6 +76,7 @@ def find_intervals(start_date: Date, end_date: Date, time_granularity: str):
         start_date = next_date + relativedelta(days=1)
 
     return intervals
+
 
 
 def construct_url(
@@ -132,7 +136,7 @@ class LinkedInAdsAPI:
             time_granularity=self.time_granularity,
         )
         response = client.get(url=url, headers=self.headers)
-
+        
         if response.status_code != 200:
             error_data = response.json()
             raise ValueError(f"LinkedIn API Error: {error_data.get('message')}")
