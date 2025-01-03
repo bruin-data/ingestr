@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import re
+import tempfile
 from datetime import date, datetime
 from typing import (
     Any,
@@ -40,6 +41,7 @@ from dlt.sources.sql_database.schema_types import (
     Table,
     TTypeAdapter,
 )
+from google.ads.googleads.client import GoogleAdsClient  # type: ignore
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 from sqlalchemy.dialects import mysql
@@ -55,6 +57,7 @@ from ingestr.src.dynamodb import dynamodb
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
+from ingestr.src.google_ads import google_ads
 from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
@@ -1340,6 +1343,7 @@ class DynamoDBSource:
                 end_value=isotime(kwargs.get("interval_end")),
             )
 
+        # bug: we never validate table.
         return dynamodb(table, creds, incremental)
 
 
@@ -1398,3 +1402,75 @@ class GoogleAnalyticsSource:
             queries=queries,
             credentials=credentials,
         ).with_resources("basic_report")
+
+
+class GoogleAdsSource:
+    resources = [
+        "customers",
+        "campaigns",
+        "change_events",
+        "customer_clients",
+    ]
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def init_client(self, params: Dict[str, List[str]]) -> GoogleAdsClient:
+        dev_token = params.get("dev_token")
+        if dev_token is None or len(dev_token) == 0:
+            raise ValueError("dev_token is required to connect to Google Ads")
+
+        credentials_path = params.get("credentials_path")
+        credentials_base64 = params.get("credentials_base64")
+        credentials_available = any(
+            map(
+                lambda x: x is not None,
+                [credentials_path, credentials_base64],
+            )
+        )
+        if credentials_available is False:
+            raise ValueError(
+                "credentials_path (or credentials_base64) is required to connect Google Ads"
+            )
+
+        path = None
+        fd = None
+        if credentials_path:
+            path = credentials_path[0]
+        else:
+            (fd, path) = tempfile.mkstemp(prefix="secret-")
+            secret = base64.b64decode(credentials_base64[0])  # type: ignore
+            os.write(fd, secret)
+            os.close(fd)
+
+        conf = {
+            "json_key_file_path": path,
+            "use_proto_plus": True,
+            "developer_token": dev_token[0],
+        }
+        try:
+            client = GoogleAdsClient.load_from_dict(conf)
+        finally:
+            if fd is not None:
+                os.remove(path)
+
+        return client
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+
+        customer_id = parsed_uri.hostname
+        if not customer_id:
+            raise ValueError("Customer ID is required to connect to Google Ads")
+
+        if table not in self.resources:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Google Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+        params = parse_qs(parsed_uri.query)
+        client = self.init_client(params)
+
+        return google_ads(
+            client,
+            customer_id,
+        ).with_resources(table)

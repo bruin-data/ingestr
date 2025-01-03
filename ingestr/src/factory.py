@@ -24,6 +24,7 @@ from ingestr.src.sources import (
     ChessSource,
     DynamoDBSource,
     FacebookAdsSource,
+    GoogleAdsSource,
     GoogleAnalyticsSource,
     GoogleSheetsSource,
     GorgiasSource,
@@ -120,6 +121,7 @@ class SourceDestinationFactory:
         "asana": AsanaSource,
         "tiktok": TikTokSource,
         "googleanalytics": GoogleAnalyticsSource,
+        "googleads": GoogleAdsSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
