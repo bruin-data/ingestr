@@ -32,6 +32,7 @@ DATE_FORMATS = [
 
 # https://dlthub.com/docs/dlt-ecosystem/file-formats/parquet#supported-destinations
 PARQUET_SUPPORTED_DESTINATIONS = [
+    "athena"
     "bigquery",
     "duckdb",
     "snowflake",
@@ -288,7 +289,6 @@ def ingest(
         ),
     ] = [],  # type: ignore
 ):
-    # TODO(turtledev): can't we move this to the top of this file?
     import hashlib
     import tempfile
     from datetime import datetime
@@ -345,7 +345,7 @@ def ingest(
             not in dlt_dest.capabilities().supported_loader_file_formats
         ):
             print(
-                f"[red]Loader file format {loader_file_format.value} is not supported by the destination.[/red]"
+                f"[red]Loader file format {loader_file_format.value} is not supported by the destination, available formats: {dlt_dest.capabilities().supported_loader_file_formats}.[/red]"
             )
             raise typer.Abort()
 
