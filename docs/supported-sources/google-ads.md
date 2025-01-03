@@ -14,6 +14,11 @@ URI parameters:
 - `credentials_path`: path to the service account JSON file.
 - `dev_token`: [developer token](https://developers.google.com/google-ads/api/docs/get-started/dev-token) to use for accessing the account.
 
+> [!NOTE]
+> You may specify credentials using `credentials_base64` instead of `credentials_path`.
+> The value of this parameter is the base64 encoded contents of the 
+> service account json file. However, we don't recommend using this
+> parameter, unless you're integrating ingestr into another system.
 ## Setting up a Google Ads integration
 
 ### Prerequisites
