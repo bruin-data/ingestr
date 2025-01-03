@@ -98,10 +98,8 @@ class SqlSource:
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
-
             incremental = dlt.sources.incremental(
                 kwargs.get("incremental_key", ""),
-                # primary_key=(),
                 initial_value=start_value,
                 end_value=end_value,
             )
@@ -161,6 +159,7 @@ class SqlSource:
                     switchDict = {
                         int: sa.INTEGER,
                         datetime: sa.TIMESTAMP,
+                        date: sa.DATE,
                         pendulum.Date: sa.DATE,
                         pendulum.DateTime: sa.TIMESTAMP,
                     }

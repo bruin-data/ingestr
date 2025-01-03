@@ -32,8 +32,6 @@ from typer.testing import CliRunner
 
 from ingestr.main import app
 
-runner = CliRunner()
-
 
 def get_abs_path(relative_path):
     return os.path.abspath(os.path.join(os.path.dirname(__file__), relative_path))
@@ -53,6 +51,7 @@ def invoke_ingest_command(
     sql_backend=None,
     loader_file_format=None,
     sql_exclude_columns=None,
+    columns=None,
 ):
     args = [
         "ingest",
@@ -102,7 +101,11 @@ def invoke_ingest_command(
         args.append("--sql-exclude-columns")
         args.append(sql_exclude_columns)
 
-    result = runner.invoke(
+    if columns:
+        args.append("--columns")
+        args.append(columns)
+
+    result = CliRunner().invoke(
         app,
         args,
         input="y\n",
@@ -925,11 +928,6 @@ def db_to_db_delete_insert_with_timerange(
     source_connection_url: str, dest_connection_url: str
 ):
     schema_rand_prefix = f"testschema_delete_insert_timerange_{get_random_string(5)}"
-    try:
-        shutil.rmtree(get_abs_path("../pipeline_data"))
-    except Exception:
-        pass
-
     source_engine = sqlalchemy.create_engine(source_connection_url)
 
     source_engine.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
@@ -1547,6 +1545,65 @@ def test_db_to_db_exclude_columns(source, dest):
     dest.stop()
 
 
+def test_date_coercion_issue():
+    """
+    By default, ingestr treats the start and end dates as datetime objects. While this worked fine for many cases, if the
+    incremental field is a date, the start and end dates cannot be compared to the incremental field, and the ingestion would fail.
+    In order to eliminate this, we have introduced a new option to ingestr, --columns, which allows the user to specify the column types for the destination table.
+    This way, ingestr will know the data type of the incremental field, and will be able to convert the start and end dates to the correct data type before running the ingestion.
+    """
+    source_instance = DuckDb()
+    dest_instance = DuckDb()
+
+    source_uri = source_instance.start()
+    dest_uri = dest_instance.start()
+
+    schema_rand_prefix = f"test_date_coercion_{get_random_string(5)}"
+    source_engine = sqlalchemy.create_engine(source_uri, poolclass=NullPool)
+    with source_engine.begin() as conn:
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+        conn.execute(
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+        )
+        conn.execute(
+            f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2024-01-01'), (2, 'val2', '2024-01-02')"
+        )
+        res = conn.execute(
+            f"select count(*) from {schema_rand_prefix}.input"
+        ).fetchall()
+        assert res[0][0] == 2
+
+    result = invoke_ingest_command(
+        source_uri,
+        f"{schema_rand_prefix}.input",
+        dest_uri,
+        f"{schema_rand_prefix}.output",
+        inc_strategy="delete+insert",
+        inc_key="updated_at",
+        sql_backend="sqlalchemy",
+        interval_start="2024-01-01",
+        interval_end="2024-01-10",
+        columns="id:bigint,val:text,updated_at:date",
+    )
+    if result.exc_info:
+        traceback.print_exception(*result.exc_info)
+    assert result.exit_code == 0
+
+    dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+    res = dest_engine.execute(
+        f"select id, val, updated_at from {schema_rand_prefix}.output"
+    ).fetchall()
+
+    assert res == [
+        (1, "val1", as_datetime("2024-01-01")),
+        (2, "val2", as_datetime("2024-01-02")),
+    ]
+
+    source_instance.stop()
+    dest_instance.stop()
+
+
 @dataclass
 class DynamoDBTestConfig:
     db_name: str
@@ -1751,11 +1808,6 @@ def test_dynamodb(dest, dynamodb, testcase):
 def custom_query_tests():
     def replace(source_connection_url, dest_connection_url):
         schema_rand_prefix = f"testschema_create_replace_cust_{get_random_string(5)}"
-        try:
-            shutil.rmtree(get_abs_path("../pipeline_data"))
-        except Exception:
-            pass
-
         source_engine = sqlalchemy.create_engine(source_connection_url)
         with source_engine.begin() as conn:
             conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
@@ -1803,11 +1855,6 @@ def custom_query_tests():
 
     def merge(source_connection_url, dest_connection_url):
         schema_rand_prefix = f"testschema_merge_{get_random_string(5)}"
-        try:
-            shutil.rmtree(get_abs_path("../pipeline_data"))
-        except Exception:
-            pass
-
         source_engine = sqlalchemy.create_engine(
             source_connection_url, poolclass=NullPool
         )

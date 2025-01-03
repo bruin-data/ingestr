@@ -7,9 +7,9 @@ The `ingest` command is a core feature of the `ingestr` tool, allowing users to 
 The following example demonstrates how to use the `ingest` command to transfer data from a source to a destination.
 
 ```bash
-ingestr ingest 
-   --source-uri '<your-source-uri-here>'
-   --source-table '<your-schema>.<your-table>'
+ingestr ingest \
+   --source-uri '<your-source-uri-here>' \
+   --source-table '<your-schema>.<your-table>' \
    --dest-uri '<your-destination-uri-here>'
 ```
 
@@ -27,6 +27,7 @@ ingestr ingest
 - `--interval-start`: Sets the start of the interval for the incremental key. Defaults to `None`.
 - `--interval-end`: Sets the end of the interval for the incremental key. Defaults to `None`.
 - `--primary-key TEXT`: Specifies the primary key for the merge operation. Defaults to `None`.
+- `--columns <column_name>:<column_type>`: Specifies the columns to be ingested. Defaults to `None`.
 
 The `interval-start` and `interval-end` options support various datetime formats, here are some examples:
 - `%Y-%m-%d`: `2023-01-31`
@@ -42,3 +43,68 @@ The `interval-start` and `interval-end` options support various datetime formats
 
 - `--help`: Displays the help message and exits the command.
 
+## Examples
+
+### Ingesting a CSV file to DuckDB
+
+```bash
+ingestr ingest \
+   --source-uri 'csv://input.csv' \
+   --source-table 'sample' \
+   --dest-uri 'duckdb://output.duckdb'
+```
+
+### Copy a table from Postgres to DuckDB
+
+```bash
+ingestr ingest \
+   --source-uri 'postgresql://myuser:mypassword@localhost:5432/mydatabase?sslmode=disable' \
+   --source-table 'public.input_table' \
+   --dest-uri 'duckdb://output.duckdb' \
+   --dest-table 'public.output_table'
+```
+
+### Incrementally ingest a table from Postgres to BigQuery
+
+```bash
+ingestr ingest 
+   --source-uri 'postgresql://myuser:mypassword@localhost:5432/mydatabase?sslmode=disable' \
+   --source-table 'public.users' \
+   --dest-uri 'bigquery://my_project?credentials_path=/path/to/service/account.json&location=EU' \
+   --dest-table 'raw.users' \
+   --incremental-key 'updated_at' \
+   --incremental-strategy 'delete+insert'
+```
+
+### Load an interval of data from Postgres to BigQuery using a date column
+
+```bash
+ingestr ingest 
+   --source-uri 'postgresql://myuser:mypassword@localhost:5432/mydatabase?sslmode=disable' \
+   --source-table 'public.users' \
+   --dest-uri 'bigquery://my_project?credentials_path=/path/to/service/account.json&location=EU' \
+   --dest-table 'raw.users' \
+   --incremental-key 'dt' \
+   --incremental-strategy 'delete+insert' \
+   --interval-start '2023-01-01' \
+   --interval-end '2023-01-31' \
+   --columns 'dt:date'
+```
+
+### Load a specific query from Postgres to Snowflake
+
+```bash
+ingestr ingest 
+   --source-uri 'postgresql://myuser:mypassword@localhost:5432/mydatabase?sslmode=disable' \
+   --dest-uri 'snowflake://user:password@account/dbname?warehouse=COMPUTE_WH&role=my_role' \
+   --source-table 'query:SELECT * FROM public.users as pu JOIN public.orders as o ON pu.id = o.user_id WHERE pu.dt BETWEEN :interval_start AND :interval_end' \
+   --dest-table 'raw.users' \
+   --incremental-key 'dt' \
+   --incremental-strategy 'delete+insert' \
+   --interval-start '2023-01-01' \
+   --interval-end '2023-01-31' \
+   --columns 'dt:date'
+```
+
+> [!INFO]
+> For more examples, please refer to the specific platforms' documentation on the sidebar.
