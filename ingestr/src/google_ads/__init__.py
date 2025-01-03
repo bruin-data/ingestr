@@ -18,21 +18,6 @@ except ImportError:
     raise MissingDependencyException("Requests-OAuthlib", ["google-ads"])
 
 
-# what is this for?
-DIMENSION_TABLES = [
-    "accounts",
-    "ad_group",
-    "ad_group_ad",
-    "ad_group_ad_label",
-    "ad_group_label",
-    "campaign_label",
-    "click_view",
-    "customer",
-    "keyword_view",
-    "geographic_view",
-]
-
-
 @dlt.source(max_table_nesting=2)
 def google_ads(
     client: GoogleAdsClient,
