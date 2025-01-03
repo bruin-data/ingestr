@@ -1435,12 +1435,8 @@ class GoogleAdsSource:
         if dev_token is None or len(dev_token) == 0:
             raise ValueError("dev_token is required to connect to Google Ads")
 
-        credentials = service_account.Credentials.from_service_account_file(
-            credentials_path[0]
-        )
         return google_ads(
             customer_id,
             credentials_path[0],
-            credentials.service_account_email,
             dev_token[0],
         ).with_resources(table)

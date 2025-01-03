@@ -36,11 +36,9 @@ DIMENSION_TABLES = [
 def get_client(
     credentials_path: str,
     dev_token: str,
-    impersonated_email: str,
 ) -> GoogleAdsClient:
     conf = {
         "json_key_file_path": credentials_path,
-        "impersonated_email": impersonated_email,
         "use_proto_plus": True,
         "developer_token": dev_token,
     }
@@ -51,13 +49,11 @@ def get_client(
 def google_ads(
     customer_id: str,
     credentials_path: str,
-    impersonated_email: str,
     dev_token: str,
 ) -> List[DltResource]:
     client = get_client(
         credentials_path=credentials_path,
         dev_token=dev_token,
-        impersonated_email=impersonated_email,
     )
     return [
         customers(client=client, customer_id=customer_id),
