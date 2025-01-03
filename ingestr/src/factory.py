@@ -30,6 +30,7 @@ from ingestr.src.sources import (
     HubspotSource,
     KafkaSource,
     KlaviyoSource,
+    LinkedInAdsSource,
     LocalCsvSource,
     MongoDbSource,
     NotionSource,
@@ -120,6 +121,7 @@ class SourceDestinationFactory:
         "asana": AsanaSource,
         "tiktok": TikTokSource,
         "googleanalytics": GoogleAnalyticsSource,
+        "linkedinads": LinkedInAdsSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
