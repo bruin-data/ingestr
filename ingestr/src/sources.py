@@ -55,6 +55,7 @@ from ingestr.src.dynamodb import dynamodb
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
+from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
@@ -1397,3 +1398,46 @@ class GoogleAnalyticsSource:
             queries=queries,
             credentials=credentials,
         ).with_resources("basic_report")
+
+
+class GitHubSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Github takes care of incrementality on its own, you should not provide incremental_key"
+            )
+        # github://?access_token=<access_token>&owner=<owner>&repo=<repo>
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        owner = source_fields.get("owner", [None])[0]
+        if not owner:
+            raise ValueError(
+                "owner of the repository is required to connect with GitHub"
+            )
+
+        repo = source_fields.get("repo", [None])[0]
+        if not repo:
+            raise ValueError(
+                "repo variable is required to retrieve data for a specific repository from GitHub."
+            )
+
+        access_token = source_fields.get("access_token", [None])[0]
+        if not access_token and table not in ["repo_events"]:
+            raise ValueError("access_token is required to connect with GitHub")
+
+        if table in ["issues", "pull_requests"]:
+            return github_reactions(
+                owner=owner, name=repo, access_token=access_token
+            ).with_resources(table)
+        elif table == "repo_events":
+            return github_repo_events(owner=owner, name=repo, access_token=access_token)
+        elif table == "stargazers":
+            return github_stargazers(owner=owner, name=repo, access_token=access_token)
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for GitHub source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
