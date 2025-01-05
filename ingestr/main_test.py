@@ -26,6 +26,7 @@ from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
+from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
@@ -115,6 +116,9 @@ def invoke_ingest_command(
         input="y\n",
         env={"DISABLE_TELEMETRY": "true"},
     )
+    if result.exit_code != 0:
+        traceback.print_exception(*result.exc_info)
+    
     return result
 
 
@@ -419,10 +423,10 @@ SOURCES = {
     "mysql8": DockerImage(
         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
     ),
-    # "sqlserver": DockerImage(
-    #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
-    #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
-    # ),
+    "sqlserver": DockerImage(
+        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+    ),
 }
 
 DESTINATIONS = {
