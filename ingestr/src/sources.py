@@ -103,12 +103,12 @@ class SqlSource:
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
-            print("START VALUE", start_value)
-            print("END VALUE", end_value)
             incremental = dlt.sources.incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
+                range_end="closed",
+                range_start="closed",
             )
 
         if uri.startswith("mysql://"):
@@ -197,7 +197,7 @@ class SqlSource:
                     if getattr(engine, "may_dispose_after_use", False):
                         engine.dispose()
 
-            dlt.sources.sql_database.table_rows = table_rows
+            dlt.sources.sql_database.table_rows = table_rows  # type: ignore
 
             # override the query adapters, the only one we want is the one here in the case of custom queries
             query_adapters = [custom_query_variable_subsitution(query_value, kwargs)]

@@ -57,7 +57,7 @@ class SpinnerCollector(Collector):
         name: str,
         inc: int = 1,
         total: Optional[int] = None,
-        message: Optional[str] = None,
+        message: Optional[str] = None,  # type: ignore
         label: str = "",
         **kwargs,
     ) -> None:

@@ -25,8 +25,8 @@ from sqlalchemy.pool import NullPool
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
-from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.mssql import SqlServerContainer  # type: ignore
+from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
@@ -118,7 +118,7 @@ def invoke_ingest_command(
     )
     if result.exit_code != 0:
         traceback.print_exception(*result.exc_info)
-    
+
     return result
 
 
@@ -983,7 +983,7 @@ def db_to_db_delete_insert_with_timerange(
         assert res.exit_code == 0
         return res
 
-    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+    dest_engine = sqlalchemy.create_engine(dest_connection_url, poolclass=NullPool)
 
     def get_output_rows():
         dest_engine.execute("CHECKPOINT")
@@ -1000,7 +1000,12 @@ def db_to_db_delete_insert_with_timerange(
 
     run("2022-01-01", "2022-01-02")  # dlt runs them with the end date exclusive
     assert_output_equals(
-        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-01-01"))]
+        [
+            (1, "val1", as_datetime("2022-01-01")),
+            (2, "val2", as_datetime("2022-01-01")),
+            (3, "val3", as_datetime("2022-01-02")),
+            (4, "val4", as_datetime("2022-01-02")),
+        ]
     )
 
     first_run_id = dest_engine.execute(
@@ -1013,7 +1018,12 @@ def db_to_db_delete_insert_with_timerange(
     res = run("2022-01-01", "2022-01-02")
 
     assert_output_equals(
-        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-01-01"))]
+        [
+            (1, "val1", as_datetime("2022-01-01")),
+            (2, "val2", as_datetime("2022-01-01")),
+            (3, "val3", as_datetime("2022-01-02")),
+            (4, "val4", as_datetime("2022-01-02")),
+        ]
     )
 
     # both rows should have a new run ID
@@ -1022,7 +1032,7 @@ def db_to_db_delete_insert_with_timerange(
     ).fetchall()
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][0] != first_run_id
-    assert count_by_run_id[0][1] == 2
+    assert count_by_run_id[0][1] == 4
     dest_engine.dispose()
     ##############################
 
@@ -1035,6 +1045,8 @@ def db_to_db_delete_insert_with_timerange(
             (2, "val2", as_datetime("2022-01-01")),
             (3, "val3", as_datetime("2022-01-02")),
             (4, "val4", as_datetime("2022-01-02")),
+            (5, "val5", as_datetime("2022-01-03")),
+            (6, "val6", as_datetime("2022-01-03")),
         ]
     )
 
@@ -1044,7 +1056,7 @@ def db_to_db_delete_insert_with_timerange(
     ).fetchall()
     assert len(count_by_run_id) == 2
     assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[1][1] == 2
+    assert count_by_run_id[1][1] == 4
     dest_engine.dispose()
     ##############################
 
@@ -1095,10 +1107,9 @@ def db_to_db_delete_insert_with_timerange(
     count_by_run_id = dest_engine.execute(
         f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 1 asc"
     ).fetchall()
-    assert len(count_by_run_id) == 3
+    assert len(count_by_run_id) == 2
     assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[1][1] == 2
-    assert count_by_run_id[2][1] == 2
+    assert count_by_run_id[1][1] == 4
     dest_engine.dispose()
     ##############################
 
@@ -1674,9 +1685,9 @@ def test_date_coercion_issue():
         (1, "val1", as_datetime("2024-01-01")),
         (2, "val2", as_datetime("2024-01-01")),
         (3, "val3", as_datetime("2024-01-01")),
-        # (4, "val4", as_datetime("2024-01-02")), # this doesn't work until inclusive ranges are enabled
-        # (5, "val5", as_datetime("2024-01-02")),
-        # (6, "val6", as_datetime("2024-01-02")),
+        (4, "val4", as_datetime("2024-01-02")),
+        (5, "val5", as_datetime("2024-01-02")),
+        (6, "val6", as_datetime("2024-01-02")),
     ]
 
     source_instance.stop()
