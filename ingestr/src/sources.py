@@ -18,7 +18,6 @@ from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
 import pendulum
-import sqlalchemy
 from dlt.common.configuration.specs import (
     AwsCredentials,
 )
@@ -42,7 +41,6 @@ from dlt.sources.sql_database.schema_types import (
 )
 from sqlalchemy import Column
 from sqlalchemy import types as sa
-from sqlalchemy.dialects import mysql
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
@@ -67,6 +65,12 @@ from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
+from ingestr.src.sql_database.callbacks import (
+    chained_query_adapter_callback,
+    custom_query_variable_subsitution,
+    limit_callback,
+    type_adapter_callback,
+)
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
 from ingestr.src.tiktok_ads import tiktok_source
@@ -99,6 +103,8 @@ class SqlSource:
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
+            print("START VALUE", start_value)
+            print("END VALUE", end_value)
             incremental = dlt.sources.incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
@@ -108,16 +114,11 @@ class SqlSource:
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
-        reflection_level = kwargs.get("sql_reflection_level")
-
-        query_adapter_callback = None
+        query_adapters = []
         if kwargs.get("sql_limit"):
-
-            def query_adapter_callback(query, table):
-                query = query.limit(kwargs.get("sql_limit"))
-                if kwargs.get("incremental_key"):
-                    query = query.order_by(kwargs.get("incremental_key"))
-                return query
+            query_adapters.append(
+                limit_callback(kwargs.get("sql_limit"), kwargs.get("incremental_key"))
+            )
 
         defer_table_reflect = False
         sql_backend = kwargs.get("sql_backend", "sqlalchemy")
@@ -198,36 +199,8 @@ class SqlSource:
 
             dlt.sources.sql_database.table_rows = table_rows
 
-            def query_adapter_callback(query, table, incremental=None, engine=None):
-                params = {}
-                if incremental:
-                    params["interval_start"] = (
-                        incremental.last_value
-                        if incremental.last_value is not None
-                        else datetime(year=1, month=1, day=1)
-                    )
-                    if incremental.end_value is not None:
-                        params["interval_end"] = incremental.end_value
-                else:
-                    if ":interval_start" in query_value:
-                        params["interval_start"] = (
-                            datetime.min
-                            if kwargs.get("interval_start") is None
-                            else kwargs.get("interval_start")
-                        )
-                    if ":interval_end" in query_value:
-                        params["interval_end"] = (
-                            datetime.max
-                            if kwargs.get("interval_end") is None
-                            else kwargs.get("interval_end")
-                        )
-
-                return sqlalchemy.text(query_value).bindparams(**params)
-
-        def type_adapter_callback(sql_type):
-            if isinstance(sql_type, mysql.SET):
-                return sa.JSON
-            return sql_type
+            # override the query adapters, the only one we want is the one here in the case of custom queries
+            query_adapters = [custom_query_variable_subsitution(query_value, kwargs)]
 
         builder_res = self.table_builder(
             credentials=ConnectionStringCredentials(uri),
@@ -236,8 +209,8 @@ class SqlSource:
             incremental=incremental,
             backend=sql_backend,
             chunk_size=kwargs.get("page_size", None),
-            reflection_level=reflection_level,
-            query_adapter_callback=query_adapter_callback,
+            reflection_level=kwargs.get("sql_reflection_level", None),
+            query_adapter_callback=chained_query_adapter_callback(query_adapters),
             type_adapter_callback=type_adapter_callback,
             table_adapter_callback=table_adapter_exclude_columns(
                 kwargs.get("sql_exclude_columns", [])
