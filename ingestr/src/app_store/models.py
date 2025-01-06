@@ -1,37 +1,33 @@
+import re
 from dataclasses import dataclass
 from dataclasses_json import dataclass_json
 from typing import List, Optional
 
 @dataclass_json
 @dataclass
-class Link:
-    self: str
-    related: Optional[str] = None
-
-@dataclass_json
-@dataclass
-class ReportsRelationship:
-    links: Link
-
-@dataclass_json
-@dataclass
-class Relationships:
-    reports: ReportsRelationship
-
-@dataclass_json
-@dataclass
-class Attributes:
+class ReportRequestAttributes:
     accessType: str
     stoppedDueToInactivity: bool
 
 @dataclass_json
 @dataclass
-class DataItem:
+class ReportAttributes:
+    name: str
+    category: str
+
+@dataclass_json
+@dataclass
+class ReportRequest:
     type: str
     id: str
-    attributes: Attributes
-    relationships: Relationships
-    links: Link
+    attributes: ReportRequestAttributes
+
+@dataclass_json
+@dataclass
+class Report:
+    type: str
+    id: str
+    attributes: ReportAttributes
 
 @dataclass_json
 @dataclass
@@ -47,6 +43,11 @@ class Meta:
 @dataclass_json
 @dataclass
 class AnalyticsReportRequestsResponse:
-    data: List[DataItem]
-    links: Link
+    data: List[ReportRequest]
+    meta: Meta
+
+@dataclass_json
+@dataclass
+class AnalyticsReportResponse:
+    data: List[Report]
     meta: Meta
