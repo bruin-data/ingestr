@@ -46,6 +46,7 @@ from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
+from ingestr.src.app_store import app_store
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
@@ -80,6 +81,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+from ingestr.src.errors import MissingValueError
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1414,3 +1416,35 @@ class GitHubSource:
             raise ValueError(
                 f"Resource '{table}' is not supported for GitHub source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
+
+class AppleAppStoreSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        key_id = params.get("key_id")
+        if key_id is None:
+            raise MissingValueError("key_id", "App Store")
+
+        key_path = params.get("key_path")
+        if key_path is None:
+            raise MissingValueError("key_path", "App Store")
+
+        issuer_id = params.get("issuer_id")
+        if issuer_id is None:
+            raise MissingValueError("issuer_id", "App Store")
+
+        
+        app_id = params.get("app_id")
+        if app_id is None:
+            raise MissingValueError("app_id", "App Store")
+        
+        return app_store(
+            key_id[0],
+            key_path[0],
+            issuer_id[0],
+            app_id,
+        )
