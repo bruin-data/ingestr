@@ -13,7 +13,7 @@ linkedinads://?access_token=<access_token>&account_ids=<account_ids>
 - `access_token`(required): It is used for authentication and is necessary to access data and reports through the LinkedIn Ads API. The access token lets your app access data using the permissions you set in the Developer App for your LinkedIn account.
 - `account_ids`(required): The comma-separated list of Ad Account IDs specifies the LinkedIn Ad Accounts for which you want to retrieve data. These IDs uniquely identify the LinkedIn Ad Accounts associated with a company, business, or individual, depending on the ownership of the Ad Accounts. They are required to fetch data for campaigns, creatives, and other related resources.
 
-[LinkedIn Ads](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder) requires an `access_token` and `account_ids` to retrieve reports from the LinkedIn Ads API. Please follow these steps to obtain the `access_token` and `account_ids`:
+[LinkedIn Ads](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder) requires an `access_token` and `account_ids` to retrieve reports from the LinkedIn Ads API. Please follow these steps to obtain the `access_token` and `account_ids`
 
 ### Create a LinkedIn developer application to obtain an access token
 1. Log in to LinkedIn with a [developer account](https://www.linkedin.com/developers)
@@ -30,19 +30,17 @@ linkedinads://?access_token=<access_token>&account_ids=<account_ids>
    - Click Generate URL
    - Send this URL to your Page Admin 
    - Click I'm done and open the URL in a new tab to verify, if you are the admin of your page.
-   -  Go to the Products tab, click 'Request access' for the Advertising API, and fill out the form.
+   -  Go to the Products tab, click 'Request access' for the Advertising API, It will take about few minutes to get approved and then you need to fill out the form where you have to provide your company name, website, and other details.
 
 #### Authorize your app and obtain access token
 1. Go to the Auth tab
-2. Copy your Client ID and Client Secret
-3. Add a redirect URL in OAuth 2.0 settings
-4. Click OAuth 2.0 tools [link](https://www.linkedin.com/developers/tools/oauth)
+4. Click OAuth 2.0 tools which is on top right corner of the page [link](https://www.linkedin.com/developers/tools/oauth)
 5. Click Create token
 6. Choose these permissions:
    - r_ads
    - r_ads_reporting
 7. Click Request access token
-8. Log in with your LinkedIn account to get your Access Token and Refresh Token. Copy the Access Token.
+8. You will be redirected to an authorization page. Use your LinkedIn credentials to log in and authorize your app and obtain your Access Token and Refresh Token. Copy the Access Token.
 
 > [!NOTE]
 >Access tokens last for 2 months. After they expire, you'll need to make new ones using 
@@ -58,11 +56,10 @@ Custom Table Format:
 custom:<dimensions>:<metrics>
 ```
 ### Parameters:
-- `dimensions`(required): A comma-separated list of [dimensions] is required. It must include campaign, account, or creative, and one time dimension, either date or month.
+- `dimensions`(required): A comma-separated list of dimensions is required. It must include at least one of the following: `campaign`, `account`, or `creative`, along with one time-based dimension, either `date` or `month`.
   - `date`: group the data in your report by day
   - `month`: group the data in your report by month
 - `metrics`(required): A comma-separated list of [metrics](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#metrics-available) to retrieve. Metrics are mandatory, and `dateRange` and `pivotValues` metrics` are included by default.
-
 
 > [!NOTE]
 > By default, Ingestr fetches data from January 1, 2018 to the today date. You can specify a custom date range using the `start-interval` and `end-interval` parameters.
