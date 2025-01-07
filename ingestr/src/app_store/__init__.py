@@ -34,4 +34,13 @@ def app_downloads_detailed(client: AppStoreConnectClient, app_ids: List[str]) ->
         if len(ongoing_requests) == 0:
             raise Exception("No ONGOING report requests found")
 
-        reports = client.list_analytics_reports(ongoing_requests[0].id)
+        reports = client.list_analytics_reports(ongoing_requests[0].id, "App Downloads Detailed")
+        for report in reports.data:
+            instances = client.list_report_instances(report.id)
+
+            # use the last instance for now
+            latest_report = instances.data[-1]
+
+            segments = client.list_report_segments(latest_report.id)
+            for segment in segments.data:
+                print(segment)

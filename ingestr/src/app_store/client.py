@@ -4,10 +4,12 @@ import requests
 from requests.models import PreparedRequest
 import jwt
 
-from typing import Sequence
+from typing import Sequence, Optional
 from .models import (
     AnalyticsReportRequestsResponse,
-    AnalyticsReportResponse
+    AnalyticsReportResponse,
+    AnalyticsReportInstancesResponse,
+    AnalyticsReportSegmentsResponse,
 )
 
 class AppStoreConnectClient:
@@ -26,15 +28,42 @@ class AppStoreConnectClient:
 
         return AnalyticsReportRequestsResponse.from_json(res.text)
     
-    def list_analytics_reports(self, req_id: str):
+    def list_analytics_reports(self, req_id: str, report_type: Optional[str] = None):
+        params = {}
+        if report_type is not None:
+            params["filter[name]"] = report_type
         res = requests.get(
             f"https://api.appstoreconnect.apple.com/v1/analyticsReportRequests/{req_id}/reports",
             auth=self.auth,
+            params=params,
         )
         if res.status_code != 200:
             raise Exception(f"http status: {res.status_code}")
         
         return AnalyticsReportResponse.from_json(res.text)
+
+    def list_report_instances(self, report_id: str):
+        res = requests.get(
+            f"https://api.appstoreconnect.apple.com/v1/analyticsReports/{report_id}/instances",
+            auth=self.auth,
+            params={
+                "filter[granularity]": "DAILY"
+            }
+        )
+        if res.status_code != 200:
+            raise Exception(f"http status: {res.status_code}")
+
+        return AnalyticsReportInstancesResponse.from_json(res.text)
+
+    def list_report_segments(self, instance_id: str):
+        res = requests.get(
+            f"https://api.appstoreconnect.apple.com/v1/analyticsReportInstances/{instance_id}/segments",
+            auth=self.auth,
+        )
+        if res.status_code != 200:
+            raise Exception(f"http status: {res.status_code}")
+
+        return AnalyticsReportSegmentsResponse.from_json(res.text)
             
     def auth(self, req: PreparedRequest) -> str:
         headers = {
