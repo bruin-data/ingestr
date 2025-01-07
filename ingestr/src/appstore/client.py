@@ -28,17 +28,16 @@ class AppStoreConnectClient:
 
         return AnalyticsReportRequestsResponse.from_json(res.text)
     
-    def list_analytics_reports(self, req_id: str, report_name: Optional[str] = None):
-        params = {}
-        if report_name is not None:
-            params["filter[name]"] = report_name
+    def list_analytics_reports(self, req_id: str, report_name: str):
+        params = {
+            "filter[name]": report_name
+        }
         res = requests.get(
             f"https://api.appstoreconnect.apple.com/v1/analyticsReportRequests/{req_id}/reports",
             auth=self.auth,
             params=params,
         )
         res.raise_for_status()
-        
         return AnalyticsReportResponse.from_json(res.text)
 
     def list_report_instances(

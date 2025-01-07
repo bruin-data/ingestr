@@ -35,7 +35,8 @@ def app_store(
     return [
         app_downloads_detailed(client, app_ids, start_date, end_date),
         app_store_discovery_and_engagement_detailed(client, app_ids, start_date, end_date),
-        app_sessions_detailed(client, app_ids, start_date, end_date)
+        app_sessions_detailed(client, app_ids, start_date, end_date),
+        app_store_installation_and_deletion_detailed(client, app_ids, start_date, end_date)
     ]
 
 def filter_instances_by_date(
@@ -244,3 +245,58 @@ def app_sessions_detailed(
 ) -> Iterable[TDataItem]:
     for app_id in app_ids:
         yield from get_analytics_report(client, app_id, "App Sessions Detailed", start_date, end_date)
+
+PRIMARY_KEY_APP_STORE_INSTALLATION_AND_DELETION_DETAILED = [
+    "app_apple_identifier",
+    "app_download_date",
+    "app_name",
+    "app_version",
+    "campaign",
+    "counts",
+    "date",
+    "device",
+    "download_type",
+    "event",
+    "page_title",
+    "page_type",
+    "platform_version",
+    "processing_date",
+    "source_info",
+    "source_type",
+    "territory",
+    "unique_devices",
+]
+
+COLUMN_HINTS_APP_STORE_INSTALLATION_AND_DELETION_DETAILED = {
+    "date": {
+        "data_type": "date",
+    },
+    "app_apple_identifier": {
+        "data_type": "bigint",
+    },
+    "counts": {
+        "data_type": "bigint",
+    },
+    "unique_devices": {
+        "data_type": "bigint",
+    },
+    "app_download_date": {
+        "data_type": "date",
+    },
+    "processing_date": {
+        "data_type": "date",
+    }
+}
+@dlt.resource(
+    name="app-store-installation-and-deletion-detailed",
+    primary_key=PRIMARY_KEY_APP_STORE_INSTALLATION_AND_DELETION_DETAILED,
+    columns=COLUMN_HINTS_APP_STORE_INSTALLATION_AND_DELETION_DETAILED
+)
+def app_store_installation_and_deletion_detailed(
+    client: AppStoreConnectClient,
+    app_ids: List[str],
+    start_date: Optional[datetime],
+    end_date: Optional[datetime]
+) -> Iterable[TDataItem]:
+    for app_id in app_ids:
+        yield from get_analytics_report(client, app_id, "App Store Installation and Deletion Detailed", start_date, end_date)
