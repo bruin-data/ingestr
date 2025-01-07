@@ -42,7 +42,7 @@ class AppStoreConnectClient:
         
         return AnalyticsReportResponse.from_json(res.text)
 
-    def list_report_instances(self, report_id: str):
+    def list_report_instances(self, report_id: str) -> AnalyticsReportInstancesResponse:
         res = requests.get(
             f"https://api.appstoreconnect.apple.com/v1/analyticsReports/{report_id}/instances",
             auth=self.auth,
@@ -55,7 +55,7 @@ class AppStoreConnectClient:
 
         return AnalyticsReportInstancesResponse.from_json(res.text)
 
-    def list_report_segments(self, instance_id: str):
+    def list_report_segments(self, instance_id: str) -> AnalyticsReportSegmentsResponse:
         res = requests.get(
             f"https://api.appstoreconnect.apple.com/v1/analyticsReportInstances/{instance_id}/segments",
             auth=self.auth,
