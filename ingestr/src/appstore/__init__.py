@@ -36,7 +36,8 @@ def app_store(
         app_downloads_detailed(client, app_ids, start_date, end_date),
         app_store_discovery_and_engagement_detailed(client, app_ids, start_date, end_date),
         app_sessions_detailed(client, app_ids, start_date, end_date),
-        app_store_installation_and_deletion_detailed(client, app_ids, start_date, end_date)
+        app_store_installation_and_deletion_detailed(client, app_ids, start_date, end_date),
+        app_store_purchases_detailed(client, app_ids, start_date, end_date)
     ]
 
 def filter_instances_by_date(
@@ -287,6 +288,7 @@ COLUMN_HINTS_APP_STORE_INSTALLATION_AND_DELETION_DETAILED = {
         "data_type": "date",
     }
 }
+
 @dlt.resource(
     name="app-store-installation-and-deletion-detailed",
     primary_key=PRIMARY_KEY_APP_STORE_INSTALLATION_AND_DELETION_DETAILED,
@@ -300,3 +302,67 @@ def app_store_installation_and_deletion_detailed(
 ) -> Iterable[TDataItem]:
     for app_id in app_ids:
         yield from get_analytics_report(client, app_id, "App Store Installation and Deletion Detailed", start_date, end_date)
+
+PRIMARY_KEY_APP_STORE_PURCHASES_DETAILED = [
+    "app_apple_identifier",
+    "app_download_date",
+    "app_name",
+    "campaign",
+    "content_apple_identifier",
+    "content_name",
+    "date",
+    "device",
+    "page_title",
+    "page_type",
+    "payment_method",
+    "platform_version",
+    "pre_order",
+    "processing_date",
+    "purchase_type",
+    "source_info",
+    "source_type",
+    "territory",
+]
+COLUMN_HINTS_APP_STORE_PURCHASES_DETAILED = {
+    "date": {
+        "data_type": "date",
+    },
+    "app_apple_identifier": {
+        "data_type": "bigint",
+    },
+    "app_download_date": {
+        "data_type": "date",
+    },
+    "content_apple_identifier": {
+        "data_type": "bigint",
+    },
+    "purchases": {
+        "data_type": "bigint",
+    },
+    "proceeds_in_usd": {
+        "data_type": "float",
+    },
+    "sales_in_usd": {
+        "data_type": "float",
+    },
+    "paying_users": {
+        "data_type": "bigint",
+    },
+    "processing_date": {
+        "data_type": "date",
+    }
+}
+
+@dlt.resource(
+    name="app-store-purchases-detailed",
+    primary_key=PRIMARY_KEY_APP_STORE_PURCHASES_DETAILED,
+    columns=COLUMN_HINTS_APP_STORE_PURCHASES_DETAILED
+)
+def app_store_purchases_detailed(
+    client: AppStoreConnectClient,
+    app_ids: List[str],
+    start_date: Optional[datetime],
+    end_date: Optional[datetime]
+) -> Iterable[TDataItem]:
+    for app_id in app_ids:
+        yield from get_analytics_report(client, app_id, "App Store Purchases Detailed", start_date, end_date)
