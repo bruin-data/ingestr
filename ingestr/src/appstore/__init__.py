@@ -37,7 +37,8 @@ def app_store(
         app_store_discovery_and_engagement_detailed(client, app_ids, start_date, end_date),
         app_sessions_detailed(client, app_ids, start_date, end_date),
         app_store_installation_and_deletion_detailed(client, app_ids, start_date, end_date),
-        app_store_purchases_detailed(client, app_ids, start_date, end_date)
+        app_store_purchases_detailed(client, app_ids, start_date, end_date),
+        app_crashes_expanded(client, app_ids, start_date, end_date),
     ]
 
 def filter_instances_by_date(
@@ -94,7 +95,9 @@ def get_analytics_report(
                     files.append(csv_path)
                 for file in files:
                     with gzip.open(file, "rt") as f:
-                        reader = csv.DictReader(f, delimiter="\t")
+                        # TODO: infer delimiter from the file itself
+                        delimiter = "," if report_name == "App Crashes Expanded" else "\t"
+                        reader = csv.DictReader(f, delimiter=delimiter)
                         for row in reader:
                             yield {"processing_date": instance.attributes.processingDate, **row}
 
@@ -366,3 +369,47 @@ def app_store_purchases_detailed(
 ) -> Iterable[TDataItem]:
     for app_id in app_ids:
         yield from get_analytics_report(client, app_id, "App Store Purchases Detailed", start_date, end_date)
+
+PRIMARY_KEY_APP_CRASHES_EXPANDED = [
+    "processing_date",
+    "territory",
+    "app_version",
+    "build",
+    "device",
+    "platform",
+    "release_type",
+    "app_name",
+    "date",
+]
+
+COLUMN_HINTS_APP_CRASHES_EXPANDED = {
+    "date": {
+        "data_type": "date",
+    },
+    "processing_date": {
+        "data_type": "date",
+    },
+    "app_apple_identifier": {
+        "data_type": "bigint",
+    },
+    "count": {
+        "data_type": "bigint",
+    },
+    "unique_devices": {
+        "data_type": "bigint",
+    }
+}
+
+@dlt.resource(
+    name="app-crashes-expanded",
+    primary_key=PRIMARY_KEY_APP_CRASHES_EXPANDED,
+    columns=COLUMN_HINTS_APP_CRASHES_EXPANDED,
+)
+def app_crashes_expanded(
+    client: AppStoreConnectClient,
+    app_ids: List[str],
+    start_date: Optional[datetime],
+    end_date: Optional[datetime]
+) -> Iterable[TDataItem]:
+    for app_id in app_ids:
+        yield from get_analytics_report(client, app_id, "App Crashes Expanded", start_date, end_date)
