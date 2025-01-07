@@ -5,6 +5,12 @@ from typing import List, Optional
 
 @dataclass_json
 @dataclass
+class Links:
+    self: str
+    next: Optional[str] = None
+
+@dataclass_json
+@dataclass
 class ReportRequestAttributes:
     accessType: str
     stoppedDueToInactivity: bool
@@ -73,21 +79,25 @@ class Meta:
 class AnalyticsReportRequestsResponse:
     data: List[ReportRequest]
     meta: Meta
+    links: Links
 
 @dataclass_json
 @dataclass
 class AnalyticsReportResponse:
     data: List[Report]
     meta: Meta
+    links: Links
 
 @dataclass_json
 @dataclass
 class AnalyticsReportInstancesResponse:
     data: List[ReportInstance]
     meta: Meta
+    links: Links
 
 @dataclass_json
 @dataclass
 class AnalyticsReportSegmentsResponse:
     data: List[ReportSegment]
     meta: Meta
+    links: Links

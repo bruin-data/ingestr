@@ -46,7 +46,7 @@ from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
-from ingestr.src.app_store import app_store
+from ingestr.src.appstore import app_store
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
@@ -81,7 +81,10 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-from ingestr.src.errors import MissingValueError
+from ingestr.src.errors import (
+    MissingValueError,
+    UnsupportedResourceError,
+)
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1441,10 +1444,23 @@ class AppleAppStoreSource:
         app_id = params.get("app_id")
         if app_id is None:
             raise MissingValueError("app_id", "App Store")
+
         
-        return app_store(
+        date_args = {}
+        if kwargs.get("interval_start"):
+            date_args["start_date"] = kwargs.get("interval_start")
+        if kwargs.get("interval_end"):
+            date_args["end_date"] = kwargs.get("interval_end")
+
+        src = app_store(
             key_id[0],
             key_path[0],
             issuer_id[0],
             app_id,
-        ).with_resources(table)
+            **date_args,
+        )
+
+        if table not in src.resources:
+            raise UnsupportedResourceError(table, "AppStore")
+
+        return src.with_resources(table)
