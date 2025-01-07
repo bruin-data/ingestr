@@ -1447,4 +1447,4 @@ class AppleAppStoreSource:
             key_path[0],
             issuer_id[0],
             app_id,
-        )
+        ).with_resources(table)
