@@ -34,7 +34,7 @@ def app_store(
 
     return [
         app_downloads_detailed(client, app_ids, start_date, end_date),
-        app_downloads_standard(client, app_ids, start_date, end_date)
+        app_store_discovery_and_engagement_detailed(client, app_ids, start_date, end_date)
     ]
 
 def filter_instances_by_date(
@@ -96,38 +96,24 @@ def get_analytics_report(
                             yield {"processing_date": instance.attributes.processingDate, **row}
 
 PRIMARY_KEY_APP_DOWNLOADS_DETAILED = [
-    "date",
-    "app_name",
     "app_apple_identifier",
-    "download_type",
+    "app_name",
     "app_version",
-    "device",
-    "platform_version",
-    "source_type",
-    "source_info",
     "campaign",
-    "page_type",
-    "page_title",
-    "pre_order",
-    "territory",
-    "processing_date",
-]
-
-PRIMARY_KEY_APP_DOWNLOADS_STANDARD = [
     "date",
-    "app_name",
-    "app_apple_identifier",
-    "download_type",
-    "app_version",
     "device",
-    "platform_version",
-    "source_type",
+    "download_type",
+    "page_title",
     "page_type",
+    "platform_version",
     "pre_order",
+    "processing_date",
+    "source_info",
+    "source_type",
     "territory",
 ]
 
-COLUMN_HINTS_APP_DOWNLOADS = {
+COLUMN_HINTS_APP_DOWNLOADS_DETAILED = {
     "date": {
         "data_type": "date",
     },
@@ -143,7 +129,7 @@ COLUMN_HINTS_APP_DOWNLOADS = {
 @dlt.resource(
     name="app-downloads-detailed", 
     primary_key=PRIMARY_KEY_APP_DOWNLOADS_DETAILED,
-    columns=COLUMN_HINTS_APP_DOWNLOADS,
+    columns=COLUMN_HINTS_APP_DOWNLOADS_DETAILED,
 )
 def app_downloads_detailed(
     client: AppStoreConnectClient,
@@ -155,16 +141,48 @@ def app_downloads_detailed(
     for app_id in app_ids:
         yield from get_analytics_report(client, app_id, "App Downloads Detailed", start_date, end_date)
 
+PRIMARY_KEY_APP_STORE_DISCOVERY_AND_ENGAGEMENT_DETAILED = [
+    "app_apple_identifier",
+    "app_name",
+    "campaign",
+    "date",
+    "device",
+    "engagement_type",
+    "event",
+    "page_title",
+    "page_type",
+    "platform_version",
+    "processing_date",
+    "source_info",
+    "source_type",
+    "territory",
+]
+
+COLUMN_HINTS_APPS_STORE_DISCOVERY_AND_ENGAGEMENT_DETAILED = {
+    "date": {
+        "data_type": "date",
+    },
+    "app_apple_identifier": {
+        "data_type": "bigint",
+    },
+    "counts": {
+        "data_type": "bigint",
+    },
+    "unique_counts": {
+        "data_type": "bigint",
+    }
+}
+
 @dlt.resource(
-    name="app-downloads-standard",
-    primary_key=PRIMARY_KEY_APP_DOWNLOADS_STANDARD,
-    columns=COLUMN_HINTS_APP_DOWNLOADS,
+    name="app-store-discovery-and-engagement-detailed",
+    primary_key=PRIMARY_KEY_APP_STORE_DISCOVERY_AND_ENGAGEMENT_DETAILED,
+    columns=COLUMN_HINTS_APPS_STORE_DISCOVERY_AND_ENGAGEMENT_DETAILED,
 )
-def app_downloads_standard(
+def app_store_discovery_and_engagement_detailed(
     client: AppStoreConnectClient,
     app_ids: List[str],
     start_date: Optional[datetime],
     end_date: Optional[datetime]
 ) -> Iterable[TDataItem]:
     for app_id in app_ids:
-        yield from get_analytics_report(client, app_id, "App Downloads Standard", start_date, end_date)
+        yield from get_analytics_report(client, app_id, "App Store Discovery and Engagement Detailed", start_date, end_date)
