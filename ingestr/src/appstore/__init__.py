@@ -123,6 +123,9 @@ COLUMN_HINTS_APP_DOWNLOADS_DETAILED = {
     },
     "counts": {
         "data_type": "bigint",
+    },
+    "processing_date": {
+        "data_type": "date",
     }
 }
 
@@ -171,6 +174,9 @@ COLUMN_HINTS_APPS_STORE_DISCOVERY_AND_ENGAGEMENT_DETAILED = {
     },
     "unique_counts": {
         "data_type": "bigint",
+    },
+    "processing_date": {
+        "data_type": "date",
     }
 }
 
@@ -220,6 +226,9 @@ COLUMN_HINTS_APP_SESSIONS_DETAILED = {
     },
     "unique_devices": {
         "data_type": "bigint",
+    },
+    "processing_date": {
+        "data_type": "date",
     }
 }
 @dlt.resource(
