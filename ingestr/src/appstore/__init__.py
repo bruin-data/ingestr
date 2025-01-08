@@ -1,21 +1,19 @@
-import os
-import dlt
-import tempfile
 import csv
 import gzip
+import os
+import tempfile
 from copy import deepcopy
-from typing import Optional
 from datetime import datetime
+from typing import Iterable, List, Optional
 
+import dlt
 import requests
-
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
-from typing import List, Iterable, Generator
+
 from .client import AppStoreConnectClient
 from .models import AnalyticsReportInstancesResponse
 from .resources import RESOURCES
-
 
 
 @dlt.source
@@ -25,16 +23,13 @@ def app_store(
     issuer_id: str,
     app_ids: List[str],
     start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None,
 ) -> Iterable[DltResource]:
-
     key = None
-    with open(key_path) as f: key = f.read()
-    client = AppStoreConnectClient(
-        key.encode(),
-        key_id,
-        issuer_id
-    )
+    with open(key_path) as f:
+        key = f.read()
+
+    client = AppStoreConnectClient(key.encode(), key_id, issuer_id)
 
     for resource in RESOURCES:
         yield dlt.resource(
@@ -44,41 +39,58 @@ def app_store(
             columns=resource.columns,
         )(client, app_ids, resource.report_name, start_date, end_date)
 
+
 def filter_instances_by_date(
-        instances: AnalyticsReportInstancesResponse,
-        start_date: Optional[datetime],
-        end_date: Optional[datetime]
+    instances: AnalyticsReportInstancesResponse,
+    start_date: Optional[datetime],
+    end_date: Optional[datetime],
 ) -> AnalyticsReportInstancesResponse:
     instances = deepcopy(instances)
     if start_date is not None:
-        instances.data = list(filter(lambda x: datetime.fromisoformat(x.attributes.processingDate) >= start_date, instances.data))
+        instances.data = list(
+            filter(
+                lambda x: datetime.fromisoformat(x.attributes.processingDate)
+                >= start_date,
+                instances.data,
+            )
+        )
     if end_date is not None:
-        instances.data = list(filter(lambda x: datetime.fromisoformat(x.attributes.processingDate) <= end_date, instances.data))
+        instances.data = list(
+            filter(
+                lambda x: datetime.fromisoformat(x.attributes.processingDate)
+                <= end_date,
+                instances.data,
+            )
+        )
 
     return instances
 
+
 def get_analytics_reports(
-        client: AppStoreConnectClient,
-        app_ids: List[str],
-        report_name: str,
-        start_date: Optional[datetime],
-        end_date: Optional[datetime],
-        last_processing_date = dlt.sources.incremental("processing_date")
+    client: AppStoreConnectClient,
+    app_ids: List[str],
+    report_name: str,
+    start_date: Optional[datetime],
+    end_date: Optional[datetime],
+    last_processing_date=dlt.sources.incremental("processing_date"),
 ) -> Iterable[TDataItem]:
     if last_processing_date.last_value:
         start_date = datetime.fromisoformat(last_processing_date.last_value)
     for app_id in app_ids:
         yield from get_report(client, app_id, report_name, start_date, end_date)
 
+
 def get_report(
-        client: AppStoreConnectClient,
-        app_id: str,
-        report_name: str,
-        start_date: Optional[datetime],
-        end_date: Optional[datetime]
+    client: AppStoreConnectClient,
+    app_id: str,
+    report_name: str,
+    start_date: Optional[datetime],
+    end_date: Optional[datetime],
 ) -> Iterable[TDataItem]:
     report_requests = client.list_analytics_report_requests(app_id)
-    ongoing_requests = list(filter(lambda x: x.attributes.accessType == "ONGOING" , report_requests.data))
+    ongoing_requests = list(
+        filter(lambda x: x.attributes.accessType == "ONGOING", report_requests.data)
+    )
 
     # todo: validate report is not stopped due to inactivity
     if len(ongoing_requests) == 0:
@@ -104,7 +116,9 @@ def get_report(
                     payload = requests.get(segment.attributes.url, stream=True)
                     payload.raise_for_status()
 
-                    csv_path = os.path.join(temp_dir, f"{segment.attributes.checksum}.csv")
+                    csv_path = os.path.join(
+                        temp_dir, f"{segment.attributes.checksum}.csv"
+                    )
                     with open(csv_path, "wb") as f:
                         for chunk in payload.iter_content(chunk_size=8192):
                             f.write(chunk)
@@ -112,7 +126,12 @@ def get_report(
                 for file in files:
                     with gzip.open(file, "rt") as f:
                         # TODO: infer delimiter from the file itself
-                        delimiter = "," if report_name == "App Crashes Expanded" else "\t"
+                        delimiter = (
+                            "," if report_name == "App Crashes Expanded" else "\t"
+                        )
                         reader = csv.DictReader(f, delimiter=delimiter)
                         for row in reader:
-                            yield {"processing_date": instance.attributes.processingDate, **row}
+                            yield {
+                                "processing_date": instance.attributes.processingDate,
+                                **row,
+                            }

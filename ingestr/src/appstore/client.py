@@ -1,17 +1,17 @@
 import time
-import requests
-from datetime import datetime
+from typing import Optional
 
-from requests.models import PreparedRequest
 import jwt
+import requests
+from requests.models import PreparedRequest
 
-from typing import Sequence, Optional
 from .models import (
+    AnalyticsReportInstancesResponse,
     AnalyticsReportRequestsResponse,
     AnalyticsReportResponse,
-    AnalyticsReportInstancesResponse,
     AnalyticsReportSegmentsResponse,
 )
+
 
 class AppStoreConnectClient:
     def __init__(self, key: bytes, key_id: str, issuer_id: str):
@@ -22,40 +22,38 @@ class AppStoreConnectClient:
     def list_analytics_report_requests(self, app_id) -> AnalyticsReportRequestsResponse:
         res = requests.get(
             f"https://api.appstoreconnect.apple.com/v1/apps/{app_id}/analyticsReportRequests",
-            auth=self.auth
+            auth=self.auth,
         )
         res.raise_for_status()
 
-        return AnalyticsReportRequestsResponse.from_json(res.text)
-    
+        return AnalyticsReportRequestsResponse.from_json(res.text)  # type: ignore
+
     def list_analytics_reports(self, req_id: str, report_name: str):
-        params = {
-            "filter[name]": report_name
-        }
+        params = {"filter[name]": report_name}
         res = requests.get(
             f"https://api.appstoreconnect.apple.com/v1/analyticsReportRequests/{req_id}/reports",
             auth=self.auth,
             params=params,
         )
         res.raise_for_status()
-        return AnalyticsReportResponse.from_json(res.text)
+        return AnalyticsReportResponse.from_json(res.text)  # type: ignore
 
     def list_report_instances(
-            self,
-            report_id: str,
-            granularity: str = "DAILY",
+        self,
+        report_id: str,
+        granularity: str = "DAILY",
     ) -> AnalyticsReportInstancesResponse:
         data = []
         url = f"https://api.appstoreconnect.apple.com/v1/analyticsReports/{report_id}/instances"
-        params = {"filter[granularity]": granularity}
+        params: Optional[dict] = {"filter[granularity]": granularity}
 
         while url:
             res = requests.get(url, auth=self.auth, params=params)
             res.raise_for_status()
-            
-            response_data = AnalyticsReportInstancesResponse.from_json(res.text)
+
+            response_data = AnalyticsReportInstancesResponse.from_json(res.text)  # type: ignore
             data.extend(response_data.data)
-            
+
             url = response_data.links.next
             params = None  # Clear params for subsequent requests
 
@@ -68,27 +66,29 @@ class AppStoreConnectClient:
     def list_report_segments(self, instance_id: str) -> AnalyticsReportSegmentsResponse:
         segments = []
         url = f"https://api.appstoreconnect.apple.com/v1/analyticsReportInstances/{instance_id}/segments"
-    
+
         while url:
             res = requests.get(url, auth=self.auth)
             res.raise_for_status()
-            
-            response_data = AnalyticsReportSegmentsResponse.from_json(res.text)
+
+            response_data = AnalyticsReportSegmentsResponse.from_json(res.text)  # type: ignore
             segments.extend(response_data.data)
-            
+
             url = response_data.links.next
-    
-        return AnalyticsReportSegmentsResponse(data=segments, links=response_data.links, meta=response_data.meta)
-            
-    def auth(self, req: PreparedRequest) -> str:
+
+        return AnalyticsReportSegmentsResponse(
+            data=segments, links=response_data.links, meta=response_data.meta
+        )
+
+    def auth(self, req: PreparedRequest) -> PreparedRequest:
         headers = {
             "alg": "ES256",
             "kid": self.__key_id,
         }
         payload = {
             "iss": self.__issuer_id,
-            "exp": int(time.time()) + 600, 
-            "aud": "appstoreconnect-v1"
+            "exp": int(time.time()) + 600,
+            "aud": "appstoreconnect-v1",
         }
         req.headers["Authorization"] = jwt.encode(
             payload,
@@ -97,4 +97,3 @@ class AppStoreConnectClient:
             headers=headers,
         )
         return req
-

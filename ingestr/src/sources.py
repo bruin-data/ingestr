@@ -51,6 +51,10 @@ from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
 from ingestr.src.dynamodb import dynamodb
+from ingestr.src.errors import (
+    MissingValueError,
+    UnsupportedResourceError,
+)
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
@@ -80,10 +84,6 @@ from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
 from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
-)
-from ingestr.src.errors import (
-    MissingValueError,
-    UnsupportedResourceError,
 )
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
@@ -1420,6 +1420,7 @@ class GitHubSource:
                 f"Resource '{table}' is not supported for GitHub source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
+
 class AppleAppStoreSource:
     def handles_incrementality(self) -> bool:
         return False
@@ -1440,12 +1441,10 @@ class AppleAppStoreSource:
         if issuer_id is None:
             raise MissingValueError("issuer_id", "App Store")
 
-        
         app_id = params.get("app_id")
         if app_id is None:
             raise MissingValueError("app_id", "App Store")
 
-        
         date_args = {}
         if kwargs.get("interval_start"):
             date_args["start_date"] = kwargs.get("interval_start")

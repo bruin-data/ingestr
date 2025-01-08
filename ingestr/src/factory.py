@@ -18,6 +18,7 @@ from ingestr.src.destinations import (
 from ingestr.src.sources import (
     AdjustSource,
     AirtableSource,
+    AppleAppStoreSource,
     AppsflyerSource,
     ArrowMemoryMappedSource,
     AsanaSource,
@@ -41,7 +42,6 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
-    AppleAppStoreSource,
 )
 
 SQL_SOURCE_SCHEMES = [

@@ -1,6 +1,6 @@
-
 from dataclasses import dataclass
 from typing import List
+
 
 @dataclass
 class ResourceConfig:
@@ -8,6 +8,7 @@ class ResourceConfig:
     primary_key: List[str]
     columns: dict
     report_name: str
+
 
 RESOURCES: List[ResourceConfig] = [
     ResourceConfig(
@@ -34,7 +35,7 @@ RESOURCES: List[ResourceConfig] = [
             "Counts": {"data_type": "bigint"},
             "processing_date": {"data_type": "date"},
         },
-        report_name="App Downloads Detailed"
+        report_name="App Downloads Detailed",
     ),
     ResourceConfig(
         name="app-store-discovery-and-engagement-detailed",
@@ -60,7 +61,7 @@ RESOURCES: List[ResourceConfig] = [
             "Unique Counts": {"data_type": "bigint"},
             "processing_date": {"data_type": "date"},
         },
-        report_name="App Store Discovery and Engagement Detailed"
+        report_name="App Store Discovery and Engagement Detailed",
     ),
     ResourceConfig(
         name="app-sessions-detailed",
@@ -87,7 +88,7 @@ RESOURCES: List[ResourceConfig] = [
             "Unique Devices": {"data_type": "bigint"},
             "processing_date": {"data_type": "date"},
         },
-        report_name="App Sessions Detailed"
+        report_name="App Sessions Detailed",
     ),
     ResourceConfig(
         name="app-store-installation-and-deletion-detailed",
@@ -118,7 +119,7 @@ RESOURCES: List[ResourceConfig] = [
             "App Download Date": {"data_type": "date"},
             "processing_date": {"data_type": "date"},
         },
-        report_name="App Store Installation and Deletion Detailed"
+        report_name="App Store Installation and Deletion Detailed",
     ),
     ResourceConfig(
         name="app-store-purchases-detailed",
@@ -152,7 +153,7 @@ RESOURCES: List[ResourceConfig] = [
             "Paying Users": {"data_type": "bigint"},
             "processing_date": {"data_type": "date"},
         },
-        report_name="App Store Purchases Detailed"
+        report_name="App Store Purchases Detailed",
     ),
     ResourceConfig(
         name="app-crashes-expanded",
@@ -173,6 +174,6 @@ RESOURCES: List[ResourceConfig] = [
             "Count": {"data_type": "bigint"},
             "Unique Devices": {"data_type": "bigint"},
         },
-        report_name="App Crashes Expanded"
-    )
+        report_name="App Crashes Expanded",
+    ),
 ]
