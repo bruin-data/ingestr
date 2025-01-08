@@ -113,7 +113,6 @@ PRIMARY_KEY_APP_DOWNLOADS_DETAILED = [
     "page_type",
     "platform_version",
     "pre_order",
-    "processing_date",
     "source_info",
     "source_type",
     "territory",
@@ -161,7 +160,6 @@ PRIMARY_KEY_APP_STORE_DISCOVERY_AND_ENGAGEMENT_DETAILED = [
     "page_title",
     "page_type",
     "platform_version",
-    "processing_date",
     "source_info",
     "source_type",
     "territory",
@@ -200,7 +198,6 @@ def app_store_discovery_and_engagement_detailed(
         yield from get_analytics_report(client, app_id, "App Store Discovery and Engagement Detailed", start_date, end_date)
 
 PRIMARY_KEY_APP_SESSIONS_DETAILED = [
-    "processing_date",
     "date",
     "app_name",
     "app_apple_identifier",
@@ -264,7 +261,6 @@ PRIMARY_KEY_APP_STORE_INSTALLATION_AND_DELETION_DETAILED = [
     "page_title",
     "page_type",
     "platform_version",
-    "processing_date",
     "source_info",
     "source_type",
     "territory",
@@ -320,7 +316,6 @@ PRIMARY_KEY_APP_STORE_PURCHASES_DETAILED = [
     "payment_method",
     "platform_version",
     "pre_order",
-    "processing_date",
     "purchase_type",
     "source_info",
     "source_type",
@@ -371,15 +366,14 @@ def app_store_purchases_detailed(
         yield from get_analytics_report(client, app_id, "App Store Purchases Detailed", start_date, end_date)
 
 PRIMARY_KEY_APP_CRASHES_EXPANDED = [
-    "processing_date",
-    "territory",
+    "app_name",
     "app_version",
     "build",
+    "date",
     "device",
     "platform",
     "release_type",
-    "app_name",
-    "date",
+    "territory",
 ]
 
 COLUMN_HINTS_APP_CRASHES_EXPANDED = {
