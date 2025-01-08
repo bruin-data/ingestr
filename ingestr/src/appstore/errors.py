@@ -2,9 +2,13 @@ class NoReportsFoundError(Exception):
     def __init__(self):
         super().__init__("No Report instances found for the given date range")
 
+
 class NoOngoingReportRequestsFoundError(Exception):
     def __init__(self):
-        super().__init__("No ONGOING report requests found (or they're stopped due to inactivity)")
+        super().__init__(
+            "No ONGOING report requests found (or they're stopped due to inactivity)"
+        )
+
 
 class NoSuchReportError(Exception):
     def __init__(self, report_name):

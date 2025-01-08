@@ -20,7 +20,9 @@ class AppStoreConnectClientInterface(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def list_analytics_reports(self, req_id: str, report_name: str) -> AnalyticsReportResponse:
+    def list_analytics_reports(
+        self, req_id: str, report_name: str
+    ) -> AnalyticsReportResponse:
         pass
 
     @abc.abstractmethod
@@ -51,7 +53,9 @@ class AppStoreConnectClient(AppStoreConnectClientInterface):
 
         return AnalyticsReportRequestsResponse.from_json(res.text)  # type: ignore
 
-    def list_analytics_reports(self, req_id: str, report_name: str) -> AnalyticsReportResponse:
+    def list_analytics_reports(
+        self, req_id: str, report_name: str
+    ) -> AnalyticsReportResponse:
         params = {"filter[name]": report_name}
         res = requests.get(
             f"https://api.appstoreconnect.apple.com/v1/analyticsReportRequests/{req_id}/reports",

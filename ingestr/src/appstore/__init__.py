@@ -11,12 +11,12 @@ import requests
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
 
-from .errors import (
-    NoReportsFoundError, 
-    NoOngoingReportRequestsFoundError,
-    NoSuchReportError
-)
 from .client import AppStoreConnectClientInterface
+from .errors import (
+    NoOngoingReportRequestsFoundError,
+    NoReportsFoundError,
+    NoSuchReportError,
+)
 from .models import AnalyticsReportInstancesResponse
 from .resources import RESOURCES
 
@@ -86,11 +86,15 @@ def get_report(
 ) -> Iterable[TDataItem]:
     report_requests = client.list_analytics_report_requests(app_id)
     ongoing_requests = list(
-        filter(lambda x: x.attributes.accessType == "ONGOING" and not x.attributes.stoppedDueToInactivity , report_requests.data)
+        filter(
+            lambda x: x.attributes.accessType == "ONGOING"
+            and not x.attributes.stoppedDueToInactivity,
+            report_requests.data,
+        )
     )
     # todo: validate report is not stopped due to inactivity
     if len(ongoing_requests) == 0:
-        raise NoOngoingReportRequestsFoundError() 
+        raise NoOngoingReportRequestsFoundError()
 
     reports = client.list_analytics_reports(ongoing_requests[0].id, report_name)
     if len(reports.data) == 0:
