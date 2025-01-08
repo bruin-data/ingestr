@@ -1,3 +1,4 @@
+import abc
 import time
 from typing import Optional
 
@@ -13,7 +14,29 @@ from .models import (
 )
 
 
-class AppStoreConnectClient:
+class AppStoreConnectClientInterface(abc.ABC):
+    @abc.abstractmethod
+    def list_analytics_report_requests(self, app_id) -> AnalyticsReportRequestsResponse:
+        pass
+
+    @abc.abstractmethod
+    def list_analytics_reports(self, req_id: str, report_name: str):
+        pass
+
+    @abc.abstractmethod
+    def list_report_instances(
+        self,
+        report_id: str,
+        granularity: str = "DAILY",
+    ) -> AnalyticsReportInstancesResponse:
+        pass
+
+    @abc.abstractmethod
+    def list_report_segments(self, instance_id: str) -> AnalyticsReportSegmentsResponse:
+        pass
+
+
+class AppStoreConnectClient(AppStoreConnectClientInterface):
     def __init__(self, key: bytes, key_id: str, issuer_id: str):
         self.__key = key
         self.__key_id = key_id

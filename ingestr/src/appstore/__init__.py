@@ -11,26 +11,18 @@ import requests
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
 
-from .client import AppStoreConnectClient
+from .client import AppStoreConnectClientInterface
 from .models import AnalyticsReportInstancesResponse
 from .resources import RESOURCES
 
 
 @dlt.source
 def app_store(
-    key_id: str,
-    key_path: str,
-    issuer_id: str,
+    client: AppStoreConnectClientInterface,
     app_ids: List[str],
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> Iterable[DltResource]:
-    key = None
-    with open(key_path) as f:
-        key = f.read()
-
-    client = AppStoreConnectClient(key.encode(), key_id, issuer_id)
-
     for resource in RESOURCES:
         yield dlt.resource(
             get_analytics_reports,
@@ -67,7 +59,7 @@ def filter_instances_by_date(
 
 
 def get_analytics_reports(
-    client: AppStoreConnectClient,
+    client: AppStoreConnectClientInterface,
     app_ids: List[str],
     report_name: str,
     start_date: Optional[datetime],
@@ -81,7 +73,7 @@ def get_analytics_reports(
 
 
 def get_report(
-    client: AppStoreConnectClient,
+    client: AppStoreConnectClientInterface,
     app_id: str,
     report_name: str,
     start_date: Optional[datetime],

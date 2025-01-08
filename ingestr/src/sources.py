@@ -47,6 +47,7 @@ from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.appstore import app_store
+from ingestr.src.appstore.client import AppStoreConnectClient
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
@@ -1423,9 +1424,20 @@ class GitHubSource:
 
 class AppleAppStoreSource:
     def handles_incrementality(self) -> bool:
-        return False
+        return True
+
+    def init_client(self, key_id: str, key_path: str, issuer_id: str):
+        key = None
+        with open(key_path) as f:
+            key = f.read()
+
+        return AppStoreConnectClient(key.encode(), key_id, issuer_id)
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "App Store takes care of incrementality on its own, you should not provide incremental_key"
+            )
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
 
@@ -1441,8 +1453,8 @@ class AppleAppStoreSource:
         if issuer_id is None:
             raise MissingValueError("issuer_id", "App Store")
 
-        app_id = params.get("app_id")
-        if app_id is None:
+        app_ids = params.get("app_id")
+        if app_ids is None:
             raise MissingValueError("app_id", "App Store")
 
         date_args = {}
@@ -1451,11 +1463,10 @@ class AppleAppStoreSource:
         if kwargs.get("interval_end"):
             date_args["end_date"] = kwargs.get("interval_end")
 
+        client = self.init_client(key_id[0], key_path[0], issuer_id[0])
         src = app_store(
-            key_id[0],
-            key_path[0],
-            issuer_id[0],
-            app_id,
+            client,
+            app_ids,
             **date_args,
         )
 
