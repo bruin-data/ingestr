@@ -11,9 +11,12 @@ import requests
 
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
-from typing import List, Iterable, Sequence
+from typing import List, Iterable, Generator
 from .client import AppStoreConnectClient
 from .models import AnalyticsReportInstancesResponse
+from .resources import RESOURCES
+
+
 
 @dlt.source
 def app_store(
@@ -23,7 +26,8 @@ def app_store(
     app_ids: List[str],
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None
-) -> Sequence[DltResource]:
+) -> Iterable[DltResource]:
+    import pdb; pdb.set_trace()
     key = None
     with open(key_path) as f: key = f.read()
     client = AppStoreConnectClient(
@@ -32,14 +36,13 @@ def app_store(
         issuer_id
     )
 
-    return [
-        app_downloads_detailed(client, app_ids, start_date, end_date),
-        app_store_discovery_and_engagement_detailed(client, app_ids, start_date, end_date),
-        app_sessions_detailed(client, app_ids, start_date, end_date),
-        app_store_installation_and_deletion_detailed(client, app_ids, start_date, end_date),
-        app_store_purchases_detailed(client, app_ids, start_date, end_date),
-        app_crashes_expanded(client, app_ids, start_date, end_date),
-    ]
+    for resource in RESOURCES:
+        yield dlt.resource(
+            get_analytics_reports,
+            name=resource.name,
+            primary_key=resource.primary_key,
+            columns=resource.columns,
+        )(client, app_ids, resource.report_name, start_date, end_date)
 
 def filter_instances_by_date(
         instances: AnalyticsReportInstancesResponse,
@@ -54,7 +57,17 @@ def filter_instances_by_date(
 
     return instances
 
-def get_analytics_report(
+def get_analytics_reports(
+        client: AppStoreConnectClient,
+        app_ids: List[str],
+        report_name: str,
+        start_date: Optional[datetime],
+        end_date: Optional[datetime]
+) -> Iterable[TDataItem]:
+    for app_id in app_ids:
+        yield from get_report(client, app_id, report_name, start_date, end_date)
+
+def get_report(
         client: AppStoreConnectClient,
         app_id: str,
         report_name: str,
@@ -100,310 +113,3 @@ def get_analytics_report(
                         reader = csv.DictReader(f, delimiter=delimiter)
                         for row in reader:
                             yield {"processing_date": instance.attributes.processingDate, **row}
-
-PRIMARY_KEY_APP_DOWNLOADS_DETAILED = [
-    "app_apple_identifier",
-    "app_name",
-    "app_version",
-    "campaign",
-    "date",
-    "device",
-    "download_type",
-    "page_title",
-    "page_type",
-    "platform_version",
-    "pre_order",
-    "source_info",
-    "source_type",
-    "territory",
-]
-
-COLUMN_HINTS_APP_DOWNLOADS_DETAILED = {
-    "date": {
-        "data_type": "date",
-    },
-    "app_apple_identifier": {
-        "data_type": "bigint",
-    },
-    "counts": {
-        "data_type": "bigint",
-    },
-    "processing_date": {
-        "data_type": "date",
-    }
-}
-
-
-@dlt.resource(
-    name="app-downloads-detailed", 
-    primary_key=PRIMARY_KEY_APP_DOWNLOADS_DETAILED,
-    columns=COLUMN_HINTS_APP_DOWNLOADS_DETAILED,
-)
-def app_downloads_detailed(
-    client: AppStoreConnectClient,
-    app_ids: List[str],
-    start_date: Optional[datetime],
-    end_date: Optional[datetime]
-) -> Iterable[TDataItem]:
-
-    for app_id in app_ids:
-        yield from get_analytics_report(client, app_id, "App Downloads Detailed", start_date, end_date)
-
-PRIMARY_KEY_APP_STORE_DISCOVERY_AND_ENGAGEMENT_DETAILED = [
-    "app_apple_identifier",
-    "app_name",
-    "campaign",
-    "date",
-    "device",
-    "engagement_type",
-    "event",
-    "page_title",
-    "page_type",
-    "platform_version",
-    "source_info",
-    "source_type",
-    "territory",
-]
-
-COLUMN_HINTS_APPS_STORE_DISCOVERY_AND_ENGAGEMENT_DETAILED = {
-    "date": {
-        "data_type": "date",
-    },
-    "app_apple_identifier": {
-        "data_type": "bigint",
-    },
-    "counts": {
-        "data_type": "bigint",
-    },
-    "unique_counts": {
-        "data_type": "bigint",
-    },
-    "processing_date": {
-        "data_type": "date",
-    }
-}
-
-@dlt.resource(
-    name="app-store-discovery-and-engagement-detailed",
-    primary_key=PRIMARY_KEY_APP_STORE_DISCOVERY_AND_ENGAGEMENT_DETAILED,
-    columns=COLUMN_HINTS_APPS_STORE_DISCOVERY_AND_ENGAGEMENT_DETAILED,
-)
-def app_store_discovery_and_engagement_detailed(
-    client: AppStoreConnectClient,
-    app_ids: List[str],
-    start_date: Optional[datetime],
-    end_date: Optional[datetime]
-) -> Iterable[TDataItem]:
-    for app_id in app_ids:
-        yield from get_analytics_report(client, app_id, "App Store Discovery and Engagement Detailed", start_date, end_date)
-
-PRIMARY_KEY_APP_SESSIONS_DETAILED = [
-    "date",
-    "app_name",
-    "app_apple_identifier",
-    "app_version",
-    "device",
-    "platform_version",
-    "source_type",
-    "source_info",
-    "campaign",
-    "page_type",
-    "page_title",
-    "app_download_date",
-    "territory",
-]
-
-COLUMN_HINTS_APP_SESSIONS_DETAILED = {
-    "date": {
-        "data_type": "date",
-    },
-    "app_apple_identifier": {
-        "data_type": "bigint",
-    },
-    "sessions": {
-        "data_type": "bigint",
-    },
-    "total_session_duration": {
-        "data_type": "bigint",
-    },
-    "unique_devices": {
-        "data_type": "bigint",
-    },
-    "processing_date": {
-        "data_type": "date",
-    }
-}
-@dlt.resource(
-    name="app-sessions-detailed",
-    primary_key=PRIMARY_KEY_APP_SESSIONS_DETAILED,
-    columns=COLUMN_HINTS_APP_SESSIONS_DETAILED
-)
-def app_sessions_detailed(
-    client: AppStoreConnectClient,
-    app_ids: List[str],
-    start_date: Optional[datetime],
-    end_date: Optional[datetime]
-) -> Iterable[TDataItem]:
-    for app_id in app_ids:
-        yield from get_analytics_report(client, app_id, "App Sessions Detailed", start_date, end_date)
-
-PRIMARY_KEY_APP_STORE_INSTALLATION_AND_DELETION_DETAILED = [
-    "app_apple_identifier",
-    "app_download_date",
-    "app_name",
-    "app_version",
-    "campaign",
-    "counts",
-    "date",
-    "device",
-    "download_type",
-    "event",
-    "page_title",
-    "page_type",
-    "platform_version",
-    "source_info",
-    "source_type",
-    "territory",
-    "unique_devices",
-]
-
-COLUMN_HINTS_APP_STORE_INSTALLATION_AND_DELETION_DETAILED = {
-    "date": {
-        "data_type": "date",
-    },
-    "app_apple_identifier": {
-        "data_type": "bigint",
-    },
-    "counts": {
-        "data_type": "bigint",
-    },
-    "unique_devices": {
-        "data_type": "bigint",
-    },
-    "app_download_date": {
-        "data_type": "date",
-    },
-    "processing_date": {
-        "data_type": "date",
-    }
-}
-
-@dlt.resource(
-    name="app-store-installation-and-deletion-detailed",
-    primary_key=PRIMARY_KEY_APP_STORE_INSTALLATION_AND_DELETION_DETAILED,
-    columns=COLUMN_HINTS_APP_STORE_INSTALLATION_AND_DELETION_DETAILED
-)
-def app_store_installation_and_deletion_detailed(
-    client: AppStoreConnectClient,
-    app_ids: List[str],
-    start_date: Optional[datetime],
-    end_date: Optional[datetime]
-) -> Iterable[TDataItem]:
-    for app_id in app_ids:
-        yield from get_analytics_report(client, app_id, "App Store Installation and Deletion Detailed", start_date, end_date)
-
-PRIMARY_KEY_APP_STORE_PURCHASES_DETAILED = [
-    "app_apple_identifier",
-    "app_download_date",
-    "app_name",
-    "campaign",
-    "content_apple_identifier",
-    "content_name",
-    "date",
-    "device",
-    "page_title",
-    "page_type",
-    "payment_method",
-    "platform_version",
-    "pre_order",
-    "purchase_type",
-    "source_info",
-    "source_type",
-    "territory",
-]
-COLUMN_HINTS_APP_STORE_PURCHASES_DETAILED = {
-    "date": {
-        "data_type": "date",
-    },
-    "app_apple_identifier": {
-        "data_type": "bigint",
-    },
-    "app_download_date": {
-        "data_type": "date",
-    },
-    "content_apple_identifier": {
-        "data_type": "bigint",
-    },
-    "purchases": {
-        "data_type": "bigint",
-    },
-    "proceeds_in_usd": {
-        "data_type": "float",
-    },
-    "sales_in_usd": {
-        "data_type": "float",
-    },
-    "paying_users": {
-        "data_type": "bigint",
-    },
-    "processing_date": {
-        "data_type": "date",
-    }
-}
-
-@dlt.resource(
-    name="app-store-purchases-detailed",
-    primary_key=PRIMARY_KEY_APP_STORE_PURCHASES_DETAILED,
-    columns=COLUMN_HINTS_APP_STORE_PURCHASES_DETAILED
-)
-def app_store_purchases_detailed(
-    client: AppStoreConnectClient,
-    app_ids: List[str],
-    start_date: Optional[datetime],
-    end_date: Optional[datetime]
-) -> Iterable[TDataItem]:
-    for app_id in app_ids:
-        yield from get_analytics_report(client, app_id, "App Store Purchases Detailed", start_date, end_date)
-
-PRIMARY_KEY_APP_CRASHES_EXPANDED = [
-    "app_name",
-    "app_version",
-    "build",
-    "date",
-    "device",
-    "platform",
-    "release_type",
-    "territory",
-]
-
-COLUMN_HINTS_APP_CRASHES_EXPANDED = {
-    "date": {
-        "data_type": "date",
-    },
-    "processing_date": {
-        "data_type": "date",
-    },
-    "app_apple_identifier": {
-        "data_type": "bigint",
-    },
-    "count": {
-        "data_type": "bigint",
-    },
-    "unique_devices": {
-        "data_type": "bigint",
-    }
-}
-
-@dlt.resource(
-    name="app-crashes-expanded",
-    primary_key=PRIMARY_KEY_APP_CRASHES_EXPANDED,
-    columns=COLUMN_HINTS_APP_CRASHES_EXPANDED,
-)
-def app_crashes_expanded(
-    client: AppStoreConnectClient,
-    app_ids: List[str],
-    start_date: Optional[datetime],
-    end_date: Optional[datetime]
-) -> Iterable[TDataItem]:
-    for app_id in app_ids:
-        yield from get_analytics_report(client, app_id, "App Crashes Expanded", start_date, end_date)
