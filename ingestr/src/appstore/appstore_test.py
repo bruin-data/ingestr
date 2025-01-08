@@ -276,6 +276,9 @@ def test_successful_ingestion(app_download_testdata):
 
         mock_get.return_value = res
 
-        dlt.pipeline(destination=dest).run(src)
+        dlt.pipeline(destination=dest, dataset_name="public").run(src)
 
     conn.sql("select count(*) from public.app_downloads_detailed").fetchone()[0] == 3
+
+def test_incremental_ingestion():
+    pass
