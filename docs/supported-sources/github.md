@@ -14,9 +14,9 @@ github://?access_token=<access_token>&owner=<owner>&repo=<repo>
 
 URI parameters:
 
-- `access_token`: Access Token used for authentication with the GitHub API
-- `owner`: Refers to the owner of the repository
-- `repo`: Refers to the name of the repository
+- `access_token` (optional): Access Token used for authentication with the GitHub API
+- `owner` (required): Refers to the owner of the repository
+- `repo` (required): Refers to the name of the repository
 
 
 ## Setting up a GitHub Integration

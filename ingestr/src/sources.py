@@ -1398,9 +1398,7 @@ class GitHubSource:
                 "repo variable is required to retrieve data for a specific repository from GitHub."
             )
 
-        access_token = source_fields.get("access_token", [None])[0]
-        if not access_token and table not in ["repo_events"]:
-            raise ValueError("access_token is required to connect with GitHub")
+        access_token = source_fields.get("access_token", [""])[0]
 
         if table in ["issues", "pull_requests"]:
             return github_reactions(

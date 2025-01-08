@@ -14,7 +14,7 @@ from .helpers import get_reactions_data, get_rest_pages, get_stargazers
 def github_reactions(
     owner: str,
     name: str,
-    access_token: str = dlt.secrets.value,
+    access_token: str,
     items_per_page: int = 100,
     max_items: Optional[int] = None,
 ) -> Sequence[DltResource]:
@@ -114,7 +114,7 @@ def github_repo_events(
 def github_stargazers(
     owner: str,
     name: str,
-    access_token: str = dlt.secrets.value,
+    access_token: str,
     items_per_page: int = 100,
     max_items: Optional[int] = None,
 ) -> Sequence[DltResource]:
