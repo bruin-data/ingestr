@@ -27,7 +27,7 @@ def app_store(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None
 ) -> Iterable[DltResource]:
-    import pdb; pdb.set_trace()
+
     key = None
     with open(key_path) as f: key = f.read()
     client = AppStoreConnectClient(
@@ -62,8 +62,11 @@ def get_analytics_reports(
         app_ids: List[str],
         report_name: str,
         start_date: Optional[datetime],
-        end_date: Optional[datetime]
+        end_date: Optional[datetime],
+        last_processing_date = dlt.sources.incremental("processing_date")
 ) -> Iterable[TDataItem]:
+    if last_processing_date.last_value:
+        start_date = datetime.fromisoformat(last_processing_date.last_value)
     for app_id in app_ids:
         yield from get_report(client, app_id, report_name, start_date, end_date)
 
