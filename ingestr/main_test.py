@@ -2101,3 +2101,66 @@ def test_github_to_duckdb(dest):
     dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
     res = dest_engine.execute(f"select count(*) from {dest_table}").fetchall()
     assert len(res) > 0
+
+
+def google_analytics_tests():
+    def test_google_analytics_full_load(
+        service_account_path: str, property_id: str, dest_uri: str
+    ):
+        ga_uri = f"googleanalytics://?credentials_path={service_account_path}&property_id={property_id}"
+        ga_dest_table = "dest.ga_events"
+        res = invoke_ingest_command(
+            ga_uri, "custom:date:sessions,activeUsers,newUsers", dest_uri, ga_dest_table
+        )
+        assert res.exit_code == 0
+
+        dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+        res = dest_engine.execute(
+            f"select date, count(*) from {ga_dest_table} group by 1"
+        ).fetchall()
+        # we load 30 days + 1 day for the current day by default
+        assert len(res) == 31
+
+    def test_google_analytics_incremental_load(
+        service_account_path: str, property_id: str, dest_uri: str
+    ):
+        ga_uri = f"googleanalytics://?credentials_path={service_account_path}&property_id={property_id}"
+        ga_dest_table = "dest.ga_events"
+        res = invoke_ingest_command(
+            ga_uri,
+            "custom:date:sessions,activeUsers,newUsers",
+            dest_uri,
+            ga_dest_table,
+            interval_start="2024-12-01",
+            interval_end="2024-12-31",
+        )
+        assert res.exit_code == 0
+
+        dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+        res = dest_engine.execute(
+            f"select date, count(*) from {ga_dest_table} group by 1 order by 1"
+        ).fetchall()
+        # we load 30 days + 1 day for the current day by default
+        assert len(res) == 31
+        assert res[0][0].strftime("%Y-%m-%d") == "2024-12-01"
+        assert res[0][1] == 1
+
+    # return [test_google_analytics_full_load, test_google_analytics_incremental_load]
+    return [test_google_analytics_incremental_load]
+
+
+@pytest.mark.skipif(
+    os.getenv("GA_TEST_SERVICE_ACCOUNT_PATH") is None
+    or os.getenv("GA_TEST_PROPERTY_ID") is None,
+    reason="Google Analytics credentials not found in environment",
+)
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize("testcase", google_analytics_tests())
+def test_google_analytics(testcase, dest):
+    testcase(
+        os.getenv("GA_TEST_SERVICE_ACCOUNT_PATH"),
+        os.getenv("GA_TEST_PROPERTY_ID"),
+        dest.start(),
+    )

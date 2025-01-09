@@ -1367,10 +1367,18 @@ class GoogleAnalyticsSource:
             {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
         ]
 
+        start_date = pendulum.now().subtract(days=30).start_of("day")
+        if kwargs.get("interval_start") is not None:
+            start_date = pendulum.instance(kwargs.get("interval_start"))  # type: ignore
+
+        end_date = pendulum.now()
+        if kwargs.get("interval_end") is not None:
+            end_date = pendulum.instance(kwargs.get("interval_end"))  # type: ignore
+
         return google_analytics(
             property_id=property_id[0],
-            start_date=pendulum.instance(kwargs.get("interval_start")),
-            end_date=pendulum.instance(kwargs.get("interval_end")),
+            start_date=start_date,
+            end_date=end_date,
             datetime_dimension=datetime,
             queries=queries,
             credentials=credentials,

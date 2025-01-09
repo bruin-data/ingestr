@@ -79,7 +79,9 @@ def get_report(
         Generator of all rows of data in the report.
     """
 
-    print("fetching for daterange", start_date.to_date_string(), end_date.to_date_string())
+    print(
+        "fetching for daterange", start_date.to_date_string(), end_date.to_date_string()
+    )
 
     offset = 0
     while True:
@@ -89,8 +91,12 @@ def get_report(
             metrics=metric_list,
             limit=per_page,
             offset=offset,
-            # date_ranges=[DateRange(start_date=start_date.to_date_string(), end_date=end_date.to_date_string())],
-            date_ranges=[DateRange(start_date="2025-01-04", end_date="2025-01-04")],
+            date_ranges=[
+                DateRange(
+                    start_date=start_date.to_date_string(),
+                    end_date=end_date.to_date_string(),
+                )
+            ],
         )
         # process request
         response = client.run_report(request)

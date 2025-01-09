@@ -38,7 +38,9 @@ def readers(
     """
     filesystem_resource = filesystem(bucket_url, credentials, file_glob=file_glob)
     filesystem_resource.apply_hints(
-        incremental=dlt.sources.incremental("modification_date")
+        incremental=dlt.sources.incremental("modification_date"),
+        range_end="closed",
+        range_start="closed",
     )
     return (
         filesystem_resource | dlt.transformer(name="read_csv")(_read_csv),
