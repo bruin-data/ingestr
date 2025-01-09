@@ -9,11 +9,11 @@ import string
 import tempfile
 import time
 import traceback
-from unittest.mock import MagicMock, patch
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional
+from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
 
 import duckdb
@@ -56,6 +56,7 @@ from ingestr.src.appstore.models import (
     ReportSegmentAttributes,
 )
 
+
 def has_exception(exception, exc_type):
     if isinstance(exception, pytest.ExceptionInfo):
         exception = exception.value
@@ -65,6 +66,7 @@ def has_exception(exception, exc_type):
             return True
         exception = exception.__cause__
     return False
+
 
 def get_abs_path(relative_path):
     return os.path.abspath(os.path.join(os.path.dirname(__file__), relative_path))
@@ -2136,20 +2138,34 @@ def test_github_to_duckdb(dest):
     assert len(res) > 0
 
 def appstore_test_cases() -> Iterable[Callable]:
-
     app_download_testdata = (
-        "Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tApp Version\tDevice\tPlatform Version\tSource Type\tSource Info\tCampaign\tPage Type\tPage Title\tPre-Order\tTerritory\n" +
-        "2025-01-01\t1\t590\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp Store search\t""\t""\tNo page\tNo page\t""\tFR\n" +
-        "2025-01-01\t1\t16\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp referrer\tcom.burbn.instagram\t""\tStore sheet\tDefault custom product page\t""\tSG\n" +
-        "2025-01-01\t1\t11\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.3\tApp Store search\t""\t""\tNo page\tNo page\t""\tMX\n"
+        "Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tApp Version\tDevice\tPlatform Version\tSource Type\tSource Info\tCampaign\tPage Type\tPage Title\tPre-Order\tTerritory\n"
+        + "2025-01-01\t1\t590\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp Store search\t"
+        "\t"
+        "\tNo page\tNo page\t"
+        "\tFR\n"
+        + "2025-01-01\t1\t16\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp referrer\tcom.burbn.instagram\t"
+        "\tStore sheet\tDefault custom product page\t"
+        "\tSG\n"
+        + "2025-01-01\t1\t11\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.3\tApp Store search\t"
+        "\t"
+        "\tNo page\tNo page\t"
+        "\tMX\n"
     )
 
-
     app_download_testdata_extended = (
-        "Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tApp Version\tDevice\tPlatform Version\tSource Type\tSource Info\tCampaign\tPage Type\tPage Title\tPre-Order\tTerritory\n" +
-        "2025-01-02\t1\t590\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp Store search\t""\t""\tNo page\tNo page\t""\tFR\n" +
-        "2025-01-02\t1\t16\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp referrer\tcom.burbn.instagram\t""\tStore sheet\tDefault custom product page\t""\tSG\n" +
-        "2025-01-02\t1\t11\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.3\tApp Store search\t""\t""\tNo page\tNo page\t""\tMX\n"
+        "Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tApp Version\tDevice\tPlatform Version\tSource Type\tSource Info\tCampaign\tPage Type\tPage Title\tPre-Order\tTerritory\n"
+        + "2025-01-02\t1\t590\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp Store search\t"
+        "\t"
+        "\tNo page\tNo page\t"
+        "\tFR\n"
+        + "2025-01-02\t1\t16\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp referrer\tcom.burbn.instagram\t"
+        "\tStore sheet\tDefault custom product page\t"
+        "\tSG\n"
+        + "2025-01-02\t1\t11\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.3\tApp Store search\t"
+        "\t"
+        "\tNo page\tNo page\t"
+        "\tMX\n"
     )
 
     api_key = base64.b64encode(b"MOCK_KEY").decode()
@@ -2230,7 +2246,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 interval_end="2024-01-02",
             )
             assert has_exception(result.exception, NoReportsFoundError)
-    
+
     def test_no_ongoing_reports_found(dest_uri):
         """
         when there are no ongoing reports, or ongoing reports that have
@@ -2272,7 +2288,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 interval_end="2024-01-02",
             )
             assert has_exception(result.exception, NoOngoingReportRequestsFoundError)
-        
+
     def test_no_such_report(dest_uri):
         """
         when there is no report with the given name, NoSuchReportError should be raised.
@@ -2390,7 +2406,9 @@ def appstore_test_cases() -> Iterable[Callable]:
             with patch("requests.get") as mock_get:
                 mock_get.return_value = create_mock_response(app_download_testdata)
                 schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
-                dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                dest_table = (
+                    f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                )
                 result = invoke_ingest_command(
                     f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                     "app-downloads-detailed",
@@ -2403,11 +2421,9 @@ def appstore_test_cases() -> Iterable[Callable]:
         assert result.exit_code == 0
 
         dest_engine = sqlalchemy.create_engine(dest_uri)
-        count = dest_engine.execute(
-            f"select count(*) from {dest_table}"
-        ).fetchone()[0]
+        count = dest_engine.execute(f"select count(*) from {dest_table}").fetchone()[0]
         assert count == 3
-        
+
     def test_incremental_ingestion(dest_uri):
         """
         when the pipeline is run till a specific end date, the next ingestion
@@ -2492,7 +2508,9 @@ def appstore_test_cases() -> Iterable[Callable]:
             with patch("requests.get") as mock_get:
                 mock_get.return_value = create_mock_response(app_download_testdata)
                 schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
-                dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                dest_table = (
+                    f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                )
                 result = invoke_ingest_command(
                     f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                     "app-downloads-detailed",
@@ -2504,9 +2522,7 @@ def appstore_test_cases() -> Iterable[Callable]:
         assert result.exit_code == 0
 
         dest_engine = sqlalchemy.create_engine(dest_uri)
-        count = dest_engine.execute(
-            f"select count(*) from {dest_table}"
-        ).fetchone()[0]
+        count = dest_engine.execute(f"select count(*) from {dest_table}").fetchone()[0]
         dest_engine.dispose()
         assert count == 3
 
@@ -2516,10 +2532,12 @@ def appstore_test_cases() -> Iterable[Callable]:
             with patch("requests.get") as mock_get:
                 mock_get.side_effect = [
                     create_mock_response(app_download_testdata),
-                    create_mock_response(app_download_testdata_extended)
+                    create_mock_response(app_download_testdata_extended),
                 ]
                 schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
-                dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                dest_table = (
+                    f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                )
                 result = invoke_ingest_command(
                     f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                     "app-downloads-detailed",
@@ -2530,13 +2548,13 @@ def appstore_test_cases() -> Iterable[Callable]:
         assert result.exit_code == 0
 
         dest_engine = sqlalchemy.create_engine(dest_uri)
-        count = dest_engine.execute(
-            f"select count(*) from {dest_table}"
-        ).fetchone()[0]
+        count = dest_engine.execute(f"select count(*) from {dest_table}").fetchone()[0]
         assert count == 6
         assert (
             len(
-                dest_engine.execute(f"select processing_date from {dest_table} group by 1").fetchall()
+                dest_engine.execute(
+                    f"select processing_date from {dest_table} group by 1"
+                ).fetchall()
             )
             == 2
         )
@@ -2549,10 +2567,11 @@ def appstore_test_cases() -> Iterable[Callable]:
         test_incremental_ingestion,
     ]
 
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 @pytest.mark.parametrize("test_case", appstore_test_cases())
 def test_appstore(dest, test_case):
-        test_case(dest.start())
-        dest.stop()
+    test_case(dest.start())
+    dest.stop()

@@ -1436,14 +1436,19 @@ class AppleAppStoreSource:
     def handles_incrementality(self) -> bool:
         return True
 
-    def init_client(self, key_id: str, issuer_id: str, key_path: Optional[List[str]], key_base64: Optional[List[str]]):
-
+    def init_client(
+        self,
+        key_id: str,
+        issuer_id: str,
+        key_path: Optional[List[str]],
+        key_base64: Optional[List[str]],
+    ):
         key = None
         if key_path is not None:
-            with open(key_path) as f:
+            with open(key_path[0]) as f:
                 key = f.read()
         else:
-            key = base64.b64decode(key_base64[0]).decode()
+            key = base64.b64decode(key_base64[0]).decode()  # type: ignore
 
         return AppStoreConnectClient(key.encode(), key_id, issuer_id)
 

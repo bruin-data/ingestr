@@ -92,7 +92,7 @@ def get_report(
             report_requests.data,
         )
     )
-    # todo: validate report is not stopped due to inactivity
+
     if len(ongoing_requests) == 0:
         raise NoOngoingReportRequestsFoundError()
 
