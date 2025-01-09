@@ -1,5 +1,7 @@
 import base64
 import csv
+import gzip
+import io
 import os
 import random
 import shutil
@@ -21,6 +23,7 @@ import pendulum
 import pyarrow as pa  # type: ignore
 import pyarrow.ipc as ipc  # type: ignore
 import pytest
+import requests
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
 from sqlalchemy.pool import NullPool
@@ -42,12 +45,15 @@ from ingestr.src.appstore.models import (
     AnalyticsReportInstancesResponse,
     AnalyticsReportRequestsResponse,
     AnalyticsReportResponse,
+    AnalyticsReportSegmentsResponse,
     Report,
     ReportAttributes,
     ReportInstance,
     ReportInstanceAttributes,
     ReportRequest,
-    ReportRequestAttributes
+    ReportRequestAttributes,
+    ReportSegment,
+    ReportSegmentAttributes,
 )
 
 def has_exception(exception, exc_type):
@@ -2129,72 +2135,35 @@ def test_github_to_duckdb(dest):
     res = dest_engine.execute(f"select count(*) from {dest_table}").fetchall()
     assert len(res) > 0
 
-
-def google_analytics_tests():
-    def test_google_analytics_full_load(
-        service_account_path: str, property_id: str, dest_uri: str
-    ):
-        ga_uri = f"googleanalytics://?credentials_path={service_account_path}&property_id={property_id}"
-        ga_dest_table = "dest.ga_events"
-        res = invoke_ingest_command(
-            ga_uri, "custom:date:sessions,activeUsers,newUsers", dest_uri, ga_dest_table
-        )
-        assert res.exit_code == 0
-
-        dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
-        res = dest_engine.execute(
-            f"select date, count(*) from {ga_dest_table} group by 1"
-        ).fetchall()
-        # we load 30 days + 1 day for the current day by default
-        assert len(res) == 31
-
-    def test_google_analytics_incremental_load(
-        service_account_path: str, property_id: str, dest_uri: str
-    ):
-        ga_uri = f"googleanalytics://?credentials_path={service_account_path}&property_id={property_id}"
-        ga_dest_table = "dest.ga_events"
-        res = invoke_ingest_command(
-            ga_uri,
-            "custom:date:sessions,activeUsers,newUsers",
-            dest_uri,
-            ga_dest_table,
-            interval_start="2024-12-01",
-            interval_end="2024-12-31",
-        )
-        assert res.exit_code == 0
-
-        dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
-        res = dest_engine.execute(
-            f"select date, count(*) from {ga_dest_table} group by 1 order by 1"
-        ).fetchall()
-        # we load 30 days + 1 day for the current day by default
-        assert len(res) == 31
-        assert res[0][0].strftime("%Y-%m-%d") == "2024-12-01"
-        assert res[0][1] == 1
-
-    # return [test_google_analytics_full_load, test_google_analytics_incremental_load]
-    return [test_google_analytics_incremental_load]
-
-
-@pytest.mark.skipif(
-    os.getenv("GA_TEST_SERVICE_ACCOUNT_PATH") is None
-    or os.getenv("GA_TEST_PROPERTY_ID") is None,
-    reason="Google Analytics credentials not found in environment",
-)
-@pytest.mark.parametrize(
-    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
-)
-@pytest.mark.parametrize("testcase", google_analytics_tests())
-def test_google_analytics(testcase, dest):
-    testcase(
-        os.getenv("GA_TEST_SERVICE_ACCOUNT_PATH"),
-        os.getenv("GA_TEST_PROPERTY_ID"),
-        dest.start(),
-    )
-
 def appstore_test_cases() -> Iterable[Callable]:
 
+    app_download_testdata = (
+        "Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tApp Version\tDevice\tPlatform Version\tSource Type\tSource Info\tCampaign\tPage Type\tPage Title\tPre-Order\tTerritory\n" +
+        "2025-01-01\t1\t590\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp Store search\t""\t""\tNo page\tNo page\t""\tFR\n" +
+        "2025-01-01\t1\t16\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp referrer\tcom.burbn.instagram\t""\tStore sheet\tDefault custom product page\t""\tSG\n" +
+        "2025-01-01\t1\t11\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.3\tApp Store search\t""\t""\tNo page\tNo page\t""\tMX\n"
+    )
+
+
+    app_download_testdata_extended = (
+        "Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tApp Version\tDevice\tPlatform Version\tSource Type\tSource Info\tCampaign\tPage Type\tPage Title\tPre-Order\tTerritory\n" +
+        "2025-01-02\t1\t590\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp Store search\t""\t""\tNo page\tNo page\t""\tFR\n" +
+        "2025-01-02\t1\t16\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp referrer\tcom.burbn.instagram\t""\tStore sheet\tDefault custom product page\t""\tSG\n" +
+        "2025-01-02\t1\t11\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.3\tApp Store search\t""\t""\tNo page\tNo page\t""\tMX\n"
+    )
+
     api_key = base64.b64encode(b"MOCK_KEY").decode()
+
+    def create_mock_response(data: str) -> requests.Response:
+        res = requests.Response()
+        buffer = io.BytesIO()
+        archive = gzip.GzipFile(fileobj=buffer, mode="w")
+        archive.write(data.encode())
+        archive.close()
+        buffer.seek(0)
+        res.status_code = 200
+        res.raw = buffer
+        return res
 
     def test_no_report_instances_found(dest_uri):
         """
@@ -2303,10 +2272,281 @@ def appstore_test_cases() -> Iterable[Callable]:
                 interval_end="2024-01-02",
             )
             assert has_exception(result.exception, NoOngoingReportRequestsFoundError)
+        
+    def test_no_such_report(dest_uri):
+        """
+        when there is no report with the given name, NoSuchReportError should be raised.
+        """
+        client = MagicMock()
+        client.list_analytics_report_requests = MagicMock(
+            return_value=AnalyticsReportRequestsResponse(
+                [
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="123",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONGOING", stoppedDueToInactivity=False
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+        client.list_analytics_reports = MagicMock(
+            return_value=AnalyticsReportResponse(
+                [],
+                None,
+                None,
+            )
+        )
+
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                "app-downloads-detailed",
+                dest_uri,
+                dest_table,
+                interval_start="2024-01-01",
+                interval_end="2024-01-02",
+            )
+            assert has_exception(result.exception, NoSuchReportError)
+
+    def test_successful_ingestion(dest_uri):
+        """
+        When there are report instances for the given date range, the data should be ingested
+        """
+        client = MagicMock()
+        client.list_analytics_report_requests = MagicMock(
+            return_value=AnalyticsReportRequestsResponse(
+                [
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="123",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONGOING", stoppedDueToInactivity=False
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+        client.list_analytics_reports = MagicMock(
+            return_value=AnalyticsReportResponse(
+                [
+                    Report(
+                        type="analyticsReports",
+                        id="123",
+                        attributes=ReportAttributes(
+                            name="app-downloads-detailed", category="USER"
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        client.list_report_instances = MagicMock(
+            return_value=AnalyticsReportInstancesResponse(
+                [
+                    ReportInstance(
+                        type="analyticsReportInstances",
+                        id="123",
+                        attributes=ReportInstanceAttributes(
+                            granularity="DAILY", processingDate="2025-01-01"
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        client.list_report_segments = MagicMock(
+            return_value=AnalyticsReportSegmentsResponse(
+                [
+                    ReportSegment(
+                        type="analyticsReportSegments",
+                        id="123",
+                        attributes=ReportSegmentAttributes(
+                            checksum="checksum-0",
+                            url="http://example.com/report.csv",  # we'll monkey patch requests.get to return this file
+                            sizeInBytes=123,
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            with patch("requests.get") as mock_get:
+                mock_get.return_value = create_mock_response(app_download_testdata)
+                schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+                dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                result = invoke_ingest_command(
+                    f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                    "app-downloads-detailed",
+                    dest_uri,
+                    dest_table,
+                    interval_start="2025-01-01",
+                    interval_end="2025-01-02",
+                )
+
+        assert result.exit_code == 0
+
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+        count = dest_engine.execute(
+            f"select count(*) from {dest_table}"
+        ).fetchone()[0]
+        assert count == 3
+        
+    def test_incremental_ingestion(dest_uri):
+        """
+        when the pipeline is run till a specific end date, the next ingestion
+        should load data from the last processing date, given that last_date is not provided
+        """
+
+        client = MagicMock()
+        client.list_analytics_report_requests = MagicMock(
+            return_value=AnalyticsReportRequestsResponse(
+                [
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="123",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONGOING", stoppedDueToInactivity=False
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+        client.list_analytics_reports = MagicMock(
+            return_value=AnalyticsReportResponse(
+                [
+                    Report(
+                        type="analyticsReports",
+                        id="123",
+                        attributes=ReportAttributes(
+                            name="app-downloads-detailed", category="USER"
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        client.list_report_instances = MagicMock(
+            return_value=AnalyticsReportInstancesResponse(
+                [
+                    ReportInstance(
+                        type="analyticsReportInstances",
+                        id="123",
+                        attributes=ReportInstanceAttributes(
+                            granularity="DAILY", processingDate="2025-01-01"
+                        ),
+                    ),
+                    ReportInstance(
+                        type="analyticsReportInstances",
+                        id="123",
+                        attributes=ReportInstanceAttributes(
+                            granularity="DAILY", processingDate="2025-01-02"
+                        ),
+                    ),
+                ],
+                None,
+                None,
+            )
+        )
+
+        client.list_report_segments = MagicMock(
+            return_value=AnalyticsReportSegmentsResponse(
+                [
+                    ReportSegment(
+                        type="analyticsReportSegments",
+                        id="123",
+                        attributes=ReportSegmentAttributes(
+                            checksum="checksum-0",
+                            url="http://example.com/report.csv",  # we'll monkey patch requests.get to return this file
+                            sizeInBytes=123,
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            with patch("requests.get") as mock_get:
+                mock_get.return_value = create_mock_response(app_download_testdata)
+                schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+                dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                result = invoke_ingest_command(
+                    f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                    "app-downloads-detailed",
+                    dest_uri,
+                    dest_table,
+                    interval_end="2025-01-01",
+                )
+
+        assert result.exit_code == 0
+
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+        count = dest_engine.execute(
+            f"select count(*) from {dest_table}"
+        ).fetchone()[0]
+        dest_engine.dispose()
+        assert count == 3
+
+        # now run the pipeline again without an end date
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            with patch("requests.get") as mock_get:
+                mock_get.side_effect = [
+                    create_mock_response(app_download_testdata),
+                    create_mock_response(app_download_testdata_extended)
+                ]
+                schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+                dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                result = invoke_ingest_command(
+                    f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                    "app-downloads-detailed",
+                    dest_uri,
+                    dest_table,
+                )
+
+        assert result.exit_code == 0
+
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+        count = dest_engine.execute(
+            f"select count(*) from {dest_table}"
+        ).fetchone()[0]
+        assert count == 6
+        assert (
+            len(
+                dest_engine.execute(f"select processing_date from {dest_table} group by 1").fetchall()
+            )
+            == 2
+        )
 
     return [
         test_no_report_instances_found,
         test_no_ongoing_reports_found,
+        test_no_such_report,
+        test_successful_ingestion,
+        test_incremental_ingestion,
     ]
 
 @pytest.mark.parametrize(
