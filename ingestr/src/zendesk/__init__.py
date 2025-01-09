@@ -260,6 +260,8 @@ def zendesk_support(
             initial_value=start_date_ts,
             end_value=end_date_ts,
             allow_external_schedulers=True,
+            range_end="closed",
+            range_start="closed",
         ),
     ) -> Iterator[TDataItem]:
         # URL For ticket events
@@ -294,6 +296,8 @@ def zendesk_support(
             initial_value=start_date_obj,
             end_value=end_date_obj,
             allow_external_schedulers=True,
+            range_end="closed",
+            range_start="closed",
         ),
     ) -> Iterator[TDataItem]:
         """
@@ -340,6 +344,8 @@ def zendesk_support(
             initial_value=start_date_iso_str,
             end_value=end_date_iso_str,
             allow_external_schedulers=True,
+            range_end="closed",
+            range_start="closed",
         ),
     ) -> Iterator[TDataItem]:
         """
