@@ -1,3 +1,4 @@
+import base64
 import csv
 import os
 import random
@@ -6,6 +7,7 @@ import string
 import tempfile
 import time
 import traceback
+from unittest.mock import MagicMock, patch
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -31,7 +33,32 @@ from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
 from ingestr.main import app
+from ingestr.src.appstore.errors import (
+    NoOngoingReportRequestsFoundError,
+    NoReportsFoundError,
+    NoSuchReportError,
+)
+from ingestr.src.appstore.models import (
+    AnalyticsReportInstancesResponse,
+    AnalyticsReportRequestsResponse,
+    AnalyticsReportResponse,
+    Report,
+    ReportAttributes,
+    ReportInstance,
+    ReportInstanceAttributes,
+    ReportRequest,
+    ReportRequestAttributes
+)
 
+def has_exception(exception, exc_type):
+    if isinstance(exception, pytest.ExceptionInfo):
+        exception = exception.value
+
+    while exception:
+        if isinstance(exception, exc_type):
+            return True
+        exception = exception.__cause__
+    return False
 
 def get_abs_path(relative_path):
     return os.path.abspath(os.path.join(os.path.dirname(__file__), relative_path))
@@ -2164,3 +2191,128 @@ def test_google_analytics(testcase, dest):
         os.getenv("GA_TEST_PROPERTY_ID"),
         dest.start(),
     )
+
+def appstore_test_cases() -> Iterable[Callable]:
+
+    api_key = base64.b64encode(b"MOCK_KEY").decode()
+
+    def test_no_report_instances_found(dest_uri):
+        """
+        When there are no report instances for the given date range,
+        NoReportsError should be raised.
+        """
+        client = MagicMock()
+        client.list_analytics_report_requests = MagicMock(
+            return_value=AnalyticsReportRequestsResponse(
+                [
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="123",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONGOING", stoppedDueToInactivity=False
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+        client.list_analytics_reports = MagicMock(
+            return_value=AnalyticsReportResponse(
+                [
+                    Report(
+                        type="analyticsReports",
+                        id="123",
+                        attributes=ReportAttributes(
+                            name="app-downloads-detailed", category="USER"
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+        client.list_report_instances = MagicMock(
+            return_value=AnalyticsReportInstancesResponse(
+                [
+                    ReportInstance(
+                        type="analyticsReportInstances",
+                        id="123",
+                        attributes=ReportInstanceAttributes(
+                            granularity="DAILY", processingDate="2024-01-03"
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                "app-downloads-detailed",
+                dest_uri,
+                dest_table,
+                interval_start="2024-01-01",
+                interval_end="2024-01-02",
+            )
+            assert has_exception(result.exception, NoReportsFoundError)
+    
+    def test_no_ongoing_reports_found(dest_uri):
+        """
+        when there are no ongoing reports, or ongoing reports that have
+        been stopped due to inactivity, NoOngoingReportRequestsFoundError should be raised.
+        """
+        client = MagicMock()
+        client.list_analytics_report_requests = MagicMock(
+            return_value=AnalyticsReportRequestsResponse(
+                [
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="123",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONE_TIME_SNAPSHOT", stoppedDueToInactivity=False
+                        ),
+                    ),
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="124",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONGOING", stoppedDueToInactivity=True
+                        ),
+                    ),
+                ],
+                None,
+                None,
+            )
+        )
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                "app-downloads-detailed",
+                dest_uri,
+                dest_table,
+                interval_start="2024-01-01",
+                interval_end="2024-01-02",
+            )
+            assert has_exception(result.exception, NoOngoingReportRequestsFoundError)
+
+    return [
+        test_no_report_instances_found,
+        test_no_ongoing_reports_found,
+    ]
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize("test_case", appstore_test_cases())
+def test_appstore(dest, test_case):
+        test_case(dest.start())
+        dest.stop()

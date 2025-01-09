@@ -1436,10 +1436,14 @@ class AppleAppStoreSource:
     def handles_incrementality(self) -> bool:
         return True
 
-    def init_client(self, key_id: str, key_path: str, issuer_id: str):
+    def init_client(self, key_id: str, issuer_id: str, key_path: Optional[List[str]], key_base64: Optional[List[str]]):
+
         key = None
-        with open(key_path) as f:
-            key = f.read()
+        if key_path is not None:
+            with open(key_path) as f:
+                key = f.read()
+        else:
+            key = base64.b64decode(key_base64[0]).decode()
 
         return AppStoreConnectClient(key.encode(), key_id, issuer_id)
 
@@ -1456,12 +1460,21 @@ class AppleAppStoreSource:
             raise MissingValueError("key_id", "App Store")
 
         key_path = params.get("key_path")
-        if key_path is None:
-            raise MissingValueError("key_path", "App Store")
+        key_base64 = params.get("key_base64")
+        key_available = any(
+            map(
+                lambda x: x is not None,
+                [key_path, key_base64],
+            )
+        )
+        if key_available is False:
+            raise MissingValueError("key_path or key_base64", "App Store")
 
         issuer_id = params.get("issuer_id")
         if issuer_id is None:
             raise MissingValueError("issuer_id", "App Store")
+
+        client = self.init_client(key_id[0], issuer_id[0], key_path, key_base64)
 
         app_ids = params.get("app_id")
         if app_ids is None:
@@ -1473,7 +1486,6 @@ class AppleAppStoreSource:
         if kwargs.get("interval_end"):
             date_args["end_date"] = kwargs.get("interval_end")
 
-        client = self.init_client(key_id[0], key_path[0], issuer_id[0])
         src = app_store(
             client,
             app_ids,
