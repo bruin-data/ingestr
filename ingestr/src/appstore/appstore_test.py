@@ -51,6 +51,7 @@ Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tAp
 2025-01-01\t1\t11\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.3\tApp Store search\t""\t""\tNo page\tNo page\t""\tMX
 """
 
+
 @pytest.fixture
 def app_download_testdata_extended():
     return """\
@@ -59,6 +60,7 @@ Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tAp
 2025-01-02\t1\t16\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp referrer\tcom.burbn.instagram\t""\tStore sheet\tDefault custom product page\t""\tSG
 2025-01-02\t1\t11\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.3\tApp Store search\t""\t""\tNo page\tNo page\t""\tMX
 """
+
 
 def test_no_report_instances_found():
     """
@@ -285,7 +287,11 @@ def test_successful_ingestion(app_download_testdata):
         mock_get.return_value = create_mock_response(app_download_testdata)
         dlt.pipeline(destination=dest, dataset_name="public").run(src)
 
-    assert conn.sql("select count(*) from public.app_downloads_detailed").fetchone()[0] == 3
+    assert (
+        conn.sql("select count(*) from public.app_downloads_detailed").fetchone()[0]
+        == 3
+    )
+
 
 def test_incremental_ingestion(app_download_testdata, app_download_testdata_extended):
     """
@@ -341,7 +347,7 @@ def test_incremental_ingestion(app_download_testdata, app_download_testdata_exte
                     attributes=ReportInstanceAttributes(
                         granularity="DAILY", processingDate="2025-01-02"
                     ),
-                )
+                ),
             ],
             None,
             None,
@@ -382,7 +388,10 @@ def test_incremental_ingestion(app_download_testdata, app_download_testdata_exte
         mock_get.return_value = create_mock_response(app_download_testdata)
         pipeline.run(src)
 
-    assert conn.sql("select count(*) from public.app_downloads_detailed").fetchone()[0] == 3
+    assert (
+        conn.sql("select count(*) from public.app_downloads_detailed").fetchone()[0]
+        == 3
+    )
 
     # now run the pipeline again without an end date
     src = app_store(
@@ -397,20 +406,28 @@ def test_incremental_ingestion(app_download_testdata, app_download_testdata_exte
                 create_mock_response(app_download_testdata_extended),
             ]
             pipeline.run(src, write_disposition="merge")
-    
-    assert conn.sql("select count(*) from public.app_downloads_detailed").fetchone()[0] == 6
-    assert len(
-        conn.sql("select processing_date from public.app_downloads_detailed group by 1").fetchall()
-    ) == 2
+
+    assert (
+        conn.sql("select count(*) from public.app_downloads_detailed").fetchone()[0]
+        == 6
+    )
+    assert (
+        len(
+            conn.sql(
+                "select processing_date from public.app_downloads_detailed group by 1"
+            ).fetchall()
+        )
+        == 2
+    )
+
 
 def create_mock_response(data: str) -> requests.Response:
-        res = requests.Response()
-        buffer = io.BytesIO()
-        buffer.mode = "rw"
-        archive = gzip.GzipFile(fileobj=buffer, mode="w")
-        archive.write(data.encode())
-        archive.close()
-        buffer.seek(0)
-        res.status_code = 200
-        res.raw = buffer
-        return res
+    res = requests.Response()
+    buffer = io.BytesIO()
+    archive = gzip.GzipFile(fileobj=buffer, mode="w")
+    archive.write(data.encode())
+    archive.close()
+    buffer.seek(0)
+    res.status_code = 200
+    res.raw = buffer
+    return res
