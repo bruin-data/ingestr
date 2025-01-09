@@ -112,19 +112,19 @@ Notice how we didn't specify a date parameter? `ingestr` will automatically use 
 ### `app-downloads-detailed`
 The App Downloads Report includes download data generated on the App Store. You can use this report to understand your total number of downloads, including first-time downloads, redownloads, updates, and more.
 
-| **Table**    | **Description**                                                                 |
-|---------------|---------------------------------------------------------------------------------|
+| **Column**   | **Description** |
+|--------------|-----------------|
 | `date`  | Date on which the event occurred. |
 | `app_name`    | The name of the app provided by you during app setup in App Store Connect.|
 | `app_apple_identifier`    |  Your app’s Apple ID.  |
-| `download_type`    | The type of download event that occured. Possible values: First-time Download, Redownload, Manual update, Auto-update or Restore |
+| `download_type`    | The type of download event that occured. |
 | `app_version` | The app version being downloaded. | 
 | `device`     | The device on which the app was downloaded.|
 | `platform_version` | The OS version of the device on which the download occured.|
-| `source_type` | The source from where the user discovered the app. Possible values: App Store search, App Store browse, App referrer, Web referrer, App Clip, Unavailable or Institutional purchase|
+| `source_type` | The source from where the user discovered the app.|
 | `source_info` | The app referrer or web referrer that led the user to discover the app.|
 | `campaign` | The Campaign Token of the campaign created in App Analytics. Column available starting November 19, 2024.|
-| `page_type` | The page type from where the app was downloaded. Possible values: Product page, In-App event, Store sheet or No Page. |
+| `page_type` | The page type from where the app was downloaded. |
 | `page_title` | The name of the product page or in-app event page that led the user to download the app.|
 | `pre-order` | A flag indicating whether the download came from a pre-order.|
 | `territory` | The App Store country or region where the download occured.|
@@ -133,3 +133,117 @@ The App Downloads Report includes download data generated on the App Store. You 
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
+### `app-store-discovery-and-engagement-detailed`
+The App Store Discovery and Engagement report provides details about how users engage with your apps on the App Store itself. This includes data about user engagement with your app’s icons, product pages, in-app event pages, and other install sheets.
+
+
+| **Column**   | **Description** |
+|--------------|-----------------|
+| `date`  | Date on which the event occurred. |
+| `app_name`    | The name of the app provided by you during app setup in App Store Connect.|
+| `app_apple_identifier`    |  Your app’s Apple ID.  |
+| `event`    | The type of event that occurred.|
+| `source_type` | The source from where the user discovered the app. |
+| `source_info` | The app referrer or web referrer that led the user to discover the app.|
+| `campaign` | The Campaign Token of the campaign created in App Analytics. Column available starting November 19, 2024.|
+| `page_type` | The page type from where the app was downloaded. |
+| `page_title` | The name of the product page or in-app event page that led the user to download the app.|
+| `device` | The device on which the event occurred. |
+| `engagement_type` | User action, if any, on the impression or page.|
+| `platform_version` | The OS version of the device on which the event occurred.|
+| `territory` | The App Store country or region where the download occured.|
+| `counts` | The total number of events that occurred. |
+| `unique_counts` | The total number of unique users that performed the event.|
+
+### `app-sessions-detailed`
+App Session provides insights on how often people open your app, and how long they spend in your app.
+
+| **Column**   | **Description** |
+|--------------|-----------------|
+| `date`  | Date on which the event occurred. |
+| `app_name`    | The name of the app provided by you during app setup in App Store Connect.|
+| `app_apple_identifier`    |  Your app’s Apple ID.  |
+| `download_type`    | The type of download event that occured. |
+| `app_version` | The app version being downloaded. | 
+| `device`     | The device on which the app was downloaded.|
+| `platform_version` | The OS version of the device on which the download occured.|
+| `source_type` | The source from where the user discovered the app.|
+| `source_info` | The app referrer or web referrer that led the user to discover the app.|
+| `campaign` | The Campaign Token of the campaign created in App Analytics. Column available starting November 19, 2024.|
+| `page_type` | The page type from where the app was downloaded. |
+| `page_title` | The name of the product page or in-app event page that led the user to download the app.|
+| `app_download_date` | The date on which the app was downloaded onto the device. This field is only populated if the download occurred in the previous 30 days, otherwise it is null.|
+| `territory` | The App Store country or region where the download occured.|
+| `sessions` | The number of sessions. Based on users who have agreed to share their data with Apple and developers.|
+| `total_session_duration` | The total duration, in seconds, of all sessions being reported.|
+| `unique_devices` | The number of unique devices contributing to the total number of sessions being reported.|
+
+### `app-store-installation-and-deletion-detailed`
+Use the data in App Store Installation and Deletion report to estimate the number of times people install and delete your App Store apps.
+
+
+| **Column**   | **Description** |
+|--------------|-----------------|
+| `date`| Date on which the event occurred.|
+| `app_name`| The name of the app provided by you during app setup in App Store Connect.|
+| `app_apple_identifier`| Date on which the event occurred.|
+| `event`| The type of usage event that occurred. |
+| `download_type`| The type of download event that occurred.|
+| `app_version`| The version of the app being associated with the instalation or deletion.|
+| `device`| The device on which the app was installed or deleted.|
+| `platform_version`| The OS version of the device on which the app was installed or deleted.|
+| `source_type`| Where the user discovered your app.|
+| `source_info`| The app referrer or web referrer that led the user to discover your app.|
+| `campaign`| The Campaign Token of the campaign created in App Analytics. Column available starting November 19, 2024.|
+| `page_type`| The page type which led the user to discover your app.|
+| `page_title`| The name of the product page or in-app event page that led the user to discover your app.|
+| `app_download_date`| The date on which the app was downloaded onto the device. This field is only populated if the download occurred in the previous 30 days, otherwise it is null.|
+| `territory`| The App Store country or region where the installation or deletion occurred.|
+| `counts`| The total count of events, based on users who have agreed to share their data with Apple and developers.|
+| `unique_devices`| The number of unique devices on which events were generated, based on users who have agreed to share their data with Apple and developers.|
+
+### `app-store-purchases-detailed`
+The App Store Purchases Report includes App Store paid app and in-app purchase data. Using the data in this report, you can measure your total revenue generated on the App Store, attribute sales to download sources and page types, and measure how many paying users you have for each individual row. Paying user counts are not summable across rows, because the same user can exist in multiple rows.
+
+| **Column**   | **Description** |
+|--------------|-----------------|
+| `date`| Date on which the event occurred.|
+| `app_name`| The name of the app provided by you during app setup in App Store Connect.|
+| `app_apple_identifier`| Your app’s Apple ID.|
+| `purchase_type`| The type of purchase made by the user on the App Store.|
+| `content_name`| The name of the content being purchased. For paid apps, the field will populate the name of app as set in App Store. For in-app purchases, the field will populate the name of the SKU as set in App Store Connect.|
+| `content_apple_identifier`| Your content’s Apple ID |
+| `payment_method`| The payment type used to charge the customer.|
+| `device`| The device on which the purchase occurred.|
+| `platform_version`| The OS version of the device on which the app was installed or deleted.|
+| `source_type`| Where the user discovered your app.|
+| `source_info`| The app referrer or web referrer that led the user to discover your app.|
+| `campaign`| The Campaign Token of the campaign created in App Analytics. Column available starting November 19, 2024.|
+| `page_type`| The page type which led the user to discover your app.|
+| `page_title`| The name of the product page or in-app event page that led the user to discover your app.|
+| `app_download_date`| The date on which the app was downloaded onto the device. This field is only populated if the download occurred in the previous 30 days, otherwise it is null.|
+| `pre-order`| Indicates whether the purchase originated from someone who pre-ordered the app.|
+| `territory`| The App Store country or region in which the purchase occurred.|
+| `purchases`| Aggregated count of purchases made. Negative value indicates refunds. If purchases count is 0 and proceeds, and sales are negative, it indicates partial refunds.|
+| `proceeds_in_usd`| The estimated proceeds in USD from purchases of your app and in-app purchases. This is the Customer Price minus applicable taxes and Apple’s commission, per Schedule 2 of the Paid Apps Agreement.|
+| `sales_in_usd`| The estimated sales in USD from purchases of your app and in-app purchases.|
+| `paying_users`| The number of unique users who paid for your app or in-app purchases. This metric is not summable across rows.|
+
+### `app-crashes-expanded`
+Use this report to understand crashes for your App Store apps by app version and device type.
+
+| **Column**   | **Description** |
+|--------------|-----------------|
+| `date`| Date on which the event occurred.|
+| `app_name`| The name of the app provided by you during app setup in App Store Connect.|
+| `app_apple_identifier`| Your app’s Apple ID.|
+| `app_version` | The app version being downloaded. | 
+| `device`     | The device on which the app was downloaded.|
+| `platform_version` | The OS version of the device on which the download occured.|
+| `crashes` | The total number of crashes.|
+| `unique_devices` | Number of unique devices where app crashed. |
+
+
+Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+To know more about these reports and their dimensions, see [App Store Analytics docs](https://developer.apple.com/documentation/analytics-reports).
