@@ -3,6 +3,9 @@ The [App Store](https://appstore.com/) is an app marketplace developed and maint
 
 `ingestr` allows you to ingest analytics, sales and performance data using the [Apple App Store Connect API](https://developer.apple.com/documentation/appstoreconnectapi)
 
+> [!NOTE]
+> Sometimes, the data in App Store Analytics reports isn’t fully complete when first provided. This happens because some information takes longer to process and appears in the reports later. For example, certain usage or sales details might be updated after the initial report is generated to correct errors or include missing data. This means that the report for a certain date may include data points from older dates. `ingestr` takes care of updating these rows to show the updated values. However, caution should be exercised when analysing current date's data, as it maybe subject to change in the future. 
+> see [Data Completeness and Corrections](https://developer.apple.com/documentation/analytics-reports/data-completeness-corrections) for more information.
 ## URI Format
 
 The URI format for App Store is as follows:
@@ -18,6 +21,7 @@ URI Parameters:
 
 ## Setting up Appstore Integration
 
+
 ### Prerequisites
 To generate an API key, you must have an Admin account in App Store Connect. 
 
@@ -26,15 +30,10 @@ To generate an API key, you must have an Admin account in App Store Connect.
 To generate a new API key to use with `ingestr`, log in to [App Store Connect](https://appstoreconnect.apple.com/) and:
 
 1. Select Users and Access, and then select the API Keys tab.
-
 2. Make sure the Team Keys tab is selected.
-
 3. Click Generate API Key or the Add (+) button.
-
 4. Enter a name for the key. The name is for your reference only and isn’t part of the key itself.
-
 5. Under Access, select the role as `FINANCE`.
-
 6. Click Generate.
 
 The new key’s name, key ID, a download link, and other information appears on the page.
