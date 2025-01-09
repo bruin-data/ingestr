@@ -49,6 +49,13 @@ You can find the App ID of your app by:
 
 With this, you are ready to ingest data from App Store.
 
+### Request a Report.
+Before you can ingest analytics data from App Store, you need to submit a [Report Request](https://developer.apple.com/documentation/appstoreconnectapi/post-v1-analyticsreportrequests). See [App Store Connect docs](https://developer.apple.com/documentation/appstoreconnectapi/downloading-analytics-reports) for more information on how to Request a Report.
+
+We recommend using `ONGOING` access-type for reports. Please note that it may take upto 48 hours after submitting a Report Request for the data to become available. For more information, see [Request analytics report](https://developer.apple.com/documentation/appstoreconnectapi/downloading-analytics-reports#Request-analytics-reports).
+
+> [!NOTE]
+> you have to create a Report Request for each individual App that you want to ingest data for. You can use [list apps](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-apps) API to get the list of all apps in your Apple Account.
 ### Example: Loading App Downloads Analytics
 
 For this example, we'll assume that:
