@@ -14,7 +14,7 @@ from .helpers import get_reactions_data, get_rest_pages, get_stargazers
 def github_reactions(
     owner: str,
     name: str,
-    access_token: str = dlt.secrets.value,
+    access_token: str,
     items_per_page: int = 100,
     max_items: Optional[int] = None,
 ) -> Sequence[DltResource]:
@@ -89,7 +89,11 @@ def github_repo_events(
     @dlt.resource(primary_key="id", table_name=lambda i: i["type"])
     def repo_events(
         last_created_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "created_at", initial_value="1970-01-01T00:00:00Z", last_value_func=max
+            "created_at",
+            initial_value="1970-01-01T00:00:00Z",
+            last_value_func=max,
+            range_end="closed",
+            range_start="closed",
         ),
     ) -> Iterator[TDataItems]:
         repos_path = (
@@ -114,7 +118,7 @@ def github_repo_events(
 def github_stargazers(
     owner: str,
     name: str,
-    access_token: str = dlt.secrets.value,
+    access_token: str,
     items_per_page: int = 100,
     max_items: Optional[int] = None,
 ) -> Sequence[DltResource]:

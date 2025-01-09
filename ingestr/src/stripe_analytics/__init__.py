@@ -84,7 +84,10 @@ def incremental_stripe_source(
     def incremental_resource(
         endpoint: str,
         created: Optional[Any] = dlt.sources.incremental(
-            "created", initial_value=start_date_unix
+            "created",
+            initial_value=start_date_unix,
+            range_end="closed",
+            range_start="closed",
         ),
     ) -> Generator[Dict[Any, Any], Any, None]:
         start_value = created.last_value

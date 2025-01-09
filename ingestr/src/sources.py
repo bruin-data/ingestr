@@ -246,6 +246,8 @@ class ArrowMemoryMappedSource:
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
+                range_end="closed",
+                range_start="closed",
             )
 
         file_path = uri.split("://")[1]
@@ -291,6 +293,8 @@ class MongoDbSource:
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
+                range_end="closed",
+                range_start="closed",
             )
 
         table_instance = self.table_builder(
@@ -359,6 +363,8 @@ class LocalCsvSource:
                 kwargs.get("incremental_key", ""),
                 initial_value=kwargs.get("interval_start"),
                 end_value=kwargs.get("interval_end"),
+                range_end="closed",
+                range_start="closed",
             )
         )
 
@@ -1317,6 +1323,8 @@ class DynamoDBSource:
                 incremental_key.strip(),
                 initial_value=isotime(kwargs.get("interval_start")),
                 end_value=isotime(kwargs.get("interval_end")),
+                range_end="closed",
+                range_start="closed",
             )
 
         return dynamodb(table, creds, incremental)
@@ -1342,11 +1350,6 @@ class GoogleAnalyticsSource:
         if not property_id:
             raise ValueError("property_id is required to connect to Google Analytics")
 
-        interval_start = kwargs.get("interval_start")
-        start_date = (
-            interval_start.strftime("%Y-%m-%d") if interval_start else "2015-08-14"
-        )
-
         fields = table.split(":")
         if len(fields) != 3:
             raise ValueError(
@@ -1370,10 +1373,19 @@ class GoogleAnalyticsSource:
             {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
         ]
 
+        start_date = pendulum.now().subtract(days=30).start_of("day")
+        if kwargs.get("interval_start") is not None:
+            start_date = pendulum.instance(kwargs.get("interval_start"))  # type: ignore
+
+        end_date = pendulum.now()
+        if kwargs.get("interval_end") is not None:
+            end_date = pendulum.instance(kwargs.get("interval_end"))  # type: ignore
+
         return google_analytics(
             property_id=property_id[0],
             start_date=start_date,
-            datetime=datetime,
+            end_date=end_date,
+            datetime_dimension=datetime,
             queries=queries,
             credentials=credentials,
         ).with_resources("basic_report")
@@ -1404,9 +1416,7 @@ class GitHubSource:
                 "repo variable is required to retrieve data for a specific repository from GitHub."
             )
 
-        access_token = source_fields.get("access_token", [None])[0]
-        if not access_token and table not in ["repo_events"]:
-            raise ValueError("access_token is required to connect with GitHub")
+        access_token = source_fields.get("access_token", [""])[0]
 
         if table in ["issues", "pull_requests"]:
             return github_reactions(

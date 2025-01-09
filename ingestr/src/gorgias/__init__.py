@@ -116,7 +116,9 @@ def gorgias_source(
         },
     )
     def customers(
-        updated_datetime=dlt.sources.incremental("updated_datetime", start_date_obj),
+        updated_datetime=dlt.sources.incremental(
+            "updated_datetime", start_date_obj, range_end="closed", range_start="closed"
+        ),
     ) -> Iterable[TDataItem]:
         """
         The resource for customers on your Gorgias domain, supports incremental loading and pagination.
@@ -290,7 +292,9 @@ def gorgias_source(
         },
     )
     def tickets(
-        updated_datetime=dlt.sources.incremental("updated_datetime", start_date_obj),
+        updated_datetime=dlt.sources.incremental(
+            "updated_datetime", start_date_obj, range_end="closed", range_start="closed"
+        ),
     ) -> Iterable[TDataItem]:
         """
         The resource for tickets on your Gorgias domain, supports incremental loading and pagination.
@@ -481,7 +485,9 @@ def gorgias_source(
         },
     )
     def ticket_messages(
-        updated_datetime=dlt.sources.incremental("updated_datetime", start_date_obj),
+        updated_datetime=dlt.sources.incremental(
+            "updated_datetime", start_date_obj, range_end="closed", range_start="closed"
+        ),
     ) -> Iterable[TDataItem]:
         """
         The resource for ticket messages on your Gorgias domain, supports incremental loading and pagination.
@@ -566,7 +572,9 @@ def gorgias_source(
         },
     )
     def satisfaction_surveys(
-        updated_datetime=dlt.sources.incremental("updated_datetime", start_date_obj),
+        updated_datetime=dlt.sources.incremental(
+            "updated_datetime", start_date_obj, range_end="closed", range_start="closed"
+        ),
     ) -> Iterable[TDataItem]:
         """
         The resource for satisfaction surveys on your Gorgias domain, supports incremental loading and pagination.

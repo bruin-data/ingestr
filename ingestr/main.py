@@ -444,7 +444,7 @@ def ingest(
 
         progressInstance: Collector = SpinnerCollector()
         if progress == Progress.log:
-            progressInstance = LogCollector(dump_system_stats=False)
+            progressInstance = LogCollector()
 
         is_pipelines_dir_temp = False
         if pipelines_dir is None:
