@@ -1539,10 +1539,10 @@ class GCSSource:
             )
         bucket_url = f"gs://{bucket_name}/"
 
-        path_to_file = parsed_uri.path.lstrip("/")
+        path_to_file = parsed_uri.path.lstrip("/") or table.strip()
         if not path_to_file:
             raise ValueError(
-                "Invalid GCS URI: The bucket name is missing. Ensure your GCS URI follows the format 'gs://bucket-name/path/to/file"
+                "--source-table must be specified"
             )
 
         credentials = None
