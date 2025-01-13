@@ -6,6 +6,7 @@ from dlt.sources import DltResource
 from pendulum import Date
 
 from .helpers import LinkedInAdsAPI, find_intervals
+from .metrics_dimenison_enum import Dimension, Metric, TimeGranularity
 
 
 @dlt.source(max_table_nesting=0)
@@ -14,9 +15,9 @@ def linked_in_ads_source(
     end_date: Date,
     access_token: str,
     account_ids: list[str],
-    dimension: str,
-    metrics: list[str],
-    time_granularity: str,
+    dimension: Dimension,
+    metrics: list[Metric],
+    time_granularity: TimeGranularity,
 ) -> DltResource:
     linkedin_api = LinkedInAdsAPI(
         access_token=access_token,
@@ -25,11 +26,12 @@ def linked_in_ads_source(
         metrics=metrics,
         time_granularity=time_granularity,
     )
-    if time_granularity == "DAILY":
-        primary_key = [dimension, "date"]
+
+    if time_granularity == TimeGranularity.daily:
+        primary_key = [dimension.value, "date"]
         incremental_loading_param = "date"
     else:
-        primary_key = [dimension, "start_date", "end_date"]
+        primary_key = [dimension.value, "start_date", "end_date"]
         incremental_loading_param = "start_date"
 
     @dlt.resource(write_disposition="merge", primary_key=primary_key)
@@ -38,6 +40,7 @@ def linked_in_ads_source(
     ) -> Iterable[TDataItem]:
         datetime_value = dateTime.last_value
         start_date = datetime_value
+        print(f"start_date: {start_date}, end_date: {end_date}")
 
         list_of_interval = find_intervals(
             start_date=start_date,

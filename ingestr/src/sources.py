@@ -68,6 +68,11 @@ from ingestr.src.kafka import kafka_consumer
 from ingestr.src.kafka.helpers import KafkaCredentials
 from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.linkedin_ads import linked_in_ads_source
+from ingestr.src.linkedin_ads.metrics_dimenison_enum import (
+    Dimension,
+    Metric,
+    TimeGranularity,
+)
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
@@ -1549,28 +1554,29 @@ class LinkedInAdsSource:
             and "account" not in dimensions
         ):
             raise ValueError(
-                "campaign, creative or account is required to connect to LinkedIn Ads. Please provide at least one of the dimensions"
+                "'campaign', 'creative' or 'account' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
             )
         if "date" not in dimensions and "month" not in dimensions:
             raise ValueError(
-                "date or month is required to connect to LinkedIn Ads. Please provide at least one of the time dimensions"
+                "'date' or 'month' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
             )
 
         if "date" in dimensions:
-            time_granularity = "DAILY"
+            time_granularity = TimeGranularity.daily
             dimensions.remove("date")
         else:
-            time_granularity = "MONTHLY"
+            time_granularity = TimeGranularity.monthly
             dimensions.remove("month")
 
-        dimension = dimensions[0]
-        metrics = fields[2].replace(" ", "").split(",")
-        metrics = [item for item in metrics if item.strip()]
+        dimension = Dimension[dimensions[0]]
 
-        if "dateRange" not in metrics:
-            metrics.append("dateRange")
-        if "pivotValues" not in metrics:
-            metrics.append("pivotValues")
+        metrics = fields[2].replace(" ", "").split(",")
+        list_metrics = [Metric(item) for item in metrics if item.strip()]
+
+        if Metric.dateRange not in list_metrics:
+            list_metrics.append(Metric.dateRange)
+        if Metric.pivotValues not in list_metrics:
+            list_metrics.append(Metric.pivotValues)
 
         return linked_in_ads_source(
             start_date=start_date,
@@ -1578,6 +1584,6 @@ class LinkedInAdsSource:
             access_token=access_token[0],
             account_ids=account_ids,
             dimension=dimension,
-            metrics=metrics,
+            metrics=list_metrics,
             time_granularity=time_granularity,
         ).with_resources("custom_reports")
