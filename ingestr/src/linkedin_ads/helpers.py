@@ -2,7 +2,6 @@ from urllib.parse import quote
 
 import pendulum
 import requests
-from dateutil.relativedelta import relativedelta
 from dlt.sources.helpers.requests import Client
 from pendulum import Date
 
@@ -66,13 +65,13 @@ def find_intervals(start_date: Date, end_date: Date, time_granularity: TimeGranu
 
     while start_date <= end_date:
         if time_granularity == TimeGranularity.daily:
-            next_date = min(start_date + relativedelta(months=6), end_date)
+            next_date = min(start_date.add(months=6), end_date)
         else:
-            next_date = min(start_date + relativedelta(years=2), end_date)
-
+            next_date = min(start_date.add(years=2), end_date)
+        
         intervals.append((start_date, next_date))
 
-        start_date = next_date + relativedelta(days=1)
+        start_date = next_date.add(days=1)
 
     return intervals
 
@@ -101,7 +100,7 @@ def construct_url(
         f"dateRange={date_range}&accounts={encoded_accounts}&"
         f"pivot={dimension_str}&fields={metrics_str}"
     )
-   
+
     return url
 
 
