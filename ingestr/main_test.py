@@ -2137,6 +2137,7 @@ def test_github_to_duckdb(dest):
     res = dest_engine.execute(f"select count(*) from {dest_table}").fetchall()
     assert len(res) > 0
 
+
 def appstore_test_cases() -> Iterable[Callable]:
     app_download_testdata = (
         "Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tApp Version\tDevice\tPlatform Version\tSource Type\tSource Info\tCampaign\tPage Type\tPage Title\tPre-Order\tTerritory\n"
@@ -2410,8 +2411,8 @@ def appstore_test_cases() -> Iterable[Callable]:
                     f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
                 )
                 result = invoke_ingest_command(
-                    f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
-                    "app-downloads-detailed",
+                    f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}",
+                    "app-downloads-detailed:123",  # moved the app ID to the table name to ensure that also works
                     dest_uri,
                     dest_table,
                     interval_start="2025-01-01",

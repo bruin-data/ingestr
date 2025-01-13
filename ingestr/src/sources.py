@@ -3,7 +3,7 @@ import csv
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import (
     Any,
     Callable,
@@ -1482,19 +1482,21 @@ class AppleAppStoreSource:
         client = self.init_client(key_id[0], issuer_id[0], key_path, key_base64)
 
         app_ids = params.get("app_id")
+        if ":" in table:
+            intended_table, app_ids_override = table.split(":", maxsplit=1)
+            app_ids = app_ids_override.split(",")
+            table = intended_table
+
         if app_ids is None:
             raise MissingValueError("app_id", "App Store")
-
-        date_args = {}
-        if kwargs.get("interval_start"):
-            date_args["start_date"] = kwargs.get("interval_start")
-        if kwargs.get("interval_end"):
-            date_args["end_date"] = kwargs.get("interval_end")
 
         src = app_store(
             client,
             app_ids,
-            **date_args,
+            start_date=kwargs.get(
+                "interval_start", datetime.now() - timedelta(days=30)
+            ),
+            end_date=kwargs.get("interval_end"),
         )
 
         if table not in src.resources:
