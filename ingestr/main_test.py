@@ -35,6 +35,8 @@ from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
+from fsspec.implementations.memory import MemoryFileSystem
+
 from ingestr.main import app
 from ingestr.src.appstore.errors import (
     NoOngoingReportRequestsFoundError,
@@ -2562,8 +2564,69 @@ def test_appstore(dest, test_case):
     dest.stop()
 
 def gcs_test_cases() -> Iterable[Callable]:
+    testdata = (
+        "name,phone,email,country\n"
+        "Rajah Roach,1-459-646-7421,adipiscing.ligula@outlook.net,Austria\n"
+        "Kiayada Jackson,(341) 484-6523,velit.egestas.lacinia@hotmail.couk,Norway\n"
+        "Bradley Grant,1-329-268-4178,leo.cras@hotmail.org,Chile\n"
+        "Damian Velasquez,(462) 744-9637,phasellus.fermentum@outlook.ca,South Africa\n"
+        "Rina Nicholson,(201) 971-6463,neque.nullam.ut@yahoo.net,Brazil\n"
+    )
     # TODO: generalise these for s3 
-    return []
+    empty_credentials = "e30K" # base 64 for "{}"
+    def test_empty_source_uri(dest_uri):
+        """
+        When the source URI is empty, an error should be raised.
+        """
+        result = invoke_ingest_command(f"gs://bucket?credentials_base64={empty_credentials}", "", dest_uri, "test")
+        assert has_exception(result.exception, ValueError)
+
+    def test_unsupported_file_format(dest_uri):
+        """
+        When the source file is not one of [csv, parquet, jsonl] it should
+        raise an exception
+        """
+        fs = MemoryFileSystem()
+        with fs.open("/data.bin", "w") as f:
+            f.write("BINARY")
+
+        with patch("ingestr.src.sources.gcsfs.GCSFileSystem") as gcsfs_mock:
+            gcsfs_mock.return_value = fs
+            schema_rand_prefix = f"testschema_gcs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"gs://bucket?credentials_base64={empty_credentials}",
+                "data.bin",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code != 0
+            assert has_exception(result.exception, ValueError)
+
+    def test_csv_load(dest_uri):
+        """
+        When the source URI is a CSV file, the data should be ingested.
+        """
+        fs = MemoryFileSystem()
+        with fs.open("/data.csv", "w") as f:
+            f.write(testdata)
+
+        with patch("ingestr.src.sources.gcsfs.GCSFileSystem") as gcsfs_mock:
+            gcsfs_mock.return_value = fs
+            schema_rand_prefix = f"testschema_gcs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"gs://bucket?credentials_base64={empty_credentials}",
+                "data.csv",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+    return [
+        test_empty_source_uri,
+        test_unsupported_file_format,
+        test_csv_load,
+    ]
 
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
