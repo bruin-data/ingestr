@@ -2617,7 +2617,7 @@ def gcs_test_cases() -> Iterable[Callable]:
             dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
             result = invoke_ingest_command(
                 f"gs://bucket?credentials_base64={empty_credentials}",
-                "data.csv",
+                "data.csv", # verify this works with a leading slash
                 dest_uri,
                 dest_table,
             )
