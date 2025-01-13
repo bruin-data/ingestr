@@ -1093,14 +1093,14 @@ class S3Source:
         bucket_name = parsed_uri.hostname
         if not bucket_name:
             raise ValueError(
-                "Invalid S3 URI: The bucket name is missing. Ensure your S3 URI follows the format 's3://bucket-name/path/to/file"
+                "Invalid S3 URI: The bucket name is missing. Ensure your S3 URI follows the format 's3://bucket-name"
             )
         bucket_url = f"s3://{bucket_name}"
 
-        path_to_file = parsed_uri.path.lstrip("/")
+        path_to_file = parsed_uri.path.lstrip("/") or table.strip()
         if not path_to_file:
             raise ValueError(
-                "Invalid S3 URI: The file path is missing. Ensure your S3 URI follows the format 's3://bucket-name/path/to/file"
+                "--source-table must be specified"
             )
 
         aws_credentials = AwsCredentials(
