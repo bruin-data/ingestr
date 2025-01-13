@@ -6,6 +6,8 @@ from dateutil.relativedelta import relativedelta
 from dlt.sources.helpers.requests import Client
 from pendulum import Date
 
+from .metrics_dimenison_enum import Dimension, Metric, TimeGranularity
+
 
 def retry_on_limit(
     response: requests.Response | None, exception: BaseException | None
@@ -24,15 +26,13 @@ def create_client() -> requests.Session:
     ).session
 
 
-def flat_structure(items, pivot, time_granularity):
-    pivot = pivot.lower()
+def flat_structure(items, pivot: Dimension, time_granularity: TimeGranularity):
     for item in items:
         if "pivotValues" in item:
             if len(item["pivotValues"]) > 1:
-                item[pivot] = item["pivotValues"]
+                item[pivot.value] = item["pivotValues"]
             else:
-                item[pivot] = item["pivotValues"][0]
-
+                item[pivot.value] = item["pivotValues"][0]
         if "dateRange" in item:
             start_date = item["dateRange"]["start"]
             start_dt = pendulum.date(
@@ -41,9 +41,9 @@ def flat_structure(items, pivot, time_granularity):
                 day=start_date["day"],
             )
 
-            if time_granularity == "DAILY":
+            if time_granularity == TimeGranularity.daily.value:
                 item["date"] = start_dt
-            elif time_granularity == "MONTHLY":
+            else:
                 end_date = item["dateRange"]["end"]
                 end_dt = pendulum.date(
                     year=end_date["year"],
@@ -59,14 +59,14 @@ def flat_structure(items, pivot, time_granularity):
     return items
 
 
-def find_intervals(start_date: Date, end_date: Date, time_granularity: str):
+def find_intervals(start_date: Date, end_date: Date, time_granularity: TimeGranularity):
     intervals = []
 
     if start_date > end_date:
         raise ValueError("Start date must be less than end date")
 
     while start_date <= end_date:
-        if time_granularity == "DAILY":
+        if time_granularity == TimeGranularity.daily:
             next_date = min(start_date + relativedelta(months=6), end_date)
         else:
             next_date = min(start_date + relativedelta(years=2), end_date)
@@ -82,26 +82,27 @@ def construct_url(
     start: Date,
     end: Date,
     account_ids: list[str],
-    metrics: list[str],
-    dimension: str,
-    time_granularity: str,
+    metrics: list[Metric],
+    dimension: Dimension,
+    time_granularity: TimeGranularity,
 ):
     date_range = f"(start:(year:{start.year},month:{start.month},day:{start.day})"
-    date_range += f",end:(year:{end.year},month:{end.month},day:{end.day})"
-    date_range += ")"
+    date_range += f",end:(year:{end.year},month:{end.month},day:{end.day}))"
     accounts = ",".join(
         [quote(f"urn:li:sponsoredAccount:{account_id}") for account_id in account_ids]
     )
     encoded_accounts = f"List({accounts})"
 
-    metrics_str = ",".join(metrics)
+    metrics_str = ",".join([metric.value for metric in metrics])
 
     url = (
         f"https://api.linkedin.com/rest/adAnalytics?"
-        f"q=analytics&timeGranularity={time_granularity}&"
+        f"q=analytics&timeGranularity={time_granularity.value}&"
         f"dateRange={date_range}&accounts={encoded_accounts}&"
-        f"pivot={dimension}&fields={metrics_str}"
+        f"pivot={dimension.value}&fields={metrics_str}"
     )
+    if not url:
+        raise ValueError("Failed to construct valid URL")
     return url
 
 
@@ -114,10 +115,10 @@ class LinkedInAdsAPI:
         dimension,
         metrics,
     ):
-        self.time_granularity: str = time_granularity
+        self.time_granularity: TimeGranularity = time_granularity
         self.account_ids: list[str] = account_ids
-        self.dimension: str = dimension.upper()
-        self.metrics: list[str] = metrics
+        self.dimension: Dimension = dimension
+        self.metrics: list[Metric] = metrics
         self.headers = {
             "Authorization": f"Bearer {access_token}",
             "Linkedin-Version": "202411",
@@ -142,9 +143,8 @@ class LinkedInAdsAPI:
 
         result = response.json()
         items = result.get("elements", [])
-        items = flat_structure(
+        yield flat_structure(
             items=items,
             pivot=self.dimension,
             time_granularity=self.time_granularity,
         )
-        yield items
