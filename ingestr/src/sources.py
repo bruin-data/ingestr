@@ -20,7 +20,6 @@ import dlt
 import pendulum
 from dlt.common.configuration.specs import (
     AwsCredentials,
-    GcpCredentials,
 )
 from dlt.common.libs.sql_alchemy import (
     Engine,
@@ -40,10 +39,10 @@ from dlt.sources.sql_database.schema_types import (
     Table,
     TTypeAdapter,
 )
+import gcsfs
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 
-from google.oauth2.service_account import Credentials as GoogleCredentials
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
@@ -1508,6 +1507,9 @@ class AppleAppStoreSource:
         return src.with_resources(table)
 
 class GCSSource:
+    SCOPES = [
+        "https://www.googleapis.com/auth/devstorage.read_only",
+    ]
     def handles_incrementality(self) -> bool:
         return True
 
@@ -1535,7 +1537,7 @@ class GCSSource:
             raise ValueError(
                 "Invalid GCS URI: The bucket name is missing. Ensure your GCS URI follows the format 'gs://bucket-name/path/to/file"
             )
-        bucket_url = f"gs://{bucket_name}"
+        bucket_url = f"gs://{bucket_name}/"
 
         path_to_file = parsed_uri.path.lstrip("/")
         if not path_to_file:
@@ -1545,15 +1547,20 @@ class GCSSource:
 
         credentials = None
         if credentials_path:
-            credentials = GoogleCredentials.from_service_account_file(
-                credentials_path[0],
-            )
+                credentials = credentials_path[0]
         else:
-            credentials = GoogleCredentials.from_service_account_info(
-                base64.b64decode(credentials_base64[0])
+            credentials = json.loads(
+                base64.b64decode(credentials_base64[0]).decode()
             )
-        
-        gcp_credentials = GcpCredentials.from_init_value(credentials)
+
+        # There's a compatiblity issue between google-auth, dlt and gcsfs
+        # that makes it difficult to use google.oauth2.service_account.Credentials
+        # (The RECOMMENDED way of passing service account credentials)
+        # directly with gcsfs. As a workaround, we construct the GCSFileSystem
+        # and pass it directly to filesystem.readers.
+        fs = gcsfs.GCSFileSystem(
+            token=credentials,
+        )
 
         file_extension = path_to_file.split(".")[-1]
         if file_extension == "csv":
@@ -1568,5 +1575,5 @@ class GCSSource:
             )
 
         return readers(
-            bucket_url=bucket_url, credentials=gcp_credentials, file_glob=path_to_file
+            bucket_url=bucket_url, credentials=fs, file_glob=path_to_file
         ).with_resources(endpoint)
