@@ -1545,7 +1545,9 @@ class GCSSource:
 
         credentials = None
         if credentials_path:
-            credentials = GoogleCredentials.from_file(credentials_path[0])
+            credentials = GoogleCredentials.from_service_account_file(
+                credentials_path[0],
+            )
         else:
             credentials = GoogleCredentials.from_service_account_info(
                 base64.b64decode(credentials_base64[0])
