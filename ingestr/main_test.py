@@ -2560,3 +2560,15 @@ def appstore_test_cases() -> Iterable[Callable]:
 def test_appstore(dest, test_case):
     test_case(dest.start())
     dest.stop()
+
+def gcs_test_cases() -> Iterable[Callable]:
+    # TODO: generalise these for s3 
+    return []
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize("test_case", gcs_test_cases())
+def test_gcs(dest, test_case):
+    test_case(dest.start())
+    dest.stop()
