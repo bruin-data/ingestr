@@ -30,9 +30,9 @@ def flat_structure(items, pivot: Dimension, time_granularity: TimeGranularity):
     for item in items:
         if "pivotValues" in item:
             if len(item["pivotValues"]) > 1:
-                item[pivot.value] = item["pivotValues"]
+                item[pivot.value.lower()] = item["pivotValues"]
             else:
-                item[pivot.value] = item["pivotValues"][0]
+                item[pivot.value.lower()] = item["pivotValues"][0]
         if "dateRange" in item:
             start_date = item["dateRange"]["start"]
             start_dt = pendulum.date(
@@ -40,8 +40,7 @@ def flat_structure(items, pivot: Dimension, time_granularity: TimeGranularity):
                 month=start_date["month"],
                 day=start_date["day"],
             )
-
-            if time_granularity == TimeGranularity.daily.value:
+            if time_granularity == TimeGranularity.daily:
                 item["date"] = start_dt
             else:
                 end_date = item["dateRange"]["end"]
@@ -92,17 +91,17 @@ def construct_url(
         [quote(f"urn:li:sponsoredAccount:{account_id}") for account_id in account_ids]
     )
     encoded_accounts = f"List({accounts})"
-
+    dimension_str = dimension.value.upper()
+    time_granularity_str = time_granularity.value
     metrics_str = ",".join([metric.value for metric in metrics])
 
     url = (
         f"https://api.linkedin.com/rest/adAnalytics?"
-        f"q=analytics&timeGranularity={time_granularity.value}&"
+        f"q=analytics&timeGranularity={time_granularity_str}&"
         f"dateRange={date_range}&accounts={encoded_accounts}&"
-        f"pivot={dimension.value}&fields={metrics_str}"
+        f"pivot={dimension_str}&fields={metrics_str}"
     )
-    if not url:
-        raise ValueError("Failed to construct valid URL")
+   
     return url
 
 

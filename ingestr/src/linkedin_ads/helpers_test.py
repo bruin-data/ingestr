@@ -1,4 +1,5 @@
 import pendulum
+from ingestr.src.linkedin_ads.metrics_dimenison_enum import Dimension, Metric, TimeGranularity
 
 from ingestr.src.linkedin_ads.helpers import (
     construct_url,
@@ -32,7 +33,14 @@ def test_flat_structure_linkedin_ads():
             "likes": 0,
         }
     ]
-    assert flat_structure(items_daily, "CAMPAIGN", "DAILY") == expected_output_daily
+    assert (
+        flat_structure(
+            items_daily,
+            pivot=Dimension.campaign,
+            time_granularity=TimeGranularity.daily,
+        )
+        == expected_output_daily
+    )
 
     items_monthly = [
         {
@@ -64,19 +72,22 @@ def test_flat_structure_linkedin_ads():
     ]
 
     assert (
-        flat_structure(items_monthly, "CAMPAIGN", "MONTHLY") == expected_output_monthly
+        flat_structure(
+            items_monthly, pivot=Dimension.campaign, time_granularity=TimeGranularity.monthly
+        )
+        == expected_output_monthly
     )
 
 
 def test_find_intervals_linkedin_ads():
     start_date = pendulum.date(2024, 1, 1)
     end_date = pendulum.date(2024, 12, 31)
-    assert find_intervals(start_date, end_date, "MONTHLY") == [
+    assert find_intervals(start_date, end_date, TimeGranularity.monthly) == [
         (pendulum.date(2024, 1, 1), pendulum.date(2024, 12, 31))
     ]
 
     assert find_intervals(
-        pendulum.date(2020, 1, 1), pendulum.date(2024, 12, 31), "MONTHLY"
+        pendulum.date(2020, 1, 1), pendulum.date(2024, 12, 31), TimeGranularity.monthly
     ) == [
         (pendulum.date(2020, 1, 1), pendulum.date(2022, 1, 1)),
         (pendulum.date(2022, 1, 2), pendulum.date(2024, 1, 2)),
@@ -84,14 +95,14 @@ def test_find_intervals_linkedin_ads():
     ]
 
     assert find_intervals(
-        pendulum.date(2022, 2, 1), pendulum.date(2024, 2, 8), "MONTHLY"
+        pendulum.date(2022, 2, 1), pendulum.date(2024, 2, 8), TimeGranularity.monthly
     ) == [
         (pendulum.date(2022, 2, 1), pendulum.date(2024, 2, 1)),
         (pendulum.date(2024, 2, 2), pendulum.date(2024, 2, 8)),
     ]
 
     assert find_intervals(
-        pendulum.date(2023, 1, 1), pendulum.date(2024, 12, 20), "DAILY"
+        pendulum.date(2023, 1, 1), pendulum.date(2024, 12, 20), TimeGranularity.daily
     ) == [
         (pendulum.date(2023, 1, 1), pendulum.date(2023, 7, 1)),
         (pendulum.date(2023, 7, 2), pendulum.date(2024, 1, 2)),
@@ -104,9 +115,9 @@ def test_construct_url_linkedin_ads():
     start = pendulum.date(2024, 1, 1)
     end = pendulum.date(2024, 12, 31)
     account_ids = ["123456", "456789"]
-    metrics = ["impressions", "clicks", "likes"]
-    dimension = "CAMPAIGN"
-    time_granularity = "MONTHLY"
+    metrics = [Metric.impressions, Metric.clicks, Metric.likes]
+    dimension = Dimension.campaign
+    time_granularity = TimeGranularity.monthly
 
     assert (
         construct_url(start, end, account_ids, metrics, dimension, time_granularity)
@@ -117,9 +128,9 @@ def test_construct_url_linkedin_ads():
             start=pendulum.date(2019, 1, 1),
             end=pendulum.date(2024, 12, 31),
             account_ids=["123456"],
-            dimension="CREATIVE",
-            metrics=["impressions", "clicks", "likes"],
-            time_granularity="MONTHLY",
+            dimension=Dimension.creative,
+            metrics=[Metric.impressions, Metric.clicks, Metric.likes],
+            time_granularity=TimeGranularity.monthly,
         )
         == "https://api.linkedin.com/rest/adAnalytics?q=analytics&timeGranularity=MONTHLY&dateRange=(start:(year:2019,month:1,day:1),end:(year:2024,month:12,day:31))&accounts=List(urn%3Ali%3AsponsoredAccount%3A123456)&pivot=CREATIVE&fields=impressions,clicks,likes"
     )

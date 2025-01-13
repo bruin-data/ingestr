@@ -1,9 +1,9 @@
 from enum import Enum
 
 class Dimension(Enum):
-    campaign = "CAMPAIGN"
-    creative = "CREATIVE"
-    account = "ACCOUNT"
+    campaign = "campaign"
+    creative = "creative"
+    account = "account"
 
 class TimeGranularity(Enum):
     daily = "DAILY"
