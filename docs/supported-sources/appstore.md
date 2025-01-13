@@ -137,8 +137,6 @@ The App Downloads Report includes download data generated on the App Store. You 
 | `counts` | The total number of downloads.|
 
 
-Use these as `--source-table` parameter in the `ingestr ingest` command.
-
 ### `app-store-discovery-and-engagement-detailed`
 The App Store Discovery and Engagement report provides details about how users engage with your apps on the App Store itself. This includes data about user engagement with your app’s icons, product pages, in-app event pages, and other install sheets.
 
