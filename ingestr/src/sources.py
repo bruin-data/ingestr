@@ -17,6 +17,7 @@ from typing import (
 from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
+import gcsfs  # type: ignore
 import pendulum
 from dlt.common.configuration.specs import (
     AwsCredentials,
@@ -39,10 +40,8 @@ from dlt.sources.sql_database.schema_types import (
     Table,
     TTypeAdapter,
 )
-import gcsfs
 from sqlalchemy import Column
 from sqlalchemy import types as sa
-
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
@@ -1099,9 +1098,7 @@ class S3Source:
 
         path_to_file = parsed_uri.path.lstrip("/") or table.strip()
         if not path_to_file:
-            raise ValueError(
-                "--source-table must be specified"
-            )
+            raise ValueError("--source-table must be specified")
 
         aws_credentials = AwsCredentials(
             aws_access_key_id=access_key_id[0],
@@ -1506,6 +1503,7 @@ class AppleAppStoreSource:
 
         return src.with_resources(table)
 
+
 class GCSSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -1538,17 +1536,13 @@ class GCSSource:
 
         path_to_file = parsed_uri.path.lstrip("/") or table.strip()
         if not path_to_file:
-            raise ValueError(
-                "--source-table must be specified"
-            )
+            raise ValueError("--source-table must be specified")
 
         credentials = None
         if credentials_path:
-                credentials = credentials_path[0]
+            credentials = credentials_path[0]
         else:
-            credentials = json.loads(
-                base64.b64decode(credentials_base64[0]).decode()
-            )
+            credentials = json.loads(base64.b64decode(credentials_base64[0]).decode())  # type: ignore
 
         # There's a compatiblity issue between google-auth, dlt and gcsfs
         # that makes it difficult to use google.oauth2.service_account.Credentials

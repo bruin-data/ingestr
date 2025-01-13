@@ -26,6 +26,7 @@ import pytest
 import requests
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
+from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
 from sqlalchemy.pool import NullPool
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
@@ -34,8 +35,6 @@ from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
-
-from fsspec.implementations.memory import MemoryFileSystem
 
 from ingestr.main import app
 from ingestr.src.appstore.errors import (
@@ -2563,6 +2562,7 @@ def test_appstore(dest, test_case):
     test_case(dest.start())
     dest.stop()
 
+
 def gcs_test_cases() -> Iterable[Callable]:
     testdata = (
         "name,phone,email,country\n"
@@ -2572,13 +2572,16 @@ def gcs_test_cases() -> Iterable[Callable]:
         "Damian Velasquez,(462) 744-9637,phasellus.fermentum@outlook.ca,South Africa\n"
         "Rina Nicholson,(201) 971-6463,neque.nullam.ut@yahoo.net,Brazil\n"
     )
-    # TODO: generalise these for s3 
-    empty_credentials = "e30K" # base 64 for "{}"
+    # TODO: generalise these for s3
+    empty_credentials = "e30K"  # base 64 for "{}"
+
     def test_empty_source_uri(dest_uri):
         """
         When the source URI is empty, an error should be raised.
         """
-        result = invoke_ingest_command(f"gs://bucket?credentials_base64={empty_credentials}", "", dest_uri, "test")
+        result = invoke_ingest_command(
+            f"gs://bucket?credentials_base64={empty_credentials}", "", dest_uri, "test"
+        )
         assert has_exception(result.exception, ValueError)
 
     def test_unsupported_file_format(dest_uri):
@@ -2617,16 +2620,18 @@ def gcs_test_cases() -> Iterable[Callable]:
             dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
             result = invoke_ingest_command(
                 f"gs://bucket?credentials_base64={empty_credentials}",
-                "data.csv", # verify this works with a leading slash
+                "data.csv",  # verify this works with a leading slash
                 dest_uri,
                 dest_table,
             )
             assert result.exit_code == 0
+
     return [
         test_empty_source_uri,
         test_unsupported_file_format,
         test_csv_load,
     ]
+
 
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
