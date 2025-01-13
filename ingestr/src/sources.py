@@ -1507,9 +1507,6 @@ class AppleAppStoreSource:
         return src.with_resources(table)
 
 class GCSSource:
-    SCOPES = [
-        "https://www.googleapis.com/auth/devstorage.read_only",
-    ]
     def handles_incrementality(self) -> bool:
         return True
 
