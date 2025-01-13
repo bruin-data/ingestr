@@ -278,4 +278,11 @@ def hubspot_events_for_objects(
         write_disposition="append",
         selected=True,
         table_name=lambda e: name + "_" + str(e["eventType"]),
-    )(dlt.sources.incremental("occurredAt", initial_value=start_date.isoformat()))
+    )(
+        dlt.sources.incremental(
+            "occurredAt",
+            initial_value=start_date.isoformat(),
+            range_end="closed",
+            range_start="closed",
+        )
+    )

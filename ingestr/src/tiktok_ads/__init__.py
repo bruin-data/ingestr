@@ -110,7 +110,12 @@ def tiktok_source(
     )
     def custom_reports(
         datetime=(
-            dlt.sources.incremental(incremental_loading_param, start_date)
+            dlt.sources.incremental(
+                incremental_loading_param,
+                start_date,
+                range_end="closed",
+                range_start="closed",
+            )
             if is_incremental
             else None
         ),

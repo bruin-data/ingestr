@@ -3,7 +3,7 @@ import csv
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import (
     Any,
     Callable,
@@ -18,7 +18,6 @@ from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
 import pendulum
-import sqlalchemy
 from dlt.common.configuration.specs import (
     AwsCredentials,
 )
@@ -42,19 +41,25 @@ from dlt.sources.sql_database.schema_types import (
 )
 from sqlalchemy import Column
 from sqlalchemy import types as sa
-from sqlalchemy.dialects import mysql
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
+from ingestr.src.appstore import app_store
+from ingestr.src.appstore.client import AppStoreConnectClient
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
 from ingestr.src.dynamodb import dynamodb
+from ingestr.src.errors import (
+    MissingValueError,
+    UnsupportedResourceError,
+)
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
+from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
@@ -67,6 +72,12 @@ from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
+from ingestr.src.sql_database.callbacks import (
+    chained_query_adapter_callback,
+    custom_query_variable_subsitution,
+    limit_callback,
+    type_adapter_callback,
+)
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
 from ingestr.src.tiktok_ads import tiktok_source
@@ -99,27 +110,22 @@ class SqlSource:
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
-
             incremental = dlt.sources.incremental(
                 kwargs.get("incremental_key", ""),
-                # primary_key=(),
                 initial_value=start_value,
                 end_value=end_value,
+                range_end="closed",
+                range_start="closed",
             )
 
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
-        reflection_level = kwargs.get("sql_reflection_level")
-
-        query_adapter_callback = None
+        query_adapters = []
         if kwargs.get("sql_limit"):
-
-            def query_adapter_callback(query, table):
-                query = query.limit(kwargs.get("sql_limit"))
-                if kwargs.get("incremental_key"):
-                    query = query.order_by(kwargs.get("incremental_key"))
-                return query
+            query_adapters.append(
+                limit_callback(kwargs.get("sql_limit"), kwargs.get("incremental_key"))
+            )
 
         defer_table_reflect = False
         sql_backend = kwargs.get("sql_backend", "sqlalchemy")
@@ -162,6 +168,7 @@ class SqlSource:
                     switchDict = {
                         int: sa.INTEGER,
                         datetime: sa.TIMESTAMP,
+                        date: sa.DATE,
                         pendulum.Date: sa.DATE,
                         pendulum.DateTime: sa.TIMESTAMP,
                     }
@@ -197,38 +204,10 @@ class SqlSource:
                     if getattr(engine, "may_dispose_after_use", False):
                         engine.dispose()
 
-            dlt.sources.sql_database.table_rows = table_rows
+            dlt.sources.sql_database.table_rows = table_rows  # type: ignore
 
-            def query_adapter_callback(query, table, incremental=None, engine=None):
-                params = {}
-                if incremental:
-                    params["interval_start"] = (
-                        incremental.last_value
-                        if incremental.last_value is not None
-                        else datetime(year=1, month=1, day=1)
-                    )
-                    if incremental.end_value is not None:
-                        params["interval_end"] = incremental.end_value
-                else:
-                    if ":interval_start" in query_value:
-                        params["interval_start"] = (
-                            datetime.min
-                            if kwargs.get("interval_start") is None
-                            else kwargs.get("interval_start")
-                        )
-                    if ":interval_end" in query_value:
-                        params["interval_end"] = (
-                            datetime.max
-                            if kwargs.get("interval_end") is None
-                            else kwargs.get("interval_end")
-                        )
-
-                return sqlalchemy.text(query_value).bindparams(**params)
-
-        def type_adapter_callback(sql_type):
-            if isinstance(sql_type, mysql.SET):
-                return sa.JSON
-            return sql_type
+            # override the query adapters, the only one we want is the one here in the case of custom queries
+            query_adapters = [custom_query_variable_subsitution(query_value, kwargs)]
 
         builder_res = self.table_builder(
             credentials=ConnectionStringCredentials(uri),
@@ -237,8 +216,8 @@ class SqlSource:
             incremental=incremental,
             backend=sql_backend,
             chunk_size=kwargs.get("page_size", None),
-            reflection_level=reflection_level,
-            query_adapter_callback=query_adapter_callback,
+            reflection_level=kwargs.get("sql_reflection_level", None),
+            query_adapter_callback=chained_query_adapter_callback(query_adapters),
             type_adapter_callback=type_adapter_callback,
             table_adapter_callback=table_adapter_exclude_columns(
                 kwargs.get("sql_exclude_columns", [])
@@ -268,6 +247,8 @@ class ArrowMemoryMappedSource:
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
+                range_end="closed",
+                range_start="closed",
             )
 
         file_path = uri.split("://")[1]
@@ -313,6 +294,8 @@ class MongoDbSource:
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
+                range_end="closed",
+                range_start="closed",
             )
 
         table_instance = self.table_builder(
@@ -381,6 +364,8 @@ class LocalCsvSource:
                 kwargs.get("incremental_key", ""),
                 initial_value=kwargs.get("interval_start"),
                 end_value=kwargs.get("interval_end"),
+                range_end="closed",
+                range_start="closed",
             )
         )
 
@@ -1339,6 +1324,8 @@ class DynamoDBSource:
                 incremental_key.strip(),
                 initial_value=isotime(kwargs.get("interval_start")),
                 end_value=isotime(kwargs.get("interval_end")),
+                range_end="closed",
+                range_start="closed",
             )
 
         return dynamodb(table, creds, incremental)
@@ -1364,11 +1351,6 @@ class GoogleAnalyticsSource:
         if not property_id:
             raise ValueError("property_id is required to connect to Google Analytics")
 
-        interval_start = kwargs.get("interval_start")
-        start_date = (
-            interval_start.strftime("%Y-%m-%d") if interval_start else "2015-08-14"
-        )
-
         fields = table.split(":")
         if len(fields) != 3:
             raise ValueError(
@@ -1392,13 +1374,136 @@ class GoogleAnalyticsSource:
             {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
         ]
 
+        start_date = pendulum.now().subtract(days=30).start_of("day")
+        if kwargs.get("interval_start") is not None:
+            start_date = pendulum.instance(kwargs.get("interval_start"))  # type: ignore
+
+        end_date = pendulum.now()
+        if kwargs.get("interval_end") is not None:
+            end_date = pendulum.instance(kwargs.get("interval_end"))  # type: ignore
+
         return google_analytics(
             property_id=property_id[0],
             start_date=start_date,
-            datetime=datetime,
+            end_date=end_date,
+            datetime_dimension=datetime,
             queries=queries,
             credentials=credentials,
         ).with_resources("basic_report")
+
+
+class GitHubSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Github takes care of incrementality on its own, you should not provide incremental_key"
+            )
+        # github://?access_token=<access_token>&owner=<owner>&repo=<repo>
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        owner = source_fields.get("owner", [None])[0]
+        if not owner:
+            raise ValueError(
+                "owner of the repository is required to connect with GitHub"
+            )
+
+        repo = source_fields.get("repo", [None])[0]
+        if not repo:
+            raise ValueError(
+                "repo variable is required to retrieve data for a specific repository from GitHub."
+            )
+
+        access_token = source_fields.get("access_token", [""])[0]
+
+        if table in ["issues", "pull_requests"]:
+            return github_reactions(
+                owner=owner, name=repo, access_token=access_token
+            ).with_resources(table)
+        elif table == "repo_events":
+            return github_repo_events(owner=owner, name=repo, access_token=access_token)
+        elif table == "stargazers":
+            return github_stargazers(owner=owner, name=repo, access_token=access_token)
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for GitHub source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+
+class AppleAppStoreSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def init_client(
+        self,
+        key_id: str,
+        issuer_id: str,
+        key_path: Optional[List[str]],
+        key_base64: Optional[List[str]],
+    ):
+        key = None
+        if key_path is not None:
+            with open(key_path[0]) as f:
+                key = f.read()
+        else:
+            key = base64.b64decode(key_base64[0]).decode()  # type: ignore
+
+        return AppStoreConnectClient(key.encode(), key_id, issuer_id)
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "App Store takes care of incrementality on its own, you should not provide incremental_key"
+            )
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        key_id = params.get("key_id")
+        if key_id is None:
+            raise MissingValueError("key_id", "App Store")
+
+        key_path = params.get("key_path")
+        key_base64 = params.get("key_base64")
+        key_available = any(
+            map(
+                lambda x: x is not None,
+                [key_path, key_base64],
+            )
+        )
+        if key_available is False:
+            raise MissingValueError("key_path or key_base64", "App Store")
+
+        issuer_id = params.get("issuer_id")
+        if issuer_id is None:
+            raise MissingValueError("issuer_id", "App Store")
+
+        client = self.init_client(key_id[0], issuer_id[0], key_path, key_base64)
+
+        app_ids = params.get("app_id")
+        if ":" in table:
+            intended_table, app_ids_override = table.split(":", maxsplit=1)
+            app_ids = app_ids_override.split(",")
+            table = intended_table
+
+        if app_ids is None:
+            raise MissingValueError("app_id", "App Store")
+
+        src = app_store(
+            client,
+            app_ids,
+            start_date=kwargs.get(
+                "interval_start", datetime.now() - timedelta(days=30)
+            ),
+            end_date=kwargs.get("interval_end"),
+        )
+
+        if table not in src.resources:
+            raise UnsupportedResourceError(table, "AppStore")
+
+        return src.with_resources(table)
 
 
 class LinkedInAdsSource:

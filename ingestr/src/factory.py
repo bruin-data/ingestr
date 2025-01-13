@@ -18,12 +18,14 @@ from ingestr.src.destinations import (
 from ingestr.src.sources import (
     AdjustSource,
     AirtableSource,
+    AppleAppStoreSource,
     AppsflyerSource,
     ArrowMemoryMappedSource,
     AsanaSource,
     ChessSource,
     DynamoDBSource,
     FacebookAdsSource,
+    GitHubSource,
     GoogleAnalyticsSource,
     GoogleSheetsSource,
     GorgiasSource,
@@ -104,6 +106,7 @@ class SourceDestinationFactory:
         "gsheets": GoogleSheetsSource,
         "shopify": ShopifySource,
         "gorgias": GorgiasSource,
+        "github": GitHubSource,
         "chess": ChessSource,
         "stripe": StripeAnalyticsSource,
         "facebookads": FacebookAdsSource,
@@ -121,6 +124,7 @@ class SourceDestinationFactory:
         "asana": AsanaSource,
         "tiktok": TikTokSource,
         "googleanalytics": GoogleAnalyticsSource,
+        "appstore": AppleAppStoreSource,
         "linkedinads": LinkedInAdsSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {

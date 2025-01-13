@@ -32,7 +32,7 @@ DATE_FORMATS = [
 
 # https://dlthub.com/docs/dlt-ecosystem/file-formats/parquet#supported-destinations
 PARQUET_SUPPORTED_DESTINATIONS = [
-    "bigquery",
+    "athena" "bigquery",
     "duckdb",
     "snowflake",
     "databricks",
@@ -57,8 +57,9 @@ class SpinnerCollector(Collector):
         name: str,
         inc: int = 1,
         total: Optional[int] = None,
-        message: Optional[str] = None,
+        message: Optional[str] = None,  # type: ignore
         label: str = "",
+        **kwargs,
     ) -> None:
         self.status.update(self.current_step)
 
@@ -287,8 +288,14 @@ def ingest(
             envvar="SQL_EXCLUDE_COLUMNS",
         ),
     ] = [],  # type: ignore
+    columns: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            help="The column types to be used for the destination table in the format of 'column_name:column_type'",
+            envvar="COLUMNS",
+        ),
+    ] = None,  # type: ignore
 ):
-    # TODO(turtledev): can't we move this to the top of this file?
     import hashlib
     import tempfile
     from datetime import datetime
@@ -296,6 +303,7 @@ def ingest(
     import dlt
     import humanize
     import typer
+    from dlt.common.data_types import TDataType
     from dlt.common.destination import Destination
     from dlt.common.pipeline import LoadInfo
     from dlt.common.runtime.collector import Collector, LogCollector
@@ -345,7 +353,7 @@ def ingest(
             not in dlt_dest.capabilities().supported_loader_file_formats
         ):
             print(
-                f"[red]Loader file format {loader_file_format.value} is not supported by the destination.[/red]"
+                f"[red]Loader file format {loader_file_format.value} is not supported by the destination, available formats: {dlt_dest.capabilities().supported_loader_file_formats}.[/red]"
             )
             raise typer.Abort()
 
@@ -356,6 +364,23 @@ def ingest(
                 executable(source.resources[res])
         else:
             executable(source)
+
+    def parse_columns(columns: list[str]) -> dict[str, TDataType]:
+        from typing import cast, get_args
+
+        possible_types = get_args(TDataType)
+
+        types: dict[str, TDataType] = {}
+        for column in columns:
+            for candidate in column.split(","):
+                column_name, column_type = candidate.split(":")
+                if column_type not in possible_types:
+                    print(
+                        f"[red]Column type '{column_type}' is not supported, supported types: {possible_types}.[/red]"
+                    )
+                    raise typer.Abort()
+                types[column_name] = cast(TDataType, column_type)
+        return types
 
     track(
         "command_triggered",
@@ -399,19 +424,27 @@ def ingest(
         column_hints: dict[str, TColumnSchema] = {}
         original_incremental_strategy = incremental_strategy
 
+        if columns:
+            column_types = parse_columns(columns)
+            for column_name, column_type in column_types.items():
+                column_hints[column_name] = {"data_type": column_type}
+
         merge_key = None
         if incremental_strategy == IncrementalStrategy.delete_insert:
             merge_key = incremental_key
             incremental_strategy = IncrementalStrategy.merge
             if incremental_key:
-                column_hints[incremental_key] = {"merge_key": True}
+                if incremental_key not in column_hints:
+                    column_hints[incremental_key] = {}
+
+                column_hints[incremental_key]["merge_key"] = True
 
         m = hashlib.sha256()
         m.update(dest_table.encode("utf-8"))
 
         progressInstance: Collector = SpinnerCollector()
         if progress == Progress.log:
-            progressInstance = LogCollector(dump_system_stats=False)
+            progressInstance = LogCollector()
 
         is_pipelines_dir_temp = False
         if pipelines_dir is None:
@@ -490,6 +523,21 @@ def ingest(
 
         if factory.source_scheme == "sqlite":
             source_table = "main." + source_table.split(".")[-1]
+
+        if (
+            incremental_key
+            and incremental_key in column_hints
+            and "data_type" in column_hints[incremental_key]
+            and column_hints[incremental_key]["data_type"] == "date"
+        ):
+            # By default, ingestr treats the start and end dates as datetime objects. While this worked fine for many cases, if the
+            # incremental field is a date, the start and end dates cannot be compared to the incremental field, and the ingestion would fail.
+            # In order to eliminate this, we have introduced a new option to ingestr, --columns, which allows the user to specify the column types for the destination table.
+            # This way, ingestr will know the data type of the incremental field, and will be able to convert the start and end dates to the correct data type before running the ingestion.
+            if interval_start:
+                interval_start = interval_start.date()  # type: ignore
+            if interval_end:
+                interval_end = interval_end.date()  # type: ignore
 
         dlt_source = source.dlt_source(
             uri=source_uri,
