@@ -18,6 +18,7 @@ from ingestr.src.destinations import (
 from ingestr.src.sources import (
     AdjustSource,
     AirtableSource,
+    AppleAppStoreSource,
     AppsflyerSource,
     ArrowMemoryMappedSource,
     AsanaSource,
@@ -122,6 +123,7 @@ class SourceDestinationFactory:
         "asana": AsanaSource,
         "tiktok": TikTokSource,
         "googleanalytics": GoogleAnalyticsSource,
+        "appstore": AppleAppStoreSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

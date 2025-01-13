@@ -3,7 +3,7 @@ import csv
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import (
     Any,
     Callable,
@@ -46,10 +46,16 @@ from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
+from ingestr.src.appstore import app_store
+from ingestr.src.appstore.client import AppStoreConnectClient
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
 from ingestr.src.dynamodb import dynamodb
+from ingestr.src.errors import (
+    MissingValueError,
+    UnsupportedResourceError,
+)
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
@@ -1424,3 +1430,76 @@ class GitHubSource:
             raise ValueError(
                 f"Resource '{table}' is not supported for GitHub source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
+
+
+class AppleAppStoreSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def init_client(
+        self,
+        key_id: str,
+        issuer_id: str,
+        key_path: Optional[List[str]],
+        key_base64: Optional[List[str]],
+    ):
+        key = None
+        if key_path is not None:
+            with open(key_path[0]) as f:
+                key = f.read()
+        else:
+            key = base64.b64decode(key_base64[0]).decode()  # type: ignore
+
+        return AppStoreConnectClient(key.encode(), key_id, issuer_id)
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "App Store takes care of incrementality on its own, you should not provide incremental_key"
+            )
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        key_id = params.get("key_id")
+        if key_id is None:
+            raise MissingValueError("key_id", "App Store")
+
+        key_path = params.get("key_path")
+        key_base64 = params.get("key_base64")
+        key_available = any(
+            map(
+                lambda x: x is not None,
+                [key_path, key_base64],
+            )
+        )
+        if key_available is False:
+            raise MissingValueError("key_path or key_base64", "App Store")
+
+        issuer_id = params.get("issuer_id")
+        if issuer_id is None:
+            raise MissingValueError("issuer_id", "App Store")
+
+        client = self.init_client(key_id[0], issuer_id[0], key_path, key_base64)
+
+        app_ids = params.get("app_id")
+        if ":" in table:
+            intended_table, app_ids_override = table.split(":", maxsplit=1)
+            app_ids = app_ids_override.split(",")
+            table = intended_table
+
+        if app_ids is None:
+            raise MissingValueError("app_id", "App Store")
+
+        src = app_store(
+            client,
+            app_ids,
+            start_date=kwargs.get(
+                "interval_start", datetime.now() - timedelta(days=30)
+            ),
+            end_date=kwargs.get("interval_end"),
+        )
+
+        if table not in src.resources:
+            raise UnsupportedResourceError(table, "AppStore")
+
+        return src.with_resources(table)
