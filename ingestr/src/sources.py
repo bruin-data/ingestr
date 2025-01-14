@@ -1535,7 +1535,7 @@ class GCSSource:
             )
         bucket_url = f"gs://{bucket_name}/"
 
-        path_to_file = parsed_uri.path.lstrip("/") or table.strip()
+        path_to_file = parsed_uri.path.lstrip("/") or table.lstrip("/")
         if not path_to_file:
             raise ValueError("--source-table must be specified")
 
