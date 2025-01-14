@@ -2568,19 +2568,14 @@ def test_appstore(dest, test_case):
     dest.stop()
 
 
-class FileSystem(MemoryFileSystem):
-    def glob(self, *args, **kwargs):
-        result = super().glob(*args, **kwargs)
-        if not isinstance(result, dict):
-            return result
-        return {k: self._with_updated(v) for k, v in result.items()}
-
-    def _with_updated(self, item):
-        return {**item, "updated": item["created"]}
-
-
-@pytest.fixture
-def filesystem_with_testdata() -> AbstractFileSystem:
+def fs_test_cases(
+        protocol: str,
+        target_fs: str,
+        auth: str,
+) -> Iterable[Callable]:
+    """
+    Tests for filesystem based sources
+    """
     testdata = (
         "name,phone,email,country\n"
         "Rajah Roach,1-459-646-7421,adipiscing.ligula@outlook.net,Austria\n"
@@ -2593,44 +2588,34 @@ def filesystem_with_testdata() -> AbstractFileSystem:
         "name,phone,email,country\n"
         "Irene Douglas,(223) 971-6463,flying.fish.kick@gmail.com,UK\n"
     )
-    fs = FileSystem()
+    test_fs = MemoryFileSystem()
 
     # for CSV tests
-    with fs.open("/data.csv", "w") as f:
+    with test_fs.open("/data.csv", "w") as f:
         f.write(testdata)
 
     # for Glob tests
-    with fs.open("/data2.csv", "w") as f:
+    with test_fs.open("/data2.csv", "w") as f:
         f.write(testdata_extended)
 
     # For Parquet tests
-    with fs.open("/data.parquet", "wb") as f:
+    with test_fs.open("/data.parquet", "wb") as f:
         table = pa.csv.read_csv(io.BytesIO(testdata.encode()))
         pya_parquet.write_table(table, f)
 
     # For JSONL tests
-    with fs.open("/data.jsonl", "w") as f:
+    with test_fs.open("/data.jsonl", "w") as f:
         reader = csv.DictReader(io.StringIO(testdata))
         for row in reader:
             json.dump(row, f)
             f.write("\n")
 
     # for testing unsupported files
-    with fs.open("/bin/data.bin", "w") as f:
+    with test_fs.open("/bin/data.bin", "w") as f:
         f.write("BINARY")
 
-    return fs
-
-
-def gcs_test_cases() -> Iterable[Callable]:
-    # TODO: generalise these for s3
-    empty_credentials = "e30K"  # base 64 for "{}"
-
-    def glob_files_override(*args):
-        files = glob_files(*args)
-        for file in files:
-            file["file_url"] = file["file_url"].removeprefix("gs://")
-            yield file
+    def glob_files_override(fs_client, _, file_glob):
+        return glob_files(fs_client, "memory://", file_glob)
 
     def assert_rows(dest_uri, dest_table, n):
         engine = sqlalchemy.create_engine(dest_uri)
@@ -2638,26 +2623,28 @@ def gcs_test_cases() -> Iterable[Callable]:
         assert len(rows) == 1
         assert rows[0] == (n,)
 
-    def test_empty_source_uri(dest_uri, fs):
+    def test_empty_source_uri(dest_uri):
         """
         When the source URI is empty, an error should be raised.
         """
         result = invoke_ingest_command(
-            f"gs://bucket?credentials_base64={empty_credentials}", "", dest_uri, "test"
+            f"{protocol}://bucket?{auth}", "", dest_uri, "test"
         )
         assert has_exception(result.exception, ValueError)
 
-    def test_unsupported_file_format(dest_uri, fs):
+    def test_unsupported_file_format(dest_uri):
         """
         When the source file is not one of [csv, parquet, jsonl] it should
         raise an exception
         """
-        with patch("ingestr.src.sources.gcsfs.GCSFileSystem") as gcsfs_mock:
-            gcsfs_mock.return_value = filesystem_with_testdata
-            schema_rand_prefix = f"testschema_gcs_{get_random_string(5)}"
-            dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
+        with (
+            patch(target_fs),
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
             result = invoke_ingest_command(
-                f"gs://bucket?credentials_base64={empty_credentials}",
+                f"{protocol}://bucket?{auth}",
                 "/bin/data.bin",
                 dest_uri,
                 dest_table,
@@ -2665,35 +2652,33 @@ def gcs_test_cases() -> Iterable[Callable]:
             assert result.exit_code != 0
             assert has_exception(result.exception, ValueError)
 
-    def test_missing_credentials(dest_uri, fs):
+    def test_missing_credentials(dest_uri):
         """
         When the credentials are missing, an error should be raised.
         """
-        with patch("ingestr.src.sources.gcsfs.GCSFileSystem") as gcsfs_mock:
-            gcsfs_mock.return_value = fs
-            schema_rand_prefix = f"testschema_gcs_{get_random_string(5)}"
-            dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
-            result = invoke_ingest_command(
-                "gs://bucket",
-                "data.csv",
-                dest_uri,
-                dest_table,
-            )
-            assert result.exit_code != 0
+        schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+        dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+        result = invoke_ingest_command(
+            f"{protocol}://bucket",
+            "/data.csv",
+            dest_uri,
+            dest_table,
+        )
+        assert result.exit_code != 0
 
-    def test_csv_load(dest_uri, fs):
+    def test_csv_load(dest_uri):
         """
         When the source URI is a CSV file, the data should be ingested.
         """
         with (
-            patch("ingestr.src.sources.gcsfs.GCSFileSystem") as gcsfs_mock,
+            patch(target_fs) as target_fs_mock,
             patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
         ):
-            gcsfs_mock.return_value = fs
-            schema_rand_prefix = f"testschema_gcs_{get_random_string(5)}"
-            dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
             result = invoke_ingest_command(
-                f"gs://bucket?credentials_base64={empty_credentials}",
+                f"{protocol}://bucket?{auth}",
                 "/data.csv",
                 dest_uri,
                 dest_table,
@@ -2701,19 +2686,19 @@ def gcs_test_cases() -> Iterable[Callable]:
             assert result.exit_code == 0
             assert_rows(dest_uri, dest_table, 5)
 
-    def test_parquet_load(dest_uri, fs):
+    def test_parquet_load(dest_uri):
         """
         When the source URI is a Parquet file, the data should be ingested.
         """
         with (
-            patch("ingestr.src.sources.gcsfs.GCSFileSystem") as gcsfs_mock,
+            patch(target_fs) as target_fs_mock,
             patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
         ):
-            gcsfs_mock.return_value = fs
-            schema_rand_prefix = f"testschema_gcs_{get_random_string(5)}"
-            dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
             result = invoke_ingest_command(
-                f"gs://bucket?credentials_base64={empty_credentials}",
+                f"{protocol}://bucket?{auth}",
                 "/data.parquet",
                 dest_uri,
                 dest_table,
@@ -2721,19 +2706,19 @@ def gcs_test_cases() -> Iterable[Callable]:
             assert result.exit_code == 0
             assert_rows(dest_uri, dest_table, 5)
 
-    def test_jsonl_load(dest_uri, fs):
+    def test_jsonl_load(dest_uri):
         """
         When the source URI is a JSONL file, the data should be ingested.
         """
         with (
-            patch("ingestr.src.sources.gcsfs.GCSFileSystem") as gcsfs_mock,
+            patch(target_fs) as target_fs_mock,
             patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
         ):
-            gcsfs_mock.return_value = fs
-            schema_rand_prefix = f"testschema_gcs_{get_random_string(5)}"
-            dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
             result = invoke_ingest_command(
-                f"gs://bucket?credentials_base64={empty_credentials}",
+                f"{protocol}://bucket?{auth}",
                 "/data.jsonl",
                 dest_uri,
                 dest_table,
@@ -2741,19 +2726,19 @@ def gcs_test_cases() -> Iterable[Callable]:
             assert result.exit_code == 0
             assert_rows(dest_uri, dest_table, 5)
 
-    def test_glob_load(dest_uri, fs):
+    def test_glob_load(dest_uri):
         """
         When the source URI is a glob pattern, all files matching the pattern should be ingested
         """
         with (
-            patch("ingestr.src.sources.gcsfs.GCSFileSystem") as gcsfs_mock,
+            patch(target_fs) as target_fs_mock,
             patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
         ):
-            gcsfs_mock.return_value = fs
-            schema_rand_prefix = f"testschema_gcs_{get_random_string(5)}"
-            dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
             result = invoke_ingest_command(
-                f"gs://bucket?credentials_base64={empty_credentials}",
+                f"{protocol}://bucket?{auth}",
                 "/*.csv",
                 dest_uri,
                 dest_table,
@@ -2775,7 +2760,29 @@ def gcs_test_cases() -> Iterable[Callable]:
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
-@pytest.mark.parametrize("test_case", gcs_test_cases())
-def test_gcs(dest, test_case, filesystem_with_testdata):
-    test_case(dest.start(), filesystem_with_testdata)
+@pytest.mark.parametrize(
+    "test_case",
+    fs_test_cases(
+        "gs",
+        "ingestr.src.sources.gcsfs.GCSFileSystem",
+        "credentials_base64=e30K", # base 64 for "{}"
+    ),
+)
+def test_gcs(dest, test_case):
+    test_case(dest.start())
+    dest.stop()
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize(
+    "test_case",
+    fs_test_cases(
+        "s3",
+        "ingestr.src.sources.s3fs.S3FileSystem",
+        "access_key_id=KEY&secret_access_key=SECRET"
+    )
+)
+def test_s3(dest, test_case):
+    test_case( dest.start())
     dest.stop()
