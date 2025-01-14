@@ -18,6 +18,7 @@ from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
 import gcsfs  # type: ignore
+import s3fs # type: ignore
 import pendulum
 from dlt.common.configuration.specs import (
     AwsCredentials,
@@ -1096,13 +1097,13 @@ class S3Source:
             )
         bucket_url = f"s3://{bucket_name}"
 
-        path_to_file = parsed_uri.path.lstrip("/") or table.strip()
+        path_to_file = parsed_uri.path.lstrip("/") or table.lstrip("/")
         if not path_to_file:
             raise ValueError("--source-table must be specified")
 
-        aws_credentials = AwsCredentials(
-            aws_access_key_id=access_key_id[0],
-            aws_secret_access_key=TSecretStrValue(secret_access_key[0]),
+        fs = s3fs.S3FileSystem(
+            key=access_key_id[0],
+            secret=secret_access_key[0],
         )
 
         file_extension = path_to_file.split(".")[-1]
@@ -1118,7 +1119,7 @@ class S3Source:
             )
 
         return readers(
-            bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
+            bucket_url, fs, path_to_file
         ).with_resources(endpoint)
 
 
@@ -1566,5 +1567,5 @@ class GCSSource:
             )
 
         return readers(
-            bucket_url=bucket_url, credentials=fs, file_glob=path_to_file
+            bucket_url, fs, path_to_file
         ).with_resources(endpoint)
