@@ -4,6 +4,7 @@ import dlt
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
 from pendulum import Date
+import pendulum
 
 from .helpers import LinkedInAdsAPI, find_intervals
 from .metrics_dimenison_enum import Dimension, Metric, TimeGranularity
@@ -36,19 +37,20 @@ def linked_in_ads_source(
 
     @dlt.resource(write_disposition="merge", primary_key=primary_key)
     def custom_reports(
-        dateTime=(dlt.sources.incremental(incremental_loading_param, start_date)),
+        dateTime=(dlt.sources.incremental(incremental_loading_param, initial_value=start_date, end_value=end_date,range_start="closed",range_end="closed")),
     ) -> Iterable[TDataItem]:
-        datetime_value = dateTime.last_value
-        start_date = datetime_value
-        print(f"start_date: {start_date}, end_date: {end_date}")
+       
+        if dateTime.end_value is None:
+            end_date = pendulum.now().date()
+        else:
+            end_date = dateTime.end_value
 
         list_of_interval = find_intervals(
-            start_date=start_date,
+            start_date=dateTime.last_value,
             end_date=end_date,
             time_granularity=time_granularity,
         )
-
         for start, end in list_of_interval:
-            yield linkedin_api.fetch_pages(start, end)
+           yield linkedin_api.fetch_pages(start, end)
 
     return custom_reports
