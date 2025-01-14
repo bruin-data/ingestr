@@ -1531,9 +1531,15 @@ class LinkedInAdsSource:
 
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
-        start_date = ensure_pendulum_datetime(interval_start).date() if interval_start else pendulum.datetime(2018, 1, 1).date()
-        end_date = ensure_pendulum_datetime(interval_end).date() if interval_end else None
-    
+        start_date = (
+            ensure_pendulum_datetime(interval_start).date()
+            if interval_start
+            else pendulum.datetime(2018, 1, 1).date()
+        )
+        end_date = (
+            ensure_pendulum_datetime(interval_end).date() if interval_end else None
+        )
+
         fields = table.split(":")
         if len(fields) != 3:
             raise ValueError(

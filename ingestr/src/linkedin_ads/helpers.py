@@ -68,7 +68,7 @@ def find_intervals(start_date: Date, end_date: Date, time_granularity: TimeGranu
             next_date = min(start_date.add(months=6), end_date)
         else:
             next_date = min(start_date.add(years=2), end_date)
-        
+
         intervals.append((start_date, next_date))
 
         start_date = next_date.add(days=1)

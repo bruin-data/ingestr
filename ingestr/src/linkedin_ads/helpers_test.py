@@ -1,10 +1,14 @@
 import pendulum
-from ingestr.src.linkedin_ads.metrics_dimenison_enum import Dimension, Metric, TimeGranularity
 
 from ingestr.src.linkedin_ads.helpers import (
     construct_url,
     find_intervals,
     flat_structure,
+)
+from ingestr.src.linkedin_ads.metrics_dimenison_enum import (
+    Dimension,
+    Metric,
+    TimeGranularity,
 )
 
 
@@ -73,7 +77,9 @@ def test_flat_structure_linkedin_ads():
 
     assert (
         flat_structure(
-            items_monthly, pivot=Dimension.campaign, time_granularity=TimeGranularity.monthly
+            items_monthly,
+            pivot=Dimension.campaign,
+            time_granularity=TimeGranularity.monthly,
         )
         == expected_output_monthly
     )

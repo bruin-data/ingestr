@@ -13,7 +13,7 @@ linkedinads://?access_token=<access_token>&account_ids=<account_ids>
 - `access_token`(required): It is used for authentication and is necessary to access data and reports through the LinkedIn Ads API. The access token lets your app access data using the permissions you set in the Developer App for your LinkedIn account.
 - `account_ids`(required): The comma-separated list of Ad Account IDs specifies the LinkedIn Ad Accounts for which you want to retrieve data. These IDs uniquely identify the LinkedIn Ad Accounts associated with a company, business, or individual, depending on the ownership of the Ad Accounts. They are required to fetch data for campaigns, creatives, and other related resources.
 
-[LinkedIn Ads] requires an `access_token` and `account_ids` to retrieve reports from the [LinkedIn Ads API](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder) . Please follow these steps to obtain the `access_token` and `account_ids`
+LinkedIn Ads requires an `access_token` and `account_ids` to retrieve reports from the [LinkedIn Ads API](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder). Please follow these steps to obtain the `access_token` and `account_ids`
 
 ### Create a LinkedIn developer application to obtain an access token
 1. Log in to LinkedIn with a [developer account](https://www.linkedin.com/developers)
@@ -24,16 +24,16 @@ linkedinads://?access_token=<access_token>&account_ids=<account_ids>
     - Your company logo
 - Accept the terms and click "Create App"
 3. To verify your app:
-   - Go to "Settings tab"
+   - Go to "Settings" tab
    - Find "App Settings"
-   - Click "Verify under Company"
+   - Click "Verify" under Company
    - Click "Generate URL"
    - Send this URL to your Page Admin 
    - Click "I'm done" and open the URL in a new tab to verify, if you are the admin of your page.
-   -  Go to the "Products" tab, click "Request access" for the Advertising API. It will take about few minutes to get approved and then you need to fill out the form where you have to provide your company name, website, and other details.
+   -  Go to the "Products" tab, and click "Request access" for the Advertising API. It will take about a few minutes to get approved and then you need to fill out the form where you have to provide your company name, website, and other details.
 
 #### Authorize your app and obtain access token
-1. Go to the Auth tab
+1. Go to the "Auth" tab
 4. Click "OAuth 2.0 tools" which is on top right corner of the page [link](https://www.linkedin.com/developers/tools/oauth)
 5. Click "Create token"
 6. Choose these permissions:
