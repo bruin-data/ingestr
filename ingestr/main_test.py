@@ -2589,11 +2589,19 @@ def filesystem_with_testdata() -> AbstractFileSystem:
         "Damian Velasquez,(462) 744-9637,phasellus.fermentum@outlook.ca,South Africa\n"
         "Rina Nicholson,(201) 971-6463,neque.nullam.ut@yahoo.net,Brazil\n"
     )
+    testdata_extended = (
+        "name,phone,email,country\n"
+        "Irene Douglas,(223) 971-6463,flying.fish.kick@gmail.com,UK\n"
+    )
     fs = FileSystem()
 
     # for CSV tests
     with fs.open("/data.csv", "w") as f:
         f.write(testdata)
+
+    # for Glob tests
+    with fs.open("/data2.csv", "w") as f:
+        f.write(testdata_extended)
 
     # For Parquet tests
     with fs.open("/data.parquet", "wb") as f:
@@ -2624,11 +2632,11 @@ def gcs_test_cases() -> Iterable[Callable]:
             file["file_url"] = file["file_url"].removeprefix("gs://")
             yield file
 
-    def assert_data_load(dest_uri, dest_table):
+    def assert_rows(dest_uri, dest_table, n):
         engine = sqlalchemy.create_engine(dest_uri)
         rows = engine.execute(f"select count(*) from {dest_table}").fetchall()
         assert len(rows) == 1
-        assert rows[0] == (5,)
+        assert rows[0] == (n,)
 
     def test_empty_source_uri(dest_uri, fs):
         """
@@ -2691,7 +2699,7 @@ def gcs_test_cases() -> Iterable[Callable]:
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_data_load(dest_uri, dest_table)
+            assert_rows(dest_uri, dest_table, 5)
 
     def test_parquet_load(dest_uri, fs):
         """
@@ -2711,7 +2719,7 @@ def gcs_test_cases() -> Iterable[Callable]:
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_data_load(dest_uri, dest_table)
+            assert_rows(dest_uri, dest_table, 5)
 
     def test_jsonl_load(dest_uri, fs):
         """
@@ -2731,13 +2739,27 @@ def gcs_test_cases() -> Iterable[Callable]:
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_data_load(dest_uri, dest_table)
+            assert_rows(dest_uri, dest_table, 5)
 
-    def test_glob_load(dest_uri):
+    def test_glob_load(dest_uri, fs):
         """
         When the source URI is a glob pattern, all files matching the pattern should be ingested
         """
-        pass
+        with (
+            patch("ingestr.src.sources.gcsfs.GCSFileSystem") as gcsfs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            gcsfs_mock.return_value = fs
+            schema_rand_prefix = f"testschema_gcs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.gcs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"gs://bucket?credentials_base64={empty_credentials}",
+                "/*.csv",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 6)
 
     return [
         test_empty_source_uri,
@@ -2746,6 +2768,7 @@ def gcs_test_cases() -> Iterable[Callable]:
         test_csv_load,
         test_parquet_load,
         test_jsonl_load,
+        test_glob_load,
     ]
 
 
