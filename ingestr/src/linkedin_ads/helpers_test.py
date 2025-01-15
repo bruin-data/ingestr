@@ -1,14 +1,13 @@
 import pendulum
 
+from ingestr.src.linkedin_ads.dimension_time_enum import (
+    Dimension,
+    TimeGranularity,
+)
 from ingestr.src.linkedin_ads.helpers import (
     construct_url,
     find_intervals,
     flat_structure,
-)
-from ingestr.src.linkedin_ads.metrics_dimenison_enum import (
-    Dimension,
-    Metric,
-    TimeGranularity,
 )
 
 
@@ -121,7 +120,7 @@ def test_construct_url_linkedin_ads():
     start = pendulum.date(2024, 1, 1)
     end = pendulum.date(2024, 12, 31)
     account_ids = ["123456", "456789"]
-    metrics = [Metric.impressions, Metric.clicks, Metric.likes]
+    metrics = ["impressions", "clicks", "likes"]
     dimension = Dimension.campaign
     time_granularity = TimeGranularity.monthly
 
@@ -135,7 +134,7 @@ def test_construct_url_linkedin_ads():
             end=pendulum.date(2024, 12, 31),
             account_ids=["123456"],
             dimension=Dimension.creative,
-            metrics=[Metric.impressions, Metric.clicks, Metric.likes],
+            metrics=["impressions", "clicks", "likes"],
             time_granularity=TimeGranularity.monthly,
         )
         == "https://api.linkedin.com/rest/adAnalytics?q=analytics&timeGranularity=MONTHLY&dateRange=(start:(year:2019,month:1,day:1),end:(year:2024,month:12,day:31))&accounts=List(urn%3Ali%3AsponsoredAccount%3A123456)&pivot=CREATIVE&fields=impressions,clicks,likes"

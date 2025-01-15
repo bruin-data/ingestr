@@ -6,8 +6,8 @@ from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
 from pendulum import Date
 
+from .dimension_time_enum import Dimension, TimeGranularity
 from .helpers import LinkedInAdsAPI, find_intervals
-from .metrics_dimenison_enum import Dimension, Metric, TimeGranularity
 
 
 @dlt.source(max_table_nesting=0)
@@ -17,7 +17,7 @@ def linked_in_ads_source(
     access_token: str,
     account_ids: list[str],
     dimension: Dimension,
-    metrics: list[Metric],
+    metrics: list[str],
     time_granularity: TimeGranularity,
 ) -> DltResource:
     linkedin_api = LinkedInAdsAPI(

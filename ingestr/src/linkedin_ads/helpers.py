@@ -5,7 +5,7 @@ import requests
 from dlt.sources.helpers.requests import Client
 from pendulum import Date
 
-from .metrics_dimenison_enum import Dimension, Metric, TimeGranularity
+from .dimension_time_enum import Dimension, TimeGranularity
 
 
 def retry_on_limit(
@@ -80,7 +80,7 @@ def construct_url(
     start: Date,
     end: Date,
     account_ids: list[str],
-    metrics: list[Metric],
+    metrics: list[str],
     dimension: Dimension,
     time_granularity: TimeGranularity,
 ):
@@ -92,7 +92,7 @@ def construct_url(
     encoded_accounts = f"List({accounts})"
     dimension_str = dimension.value.upper()
     time_granularity_str = time_granularity.value
-    metrics_str = ",".join([metric.value for metric in metrics])
+    metrics_str = ",".join([metric for metric in metrics])
 
     url = (
         f"https://api.linkedin.com/rest/adAnalytics?"
@@ -116,7 +116,7 @@ class LinkedInAdsAPI:
         self.time_granularity: TimeGranularity = time_granularity
         self.account_ids: list[str] = account_ids
         self.dimension: Dimension = dimension
-        self.metrics: list[Metric] = metrics
+        self.metrics: list[str] = metrics
         self.headers = {
             "Authorization": f"Bearer {access_token}",
             "Linkedin-Version": "202411",

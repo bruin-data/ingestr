@@ -68,9 +68,8 @@ from ingestr.src.kafka import kafka_consumer
 from ingestr.src.kafka.helpers import KafkaCredentials
 from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.linkedin_ads import linked_in_ads_source
-from ingestr.src.linkedin_ads.metrics_dimenison_enum import (
+from ingestr.src.linkedin_ads.dimension_time_enum import (
     Dimension,
-    Metric,
     TimeGranularity,
 )
 from ingestr.src.mongodb import mongodb_collection
@@ -1571,12 +1570,11 @@ class LinkedInAdsSource:
         dimension = Dimension[dimensions[0]]
 
         metrics = fields[2].replace(" ", "").split(",")
-        list_metrics = [Metric(item) for item in metrics if item.strip()]
-
-        if Metric.dateRange not in list_metrics:
-            list_metrics.append(Metric.dateRange)
-        if Metric.pivotValues not in list_metrics:
-            list_metrics.append(Metric.pivotValues)
+        metrics = [item for item in metrics if item.strip()]
+        if "dateRange" not in metrics:
+            metrics.append("dateRange")
+        if "pivotValues" not in metrics:
+            metrics.append("pivotValues")
 
         return linked_in_ads_source(
             start_date=start_date,
@@ -1584,6 +1582,6 @@ class LinkedInAdsSource:
             access_token=access_token[0],
             account_ids=account_ids,
             dimension=dimension,
-            metrics=list_metrics,
+            metrics=metrics,
             time_granularity=time_granularity,
         ).with_resources("custom_reports")
