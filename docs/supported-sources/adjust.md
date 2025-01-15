@@ -34,6 +34,7 @@ Adjust source allows ingesting data from various sources:
 
 - `campaigns`: Retrieves data for a campaign, showing the app's revenue and network costs over multiple days.
 - `creatives`: Retrieves data for a creative assets, detailing the app's revenue and network costs across multiple days.
+- `events`: Retrieves data for [events](https://dev.adjust.com/en/api/rs-api/events/) and event slugs.
 - `custom`: Retrieves custom data based on the dimensions and metrics specified.
 
 ### Custom reports: `custom:<dimensions>:<metrics>[:<filters>]`
