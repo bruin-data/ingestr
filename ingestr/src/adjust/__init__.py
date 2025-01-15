@@ -56,6 +56,11 @@ def adjust_source(
             filters=filters,
         )
 
+    @dlt.resource(write_disposition="replace", primary_key="id")
+    def events():
+        adjust_api = AdjustAPI(api_key=api_key)
+        yield adjust_api.fetch_events()
+
     @dlt.resource(write_disposition="merge", merge_key="day")
     def creatives():
         adjust_api = AdjustAPI(api_key=api_key)
@@ -68,7 +73,7 @@ def adjust_source(
         )
 
     if not dimensions:
-        return campaigns, creatives
+        return campaigns, creatives, events
 
     merge_key = merge_key
     type_hints = {}
@@ -100,4 +105,4 @@ def adjust_source(
             filters=filters,
         )
 
-    return campaigns, creatives, custom
+    return campaigns, creatives, custom, events

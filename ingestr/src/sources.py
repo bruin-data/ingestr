@@ -17,6 +17,8 @@ from typing import (
 from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
+import gcsfs  # type: ignore
+import s3fs # type: ignore
 import pendulum
 from dlt.common.configuration.specs import (
     AwsCredentials,
@@ -1096,19 +1098,17 @@ class S3Source:
         bucket_name = parsed_uri.hostname
         if not bucket_name:
             raise ValueError(
-                "Invalid S3 URI: The bucket name is missing. Ensure your S3 URI follows the format 's3://bucket-name/path/to/file"
+                "Invalid S3 URI: The bucket name is missing. Ensure your S3 URI follows the format 's3://bucket-name"
             )
         bucket_url = f"s3://{bucket_name}"
 
-        path_to_file = parsed_uri.path.lstrip("/")
+        path_to_file = parsed_uri.path.lstrip("/") or table.lstrip("/")
         if not path_to_file:
-            raise ValueError(
-                "Invalid S3 URI: The file path is missing. Ensure your S3 URI follows the format 's3://bucket-name/path/to/file"
-            )
+            raise ValueError("--source-table must be specified")
 
-        aws_credentials = AwsCredentials(
-            aws_access_key_id=access_key_id[0],
-            aws_secret_access_key=TSecretStrValue(secret_access_key[0]),
+        fs = s3fs.S3FileSystem(
+            key=access_key_id[0],
+            secret=secret_access_key[0],
         )
 
         file_extension = path_to_file.split(".")[-1]
@@ -1124,7 +1124,7 @@ class S3Source:
             )
 
         return readers(
-            bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
+            bucket_url, fs, path_to_file
         ).with_resources(endpoint)
 
 
@@ -1508,6 +1508,72 @@ class AppleAppStoreSource:
             raise UnsupportedResourceError(table, "AppStore")
 
         return src.with_resources(table)
+
+
+class GCSSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "GCS takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        credentials_path = params.get("credentials_path")
+        credentials_base64 = params.get("credentials_base64")
+        credentials_available = any(
+            map(
+                lambda x: x is not None,
+                [credentials_path, credentials_base64],
+            )
+        )
+        if credentials_available is False:
+            raise MissingValueError("credentials_path or credentials_base64", "GCS")
+
+        bucket_name = parsed_uri.hostname
+        if not bucket_name:
+            raise ValueError(
+                "Invalid GCS URI: The bucket name is missing. Ensure your GCS URI follows the format 'gs://bucket-name/path/to/file"
+            )
+        bucket_url = f"gs://{bucket_name}/"
+
+        path_to_file = parsed_uri.path.lstrip("/") or table.lstrip("/")
+        if not path_to_file:
+            raise ValueError("--source-table must be specified")
+
+        credentials = None
+        if credentials_path:
+            credentials = credentials_path[0]
+        else:
+            credentials = json.loads(base64.b64decode(credentials_base64[0]).decode())  # type: ignore
+
+        # There's a compatiblity issue between google-auth, dlt and gcsfs
+        # that makes it difficult to use google.oauth2.service_account.Credentials
+        # (The RECOMMENDED way of passing service account credentials)
+        # directly with gcsfs. As a workaround, we construct the GCSFileSystem
+        # and pass it directly to filesystem.readers.
+        fs = gcsfs.GCSFileSystem(
+            token=credentials,
+        )
+
+        file_extension = path_to_file.split(".")[-1]
+        if file_extension == "csv":
+            endpoint = "read_csv"
+        elif file_extension == "jsonl":
+            endpoint = "read_jsonl"
+        elif file_extension == "parquet":
+            endpoint = "read_parquet"
+        else:
+            raise ValueError(
+                "GCS Source only supports specific formats files: csv, jsonl, parquet"
+            )
+
+        return readers(
+            bucket_url, fs, path_to_file
+        ).with_resources(endpoint)
 
 
 class LinkedInAdsSource:

@@ -25,6 +25,7 @@ from ingestr.src.sources import (
     ChessSource,
     DynamoDBSource,
     FacebookAdsSource,
+    GCSSource,
     GitHubSource,
     GoogleAnalyticsSource,
     GoogleSheetsSource,
@@ -125,6 +126,7 @@ class SourceDestinationFactory:
         "tiktok": TikTokSource,
         "googleanalytics": GoogleAnalyticsSource,
         "appstore": AppleAppStoreSource,
+        "gs": GCSSource,
         "linkedinads": LinkedInAdsSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
