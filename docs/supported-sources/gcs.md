@@ -4,7 +4,7 @@
 
 ## URI format
 
-The URI format for S3 is as follows:
+The URI format for Google Cloud Storage is as follows:
 
 ```plaintext
 gs://<bucket_name>?credentials_path=/path/to/service-account.json>
