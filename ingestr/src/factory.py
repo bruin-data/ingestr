@@ -14,6 +14,7 @@ from ingestr.src.destinations import (
     RedshiftDestination,
     SnowflakeDestination,
     SynapseDestination,
+    ClickhouseDestination,
 )
 from ingestr.src.sources import (
     AdjustSource,
@@ -140,6 +141,7 @@ class SourceDestinationFactory:
         "synapse": SynapseDestination,
         "csv": CsvDestination,
         "athena": AthenaDestination,
+        "clickhouse": ClickhouseDestination,
     }
 
     def __init__(self, source_uri: str, destination_uri: str):

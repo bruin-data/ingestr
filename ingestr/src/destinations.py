@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
 from dlt.common.configuration.specs import AwsCredentials
+from dlt.destinations.impl.clickhouse.configuration import ClickHouseCredentials
 
 
 class GenericSqlDestination:
@@ -261,3 +262,26 @@ class AthenaDestination:
 
     def post_load(self):
         pass
+
+class ClickhouseDestination:
+    def dlt_dest(self, uri: str, **kwargs):
+    
+        connection_string = f""
+        print(f"Using connection string: {connection_string}")
+        credentials = ClickHouseCredentials(
+           connection_string
+        )
+        return dlt.destinations.clickhouse(credentials=credentials)
+
+    def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
+        table_fields = table.split(".")
+        if len(table_fields) != 2:
+            raise ValueError("Table name must be in the format <schema>.<table>")
+        return {
+            "dataset_name": table_fields[-2],
+            "table_name": table_fields[-1],
+        }
+
+    def post_load(self):
+        pass
+    
