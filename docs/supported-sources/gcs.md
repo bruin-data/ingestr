@@ -22,7 +22,7 @@ To use Google Cloud Storage source in `ingestr`, you will need:
 * A Service Account with atleast [roles/storage.objectUser](https://cloud.google.com/storage/docs/access-control/iam-roles) IAM permission.
 * A Service Account key file for the corresponding service account.
 
-For more information on how to create a Service Account or it's keys, see [Create service accounts](https://cloud.google.com/iam/docs/service-accounts-create) and [Create or delete service account keys](https://cloud.google.com/iam/docs/keys-create-delete) on Google cloud docs.
+For more information on how to create a Service Account or it's keys, see [Create service accounts](https://cloud.google.com/iam/docs/service-accounts-create) and [Create or delete service account keys](https://cloud.google.com/iam/docs/keys-create-delete) on Google Cloud docs.
 
 ## Example
 
