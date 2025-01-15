@@ -30,7 +30,7 @@ Let's assume that:
 * Service account key in available in the current directory, under the filename `service_account.json`. 
 * The bucket you want to load data from is called `my-org-bucket`
 * The source file is available at `/data/latest/dump.csv`
-* The data needs to be saved in a duckdb database called `local.db`
+* The data needs to be saved in a DuckDB database called `local.db`
 * The destination table name will be `public.latest_dump`
 
 You can run the following command line to achieve this:
