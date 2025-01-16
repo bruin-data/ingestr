@@ -265,13 +265,18 @@ class AthenaDestination:
 
 class ClickhouseDestination:
     def dlt_dest(self, uri: str, **kwargs):
+         credentials = ClickHouseCredentials(
+            {"host":"localhost",
+            "port":9000,
+            "username":"",
+            "password":"",
+            "database":"",
+            "secure":0,
+            "http_port":8123}
+         )
+        
     
-        connection_string = f""
-        print(f"Using connection string: {connection_string}")
-        credentials = ClickHouseCredentials(
-           connection_string
-        )
-        return dlt.destinations.clickhouse(credentials=credentials)
+         return dlt.destinations.clickhouse(credentials=credentials)
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
         table_fields = table.split(".")
