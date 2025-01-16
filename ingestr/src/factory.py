@@ -33,6 +33,7 @@ from ingestr.src.sources import (
     HubspotSource,
     KafkaSource,
     KlaviyoSource,
+    LinkedInAdsSource,
     LocalCsvSource,
     MongoDbSource,
     NotionSource,
@@ -126,6 +127,7 @@ class SourceDestinationFactory:
         "googleanalytics": GoogleAnalyticsSource,
         "appstore": AppleAppStoreSource,
         "gs": GCSSource,
+        "linkedinads": LinkedInAdsSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

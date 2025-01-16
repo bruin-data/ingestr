@@ -69,6 +69,11 @@ from ingestr.src.hubspot import hubspot
 from ingestr.src.kafka import kafka_consumer
 from ingestr.src.kafka.helpers import KafkaCredentials
 from ingestr.src.klaviyo._init_ import klaviyo_source
+from ingestr.src.linkedin_ads import linked_in_ads_source
+from ingestr.src.linkedin_ads.dimension_time_enum import (
+    Dimension,
+    TimeGranularity,
+)
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
@@ -1569,3 +1574,80 @@ class GCSSource:
         return readers(
             bucket_url, fs, path_to_file
         ).with_resources(endpoint)
+
+
+class LinkedInAdsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        access_token = source_fields.get("access_token")
+        if not access_token:
+            raise ValueError("access_token is required to connect to LinkedIn Ads")
+
+        account_ids = source_fields.get("account_ids")
+
+        if not account_ids:
+            raise ValueError("account_ids is required to connect to LinkedIn Ads")
+        account_ids = account_ids[0].replace(" ", "").split(",")
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+        start_date = (
+            ensure_pendulum_datetime(interval_start).date()
+            if interval_start
+            else pendulum.datetime(2018, 1, 1).date()
+        )
+        end_date = (
+            ensure_pendulum_datetime(interval_end).date() if interval_end else None
+        )
+
+        fields = table.split(":")
+        if len(fields) != 3:
+            raise ValueError(
+                "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
+            )
+
+        dimensions = fields[1].replace(" ", "").split(",")
+        dimensions = [item for item in dimensions if item.strip()]
+        if (
+            "campaign" not in dimensions
+            and "creative" not in dimensions
+            and "account" not in dimensions
+        ):
+            raise ValueError(
+                "'campaign', 'creative' or 'account' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
+            )
+        if "date" not in dimensions and "month" not in dimensions:
+            raise ValueError(
+                "'date' or 'month' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
+            )
+
+        if "date" in dimensions:
+            time_granularity = TimeGranularity.daily
+            dimensions.remove("date")
+        else:
+            time_granularity = TimeGranularity.monthly
+            dimensions.remove("month")
+
+        dimension = Dimension[dimensions[0]]
+
+        metrics = fields[2].replace(" ", "").split(",")
+        metrics = [item for item in metrics if item.strip()]
+        if "dateRange" not in metrics:
+            metrics.append("dateRange")
+        if "pivotValues" not in metrics:
+            metrics.append("pivotValues")
+
+        return linked_in_ads_source(
+            start_date=start_date,
+            end_date=end_date,
+            access_token=access_token[0],
+            account_ids=account_ids,
+            dimension=dimension,
+            metrics=metrics,
+            time_granularity=time_granularity,
+        ).with_resources("custom_reports")
