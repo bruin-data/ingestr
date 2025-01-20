@@ -263,20 +263,26 @@ class AthenaDestination:
     def post_load(self):
         pass
 
+
 class ClickhouseDestination:
     def dlt_dest(self, uri: str, **kwargs):
-         credentials = ClickHouseCredentials(
-            {"host":"localhost",
-            "port":9000,
-            "username":"",
-            "password":"",
-            "database":"",
-            "secure":0,
-            "http_port":8123}
-         )
+        source_fields = urlparse(uri)
+        source_params = parse_qs(source_fields.query)
+        #clickhouse://<host>:<http_port>/<database>?username=<username>&password=<password>&secure=<secure>
         
-    
-         return dlt.destinations.clickhouse(credentials=credentials)
+        credentials = ClickHouseCredentials(
+            {
+                "host": "localhost",
+                "username": "user_123",
+                "password": "password_123",
+                "database": "db_123",
+                "secure": 0,
+                "http_port": 8443,
+                #ClickHouse local storage staging uses the clickhouse-connect library, which communicates with ClickHouse over HTTP.
+            }
+        )
+
+        return dlt.destinations.clickhouse(credentials=credentials)
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
         table_fields = table.split(".")
@@ -289,4 +295,3 @@ class ClickhouseDestination:
 
     def post_load(self):
         pass
-    
