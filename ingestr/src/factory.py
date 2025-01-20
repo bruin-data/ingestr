@@ -6,6 +6,7 @@ from dlt.common.destination import Destination
 from ingestr.src.destinations import (
     AthenaDestination,
     BigQueryDestination,
+    ClickhouseDestination,
     CsvDestination,
     DatabricksDestination,
     DuckDBDestination,
@@ -14,7 +15,6 @@ from ingestr.src.destinations import (
     RedshiftDestination,
     SnowflakeDestination,
     SynapseDestination,
-    ClickhouseDestination,
 )
 from ingestr.src.sources import (
     AdjustSource,
