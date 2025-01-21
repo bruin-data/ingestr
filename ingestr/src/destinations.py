@@ -272,19 +272,27 @@ class ClickhouseDestination:
 
         username = parsed_uri.username
         if not username:
-            raise ValueError("A username is required to connect to the ClickHouse database.")
+            raise ValueError(
+                "A username is required to connect to the ClickHouse database."
+            )
 
         password = parsed_uri.password
         if not password:
-            raise ValueError("A password is required to authenticate with the ClickHouse database.")
+            raise ValueError(
+                "A password is required to authenticate with the ClickHouse database."
+            )
 
         host = parsed_uri.hostname
         if not host:
-            raise ValueError("The hostname or IP address of the ClickHouse server is required to establish a connection.")
+            raise ValueError(
+                "The hostname or IP address of the ClickHouse server is required to establish a connection."
+            )
 
         port = parsed_uri.port
         if not port:
-            raise ValueError("The TCP port of the ClickHouse server is required to establish a connection.")
+            raise ValueError(
+                "The TCP port of the ClickHouse server is required to establish a connection."
+            )
 
         database = parsed_uri.path.lstrip("/")
         if not database:

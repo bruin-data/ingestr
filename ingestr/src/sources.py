@@ -18,8 +18,8 @@ from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
 import gcsfs  # type: ignore
-import s3fs # type: ignore
 import pendulum
+import s3fs  # type: ignore
 from dlt.common.configuration.specs import (
     AwsCredentials,
 )
@@ -1123,9 +1123,7 @@ class S3Source:
                 "S3 Source only supports specific formats files: csv, jsonl, parquet"
             )
 
-        return readers(
-            bucket_url, fs, path_to_file
-        ).with_resources(endpoint)
+        return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
 
 
 class TikTokSource:
@@ -1571,9 +1569,7 @@ class GCSSource:
                 "GCS Source only supports specific formats files: csv, jsonl, parquet"
             )
 
-        return readers(
-            bucket_url, fs, path_to_file
-        ).with_resources(endpoint)
+        return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
 
 
 class LinkedInAdsSource:
