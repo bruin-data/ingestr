@@ -9,7 +9,9 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
 from dlt.common.configuration.specs import AwsCredentials
-from dlt.destinations.impl.clickhouse.configuration import ClickHouseCredentials
+from dlt.destinations.impl.clickhouse.configuration import (
+    ClickHouseCredentials,
+)
 
 
 class GenericSqlDestination:
@@ -266,23 +268,43 @@ class AthenaDestination:
 
 class ClickhouseDestination:
     def dlt_dest(self, uri: str, **kwargs):
-        source_fields = urlparse(uri)
-        source_params = parse_qs(source_fields.query)
-        #clickhouse://<host>:<http_port>/<database>?username=<username>&password=<password>&secure=<secure>
-        
+        parsed_uri = urlparse(uri)
+
+        username = parsed_uri.username
+        if not username:
+            raise ValueError("A username is required to connect to the ClickHouse database.")
+
+        password = parsed_uri.password
+        if not password:
+            raise ValueError("A password is required to authenticate with the ClickHouse database.")
+
+        host = parsed_uri.hostname
+        if not host:
+            raise ValueError("The hostname or IP address of the ClickHouse server is required to establish a connection.")
+
+        port = parsed_uri.port
+        if not port:
+            raise ValueError("The TCP port of the ClickHouse server is required to establish a connection.")
+
+        database = parsed_uri.path.lstrip("/")
+        if not database:
+            raise ValueError("The database name is required to connect to ClickHouse.")
+
         credentials = ClickHouseCredentials(
             {
-                "host": "localhost",
-                "username": "user_123",
-                "password": "password_123",
-                "database": "db_123",
+                "host": host,
+                "port": port,
+                "username": username,
+                "password": password,
+                "database": database,
+                "http_port": "8123",
                 "secure": 0,
-                "http_port": 8443,
-                #ClickHouse local storage staging uses the clickhouse-connect library, which communicates with ClickHouse over HTTP.
             }
         )
 
-        return dlt.destinations.clickhouse(credentials=credentials)
+        return dlt.destinations.clickhouse(
+            credentials=credentials, dataset_table_separator="."
+        )
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
         table_fields = table.split(".")
