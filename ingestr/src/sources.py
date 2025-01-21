@@ -1405,13 +1405,6 @@ class GoogleAnalyticsSource:
 
 
 class GoogleAdsSource:
-    resources = [
-        "customers",
-        "campaigns",
-        "change_events",
-        "customer_clients",
-    ]
-
     def handles_incrementality(self) -> bool:
         return False
 
@@ -1463,14 +1456,18 @@ class GoogleAdsSource:
         if not customer_id:
             raise ValueError("Customer ID is required to connect to Google Ads")
 
-        if table not in self.resources:
-            raise ValueError(
-                f"Resource '{table}' is not supported for Google Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
-            )
+
         params = parse_qs(parsed_uri.query)
         client = self.init_client(params)
 
-        return google_ads(
+        src = google_ads(
             client,
             customer_id,
-        ).with_resources(table)
+        )
+
+        if table not in src.resources:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Google Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        return src.with_resources(table)

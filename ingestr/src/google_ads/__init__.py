@@ -28,6 +28,8 @@ def google_ads(
         campaigns(client=client, customer_id=customer_id),
         change_events(client=client, customer_id=customer_id),
         customer_clients(client=client, customer_id=customer_id),
+        asset_report_daily(client=client, customer_id=customer_id),
+        ad_report_daily(client=client, customer_id=customer_id),
     ]
 
 
@@ -73,3 +75,64 @@ def customer_clients(client: Resource, customer_id: str) -> Iterator[TDataItem]:
     for batch in stream:
         for row in batch.results:
             yield to_dict(row.customer_client)
+
+@dlt.resource
+def asset_report_daily(client: Resource, customer_id: str) -> Iterator[TDataItem]:
+    # Issues a search request using streaming.
+    ga_service = client.get_service("GoogleAdsService")
+    query = """
+        SELECT 
+            metrics.clicks, 
+            metrics.conversions, 
+            metrics.conversions_value, 
+            metrics.cost_micros, 
+            metrics.impressions, 
+            campaign.id, 
+            campaign.name, 
+            customer.id, 
+            ad_group.id, 
+            ad_group.name, 
+            asset.id 
+            segments.date, 
+        FROM 
+            ad_group_ad_asset_view 
+        WHERE 
+            segments.date = '2025-01-19' 
+    """
+    stream = ga_service.search_stream(customer_id=customer_id, query=query)
+    for batch in stream:
+        for row in batch.results:
+            yield to_dict(row)
+
+@dlt.resource
+def ad_report_daily(client: Resource, customer_id: str) -> Iterator[TDataItem]:
+    # Issues a search request using streaming.
+    ga_service = client.get_service("GoogleAdsService")
+    query = """
+        SELECT
+            metrics.clicks,
+            metrics.conversions,
+            metrics.conversions_value,
+            metrics.impressions,
+            metrics.cost_micros,
+            metrics.video_quartile_p25_rate,
+            metrics.video_quartile_p50_rate,
+            metrics.video_quartile_p75_rate,
+            metrics.video_quartile_p100_rate,
+            customer.id,
+            campaign.id,
+            campaign.name,
+            ad_group.id,
+            ad_group.name,
+            ad_group.status,
+            ad_group_ad.ad.id,
+            segments.date
+        FROM
+            ad_group_ad
+        WHERE
+            segments.date = '2025-01-19'
+    """
+    stream = ga_service.search_stream(customer_id=customer_id, query=query)
+    for batch in stream:
+        for row in batch.results:
+            yield to_dict(row)
