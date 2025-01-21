@@ -40,4 +40,4 @@ pyathena==3.9.0
 google-analytics-data==0.18.16
 asana==3.2.3
 dataclasses-json==0.6.7
-
+gcsfs==2024.10.0

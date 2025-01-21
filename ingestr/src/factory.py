@@ -26,6 +26,7 @@ from ingestr.src.sources import (
     ChessSource,
     DynamoDBSource,
     FacebookAdsSource,
+    GCSSource,
     GitHubSource,
     GoogleAnalyticsSource,
     GoogleSheetsSource,
@@ -33,6 +34,7 @@ from ingestr.src.sources import (
     HubspotSource,
     KafkaSource,
     KlaviyoSource,
+    LinkedInAdsSource,
     LocalCsvSource,
     MongoDbSource,
     NotionSource,
@@ -125,6 +127,8 @@ class SourceDestinationFactory:
         "tiktok": TikTokSource,
         "googleanalytics": GoogleAnalyticsSource,
         "appstore": AppleAppStoreSource,
+        "gs": GCSSource,
+        "linkedinads": LinkedInAdsSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

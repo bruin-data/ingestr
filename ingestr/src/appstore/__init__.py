@@ -28,6 +28,10 @@ def app_store(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> Iterable[DltResource]:
+    if start_date and start_date.tzinfo is not None:
+        start_date = start_date.replace(tzinfo=None)
+    if end_date and end_date.tzinfo is not None:
+        end_date = end_date.replace(tzinfo=None)
     for resource in RESOURCES:
         yield dlt.resource(
             get_analytics_reports,
