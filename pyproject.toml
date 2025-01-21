@@ -85,7 +85,7 @@ exclude = [
     'src/google_analytics/.*',
 
     'src/dynamodb/.*',
-
+    'src/clickhouse/.*',
     'src/asana_source/.*',
     'src/tiktok_ads/.*',
   ]
@@ -113,6 +113,7 @@ module = [
   "ingestr.src.asana_source.*",
   "ingestr.src.tiktok_ads.*",
   "ingestr.src.github.*",
+  "ingestr.src.clickhouse.*",
 ]
 follow_imports = "skip"
 

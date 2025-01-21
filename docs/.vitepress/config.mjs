@@ -97,6 +97,7 @@ export default defineConfig({
               { text: "Apple App Store", link: "/supported-sources/appstore.md"},
               { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
+              { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
               { text: "DynamoDB", link: "/supported-sources/dynamodb.md" },
               {
                 text: "Facebook Ads",
