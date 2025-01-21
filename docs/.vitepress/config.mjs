@@ -59,6 +59,7 @@ export default defineConfig({
             items: [
               { text: "AWS Athena", link: "/supported-sources/athena.md" },
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
+              { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
               { text: "Databricks", link: "/supported-sources/databricks.md" },
               { text: "DuckDB", link: "/supported-sources/duckdb.md" },
               {
@@ -97,7 +98,6 @@ export default defineConfig({
               { text: "Apple App Store", link: "/supported-sources/appstore.md"},
               { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
-              { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
               { text: "DynamoDB", link: "/supported-sources/dynamodb.md" },
               {
                 text: "Facebook Ads",

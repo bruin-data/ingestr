@@ -7,28 +7,26 @@ Ingestr supports ClickHouse as a destination.
 The URI format for ClickHouse as a destination is as follows:
 
 ```plaintext
-clickhouse://<username>:<password>@<host>:<http_port>/<database>?secure=<secure>
+clickhouse://<username>:<password>@<host>:<port>/<database>
 ```
 ## URI parameters:
-- `host` (required): The host of Clickhouse server.
-- `http_port` (optional): The HTTP port of Clickhouse.
+- `username` (required): The username is required to authenticate with the ClickHouse server.
+- `password` (required): The password is required to authenticate the provided username.
+- `host` (required): The hostname or IP address of the ClickHouse server where the database is hosted.
+- `port` (required): The TCP port number used by the ClickHouse server.
 - `database` (required): The name of the ClickHouse database to connect to.
-- `username` (required): The username of Clickhouse server.
-- `password` (required): The password of Clickhouse server.
-- `secure` (optional): The secure connection of Clickhouse server.
 
-ClickHouse requires an `database`, `username` `password` `host` to connect to the ClickHouse server. Please follow the guide to obtain the [credentials](https://dlthub.com/docs/dlt-ecosystem/destinations/clickhouse#2-setup-clickhouse-database). Once you've completed the guide, you should have all the above-mentioned credentials.
 
-This is a sample command that will copy the data from the Stripe source into ClickHouse.
+ClickHouse requires a `username`, `password`, `host`, `port`, and `database` to connect to the ClickHouse server. For more information, read [here](https://dlthub.com/docs/dlt-ecosystem/destinations/clickhouse#2-setup-clickhouse-database). Once you've completed the guide, you should have all the above-mentioned credentials.
 
-```sh
+```
 ingestr ingest \
     --source-uri "stripe://?api_key=key123" \
     --source-table 'event' \
-    --dest-uri "clickhouse://localhost:8123/db_123?username=user_123&password=password_123&secure=0" \
-    --dest-table 'dest.stripe_event'
+    --dest-uri "clickhouse://user_123:pass123@localhost:9000/DB_123" \
+    --dest-table 'stripe.event'
 ```
 
-This command will retrieve data for the specified date range and save it to the `dest.stripe_event` table in the ClickHouse database.
+This is a sample command that will copy the data from the Stripe source into Athena.
 
-
+<img alt="clickhouse_img" src="../media/clickhouse_img.png" />
