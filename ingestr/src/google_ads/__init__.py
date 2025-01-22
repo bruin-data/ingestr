@@ -21,6 +21,20 @@ class Report:
     resource: str
     dimensions: List[str]
     metrics: List[str]
+    segments: List[str]
+
+    def __init__(
+        self,
+        resource: str = "",
+        dimensions: List[str] = [],
+        metrics: List[str] = [],
+        segments: List[str] = [],
+    ):
+        self.resource = resource
+        self.dimensions = dimensions
+        self.metrics = metrics
+        self.segments = segments
+
 
     @classmethod
     def from_spec(cls, spec: str):
@@ -32,12 +46,13 @@ class Report:
         Example:
         custom:ad_group_ad_asset_view:ad_group.id,campaign.id:clicks,conversions
         """
-        report = cls()
         if spec.count(":") != 3:
             raise ValueError("Invalid report specification format. Expected custom:{resource}:{dimensions}:{metrics}")
 
         _, resource, dimensions, metrics = spec.split(":")
 
+        report = cls()
+        report.segments = ["segments.date"]
         report.resource = resource
         report.dimensions = [
             d for d in map(cls._parse_dimension, dimensions.split(","))
@@ -62,6 +77,36 @@ class Report:
         if not metric.startswith("metrics."):
             metric = f"metrics.{metric.strip()}"
         return metric
+
+BUILTIN_REPORTS: Dict[str, Report] = {
+    "campaign_report_daily": Report(
+        resource="campaign",
+        dimensions=[
+            "campaign.id",
+            "customer.id",
+        ],
+        metrics=[
+            "metrics.active_view_impressions",
+            "metrics.active_view_measurability",
+            "metrics.active_view_measurable_cost_micros",
+            "metrics.active_view_measurable_impressions",
+            "metrics.active_view_viewability",
+            "metrics.clicks",
+            "metrics.conversions",
+            "metrics.conversions_value",
+            "metrics.cost_micros",
+            "metrics.impressions",
+            "metrics.interactions",
+            "metrics.interaction_event_types",
+            "metrics.view_through_conversions",
+        ],
+        segments=[
+            "segments.date",
+            "segments.ad_network_type",
+            "segments.device",
+        ],
+    ),
+}
     
 @dlt.source
 def google_ads(
@@ -71,16 +116,22 @@ def google_ads(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ):
-    report: Optional[Report] = None
     if report_spec is not None:
-        report = Report().from_spec(report_spec)
+        custom_report = Report().from_spec(report_spec)
+        yield dlt.resource(
+            daily_report,
+            name="daily_report",
+            write_disposition="merge",
+            primary_key=custom_report.dimensions + custom_report.segments,
+        )(client, customer_id, report, start_date, end_date)
 
-    yield dlt.resource(
-        daily_report,
-        name="daily_report",
-        write_disposition="merge",
-        primary_key=report.dimensions,
-    )(client, customer_id, report, start_date, end_date)
+    for report_name, report in BUILTIN_REPORTS.items():
+        yield dlt.resource(
+            daily_report,
+            name=report_name,
+            write_disposition="merge",
+            primary_key=report.dimensions + report.segments,
+        )(client, customer_id, report, start_date, end_date)
 
 def daily_report(
     client: Resource,
@@ -90,10 +141,10 @@ def daily_report(
     end_date: Optional[datetime] = None,
 ):
     ga_service = client.get_service("GoogleAdsService")
+    fields = report.dimensions + report.metrics + report.segments
     query = f"""
         SELECT
-            {", ".join(report.dimensions + report.metrics)},
-            segments.date
+            {", ".join(fields)}
         FROM
             {report.resource}
         WHERE
@@ -101,7 +152,7 @@ def daily_report(
     """
     allowed_keys = set([
         k.replace(".", "_") 
-        for k in report.dimensions + report.metrics + ["segments.date"]
+        for k in fields
     ])
     stream = ga_service.search_stream(customer_id=customer_id, query=query)
     for batch in stream:
