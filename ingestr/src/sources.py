@@ -4,7 +4,7 @@ import json
 import os
 import re
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import (
     Any,
     Callable,
@@ -1460,12 +1460,17 @@ class GoogleAdsSource:
         params = parse_qs(parsed_uri.query)
         client = self.init_client(params)
 
-        date_args = {}
-        if kwargs.get("interval_start"):
-            date_args["start_date"] = kwargs.get("interval_start")
+        date_args = {
+            "start_date":  kwargs.get("interval_start") or datetime.now() - timedelta(days=30),
+            "end_date": kwargs.get("interval_end") or datetime.now()
+        }
 
-        if kwargs.get("interval_end"):
-            date_args["end_date"] = kwargs.get("interval_end")
+        # most combinations of explict start/end dates are automatically handled.
+        # however, in the scenario where only the end date is provided, we need to
+        # calculate the start date based on the end date.
+        if "interval_end" in kwargs and "interval_start" not in kwargs:
+            date_args["start_date"] = kwargs.get("interval_end") - timedelta(days=30)
+        
 
         src = google_ads(
             client,
