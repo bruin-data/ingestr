@@ -88,7 +88,7 @@ def asset_report_daily(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> Iterator[TDataItem]:
-    # Issues a search request using streaming.
+
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
         SELECT 
@@ -112,7 +112,20 @@ def asset_report_daily(
     stream = ga_service.search_stream(customer_id=customer_id, query=query)
     for batch in stream:
         for row in batch.results:
-            yield to_dict(row)
+            yield  {
+                "clicks": row.metrics.clicks,
+                "conversions": row.metrics.conversions,
+                "conversions_value": row.metrics.conversions_value,
+                "cost_micros": row.metrics.cost_micros,
+                "impressions": row.metrics.impressions,
+                "campaign_id": row.campaign.id,
+                "campaign_name": row.campaign.name,
+                "customer_id": row.customer.id,
+                "ad_group_id": row.ad_group.id,
+                "ad_group_name": row.ad_group.name,
+                "asset_id": row.asset.id,
+                "date": row.segments.date
+            }
 
 @dlt.resource
 def ad_report_daily(
@@ -121,7 +134,7 @@ def ad_report_daily(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> Iterator[TDataItem]:
-    # Issues a search request using streaming.
+
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
         SELECT
@@ -150,4 +163,22 @@ def ad_report_daily(
     stream = ga_service.search_stream(customer_id=customer_id, query=query)
     for batch in stream:
         for row in batch.results:
-            yield to_dict(row)
+            yield  {
+                "clicks": row.metrics.clicks,
+                "conversions": row.metrics.conversions,
+                "conversions_value": row.metrics.conversions_value,
+                "impressions": row.metrics.impressions,
+                "cost_micros": row.metrics.cost_micros,
+                "video_quartile_p25_rate": row.metrics.video_quartile_p25_rate,
+                "video_quartile_p50_rate": row.metrics.video_quartile_p50_rate,
+                "video_quartile_p75_rate": row.metrics.video_quartile_p75_rate,
+                "video_quartile_p100_rate": row.metrics.video_quartile_p100_rate,
+                "customer_id": row.customer.id,
+                "campaign_id": row.campaign.id,
+                "campaign_name": row.campaign.name,
+                "ad_group_id": row.ad_group.id,
+                "ad_group_name": row.ad_group.name,
+                "ad_group_status": row.ad_group.status,
+                "ad_group_ad_ad_id": row.ad_group_ad.ad.id,
+                "date": row.segments.date
+            }

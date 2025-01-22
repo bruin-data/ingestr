@@ -14,7 +14,7 @@ def date_predicate(column: str, start_date: Optional[datetime], end_date: Option
         clauses.append(f"""{column} >= '{start_date.strftime("%Y-%m-%d")}'""")
     
     if end_date is not None:
-        clauses.append(f"""{column} <= '{start_date.strftime("%Y-%m-%d")}'""")
+        clauses.append(f"""{column} <= '{end_date.strftime("%Y-%m-%d")}'""")
     
     return " AND ".join(clauses)
     
