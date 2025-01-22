@@ -49,15 +49,19 @@ class Report:
 
     @classmethod
     def _parse_dimension(self, dim: str):
+        dim = dim.strip()
         if dim.count(".") == 0:
             raise ValueError("Invalid dimension format. Expected {resource}.{field}")
-        return dim.strip()
+        if dim.startswith("segments."):
+            raise ValueError("Invalid dimension format. Segments are not allowed in dimensions.")
+        return dim
     
     @classmethod
     def _parse_metric(self, metric: str):
+        metric = metric.strip()
         if not metric.startswith("metrics."):
             metric = f"metrics.{metric.strip()}"
-        return metric.strip()
+        return metric
     
 @dlt.source
 def google_ads(
