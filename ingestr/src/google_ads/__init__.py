@@ -2,7 +2,8 @@
 Preliminary implementation of Google Ads pipeline.
 """
 
-from typing import Iterator, List
+from typing import Iterator, List, Optional
+from datetime import datetime
 
 import dlt
 from dlt.common.exceptions import MissingDependencyException
@@ -11,6 +12,8 @@ from dlt.sources import DltResource
 from googleapiclient.discovery import Resource  # type: ignore
 
 from .helpers.data_processing import to_dict
+
+from .predicates import date_predicate
 
 try:
     from google.ads.googleads.client import GoogleAdsClient  # type: ignore
@@ -22,14 +25,16 @@ except ImportError:
 def google_ads(
     client: GoogleAdsClient,
     customer_id: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
 ) -> List[DltResource]:
     return [
         customers(client=client, customer_id=customer_id),
         campaigns(client=client, customer_id=customer_id),
         change_events(client=client, customer_id=customer_id),
         customer_clients(client=client, customer_id=customer_id),
-        asset_report_daily(client=client, customer_id=customer_id),
-        ad_report_daily(client=client, customer_id=customer_id),
+        asset_report_daily(client=client, customer_id=customer_id, start_date=start_date, end_date=end_date),
+        ad_report_daily(client=client, customer_id=customer_id, start_date=start_date, end_date=end_date),
     ]
 
 
@@ -77,10 +82,15 @@ def customer_clients(client: Resource, customer_id: str) -> Iterator[TDataItem]:
             yield to_dict(row.customer_client)
 
 @dlt.resource
-def asset_report_daily(client: Resource, customer_id: str) -> Iterator[TDataItem]:
+def asset_report_daily(
+    client: Resource,
+    customer_id: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> Iterator[TDataItem]:
     # Issues a search request using streaming.
     ga_service = client.get_service("GoogleAdsService")
-    query = """
+    query = f"""
         SELECT 
             metrics.clicks, 
             metrics.conversions, 
@@ -92,12 +102,12 @@ def asset_report_daily(client: Resource, customer_id: str) -> Iterator[TDataItem
             customer.id, 
             ad_group.id, 
             ad_group.name, 
-            asset.id 
-            segments.date, 
+            asset.id,
+            segments.date
         FROM 
             ad_group_ad_asset_view 
         WHERE 
-            segments.date = '2025-01-19' 
+            {date_predicate("segments.date", start_date, end_date)}
     """
     stream = ga_service.search_stream(customer_id=customer_id, query=query)
     for batch in stream:
@@ -105,10 +115,15 @@ def asset_report_daily(client: Resource, customer_id: str) -> Iterator[TDataItem
             yield to_dict(row)
 
 @dlt.resource
-def ad_report_daily(client: Resource, customer_id: str) -> Iterator[TDataItem]:
+def ad_report_daily(
+    client: Resource,
+    customer_id: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> Iterator[TDataItem]:
     # Issues a search request using streaming.
     ga_service = client.get_service("GoogleAdsService")
-    query = """
+    query = f"""
         SELECT
             metrics.clicks,
             metrics.conversions,
@@ -130,7 +145,7 @@ def ad_report_daily(client: Resource, customer_id: str) -> Iterator[TDataItem]:
         FROM
             ad_group_ad
         WHERE
-            segments.date = '2025-01-19'
+            {date_predicate("segments.date", start_date, end_date)}
     """
     stream = ga_service.search_stream(customer_id=customer_id, query=query)
     for batch in stream:

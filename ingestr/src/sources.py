@@ -1460,9 +1460,17 @@ class GoogleAdsSource:
         params = parse_qs(parsed_uri.query)
         client = self.init_client(params)
 
+        date_args = {}
+        if kwargs.get("interval_start"):
+            date_args["start_date"] = kwargs.get("interval_start")
+
+        if kwargs.get("interval_end"):
+            date_args["end_date"] = kwargs.get("interval_end")
+
         src = google_ads(
             client,
             customer_id,
+            **date_args,
         )
 
         if table not in src.resources:
