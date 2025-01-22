@@ -11,7 +11,7 @@ def to_dict(item: Any) -> Iterator[TDataItem]:
     :param batch:
     :return:
     """
-    yield json.loads(
+    return json.loads(
         proto.Message.to_json(
             item,
             preserving_proto_field_name=True,

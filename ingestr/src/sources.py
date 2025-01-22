@@ -1475,11 +1475,16 @@ class GoogleAdsSource:
         # calculate the start date based on the end date.
         if "interval_end" in kwargs and "interval_start" not in kwargs:
             date_args["start_date"] = kwargs.get("interval_end") - timedelta(days=30)
-        
+
+        report_spec = None
+        if table.startswith("custom:"):
+            report_spec = table
+            table = "daily_report"
 
         src = google_ads(
             client,
             customer_id,
+            report_spec,
             **date_args,
         )
 

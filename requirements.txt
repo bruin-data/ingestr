@@ -33,3 +33,4 @@ pyarrow==18.1.0
 pyathena==3.9.0
 google-analytics-data==0.18.15
 asana==3.2.3
+flatten_json==0.1.14
