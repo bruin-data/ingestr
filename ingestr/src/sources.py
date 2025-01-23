@@ -4,7 +4,12 @@ import json
 import os
 import re
 import tempfile
-from datetime import date, datetime, timedelta
+from datetime import (
+    date,
+    datetime,
+    timedelta,
+    timezone
+)
 from typing import (
     Any,
     Callable,
@@ -1465,7 +1470,7 @@ class GoogleAdsSource:
         params = parse_qs(parsed_uri.query)
         client = self.init_client(params)
 
-        start_date = kwargs.get("interval_start") or datetime.now() - timedelta(days=30)
+        start_date = kwargs.get("interval_start") or datetime.now(tz=timezone.utc) - timedelta(days=30)
         end_date =  kwargs.get("interval_end")
 
         # most combinations of explict start/end dates are automatically handled.

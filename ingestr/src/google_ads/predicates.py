@@ -1,5 +1,5 @@
 from typing import Optional
-from datetime import datetime 
+from datetime import datetime, timezone
 
 def date_predicate(column: str, start_date: datetime, end_date: Optional[datetime]) -> str:
     """
@@ -10,7 +10,7 @@ def date_predicate(column: str, start_date: datetime, end_date: Optional[datetim
         raise ValueError("start_date must be provided")
     
     if end_date is None:
-        end_date = datetime.now()
+        end_date = datetime.now(tz=timezone.utc).date()
     
     clauses = []
     if start_date is not None:
