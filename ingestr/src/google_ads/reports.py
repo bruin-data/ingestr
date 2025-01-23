@@ -209,7 +209,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
         ]
     ),
     "keyword_report_daily": Report(
-        resource="ad_group_audience_view",
+        resource="keyword_view",
         dimensions=[
             "ad_group.id",
             "customer.id",
@@ -243,7 +243,8 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "click_view.gclid",
             "customer.id",
             "ad_group.id",
-            "campaign.id"
+            "campaign.id",
+            "segments.date"
         ],
         metrics=[
             "metrics.clicks",
@@ -252,11 +253,12 @@ BUILTIN_REPORTS: Dict[str, Report] = {
     "landing_page_report_daily": Report(
         resource="landing_page_view",
         dimensions=[
-            "landing_page_view.expanded_final_url",
+            "landing_page_view.unexpanded_final_url",
             "landing_page_view.resource_name",
             "customer.id",
             "ad_group.id",
-            "campaign.id"
+            "campaign.id",
+            "segments.date"
         ],
         metrics=[
             "metrics.average_cpc",
