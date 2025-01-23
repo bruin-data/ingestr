@@ -145,6 +145,7 @@ class SourceDestinationFactory:
         "synapse": SynapseDestination,
         "csv": CsvDestination,
         "athena": AthenaDestination,
+        "clickhouse+native": ClickhouseDestination,
         "clickhouse": ClickhouseDestination,
     }
 
