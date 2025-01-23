@@ -3,7 +3,7 @@ import proto # type: ignore
 from typing import Iterator, Optional,Any
 from datetime import datetime, date
 
-from flatten_json import flatten
+from flatten_json import flatten # type: ignore
 import dlt
 from dlt.common.exceptions import MissingDependencyException
 from dlt.common.typing import TDataItem
