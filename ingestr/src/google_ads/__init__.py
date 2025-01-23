@@ -70,6 +70,10 @@ def daily_report(
         WHERE
             {date_predicate("segments.date", date.last_value, date.end_value)}
     """
+    if report.unfilterable is True:
+        i = query.index("WHERE", 0)
+        query = query[:i]
+
     allowed_keys = set([
         field.to_column(k) 
         for k in fields

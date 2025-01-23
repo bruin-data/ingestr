@@ -2,6 +2,7 @@ from typing import Dict, List
 
 class Report:
     resource: str
+    unfilterable: bool
     dimensions: List[str]
     metrics: List[str]
     segments: List[str]
@@ -12,11 +13,13 @@ class Report:
         dimensions: List[str] = [],
         metrics: List[str] = [],
         segments: List[str] = [],
+        unfilterable: bool = False
     ):
         self.resource = resource
         self.dimensions = dimensions
         self.metrics = metrics
         self.segments = segments
+        self.unfilterable = unfilterable
 
     def primary_keys(self) -> List[str]:
         return [
@@ -278,7 +281,8 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "ad_group.id",
             "campaign.id",
             "keyword_view.resource_name",
-            "ad_group_criterion.criterion_id"
+            "ad_group_criterion.criterion_id",
+            "segments.date",
         ],
         metrics=[
             "metrics.absolute_top_impression_percentage",
@@ -302,7 +306,8 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "campaign.id",
             "search_term_view.resource_name",
             "search_term_view.search_term",
-            "search_term_view.status"
+            "search_term_view.status",
+            "segments.date"
         ],
         segments=[
             "segments.search_term_match_type",
@@ -334,6 +339,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "ad_group.id",
             "campaign.id"
         ],
+        unfilterable=True,
     ),
     "local_services_lead_report_daily": Report(
         resource="local_services_lead",
@@ -351,19 +357,21 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "local_services_lead.note.edit_date_time",
             "local_services_lead.service_id"
         ],
+        unfilterable=True,
     ),
     "local_services_lead_conversations_report_daily": Report(
         resource="local_services_lead_conversation",
         dimensions=[
             "customer.id",
+            "local_services_lead_conversation.id",
             "local_services_lead_conversation.event_date_time",
             "local_services_lead_conversation.conversation_channel",
-            "local_services_lead_conversation.local_services_lead_id",
-            "local_services_lead_conversation.message_details_attachment_urls",
-            "local_services_lead_conversation.message_details_text",
+            "local_services_lead_conversation.message_details.attachment_urls",
+            "local_services_lead_conversation.message_details.text",
             "local_services_lead_conversation.participant_type",
-            "local_services_lead_conversation.phone_call_details_call_duration_millis",
-            "local_services_lead_conversation.phone_call_details_call_recording_url"
+            "local_services_lead_conversation.phone_call_details.call_duration_millis",
+            "local_services_lead_conversation.phone_call_details.call_recording_url"
         ],
+        unfilterable=True,
     ),
 }
