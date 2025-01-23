@@ -58,12 +58,14 @@ class Report:
         report = cls()
         report.segments = ["segments.date"]
         report.resource = resource
-        report.dimensions = [
-            d for d in map(cls._parse_dimension, dimensions.split(","))
-        ]
-        report.metrics = [
-            m for m in map(cls._parse_metric, metrics.split(","))
-        ]
+        if dimensions.strip() != "":
+            report.dimensions = [
+                d for d in map(cls._parse_dimension, dimensions.split(","))
+            ]
+        if metrics.strip() != "":
+            report.metrics = [
+                m for m in map(cls._parse_metric, metrics.split(","))
+            ]
         return report
 
     @classmethod
