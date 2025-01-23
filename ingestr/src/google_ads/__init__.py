@@ -1,5 +1,5 @@
 from typing import Iterator, List, Optional, Callable, Dict
-from datetime import datetime
+from datetime import datetime, date
 
 from flatten_json import flatten
 import dlt
@@ -384,10 +384,17 @@ BUILTIN_REPORTS: Dict[str, Report] = {
 def google_ads(
     client: GoogleAdsClient,
     customer_id: str,
-    date: dlt.sources.incremental[datetime],
     report_spec: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
 ) -> Iterator[DltResource]:
-
+    date_range = dlt.sources.incremental(
+        "segments_date",
+        initial_value=start_date.date(),
+        end_value=end_date.date() if end_date is not None else None,
+        # range_start="closed",
+        # range_end="closed",
+    )
     if report_spec is not None:
         custom_report = Report().from_spec(report_spec)
         yield dlt.resource(
@@ -395,7 +402,7 @@ def google_ads(
             name="daily_report",
             write_disposition="merge",
             primary_key=custom_report.primary_keys(),
-        )(client, customer_id, report, date)
+        )(client, customer_id, custom_report, date_range)
 
     for report_name, report in BUILTIN_REPORTS.items():
         yield dlt.resource(
@@ -403,13 +410,13 @@ def google_ads(
             name=report_name,
             write_disposition="merge",
             primary_key=report.primary_keys(),
-        )(client, customer_id, report, date)
+        )(client, customer_id, report, date_range)
 
 def daily_report(
     client: Resource,
     customer_id: str,
     report: Report,
-    date: dlt.sources.incremental[datetime],
+    date: dlt.sources.incremental[date],
 ) -> Iterator[TDataItem]:
     ga_service = client.get_service("GoogleAdsService")
     fields = report.dimensions + report.metrics + report.segments
@@ -430,7 +437,7 @@ def daily_report(
         for row in batch.results:
             data = flatten(to_dict(row))
             if "segments_date" in data:
-                data["segments_date"] = datetime.strptime(data["segments_date"], "%Y-%m-%d")
+                data["segments_date"] = datetime.strptime(data["segments_date"], "%Y-%m-%d").date()
             yield {
                 k:v for k,v in data.items() if k in allowed_keys
             }

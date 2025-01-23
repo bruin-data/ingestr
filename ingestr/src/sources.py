@@ -1479,16 +1479,12 @@ class GoogleAdsSource:
             report_spec = table
             table = "daily_report"
         
-        date_range = dlt.sources.incremental(
-            "segments_date",
-            initial_value=start_date,
-            end_value=end_date,
-        )
         src = google_ads(
             client,
             customer_id,
-            date_range,
             report_spec,
+            start_date=start_date,
+            end_date=end_date,
         )
 
         if table not in src.resources:
