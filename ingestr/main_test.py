@@ -1,66 +1,20 @@
-import base64
-import csv
-import gzip
-import io
-import json
 import os
 import random
 import shutil
 import string
-import tempfile
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Callable, Dict, Iterable, List, Optional
-from unittest.mock import MagicMock, patch
-from urllib.parse import urlparse
 
-import duckdb
-import numpy as np
-import pandas as pd  # type: ignore
-import pendulum
-import pyarrow as pa  # type: ignore
-import pyarrow.csv  # type: ignore
-import pyarrow.ipc as ipc  # type: ignore
-import pyarrow.parquet as pya_parquet  # type: ignore
 import pytest
-import requests
 import sqlalchemy
-from confluent_kafka import Producer  # type: ignore
-from dlt.sources.filesystem import glob_files
-from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
-from sqlalchemy.pool import NullPool
-from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
-from testcontainers.kafka import KafkaContainer  # type: ignore
-from testcontainers.localstack import LocalStackContainer  # type: ignore
-from testcontainers.mysql import MySqlContainer  # type: ignore
+from sqlalchemy import text
+from testcontainers.clickhouse import ClickHouseContainer  # type:ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
-from testcontainers.clickhouse import ClickHouseContainer 
-from sqlalchemy import text
 
 from ingestr.main import app
-from ingestr.src.appstore.errors import (
-    NoOngoingReportRequestsFoundError,
-    NoReportsFoundError,
-    NoSuchReportError,
-)
-from ingestr.src.appstore.models import (
-    AnalyticsReportInstancesResponse,
-    AnalyticsReportRequestsResponse,
-    AnalyticsReportResponse,
-    AnalyticsReportSegmentsResponse,
-    Report,
-    ReportAttributes,
-    ReportInstance,
-    ReportInstanceAttributes,
-    ReportRequest,
-    ReportRequestAttributes,
-    ReportSegment,
-    ReportSegmentAttributes,
-)
 
 
 def has_exception(exception, exc_type):
@@ -157,7 +111,7 @@ def invoke_ingest_command(
         input="y\n",
         env={"DISABLE_TELEMETRY": "true"},
     )
-    
+
     if result.exit_code != 0:
         traceback.print_exception(*result.exc_info)
 
@@ -196,25 +150,28 @@ class DockerImage:
         if self.container:
             self.container.stop()
 
+
 POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
 MYSQL8_IMAGE = "mysql:8.4.1"
 MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04"
 
 pgDocker = DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start())
-clickhouseDocker = DockerImage(lambda: ClickHouseContainer(
-                image="clickhouse/clickhouse-server:latest", 
-                username="test_123", 
-                password="test_123", 
-                dbname="testDB",
-                port=9000
-            )
-            .with_bind_ports(9000,9000)
-            .with_bind_ports(8123,8123)
-            .start())
+clickhouseDocker = DockerImage(
+    lambda: ClickHouseContainer(
+        image="clickhouse/clickhouse-server:latest",
+        username="test_123",
+        password="test_123",
+        dbname="testDB",
+        port=9000,
+    )
+    .with_bind_ports(9000, 9000)
+    .with_bind_ports(8123, 8123)
+    .start()
+)
 
 SOURCES = {
     "postgres": pgDocker,
-    #"duckdb": DuckDb(),
+    # "duckdb": DuckDb(),
     # "mysql8": DockerImage(
     #     lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
     # ),
@@ -259,13 +216,14 @@ def test_create_replace(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-    
+
     print(f"Source URI: {source_uri}")
     print(f"Dest URI: {dest_uri}")
-    
+
     db_to_db_create_replace(source_uri, dest_uri)
     source.stop()
     dest.stop()
+
 
 def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str):
     schema_rand_prefix = f"testschema_create_replace_{get_random_string(5)}"
@@ -273,28 +231,33 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
     # try:
     #     shutil.rmtree(get_abs_path("../pipeline_data"))
     # except Exception:
-    
+
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
         conn.execute(text(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}"))
         conn.execute(text(f"CREATE SCHEMA {schema_rand_prefix}"))
-        conn.execute(text(
-            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
-        ))
-        conn.execute(text(
-            f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01')"
-        ))
-        conn.execute(text(
-            f"INSERT INTO {schema_rand_prefix}.input VALUES (2, 'val2', '2022-02-01')"
-        ))
-        res = conn.execute(text(
-            f"select count(*) from {schema_rand_prefix}.input"
-        )).fetchall()
+        conn.execute(
+            text(
+                f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+            )
+        )
+        conn.execute(
+            text(
+                f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01')"
+            )
+        )
+        conn.execute(
+            text(
+                f"INSERT INTO {schema_rand_prefix}.input VALUES (2, 'val2', '2022-02-01')"
+            )
+        )
+        res = conn.execute(
+            text(f"select count(*) from {schema_rand_prefix}.input")
+        ).fetchall()
         assert res[0][0] == 2
 
     print(f"source_connection_url: {source_connection_url}")
     print(f"dest_connection_url: {dest_connection_url}")
-    
 
     result = invoke_ingest_command(
         source_connection_url,
@@ -304,25 +267,25 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
     )
 
     assert result.exit_code == 0
-    
+
     if "clickhouse" in dest_connection_url:
-        dest_connection_url = dest_connection_url.replace("clickhouse://", "clickhouse+native://")
+        dest_connection_url = dest_connection_url.replace(
+            "clickhouse://", "clickhouse+native://"
+        )
         dest_engine = sqlalchemy.create_engine(dest_connection_url)
         with dest_engine.connect() as connection:
             if "clickhouse" in dest_connection_url:
-                database_name = dest_connection_url.split("/")[-1] 
+                database_name = dest_connection_url.split("/")[-1]
                 query = f'SELECT id, val, updated_at FROM "{database_name}"."{schema_rand_prefix}.output"'
-                res = connection.execute(text(
-                query
-                )).fetchall()
+                res = connection.execute(text(query)).fetchall()
                 for row in res:
                     print(f"row: {row}")
     else:
         dest_engine = sqlalchemy.create_engine(dest_connection_url)
         with dest_engine.connect() as connection:
-            res = connection.execute(text(
-                f"SELECT id, val, updated_at FROM {schema_rand_prefix}.output"
-            )).fetchall()
+            res = connection.execute(
+                text(f"SELECT id, val, updated_at FROM {schema_rand_prefix}.output")
+            ).fetchall()
 
     assert len(res) == 2
     assert res[0] == (1, "val1", as_datetime("2022-01-01"))
@@ -571,8 +534,6 @@ def get_random_string(length):
 #         pass
 
 
-
-
 # class DuckDb:
 #     def start(self) -> str:
 #         self.abs_path = get_abs_path(f"./testdata/duckdb_{get_random_string(5)}.db")
@@ -586,8 +547,6 @@ def get_random_string(length):
 
 #     def stop_fully(self):
 #         self.stop()
-
-
 
 
 @pytest.mark.parametrize(
@@ -656,8 +615,6 @@ def test_merge_with_primary_key(source, dest):
 #     dest.stop()
 
 
-
-
 def db_to_db_append(source_connection_url: str, dest_connection_url: str):
     schema_rand_prefix = f"testschema_append_{get_random_string(5)}"
     try:
@@ -691,16 +648,18 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
             sql_backend="sqlalchemy",
         )
         assert res.exit_code == 0
-    
+
     # sqlalchemy.engine to use tcp connection sqlalchemy need to use clickhouse+native
     if "clickhouse" in dest_connection_url:
-      dest_connection_url = dest_connection_url.replace("clickhouse://", "clickhouse+native://")
+        dest_connection_url = dest_connection_url.replace(
+            "clickhouse://", "clickhouse+native://"
+        )
 
     dest_engine = sqlalchemy.create_engine(dest_connection_url)
 
     def get_output_table():
         if "clickhouse" in dest_connection_url:
-            database_name = dest_connection_url.split("/")[-1] 
+            database_name = dest_connection_url.split("/")[-1]
             return dest_engine.execute(
                 f'select id, val, updated_at from "{database_name}"."{schema_rand_prefix}.output" order by id asc'
             ).fetchall()
@@ -708,10 +667,12 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
             return dest_engine.execute(
                 f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
             ).fetchall()
-        
-    #run function use dest_connection_url for ingestr i.e clickhouse+native to clickhouse
+
+    # run function use dest_connection_url for ingestr i.e clickhouse+native to clickhouse
     if "clickhouse" in dest_connection_url:
-       dest_connection_url = dest_connection_url.replace("clickhouse+native://", "clickhouse://")
+        dest_connection_url = dest_connection_url.replace(
+            "clickhouse+native://", "clickhouse://"
+        )
 
     run()
 
@@ -738,7 +699,7 @@ def db_to_db_merge_with_primary_key(
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
         pass
-    
+
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
         conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
@@ -759,7 +720,7 @@ def db_to_db_merge_with_primary_key(
         assert res[0][0] == 2
 
     source_engine.dispose()
-    
+
     def run():
         res = invoke_ingest_command(
             source_connection_url,
@@ -774,16 +735,18 @@ def db_to_db_merge_with_primary_key(
         print("dest_connection_url=>", dest_connection_url)
         assert res.exit_code == 0
         return res
-    
+
     # sqlalchemy.engine have use to clickhouse+native for tcp connection
-    
+
     if "clickhouse" in dest_connection_url:
-      dest_connection_url = dest_connection_url.replace("clickhouse://", "clickhouse+native://")
-      database_name = dest_connection_url.split("/")[-1]
-      query= f'select id, val, updated_at from "{database_name}"."{schema_rand_prefix}.output".output order by id asc'
+        dest_connection_url = dest_connection_url.replace(
+            "clickhouse://", "clickhouse+native://"
+        )
+        database_name = dest_connection_url.split("/")[-1]
+        query = f'select id, val, updated_at from "{database_name}"."{schema_rand_prefix}.output".output order by id asc'
 
     dest_engine = sqlalchemy.create_engine(dest_connection_url)
-    
+
     def get_output_rows():
         if "clickhouse" in dest_connection_url:
             return dest_engine.execute(query).fetchall()
@@ -799,14 +762,16 @@ def db_to_db_merge_with_primary_key(
             assert res[i] == row
 
     dest_engine.dispose()
-    
+
     if "clickhouse" in dest_connection_url:
-     dest_connection_url = dest_connection_url.replace("clickhouse+native://", "clickhouse://")
+        dest_connection_url = dest_connection_url.replace(
+            "clickhouse+native://", "clickhouse://"
+        )
     res = run()
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
     )
-    
+
     if "clickhouse" in dest_connection_url:
         first_run_id = dest_engine.execute(
             f'select _dlt_load_id from "{database_name}"."{schema_rand_prefix}.output".output limit 1'
@@ -820,7 +785,7 @@ def db_to_db_merge_with_primary_key(
 
     ##############################
     # we'll run again, we don't expect any changes since the data hasn't changed
-    
+
     res = run()
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
@@ -1068,7 +1033,7 @@ def db_to_db_merge_with_primary_key(
 #     assert count_by_run_id[1][0] == first_run_id
 #     assert count_by_run_id[1][1] == 1
 #     dest_engine.dispose()
-    ##############################
+##############################
 
 
 # def db_to_db_delete_insert_with_timerange(
@@ -1090,7 +1055,7 @@ def db_to_db_merge_with_primary_key(
 #         )
 
 #     source_engine.execute(
-#         f"""INSERT INTO {schema_rand_prefix}.input VALUES 
+#         f"""INSERT INTO {schema_rand_prefix}.input VALUES
 #         (1, 'val1', '2022-01-01T00:00:00'),
 #         (2, 'val2', '2022-01-01T00:00:00'),
 #         (3, 'val3', '2022-01-02T00:00:00'),
@@ -1249,6 +1214,7 @@ def db_to_db_merge_with_primary_key(
 #     assert count_by_run_id[1][1] == 4
 #     dest_engine.dispose()
 #     ##############################
+
 
 def as_datetime(date_str: str) -> date:
     return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).date()
@@ -1718,7 +1684,7 @@ def as_datetime2(date_str: str) -> date:
 #             f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
 #         )
 #         conn.execute(
-#             f"""INSERT INTO {schema_rand_prefix}.input VALUES 
+#             f"""INSERT INTO {schema_rand_prefix}.input VALUES
 #                 (1, 'val1', '2024-01-01'),
 #                 (2, 'val2', '2024-01-01'),
 #                 (3, 'val3', '2024-01-01'),
@@ -1780,7 +1746,7 @@ def as_datetime2(date_str: str) -> date:
 #             f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
 #         )
 #         conn.execute(
-#             f"""INSERT INTO {schema_rand_prefix}.input VALUES 
+#             f"""INSERT INTO {schema_rand_prefix}.input VALUES
 #                 (1, 'val1', '2024-01-01'),
 #                 (2, 'val2', '2024-01-01'),
 #                 (3, 'val3', '2024-01-01'),
