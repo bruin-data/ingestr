@@ -13,11 +13,11 @@ secret_detected() {
 
 # use gitleaks binary if available
 # else fallback to using docker for running gitleaks
-CMD="gitleaks dir -v"
+CMD="gitleaks protect --staged -v"
 
 if [[ ! `which gitleaks`  ]]; then
     which docker > /dev/null || (echo "gitleaks or docker is required for running secrets scan." && exit 1)
-    CMD="docker run -v $PWD:$WORK_DIR -w $WORK_DIR --rm ghcr.io/gitleaks/gitleaks:latest dir -v"
+    CMD="docker run -v $PWD:$WORK_DIR -w $WORK_DIR --rm ghcr.io/gitleaks/gitleaks:latest protect --staged -v"
 fi
 
 $CMD || secret_detected

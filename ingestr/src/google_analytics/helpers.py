@@ -57,9 +57,9 @@ def get_report(
     property_id: int,
     dimension_list: List[Dimension],
     metric_list: List[Metric],
-    limit: int,
-    start_date: str,
-    end_date: str,
+    per_page: int,
+    start_date: pendulum.DateTime,
+    end_date: pendulum.DateTime,
 ) -> Iterator[TDataItem]:
     """
     Gets all the possible pages of reports with the given query parameters.
@@ -79,30 +79,36 @@ def get_report(
         Generator of all rows of data in the report.
     """
 
-    request = RunReportRequest(
-        property=f"properties/{property_id}",
-        dimensions=dimension_list,
-        metrics=metric_list,
-        limit=limit,
-        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+    print(
+        "fetching for daterange", start_date.to_date_string(), end_date.to_date_string()
     )
-    # process request
-    response = client.run_report(request)
-    processed_response_generator = process_report(response=response)
-    yield from processed_response_generator
+
+    offset = 0
+    while True:
+        request = RunReportRequest(
+            property=f"properties/{property_id}",
+            dimensions=dimension_list,
+            metrics=metric_list,
+            limit=per_page,
+            offset=offset,
+            date_ranges=[
+                DateRange(
+                    start_date=start_date.to_date_string(),
+                    end_date=end_date.to_date_string(),
+                )
+            ],
+        )
+        # process request
+        response = client.run_report(request)
+        processed_response_generator = process_report(response=response)
+        # import pdb; pdb.set_trace()
+        yield from processed_response_generator
+        offset += per_page
+        if len(response.rows) < per_page or offset > 1000000:
+            break
 
 
 def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
-    """
-    Receives a single page for a report response, processes it, and returns a generator for every row of data in the report page.
-
-    Args:
-        response: The API response for a single page of the report.
-
-    Yields:
-        Generator of dictionaries for every row of the report page.
-    """
-
     metrics_headers = [header.name for header in response.metric_headers]
     dimensions_headers = [header.name for header in response.dimension_headers]
 
@@ -156,16 +162,6 @@ def process_metric_value(metric_type: MetricType, value: str) -> Union[str, int,
 
 
 def _resolve_dimension_value(dimension_name: str, dimension_value: str) -> Any:
-    """
-    Helper function that receives a dimension's name and value and converts it to a datetime object if needed.
-
-    Args:
-        dimension_name: Name of the dimension.
-        dimension_value: Value of the dimension.
-
-    Returns:
-        The value of the dimension with the correct data type.
-    """
     if dimension_name == "date":
         return pendulum.from_format(dimension_value, "YYYYMMDD", tz="UTC")
     elif dimension_name == "dateHour":

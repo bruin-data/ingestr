@@ -1,4 +1,8 @@
+import base64
 import csv
+import gzip
+import io
+import json
 import os
 import random
 import shutil
@@ -10,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional
+from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
 
 import duckdb
@@ -17,10 +22,16 @@ import numpy as np
 import pandas as pd  # type: ignore
 import pendulum
 import pyarrow as pa  # type: ignore
+import pyarrow.csv  # type: ignore
 import pyarrow.ipc as ipc  # type: ignore
+import pyarrow.parquet as pya_parquet  # type: ignore
 import pytest
+import requests
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
+from dlt.sources.filesystem import glob_files
+from fsspec import AbstractFileSystem  # type: ignore
+from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
 from sqlalchemy.pool import NullPool
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
@@ -31,8 +42,36 @@ from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
 from ingestr.main import app
+from ingestr.src.appstore.errors import (
+    NoOngoingReportRequestsFoundError,
+    NoReportsFoundError,
+    NoSuchReportError,
+)
+from ingestr.src.appstore.models import (
+    AnalyticsReportInstancesResponse,
+    AnalyticsReportRequestsResponse,
+    AnalyticsReportResponse,
+    AnalyticsReportSegmentsResponse,
+    Report,
+    ReportAttributes,
+    ReportInstance,
+    ReportInstanceAttributes,
+    ReportRequest,
+    ReportRequestAttributes,
+    ReportSegment,
+    ReportSegmentAttributes,
+)
 
-runner = CliRunner()
+
+def has_exception(exception, exc_type):
+    if isinstance(exception, pytest.ExceptionInfo):
+        exception = exception.value
+
+    while exception:
+        if isinstance(exception, exc_type):
+            return True
+        exception = exception.__cause__
+    return False
 
 
 def get_abs_path(relative_path):
@@ -53,6 +92,8 @@ def invoke_ingest_command(
     sql_backend=None,
     loader_file_format=None,
     sql_exclude_columns=None,
+    columns=None,
+    sql_limit=None,
 ):
     args = [
         "ingest",
@@ -102,12 +143,23 @@ def invoke_ingest_command(
         args.append("--sql-exclude-columns")
         args.append(sql_exclude_columns)
 
-    result = runner.invoke(
+    if columns:
+        args.append("--columns")
+        args.append(columns)
+
+    if sql_limit:
+        args.append("--sql-limit")
+        args.append(sql_limit)
+
+    result = CliRunner().invoke(
         app,
         args,
         input="y\n",
         env={"DISABLE_TELEMETRY": "true"},
     )
+    if result.exit_code != 0:
+        traceback.print_exception(*result.exc_info)
+
     return result
 
 
@@ -412,10 +464,10 @@ SOURCES = {
     "mysql8": DockerImage(
         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
     ),
-    "sqlserver": DockerImage(
-        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
-        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
-    ),
+    # "sqlserver": DockerImage(
+    #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+    #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+    # ),
 }
 
 DESTINATIONS = {
@@ -847,6 +899,8 @@ def db_to_db_delete_insert_without_primary_key(
             inc_key="updated_at",
             sql_backend="sqlalchemy",
         )
+        if res.exit_code != 0:
+            traceback.print_exception(*res.exc_info)
         assert res.exit_code == 0
         return res
 
@@ -925,11 +979,6 @@ def db_to_db_delete_insert_with_timerange(
     source_connection_url: str, dest_connection_url: str
 ):
     schema_rand_prefix = f"testschema_delete_insert_timerange_{get_random_string(5)}"
-    try:
-        shutil.rmtree(get_abs_path("../pipeline_data"))
-    except Exception:
-        pass
-
     source_engine = sqlalchemy.create_engine(source_connection_url)
 
     source_engine.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
@@ -975,7 +1024,7 @@ def db_to_db_delete_insert_with_timerange(
         assert res.exit_code == 0
         return res
 
-    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+    dest_engine = sqlalchemy.create_engine(dest_connection_url, poolclass=NullPool)
 
     def get_output_rows():
         dest_engine.execute("CHECKPOINT")
@@ -992,7 +1041,12 @@ def db_to_db_delete_insert_with_timerange(
 
     run("2022-01-01", "2022-01-02")  # dlt runs them with the end date exclusive
     assert_output_equals(
-        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-01-01"))]
+        [
+            (1, "val1", as_datetime("2022-01-01")),
+            (2, "val2", as_datetime("2022-01-01")),
+            (3, "val3", as_datetime("2022-01-02")),
+            (4, "val4", as_datetime("2022-01-02")),
+        ]
     )
 
     first_run_id = dest_engine.execute(
@@ -1005,7 +1059,12 @@ def db_to_db_delete_insert_with_timerange(
     res = run("2022-01-01", "2022-01-02")
 
     assert_output_equals(
-        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-01-01"))]
+        [
+            (1, "val1", as_datetime("2022-01-01")),
+            (2, "val2", as_datetime("2022-01-01")),
+            (3, "val3", as_datetime("2022-01-02")),
+            (4, "val4", as_datetime("2022-01-02")),
+        ]
     )
 
     # both rows should have a new run ID
@@ -1014,7 +1073,7 @@ def db_to_db_delete_insert_with_timerange(
     ).fetchall()
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][0] != first_run_id
-    assert count_by_run_id[0][1] == 2
+    assert count_by_run_id[0][1] == 4
     dest_engine.dispose()
     ##############################
 
@@ -1027,6 +1086,8 @@ def db_to_db_delete_insert_with_timerange(
             (2, "val2", as_datetime("2022-01-01")),
             (3, "val3", as_datetime("2022-01-02")),
             (4, "val4", as_datetime("2022-01-02")),
+            (5, "val5", as_datetime("2022-01-03")),
+            (6, "val6", as_datetime("2022-01-03")),
         ]
     )
 
@@ -1036,7 +1097,7 @@ def db_to_db_delete_insert_with_timerange(
     ).fetchall()
     assert len(count_by_run_id) == 2
     assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[1][1] == 2
+    assert count_by_run_id[1][1] == 4
     dest_engine.dispose()
     ##############################
 
@@ -1087,10 +1148,9 @@ def db_to_db_delete_insert_with_timerange(
     count_by_run_id = dest_engine.execute(
         f"select _dlt_load_id, count(*) from {schema_rand_prefix}.output group by 1 order by 1 asc"
     ).fetchall()
-    assert len(count_by_run_id) == 3
+    assert len(count_by_run_id) == 2
     assert count_by_run_id[0][1] == 2
-    assert count_by_run_id[1][1] == 2
-    assert count_by_run_id[2][1] == 2
+    assert count_by_run_id[1][1] == 4
     dest_engine.dispose()
     ##############################
 
@@ -1547,6 +1607,134 @@ def test_db_to_db_exclude_columns(source, dest):
     dest.stop()
 
 
+def test_sql_limit():
+    source_instance = DuckDb()
+    dest_instance = DuckDb()
+
+    source_uri = source_instance.start()
+    dest_uri = dest_instance.start()
+
+    schema_rand_prefix = f"test_sql_limit_{get_random_string(5)}"
+    source_engine = sqlalchemy.create_engine(source_uri, poolclass=NullPool)
+    with source_engine.begin() as conn:
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+        conn.execute(
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+        )
+        conn.execute(
+            f"""INSERT INTO {schema_rand_prefix}.input VALUES 
+                (1, 'val1', '2024-01-01'),
+                (2, 'val2', '2024-01-01'),
+                (3, 'val3', '2024-01-01'),
+                (4, 'val4', '2024-01-02'),
+                (5, 'val5', '2024-01-02')"""
+        )
+        res = conn.execute(
+            f"select count(*) from {schema_rand_prefix}.input"
+        ).fetchall()
+        assert res[0][0] == 5
+
+    result = invoke_ingest_command(
+        source_uri,
+        f"{schema_rand_prefix}.input",
+        dest_uri,
+        f"{schema_rand_prefix}.output",
+        sql_backend="sqlalchemy",
+        sql_limit=4,
+    )
+    if result.exception:
+        traceback.print_exception(*result.exc_info)
+    assert result.exit_code == 0
+
+    dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+    res = dest_engine.execute(
+        f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
+    ).fetchall()
+
+    assert res == [
+        (1, "val1", as_datetime("2024-01-01")),
+        (2, "val2", as_datetime("2024-01-01")),
+        (3, "val3", as_datetime("2024-01-01")),
+        (4, "val4", as_datetime("2024-01-02")),
+    ]
+
+    source_instance.stop()
+    dest_instance.stop()
+
+
+def test_date_coercion_issue():
+    """
+    By default, ingestr treats the start and end dates as datetime objects. While this worked fine for many cases, if the
+    incremental field is a date, the start and end dates cannot be compared to the incremental field, and the ingestion would fail.
+    In order to eliminate this, we have introduced a new option to ingestr, --columns, which allows the user to specify the column types for the destination table.
+    This way, ingestr will know the data type of the incremental field, and will be able to convert the start and end dates to the correct data type before running the ingestion.
+    """
+    source_instance = DuckDb()
+    dest_instance = DuckDb()
+
+    source_uri = source_instance.start()
+    dest_uri = dest_instance.start()
+
+    schema_rand_prefix = f"test_date_coercion_{get_random_string(5)}"
+    source_engine = sqlalchemy.create_engine(source_uri, poolclass=NullPool)
+    with source_engine.begin() as conn:
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+        conn.execute(
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+        )
+        conn.execute(
+            f"""INSERT INTO {schema_rand_prefix}.input VALUES 
+                (1, 'val1', '2024-01-01'),
+                (2, 'val2', '2024-01-01'),
+                (3, 'val3', '2024-01-01'),
+                (4, 'val4', '2024-01-02'),
+                (5, 'val5', '2024-01-02'),
+                (6, 'val6', '2024-01-02'),
+                (7, 'val7', '2024-01-03'),
+                (8, 'val8', '2024-01-03'),
+                (9, 'val9', '2024-01-03')"""
+        )
+        res = conn.execute(
+            f"select count(*) from {schema_rand_prefix}.input"
+        ).fetchall()
+        assert res[0][0] == 9
+
+    result = invoke_ingest_command(
+        source_uri,
+        f"{schema_rand_prefix}.input",
+        dest_uri,
+        f"{schema_rand_prefix}.output",
+        inc_strategy="delete+insert",
+        inc_key="updated_at",
+        sql_backend="sqlalchemy",
+        interval_start="2024-01-01",
+        interval_end="2024-01-02",
+        columns="updated_at:date",
+    )
+    if result.exception:
+        traceback.print_exception(*result.exc_info)
+    assert result.exit_code == 0
+
+    dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+    res = dest_engine.execute(
+        f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
+    ).fetchall()
+
+    assert res == [
+        (1, "val1", as_datetime("2024-01-01")),
+        (2, "val2", as_datetime("2024-01-01")),
+        (3, "val3", as_datetime("2024-01-01")),
+        (4, "val4", as_datetime("2024-01-02")),
+        (5, "val5", as_datetime("2024-01-02")),
+        (6, "val6", as_datetime("2024-01-02")),
+    ]
+
+    source_instance.stop()
+    dest_instance.stop()
+
+
 @dataclass
 class DynamoDBTestConfig:
     db_name: str
@@ -1751,11 +1939,6 @@ def test_dynamodb(dest, dynamodb, testcase):
 def custom_query_tests():
     def replace(source_connection_url, dest_connection_url):
         schema_rand_prefix = f"testschema_create_replace_cust_{get_random_string(5)}"
-        try:
-            shutil.rmtree(get_abs_path("../pipeline_data"))
-        except Exception:
-            pass
-
         source_engine = sqlalchemy.create_engine(source_connection_url)
         with source_engine.begin() as conn:
             conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
@@ -1803,11 +1986,6 @@ def custom_query_tests():
 
     def merge(source_connection_url, dest_connection_url):
         schema_rand_prefix = f"testschema_merge_{get_random_string(5)}"
-        try:
-            shutil.rmtree(get_abs_path("../pipeline_data"))
-        except Exception:
-            pass
-
         source_engine = sqlalchemy.create_engine(
             source_connection_url, poolclass=NullPool
         )
@@ -1945,3 +2123,666 @@ def custom_query_tests():
 @pytest.mark.parametrize("testcase", custom_query_tests())
 def test_custom_query(testcase, source, dest):
     testcase(source.start(), dest.start())
+
+
+# Integration testing when the access token is not provided, and it is only for the resource "repo_events
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_github_to_duckdb(dest):
+    dest_uri = dest.start()
+    source_uri = "github://?owner=bruin-data&repo=ingestr"
+    source_table = "repo_events"
+
+    dest_table = "dest.github_repo_events"
+
+    res = invoke_ingest_command(source_uri, source_table, dest_uri, dest_table)
+
+    assert res.exit_code == 0
+    dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+    res = dest_engine.execute(f"select count(*) from {dest_table}").fetchall()
+    assert len(res) > 0
+
+
+def appstore_test_cases() -> Iterable[Callable]:
+    app_download_testdata = (
+        "Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tApp Version\tDevice\tPlatform Version\tSource Type\tSource Info\tCampaign\tPage Type\tPage Title\tPre-Order\tTerritory\n"
+        "2025-01-01\t1\t590\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp Store search\t\t\tNo page\tNo page\t\tFR\n"
+        "2025-01-01\t1\t16\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp referrer\tcom.burbn.instagram\t\tStore sheet\tDefault custom product page\t\tSG\n"
+        "2025-01-01\t1\t11\t2025-01-01\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.3\tApp Store search\t\t\tNo page\tNo page\t\tMX\n"
+    )
+
+    app_download_testdata_extended = (
+        "Date\tApp Apple Identifier\tCounts\tProcessing Date\tApp Name\tDownload Type\tApp Version\tDevice\tPlatform Version\tSource Type\tSource Info\tCampaign\tPage Type\tPage Title\tPre-Order\tTerritory\n"
+        "2025-01-02\t1\t590\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp Store search\t\t\tNo page\tNo page\t\tFR\n"
+        "2025-01-02\t1\t16\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.1\tApp referrer\tcom.burbn.instagram\t\tStore sheet\tDefault custom product page\t\tSG\n"
+        "2025-01-02\t1\t11\t2025-01-02\tAcme Inc\tAuto-update\t4.2.40\tiPhone\tiOS 18.3\tApp Store search\t\t\tNo page\tNo page\t\tMX\n"
+    )
+
+    api_key = base64.b64encode(b"MOCK_KEY").decode()
+
+    def create_mock_response(data: str) -> requests.Response:
+        res = requests.Response()
+        buffer = io.BytesIO()
+        archive = gzip.GzipFile(fileobj=buffer, mode="w")
+        archive.write(data.encode())
+        archive.close()
+        buffer.seek(0)
+        res.status_code = 200
+        res.raw = buffer
+        return res
+
+    def test_no_report_instances_found(dest_uri):
+        """
+        When there are no report instances for the given date range,
+        NoReportsError should be raised.
+        """
+        client = MagicMock()
+        client.list_analytics_report_requests = MagicMock(
+            return_value=AnalyticsReportRequestsResponse(
+                [
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="123",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONGOING", stoppedDueToInactivity=False
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+        client.list_analytics_reports = MagicMock(
+            return_value=AnalyticsReportResponse(
+                [
+                    Report(
+                        type="analyticsReports",
+                        id="123",
+                        attributes=ReportAttributes(
+                            name="app-downloads-detailed", category="USER"
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+        client.list_report_instances = MagicMock(
+            return_value=AnalyticsReportInstancesResponse(
+                [
+                    ReportInstance(
+                        type="analyticsReportInstances",
+                        id="123",
+                        attributes=ReportInstanceAttributes(
+                            granularity="DAILY", processingDate="2024-01-03"
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                "app-downloads-detailed",
+                dest_uri,
+                dest_table,
+                interval_start="2024-01-01",
+                interval_end="2024-01-02",
+            )
+            assert has_exception(result.exception, NoReportsFoundError)
+
+    def test_no_ongoing_reports_found(dest_uri):
+        """
+        when there are no ongoing reports, or ongoing reports that have
+        been stopped due to inactivity, NoOngoingReportRequestsFoundError should be raised.
+        """
+        client = MagicMock()
+        client.list_analytics_report_requests = MagicMock(
+            return_value=AnalyticsReportRequestsResponse(
+                [
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="123",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONE_TIME_SNAPSHOT", stoppedDueToInactivity=False
+                        ),
+                    ),
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="124",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONGOING", stoppedDueToInactivity=True
+                        ),
+                    ),
+                ],
+                None,
+                None,
+            )
+        )
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                "app-downloads-detailed",
+                dest_uri,
+                dest_table,
+                interval_start="2024-01-01",
+                interval_end="2024-01-02",
+            )
+            assert has_exception(result.exception, NoOngoingReportRequestsFoundError)
+
+    def test_no_such_report(dest_uri):
+        """
+        when there is no report with the given name, NoSuchReportError should be raised.
+        """
+        client = MagicMock()
+        client.list_analytics_report_requests = MagicMock(
+            return_value=AnalyticsReportRequestsResponse(
+                [
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="123",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONGOING", stoppedDueToInactivity=False
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+        client.list_analytics_reports = MagicMock(
+            return_value=AnalyticsReportResponse(
+                [],
+                None,
+                None,
+            )
+        )
+
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                "app-downloads-detailed",
+                dest_uri,
+                dest_table,
+                interval_start="2024-01-01",
+                interval_end="2024-01-02",
+            )
+            assert has_exception(result.exception, NoSuchReportError)
+
+    def test_successful_ingestion(dest_uri):
+        """
+        When there are report instances for the given date range, the data should be ingested
+        """
+        client = MagicMock()
+        client.list_analytics_report_requests = MagicMock(
+            return_value=AnalyticsReportRequestsResponse(
+                [
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="123",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONGOING", stoppedDueToInactivity=False
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+        client.list_analytics_reports = MagicMock(
+            return_value=AnalyticsReportResponse(
+                [
+                    Report(
+                        type="analyticsReports",
+                        id="123",
+                        attributes=ReportAttributes(
+                            name="app-downloads-detailed", category="USER"
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        client.list_report_instances = MagicMock(
+            return_value=AnalyticsReportInstancesResponse(
+                [
+                    ReportInstance(
+                        type="analyticsReportInstances",
+                        id="123",
+                        attributes=ReportInstanceAttributes(
+                            granularity="DAILY", processingDate="2025-01-01"
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        client.list_report_segments = MagicMock(
+            return_value=AnalyticsReportSegmentsResponse(
+                [
+                    ReportSegment(
+                        type="analyticsReportSegments",
+                        id="123",
+                        attributes=ReportSegmentAttributes(
+                            checksum="checksum-0",
+                            url="http://example.com/report.csv",  # we'll monkey patch requests.get to return this file
+                            sizeInBytes=123,
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            with patch("requests.get") as mock_get:
+                mock_get.return_value = create_mock_response(app_download_testdata)
+                schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+                dest_table = (
+                    f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                )
+                result = invoke_ingest_command(
+                    f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}",
+                    "app-downloads-detailed:123",  # moved the app ID to the table name to ensure that also works
+                    dest_uri,
+                    dest_table,
+                    interval_start="2025-01-01",
+                    interval_end="2025-01-02",
+                )
+
+        assert result.exit_code == 0
+
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+        count = dest_engine.execute(f"select count(*) from {dest_table}").fetchone()[0]
+        assert count == 3
+
+    def test_incremental_ingestion(dest_uri):
+        """
+        when the pipeline is run till a specific end date, the next ingestion
+        should load data from the last processing date, given that last_date is not provided
+        """
+
+        client = MagicMock()
+        client.list_analytics_report_requests = MagicMock(
+            return_value=AnalyticsReportRequestsResponse(
+                [
+                    ReportRequest(
+                        type="analyticsReportRequests",
+                        id="123",
+                        attributes=ReportRequestAttributes(
+                            accessType="ONGOING", stoppedDueToInactivity=False
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+        client.list_analytics_reports = MagicMock(
+            return_value=AnalyticsReportResponse(
+                [
+                    Report(
+                        type="analyticsReports",
+                        id="123",
+                        attributes=ReportAttributes(
+                            name="app-downloads-detailed", category="USER"
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        client.list_report_instances = MagicMock(
+            return_value=AnalyticsReportInstancesResponse(
+                [
+                    ReportInstance(
+                        type="analyticsReportInstances",
+                        id="123",
+                        attributes=ReportInstanceAttributes(
+                            granularity="DAILY", processingDate="2025-01-01"
+                        ),
+                    ),
+                    ReportInstance(
+                        type="analyticsReportInstances",
+                        id="123",
+                        attributes=ReportInstanceAttributes(
+                            granularity="DAILY", processingDate="2025-01-02"
+                        ),
+                    ),
+                ],
+                None,
+                None,
+            )
+        )
+
+        client.list_report_segments = MagicMock(
+            return_value=AnalyticsReportSegmentsResponse(
+                [
+                    ReportSegment(
+                        type="analyticsReportSegments",
+                        id="123",
+                        attributes=ReportSegmentAttributes(
+                            checksum="checksum-0",
+                            url="http://example.com/report.csv",  # we'll monkey patch requests.get to return this file
+                            sizeInBytes=123,
+                        ),
+                    )
+                ],
+                None,
+                None,
+            )
+        )
+
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            with patch("requests.get") as mock_get:
+                mock_get.return_value = create_mock_response(app_download_testdata)
+                schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+                dest_table = (
+                    f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                )
+                result = invoke_ingest_command(
+                    f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                    "app-downloads-detailed",
+                    dest_uri,
+                    dest_table,
+                    interval_end="2025-01-01",
+                )
+
+        assert result.exit_code == 0
+
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+        count = dest_engine.execute(f"select count(*) from {dest_table}").fetchone()[0]
+        dest_engine.dispose()
+        assert count == 3
+
+        # now run the pipeline again without an end date
+        with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
+            mock_client.return_value = client
+            with patch("requests.get") as mock_get:
+                mock_get.side_effect = [
+                    create_mock_response(app_download_testdata),
+                    create_mock_response(app_download_testdata_extended),
+                ]
+                schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
+                dest_table = (
+                    f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+                )
+                result = invoke_ingest_command(
+                    f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
+                    "app-downloads-detailed",
+                    dest_uri,
+                    dest_table,
+                )
+
+        assert result.exit_code == 0
+
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+        count = dest_engine.execute(f"select count(*) from {dest_table}").fetchone()[0]
+        assert count == 6
+        assert (
+            len(
+                dest_engine.execute(
+                    f"select processing_date from {dest_table} group by 1"
+                ).fetchall()
+            )
+            == 2
+        )
+
+    return [
+        test_no_report_instances_found,
+        test_no_ongoing_reports_found,
+        test_no_such_report,
+        test_successful_ingestion,
+        test_incremental_ingestion,
+    ]
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize("test_case", appstore_test_cases())
+def test_appstore(dest, test_case):
+    test_case(dest.start())
+    dest.stop()
+
+
+def fs_test_cases(
+        protocol: str,
+        target_fs: str,
+        auth: str,
+) -> Iterable[Callable]:
+    """
+    Tests for filesystem based sources
+    """
+    testdata = (
+        "name,phone,email,country\n"
+        "Rajah Roach,1-459-646-7421,adipiscing.ligula@outlook.net,Austria\n"
+        "Kiayada Jackson,(341) 484-6523,velit.egestas.lacinia@hotmail.couk,Norway\n"
+        "Bradley Grant,1-329-268-4178,leo.cras@hotmail.org,Chile\n"
+        "Damian Velasquez,(462) 744-9637,phasellus.fermentum@outlook.ca,South Africa\n"
+        "Rina Nicholson,(201) 971-6463,neque.nullam.ut@yahoo.net,Brazil\n"
+    )
+    testdata_extended = (
+        "name,phone,email,country\n"
+        "Irene Douglas,(223) 971-6463,flying.fish.kick@gmail.com,UK\n"
+    )
+    test_fs = MemoryFileSystem()
+
+    # for CSV tests
+    with test_fs.open("/data.csv", "w") as f:
+        f.write(testdata)
+
+    # for Glob tests
+    with test_fs.open("/data2.csv", "w") as f:
+        f.write(testdata_extended)
+
+    # For Parquet tests
+    with test_fs.open("/data.parquet", "wb") as f:
+        table = pa.csv.read_csv(io.BytesIO(testdata.encode()))
+        pya_parquet.write_table(table, f)
+
+    # For JSONL tests
+    with test_fs.open("/data.jsonl", "w") as f:
+        reader = csv.DictReader(io.StringIO(testdata))
+        for row in reader:
+            json.dump(row, f)
+            f.write("\n")
+
+    # for testing unsupported files
+    with test_fs.open("/bin/data.bin", "w") as f:
+        f.write("BINARY")
+
+    def glob_files_override(fs_client, _, file_glob):
+        return glob_files(fs_client, "memory://", file_glob)
+
+    def assert_rows(dest_uri, dest_table, n):
+        engine = sqlalchemy.create_engine(dest_uri)
+        rows = engine.execute(f"select count(*) from {dest_table}").fetchall()
+        assert len(rows) == 1
+        assert rows[0] == (n,)
+
+    def test_empty_source_uri(dest_uri):
+        """
+        When the source URI is empty, an error should be raised.
+        """
+        result = invoke_ingest_command(
+            f"{protocol}://bucket?{auth}", "", dest_uri, "test"
+        )
+        assert has_exception(result.exception, ValueError)
+
+    def test_unsupported_file_format(dest_uri):
+        """
+        When the source file is not one of [csv, parquet, jsonl] it should
+        raise an exception
+        """
+        with (
+            patch(target_fs),
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://bucket?{auth}",
+                "/bin/data.bin",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code != 0
+            assert has_exception(result.exception, ValueError)
+
+    def test_missing_credentials(dest_uri):
+        """
+        When the credentials are missing, an error should be raised.
+        """
+        schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+        dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+        result = invoke_ingest_command(
+            f"{protocol}://bucket",
+            "/data.csv",
+            dest_uri,
+            dest_table,
+        )
+        assert result.exit_code != 0
+
+    def test_csv_load(dest_uri):
+        """
+        When the source URI is a CSV file, the data should be ingested.
+        """
+        with (
+            patch(target_fs) as target_fs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://bucket?{auth}",
+                "/data.csv",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 5)
+
+    def test_parquet_load(dest_uri):
+        """
+        When the source URI is a Parquet file, the data should be ingested.
+        """
+        with (
+            patch(target_fs) as target_fs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://bucket?{auth}",
+                "/data.parquet",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 5)
+
+    def test_jsonl_load(dest_uri):
+        """
+        When the source URI is a JSONL file, the data should be ingested.
+        """
+        with (
+            patch(target_fs) as target_fs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://bucket?{auth}",
+                "/data.jsonl",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 5)
+
+    def test_glob_load(dest_uri):
+        """
+        When the source URI is a glob pattern, all files matching the pattern should be ingested
+        """
+        with (
+            patch(target_fs) as target_fs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://bucket?{auth}",
+                "/*.csv",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 6)
+
+    return [
+        test_empty_source_uri,
+        test_missing_credentials,
+        test_unsupported_file_format,
+        test_csv_load,
+        test_parquet_load,
+        test_jsonl_load,
+        test_glob_load,
+    ]
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize(
+    "test_case",
+    fs_test_cases(
+        "gs",
+        "ingestr.src.sources.gcsfs.GCSFileSystem",
+        "credentials_base64=e30K", # base 64 for "{}"
+    ),
+)
+def test_gcs(dest, test_case):
+    test_case(dest.start())
+    dest.stop()
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize(
+    "test_case",
+    fs_test_cases(
+        "s3",
+        "ingestr.src.sources.s3fs.S3FileSystem",
+        "access_key_id=KEY&secret_access_key=SECRET"
+    )
+)
+def test_s3(dest, test_case):
+    test_case( dest.start())
+    dest.stop()

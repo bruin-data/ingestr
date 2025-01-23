@@ -2,26 +2,32 @@
 Defines all the sources and resources needed for Google Analytics V4
 """
 
-from typing import List, Optional, Union
+from typing import Iterator, List, Optional, Union
 
 import dlt
-from dlt.common.typing import DictStrAny
-from dlt.sources import DltResource
+from dlt.common import pendulum
+from dlt.common.typing import DictStrAny, TDataItem
+from dlt.extract import DltResource
 from dlt.sources.credentials import GcpOAuthCredentials, GcpServiceAccountCredentials
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
+from google.analytics.data_v1beta.types import (
+    Dimension,
+    Metric,
+)
 
-from .helpers import basic_report
+from .helpers import get_report
 
 
 @dlt.source(max_table_nesting=0)
 def google_analytics(
-    datetime: str,
+    datetime_dimension: str,
     credentials: Union[
         GcpOAuthCredentials, GcpServiceAccountCredentials
     ] = dlt.secrets.value,
     property_id: int = dlt.config.value,
     queries: List[DictStrAny] = dlt.config.value,
-    start_date: Optional[str] = "2015-08-14",
+    start_date: Optional[pendulum.DateTime] = pendulum.datetime(2024, 1, 1),
+    end_date: Optional[pendulum.DateTime] = None,
     rows_per_page: int = 10000,
 ) -> List[DltResource]:
     try:
@@ -50,21 +56,51 @@ def google_analytics(
 
     # always add "date" to dimensions so we are able to track the last day of a report
     dimensions = query["dimensions"]
-    resource_name = query["resource_name"]
 
-    res = dlt.resource(
-        basic_report, name="basic_report", merge_key=datetime, write_disposition="merge"
-    )(
-        client=client,
-        rows_per_page=rows_per_page,
-        property_id=property_id,
-        dimensions=dimensions,
-        metrics=query["metrics"],
-        resource_name=resource_name,
-        start_date=start_date,
-        last_date=dlt.sources.incremental(
-            datetime
-        ),  # pass empty primary key to avoid unique checks, a primary key defined by the resource will be used
+    @dlt.resource(
+        name="basic_report",
+        merge_key=datetime_dimension,
+        write_disposition="merge",
     )
+    def basic_report(
+        incremental=dlt.sources.incremental(
+            datetime_dimension,
+            initial_value=start_date,
+            end_value=end_date,
+            range_end="closed",
+            range_start="closed",
+        ),
+    ) -> Iterator[TDataItem]:
+        start_date = incremental.last_value
+        end_date = incremental.end_value
+        if start_date is None:
+            start_date = pendulum.datetime(2024, 1, 1)
+        if end_date is None:
+            end_date = pendulum.yesterday()
+        yield from get_report(
+            client=client,
+            property_id=property_id,
+            dimension_list=[Dimension(name=dimension) for dimension in dimensions],
+            metric_list=[Metric(name=metric) for metric in query["metrics"]],
+            per_page=rows_per_page,
+            start_date=start_date,
+            end_date=end_date,
+        )
 
-    return [res]
+    # res = dlt.resource(
+    #     basic_report, name="basic_report", merge_key=datetime_dimension, write_disposition="merge"
+    # )(
+    #     client=client,
+    #     rows_per_page=rows_per_page,
+    #     property_id=property_id,
+    #     dimensions=dimensions,
+    #     metrics=query["metrics"],
+    #     resource_name=resource_name,
+    #     last_date=dlt.sources.incremental(
+    #         datetime_dimension,
+    #         initial_value=start_date,
+    #         end_value=end_date,
+    #     ),
+    # )
+
+    return [basic_report]

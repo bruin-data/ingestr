@@ -23,8 +23,9 @@ from typing import (
 from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
+import gcsfs  # type: ignore
+import s3fs # type: ignore
 import pendulum
-import sqlalchemy
 from dlt.common.configuration.specs import (
     AwsCredentials,
 )
@@ -49,20 +50,26 @@ from dlt.sources.sql_database.schema_types import (
 from google.ads.googleads.client import GoogleAdsClient  # type: ignore
 from sqlalchemy import Column
 from sqlalchemy import types as sa
-from sqlalchemy.dialects import mysql
 
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
+from ingestr.src.appstore import app_store
+from ingestr.src.appstore.client import AppStoreConnectClient
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
 from ingestr.src.dynamodb import dynamodb
+from ingestr.src.errors import (
+    MissingValueError,
+    UnsupportedResourceError,
+)
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.google_ads import google_ads
+from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
@@ -70,10 +77,21 @@ from ingestr.src.hubspot import hubspot
 from ingestr.src.kafka import kafka_consumer
 from ingestr.src.kafka.helpers import KafkaCredentials
 from ingestr.src.klaviyo._init_ import klaviyo_source
+from ingestr.src.linkedin_ads import linked_in_ads_source
+from ingestr.src.linkedin_ads.dimension_time_enum import (
+    Dimension,
+    TimeGranularity,
+)
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
+from ingestr.src.sql_database.callbacks import (
+    chained_query_adapter_callback,
+    custom_query_variable_subsitution,
+    limit_callback,
+    type_adapter_callback,
+)
 from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
 from ingestr.src.tiktok_ads import tiktok_source
@@ -106,27 +124,22 @@ class SqlSource:
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
-
             incremental = dlt.sources.incremental(
                 kwargs.get("incremental_key", ""),
-                # primary_key=(),
                 initial_value=start_value,
                 end_value=end_value,
+                range_end="closed",
+                range_start="closed",
             )
 
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
-        reflection_level = kwargs.get("sql_reflection_level")
-
-        query_adapter_callback = None
+        query_adapters = []
         if kwargs.get("sql_limit"):
-
-            def query_adapter_callback(query, table):
-                query = query.limit(kwargs.get("sql_limit"))
-                if kwargs.get("incremental_key"):
-                    query = query.order_by(kwargs.get("incremental_key"))
-                return query
+            query_adapters.append(
+                limit_callback(kwargs.get("sql_limit"), kwargs.get("incremental_key"))
+            )
 
         defer_table_reflect = False
         sql_backend = kwargs.get("sql_backend", "sqlalchemy")
@@ -169,6 +182,7 @@ class SqlSource:
                     switchDict = {
                         int: sa.INTEGER,
                         datetime: sa.TIMESTAMP,
+                        date: sa.DATE,
                         pendulum.Date: sa.DATE,
                         pendulum.DateTime: sa.TIMESTAMP,
                     }
@@ -204,38 +218,10 @@ class SqlSource:
                     if getattr(engine, "may_dispose_after_use", False):
                         engine.dispose()
 
-            dlt.sources.sql_database.table_rows = table_rows
+            dlt.sources.sql_database.table_rows = table_rows  # type: ignore
 
-            def query_adapter_callback(query, table, incremental=None, engine=None):
-                params = {}
-                if incremental:
-                    params["interval_start"] = (
-                        incremental.last_value
-                        if incremental.last_value is not None
-                        else datetime(year=1, month=1, day=1)
-                    )
-                    if incremental.end_value is not None:
-                        params["interval_end"] = incremental.end_value
-                else:
-                    if ":interval_start" in query_value:
-                        params["interval_start"] = (
-                            datetime.min
-                            if kwargs.get("interval_start") is None
-                            else kwargs.get("interval_start")
-                        )
-                    if ":interval_end" in query_value:
-                        params["interval_end"] = (
-                            datetime.max
-                            if kwargs.get("interval_end") is None
-                            else kwargs.get("interval_end")
-                        )
-
-                return sqlalchemy.text(query_value).bindparams(**params)
-
-        def type_adapter_callback(sql_type):
-            if isinstance(sql_type, mysql.SET):
-                return sa.JSON
-            return sql_type
+            # override the query adapters, the only one we want is the one here in the case of custom queries
+            query_adapters = [custom_query_variable_subsitution(query_value, kwargs)]
 
         builder_res = self.table_builder(
             credentials=ConnectionStringCredentials(uri),
@@ -244,8 +230,8 @@ class SqlSource:
             incremental=incremental,
             backend=sql_backend,
             chunk_size=kwargs.get("page_size", None),
-            reflection_level=reflection_level,
-            query_adapter_callback=query_adapter_callback,
+            reflection_level=kwargs.get("sql_reflection_level", None),
+            query_adapter_callback=chained_query_adapter_callback(query_adapters),
             type_adapter_callback=type_adapter_callback,
             table_adapter_callback=table_adapter_exclude_columns(
                 kwargs.get("sql_exclude_columns", [])
@@ -275,6 +261,8 @@ class ArrowMemoryMappedSource:
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
+                range_end="closed",
+                range_start="closed",
             )
 
         file_path = uri.split("://")[1]
@@ -320,6 +308,8 @@ class MongoDbSource:
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
+                range_end="closed",
+                range_start="closed",
             )
 
         table_instance = self.table_builder(
@@ -388,6 +378,8 @@ class LocalCsvSource:
                 kwargs.get("incremental_key", ""),
                 initial_value=kwargs.get("interval_start"),
                 end_value=kwargs.get("interval_end"),
+                range_end="closed",
+                range_start="closed",
             )
         )
 
@@ -1114,19 +1106,17 @@ class S3Source:
         bucket_name = parsed_uri.hostname
         if not bucket_name:
             raise ValueError(
-                "Invalid S3 URI: The bucket name is missing. Ensure your S3 URI follows the format 's3://bucket-name/path/to/file"
+                "Invalid S3 URI: The bucket name is missing. Ensure your S3 URI follows the format 's3://bucket-name"
             )
         bucket_url = f"s3://{bucket_name}"
 
-        path_to_file = parsed_uri.path.lstrip("/")
+        path_to_file = parsed_uri.path.lstrip("/") or table.lstrip("/")
         if not path_to_file:
-            raise ValueError(
-                "Invalid S3 URI: The file path is missing. Ensure your S3 URI follows the format 's3://bucket-name/path/to/file"
-            )
+            raise ValueError("--source-table must be specified")
 
-        aws_credentials = AwsCredentials(
-            aws_access_key_id=access_key_id[0],
-            aws_secret_access_key=TSecretStrValue(secret_access_key[0]),
+        fs = s3fs.S3FileSystem(
+            key=access_key_id[0],
+            secret=secret_access_key[0],
         )
 
         file_extension = path_to_file.split(".")[-1]
@@ -1142,7 +1132,7 @@ class S3Source:
             )
 
         return readers(
-            bucket_url=bucket_url, credentials=aws_credentials, file_glob=path_to_file
+            bucket_url, fs, path_to_file
         ).with_resources(endpoint)
 
 
@@ -1346,6 +1336,8 @@ class DynamoDBSource:
                 incremental_key.strip(),
                 initial_value=isotime(kwargs.get("interval_start")),
                 end_value=isotime(kwargs.get("interval_end")),
+                range_end="closed",
+                range_start="closed",
             )
 
         # bug: we never validate table.
@@ -1372,11 +1364,6 @@ class GoogleAnalyticsSource:
         if not property_id:
             raise ValueError("property_id is required to connect to Google Analytics")
 
-        interval_start = kwargs.get("interval_start")
-        start_date = (
-            interval_start.strftime("%Y-%m-%d") if interval_start else "2015-08-14"
-        )
-
         fields = table.split(":")
         if len(fields) != 3:
             raise ValueError(
@@ -1400,23 +1387,162 @@ class GoogleAnalyticsSource:
             {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
         ]
 
+        start_date = pendulum.now().subtract(days=30).start_of("day")
+        if kwargs.get("interval_start") is not None:
+            start_date = pendulum.instance(kwargs.get("interval_start"))  # type: ignore
+
+        end_date = pendulum.now()
+        if kwargs.get("interval_end") is not None:
+            end_date = pendulum.instance(kwargs.get("interval_end"))  # type: ignore
+
         return google_analytics(
             property_id=property_id[0],
             start_date=start_date,
-            datetime=datetime,
+            end_date=end_date,
+            datetime_dimension=datetime,
             queries=queries,
             credentials=credentials,
         ).with_resources("basic_report")
 
 
-class GoogleAdsSource:
+class GitHubSource:
     def handles_incrementality(self) -> bool:
         return True
 
-    def init_client(self, params: Dict[str, List[str]]) -> GoogleAdsClient:
-        dev_token = params.get("dev_token")
-        if dev_token is None or len(dev_token) == 0:
-            raise ValueError("dev_token is required to connect to Google Ads")
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Github takes care of incrementality on its own, you should not provide incremental_key"
+            )
+        # github://?access_token=<access_token>&owner=<owner>&repo=<repo>
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        owner = source_fields.get("owner", [None])[0]
+        if not owner:
+            raise ValueError(
+                "owner of the repository is required to connect with GitHub"
+            )
+
+        repo = source_fields.get("repo", [None])[0]
+        if not repo:
+            raise ValueError(
+                "repo variable is required to retrieve data for a specific repository from GitHub."
+            )
+
+        access_token = source_fields.get("access_token", [""])[0]
+
+        if table in ["issues", "pull_requests"]:
+            return github_reactions(
+                owner=owner, name=repo, access_token=access_token
+            ).with_resources(table)
+        elif table == "repo_events":
+            return github_repo_events(owner=owner, name=repo, access_token=access_token)
+        elif table == "stargazers":
+            return github_stargazers(owner=owner, name=repo, access_token=access_token)
+        else:
+            raise ValueError(
+                f"Resource '{table}' is not supported for GitHub source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+
+class AppleAppStoreSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def init_client(
+        self,
+        key_id: str,
+        issuer_id: str,
+        key_path: Optional[List[str]],
+        key_base64: Optional[List[str]],
+    ):
+        key = None
+        if key_path is not None:
+            with open(key_path[0]) as f:
+                key = f.read()
+        else:
+            key = base64.b64decode(key_base64[0]).decode()  # type: ignore
+
+        return AppStoreConnectClient(key.encode(), key_id, issuer_id)
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "App Store takes care of incrementality on its own, you should not provide incremental_key"
+            )
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        key_id = params.get("key_id")
+        if key_id is None:
+            raise MissingValueError("key_id", "App Store")
+
+        key_path = params.get("key_path")
+        key_base64 = params.get("key_base64")
+        key_available = any(
+            map(
+                lambda x: x is not None,
+                [key_path, key_base64],
+            )
+        )
+        if key_available is False:
+            raise MissingValueError("key_path or key_base64", "App Store")
+
+        issuer_id = params.get("issuer_id")
+        if issuer_id is None:
+            raise MissingValueError("issuer_id", "App Store")
+
+        client = self.init_client(key_id[0], issuer_id[0], key_path, key_base64)
+
+        app_ids = params.get("app_id")
+        if ":" in table:
+            intended_table, app_ids_override = table.split(":", maxsplit=1)
+            app_ids = app_ids_override.split(",")
+            table = intended_table
+
+        if app_ids is None:
+            raise MissingValueError("app_id", "App Store")
+
+        src = app_store(
+            client,
+            app_ids,
+            start_date=kwargs.get(
+                "interval_start", datetime.now() - timedelta(days=30)
+            ),
+            end_date=kwargs.get("interval_end"),
+        )
+
+        if table not in src.resources:
+            raise UnsupportedResourceError(table, "AppStore")
+
+        return src.with_resources(table)
+
+
+class GCSSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "GCS takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+            raise MissingValueError("credentials_path or credentials_base64", "GCS")
+
+        bucket_name = parsed_uri.hostname
+        if not bucket_name:
+            raise ValueError(
+                "Invalid GCS URI: The bucket name is missing. Ensure your GCS URI follows the format 'gs://bucket-name/path/to/file"
+            )
+        bucket_url = f"gs://{bucket_name}/"
+
+        path_to_file = parsed_uri.path.lstrip("/") or table.lstrip("/")
+        if not path_to_file:
+            raise ValueError("--source-table must be specified")
 
         credentials_path = params.get("credentials_path")
         credentials_base64 = params.get("credentials_base64")
@@ -1427,10 +1553,58 @@ class GoogleAdsSource:
             )
         )
         if credentials_available is False:
+        credentials = None
+        if credentials_path:
+            credentials = credentials_path[0]
+        else:
+            credentials = json.loads(base64.b64decode(credentials_base64[0]).decode())  # type: ignore
+
+        # There's a compatiblity issue between google-auth, dlt and gcsfs
+        # that makes it difficult to use google.oauth2.service_account.Credentials
+        # (The RECOMMENDED way of passing service account credentials)
+        # directly with gcsfs. As a workaround, we construct the GCSFileSystem
+        # and pass it directly to filesystem.readers.
+        fs = gcsfs.GCSFileSystem(
+            token=credentials,
+        )
+
+        file_extension = path_to_file.split(".")[-1]
+        if file_extension == "csv":
+            endpoint = "read_csv"
+        elif file_extension == "jsonl":
+            endpoint = "read_jsonl"
+        elif file_extension == "parquet":
+            endpoint = "read_parquet"
+        else:
             raise ValueError(
+                "GCS Source only supports specific formats files: csv, jsonl, parquet"
+            )
+
+        return readers(
+            bucket_url, fs, path_to_file
+        ).with_resources(endpoint)
+
+ class GoogleAdsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def init_client(self, params: Dict[str, List[str]]) -> GoogleAdsClient:
+        dev_token = params.get("dev_token")
+        if dev_token is None or len(dev_token) == 0:
+            raise ValueError("dev_token is required to connect to Google Ads")
+           raise ValueError(
                 "credentials_path (or credentials_base64) is required to connect Google Ads"
             )
 
+        credentials_path = params.get("credentials_path")
+        credentials_base64 = params.get("credentials_base64")
+        credentials_available = any(
+            map(
+                lambda x: x is not None,
+                [credentials_path, credentials_base64],
+            )
+        )
+        if credentials_available is False:
         path = None
         fd = None
         if credentials_path:
@@ -1498,3 +1672,80 @@ class GoogleAdsSource:
             )
 
         return src.with_resources(table)
+
+class LinkedInAdsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        access_token = source_fields.get("access_token")
+        if not access_token:
+            raise ValueError("access_token is required to connect to LinkedIn Ads")
+
+        account_ids = source_fields.get("account_ids")
+
+        if not account_ids:
+            raise ValueError("account_ids is required to connect to LinkedIn Ads")
+        account_ids = account_ids[0].replace(" ", "").split(",")
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+        start_date = (
+            ensure_pendulum_datetime(interval_start).date()
+            if interval_start
+            else pendulum.datetime(2018, 1, 1).date()
+        )
+        end_date = (
+            ensure_pendulum_datetime(interval_end).date() if interval_end else None
+        )
+
+        fields = table.split(":")
+        if len(fields) != 3:
+            raise ValueError(
+                "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
+            )
+
+        dimensions = fields[1].replace(" ", "").split(",")
+        dimensions = [item for item in dimensions if item.strip()]
+        if (
+            "campaign" not in dimensions
+            and "creative" not in dimensions
+            and "account" not in dimensions
+        ):
+            raise ValueError(
+                "'campaign', 'creative' or 'account' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
+            )
+        if "date" not in dimensions and "month" not in dimensions:
+            raise ValueError(
+                "'date' or 'month' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
+            )
+
+        if "date" in dimensions:
+            time_granularity = TimeGranularity.daily
+            dimensions.remove("date")
+        else:
+            time_granularity = TimeGranularity.monthly
+            dimensions.remove("month")
+
+        dimension = Dimension[dimensions[0]]
+
+        metrics = fields[2].replace(" ", "").split(",")
+        metrics = [item for item in metrics if item.strip()]
+        if "dateRange" not in metrics:
+            metrics.append("dateRange")
+        if "pivotValues" not in metrics:
+            metrics.append("pivotValues")
+
+        return linked_in_ads_source(
+            start_date=start_date,
+            end_date=end_date,
+            access_token=access_token[0],
+            account_ids=account_ids,
+            dimension=dimension,
+            metrics=metrics,
+            time_granularity=time_granularity,
+        ).with_resources("custom_reports")
+

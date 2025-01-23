@@ -28,10 +28,20 @@ DEFAULT_METRICS = [
 ]
 
 
+def retry_on_limit(response: requests.Response, exception: BaseException) -> bool:
+    return response.status_code == 429
+
+
 class AdjustAPI:
     def __init__(self, api_key):
         self.api_key = api_key
-        self.uri = "https://automate.adjust.com/reports-service/report"
+        self.request_client = Client(
+            request_timeout=8.0,
+            raise_for_status=False,
+            retry_condition=retry_on_limit,
+            request_max_attempts=12,
+            request_backoff_factor=2,
+        ).session
 
     def fetch_report_data(
         self,
@@ -62,24 +72,26 @@ class AdjustAPI:
                 f"Invalid date range: Start date ({start_date}) must be earlier than end date ({end_date})."
             )
 
-        def retry_on_limit(
-            response: requests.Response, exception: BaseException
-        ) -> bool:
-            return response.status_code == 429
-
-        request_client = Client(
-            request_timeout=8.0,
-            raise_for_status=False,
-            retry_condition=retry_on_limit,
-            request_max_attempts=12,
-            request_backoff_factor=2,
-        ).session
-
-        response = request_client.get(self.uri, headers=headers, params=params)
+        response = self.request_client.get(
+            "https://automate.adjust.com/reports-service/report",
+            headers=headers,
+            params=params,
+        )
         if response.status_code == 200:
             result = response.json()
             items = result.get("rows", [])
             yield items
+        else:
+            raise HTTPError(f"Request failed with status code: {response.status_code}")
+
+    def fetch_events(self):
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        response = self.request_client.get(
+            "https://automate.adjust.com/reports-service/events", headers=headers
+        )
+        if response.status_code == 200:
+            result = response.json()
+            yield result
         else:
             raise HTTPError(f"Request failed with status code: {response.status_code}")
 
