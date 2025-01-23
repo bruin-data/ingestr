@@ -39,7 +39,7 @@ You also need the 10-digit customer id of the account you're making API calls to
 
 ### Example
 
-Let's say we want to ingest information about campaigns and ads that we've created on our Google Ads account, and save them to a table `public.campaigns` in duckdb database called `adverts.db`.
+Let's say we want to ingest information about campaigns (on a daily interval) and save them to a table `public.campaigns` in duckdb database called `adverts.db`.
 
 For this example, we'll assume that:
 * The service account JSON file is located in the current directory and is named `svc_account.json`
@@ -50,19 +50,88 @@ You can run the following to achieve this:
 ```sh
 ingestr ingest \
   --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
-  --source-table "campaigns" \
+  --source-table "campaign_report_daily" \
   --dest-uri "duckdb://./adverts.db" \
   --dest-table "public.campaigns"
 ```
+
+## Custom Reports
+`googleads` source supports custom reports. You can pass a custom report definition to `--source-table` and it will dynamically create a report for you.
+
+The format of a custom report looks like the following:
+```
+custom:{resource_name}:{dimensions}:{metrics}
+```
+Where:
+* `{resource_name}` is a [Google Ads Resource](https://developers.google.com/google-ads/api/fields/v18/overview_query_builder#list-of-all-resources).
+* `{dimensions}` is a comma separated list of the Resource's attribute fields, or fields of [attributed resources](https://developers.google.com/google-ads/api/docs/query/overview).
+* `{metrics}` is a comma separated list of the Resource's [metrics](https://developers.google.com/google-ads/api/fields/v18/metrics). Note that the `metrics.` prefix is optional. 
+
+Notes:
+* `{dimensions}` and `{metrics}` are optional. If you don't need them, you can leave their respective segment blank.
+* `segments` are currently not supported as dimensions.
+* `segments.date` is automatically added to all custom reports.
+
+### Custom Report Example
+For this example, we will ingest data from `ad_group_ad_asset_view`.
+We want to obtain the following info:
+**dimensions**
+  * ad_group.id
+  * campagin.id
+  * customer.id
+**metrics**
+  * metrics.clicks
+  * metrics.conversions
+  * metrics.impressions
+
+To achieve this, we pass a `custom` report specification to `ingestr` source table as follows:
+```sh
+ingestr ingest \
+  --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
+  --source-table "custom:ad_group_ad_asset_view:ad_group.id,campaign.id,customer.id:clicks,conversions,impressions" \
+  --dest-uri "duckdb:///custom.db" \
+  --dest-table "public.report"
+```
+
+Notice the lack of `metrics.` prefix in the metrics segment. Please note that `--dest-table` is mandatory when creating
+a custom report.
+
+**Without Metrics**
+
+Here's an example of the above report, without any associated metrics:
+```sh
+ingestr ingest \
+  --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
+  --source-table "custom:ad_group_ad_asset_view:ad_group.id,campaign.id,customer.id:" \
+  --dest-uri "duckdb:///custom.db" \
+```
+
+**Without Dimensions**
+
+Here's an example of the above report, without any associated dimensions:
+```sh
+ingestr ingest \
+  --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
+  --source-table "custom:ad_group_ad_asset_view::clicks,conversions,impressions" \
+  --dest-uri "duckdb:///custom.db" \
+```
+
+
 
 ## Tables
 
 | Name             | Description                                                             |
 |------------------|-------------------------------------------------------------------------|
-| customers        | Businesses or individuals who pay to advertise their products           |
-| campaigns        | Structured sets of ad groups and advertisements                         |
-| change_events    | Modifications made to an account's ads, campaigns, and related settings |
-| customer_clients | Accounts that are managed by a given account                            |
-
-> [!WARNING]
-> Google Ads source doesn't support incremental loading. This means that ingestr will do a full-reload every time you run `ingest`.
+| `account_report_daily` | Provides daily metrics aggregated at the account level. |
+| `campaign_report_daily` | Provides daily metrics aggregated at the campaign level. |
+| `ad_group_report_daily` | Provides daily metrics aggregated at the ad group level. |
+| `ad_report_daily` | Provides daily metrics aggregated at the ad level. |
+| `audience_report_daily` | Provides daily metrics aggregated at the audience level. |
+| `keyword_report_daily` | Provides daily metrics aggregated at the keyword level. |
+| `click_report_daily` | Provides daily metrics on clicks. |
+| `landing_page_report_daily` | Provides daily metrics on landing page performance. |
+| `search_keyword_report_daily` | Provides daily metrics on search keywords. |
+| `search_term_report_daily` | Provides daily metrics on search terms. |
+| `lead_form_submission_data_report_daily` | Provides daily metrics on lead form submissions. |
+| `local_services_lead_report_daily` | Provides daily metrics on local services leads. |
+| `local_services_lead_conversations_report_daily` | Provides daily metrics on local services lead conversations. |
