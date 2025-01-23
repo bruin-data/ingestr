@@ -269,6 +269,7 @@ class AthenaDestination:
 class ClickhouseDestination:
     def dlt_dest(self, uri: str, **kwargs):
         parsed_uri = urlparse(uri)
+        print(f"parsed_uri: {parsed_uri}")
 
         if "dest_table" in kwargs:
             table = kwargs["dest_table"]
@@ -300,9 +301,7 @@ class ClickhouseDestination:
                 "The TCP port of the ClickHouse server is required to establish a connection."
             )
 
-        # database = parsed_uri.path.lstrip("/")
-        # if not database:
-        #     raise ValueError("The database name is required to connect to ClickHouse.")
+        http_port = int(parsed_uri.query.split('http_port=')[1]) if 'http_port=' in parsed_uri.query else 8123
 
         credentials = ClickHouseCredentials(
             {
@@ -311,14 +310,12 @@ class ClickhouseDestination:
                 "username": username,
                 "password": password,
                 "database": database,
-                "http_port": "8123",
+                "http_port": http_port,
                 "secure": 0,
             }
         )
 
-        return dlt.destinations.clickhouse(
-            credentials=credentials, dataset_table_separator="."
-        )
+        return dlt.destinations.clickhouse(credentials=credentials)
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
         table_fields = table.split(".")
