@@ -6,6 +6,7 @@ import json
 import os
 import random
 import shutil
+import socket
 import string
 import tempfile
 import time
@@ -30,16 +31,13 @@ import requests
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
 from dlt.sources.filesystem import glob_files
-from fsspec import AbstractFileSystem  # type: ignore
 from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
 from sqlalchemy.pool import NullPool
+from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
-from testcontainers.mssql import SqlServerContainer  # type: ignore
-from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
-from testcontainers.clickhouse import ClickHouseContainer # type: ignore
 from typer.testing import CliRunner
 
 from ingestr.main import app
@@ -415,32 +413,70 @@ class DockerImage:
 
     def start(self) -> str:
         if self.container:
-            return (self.container.get_connection_url() + self.connection_suffix).replace(
-                "clickhouse://",
-                "clickhouse+native://",
-            )
+            return self.container.get_connection_url() + self.connection_suffix
 
         if self.starting:
             while self.container is None:
                 time.sleep(0.1)
 
-            return (
-                self.container.get_connection_url() + self.connection_suffix
-            ).replace(
-                "clickhouse://",
-                "clickhouse+native://",
-            )
+            return self.container.get_connection_url() + self.connection_suffix
 
         self.starting = True
         self.container = self.container_creator()
         self.starting = False
         if self.container:
+            return self.container.get_connection_url() + self.connection_suffix
+
+        raise Exception("Failed to start container")
+
+    def stop(self):
+        pass
+
+    def stop_fully(self):
+        if self.container:
+            self.container.stop()
+
+
+class ClickhouseDockerImage:
+    def __init__(self, container_creator, connection_suffix: str = "") -> None:
+        self.container_creator = container_creator
+        self.connection_suffix = connection_suffix
+        self.container = None
+        self.starting = False
+
+    def start(self) -> str:
+        if self.container:
+            exposed_port = self.container.get_exposed_port(8123)
             return (
                 self.container.get_connection_url() + self.connection_suffix
             ).replace(
                 "clickhouse://",
                 "clickhouse+native://",
-            )
+            ) + f"?http_port={exposed_port}"
+
+        if self.starting:
+            while self.container is None:
+                time.sleep(0.1)
+
+            exposed_port = self.container.get_exposed_port(8123)
+            return (
+                self.container.get_connection_url() + self.connection_suffix
+            ).replace(
+                "clickhouse://",
+                "clickhouse+native://",
+            ) + f"?http_port={exposed_port}"
+
+        self.starting = True
+        self.container = self.container_creator()
+        self.starting = False
+        if self.container:
+            exposed_port = self.container.get_exposed_port(8123)
+            return (
+                self.container.get_connection_url() + self.connection_suffix
+            ).replace(
+                "clickhouse://",
+                "clickhouse+native://",
+            ) + f"?http_port={exposed_port}"
 
         raise Exception("Failed to start container")
 
@@ -484,18 +520,32 @@ SOURCES = {
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
     # ),
 }
+
+
+def get_free_port():
+    """Find a free port on the host machine by creating a temporary socket."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))  # Bind to port 0 lets OS assign a free port
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
+
+
 def get_clickhouse_container():
     ch = ClickHouseContainer(CLICKHOUSE_IMAGE)
     ch.dbname = ""
+    # get free port from host and bind it to clickhouse default http server
+    free_port = get_free_port()
+    ch.with_bind_ports(8123, free_port)
+
     return ch
+
 
 DESTINATIONS = {
     # "postgres": pgDocker,
     "duckdb": DuckDb(),
-    "clickhouse+native": DockerImage(
-        lambda: get_clickhouse_container()
-        .with_bind_ports(8123, 8123)
-        .start()
+    "clickhouse+native": ClickhouseDockerImage(
+        lambda: get_clickhouse_container().start()
     ),
 }
 
@@ -516,6 +566,8 @@ def manage_containers():
         # Wait for all futures to complete
         for future in futures:
             future.result()
+
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
@@ -528,9 +580,14 @@ def test_create_replace(source, dest):
         source_uri = source_future.result()
         dest_uri = dest_future.result()
 
+    print(f"source_uri: {source_uri}")
+    print(f"dest_uri: {dest_uri}")
+
     db_to_db_create_replace(source_uri, dest_uri)
     source.stop()
     dest.stop()
+
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
@@ -546,6 +603,7 @@ def test_append(source, dest):
     source.stop()
     dest.stop()
 
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
@@ -560,6 +618,7 @@ def test_merge_with_primary_key(source, dest):
     db_to_db_merge_with_primary_key(source_uri, dest_uri)
     source.stop()
     dest.stop()
+
 
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
@@ -619,7 +678,7 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
             f"select count(*) from {schema_rand_prefix}.input"
         ).fetchall()
         assert res[0][0] == 2
-    
+
     create_clickhouse_database(dest_connection_url, schema_rand_prefix)
 
     result = invoke_ingest_command(
@@ -639,6 +698,7 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
     assert len(res) == 2
     assert res[0] == (1, "val1", as_datetime("2022-01-01"))
     assert res[1] == (2, "val2", as_datetime("2022-02-01"))
+
 
 def db_to_db_append(source_connection_url: str, dest_connection_url: str):
     schema_rand_prefix = f"testschema_append_{get_random_string(5)}"
@@ -680,7 +740,7 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
         return dest_engine.execute(
             f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
-    
+
     create_clickhouse_database(dest_connection_url, schema_rand_prefix)
     run()
 
@@ -1214,6 +1274,7 @@ def test_kafka_to_db(dest):
         producer.produce(topic, message.encode("utf-8"))
     producer.flush()
     create_clickhouse_database(dest_uri, "testschema")
+
     def run():
         res = invoke_ingest_command(
             f"kafka://?bootstrap_servers={kafka.get_bootstrap_server()}&group_id=test_group",
@@ -1229,7 +1290,7 @@ def test_kafka_to_db(dest):
         return dest_engine.execute(
             "select _kafka__data from testschema.output order by _kafka_msg_id asc"
         ).fetchall()
-    
+
     create_clickhouse_database(dest_uri, "testschema")
     run()
 
@@ -1365,10 +1426,10 @@ def test_arrow_mmap_to_db_delete_insert(dest):
                 writer.write_table(table)
                 writer.close()
             create_clickhouse_database(dest_uri, schema)
-            
+
             if "clickhouse" in dest_uri:
                 pytest.skip("")
-                
+
             res = invoke_ingest_command(
                 f"mmap://{tmp.name}",
                 "whatever",
@@ -1472,6 +1533,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         assert res[0][1] == row_count
         assert res[1][0] == as_datetime2("2024-11-06")
         assert res[1][1] == 1000
+
 
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
@@ -1847,7 +1909,7 @@ def dynamodb_tests() -> Iterable[Callable]:
     def smoke_test(dest_uri, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
         dest_engine = sqlalchemy.create_engine(dest_uri)
-        create_clickhouse_database(dest_uri, "public")  
+        create_clickhouse_database(dest_uri, "public")
         result = invoke_ingest_command(
             dynamodb.uri, dynamodb.db_name, dest_uri, dest_table, "append", "updated_at"
         )
@@ -2036,6 +2098,7 @@ def custom_query_tests():
                 f"INSERT INTO {schema_rand_prefix}.order_items (id, order_id, subname) VALUES (1, 1, 'Item 1 for First Order'), (2, 1, 'Item 2 for First Order'), (3, 2, 'Item 1 for Second Order'), (4, 3, 'Item 1 for Third Order')"
             )
         create_clickhouse_database(dest_connection_url, schema_rand_prefix)
+
         def run():
             result = invoke_ingest_command(
                 source_connection_url,
@@ -2146,6 +2209,7 @@ def custom_query_tests():
         merge,
     ]
 
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
@@ -2153,7 +2217,7 @@ def custom_query_tests():
 @pytest.mark.parametrize("testcase", custom_query_tests())
 def test_custom_query(testcase, source, dest):
     testcase(source.start(), dest.start())
-   
+
 
 # Integration testing when the access token is not provided, and it is only for the resource "repo_events
 @pytest.mark.parametrize(
@@ -2605,9 +2669,9 @@ def test_appstore(dest, test_case):
 
 
 def fs_test_cases(
-        protocol: str,
-        target_fs: str,
-        auth: str,
+    protocol: str,
+    target_fs: str,
+    auth: str,
 ) -> Iterable[Callable]:
     """
     Tests for filesystem based sources
@@ -2807,12 +2871,13 @@ def fs_test_cases(
     fs_test_cases(
         "gs",
         "ingestr.src.sources.gcsfs.GCSFileSystem",
-        "credentials_base64=e30K", # base 64 for "{}"
+        "credentials_base64=e30K",  # base 64 for "{}"
     ),
 )
 def test_gcs(dest, test_case):
     test_case(dest.start())
     dest.stop()
+
 
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
@@ -2822,12 +2887,13 @@ def test_gcs(dest, test_case):
     fs_test_cases(
         "s3",
         "ingestr.src.sources.s3fs.S3FileSystem",
-        "access_key_id=KEY&secret_access_key=SECRET"
-    )
+        "access_key_id=KEY&secret_access_key=SECRET",
+    ),
 )
 def test_s3(dest, test_case):
-    test_case( dest.start())
+    test_case(dest.start())
     dest.stop()
+
 
 def create_clickhouse_database(dest_connection_url, schema_rand_prefix):
     if "clickhouse" in dest_connection_url:

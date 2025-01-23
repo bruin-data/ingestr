@@ -301,7 +301,11 @@ class ClickhouseDestination:
                 "The TCP port of the ClickHouse server is required to establish a connection."
             )
 
-        http_port = int(parsed_uri.query.split('http_port=')[1]) if 'http_port=' in parsed_uri.query else 8123
+        http_port = (
+            int(parsed_uri.query.split("http_port=")[1])
+            if "http_port=" in parsed_uri.query
+            else 8123
+        )
 
         credentials = ClickHouseCredentials(
             {
