@@ -211,7 +211,8 @@ METRICS_SCHEMA = {
 METRIC_TO_DLT_TYPE = {
     "INT64": "bigint",
     "DOUBLE": "double",
-    "ENUM": "string", # TODO: map enum types
+    "STRING": "text",
+    "ENUM": "text",
     # TODO: support message types
     # "MESSAGE": "string", 
 }

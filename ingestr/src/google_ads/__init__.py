@@ -77,7 +77,7 @@ def daily_report(
     stream = ga_service.search_stream(customer_id=customer_id, query=query)
     for batch in stream:
         for row in batch.results:
-            data = flatten(to_dict(row))
+            data = flatten(merge_lists(to_dict(row)))
             if "segments_date" in data:
                 data["segments_date"] = datetime.strptime(data["segments_date"], "%Y-%m-%d").date()
             yield {
@@ -96,5 +96,16 @@ def to_dict(item: Any) -> TDataItem:
             preserving_proto_field_name=True,
             use_integers_for_enums=False,
             including_default_value_fields=False,
+
         )
     )
+
+def merge_lists(item: dict) -> dict:
+    replacements = {}
+    for k,v in item.get("metrics", {}).items():
+        if isinstance(v, list):
+            replacements[k] = ",".join(v)
+    if len(replacements) == 0:
+        return item
+    item["metrics"].update(replacements)
+    return item
