@@ -1531,8 +1531,7 @@ class GCSSource:
 
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
-            raise MissingValueError("credentials_path or credentials_base64", "GCS")
-
+        
         bucket_name = parsed_uri.hostname
         if not bucket_name:
             raise ValueError(
@@ -1553,6 +1552,8 @@ class GCSSource:
             )
         )
         if credentials_available is False:
+            raise MissingValueError("credentials_path or credentials_base64", "GCS")
+            
         credentials = None
         if credentials_path:
             credentials = credentials_path[0]
@@ -1592,9 +1593,6 @@ class GCSSource:
         dev_token = params.get("dev_token")
         if dev_token is None or len(dev_token) == 0:
             raise ValueError("dev_token is required to connect to Google Ads")
-           raise ValueError(
-                "credentials_path (or credentials_base64) is required to connect Google Ads"
-            )
 
         credentials_path = params.get("credentials_path")
         credentials_base64 = params.get("credentials_base64")
@@ -1605,6 +1603,10 @@ class GCSSource:
             )
         )
         if credentials_available is False:
+            raise ValueError(
+                "credentials_path (or credentials_base64) is required to connect Google Ads"
+            )
+
         path = None
         fd = None
         if credentials_path:
