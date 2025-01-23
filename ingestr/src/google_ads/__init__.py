@@ -1,4 +1,6 @@
-from typing import Iterator, List, Optional, Callable, Dict
+import json
+import proto # type: ignore
+from typing import Iterator, Optional,Any
 from datetime import datetime, date
 
 from flatten_json import flatten
@@ -8,11 +10,10 @@ from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
 from googleapiclient.discovery import Resource  # type: ignore
 
-from .helpers.data_processing import to_dict
-
 from .predicates import date_predicate
 from .metrics import dlt_metrics_schema
 from .reports import Report, BUILTIN_REPORTS
+from . import field
 
 try:
     from google.ads.googleads.client import GoogleAdsClient  # type: ignore
@@ -70,7 +71,7 @@ def daily_report(
             {date_predicate("segments.date", date.last_value, date.end_value)}
     """
     allowed_keys = set([
-        k.replace(".", "_") 
+        field.to_column(k) 
         for k in fields
     ])
     stream = ga_service.search_stream(customer_id=customer_id, query=query)
@@ -82,3 +83,18 @@ def daily_report(
             yield {
                 k:v for k,v in data.items() if k in allowed_keys
             }
+
+def to_dict(item: Any) -> TDataItem:
+    """
+    Processes a batch result (page of results per dimension) accordingly
+    :param batch:
+    :return:
+    """
+    return json.loads(
+        proto.Message.to_json(
+            item,
+            preserving_proto_field_name=True,
+            use_integers_for_enums=False,
+            including_default_value_fields=False,
+        )
+    )

@@ -1,3 +1,4 @@
+from . import field
 from typing import List
 
 METRICS_SCHEMA = {
@@ -230,7 +231,7 @@ def dlt_metrics_schema(metrics: List[str]):
             raise ValueError(f"Unsupported metric '{metric}' of type '{typ}'")
 
         # ???: can we make these non-nullable?
-        schema[metric.replace(".", "_")] = {
+        schema[field.to_column(metric)] = {
             "data_type": METRIC_TO_DLT_TYPE[typ],
         }
     return schema
