@@ -638,7 +638,6 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
     assert res[0] == (1, "val1", as_datetime("2022-01-01"))
     assert res[1] == (2, "val2", as_datetime("2022-02-01"))
 
-
 def db_to_db_append(source_connection_url: str, dest_connection_url: str):
     schema_rand_prefix = f"testschema_append_{get_random_string(5)}"
     try:
@@ -1212,7 +1211,7 @@ def test_kafka_to_db(dest):
     for message in messages:
         producer.produce(topic, message.encode("utf-8"))
     producer.flush()
-
+    create_clickhouse_database(dest_uri, "testschema")
     def run():
         res = invoke_ingest_command(
             f"kafka://?bootstrap_servers={kafka.get_bootstrap_server()}&group_id=test_group",
@@ -2149,7 +2148,7 @@ def custom_query_tests():
 @pytest.mark.parametrize("testcase", custom_query_tests())
 def test_custom_query(testcase, source, dest):
     testcase(source.start(), dest.start())
-    dest.stop()
+   
 
 # Integration testing when the access token is not provided, and it is only for the resource "repo_events
 @pytest.mark.parametrize(
@@ -2161,7 +2160,7 @@ def test_github_to_duckdb(dest):
     source_table = "repo_events"
 
     dest_table = "dest.github_repo_events"
-    
+    create_clickhouse_database(dest_uri, "dest")
     res = invoke_ingest_command(source_uri, source_table, dest_uri, dest_table)
 
     assert res.exit_code == 0
@@ -2249,11 +2248,12 @@ def appstore_test_cases() -> Iterable[Callable]:
                 None,
             )
         )
-    
+
         with patch("ingestr.src.sources.AppStoreConnectClient") as mock_client:
             mock_client.return_value = client
             schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                 "app-downloads-detailed",
@@ -2296,6 +2296,7 @@ def appstore_test_cases() -> Iterable[Callable]:
             mock_client.return_value = client
             schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                 "app-downloads-detailed",
@@ -2338,6 +2339,7 @@ def appstore_test_cases() -> Iterable[Callable]:
             mock_client.return_value = client
             schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                 "app-downloads-detailed",
@@ -2426,6 +2428,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table = (
                     f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
                 )
+                create_clickhouse_database(dest_uri, schema_rand_prefix)
                 result = invoke_ingest_command(
                     f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}",
                     "app-downloads-detailed:123",  # moved the app ID to the table name to ensure that also works
@@ -2528,6 +2531,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table = (
                     f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
                 )
+                create_clickhouse_database(dest_uri, schema_rand_prefix)
                 result = invoke_ingest_command(
                     f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                     "app-downloads-detailed",
@@ -2555,6 +2559,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table = (
                     f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
                 )
+                create_clickhouse_database(dest_uri, schema_rand_prefix)
                 result = invoke_ingest_command(
                     f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                     "app-downloads-detailed",
@@ -2669,6 +2674,7 @@ def fs_test_cases(
         ):
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/bin/data.bin",
@@ -2684,6 +2690,7 @@ def fs_test_cases(
         """
         schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
         dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+        create_clickhouse_database(dest_uri, schema_rand_prefix)
         result = invoke_ingest_command(
             f"{protocol}://bucket",
             "/data.csv",
@@ -2703,6 +2710,7 @@ def fs_test_cases(
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/data.csv",
@@ -2723,6 +2731,7 @@ def fs_test_cases(
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/data.parquet",
@@ -2743,6 +2752,7 @@ def fs_test_cases(
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/data.jsonl",
@@ -2763,6 +2773,7 @@ def fs_test_cases(
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/*.csv",
