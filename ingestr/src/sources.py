@@ -1653,7 +1653,7 @@ class GoogleAdsSource:
         # however, in the scenario where only the end date is provided, we need to
         # calculate the start date based on the end date.
         if kwargs.get("interval_end") is not None and kwargs.get("interval_start") is None:
-            start_date = end_date - timedelta(days=30)
+            start_date = end_date - timedelta(days=30) # type: ignore
 
         report_spec = None
         if table.startswith("custom:"):
