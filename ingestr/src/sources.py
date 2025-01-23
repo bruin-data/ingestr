@@ -1465,27 +1465,30 @@ class GoogleAdsSource:
         params = parse_qs(parsed_uri.query)
         client = self.init_client(params)
 
-        date_args = {
-            "start_date":  kwargs.get("interval_start") or datetime.now() - timedelta(days=30),
-            "end_date": kwargs.get("interval_end") or datetime.now()
-        }
+        start_date = kwargs.get("interval_start") or datetime.now() - timedelta(days=30)
+        end_date =  kwargs.get("interval_end")
 
         # most combinations of explict start/end dates are automatically handled.
         # however, in the scenario where only the end date is provided, we need to
         # calculate the start date based on the end date.
-        if "interval_end" in kwargs and "interval_start" not in kwargs:
-            date_args["start_date"] = kwargs.get("interval_end") - timedelta(days=30)
+        if kwargs.get("interval_end") is not None and kwargs.get("interval_start") is None:
+            start_date = end_date - timedelta(days=30)
 
         report_spec = None
         if table.startswith("custom:"):
             report_spec = table
             table = "daily_report"
-
+        
+        date_range = dlt.sources.incremental(
+            "segments_date",
+            initial_value=start_date,
+            end_value=end_date,
+        )
         src = google_ads(
             client,
             customer_id,
+            date_range,
             report_spec,
-            **date_args,
         )
 
         if table not in src.resources:

@@ -35,6 +35,10 @@ class Report:
         self.metrics = metrics
         self.segments = segments
 
+    def primary_keys(self) -> List[str]:
+        return [
+            k.replace(".", "_") for k in self.dimensions + self.segments
+        ]
 
     @classmethod
     def from_spec(cls, spec: str):
@@ -380,34 +384,33 @@ BUILTIN_REPORTS: Dict[str, Report] = {
 def google_ads(
     client: GoogleAdsClient,
     customer_id: str,
+    date: dlt.sources.incremental[datetime],
     report_spec: Optional[str] = None,
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
-):
+) -> Iterator[DltResource]:
+
     if report_spec is not None:
         custom_report = Report().from_spec(report_spec)
         yield dlt.resource(
             daily_report,
             name="daily_report",
             write_disposition="merge",
-            primary_key=custom_report.dimensions + custom_report.segments,
-        )(client, customer_id, report, start_date, end_date)
+            primary_key=custom_report.primary_keys(),
+        )(client, customer_id, report, date)
 
     for report_name, report in BUILTIN_REPORTS.items():
         yield dlt.resource(
             daily_report,
             name=report_name,
             write_disposition="merge",
-            primary_key=report.dimensions + report.segments,
-        )(client, customer_id, report, start_date, end_date)
+            primary_key=report.primary_keys(),
+        )(client, customer_id, report, date)
 
 def daily_report(
     client: Resource,
     customer_id: str,
     report: Report,
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
-):
+    date: dlt.sources.incremental[datetime],
+) -> Iterator[TDataItem]:
     ga_service = client.get_service("GoogleAdsService")
     fields = report.dimensions + report.metrics + report.segments
     query = f"""
@@ -416,7 +419,7 @@ def daily_report(
         FROM
             {report.resource}
         WHERE
-            {date_predicate("segments.date", start_date, end_date)}
+            {date_predicate("segments.date", date.last_value, date.end_value)}
     """
     allowed_keys = set([
         k.replace(".", "_") 
@@ -426,6 +429,8 @@ def daily_report(
     for batch in stream:
         for row in batch.results:
             data = flatten(to_dict(row))
+            if "segments_date" in data:
+                data["segments_date"] = datetime.strptime(data["segments_date"], "%Y-%m-%d")
             yield {
                 k:v for k,v in data.items() if k in allowed_keys
             }
