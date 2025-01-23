@@ -31,7 +31,7 @@ def google_ads(
     date_range = dlt.sources.incremental(
         "segments_date",
         initial_value=start_date.date(),
-        end_value=end_date.date() if end_date is not None else None,
+        end_value=end_date.date() if end_date is not None else None, # type: ignore
         # range_start="closed",
         # range_end="closed",
     )
