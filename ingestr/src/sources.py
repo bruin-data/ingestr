@@ -1585,7 +1585,7 @@ class GCSSource:
             bucket_url, fs, path_to_file
         ).with_resources(endpoint)
 
- class GoogleAdsSource:
+class GoogleAdsSource:
     def handles_incrementality(self) -> bool:
         return True
 
