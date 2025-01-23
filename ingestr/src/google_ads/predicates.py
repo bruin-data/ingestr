@@ -1,7 +1,7 @@
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import date, timezone
 
-def date_predicate(column: str, start_date: datetime, end_date: Optional[datetime]) -> str:
+def date_predicate(column: str, start_date: date, end_date: Optional[date]) -> str:
     """
     Generates a date predicate for the WHERE clause of a
     GAQL query.
