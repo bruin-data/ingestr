@@ -30,13 +30,11 @@ import requests
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
 from dlt.sources.filesystem import glob_files
-from fsspec import AbstractFileSystem  # type: ignore
 from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
 from sqlalchemy.pool import NullPool
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
-from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
@@ -2569,9 +2567,9 @@ def test_appstore(dest, test_case):
 
 
 def fs_test_cases(
-        protocol: str,
-        target_fs: str,
-        auth: str,
+    protocol: str,
+    target_fs: str,
+    auth: str,
 ) -> Iterable[Callable]:
     """
     Tests for filesystem based sources
@@ -2765,12 +2763,13 @@ def fs_test_cases(
     fs_test_cases(
         "gs",
         "ingestr.src.sources.gcsfs.GCSFileSystem",
-        "credentials_base64=e30K", # base 64 for "{}"
+        "credentials_base64=e30K",  # base 64 for "{}"
     ),
 )
 def test_gcs(dest, test_case):
     test_case(dest.start())
     dest.stop()
+
 
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
@@ -2780,9 +2779,9 @@ def test_gcs(dest, test_case):
     fs_test_cases(
         "s3",
         "ingestr.src.sources.s3fs.S3FileSystem",
-        "access_key_id=KEY&secret_access_key=SECRET"
-    )
+        "access_key_id=KEY&secret_access_key=SECRET",
+    ),
 )
 def test_s3(dest, test_case):
-    test_case( dest.start())
+    test_case(dest.start())
     dest.stop()

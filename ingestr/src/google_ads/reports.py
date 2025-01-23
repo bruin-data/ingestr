@@ -1,5 +1,6 @@
 from typing import Dict, List
 
+
 class Report:
     resource: str
     unfilterable: bool
@@ -13,7 +14,7 @@ class Report:
         dimensions: List[str] = [],
         metrics: List[str] = [],
         segments: List[str] = [],
-        unfilterable: bool = False
+        unfilterable: bool = False,
     ):
         self.resource = resource
         self.dimensions = dimensions
@@ -22,9 +23,7 @@ class Report:
         self.unfilterable = unfilterable
 
     def primary_keys(self) -> List[str]:
-        return [
-            k.replace(".", "_") for k in self.dimensions + self.segments
-        ]
+        return [k.replace(".", "_") for k in self.dimensions + self.segments]
 
     @classmethod
     def from_spec(cls, spec: str):
@@ -37,7 +36,9 @@ class Report:
         custom:ad_group_ad_asset_view:ad_group.id,campaign.id:clicks,conversions
         """
         if spec.count(":") != 3:
-            raise ValueError("Invalid report specification format. Expected custom:{resource}:{dimensions}:{metrics}")
+            raise ValueError(
+                "Invalid report specification format. Expected custom:{resource}:{dimensions}:{metrics}"
+            )
 
         _, resource, dimensions, metrics = spec.split(":")
 
@@ -49,9 +50,7 @@ class Report:
                 d for d in map(cls._parse_dimension, dimensions.split(","))
             ]
         if metrics.strip() != "":
-            report.metrics = [
-                m for m in map(cls._parse_metric, metrics.split(","))
-            ]
+            report.metrics = [m for m in map(cls._parse_metric, metrics.split(","))]
         return report
 
     @classmethod
@@ -60,9 +59,11 @@ class Report:
         if dim.count(".") == 0:
             raise ValueError("Invalid dimension format. Expected {resource}.{field}")
         if dim.startswith("segments."):
-            raise ValueError("Invalid dimension format. Segments are not allowed in dimensions.")
+            raise ValueError(
+                "Invalid dimension format. Segments are not allowed in dimensions."
+            )
         return dim
-    
+
     @classmethod
     def _parse_metric(self, metric: str):
         metric = metric.strip()
@@ -180,7 +181,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "metrics.interactions",
             "metrics.interaction_event_types",
             "metrics.view_through_conversions",
-        ]
+        ],
     ),
     "audience_report_daily": Report(
         resource="ad_group_audience_view",
@@ -188,7 +189,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "ad_group.id",
             "customer.id",
             "campaign.id",
-            "ad_group_criterion.criterion_id"
+            "ad_group_criterion.criterion_id",
         ],
         segments=[
             "segments.date",
@@ -208,8 +209,8 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "metrics.impressions",
             "metrics.interactions",
             "metrics.interaction_event_types",
-            "metrics.view_through_conversions"
-        ]
+            "metrics.view_through_conversions",
+        ],
     ),
     "keyword_report_daily": Report(
         resource="keyword_view",
@@ -217,7 +218,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "ad_group.id",
             "customer.id",
             "campaign.id",
-            "ad_group_criterion.criterion_id"
+            "ad_group_criterion.criterion_id",
         ],
         segments=[
             "segments.date",
@@ -237,8 +238,8 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "metrics.impressions",
             "metrics.interactions",
             "metrics.interaction_event_types",
-            "metrics.view_through_conversions"
-        ]
+            "metrics.view_through_conversions",
+        ],
     ),
     "click_report_daily": Report(
         resource="click_view",
@@ -247,11 +248,11 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "customer.id",
             "ad_group.id",
             "campaign.id",
-            "segments.date"
+            "segments.date",
         ],
         metrics=[
             "metrics.clicks",
-        ]
+        ],
     ),
     "landing_page_report_daily": Report(
         resource="landing_page_view",
@@ -261,7 +262,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "customer.id",
             "ad_group.id",
             "campaign.id",
-            "segments.date"
+            "segments.date",
         ],
         metrics=[
             "metrics.average_cpc",
@@ -271,7 +272,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "metrics.impressions",
             "metrics.mobile_friendly_clicks_percentage",
             "metrics.speed_score",
-            "metrics.valid_accelerated_mobile_pages_clicks_percentage"
+            "metrics.valid_accelerated_mobile_pages_clicks_percentage",
         ],
     ),
     "search_keyword_report_daily": Report(
@@ -295,7 +296,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "metrics.ctr",
             "metrics.impressions",
             "metrics.top_impression_percentage",
-            "metrics.view_through_conversions"
+            "metrics.view_through_conversions",
         ],
     ),
     "search_term_report_daily": Report(
@@ -307,7 +308,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "search_term_view.resource_name",
             "search_term_view.search_term",
             "search_term_view.status",
-            "segments.date"
+            "segments.date",
         ],
         segments=[
             "segments.search_term_match_type",
@@ -323,7 +324,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "metrics.ctr",
             "metrics.impressions",
             "metrics.top_impression_percentage",
-            "metrics.view_through_conversions"
+            "metrics.view_through_conversions",
         ],
     ),
     "lead_form_submission_data_report_daily": Report(
@@ -337,7 +338,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "customer.id",
             "ad_group_ad.ad.id",
             "ad_group.id",
-            "campaign.id"
+            "campaign.id",
         ],
         unfilterable=True,
     ),
@@ -355,7 +356,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "local_services_lead.locale",
             "local_services_lead.note.description",
             "local_services_lead.note.edit_date_time",
-            "local_services_lead.service_id"
+            "local_services_lead.service_id",
         ],
         unfilterable=True,
     ),
@@ -370,7 +371,7 @@ BUILTIN_REPORTS: Dict[str, Report] = {
             "local_services_lead_conversation.message_details.text",
             "local_services_lead_conversation.participant_type",
             "local_services_lead_conversation.phone_call_details.call_duration_millis",
-            "local_services_lead_conversation.phone_call_details.call_recording_url"
+            "local_services_lead_conversation.phone_call_details.call_recording_url",
         ],
         unfilterable=True,
     ),

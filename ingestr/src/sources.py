@@ -4,12 +4,7 @@ import json
 import os
 import re
 import tempfile
-from datetime import (
-    date,
-    datetime,
-    timedelta,
-    timezone
-)
+from datetime import date, datetime, timedelta, timezone
 from typing import (
     Any,
     Callable,
@@ -24,8 +19,8 @@ from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
 import gcsfs  # type: ignore
-import s3fs # type: ignore
 import pendulum
+import s3fs  # type: ignore
 from dlt.common.configuration.specs import (
     AwsCredentials,
 )
@@ -68,8 +63,8 @@ from ingestr.src.errors import (
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
-from ingestr.src.google_ads import google_ads
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
+from ingestr.src.google_ads import google_ads
 from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
@@ -1131,9 +1126,7 @@ class S3Source:
                 "S3 Source only supports specific formats files: csv, jsonl, parquet"
             )
 
-        return readers(
-            bucket_url, fs, path_to_file
-        ).with_resources(endpoint)
+        return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
 
 
 class TikTokSource:
@@ -1531,7 +1524,7 @@ class GCSSource:
 
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
-        
+
         bucket_name = parsed_uri.hostname
         if not bucket_name:
             raise ValueError(
@@ -1553,7 +1546,7 @@ class GCSSource:
         )
         if credentials_available is False:
             raise MissingValueError("credentials_path or credentials_base64", "GCS")
-            
+
         credentials = None
         if credentials_path:
             credentials = credentials_path[0]
@@ -1581,9 +1574,8 @@ class GCSSource:
                 "GCS Source only supports specific formats files: csv, jsonl, parquet"
             )
 
-        return readers(
-            bucket_url, fs, path_to_file
-        ).with_resources(endpoint)
+        return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
+
 
 class GoogleAdsSource:
     def handles_incrementality(self) -> bool:
@@ -1642,24 +1634,28 @@ class GoogleAdsSource:
         if not customer_id:
             raise ValueError("Customer ID is required to connect to Google Ads")
 
-
         params = parse_qs(parsed_uri.query)
         client = self.init_client(params)
 
-        start_date = kwargs.get("interval_start") or datetime.now(tz=timezone.utc) - timedelta(days=30)
-        end_date =  kwargs.get("interval_end")
+        start_date = kwargs.get("interval_start") or datetime.now(
+            tz=timezone.utc
+        ) - timedelta(days=30)
+        end_date = kwargs.get("interval_end")
 
         # most combinations of explict start/end dates are automatically handled.
         # however, in the scenario where only the end date is provided, we need to
         # calculate the start date based on the end date.
-        if kwargs.get("interval_end") is not None and kwargs.get("interval_start") is None:
-            start_date = end_date - timedelta(days=30) # type: ignore
+        if (
+            kwargs.get("interval_end") is not None
+            and kwargs.get("interval_start") is None
+        ):
+            start_date = end_date - timedelta(days=30)  # type: ignore
 
         report_spec = None
         if table.startswith("custom:"):
             report_spec = table
             table = "daily_report"
-        
+
         src = google_ads(
             client,
             customer_id,
@@ -1674,6 +1670,7 @@ class GoogleAdsSource:
             )
 
         return src.with_resources(table)
+
 
 class LinkedInAdsSource:
     def handles_incrementality(self) -> bool:
@@ -1750,4 +1747,3 @@ class LinkedInAdsSource:
             metrics=metrics,
             time_granularity=time_granularity,
         ).with_resources("custom_reports")
-
