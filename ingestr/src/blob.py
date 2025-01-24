@@ -32,7 +32,7 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
 
     if table == "":
         warnings.warn(
-            f"Using the form '{uri.scheme}://bucket-name/file-glob' with table=None is deprecated and will be removed in future versions.",
+            f"Using the form '{uri.scheme}://bucket-name/file-glob' is deprecated and will be removed in future versions.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -40,11 +40,11 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
 
     if host != "":
         warnings.warn(
-            f"Using the form '{uri.scheme}://bucket-name' with table='file-glob' is deprecated and will be removed in future versions.",
+            f"Using the form '{uri.scheme}://bucket-name' is deprecated and will be removed in future versions.",
             DeprecationWarning,
             stacklevel=2,
         )
         return host, table.lstrip("/")
 
-    parts = table.split("/", maxsplit=1)
+    parts = table.lstrip("/").split("/", maxsplit=1)
     return parts[0], parts[1]
