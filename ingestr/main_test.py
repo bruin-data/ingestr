@@ -442,40 +442,9 @@ class ClickhouseDockerImage(DockerImage):
         super().__init__(container_creator, connection_suffix)
 
     def start(self) -> str:
-        if self.container:
-            exposed_port = self.container.get_exposed_port(8123)
-            return (
-                self.container.get_connection_url() + self.connection_suffix
-            ).replace(
-                "clickhouse://",
-                "clickhouse+native://",
-            ) + f"?http_port={exposed_port}"
-
-        if self.starting:
-            while self.container is None:
-                time.sleep(0.1)
-
-            exposed_port = self.container.get_exposed_port(8123)
-            return (
-                self.container.get_connection_url() + self.connection_suffix
-            ).replace(
-                "clickhouse://",
-                "clickhouse+native://",
-            ) + f"?http_port={exposed_port}"
-
-        self.starting = True
-        self.container = self.container_creator()
-        self.starting = False
-        if self.container:
-            exposed_port = self.container.get_exposed_port(8123)
-            return (
-                self.container.get_connection_url() + self.connection_suffix
-            ).replace(
-                "clickhouse://",
-                "clickhouse+native://",
-            ) + f"?http_port={exposed_port}"
-
-        raise Exception("Failed to start container")
+        url = super().start()
+        port = self.container.get_exposed_port(8123)
+        return url.replace("clickhouse://", f"clickhouse+native://") + f"?http_port={port}"
 
 class DuckDb:
     def start(self) -> str:
@@ -502,7 +471,7 @@ clickHouseDocker = ClickhouseDockerImage(
     lambda: ClickHouseContainer(CLICKHOUSE_IMAGE).start()
 )
 SOURCES = {
-    # "postgres": pgDocker,
+    "postgres": pgDocker,
     "duckdb": DuckDb(),
     # "mysql8": DockerImage(
     #     lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
@@ -516,7 +485,7 @@ SOURCES = {
 
 
 DESTINATIONS = {
-    # "postgres": pgDocker,
+    "postgres": pgDocker,
     "duckdb": DuckDb(),
     "clickhouse+native": clickHouseDocker,
 }
@@ -619,7 +588,6 @@ def test_delete_insert_with_time_range(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-        
     db_to_db_delete_insert_with_timerange(source_uri, dest_uri)
     source.stop()
     dest.stop()
