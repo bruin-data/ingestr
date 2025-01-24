@@ -437,12 +437,9 @@ class DockerImage:
             self.container.stop()
 
 
-class ClickhouseDockerImage:
+class ClickhouseDockerImage(DockerImage):
     def __init__(self, container_creator, connection_suffix: str = "") -> None:
-        self.container_creator = container_creator
-        self.connection_suffix = connection_suffix
-        self.container = None
-        self.starting = False
+        super().__init__(container_creator, connection_suffix)
 
     def start(self) -> str:
         if self.container:
@@ -479,14 +476,6 @@ class ClickhouseDockerImage:
             ) + f"?http_port={exposed_port}"
 
         raise Exception("Failed to start container")
-
-    def stop(self):
-        pass
-
-    def stop_fully(self):
-        if self.container:
-            self.container.stop()
-
 
 class DuckDb:
     def start(self) -> str:
