@@ -26,20 +26,6 @@ ingestr ingest \
     --dest-table 'stripe.event'
 ```
 
-## Important Note for Local Development
-
-Clickhouse's HTTP interface defaults to port 8123. If you're running Clickhouse in Docker, you must map the container's port 8123 to a port on your host (e.g., 8888) to access the HTTP interface.
-
-In such cases, Ingestr requires the `http_port` query parameter in your connection string to specify the host port mapped to 8123.
-
-For example, if you've mapped port 8123 to 8888 on your host, your connection string should be:
-
-```
-clickhouse://user:pass@localhost:9000?http_port=8888
-```
-
-This parameter is only needed when Clickhouse is running in Docker and its HTTP port has been mapped to a different host port. By default, Ingestr will attempt to connect to Clickhouse's HTTP interface on port 8123.
-
-This is a sample command that will copy the data from the Stripe source into Athena.
+This is a sample command that will copy the data from the Stripe source into ClickHouse Database.
 
 <img alt="clickhouse_img" src="../media/clickhouse_img.png" />
