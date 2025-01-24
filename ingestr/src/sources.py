@@ -46,6 +46,7 @@ from google.ads.googleads.client import GoogleAdsClient  # type: ignore
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 
+from ingestr.src import blob
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
@@ -57,6 +58,7 @@ from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
 from ingestr.src.dynamodb import dynamodb
 from ingestr.src.errors import (
+    InvalidBlobTableError,
     MissingValueError,
     UnsupportedResourceError,
 )
@@ -1098,16 +1100,11 @@ class S3Source:
         if not secret_access_key:
             raise ValueError("secret_access_key is required to connect to S3")
 
-        bucket_name = parsed_uri.hostname
-        if not bucket_name:
-            raise ValueError(
-                "Invalid S3 URI: The bucket name is missing. Ensure your S3 URI follows the format 's3://bucket-name"
-            )
-        bucket_url = f"s3://{bucket_name}"
+        bucket_name, path_to_file = blob.parse_uri(parsed_uri, table)
+        if not bucket_name or not path_to_file:
+            raise InvalidBlobTableError("S3")
 
-        path_to_file = parsed_uri.path.lstrip("/") or table.lstrip("/")
-        if not path_to_file:
-            raise ValueError("--source-table must be specified")
+        bucket_url = f"s3://{bucket_name}/"
 
         fs = s3fs.S3FileSystem(
             key=access_key_id[0],
@@ -1525,16 +1522,11 @@ class GCSSource:
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
 
-        bucket_name = parsed_uri.hostname
-        if not bucket_name:
-            raise ValueError(
-                "Invalid GCS URI: The bucket name is missing. Ensure your GCS URI follows the format 'gs://bucket-name/path/to/file"
-            )
-        bucket_url = f"gs://{bucket_name}/"
+        bucket_name, path_to_file = blob.parse_uri(parsed_uri, table)
+        if not bucket_name or not path_to_file:
+            raise InvalidBlobTableError("GCS")
 
-        path_to_file = parsed_uri.path.lstrip("/") or table.lstrip("/")
-        if not path_to_file:
-            raise ValueError("--source-table must be specified")
+        bucket_url = f"gs://{bucket_name}"
 
         credentials_path = params.get("credentials_path")
         credentials_base64 = params.get("credentials_base64")
@@ -1575,7 +1567,6 @@ class GCSSource:
             )
 
         return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
-
 
 class GoogleAdsSource:
     def handles_incrementality(self) -> bool:
