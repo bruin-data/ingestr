@@ -47,4 +47,7 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
         return host, table.lstrip("/")
 
     parts = table.lstrip("/").split("/", maxsplit=1)
+    if len(parts) != 2:
+        return "", parts[0]
+
     return parts[0], parts[1]

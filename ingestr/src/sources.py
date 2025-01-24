@@ -1532,7 +1532,7 @@ class GCSSource:
         if not bucket_name or not path_to_file:
             raise InvalidBlobTableError("GCS")
 
-        bucket_url = f"gs://{bucket_name}/"
+        bucket_url = f"gs://{bucket_name}"
 
         credentials = None
         if credentials_path:

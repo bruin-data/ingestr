@@ -13,6 +13,6 @@ class UnsupportedResourceError(Exception):
 class InvalidBlobTableError(Exception):
     def __init__(self, source):
         super().__init__(
-            f"Invalid source table for {source}"
+            f"Invalid source table for {source} "
             "Ensure that the table is in the format {bucket-name}/{file glob}"
         )
