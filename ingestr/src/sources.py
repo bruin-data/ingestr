@@ -3,7 +3,8 @@ import csv
 import json
 import os
 import re
-from datetime import date, datetime, timedelta
+import tempfile
+from datetime import date, datetime, timedelta, timezone
 from typing import (
     Any,
     Callable,
@@ -41,6 +42,7 @@ from dlt.sources.sql_database.schema_types import (
     Table,
     TTypeAdapter,
 )
+from google.ads.googleads.client import GoogleAdsClient  # type: ignore
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 
@@ -64,6 +66,7 @@ from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_sour
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
+from ingestr.src.google_ads import google_ads
 from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
@@ -1327,6 +1330,7 @@ class DynamoDBSource:
                 range_start="closed",
             )
 
+        # bug: we never validate table.
         return dynamodb(table, creds, incremental)
 
 
@@ -1517,6 +1521,13 @@ class GCSSource:
 
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
+
+        bucket_name, path_to_file = blob.parse_uri(parsed_uri, table)
+        if not bucket_name or not path_to_file:
+            raise InvalidBlobTableError("GCS")
+
+        bucket_url = f"gs://{bucket_name}"
+
         credentials_path = params.get("credentials_path")
         credentials_base64 = params.get("credentials_base64")
         credentials_available = any(
@@ -1527,12 +1538,6 @@ class GCSSource:
         )
         if credentials_available is False:
             raise MissingValueError("credentials_path or credentials_base64", "GCS")
-
-        bucket_name, path_to_file = blob.parse_uri(parsed_uri, table)
-        if not bucket_name or not path_to_file:
-            raise InvalidBlobTableError("GCS")
-
-        bucket_url = f"gs://{bucket_name}"
 
         credentials = None
         if credentials_path:
@@ -1562,6 +1567,98 @@ class GCSSource:
             )
 
         return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
+
+class GoogleAdsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def init_client(self, params: Dict[str, List[str]]) -> GoogleAdsClient:
+        dev_token = params.get("dev_token")
+        if dev_token is None or len(dev_token) == 0:
+            raise MissingValueError("dev_token", "Google Ads")
+
+        credentials_path = params.get("credentials_path")
+        credentials_base64 = params.get("credentials_base64")
+        credentials_available = any(
+            map(
+                lambda x: x is not None,
+                [credentials_path, credentials_base64],
+            )
+        )
+        if credentials_available is False:
+            raise MissingValueError(
+                "credentials_path or credentials_base64", "Google Ads"
+            )
+
+        path = None
+        fd = None
+        if credentials_path:
+            path = credentials_path[0]
+        else:
+            (fd, path) = tempfile.mkstemp(prefix="secret-")
+            secret = base64.b64decode(credentials_base64[0])  # type: ignore
+            os.write(fd, secret)
+            os.close(fd)
+
+        conf = {
+            "json_key_file_path": path,
+            "use_proto_plus": True,
+            "developer_token": dev_token[0],
+        }
+        try:
+            client = GoogleAdsClient.load_from_dict(conf)
+        finally:
+            if fd is not None:
+                os.remove(path)
+
+        return client
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key") is not None:
+            raise ValueError(
+                "Google Ads takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        parsed_uri = urlparse(uri)
+
+        customer_id = parsed_uri.hostname
+        if not customer_id:
+            raise MissingValueError("customer_id", "Google Ads")
+
+        params = parse_qs(parsed_uri.query)
+        client = self.init_client(params)
+
+        start_date = kwargs.get("interval_start") or datetime.now(
+            tz=timezone.utc
+        ) - timedelta(days=30)
+        end_date = kwargs.get("interval_end")
+
+        # most combinations of explict start/end dates are automatically handled.
+        # however, in the scenario where only the end date is provided, we need to
+        # calculate the start date based on the end date.
+        if (
+            kwargs.get("interval_end") is not None
+            and kwargs.get("interval_start") is None
+        ):
+            start_date = end_date - timedelta(days=30)  # type: ignore
+
+        report_spec = None
+        if table.startswith("daily:"):
+            report_spec = table
+            table = "daily_report"
+
+        src = google_ads(
+            client,
+            customer_id,
+            report_spec,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        if table not in src.resources:
+            raise UnsupportedResourceError(table, "Google Ads")
+
+        return src.with_resources(table)
 
 
 class LinkedInAdsSource:
