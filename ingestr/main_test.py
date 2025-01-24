@@ -1897,8 +1897,9 @@ def dynamodb_tests() -> Iterable[Callable]:
 
     def smoke_test(dest_uri, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
-        dest_engine = sqlalchemy.create_engine(dest_uri)
         create_clickhouse_database(dest_uri, "public")
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+
         result = invoke_ingest_command(
             dynamodb.uri, dynamodb.db_name, dest_uri, dest_table, "append", "updated_at"
         )
@@ -1913,7 +1914,7 @@ def dynamodb_tests() -> Iterable[Callable]:
 
     def append_test(dest_uri, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
-
+        create_clickhouse_database(dest_uri, "public")
         # connection pooling causes issues with duckdb, when the connection
         # is reused below, so we disable pooling.
         dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
@@ -1941,6 +1942,7 @@ def dynamodb_tests() -> Iterable[Callable]:
     def incremental_test_factory(strategy):
         def incremental_test(dest_uri, dynamodb):
             dest_table = f"public.dynamodb_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, "public")
             dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
 
             result = invoke_ingest_command(
