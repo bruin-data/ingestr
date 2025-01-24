@@ -270,6 +270,12 @@ class ClickhouseDestination:
     def dlt_dest(self, uri: str, **kwargs):
         parsed_uri = urlparse(uri)
 
+        if "dest_table" in kwargs:
+            table = kwargs["dest_table"]
+            database = table.split(".")[0]
+        else:
+            database = parsed_uri.path.lstrip("/")
+
         username = parsed_uri.username
         if not username:
             raise ValueError(
@@ -293,10 +299,12 @@ class ClickhouseDestination:
             raise ValueError(
                 "The TCP port of the ClickHouse server is required to establish a connection."
             )
-
-        database = parsed_uri.path.lstrip("/")
-        if not database:
-            raise ValueError("The database name is required to connect to ClickHouse.")
+        
+        http_port = (
+            int(parsed_uri.query.split("http_port=")[1])
+            if "http_port=" in parsed_uri.query
+            else 8123
+        )
 
         credentials = ClickHouseCredentials(
             {
@@ -304,14 +312,14 @@ class ClickhouseDestination:
                 "port": port,
                 "username": username,
                 "password": password,
+                "http_port": http_port,
                 "database": database,
-                "http_port": "8123",
                 "secure": 0,
             }
         )
 
         return dlt.destinations.clickhouse(
-            credentials=credentials, dataset_table_separator="."
+            credentials=credentials
         )
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
@@ -319,8 +327,7 @@ class ClickhouseDestination:
         if len(table_fields) != 2:
             raise ValueError("Table name must be in the format <schema>.<table>")
         return {
-            "dataset_name": table_fields[-2],
-            "table_name": table_fields[-1],
+            "table_name": table_fields[-1]
         }
 
     def post_load(self):
