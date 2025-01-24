@@ -1,4 +1,5 @@
 from typing import Dict, List
+from . import field
 
 
 class Report:
@@ -23,7 +24,7 @@ class Report:
         self.unfilterable = unfilterable
 
     def primary_keys(self) -> List[str]:
-        return [k.replace(".", "_") for k in self.dimensions + self.segments]
+        return [field.to_column(k) for k in self.dimensions + self.segments]
 
     @classmethod
     def from_spec(cls, spec: str):
@@ -37,7 +38,7 @@ class Report:
         """
         if spec.count(":") != 3:
             raise ValueError(
-                "Invalid report specification format. Expected custom:{resource}:{dimensions}:{metrics}"
+                "Invalid report specification format. Expected daily:{resource}:{dimensions}:{metrics}"
             )
 
         _, resource, dimensions, metrics = spec.split(":")

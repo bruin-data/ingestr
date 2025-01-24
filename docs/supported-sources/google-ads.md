@@ -56,11 +56,11 @@ ingestr ingest \
 ```
 
 ## Custom Reports
-`googleads` source supports custom reports. You can pass a custom report definition to `--source-table` and it will dynamically create a report for you.
+`googleads` source supports custom reports. You can pass a custom report definition to `--source-table` and it will dynamically create a report for you. These reports are aggregated at a daily interval.
 
 The format of a custom report looks like the following:
 ```
-custom:{resource_name}:{dimensions}:{metrics}
+daily:{resource_name}:{dimensions}:{metrics}
 ```
 Where:
 * `{resource_name}` is a [Google Ads Resource](https://developers.google.com/google-ads/api/fields/v18/overview_query_builder#list-of-all-resources).
@@ -88,7 +88,7 @@ To achieve this, we pass a `custom` report specification to `ingestr` source tab
 ```sh
 ingestr ingest \
   --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
-  --source-table "custom:ad_group_ad_asset_view:ad_group.id,campaign.id,customer.id:clicks,conversions,impressions" \
+  --source-table "daily:ad_group_ad_asset_view:ad_group.id,campaign.id,customer.id:clicks,conversions,impressions" \
   --dest-uri "duckdb:///custom.db" \
   --dest-table "public.report"
 ```
@@ -102,7 +102,7 @@ Here's an example of the above report, without any associated metrics:
 ```sh
 ingestr ingest \
   --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
-  --source-table "custom:ad_group_ad_asset_view:ad_group.id,campaign.id,customer.id:" \
+  --source-table "daily:ad_group_ad_asset_view:ad_group.id,campaign.id,customer.id:" \
   --dest-uri "duckdb:///custom.db" \
 ```
 
@@ -112,7 +112,7 @@ Here's an example of the above report, without any associated dimensions:
 ```sh
 ingestr ingest \
   --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
-  --source-table "custom:ad_group_ad_asset_view::clicks,conversions,impressions" \
+  --source-table "daily:ad_group_ad_asset_view::clicks,conversions,impressions" \
   --dest-uri "duckdb:///custom.db" \
 ```
 

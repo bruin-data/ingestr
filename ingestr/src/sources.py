@@ -1650,7 +1650,7 @@ class GoogleAdsSource:
             start_date = end_date - timedelta(days=30)  # type: ignore
 
         report_spec = None
-        if table.startswith("custom:"):
+        if table.startswith("daily:"):
             report_spec = table
             table = "daily_report"
 
