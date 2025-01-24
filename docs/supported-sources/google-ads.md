@@ -54,6 +54,23 @@ ingestr ingest \
   --dest-uri "duckdb://./adverts.db" \
   --dest-table "public.campaigns"
 ```
+## Tables
+
+| Name             | Description                                                             |
+|------------------|-------------------------------------------------------------------------|
+| `account_report_daily` | Provides daily metrics aggregated at the account level. |
+| `campaign_report_daily` | Provides daily metrics aggregated at the campaign level. |
+| `ad_group_report_daily` | Provides daily metrics aggregated at the ad group level. |
+| `ad_report_daily` | Provides daily metrics aggregated at the ad level. |
+| `audience_report_daily` | Provides daily metrics aggregated at the audience level. |
+| `keyword_report_daily` | Provides daily metrics aggregated at the keyword level. |
+| `click_report_daily` | Provides daily metrics on clicks. |
+| `landing_page_report_daily` | Provides daily metrics on landing page performance. |
+| `search_keyword_report_daily` | Provides daily metrics on search keywords. |
+| `search_term_report_daily` | Provides daily metrics on search terms. |
+| `lead_form_submission_data_report_daily` | Provides daily metrics on lead form submissions. |
+| `local_services_lead_report_daily` | Provides daily metrics on local services leads. |
+| `local_services_lead_conversations_report_daily` | Provides daily metrics on local services lead conversations. |
 
 ## Custom Reports
 `googleads` source supports custom reports. You can pass a custom report definition to `--source-table` and it will dynamically create a report for you. These reports are aggregated at a daily interval.
@@ -115,23 +132,3 @@ ingestr ingest \
   --source-table "daily:ad_group_ad_asset_view::clicks,conversions,impressions" \
   --dest-uri "duckdb:///custom.db" \
 ```
-
-
-
-## Tables
-
-| Name             | Description                                                             |
-|------------------|-------------------------------------------------------------------------|
-| `account_report_daily` | Provides daily metrics aggregated at the account level. |
-| `campaign_report_daily` | Provides daily metrics aggregated at the campaign level. |
-| `ad_group_report_daily` | Provides daily metrics aggregated at the ad group level. |
-| `ad_report_daily` | Provides daily metrics aggregated at the ad level. |
-| `audience_report_daily` | Provides daily metrics aggregated at the audience level. |
-| `keyword_report_daily` | Provides daily metrics aggregated at the keyword level. |
-| `click_report_daily` | Provides daily metrics on clicks. |
-| `landing_page_report_daily` | Provides daily metrics on landing page performance. |
-| `search_keyword_report_daily` | Provides daily metrics on search keywords. |
-| `search_term_report_daily` | Provides daily metrics on search terms. |
-| `lead_form_submission_data_report_daily` | Provides daily metrics on lead form submissions. |
-| `local_services_lead_report_daily` | Provides daily metrics on local services leads. |
-| `local_services_lead_conversations_report_daily` | Provides daily metrics on local services lead conversations. |
