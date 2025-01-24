@@ -18,8 +18,8 @@ from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
 import gcsfs  # type: ignore
-import s3fs # type: ignore
 import pendulum
+import s3fs  # type: ignore
 from dlt.common.configuration.specs import (
     AwsCredentials,
 )
@@ -44,6 +44,7 @@ from dlt.sources.sql_database.schema_types import (
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 
+from ingestr.src import blob
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
@@ -55,6 +56,7 @@ from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
 from ingestr.src.dynamodb import dynamodb
 from ingestr.src.errors import (
+    InvalidBlobTableError,
     MissingValueError,
     UnsupportedResourceError,
 )
@@ -1095,16 +1097,11 @@ class S3Source:
         if not secret_access_key:
             raise ValueError("secret_access_key is required to connect to S3")
 
-        bucket_name = parsed_uri.hostname
-        if not bucket_name:
-            raise ValueError(
-                "Invalid S3 URI: The bucket name is missing. Ensure your S3 URI follows the format 's3://bucket-name"
-            )
-        bucket_url = f"s3://{bucket_name}"
+        bucket_name, path_to_file = blob.parse_uri(parsed_uri, table)
+        if not bucket_name or not path_to_file:
+            raise InvalidBlobTableError("S3")
 
-        path_to_file = parsed_uri.path.lstrip("/") or table.lstrip("/")
-        if not path_to_file:
-            raise ValueError("--source-table must be specified")
+        bucket_url = f"s3://{bucket_name}/"
 
         fs = s3fs.S3FileSystem(
             key=access_key_id[0],
@@ -1123,9 +1120,7 @@ class S3Source:
                 "S3 Source only supports specific formats files: csv, jsonl, parquet"
             )
 
-        return readers(
-            bucket_url, fs, path_to_file
-        ).with_resources(endpoint)
+        return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
 
 
 class TikTokSource:
@@ -1533,16 +1528,11 @@ class GCSSource:
         if credentials_available is False:
             raise MissingValueError("credentials_path or credentials_base64", "GCS")
 
-        bucket_name = parsed_uri.hostname
-        if not bucket_name:
-            raise ValueError(
-                "Invalid GCS URI: The bucket name is missing. Ensure your GCS URI follows the format 'gs://bucket-name/path/to/file"
-            )
-        bucket_url = f"gs://{bucket_name}/"
+        bucket_name, path_to_file = blob.parse_uri(parsed_uri, table)
+        if not bucket_name or not path_to_file:
+            raise InvalidBlobTableError("GCS")
 
-        path_to_file = parsed_uri.path.lstrip("/") or table.lstrip("/")
-        if not path_to_file:
-            raise ValueError("--source-table must be specified")
+        bucket_url = f"gs://{bucket_name}/"
 
         credentials = None
         if credentials_path:
@@ -1571,9 +1561,7 @@ class GCSSource:
                 "GCS Source only supports specific formats files: csv, jsonl, parquet"
             )
 
-        return readers(
-            bucket_url, fs, path_to_file
-        ).with_resources(endpoint)
+        return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
 
 
 class LinkedInAdsSource:
