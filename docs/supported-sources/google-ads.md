@@ -84,7 +84,7 @@ We want to obtain the following info:
   * metrics.conversions
   * metrics.impressions
 
-To achieve this, we pass a `custom` report specification to `ingestr` source table as follows:
+To achieve this, we pass a `daily` report specification to `ingestr` source table as follows:
 ```sh
 ingestr ingest \
   --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
