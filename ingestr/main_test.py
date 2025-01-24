@@ -498,6 +498,9 @@ MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04"
 CLICKHOUSE_IMAGE = "clickhouse/clickhouse-server:latest"
 
 pgDocker = DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start())
+clickHouseDocker = ClickhouseDockerImage(
+    lambda: ClickHouseContainer(CLICKHOUSE_IMAGE).start()
+)
 SOURCES = {
     # "postgres": pgDocker,
     "duckdb": DuckDb(),
@@ -511,31 +514,11 @@ SOURCES = {
 }
 
 
-def get_free_port():
-    """Find a free port on the host machine by creating a temporary socket."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))  # Bind to port 0 lets OS assign a free port
-        s.listen(1)
-        port = s.getsockname()[1]
-    return port
-
-
-def get_clickhouse_container():
-    ch = ClickHouseContainer(CLICKHOUSE_IMAGE)
-    ch.dbname = ""
-    # get free port from host and bind it to clickhouse default http server
-    free_port = get_free_port()
-    ch.with_bind_ports(8123, free_port)
-
-    return ch
-
 
 DESTINATIONS = {
     # "postgres": pgDocker,
     "duckdb": DuckDb(),
-    "clickhouse+native": ClickhouseDockerImage(
-        lambda: get_clickhouse_container().start()
-    ),
+    "clickhouse+native": clickHouseDocker,
 }
 
 
@@ -636,8 +619,7 @@ def test_delete_insert_with_time_range(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-    if "clickhouse" in dest_uri:
-        pytest.skip("Clickhouse is not supported for this test")
+        
     db_to_db_delete_insert_with_timerange(source_uri, dest_uri)
     source.stop()
     dest.stop()
@@ -1099,7 +1081,8 @@ def db_to_db_delete_insert_with_timerange(
     dest_engine = sqlalchemy.create_engine(dest_connection_url, poolclass=NullPool)
 
     def get_output_rows():
-        dest_engine.execute("CHECKPOINT")
+        if "clickhouse" not in dest_connection_url:
+            dest_engine.execute("CHECKPOINT")
         rows = dest_engine.execute(
             f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
@@ -1414,10 +1397,11 @@ def test_arrow_mmap_to_db_delete_insert(dest):
                 writer = ipc.new_file(f, table.schema)
                 writer.write_table(table)
                 writer.close()
-            create_clickhouse_database(dest_uri, schema)
 
             if "clickhouse" in dest_uri:
-                pytest.skip("")
+                pytest.skip("clickhouse is not supported for this test")
+
+            create_clickhouse_database(dest_uri, schema)
 
             res = invoke_ingest_command(
                 f"mmap://{tmp.name}",
