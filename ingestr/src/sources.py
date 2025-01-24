@@ -1584,7 +1584,7 @@ class GoogleAdsSource:
     def init_client(self, params: Dict[str, List[str]]) -> GoogleAdsClient:
         dev_token = params.get("dev_token")
         if dev_token is None or len(dev_token) == 0:
-            raise ValueError("dev_token is required to connect to Google Ads")
+            raise MissingValueError("dev_token", "Google Ads")
 
         credentials_path = params.get("credentials_path")
         credentials_base64 = params.get("credentials_base64")
@@ -1595,9 +1595,7 @@ class GoogleAdsSource:
             )
         )
         if credentials_available is False:
-            raise ValueError(
-                "credentials_path (or credentials_base64) is required to connect Google Ads"
-            )
+            raise MissingValueError("credentials_path or credentials_base64", "Google Ads")
 
         path = None
         fd = None
@@ -1632,7 +1630,7 @@ class GoogleAdsSource:
 
         customer_id = parsed_uri.hostname
         if not customer_id:
-            raise ValueError("Customer ID is required to connect to Google Ads")
+            raise MissingValueError("customer_id", "Google Ads")
 
         params = parse_qs(parsed_uri.query)
         client = self.init_client(params)
@@ -1665,9 +1663,7 @@ class GoogleAdsSource:
         )
 
         if table not in src.resources:
-            raise ValueError(
-                f"Resource '{table}' is not supported for Google Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
-            )
+            raise UnsupportedResourceError(table, "Google Ads")
 
         return src.with_resources(table)
 
