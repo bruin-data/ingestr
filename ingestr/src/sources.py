@@ -1595,7 +1595,9 @@ class GoogleAdsSource:
             )
         )
         if credentials_available is False:
-            raise MissingValueError("credentials_path or credentials_base64", "Google Ads")
+            raise MissingValueError(
+                "credentials_path or credentials_base64", "Google Ads"
+            )
 
         path = None
         fd = None
