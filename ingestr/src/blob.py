@@ -21,10 +21,6 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
 
     The first form is the prefered method. Other forms are supported
     for backward compatibility, but discouraged.
-
-    Raises:
-
-    Returns: Tuple[bucket_name, file_glob]
     """
 
     table = table.strip()
