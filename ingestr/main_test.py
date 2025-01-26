@@ -36,9 +36,9 @@ from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
+from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
-from testcontainers.mysql import MySqlContainer  # type: ignore
 
 from ingestr.main import app
 from ingestr.src.appstore.errors import (
@@ -496,6 +496,7 @@ DESTINATIONS = {
     "duckdb": DuckDb(),
     "clickhouse+native": clickHouseDocker,
 }
+
 
 @pytest.fixture(scope="session", autouse=True)
 def manage_containers():
@@ -1369,11 +1370,6 @@ def test_arrow_mmap_to_db_delete_insert(dest):
                 writer.write_table(table)
                 writer.close()
 
-            if "clickhouse" in dest_uri:
-                pytest.skip("clickhouse is not supported for this test")
-
-            create_clickhouse_database(dest_uri, schema)
-
             res = invoke_ingest_command(
                 f"mmap://{tmp.name}",
                 "whatever",
@@ -1387,6 +1383,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
             return res
 
     dest_uri = dest.start()
+    create_clickhouse_database(dest_uri, schema)
     dest_engine = sqlalchemy.create_engine(dest_uri)
 
     # let's start with a basic dataframe
@@ -1492,7 +1489,7 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
                 writer = ipc.new_file(f, table.schema)
                 writer.write_table(table)
                 writer.close()
-            create_clickhouse_database(dest_uri, schema)
+
             res = invoke_ingest_command(
                 f"mmap://{tmp.name}",
                 "whatever",
@@ -1501,12 +1498,11 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
                 inc_strategy="merge",
                 primary_key="id",
             )
-            if "clickhouse" in dest_uri:
-                pytest.skip("")
             assert res.exit_code == 0
             return res
 
     dest_uri = dest.start()
+    create_clickhouse_database(dest_uri, schema)
     dest_engine = sqlalchemy.create_engine(dest_uri)
 
     # let's start with a basic dataframe
@@ -1553,6 +1549,7 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
 
     with dest_engine.begin() as conn:
         res = conn.execute(f"select count(*) from {schema}.output").fetchall()
+
         assert res[0][0] == row_count + 1000
 
         res = conn.execute(
@@ -1572,10 +1569,10 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
             "value": ["a"] * 1000,
         }
     )
-
     run_command(old_rows)
     with dest_engine.begin() as conn:
         res = conn.execute(f"select count(*) from {schema}.output").fetchall()
+        print(f"res: {res}")
         assert res[0][0] == row_count + 1000
         res = conn.execute(
             f"select value, count(*) from {schema}.output group by 1 order by 1 asc"
