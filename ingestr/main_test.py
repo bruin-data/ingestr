@@ -483,7 +483,7 @@ mysqlDocker = DockerImage(lambda: MySqlContainer(MYSQL8_IMAGE, username="root").
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
-    # "mysql8": mysqlDocker,
+    "mysql8": mysqlDocker,
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
