@@ -1199,7 +1199,7 @@ def test_kafka_to_db(dest):
     with ThreadPoolExecutor() as executor:
         dest_future = executor.submit(dest.start)
         source_future = executor.submit(
-            KafkaContainer("confluentinc/cp-kafka:7.6.0").start, timeout=60
+            KafkaContainer("confluentinc/cp-kafka:7.6.0").start, timeout=120
         )
         dest_uri = dest_future.result()
         kafka = source_future.result()
