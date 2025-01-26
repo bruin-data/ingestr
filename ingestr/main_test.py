@@ -497,7 +497,6 @@ DESTINATIONS = {
     "clickhouse+native": clickHouseDocker,
 }
 
-
 @pytest.fixture(scope="session", autouse=True)
 def manage_containers():
     # Run all tests
@@ -527,9 +526,6 @@ def test_create_replace(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-
-    print(f"source_uri: {source_uri}")
-    print(f"dest_uri: {dest_uri}")
 
     db_to_db_create_replace(source_uri, dest_uri)
     source.stop()
