@@ -1568,6 +1568,7 @@ class GCSSource:
 
         return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
 
+
 class GoogleAdsSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -1659,6 +1660,7 @@ class GoogleAdsSource:
             raise UnsupportedResourceError(table, "Google Ads")
 
         return src.with_resources(table)
+
 
 class LinkedInAdsSource:
     def handles_incrementality(self) -> bool:
