@@ -1573,7 +1573,6 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
     run_command(old_rows)
     with dest_engine.begin() as conn:
         res = conn.execute(f"select count(*) from {schema}.output").fetchall()
-        print(f"res: {res}")
         assert res[0][0] == row_count + 1000
         res = conn.execute(
             f"select value, count(*) from {schema}.output group by 1 order by 1 asc"
