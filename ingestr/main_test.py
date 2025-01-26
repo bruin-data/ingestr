@@ -6,7 +6,6 @@ import json
 import os
 import random
 import shutil
-import socket
 import string
 import tempfile
 import time
@@ -37,8 +36,8 @@ from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
-from testcontainers.postgres import PostgresContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
+from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
 from ingestr.main import app
@@ -445,7 +444,10 @@ class ClickhouseDockerImage(DockerImage):
     def start(self) -> str:
         url = super().start()
         port = self.container.get_exposed_port(8123)
-        return url.replace("clickhouse://", f"clickhouse+native://") + f"?http_port={port}"
+        return (
+            url.replace("clickhouse://", "clickhouse+native://") + f"?http_port={port}"
+        )
+
 
 class DuckDb:
     def start(self) -> str:
@@ -471,9 +473,7 @@ pgDocker = DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).st
 clickHouseDocker = ClickhouseDockerImage(
     lambda: ClickHouseContainer(CLICKHOUSE_IMAGE).start()
 )
-mysqlDocker = DockerImage(
-        lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
-)
+mysqlDocker = DockerImage(lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start())
 
 SOURCES = {
     "postgres": pgDocker,
@@ -484,7 +484,6 @@ SOURCES = {
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
     # ),
 }
-
 
 
 DESTINATIONS = {
@@ -731,6 +730,7 @@ def db_to_db_merge_with_primary_key(
 
     source_engine.dispose()
     create_clickhouse_database(dest_connection_url, schema_rand_prefix)
+
     def run():
         res = invoke_ingest_command(
             source_connection_url,
