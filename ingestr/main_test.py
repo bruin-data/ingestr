@@ -36,7 +36,6 @@ from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
-from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
@@ -765,6 +764,8 @@ def db_to_db_merge_with_primary_key(
             assert res[i] == row
 
     dest_engine.dispose()
+
+    create_clickhouse_database(dest_connection_url, schema_rand_prefix)
     res = run()
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
@@ -2814,6 +2815,7 @@ def fs_test_cases(
         ):
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, schema_rand_prefix)
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
             result = invoke_ingest_command(
                 f"{protocol}://?{auth}",
