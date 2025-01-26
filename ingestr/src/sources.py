@@ -19,7 +19,6 @@ from urllib.parse import ParseResult, parse_qs, quote, urlparse
 
 import dlt
 import gcsfs  # type: ignore
-import s3fs # type: ignore
 import pendulum
 import s3fs  # type: ignore
 from dlt.common.configuration.specs import (
@@ -1568,6 +1567,7 @@ class GCSSource:
             )
 
         return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
+
 
 class GoogleAdsSource:
     def handles_incrementality(self) -> bool:

@@ -6,7 +6,6 @@ import json
 import os
 import random
 import shutil
-import socket
 import string
 import tempfile
 import time
@@ -37,7 +36,6 @@ from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
-from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
@@ -447,8 +445,14 @@ class ClickhouseDockerImage(DockerImage):
 
     def start(self) -> str:
         url = super().start()
+        if self.container is None:
+            raise ValueError("Container is not initialized.")
+        
         port = self.container.get_exposed_port(8123)
-        return url.replace("clickhouse://", f"clickhouse+native://") + f"?http_port={port}"
+        return (
+            url.replace("clickhouse://", "clickhouse+native://") + f"?http_port={port}"
+        )
+
 
 class DuckDb:
     def start(self) -> str:
@@ -477,15 +481,14 @@ clickHouseDocker = ClickhouseDockerImage(
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
-#     "mysql8": DockerImage(
-#         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
-#     ),
+    #     "mysql8": DockerImage(
+    #         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
+    #     ),
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
     # ),
 }
-
 
 
 DESTINATIONS = {
