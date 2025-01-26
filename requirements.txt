@@ -5,6 +5,7 @@ dataclasses-json==0.6.7
 dlt==1.5.0
 duckdb_engine==0.13.5
 duckdb==1.1.3
+google-ads==25.1.0
 facebook-business==20.0.0
 google-analytics-data==0.18.16
 google-api-python-client==2.130.0
@@ -39,7 +40,9 @@ pyarrow==18.1.0
 pyathena==3.9.0
 google-analytics-data==0.18.16
 asana==3.2.3
+flatten_json==0.1.14
 dataclasses-json==0.6.7
 gcsfs==2024.10.0
 clickhouse-connect == 0.8.14
 clickhouse-driver ==  0.2.9
+
