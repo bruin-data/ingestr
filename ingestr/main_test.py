@@ -734,7 +734,6 @@ def db_to_db_merge_with_primary_key(
         assert res[0][0] == 2
 
     source_engine.dispose()
-    create_clickhouse_database(dest_connection_url, schema_rand_prefix)
 
     def run():
         res = invoke_ingest_command(
@@ -764,7 +763,6 @@ def db_to_db_merge_with_primary_key(
             assert res[i] == row
 
     dest_engine.dispose()
-
     create_clickhouse_database(dest_connection_url, schema_rand_prefix)
     res = run()
     assert_output_equals(
