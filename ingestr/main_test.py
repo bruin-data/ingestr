@@ -60,6 +60,9 @@ from ingestr.src.appstore.models import (
     ReportSegment,
     ReportSegmentAttributes,
 )
+from ingestr.src.errors import (
+    InvalidBlobTableError,
+)
 
 
 def has_exception(exception, exc_type):
@@ -2675,7 +2678,7 @@ def fs_test_cases(
         result = invoke_ingest_command(
             f"{protocol}://bucket?{auth}", "", dest_uri, "test"
         )
-        assert has_exception(result.exception, ValueError)
+        assert has_exception(result.exception, InvalidBlobTableError)
 
     def test_unsupported_file_format(dest_uri):
         """
@@ -2797,6 +2800,27 @@ def fs_test_cases(
             assert result.exit_code == 0
             assert_rows(dest_uri, dest_table, 6)
 
+    def test_compound_table_name(dest_uri):
+        """
+        When table contains both the bucket name and the file glob,
+        loads should be successful.
+        """
+        with (
+            patch(target_fs) as target_fs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://?{auth}",
+                "bucket/*.csv",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 6)
+
     return [
         test_empty_source_uri,
         test_missing_credentials,
@@ -2805,6 +2829,7 @@ def fs_test_cases(
         test_parquet_load,
         test_jsonl_load,
         test_glob_load,
+        test_compound_table_name,
     ]
 
 
