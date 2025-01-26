@@ -38,6 +38,7 @@ from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
+from testcontainers.mysql import MySqlContainer  # type: ignore
 from typer.testing import CliRunner
 
 from ingestr.main import app
@@ -473,9 +474,9 @@ clickHouseDocker = ClickhouseDockerImage(
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
-    # "mysql8": DockerImage(
-    #     lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
-    # ),
+    "mysql8": DockerImage(
+        lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
+    ),
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
@@ -727,7 +728,7 @@ def db_to_db_merge_with_primary_key(
         assert res[0][0] == 2
 
     source_engine.dispose()
-
+    create_clickhouse_database(dest_connection_url, schema_rand_prefix)
     def run():
         res = invoke_ingest_command(
             source_connection_url,
@@ -756,7 +757,6 @@ def db_to_db_merge_with_primary_key(
             assert res[i] == row
 
     dest_engine.dispose()
-    create_clickhouse_database(dest_connection_url, schema_rand_prefix)
     res = run()
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
