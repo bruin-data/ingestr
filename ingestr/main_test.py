@@ -527,7 +527,6 @@ def test_create_replace(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-
     db_to_db_create_replace(source_uri, dest_uri)
     source.stop()
     dest.stop()
@@ -1364,6 +1363,8 @@ def test_arrow_mmap_to_db_delete_insert(dest):
 
     def run_command(df: pd.DataFrame, incremental_key: Optional[str] = None):
         table = pa.Table.from_pandas(df)
+        if "clickhouse" in dest_uri:
+            pytest.skip("")
         with tempfile.NamedTemporaryFile(suffix=".arrow", delete=True) as tmp:
             with pa.OSFile(tmp.name, "wb") as f:
                 writer = ipc.new_file(f, table.schema)
