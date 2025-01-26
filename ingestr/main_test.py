@@ -37,6 +37,7 @@ from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
+from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
@@ -59,6 +60,9 @@ from ingestr.src.appstore.models import (
     ReportRequestAttributes,
     ReportSegment,
     ReportSegmentAttributes,
+)
+from ingestr.src.errors import (
+    InvalidBlobTableError,
 )
 
 
@@ -473,9 +477,9 @@ clickHouseDocker = ClickhouseDockerImage(
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
-    # "mysql8": DockerImage(
-    #     lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
-    # ),
+    "mysql8": DockerImage(
+        lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
+    ),
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
@@ -2673,7 +2677,7 @@ def fs_test_cases(
         result = invoke_ingest_command(
             f"{protocol}://bucket?{auth}", "", dest_uri, "test"
         )
-        assert has_exception(result.exception, ValueError)
+        assert has_exception(result.exception, InvalidBlobTableError)
 
     def test_unsupported_file_format(dest_uri):
         """
@@ -2795,6 +2799,27 @@ def fs_test_cases(
             assert result.exit_code == 0
             assert_rows(dest_uri, dest_table, 6)
 
+    def test_compound_table_name(dest_uri):
+        """
+        When table contains both the bucket name and the file glob,
+        loads should be successful.
+        """
+        with (
+            patch(target_fs) as target_fs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://?{auth}",
+                "bucket/*.csv",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 6)
+
     return [
         test_empty_source_uri,
         test_missing_credentials,
@@ -2803,6 +2828,7 @@ def fs_test_cases(
         test_parquet_load,
         test_jsonl_load,
         test_glob_load,
+        test_compound_table_name,
     ]
 
 

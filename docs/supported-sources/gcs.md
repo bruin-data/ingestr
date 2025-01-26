@@ -7,13 +7,17 @@
 The URI format for Google Cloud Storage is as follows:
 
 ```plaintext
-gs://<bucket_name>?credentials_path=/path/to/service-account.json>
+gs://?credentials_path=/path/to/service-account.json>
 ```
 
 URI parameters:
 
-- `bucket_name`: The name of the bucket
 - `credentials_path`: path to file containing your Google Cloud [Service Account](https://cloud.google.com/iam/docs/service-account-overview)
+
+The `--source-table` must be in the format:
+```
+{bucket name}/{file glob}
+```
 
 ## Setting up a GCS Integration
 
@@ -29,7 +33,7 @@ For more information on how to create a Service Account or it's keys, see [Creat
 Let's assume that:
 * Service account key in available in the current directory, under the filename `service_account.json`. 
 * The bucket you want to load data from is called `my-org-bucket`
-* The source file is available at `/data/latest/dump.csv`
+* The source file is available at `data/latest/dump.csv`
 * The data needs to be saved in a DuckDB database called `local.db`
 * The destination table name will be `public.latest_dump`
 
@@ -37,8 +41,8 @@ You can run the following command line to achieve this:
 
 ```sh
 ingestr ingest \
-    --source-uri "gs://my-org-bucket?credentials_path=$PWD/service_account.json" \
-    --source-table "/data/latest/dump.csv" \
+    --source-uri "gs://?credentials_path=$PWD/service_account.json" \
+    --source-table "my-org-bucket/data/latest/dump.csv" \
     --dest-uri "duckdb:///local.db" \
     --dest-table "public.latest_dump"
 ```
@@ -53,7 +57,7 @@ ingestr ingest \
 `ingestr` supports [glob](https://en.wikipedia.org/wiki/Glob_(programming)) like pattern matching for `gs` source.
 This allows for a powerful pattern matching mechanism that allows you to specify multiple files in a single `--source-table`.
 
-Below are some examples of path patterns, each path pattern is a reference from the root of the bucket:
+Below are some examples of path patterns, each path pattern is glob you can specify after the bucket name:
 
 - `**/*.csv`: Retrieves all the CSV files, regardless of how deep they are within the folder structure.
 - `*.csv`: Retrieves all the CSV files from the first level of a folder.
