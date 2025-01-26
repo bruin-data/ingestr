@@ -38,6 +38,7 @@ from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
+from testcontainers.mysql import MySqlContainer  # type: ignore
 
 from ingestr.main import app
 from ingestr.src.appstore.errors import (
@@ -483,7 +484,7 @@ mysqlDocker = DockerImage(lambda: MySqlContainer(MYSQL8_IMAGE, username="root").
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
-    "mysql8": mysqlDocker,
+    # "mysql8": mysqlDocker,
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
