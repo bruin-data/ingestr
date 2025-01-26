@@ -477,9 +477,9 @@ clickHouseDocker = ClickhouseDockerImage(
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
-    "mysql8": DockerImage(
-        lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
-    ),
+#     "mysql8": DockerImage(
+#         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
+#     ),
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
@@ -2810,6 +2810,7 @@ def fs_test_cases(
         ):
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            create_clickhouse_database(dest_uri, schema_rand_prefix)
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
             result = invoke_ingest_command(
                 f"{protocol}://?{auth}",
