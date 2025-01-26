@@ -471,12 +471,14 @@ pgDocker = DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).st
 clickHouseDocker = ClickhouseDockerImage(
     lambda: ClickHouseContainer(CLICKHOUSE_IMAGE).start()
 )
+mysqlDocker = DockerImage(
+        lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
+)
+
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
-    "mysql8": DockerImage(
-        lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
-    ),
+    "mysql8": mysqlDocker,
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
