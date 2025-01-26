@@ -38,6 +38,7 @@ from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
+from testcontainers.mysql import MySqlContainer  # type: ignore
 
 from ingestr.main import app
 from ingestr.src.appstore.errors import (
@@ -447,7 +448,6 @@ class ClickhouseDockerImage(DockerImage):
         url = super().start()
         if self.container is None:
             raise ValueError("Container is not initialized.")
-        
         port = self.container.get_exposed_port(8123)
         return (
             url.replace("clickhouse://", "clickhouse+native://") + f"?http_port={port}"
@@ -478,12 +478,12 @@ pgDocker = DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).st
 clickHouseDocker = ClickhouseDockerImage(
     lambda: ClickHouseContainer(CLICKHOUSE_IMAGE).start()
 )
+mysqlDocker = DockerImage(lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start())
+
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
-    #     "mysql8": DockerImage(
-    #         lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
-    #     ),
+    "mysql8": mysqlDocker,
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
@@ -496,7 +496,6 @@ DESTINATIONS = {
     "duckdb": DuckDb(),
     "clickhouse+native": clickHouseDocker,
 }
-
 
 @pytest.fixture(scope="session", autouse=True)
 def manage_containers():
@@ -527,9 +526,6 @@ def test_create_replace(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-
-    print(f"source_uri: {source_uri}")
-    print(f"dest_uri: {dest_uri}")
 
     db_to_db_create_replace(source_uri, dest_uri)
     source.stop()
@@ -1203,7 +1199,7 @@ def test_kafka_to_db(dest):
     with ThreadPoolExecutor() as executor:
         dest_future = executor.submit(dest.start)
         source_future = executor.submit(
-            KafkaContainer("confluentinc/cp-kafka:7.6.0").start, timeout=60
+            KafkaContainer("confluentinc/cp-kafka:7.6.0").start, timeout=120
         )
         dest_uri = dest_future.result()
         kafka = source_future.result()
