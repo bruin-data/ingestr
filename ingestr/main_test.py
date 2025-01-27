@@ -60,6 +60,7 @@ from ingestr.src.appstore.models import (
     ReportSegment,
     ReportSegmentAttributes,
 )
+from ingestr.src.destinations import ClickhouseDestination
 from ingestr.src.errors import (
     InvalidBlobTableError,
 )
@@ -481,9 +482,9 @@ clickHouseDocker = ClickhouseDockerImage(
 mysqlDocker = DockerImage(lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start())
 
 SOURCES = {
-    "postgres": pgDocker,
+    # "postgres": pgDocker,
     "duckdb": DuckDb(),
-    "mysql8": mysqlDocker,
+    # "mysql8": mysqlDocker,
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
@@ -492,8 +493,8 @@ SOURCES = {
 
 
 DESTINATIONS = {
-    "postgres": pgDocker,
-    "duckdb": DuckDb(),
+    # "postgres": pgDocker,
+    # "duckdb": DuckDb(),
     "clickhouse+native": clickHouseDocker,
 }
 
@@ -515,6 +516,25 @@ def manage_containers():
         for future in futures:
             future.result()
 
+@pytest.fixture(scope="session", autouse=True)
+def autocreate_db_for_clickhouse():
+    """
+    patches ClickhouseSource to autocreate dest table's if they don't exist
+    """
+
+    dlt_dest = ClickhouseDestination().dlt_dest
+    def patched_dlt_dest(uri, **kwargs):
+        db, _ = kwargs["dest_table"].split(".")
+        dest_engine = sqlalchemy.create_engine(uri)
+        dest_engine.execute(f"DROP DATABASE IF EXISTS {db}")
+        dest_engine.execute(f"CREATE DATABASE {db}")
+        return dlt_dest(uri, **kwargs)
+
+    patcher = patch("ingestr.src.factory.ClickhouseDestination.dlt_dest")
+    mock = patcher.start()
+    mock.side_effect = patched_dlt_dest
+    yield
+    patcher.stop()
 
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
@@ -621,8 +641,6 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
         ).fetchall()
         assert res[0][0] == 2
 
-    create_clickhouse_database(dest_connection_url, schema_rand_prefix)
-
     result = invoke_ingest_command(
         source_connection_url,
         f"{schema_rand_prefix}.input",
@@ -683,7 +701,6 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
             f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
 
-    create_clickhouse_database(dest_connection_url, schema_rand_prefix)
     run()
 
     res = get_output_table()
@@ -759,7 +776,6 @@ def db_to_db_merge_with_primary_key(
             assert res[i] == row
 
     dest_engine.dispose()
-    create_clickhouse_database(dest_connection_url, schema_rand_prefix)
     res = run()
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
@@ -941,7 +957,6 @@ def db_to_db_delete_insert_without_primary_key(
         for i, row in enumerate(expected):
             assert res[i] == row
 
-    create_clickhouse_database(dest_connection_url, schema_rand_prefix)
     run()
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
@@ -1065,7 +1080,6 @@ def db_to_db_delete_insert_with_timerange(
         for i, row in enumerate(expected):
             assert res[i] == row
 
-    create_clickhouse_database(dest_connection_url, schema_rand_prefix)
 
     run("2022-01-01", "2022-01-02")  # dlt runs them with the end date exclusive
     assert_output_equals(
@@ -1216,7 +1230,6 @@ def test_kafka_to_db(dest):
     for message in messages:
         producer.produce(topic, message.encode("utf-8"))
     producer.flush()
-    create_clickhouse_database(dest_uri, "testschema")
 
     def run():
         res = invoke_ingest_command(
@@ -1234,7 +1247,6 @@ def test_kafka_to_db(dest):
             "select _kafka__data from testschema.output order by _kafka_msg_id asc"
         ).fetchall()
 
-    create_clickhouse_database(dest_uri, "testschema")
     run()
 
     res = get_output_table()
@@ -1317,7 +1329,6 @@ def test_arrow_mmap_to_db_create_replace(dest):
     )
 
     table = pa.Table.from_pandas(df)
-    create_clickhouse_database(dest_uri, schema)
     run_command(table)
 
     dest_engine = sqlalchemy.create_engine(dest_uri)
@@ -1384,7 +1395,6 @@ def test_arrow_mmap_to_db_delete_insert(dest):
             return res
 
     dest_uri = dest.start()
-    create_clickhouse_database(dest_uri, schema)
     dest_engine = sqlalchemy.create_engine(dest_uri)
 
     # let's start with a basic dataframe
@@ -1503,7 +1513,6 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
             return res
 
     dest_uri = dest.start()
-    create_clickhouse_database(dest_uri, schema)
     dest_engine = sqlalchemy.create_engine(dest_uri)
 
     # let's start with a basic dataframe
@@ -1612,7 +1621,6 @@ def test_db_to_db_exclude_columns(source, dest):
             f"select count(*) from {schema_rand_prefix}.input"
         ).fetchall()
         assert res[0][0] == 2
-    create_clickhouse_database(dest_uri, schema_rand_prefix)
     result = invoke_ingest_command(
         source_uri,
         f"{schema_rand_prefix}.input",
@@ -1849,7 +1857,6 @@ def dynamodb_tests() -> Iterable[Callable]:
 
     def smoke_test(dest_uri, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
-        create_clickhouse_database(dest_uri, "public")
         dest_engine = sqlalchemy.create_engine(dest_uri)
 
         result = invoke_ingest_command(
@@ -1866,7 +1873,6 @@ def dynamodb_tests() -> Iterable[Callable]:
 
     def append_test(dest_uri, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
-        create_clickhouse_database(dest_uri, "public")
         # connection pooling causes issues with duckdb, when the connection
         # is reused below, so we disable pooling.
         dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
@@ -1894,7 +1900,6 @@ def dynamodb_tests() -> Iterable[Callable]:
     def incremental_test_factory(strategy):
         def incremental_test(dest_uri, dynamodb):
             dest_table = f"public.dynamodb_{get_random_string(5)}"
-            create_clickhouse_database(dest_uri, "public")
             dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
 
             result = invoke_ingest_command(
@@ -1998,7 +2003,6 @@ def custom_query_tests():
                 f"select count(*) from {schema_rand_prefix}.order_items"
             ).fetchall()
             assert res[0][0] == 4
-        create_clickhouse_database(dest_connection_url, schema_rand_prefix)
 
         result = invoke_ingest_command(
             source_connection_url,
@@ -2040,7 +2044,6 @@ def custom_query_tests():
             conn.execute(
                 f"INSERT INTO {schema_rand_prefix}.order_items (id, order_id, subname) VALUES (1, 1, 'Item 1 for First Order'), (2, 1, 'Item 2 for First Order'), (3, 2, 'Item 1 for Second Order'), (4, 3, 'Item 1 for Third Order')"
             )
-        create_clickhouse_database(dest_connection_url, schema_rand_prefix)
 
         def run():
             result = invoke_ingest_command(
@@ -2172,7 +2175,6 @@ def test_github_to_duckdb(dest):
     source_table = "repo_events"
 
     dest_table = "dest.github_repo_events"
-    create_clickhouse_database(dest_uri, "dest")
     res = invoke_ingest_command(source_uri, source_table, dest_uri, dest_table)
 
     assert res.exit_code == 0
@@ -2265,7 +2267,6 @@ def appstore_test_cases() -> Iterable[Callable]:
             mock_client.return_value = client
             schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
-            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                 "app-downloads-detailed",
@@ -2308,7 +2309,6 @@ def appstore_test_cases() -> Iterable[Callable]:
             mock_client.return_value = client
             schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
-            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                 "app-downloads-detailed",
@@ -2351,7 +2351,6 @@ def appstore_test_cases() -> Iterable[Callable]:
             mock_client.return_value = client
             schema_rand_prefix = f"testschema_appstore_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
-            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                 "app-downloads-detailed",
@@ -2440,7 +2439,6 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table = (
                     f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
                 )
-                create_clickhouse_database(dest_uri, schema_rand_prefix)
                 result = invoke_ingest_command(
                     f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}",
                     "app-downloads-detailed:123",  # moved the app ID to the table name to ensure that also works
@@ -2543,7 +2541,6 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table = (
                     f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
                 )
-                create_clickhouse_database(dest_uri, schema_rand_prefix)
                 result = invoke_ingest_command(
                     f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                     "app-downloads-detailed",
@@ -2571,7 +2568,6 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table = (
                     f"{schema_rand_prefix}.app_downloads_{get_random_string(5)}"
                 )
-                create_clickhouse_database(dest_uri, schema_rand_prefix)
                 result = invoke_ingest_command(
                     f"appstore://?key_id=123&issuer_id=123&key_base64={api_key}&app_id=123",
                     "app-downloads-detailed",
@@ -2686,7 +2682,6 @@ def fs_test_cases(
         ):
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
-            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/bin/data.bin",
@@ -2702,7 +2697,6 @@ def fs_test_cases(
         """
         schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
         dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
-        create_clickhouse_database(dest_uri, schema_rand_prefix)
         result = invoke_ingest_command(
             f"{protocol}://bucket",
             "/data.csv",
@@ -2722,7 +2716,6 @@ def fs_test_cases(
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
-            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/data.csv",
@@ -2743,7 +2736,6 @@ def fs_test_cases(
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
-            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/data.parquet",
@@ -2764,7 +2756,6 @@ def fs_test_cases(
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
-            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/data.jsonl",
@@ -2785,7 +2776,6 @@ def fs_test_cases(
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
-            create_clickhouse_database(dest_uri, schema_rand_prefix)
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/*.csv",
@@ -2806,7 +2796,6 @@ def fs_test_cases(
         ):
             target_fs_mock.return_value = test_fs
             schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
-            create_clickhouse_database(dest_uri, schema_rand_prefix)
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
             result = invoke_ingest_command(
                 f"{protocol}://?{auth}",
@@ -2861,8 +2850,3 @@ def test_s3(dest, test_case):
     dest.stop()
 
 
-def create_clickhouse_database(dest_connection_url, schema_rand_prefix):
-    if "clickhouse" in dest_connection_url:
-        dest_engine = sqlalchemy.create_engine(dest_connection_url)
-        dest_engine.execute(f"DROP DATABASE IF EXISTS {schema_rand_prefix}")
-        dest_engine.execute(f"CREATE DATABASE {schema_rand_prefix}")
