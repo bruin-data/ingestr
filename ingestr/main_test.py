@@ -516,6 +516,7 @@ def manage_containers():
         for future in futures:
             future.result()
 
+
 @pytest.fixture(scope="session", autouse=True)
 def autocreate_db_for_clickhouse():
     """
@@ -523,6 +524,7 @@ def autocreate_db_for_clickhouse():
     """
 
     dlt_dest = ClickhouseDestination().dlt_dest
+
     def patched_dlt_dest(uri, **kwargs):
         db, _ = kwargs["dest_table"].split(".")
         dest_engine = sqlalchemy.create_engine(uri)
@@ -534,6 +536,7 @@ def autocreate_db_for_clickhouse():
     mock.side_effect = patched_dlt_dest
     yield
     patcher.stop()
+
 
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
@@ -1079,7 +1082,6 @@ def db_to_db_delete_insert_with_timerange(
         for i, row in enumerate(expected):
             assert res[i] == row
 
-
     run("2022-01-01", "2022-01-02")  # dlt runs them with the end date exclusive
     assert_output_equals(
         [
@@ -1200,7 +1202,7 @@ def as_datetime(date_str: str) -> date:
     return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).date()
 
 
-def as_datetime2(date_str: str) -> date:
+def as_datetime2(date_str: str) -> datetime:
     return datetime.strptime(date_str, "%Y-%m-%d")
 
 
@@ -1413,7 +1415,6 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         if dest_uri.startswith("clickhouse"):
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
-
 
     # the first load, it should be loaded correctly
     with dest_engine.begin() as conn:
@@ -2854,5 +2855,3 @@ def test_gcs(dest, test_case):
 def test_s3(dest, test_case):
     test_case(dest.start())
     dest.stop()
-
-
