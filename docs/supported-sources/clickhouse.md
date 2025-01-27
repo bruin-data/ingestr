@@ -7,7 +7,7 @@ Ingestr supports ClickHouse as a destination.
 The URI format for ClickHouse as a destination is as follows:
 
 ```plaintext
-clickhouse://<username>:<password>@<host>:<port>?<http_port>
+clickhouse://<username>:<password>@<host>:<port>?http_port=<http_port>
 ```
 ## URI parameters:
 - `username` (required): The username is required to authenticate with the ClickHouse server.
