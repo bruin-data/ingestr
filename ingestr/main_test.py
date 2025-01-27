@@ -473,7 +473,7 @@ class DuckDb:
 POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
 MYSQL8_IMAGE = "mysql:8.4.1"
 MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04"
-CLICKHOUSE_IMAGE = "clickhouse/clickhouse-server:latest"
+CLICKHOUSE_IMAGE = "clickhouse/clickhouse-server:24.12"
 
 pgDocker = DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start())
 clickHouseDocker = ClickhouseDockerImage(
