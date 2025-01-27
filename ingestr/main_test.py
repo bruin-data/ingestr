@@ -482,9 +482,9 @@ clickHouseDocker = ClickhouseDockerImage(
 mysqlDocker = DockerImage(lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start())
 
 SOURCES = {
-    # "postgres": pgDocker,
+    "postgres": pgDocker,
     "duckdb": DuckDb(),
-    # "mysql8": mysqlDocker,
+    "mysql8": mysqlDocker,
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
@@ -493,8 +493,8 @@ SOURCES = {
 
 
 DESTINATIONS = {
-    # "postgres": pgDocker,
-    # "duckdb": DuckDb(),
+    "postgres": pgDocker,
+    "duckdb": DuckDb(),
     "clickhouse+native": clickHouseDocker,
 }
 
@@ -526,8 +526,7 @@ def autocreate_db_for_clickhouse():
     def patched_dlt_dest(uri, **kwargs):
         db, _ = kwargs["dest_table"].split(".")
         dest_engine = sqlalchemy.create_engine(uri)
-        dest_engine.execute(f"DROP DATABASE IF EXISTS {db}")
-        dest_engine.execute(f"CREATE DATABASE {db}")
+        dest_engine.execute(f"CREATE DATABASE IF NOT EXISTS {db}")
         return dlt_dest(uri, **kwargs)
 
     patcher = patch("ingestr.src.factory.ClickhouseDestination.dlt_dest")
@@ -2666,8 +2665,9 @@ def fs_test_cases(
         """
         When the source URI is empty, an error should be raised.
         """
+        schema = f"testschema_fs_{get_random_string(5)}"
         result = invoke_ingest_command(
-            f"{protocol}://bucket?{auth}", "", dest_uri, "test"
+            f"{protocol}://bucket?{auth}", "", dest_uri, f"{schema}.test"
         )
         assert has_exception(result.exception, InvalidBlobTableError)
 
