@@ -1360,12 +1360,11 @@ def test_arrow_mmap_to_db_create_replace(dest):
 )
 def test_arrow_mmap_to_db_delete_insert(dest):
     schema = f"testschema_arrow_mmap_del_ins_{get_random_string(5)}"
-    if "clickhouse" in dest.uri:
-       pytest.skip("")
 
     def run_command(df: pd.DataFrame, incremental_key: Optional[str] = None):
         table = pa.Table.from_pandas(df)
-
+        if "clickhouse" in dest_uri:
+            pytest.skip("")
         with tempfile.NamedTemporaryFile(suffix=".arrow", delete=True) as tmp:
             with pa.OSFile(tmp.name, "wb") as f:
                 writer = ipc.new_file(f, table.schema)
