@@ -519,7 +519,7 @@ def manage_containers():
 @pytest.fixture(scope="session", autouse=True)
 def autocreate_db_for_clickhouse():
     """
-    patches ClickhouseSource to autocreate dest table's if they don't exist
+    patches ClickhouseDestination to autocreate dest tables if they don't exist
     """
 
     dlt_dest = ClickhouseDestination().dlt_dest
