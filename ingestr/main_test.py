@@ -1373,8 +1373,6 @@ def test_arrow_mmap_to_db_delete_insert(dest):
 
     def run_command(df: pd.DataFrame, incremental_key: Optional[str] = None):
         table = pa.Table.from_pandas(df)
-        if "clickhouse" in dest_uri:
-            pytest.skip("")
         with tempfile.NamedTemporaryFile(suffix=".arrow", delete=True) as tmp:
             with pa.OSFile(tmp.name, "wb") as f:
                 writer = ipc.new_file(f, table.schema)
@@ -1388,6 +1386,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
                 f"{schema}.output",
                 inc_key=incremental_key,
                 inc_strategy="delete+insert",
+                primary_key="id",
             )
 
             assert res.exit_code == 0
@@ -1409,6 +1408,13 @@ def test_arrow_mmap_to_db_delete_insert(dest):
 
     run_command(df, "date")
 
+    def build_datetime(ds: str):
+        dt: datetime = as_datetime2(ds)
+        if dest_uri.startswith("clickhouse"):
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+
     # the first load, it should be loaded correctly
     with dest_engine.begin() as conn:
         res = conn.execute(f"select count(*) from {schema}.output").fetchall()
@@ -1417,7 +1423,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         res = conn.execute(
             f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
-        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][0] == build_datetime("2024-11-05")
         assert res[0][1] == row_count
 
     dest_engine.dispose()
@@ -1431,7 +1437,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         res = conn.execute(
             f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
-        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][0] == build_datetime("2024-11-05")
         assert res[0][1] == row_count
     dest_engine.dispose()
 
@@ -1455,9 +1461,9 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         res = conn.execute(
             f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
-        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][0] == build_datetime("2024-11-05")
         assert res[0][1] == row_count
-        assert res[1][0] == as_datetime2("2024-11-06")
+        assert res[1][0] == build_datetime("2024-11-06")
         assert res[1][1] == 1000
     dest_engine.dispose()
 
@@ -1480,9 +1486,9 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         res = conn.execute(
             f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
-        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][0] == build_datetime("2024-11-05")
         assert res[0][1] == row_count
-        assert res[1][0] == as_datetime2("2024-11-06")
+        assert res[1][0] == build_datetime("2024-11-06")
         assert res[1][1] == 1000
 
 
