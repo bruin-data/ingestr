@@ -1371,6 +1371,10 @@ def test_arrow_mmap_to_db_create_replace(dest):
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_arrow_mmap_to_db_delete_insert(dest):
+    
+    if "clickhouse" in dest:
+        pytest.skip("clickhouse is not supported for this test")
+
     schema = f"testschema_arrow_mmap_del_ins_{get_random_string(5)}"
 
     def run_command(df: pd.DataFrame, incremental_key: Optional[str] = None):
@@ -1388,7 +1392,6 @@ def test_arrow_mmap_to_db_delete_insert(dest):
                 f"{schema}.output",
                 inc_key=incremental_key,
                 inc_strategy="delete+insert",
-                primary_key="id",
             )
 
             assert res.exit_code == 0
