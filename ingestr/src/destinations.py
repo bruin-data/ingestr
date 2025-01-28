@@ -269,7 +269,6 @@ class AthenaDestination:
 class ClickhouseDestination:
     def dlt_dest(self, uri: str, **kwargs):
         parsed_uri = urlparse(uri)
-        print(f"parsed_uri: {parsed_uri}")
 
         if "dest_table" in kwargs:
             table = kwargs["dest_table"]
