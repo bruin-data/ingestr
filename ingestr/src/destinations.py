@@ -305,7 +305,7 @@ class ClickhouseDestination:
         http_port = (
             int(query_params["http_port"][0]) if "http_port" in query_params else 8123
         )
-        
+
         credentials = ClickHouseCredentials(
             {
                 "host": host,

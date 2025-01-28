@@ -1371,7 +1371,6 @@ def test_arrow_mmap_to_db_create_replace(dest):
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_arrow_mmap_to_db_delete_insert(dest):
-    
     if "clickhouse" in dest:
         pytest.skip("clickhouse is not supported for this test")
 
