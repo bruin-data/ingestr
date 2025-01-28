@@ -451,7 +451,7 @@ def ingest(
             pipelines_dir = tempfile.mkdtemp()
             is_pipelines_dir_temp = True
 
-        dlt_dest = destination.dlt_dest(uri=dest_uri)
+        dlt_dest = destination.dlt_dest(uri=dest_uri, dest_table=dest_table)
         validate_loader_file_format(dlt_dest, loader_file_format)
 
         if partition_by:

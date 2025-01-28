@@ -59,6 +59,7 @@ export default defineConfig({
             items: [
               { text: "AWS Athena", link: "/supported-sources/athena.md" },
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
+              { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
               { text: "Databricks", link: "/supported-sources/databricks.md" },
               { text: "DuckDB", link: "/supported-sources/duckdb.md" },
               {

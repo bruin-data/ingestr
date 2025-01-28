@@ -6,6 +6,7 @@ from dlt.common.destination import Destination
 from ingestr.src.destinations import (
     AthenaDestination,
     BigQueryDestination,
+    ClickhouseDestination,
     CsvDestination,
     DatabricksDestination,
     DuckDBDestination,
@@ -146,6 +147,8 @@ class SourceDestinationFactory:
         "synapse": SynapseDestination,
         "csv": CsvDestination,
         "athena": AthenaDestination,
+        "clickhouse+native": ClickhouseDestination,
+        "clickhouse": ClickhouseDestination,
     }
 
     def __init__(self, source_uri: str, destination_uri: str):

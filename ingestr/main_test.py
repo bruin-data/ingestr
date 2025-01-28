@@ -32,6 +32,7 @@ from confluent_kafka import Producer  # type: ignore
 from dlt.sources.filesystem import glob_files
 from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
 from sqlalchemy.pool import NullPool
+from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
@@ -59,6 +60,7 @@ from ingestr.src.appstore.models import (
     ReportSegment,
     ReportSegmentAttributes,
 )
+from ingestr.src.destinations import ClickhouseDestination
 from ingestr.src.errors import (
     InvalidBlobTableError,
 )
@@ -439,6 +441,20 @@ class DockerImage:
             self.container.stop()
 
 
+class ClickhouseDockerImage(DockerImage):
+    def __init__(self, container_creator, connection_suffix: str = "") -> None:
+        super().__init__(container_creator, connection_suffix)
+
+    def start(self) -> str:
+        url = super().start()
+        if self.container is None:
+            raise ValueError("Container is not initialized.")
+        port = self.container.get_exposed_port(8123)
+        return (
+            url.replace("clickhouse://", "clickhouse+native://") + f"?http_port={port}"
+        )
+
+
 class DuckDb:
     def start(self) -> str:
         self.abs_path = get_abs_path(f"./testdata/duckdb_{get_random_string(5)}.db")
@@ -457,23 +473,29 @@ class DuckDb:
 POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
 MYSQL8_IMAGE = "mysql:8.4.1"
 MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04"
+CLICKHOUSE_IMAGE = "clickhouse/clickhouse-server:24.12"
 
 pgDocker = DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start())
+clickHouseDocker = ClickhouseDockerImage(
+    lambda: ClickHouseContainer(CLICKHOUSE_IMAGE).start()
+)
+mysqlDocker = DockerImage(lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start())
+
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
-    "mysql8": DockerImage(
-        lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
-    ),
+    "mysql8": mysqlDocker,
     # "sqlserver": DockerImage(
     #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
     #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
     # ),
 }
 
+
 DESTINATIONS = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
+    "clickhouse+native": clickHouseDocker,
 }
 
 
@@ -495,6 +517,27 @@ def manage_containers():
             future.result()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def autocreate_db_for_clickhouse():
+    """
+    patches ClickhouseDestination to autocreate dest tables if they don't exist
+    """
+
+    dlt_dest = ClickhouseDestination().dlt_dest
+
+    def patched_dlt_dest(uri, **kwargs):
+        db, _ = kwargs["dest_table"].split(".")
+        dest_engine = sqlalchemy.create_engine(uri)
+        dest_engine.execute(f"CREATE DATABASE IF NOT EXISTS {db}")
+        return dlt_dest(uri, **kwargs)
+
+    patcher = patch("ingestr.src.factory.ClickhouseDestination.dlt_dest")
+    mock = patcher.start()
+    mock.side_effect = patched_dlt_dest
+    yield
+    patcher.stop()
+
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
@@ -506,7 +549,6 @@ def test_create_replace(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-
     db_to_db_create_replace(source_uri, dest_uri)
     source.stop()
     dest.stop()
@@ -692,7 +734,7 @@ def db_to_db_merge_with_primary_key(
         conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
         conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
         conn.execute(
-            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER NOT NULL, val VARCHAR(20), updated_at DATE NOT NULL)"
         )
         conn.execute(
             f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01')"
@@ -736,7 +778,6 @@ def db_to_db_merge_with_primary_key(
             assert res[i] == row
 
     dest_engine.dispose()
-
     res = run()
     assert_output_equals(
         [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
@@ -1028,7 +1069,8 @@ def db_to_db_delete_insert_with_timerange(
     dest_engine = sqlalchemy.create_engine(dest_connection_url, poolclass=NullPool)
 
     def get_output_rows():
-        dest_engine.execute("CHECKPOINT")
+        if "clickhouse" not in dest_connection_url:
+            dest_engine.execute("CHECKPOINT")
         rows = dest_engine.execute(
             f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
@@ -1160,7 +1202,7 @@ def as_datetime(date_str: str) -> date:
     return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).date()
 
 
-def as_datetime2(date_str: str) -> date:
+def as_datetime2(date_str: str) -> datetime:
     return datetime.strptime(date_str, "%Y-%m-%d")
 
 
@@ -1172,7 +1214,7 @@ def test_kafka_to_db(dest):
     with ThreadPoolExecutor() as executor:
         dest_future = executor.submit(dest.start)
         source_future = executor.submit(
-            KafkaContainer("confluentinc/cp-kafka:7.6.0").start, timeout=60
+            KafkaContainer("confluentinc/cp-kafka:7.6.0").start, timeout=120
         )
         dest_uri = dest_future.result()
         kafka = source_future.result()
@@ -1352,6 +1394,9 @@ def test_arrow_mmap_to_db_delete_insert(dest):
             return res
 
     dest_uri = dest.start()
+    if "clickhouse" in dest_uri:
+        pytest.skip("clickhouse is not supported for this test")
+
     dest_engine = sqlalchemy.create_engine(dest_uri)
 
     # let's start with a basic dataframe
@@ -1367,6 +1412,12 @@ def test_arrow_mmap_to_db_delete_insert(dest):
 
     run_command(df, "date")
 
+    def build_datetime(ds: str):
+        dt: datetime = as_datetime2(ds)
+        if dest_uri.startswith("clickhouse"):
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
     # the first load, it should be loaded correctly
     with dest_engine.begin() as conn:
         res = conn.execute(f"select count(*) from {schema}.output").fetchall()
@@ -1375,7 +1426,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         res = conn.execute(
             f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
-        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][0] == build_datetime("2024-11-05")
         assert res[0][1] == row_count
 
     dest_engine.dispose()
@@ -1389,7 +1440,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         res = conn.execute(
             f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
-        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][0] == build_datetime("2024-11-05")
         assert res[0][1] == row_count
     dest_engine.dispose()
 
@@ -1413,9 +1464,9 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         res = conn.execute(
             f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
-        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][0] == build_datetime("2024-11-05")
         assert res[0][1] == row_count
-        assert res[1][0] == as_datetime2("2024-11-06")
+        assert res[1][0] == build_datetime("2024-11-06")
         assert res[1][1] == 1000
     dest_engine.dispose()
 
@@ -1438,9 +1489,9 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         res = conn.execute(
             f"select date, count(*) from {schema}.output group by 1 order by 1 asc"
         ).fetchall()
-        assert res[0][0] == as_datetime2("2024-11-05")
+        assert res[0][0] == build_datetime("2024-11-05")
         assert res[0][1] == row_count
-        assert res[1][0] == as_datetime2("2024-11-06")
+        assert res[1][0] == build_datetime("2024-11-06")
         assert res[1][1] == 1000
 
 
@@ -1466,7 +1517,6 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
                 inc_strategy="merge",
                 primary_key="id",
             )
-
             assert res.exit_code == 0
             return res
 
@@ -1517,6 +1567,7 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
 
     with dest_engine.begin() as conn:
         res = conn.execute(f"select count(*) from {schema}.output").fetchall()
+
         assert res[0][0] == row_count + 1000
 
         res = conn.execute(
@@ -1536,7 +1587,6 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
             "value": ["a"] * 1000,
         }
     )
-
     run_command(old_rows)
     with dest_engine.begin() as conn:
         res = conn.execute(f"select count(*) from {schema}.output").fetchall()
@@ -1579,7 +1629,6 @@ def test_db_to_db_exclude_columns(source, dest):
             f"select count(*) from {schema_rand_prefix}.input"
         ).fetchall()
         assert res[0][0] == 2
-
     result = invoke_ingest_command(
         source_uri,
         f"{schema_rand_prefix}.input",
@@ -1821,7 +1870,6 @@ def dynamodb_tests() -> Iterable[Callable]:
         result = invoke_ingest_command(
             dynamodb.uri, dynamodb.db_name, dest_uri, dest_table, "append", "updated_at"
         )
-
         assert_success(result)
         result = dest_engine.execute(
             f"SELECT id, updated_at from {dest_table} ORDER BY id"
@@ -1833,7 +1881,6 @@ def dynamodb_tests() -> Iterable[Callable]:
 
     def append_test(dest_uri, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
-
         # connection pooling causes issues with duckdb, when the connection
         # is reused below, so we disable pooling.
         dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
@@ -2136,7 +2183,6 @@ def test_github_to_duckdb(dest):
     source_table = "repo_events"
 
     dest_table = "dest.github_repo_events"
-
     res = invoke_ingest_command(source_uri, source_table, dest_uri, dest_table)
 
     assert res.exit_code == 0
@@ -2628,8 +2674,9 @@ def fs_test_cases(
         """
         When the source URI is empty, an error should be raised.
         """
+        schema = f"testschema_fs_{get_random_string(5)}"
         result = invoke_ingest_command(
-            f"{protocol}://bucket?{auth}", "", dest_uri, "test"
+            f"{protocol}://bucket?{auth}", "", dest_uri, f"{schema}.test"
         )
         assert has_exception(result.exception, InvalidBlobTableError)
 
