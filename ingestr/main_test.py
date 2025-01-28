@@ -1371,9 +1371,6 @@ def test_arrow_mmap_to_db_create_replace(dest):
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_arrow_mmap_to_db_delete_insert(dest):
-    if "clickhouse" in dest:
-        pytest.skip("clickhouse is not supported for this test")
-
     schema = f"testschema_arrow_mmap_del_ins_{get_random_string(5)}"
 
     def run_command(df: pd.DataFrame, incremental_key: Optional[str] = None):
@@ -1397,6 +1394,9 @@ def test_arrow_mmap_to_db_delete_insert(dest):
             return res
 
     dest_uri = dest.start()
+    if "clickhouse" in dest_uri:
+        pytest.skip("clickhouse is not supported for this test")
+
     dest_engine = sqlalchemy.create_engine(dest_uri)
 
     # let's start with a basic dataframe
