@@ -29,3 +29,9 @@ ingestr ingest \
 This is a sample command that will copy the data from the Stripe source into Athena.
 
 <img alt="clickhouse_img" src="../media/clickhouse_img.png" />
+
+<!-- 
+    see https://github.com/dlt-hub/dlt/issues/2248
+-->
+> [!WARNING]
+> Clickhouse currently doesn't support `delete+insert`, `merge` or `scd2` incremental strategies.
