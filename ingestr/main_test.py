@@ -1811,6 +1811,10 @@ def test_csv_dest():
                 "dataset.table",  # unused by csv dest
             )
             assert result.exit_code == 0
+            with open(csv_dest.name, "r") as output:
+                reader = csv.DictReader(output)
+                rows = [row for row in reader]
+                assert len(rows) == 4
         finally:
             os.remove(duck_src.name)
             os.remove(csv_dest.name)
