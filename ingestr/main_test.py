@@ -1784,6 +1784,37 @@ def test_date_coercion_issue():
     source_instance.stop()
     dest_instance.stop()
 
+def test_csv_dest():
+    """
+    Smoke test to ensure that CSV destination works.
+    """
+    with (
+        tempfile.NamedTemporaryFile("w") as duck_src,
+        tempfile.NamedTemporaryFile("w") as csv_dest,
+    ):
+        duck_src.close()
+        csv_dest.close()
+        try:
+            conn = duckdb.connect(duck_src.name)
+            conn.sql("""
+                CREATE SCHEMA public;
+                CREATE TABLE public.testdata(name varchar, age integer);
+                INSERT INTO public.testdata(name, age)
+                VALUES ('Jhon', 42), ('Lisa', 21), ('Mike', 24), ('Mary', 27);
+            """)
+            conn.close()
+            result = invoke_ingest_command(
+                f"duckdb:///{duck_src.name}",
+                "public.testdata",
+                f"csv://{csv_dest.name}",
+                "dataset.table", # unused by csv dest
+            )
+            assert result.exit_code == 0 
+        finally:
+            os.remove(duck_src.name)
+            os.remove(csv_dest.name)
+
+
 
 @dataclass
 class DynamoDBTestConfig:
