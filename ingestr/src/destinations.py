@@ -308,7 +308,9 @@ class ClickhouseDestination:
         secure = int(query_params["secure"][0]) if "secure" in query_params else 1
 
         if secure not in (0, 1):
-            raise ValueError("Invalid value for secure. Set to `1` for a secure HTTPS connection or `0` for an non-secure HTTP connection.")
+            raise ValueError(
+                "Invalid value for secure. Set to `1` for a secure HTTPS connection or `0` for a non-secure HTTP connection."
+            )
 
         credentials = ClickHouseCredentials(
             {
