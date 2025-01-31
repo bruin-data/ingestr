@@ -1784,6 +1784,7 @@ def test_date_coercion_issue():
     source_instance.stop()
     dest_instance.stop()
 
+
 def test_csv_dest():
     """
     Smoke test to ensure that CSV destination works.
@@ -1807,13 +1808,12 @@ def test_csv_dest():
                 f"duckdb:///{duck_src.name}",
                 "public.testdata",
                 f"csv://{csv_dest.name}",
-                "dataset.table", # unused by csv dest
+                "dataset.table",  # unused by csv dest
             )
-            assert result.exit_code == 0 
+            assert result.exit_code == 0
         finally:
             os.remove(duck_src.name)
             os.remove(csv_dest.name)
-
 
 
 @dataclass
