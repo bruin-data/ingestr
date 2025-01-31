@@ -451,7 +451,7 @@ class ClickhouseDockerImage(DockerImage):
             raise ValueError("Container is not initialized.")
         port = self.container.get_exposed_port(8123)
         return (
-            url.replace("clickhouse://", "clickhouse+native://") + f"?http_port={port}"
+            url.replace("clickhouse://", "clickhouse+native://") + f"?http_port={port}&secure=0"
         )
 
 

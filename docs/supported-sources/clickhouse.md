@@ -7,7 +7,7 @@ Ingestr supports ClickHouse as a destination.
 The URI format for ClickHouse as a destination is as follows:
 
 ```plaintext
-clickhouse://<username>:<password>@<host>:<port>?http_port=<http_port>
+clickhouse://<username>:<password>@<host>:<port>?http_port=<http_port>&secure=<secure>
 ```
 ## URI parameters:
 - `username` (required): The username is required to authenticate with the ClickHouse server.
@@ -15,6 +15,7 @@ clickhouse://<username>:<password>@<host>:<port>?http_port=<http_port>
 - `host` (required): The hostname or IP address of the ClickHouse server where the database is hosted.
 - `port` (required): The TCP port number used by the ClickHouse server.
 - `http_port` (optional): The port number to use when connecting to the ClickHouse server's HTTP interface. Make sure your ClickHouse server is configured to accept HTTP connections on the port specified by http_port. By default, ClickHouse uses port 8123.
+- `secure` (optional): Set to `1` for a secure HTTPS connection or `0` for an non-secure HTTP connection. By default, it is set to `1`.
 
 ClickHouse requires a `username`, `password`, `host` and `port` to connect to the ClickHouse server. For more information, read [here](https://dlthub.com/docs/dlt-ecosystem/destinations/clickhouse#2-setup-clickhouse-database). Once you've completed the guide, you should have all the above-mentioned credentials.
 
