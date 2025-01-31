@@ -1,6 +1,5 @@
 import base64
 import csv
-import gzip
 import json
 import os
 import shutil
@@ -8,6 +7,7 @@ import tempfile
 from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
+import pyarrow.parquet  # type: ignore
 from dlt.common.configuration.specs import AwsCredentials
 from dlt.destinations.impl.clickhouse.configuration import (
     ClickHouseCredentials,
@@ -184,19 +184,17 @@ class CsvDestination(GenericSqlDestination):
         if output_path.count("/") > 1:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        with gzip.open(first_file_path, "rt", encoding="utf-8") as jsonl_file:  # type: ignore
-            with open(output_path, "w", newline="") as csv_file:
-                csv_writer = None
-                for line in jsonl_file:
-                    json_obj = filter_keys(json.loads(line))
-                    if csv_writer is None:
-                        csv_writer = csv.DictWriter(
-                            csv_file, fieldnames=json_obj.keys()
-                        )
-                        csv_writer.writeheader()
+        table = pyarrow.parquet.read_table(first_file_path)
+        rows = table.to_pylist()
+        with open(output_path, "w", newline="") as csv_file:
+            csv_writer = None
+            for row in rows:
+                row = filter_keys(row)
+                if csv_writer is None:
+                    csv_writer = csv.DictWriter(csv_file, fieldnames=row.keys())
+                    csv_writer.writeheader()
 
-                    csv_writer.writerow(json_obj)
-
+                csv_writer.writerow(row)
         shutil.rmtree(self.temp_path)
 
 
