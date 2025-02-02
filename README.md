@@ -68,7 +68,6 @@ Pull requests are welcome. However, please open an issue first to discuss what y
 > After cloning `ingestr` make sure to run `make setup` to install githooks.
 
 ## Supported sources & destinations
-
 <table>
     <tr>
         <th></th>
@@ -78,7 +77,6 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     <tr>
         <td colspan="3" style='text-align:center;'><strong>Databases</strong></td>
     </tr>
-    
     <tr>
         <td>BigQuery</td>
         <td>✅</td>
@@ -109,7 +107,6 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
         <td>✅</td>
     </tr>
-    
     <tr>
         <td>MongoDB</td>
         <td>✅</td>
@@ -150,7 +147,6 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
         <td>❌</td>
     </tr>
-    
     <tr>
         <td colspan="3" style='text-align:center;'><strong>Platforms</strong></td>
     </tr>
