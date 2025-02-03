@@ -98,7 +98,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-from ingestr.src.applovin import applovin_source
+from ingestr.src.applovin import applovin_source, ReportType
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1761,7 +1761,7 @@ class AppLovinSource:
         if len(parts) != 2:
             raise ValueError("source table must be in the format {report_type}_{report_name}")
         report_type, report_name = parts
-
+        
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
 
@@ -1771,13 +1771,15 @@ class AppLovinSource:
 
         src = applovin_source(
             api_key,
-            report_type,
-            start_date,
-            end_date,
+            ReportType(report_type),
+            start_date.strftime("%Y-%m-%d"),
+            end_date.strftime("%Y-%m-%d"),
         )
 
         if report_name not in src.resources:
             raise UnsupportedResourceError(table, "AppLovin")
+        
+        return src.with_resources(report_name)
 
         
         

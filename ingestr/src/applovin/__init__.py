@@ -109,6 +109,7 @@ def applovin_source(
                     "report_type": report_type.value, 
                     "columns": ",".join(REPORT_SCHEMA[report_type]),
                 },
+                "paginator": "single_page",
             },
         },
         "resources": [
