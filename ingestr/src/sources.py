@@ -1756,12 +1756,6 @@ class AppLovinSource:
         if api_key is None:
             raise MissingValueError("api_key", "AppLovin")
         
-        # todo: custom reports
-        parts = table.split("_", maxsplit=1)
-        if len(parts) != 2:
-            raise ValueError("source table must be in the format {report_type}_{report_name}")
-        report_type, report_name = parts
-        
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
 
@@ -1771,15 +1765,14 @@ class AppLovinSource:
 
         src = applovin_source(
             api_key,
-            ReportType(report_type),
             start_date.strftime("%Y-%m-%d"),
             end_date.strftime("%Y-%m-%d"),
         )
 
-        if report_name not in src.resources:
+        if table not in src.resources:
             raise UnsupportedResourceError(table, "AppLovin")
         
-        return src.with_resources(report_name)
+        return src.with_resources(table)
 
         
         

@@ -77,12 +77,10 @@ REPORT_SCHEMA = {
 @dlt.source
 def applovin_source(
     api_key: str,
-    report_type: ReportType,
     start_date: str,
     end_date: str,
 ):
     # validate that start_date & end_date are within the last 45 days
-    # validate that ReportType.ADVERTISER is only used with probabilisticReport & skaReport
     config: RESTAPIConfig = {
         "client": {
             "base_url": "https://r.applovin.com/",
@@ -94,7 +92,6 @@ def applovin_source(
             },
         },
         "resource_defaults": {
-            "primary_key": REPORT_SCHEMA[report_type],
             "write_disposition": "merge",
             "endpoint": {
                 "incremental": {
@@ -106,16 +103,56 @@ def applovin_source(
                 },
                 "params": {
                     "format": "json",
-                    "report_type": report_type.value, 
-                    "columns": ",".join(REPORT_SCHEMA[report_type]),
                 },
                 "paginator": "single_page",
             },
         },
         "resources": [
-            "report",
-            "probabilisticReport",
-            "skaReport",
+            {
+                "name": "publisher_report",
+                "primary_key": REPORT_SCHEMA[ReportType.PUBLISHER],
+                "endpoint": {
+                    "path": "report",
+                    "params": {
+                        "report_type": ReportType.PUBLISHER.value,
+                        "columns": ",".join(REPORT_SCHEMA[ReportType.PUBLISHER])
+                    },
+                },
+            },
+            {
+                "name": "advertiser_report",
+                "primary_key": REPORT_SCHEMA[ReportType.ADVERTISER],
+                "endpoint": {
+                    "path": "report",
+                    "params": {
+                        "report_type": ReportType.ADVERTISER.value,
+                        "columns": ",".join(REPORT_SCHEMA[ReportType.ADVERTISER])
+                    },
+                },
+            },
+            {
+                "name": "advertiser_probabilistic_report",
+                "primary_key": REPORT_SCHEMA[ReportType.ADVERTISER],
+                "endpoint": {
+                    "path": "probabilisticReport",
+                    "params": {
+                        "report_type": ReportType.ADVERTISER.value,
+                        "columns": ",".join(REPORT_SCHEMA[ReportType.ADVERTISER])
+                    },
+                },
+            },
+            {
+                "name": "advertiser_ska_report",
+                "primary_key": REPORT_SCHEMA[ReportType.ADVERTISER],
+                "endpoint": {
+                    "path": "skaReport",
+                    "params": {
+                        "report_type": ReportType.ADVERTISER.value,
+                        "columns": ",".join(REPORT_SCHEMA[ReportType.ADVERTISER])
+                    },
+                },
+            },
         ]
     }
+
     yield from rest_api_resources(config)
