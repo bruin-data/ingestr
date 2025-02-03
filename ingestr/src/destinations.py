@@ -297,11 +297,20 @@ class ClickhouseDestination:
             raise ValueError(
                 "The TCP port of the ClickHouse server is required to establish a connection."
             )
-
+        
         query_params = parse_qs(parsed_uri.query)
+        secure = int(query_params["secure"][0]) if "secure" in query_params else 1
+
         http_port = (
-            int(query_params["http_port"][0]) if "http_port" in query_params else 8123
+            int(query_params["http_port"][0])
+            if "http_port" in query_params
+            else 8443 if secure == 1 else 8123
         )
+
+        if secure not in (0, 1):
+            raise ValueError(
+                "Invalid value for secure. Set to `1` for a secure HTTPS connection or `0` for a non-secure HTTP connection."
+            )
 
         credentials = ClickHouseCredentials(
             {
@@ -311,10 +320,9 @@ class ClickhouseDestination:
                 "password": password,
                 "database": database,
                 "http_port": http_port,
-                "secure": 0,
+                "secure": secure,
             }
         )
-
         return dlt.destinations.clickhouse(credentials=credentials)
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
