@@ -167,6 +167,8 @@ def applovin_source(
                     "end_param": "end",
                     "initial_value": start_date,
                     "end_value": end_date,
+                    "range_start": "closed",
+                    "range_end": "closed",
                 },
                 "params": {
                     "format": "json",
