@@ -15,7 +15,29 @@ class InvalidDimensionError(Exception):
     def __init__(self, dim: str, report_type: str):
         super().__init__(f"Unknown dimension {dim} for report type {report_type}")
 
-REPORT_SCHEMA: Dict[ReportType, Set[str]] = {
+TYPE_HINTS = {
+    "ad_type": {"data_type": "text"},
+    "application": {"data_type": "text"},
+    "application_is_hidden": {"data_type": "bool"},
+    "bidding_integration": {"data_type": "text"},
+    "clicks": {"data_type": "bigint"},
+    "country": {"data_type": "text"},
+    "ctr": {"data_type": "double"},
+    "day": {"data_type": "date"},
+    "device_type": {"data_type": "text"},
+    "ecpm": {"data_type": "double"},
+    "impressions": {"data_type": "bigint"},
+    "package_name": {"data_type": "text"},
+    "placement_type": {"data_type": "text"},
+    "platform": {"data_type": "text"},
+    "revenue": {"data_type": "double"},
+    "size": {"data_type": "text"},
+    "store_id": {"data_type": "text"},
+    "zone": {"data_type": "text"},
+    "zone_id": {"data_type": "text"},
+}
+
+REPORT_SCHEMA: Dict[ReportType, Dict] = {
     ReportType.PUBLISHER: [
         "ad_type",
         "application",
@@ -81,6 +103,7 @@ REPORT_SCHEMA: Dict[ReportType, Set[str]] = {
 # NOTE(turtledev): These values are valid columns,
 # but often don't produce a value. Find a way to either add
 # a default value, or use an alternative strategy to de-duplicate
+# OR make them nullable
 SKA_REPORT_EXCLUDE = [
     "ad",
     "ad_id",
@@ -156,6 +179,7 @@ def applovin_source(
             {
                 "name": "publisher_report",
                 "primary_key": REPORT_SCHEMA[ReportType.PUBLISHER],
+                "columns": build_schema(REPORT_SCHEMA[ReportType.PUBLISHER]),
                 "endpoint": {
                     "path": "report",
                     "params": {
@@ -252,3 +276,10 @@ def exclude(source: List[str], excludes: List[str]) -> List[str]:
         col for col in source
         if col not in excludes
     ]
+
+def build_schema(cols: List[str]) -> dict:
+    return {
+        col: TYPE_HINTS[col] for col in cols
+        if col in TYPE_HINTS
+    }
+    
