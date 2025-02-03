@@ -42,8 +42,6 @@ REPORT_SCHEMA: Dict[ReportType, Set[str]] = {
         "ad_creative_type",
         "ad_id",
         "ad_type",
-        "app_id_external",
-        "application",
         "average_cpa",
         "average_cpc",
         "campaign",
@@ -67,7 +65,6 @@ REPORT_SCHEMA: Dict[ReportType, Set[str]] = {
         "device_type",
         "external_placement_id",
         "first_purchase",
-        "hour",
         "impressions",
         "installs",
         "optimization_day_target",
@@ -81,12 +78,10 @@ REPORT_SCHEMA: Dict[ReportType, Set[str]] = {
     ],
 }
 
-SKA_REPORT_EXCLUDE=[
+SKA_REPORT_EXCLUDE = [
     "ad",
     "ad_id",
     "ad_type",
-    "app_id_external",
-    "application",
     "average_cpc",
     "campaign_ad_type",
     "clicks",
@@ -98,7 +93,6 @@ SKA_REPORT_EXCLUDE=[
     "custom_page_id",
     "device_type",
     "first_purchase",
-    "hour",
     "impressions",
     "placement_type",
     "sales",
@@ -106,6 +100,10 @@ SKA_REPORT_EXCLUDE=[
     "traffic_source"
 ]
 
+PROBABILISTIC_REPORT_EXCLUDE = [
+    "installs",
+    "redownloads",
+]
 
 @dlt.source
 def applovin_source(
@@ -114,10 +112,15 @@ def applovin_source(
     end_date: str,
     custom: str,
 ):
-    ska_report_columns = [
-        col for col in REPORT_SCHEMA[ReportType.ADVERTISER]
-        if col not in SKA_REPORT_EXCLUDE
-    ]
+    ska_report_columns = exclude(
+        REPORT_SCHEMA[ReportType.ADVERTISER],
+        SKA_REPORT_EXCLUDE,
+    )
+
+    probabilistic_report_columns = exclude(
+        REPORT_SCHEMA[ReportType.ADVERTISER],
+        PROBABILISTIC_REPORT_EXCLUDE,
+    )
 
     # validate that start_date & end_date are within the last 45 days
     config: RESTAPIConfig = {
@@ -171,12 +174,12 @@ def applovin_source(
             },
             {
                 "name": "advertiser_probabilistic_report",
-                "primary_key": REPORT_SCHEMA[ReportType.ADVERTISER],
+                "primary_key": probabilistic_report_columns,
                 "endpoint": {
                     "path": "probabilisticReport",
                     "params": {
                         "report_type": ReportType.ADVERTISER.value,
-                        "columns": ",".join(REPORT_SCHEMA[ReportType.ADVERTISER])
+                        "columns": ",".join(probabilistic_report_columns)
                     },
                 },
             },
@@ -240,3 +243,9 @@ def validate_dimensions(report_type: ReportType, dimensions: str) -> List[str]:
     
     return dims
 
+def exclude(source: List[str], excludes: List[str]) -> List[str]:
+    excludes = set(excludes)
+    return [
+        col for col in source
+        if col not in excludes
+    ]
