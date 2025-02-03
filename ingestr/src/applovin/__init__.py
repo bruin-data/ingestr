@@ -78,6 +78,9 @@ REPORT_SCHEMA: Dict[ReportType, Set[str]] = {
     ],
 }
 
+# NOTE(turtledev): These values are valid columns,
+# but often don't produce a value. Find a way to either add
+# a default value, or use an alternative strategy to de-duplicate
 SKA_REPORT_EXCLUDE = [
     "ad",
     "ad_id",
