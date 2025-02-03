@@ -98,6 +98,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+from ingestr.src.applovin import applovin_source
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1737,3 +1738,46 @@ class LinkedInAdsSource:
             metrics=metrics,
             time_granularity=time_granularity,
         ).with_resources("custom_reports")
+
+class AppLovinSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key") is not None:
+            raise ValueError(
+                "Google Ads takes care of incrementality on its own, you should not provide incremental_key"
+            )
+        
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        api_key = params.get("api_key", None)
+        if api_key is None:
+            raise MissingValueError("api_key", "AppLovin")
+        
+        # todo: custom reports
+        parts = table.split("_", maxsplit=1)
+        if len(parts) != 2:
+            raise ValueError("source table must be in the format {report_type}_{report_name}")
+        report_type, report_name = parts
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        now = datetime.now().replace(tzinfo=timezone.utc)
+        start_date = interval_start if interval_start is not None else now - timedelta(days=30)
+        end_date = interval_end if interval_end is not None else now
+
+        src = applovin_source(
+            api_key,
+            report_type,
+            start_date,
+            end_date,
+        )
+
+        if report_name not in src.resources:
+            raise UnsupportedResourceError(table, "AppLovin")
+
+        
+        
