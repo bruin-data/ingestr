@@ -16,25 +16,24 @@ class InvalidDimensionError(Exception):
         super().__init__(f"Unknown dimension {dim} for report type {report_type}")
 
 TYPE_HINTS = {
-    "ad_type": {"data_type": "text"},
-    "application": {"data_type": "text"},
     "application_is_hidden": {"data_type": "bool"},
-    "bidding_integration": {"data_type": "text"},
+    "average_cpa": {"data_type": "double"},
+    "average_cpc": {"data_type": "double"},
+    "campaign_bid_goal": {"data_type": "double"},
+    "campaign_roas_goal": {"data_type": "double"},
     "clicks": {"data_type": "bigint"},
-    "country": {"data_type": "text"},
+    "conversions": {"data_type": "bigint"},
+    "conversion_rate": {"data_type": "double"},
+    "cost": {"data_type": "double" },  # assuming float. 
     "ctr": {"data_type": "double"},
     "day": {"data_type": "date"},
-    "device_type": {"data_type": "text"},
+    "first_purchase": {"data_type": "bigint"},
     "ecpm": {"data_type": "double"},
     "impressions": {"data_type": "bigint"},
-    "package_name": {"data_type": "text"},
-    "placement_type": {"data_type": "text"},
-    "platform": {"data_type": "text"},
+    "installs": {"data_type": "bigint"},
     "revenue": {"data_type": "double"},
-    "size": {"data_type": "text"},
-    "store_id": {"data_type": "text"},
-    "zone": {"data_type": "text"},
-    "zone_id": {"data_type": "text"},
+    "redownloads": {"data_type": "bigint"},
+    "sales": {"data_type": "double"}, # assuming float.
 }
 
 REPORT_SCHEMA: Dict[ReportType, Dict] = {
@@ -179,7 +178,7 @@ def applovin_source(
             {
                 "name": "publisher_report",
                 "primary_key": REPORT_SCHEMA[ReportType.PUBLISHER],
-                "columns": build_schema(REPORT_SCHEMA[ReportType.PUBLISHER]),
+                "columns": build_type_hints(REPORT_SCHEMA[ReportType.PUBLISHER]),
                 "endpoint": {
                     "path": "report",
                     "params": {
@@ -191,6 +190,7 @@ def applovin_source(
             {
                 "name": "advertiser_report",
                 "primary_key": REPORT_SCHEMA[ReportType.ADVERTISER],
+                "columns": build_type_hints(REPORT_SCHEMA[ReportType.ADVERTISER]),
                 "endpoint": {
                     "path": "report",
                     "params": {
@@ -202,6 +202,7 @@ def applovin_source(
             {
                 "name": "advertiser_probabilistic_report",
                 "primary_key": probabilistic_report_columns,
+                "columns": build_type_hints(probabilistic_report_columns),
                 "endpoint": {
                     "path": "probabilisticReport",
                     "params": {
@@ -213,6 +214,7 @@ def applovin_source(
             {
                 "name": "advertiser_ska_report",
                 "primary_key": ska_report_columns,
+                "columns": build_type_hints(ska_report_columns),
                 "endpoint": {
                     "path": "skaReport",
                     "params": {
@@ -277,7 +279,7 @@ def exclude(source: List[str], excludes: List[str]) -> List[str]:
         if col not in excludes
     ]
 
-def build_schema(cols: List[str]) -> dict:
+def build_type_hints(cols: List[str]) -> dict:
     return {
         col: TYPE_HINTS[col] for col in cols
         if col in TYPE_HINTS
