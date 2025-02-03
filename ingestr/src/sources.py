@@ -1759,9 +1759,15 @@ class AppLovinSource:
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
 
-        now = datetime.now().replace(tzinfo=timezone.utc)
+        now = datetime.now()
         start_date = interval_start if interval_start is not None else now - timedelta(days=30)
         end_date = interval_end if interval_end is not None else now
+
+        oldest_supported_date = now - timedelta(days=45)
+        if start_date < oldest_supported_date:
+            raise ValueError("applovin doesn't support start_date older than 45 days")
+        if end_date < oldest_supported_date:
+            raise ValueError("applovin doesn't support end_date older than 45 days")
 
         custom_report = None
         if table.startswith("custom:"):
