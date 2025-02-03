@@ -81,6 +81,31 @@ REPORT_SCHEMA: Dict[ReportType, Set[str]] = {
     ],
 }
 
+SKA_REPORT_EXCLUDE=[
+    "ad",
+    "ad_id",
+    "ad_type",
+    "app_id_external",
+    "application",
+    "average_cpc",
+    "campaign_ad_type",
+    "clicks",
+    "conversions",
+    "conversion_rate",
+    "creative_set",
+    "creative_set_id",
+    "ctr",
+    "custom_page_id",
+    "device_type",
+    "first_purchase",
+    "hour",
+    "impressions",
+    "placement_type",
+    "sales",
+    "size",
+    "traffic_source"
+]
+
 
 @dlt.source
 def applovin_source(
@@ -89,6 +114,10 @@ def applovin_source(
     end_date: str,
     custom: str,
 ):
+    ska_report_columns = [
+        col for col in REPORT_SCHEMA[ReportType.ADVERTISER]
+        if col not in SKA_REPORT_EXCLUDE
+    ]
 
     # validate that start_date & end_date are within the last 45 days
     config: RESTAPIConfig = {
@@ -153,12 +182,12 @@ def applovin_source(
             },
             {
                 "name": "advertiser_ska_report",
-                "primary_key": REPORT_SCHEMA[ReportType.ADVERTISER],
+                "primary_key": ska_report_columns,
                 "endpoint": {
                     "path": "skaReport",
                     "params": {
                         "report_type": ReportType.ADVERTISER.value,
-                        "columns": ",".join(REPORT_SCHEMA[ReportType.ADVERTISER])
+                        "columns": ",".join(ska_report_columns)
                     },
                 },
             },
@@ -210,3 +239,4 @@ def validate_dimensions(report_type: ReportType, dimensions: str) -> List[str]:
         dims.append("day")
     
     return dims
+
