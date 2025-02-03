@@ -1763,10 +1763,16 @@ class AppLovinSource:
         start_date = interval_start if interval_start is not None else now - timedelta(days=30)
         end_date = interval_end if interval_end is not None else now
 
+        custom_report = None
+        if table.startswith("custom:"):
+            custom_report = table
+            table = "custom_report"
+
         src = applovin_source(
             api_key,
             start_date.strftime("%Y-%m-%d"),
             end_date.strftime("%Y-%m-%d"),
+            custom_report,
         )
 
         if table not in src.resources:

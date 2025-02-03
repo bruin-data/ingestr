@@ -1,13 +1,21 @@
 import dlt
-from datetime import datetime
 from dlt.sources.rest_api import RESTAPIConfig, rest_api_resources
 from enum import Enum
+from typing import List, Dict, Set
 
 class ReportType(Enum):
     PUBLISHER = "publisher"
     ADVERTISER = "advertiser"
 
-REPORT_SCHEMA = {
+class InvalidCustomReportError(Exception):
+    def __init__(self):
+        super().__init__("Custom report should be in the format 'custom:{endpoint}:{report_type}:{dimensions}")
+
+class InvalidDimensionError(Exception):
+    def __init__(self, dim: str, report_type: str):
+        super().__init__(f"Unknown dimension {dim} for report type {report_type}")
+
+REPORT_SCHEMA: Dict[ReportType, Set[str]] = {
     ReportType.PUBLISHER: [
         "ad_type",
         "application",
@@ -79,7 +87,9 @@ def applovin_source(
     api_key: str,
     start_date: str,
     end_date: str,
+    custom: str,
 ):
+
     # validate that start_date & end_date are within the last 45 days
     config: RESTAPIConfig = {
         "client": {
@@ -155,4 +165,48 @@ def applovin_source(
         ]
     }
 
+    if custom:
+        custom_report = custom_report_from_spec(custom)
+        config["resources"].append(custom_report)
+
+
     yield from rest_api_resources(config)
+
+
+
+def custom_report_from_spec(spec: str) -> dict:
+    parts = spec.split(":")
+    if len(parts) != 4:
+        raise InvalidCustomReportError()
+
+    _, endpoint, report_type, dimensions = parts
+    report_type = ReportType(report_type.strip())
+    dimensions = validate_dimensions(report_type, dimensions)
+    endpoint = endpoint.strip()
+
+    return {
+        "name": "custom_report",
+        "primary_key": dimensions,
+        "endpoint": {
+            "path": endpoint,
+            "params": {
+                "report_type": report_type.value,
+                "columns": ",".join(dimensions)
+            },
+        },
+    }
+
+def validate_dimensions(report_type: ReportType, dimensions: str) -> List[str]:
+    dims = [
+        dim.strip() for dim in dimensions.split(",")
+    ]
+
+    schema = set(REPORT_SCHEMA[report_type])
+    for dim in dims:
+        if dim not in schema:
+            raise InvalidDimensionError(dim, report_type.value)
+
+    if "day" not in dims:
+        dims.append("day")
+    
+    return dims
