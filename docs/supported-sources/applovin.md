@@ -75,7 +75,8 @@ ingestr ingest \
 ```
 
 Now we can check the database again, and we will see that the data was loaded for the rest of the days automatically.
-```
+```sh
+$ duckdb report.db 'select day from public.publisher_report group by 1'
 ┌────────────┐
 │    day     │
 │    date    │
@@ -101,6 +102,7 @@ Now we can check the database again, and we will see that the data was loaded fo
 ## Tables
 
 | Name | Description |
+| --- | --- |
 | `publisher-report` | Provides daily metrics from the `report` end point using the report_type `publisher` |
 | `advertiser-report` | Provides daily metrics from the `report` end point using the report_type `advertiser`|
 | `advertiser-probabilistic-report` | Provides daily metrics from the `probabilisticReport` end point using the report_type `advertiser` |
