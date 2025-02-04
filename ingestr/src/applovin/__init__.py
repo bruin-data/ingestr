@@ -178,7 +178,9 @@ def applovin_source(
         "resources": [
             {
                 "name": "publisher_report",
-                "primary_key": REPORT_SCHEMA[ReportType.PUBLISHER],
+                "primary_key": primary_keys_from_cols(
+                    REPORT_SCHEMA[ReportType.PUBLISHER]
+                ),
                 "columns": build_type_hints(REPORT_SCHEMA[ReportType.PUBLISHER]),
                 "endpoint": {
                     "path": "report",
@@ -190,7 +192,9 @@ def applovin_source(
             },
             {
                 "name": "advertiser_report",
-                "primary_key": REPORT_SCHEMA[ReportType.ADVERTISER],
+                "primary_key": primary_keys_from_cols(
+                    REPORT_SCHEMA[ReportType.ADVERTISER]
+                ),
                 "columns": build_type_hints(REPORT_SCHEMA[ReportType.ADVERTISER]),
                 "endpoint": {
                     "path": "report",
@@ -202,7 +206,9 @@ def applovin_source(
             },
             {
                 "name": "advertiser_probabilistic_report",
-                "primary_key": probabilistic_report_columns,
+                "primary_key": primary_keys_from_cols(
+                    probabilistic_report_columns
+                ),
                 "columns": build_type_hints(probabilistic_report_columns),
                 "endpoint": {
                     "path": "probabilisticReport",
@@ -214,7 +220,9 @@ def applovin_source(
             },
             {
                 "name": "advertiser_ska_report",
-                "primary_key": ska_report_columns,
+                "primary_key": primary_keys_from_cols(
+                    ska_report_columns
+                ),
                 "columns": build_type_hints(ska_report_columns),
                 "endpoint": {
                     "path": "skaReport",
@@ -248,7 +256,7 @@ def custom_report_from_spec(spec: str) -> dict:
 
     return {
         "name": "custom_report",
-        "primary_key": dimensions,
+        "primary_key": primary_keys_from_cols(dimensions),
         "columns": build_type_hints(dimensions),
         "endpoint": {
             "path": endpoint,
@@ -286,4 +294,17 @@ def build_type_hints(cols: List[str]) -> dict:
         col: TYPE_HINTS[col] for col in cols
         if col in TYPE_HINTS
     }
-    
+
+def primary_keys_from_cols(cols: List[str]) -> List[str]:
+    """
+        Filter a column list by dropping all columns
+        that have type hints. We treat those columns
+        as metric types. 
+
+        Exception: date is always considered a dimension.
+    """
+
+    return [
+        col for col in cols
+        if col not in TYPE_HINTS or col == "day"
+    ] 
