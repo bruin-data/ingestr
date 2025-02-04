@@ -259,12 +259,6 @@ def custom_report_from_spec(spec: str) -> EndpointResource:
 def validate_dimensions(report_type: ReportType, dimensions: str) -> List[str]:
     dims = [dim.strip() for dim in dimensions.split(",")]
 
-    # remove column name validation
-    schema = set(REPORT_SCHEMA[report_type])
-    for dim in dims:
-        if dim not in schema:
-            raise InvalidDimensionError(dim, report_type.value)
-
     if "day" not in dims:
         dims.append("day")
 
