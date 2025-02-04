@@ -1764,13 +1764,7 @@ class AppLovinSource:
         start_date = (
             interval_start if interval_start is not None else now - timedelta(days=1)
         )
-        end_date = interval_end if interval_end is not None else now
-
-        oldest_supported_date = now - timedelta(days=45)
-        if start_date < oldest_supported_date:
-            raise ValueError("applovin doesn't support start_date older than 45 days")
-        if end_date < oldest_supported_date:
-            raise ValueError("applovin doesn't support end_date older than 45 days")
+        end_date = interval_end
 
         custom_report = None
         if table.startswith("custom:"):
@@ -1780,7 +1774,7 @@ class AppLovinSource:
         src = applovin_source(
             api_key[0],
             start_date.strftime("%Y-%m-%d"),
-            end_date.strftime("%Y-%m-%d"),
+            end_date.strftime("%Y-%m-%d") if end_date else None,
             custom_report,
         )
 

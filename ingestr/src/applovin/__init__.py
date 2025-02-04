@@ -1,5 +1,6 @@
 from enum import Enum
 from typing import Dict, List, Optional
+from datetime import datetime, timezone
 
 import dlt
 from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
@@ -143,7 +144,7 @@ PROBABILISTIC_REPORT_EXCLUDE = [
 def applovin_source(
     api_key: str,
     start_date: str,
-    end_date: str,
+    end_date: Optional[str],
     custom: Optional[str],
 ):
     ska_report_columns = exclude(
@@ -155,6 +156,11 @@ def applovin_source(
         REPORT_SCHEMA[ReportType.ADVERTISER],
         PROBABILISTIC_REPORT_EXCLUDE,
     )
+    backfill = False
+    if end_date is None:
+        backfill = True
+        end_date = datetime.now(timezone.utc).date().strftime("%Y-%m-%d")
+
 
     config: RESTAPIConfig = {
         "client": {
@@ -214,6 +220,9 @@ def applovin_source(
     if custom:
         custom_report = custom_report_from_spec(custom)
         config["resources"].append(custom_report)
+    
+    if backfill:
+        config["resource_defaults"]["endpoint"]["incremental"]["end_value"] = end_date
 
     yield from rest_api_resources(config)
 
@@ -245,7 +254,7 @@ def custom_report_from_spec(spec: str) -> EndpointResource:
 
     _, endpoint, report, dims = parts
     report_type = ReportType(report.strip())
-    dimensions = validate_dimensions(report_type, dims)
+    dimensions = validate_dimensions(dims)
     endpoint = endpoint.strip()
 
     return resource(
@@ -256,7 +265,7 @@ def custom_report_from_spec(spec: str) -> EndpointResource:
     )
 
 
-def validate_dimensions(report_type: ReportType, dimensions: str) -> List[str]:
+def validate_dimensions(dimensions: str) -> List[str]:
     dims = [dim.strip() for dim in dimensions.split(",")]
 
     if "day" not in dims:
