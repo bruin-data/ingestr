@@ -5,16 +5,17 @@ import dlt
 from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
 
 
-
 class InvalidCustomReportError(Exception):
     def __init__(self):
         super().__init__(
             "Custom report should be in the format 'custom:{endpoint}:{report_type}:{dimensions}"
         )
 
+
 class InvalidDimensionError(Exception):
     def __init__(self, dim: str, report_type: str):
         super().__init__(f"Unknown dimension {dim} for report type {report_type}")
+
 
 TYPE_HINTS = {
     "application_is_hidden": {"data_type": "bool"},
@@ -37,10 +38,10 @@ TYPE_HINTS = {
     "sales": {"data_type": "double"},  # assuming float.
 }
 
+
 class ReportType(Enum):
     PUBLISHER = "publisher"
     ADVERTISER = "advertiser"
-
 
 
 REPORT_SCHEMA: Dict[ReportType, List[str]] = {
