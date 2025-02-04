@@ -176,62 +176,10 @@ def applovin_source(
             },
         },
         "resources": [
-            {
-                "name": "publisher_report",
-                "primary_key": primary_keys_from_cols(
-                    REPORT_SCHEMA[ReportType.PUBLISHER]
-                ),
-                "columns": build_type_hints(REPORT_SCHEMA[ReportType.PUBLISHER]),
-                "endpoint": {
-                    "path": "report",
-                    "params": {
-                        "report_type": ReportType.PUBLISHER.value,
-                        "columns": ",".join(REPORT_SCHEMA[ReportType.PUBLISHER])
-                    },
-                },
-            },
-            {
-                "name": "advertiser_report",
-                "primary_key": primary_keys_from_cols(
-                    REPORT_SCHEMA[ReportType.ADVERTISER]
-                ),
-                "columns": build_type_hints(REPORT_SCHEMA[ReportType.ADVERTISER]),
-                "endpoint": {
-                    "path": "report",
-                    "params": {
-                        "report_type": ReportType.ADVERTISER.value,
-                        "columns": ",".join(REPORT_SCHEMA[ReportType.ADVERTISER])
-                    },
-                },
-            },
-            {
-                "name": "advertiser_probabilistic_report",
-                "primary_key": primary_keys_from_cols(
-                    probabilistic_report_columns
-                ),
-                "columns": build_type_hints(probabilistic_report_columns),
-                "endpoint": {
-                    "path": "probabilisticReport",
-                    "params": {
-                        "report_type": ReportType.ADVERTISER.value,
-                        "columns": ",".join(probabilistic_report_columns)
-                    },
-                },
-            },
-            {
-                "name": "advertiser_ska_report",
-                "primary_key": primary_keys_from_cols(
-                    ska_report_columns
-                ),
-                "columns": build_type_hints(ska_report_columns),
-                "endpoint": {
-                    "path": "skaReport",
-                    "params": {
-                        "report_type": ReportType.ADVERTISER.value,
-                        "columns": ",".join(ska_report_columns)
-                    },
-                },
-            },
+            resource("publisher_report", "report", REPORT_SCHEMA[ReportType.PUBLISHER], ReportType.PUBLISHER),
+            resource("advertiser_report", "report", REPORT_SCHEMA[ReportType.ADVERTISER], ReportType.ADVERTISER),
+            resource("advertiser_probabilistic_report", "probabilisticReport", probabilistic_report_columns, ReportType.ADVERTISER),
+            resource("advertiser_ska_report", "skaReport", ska_report_columns, ReportType.ADVERTISER),
         ]
     }
 
@@ -241,6 +189,26 @@ def applovin_source(
 
 
     yield from rest_api_resources(config)
+
+
+def resource(
+    name: str,
+    endpoint: str,
+    dimensions: str,
+    report_type: ReportType,
+):
+    return {
+        "name": name,
+        "primary_key": primary_keys_from_cols(dimensions),
+        "columns": build_type_hints(dimensions),
+        "endpoint": {
+            "path": endpoint,
+            "params": {
+                "report_type": report_type.value,
+                "columns": ",".join(dimensions)
+            },
+        },
+    }
 
 
 
@@ -254,18 +222,12 @@ def custom_report_from_spec(spec: str) -> dict:
     dimensions = validate_dimensions(report_type, dimensions)
     endpoint = endpoint.strip()
 
-    return {
-        "name": "custom_report",
-        "primary_key": primary_keys_from_cols(dimensions),
-        "columns": build_type_hints(dimensions),
-        "endpoint": {
-            "path": endpoint,
-            "params": {
-                "report_type": report_type.value,
-                "columns": ",".join(dimensions)
-            },
-        },
-    }
+    return resource(
+        name="custom_report",
+        endpoint=endpoint,
+        dimensions=dimensions,
+        report_type=report_type
+    )
 
 def validate_dimensions(report_type: ReportType, dimensions: str) -> List[str]:
     dims = [
