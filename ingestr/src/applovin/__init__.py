@@ -147,7 +147,6 @@ def applovin_source(
         PROBABILISTIC_REPORT_EXCLUDE,
     )
 
-    # validate that start_date & end_date are within the last 45 days
     config: RESTAPIConfig = {
         "client": {
             "base_url": "https://r.applovin.com/",
@@ -250,6 +249,7 @@ def custom_report_from_spec(spec: str) -> dict:
     return {
         "name": "custom_report",
         "primary_key": dimensions,
+        "columns": build_type_hints(dimensions),
         "endpoint": {
             "path": endpoint,
             "params": {
