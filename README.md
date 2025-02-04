@@ -68,7 +68,6 @@ Pull requests are welcome. However, please open an issue first to discuss what y
 > After cloning `ingestr` make sure to run `make setup` to install githooks.
 
 ## Supported sources & destinations
-
 <table>
     <tr>
         <th></th>
@@ -79,23 +78,13 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td colspan="3" style='text-align:center;'><strong>Databases</strong></td>
     </tr>
     <tr>
-        <td>Postgres</td>
-        <td>✅</td>
-        <td>✅</td>
-    </tr>
-    <tr>
         <td>BigQuery</td>
         <td>✅</td>
         <td>✅</td>
     </tr>
     <tr>
-        <td>Snowflake</td>
-        <td>✅</td>
-        <td>✅</td>
-    </tr>
-    <tr>
-        <td>Redshift</td>
-        <td>✅</td>
+        <td>ClickHouse</td>
+        <td>❌</td>
         <td>✅</td>
     </tr>
     <tr>
@@ -109,12 +98,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
-        <td>Microsoft SQL Server</td>
+        <td>Local CSV file</td>
         <td>✅</td>
         <td>✅</td>
     </tr>
     <tr>
-        <td>Local CSV file</td>
+        <td>Microsoft SQL Server</td>
         <td>✅</td>
         <td>✅</td>
     </tr>
@@ -124,9 +113,24 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>❌</td>
     </tr>
     <tr>
+        <td>MySQL</td>
+        <td>✅</td>
+        <td>❌</td>
+    </tr>
+    <tr>
         <td>Oracle</td>
         <td>✅</td>
         <td>❌</td>
+    </tr>
+    <tr>
+        <td>Postgres</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+     <tr>
+        <td>Redshift</td>
+        <td>✅</td>
+        <td>✅</td>
     </tr>
     <tr>
         <td>SAP Hana</td>
@@ -134,12 +138,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>❌</td>
     </tr>
     <tr>
-        <td>SQLite</td>
+        <td>Snowflake</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>✅</td>
     </tr>
     <tr>
-        <td>MySQL</td>
+        <td>SQLite</td>
         <td>✅</td>
         <td>❌</td>
     </tr>
@@ -155,7 +159,17 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Apache Kafka</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>AppsFlyer</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>App Store</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -180,6 +194,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Github</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Gorgias</td>
         <td>✅</td>
         <td>-</td>
@@ -190,12 +209,27 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
-        <td>HubSpot</td>
+        <td>Google Ads</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Google Analytics</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Intercom</td>
         <td>✅</td>
         <td>-</td>
     </tr>
      <tr>
         <td>Klaviyo</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>LinkedIn Ads</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -221,6 +255,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>Stripe</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>TikTok Ads</td>
         <td>✅</td>
         <td>-</td>
     </tr>
