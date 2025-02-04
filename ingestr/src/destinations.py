@@ -297,14 +297,16 @@ class ClickhouseDestination:
             raise ValueError(
                 "The TCP port of the ClickHouse server is required to establish a connection."
             )
-        
+
         query_params = parse_qs(parsed_uri.query)
         secure = int(query_params["secure"][0]) if "secure" in query_params else 1
 
         http_port = (
             int(query_params["http_port"][0])
             if "http_port" in query_params
-            else 8443 if secure == 1 else 8123
+            else 8443
+            if secure == 1
+            else 8123
         )
 
         if secure not in (0, 1):
