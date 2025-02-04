@@ -119,7 +119,7 @@ custom:{endpoint}:{report_type}:{columns}
 Where:
 * `{endpoint}` is the API endpoint for applovin reports (one of `report`, `probabilisticReport` or `skaReport`)
 * `{report_type}` is the [report type](https://developers.applovin.com/en/app-discovery/api/reporting-api#required-parameters) (one of `publisher` or `advertiser`)
-* `{columns}` are the [columns](https://developers.applovin.com/en/app-discovery/api/reporting-api#required-parameters) of the given report type.
+* `{columns}` are the [columns](https://developers.applovin.com/en/app-discovery/api/reporting-api#allowed-publisher-columns) of the given report type.
 
 
 ### Custom Report Example
