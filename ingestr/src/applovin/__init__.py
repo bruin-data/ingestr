@@ -226,8 +226,8 @@ def resource(
 ) -> EndpointResource:
     return {
         "name": name,
-        "primary_key": primary_keys_from_cols(dimensions),
         "columns": build_type_hints(dimensions),
+        "merge_key": "day",
         "endpoint": {
             "path": endpoint,
             "params": {
@@ -273,15 +273,3 @@ def exclude(source: List[str], exclude_list: List[str]) -> List[str]:
 def build_type_hints(cols: List[str]) -> dict:
     return {col: TYPE_HINTS[col] for col in cols if col in TYPE_HINTS}
 
-
-# remove primary keys, use merge key for resolution
-def primary_keys_from_cols(cols: List[str]) -> List[str]:
-    """
-    Filter a column list by dropping all columns
-    that have type hints. We treat those columns
-    as metric types.
-
-    Exception: date is always considered a dimension.
-    """
-
-    return [col for col in cols if col not in TYPE_HINTS or col == "day"]
