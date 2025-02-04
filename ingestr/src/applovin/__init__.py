@@ -1,6 +1,6 @@
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional
-from datetime import datetime, timezone
 
 import dlt
 from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
@@ -161,7 +161,6 @@ def applovin_source(
         backfill = True
         end_date = datetime.now(timezone.utc).date().strftime("%Y-%m-%d")
 
-
     config: RESTAPIConfig = {
         "client": {
             "base_url": "https://r.applovin.com/",
@@ -220,9 +219,9 @@ def applovin_source(
     if custom:
         custom_report = custom_report_from_spec(custom)
         config["resources"].append(custom_report)
-    
+
     if backfill:
-        config["resource_defaults"]["endpoint"]["incremental"]["end_value"] = end_date
+        config["resource_defaults"]["endpoint"]["incremental"]["end_value"] = end_date  # type: ignore
 
     yield from rest_api_resources(config)
 
@@ -281,4 +280,3 @@ def exclude(source: List[str], exclude_list: List[str]) -> List[str]:
 
 def build_type_hints(cols: List[str]) -> dict:
     return {col: TYPE_HINTS[col] for col in cols if col in TYPE_HINTS}
-
