@@ -172,39 +172,38 @@ def applovin_source(
                 "incremental": {
                     "cursor_path": "day",
                     "start_param": "start",
-                    "end_param": "end",
                     "initial_value": start_date,
-                    "end_value": end_date,
                     "range_start": "closed",
                     "range_end": "closed",
                 },
                 "params": {
                     "format": "json",
+                    "end": end_date,
                 },
                 "paginator": "single_page",
             },
         },
         "resources": [
             resource(
-                "publisher_report",
+                "publisher-report",
                 "report",
                 REPORT_SCHEMA[ReportType.PUBLISHER],
                 ReportType.PUBLISHER,
             ),
             resource(
-                "advertiser_report",
+                "advertiser-report",
                 "report",
                 REPORT_SCHEMA[ReportType.ADVERTISER],
                 ReportType.ADVERTISER,
             ),
             resource(
-                "advertiser_probabilistic_report",
+                "advertiser-probabilistic-report",
                 "probabilisticReport",
                 probabilistic_report_columns,
                 ReportType.ADVERTISER,
             ),
             resource(
-                "advertiser_ska_report",
+                "advertiser-ska-report",
                 "skaReport",
                 ska_report_columns,
                 ReportType.ADVERTISER,
@@ -260,6 +259,7 @@ def custom_report_from_spec(spec: str) -> EndpointResource:
 def validate_dimensions(report_type: ReportType, dimensions: str) -> List[str]:
     dims = [dim.strip() for dim in dimensions.split(",")]
 
+    # remove column name validation
     schema = set(REPORT_SCHEMA[report_type])
     for dim in dims:
         if dim not in schema:
@@ -280,6 +280,7 @@ def build_type_hints(cols: List[str]) -> dict:
     return {col: TYPE_HINTS[col] for col in cols if col in TYPE_HINTS}
 
 
+# remove primary keys, use merge key for resolution
 def primary_keys_from_cols(cols: List[str]) -> List[str]:
     """
     Filter a column list by dropping all columns

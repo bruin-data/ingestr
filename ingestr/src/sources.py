@@ -1762,7 +1762,7 @@ class AppLovinSource:
 
         now = datetime.now()
         start_date = (
-            interval_start if interval_start is not None else now - timedelta(days=30)
+            interval_start if interval_start is not None else now - timedelta(days=1)
         )
         end_date = interval_end if interval_end is not None else now
 
