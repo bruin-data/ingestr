@@ -1,15 +1,16 @@
-import dlt
-from dlt.sources.rest_api import RESTAPIConfig, rest_api_resources
 from enum import Enum
-from typing import List, Dict, Set
+from typing import Dict, List, Optional
 
-class ReportType(Enum):
-    PUBLISHER = "publisher"
-    ADVERTISER = "advertiser"
+import dlt
+from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
+
+
 
 class InvalidCustomReportError(Exception):
     def __init__(self):
-        super().__init__("Custom report should be in the format 'custom:{endpoint}:{report_type}:{dimensions}")
+        super().__init__(
+            "Custom report should be in the format 'custom:{endpoint}:{report_type}:{dimensions}"
+        )
 
 class InvalidDimensionError(Exception):
     def __init__(self, dim: str, report_type: str):
@@ -24,7 +25,7 @@ TYPE_HINTS = {
     "clicks": {"data_type": "bigint"},
     "conversions": {"data_type": "bigint"},
     "conversion_rate": {"data_type": "double"},
-    "cost": {"data_type": "double" },  # assuming float. 
+    "cost": {"data_type": "double"},  # assuming float.
     "ctr": {"data_type": "double"},
     "day": {"data_type": "date"},
     "first_purchase": {"data_type": "bigint"},
@@ -33,10 +34,16 @@ TYPE_HINTS = {
     "installs": {"data_type": "bigint"},
     "revenue": {"data_type": "double"},
     "redownloads": {"data_type": "bigint"},
-    "sales": {"data_type": "double"}, # assuming float.
+    "sales": {"data_type": "double"},  # assuming float.
 }
 
-REPORT_SCHEMA: Dict[ReportType, Dict] = {
+class ReportType(Enum):
+    PUBLISHER = "publisher"
+    ADVERTISER = "advertiser"
+
+
+
+REPORT_SCHEMA: Dict[ReportType, List[str]] = {
     ReportType.PUBLISHER: [
         "ad_type",
         "application",
@@ -95,7 +102,7 @@ REPORT_SCHEMA: Dict[ReportType, Dict] = {
         "sales",
         "size",
         "target_event",
-        "traffic_source"
+        "traffic_source",
     ],
 }
 
@@ -122,7 +129,7 @@ SKA_REPORT_EXCLUDE = [
     "placement_type",
     "sales",
     "size",
-    "traffic_source"
+    "traffic_source",
 ]
 
 PROBABILISTIC_REPORT_EXCLUDE = [
@@ -130,12 +137,13 @@ PROBABILISTIC_REPORT_EXCLUDE = [
     "redownloads",
 ]
 
+
 @dlt.source
 def applovin_source(
     api_key: str,
     start_date: str,
     end_date: str,
-    custom: str,
+    custom: Optional[str],
 ):
     ska_report_columns = exclude(
         REPORT_SCHEMA[ReportType.ADVERTISER],
@@ -176,17 +184,36 @@ def applovin_source(
             },
         },
         "resources": [
-            resource("publisher_report", "report", REPORT_SCHEMA[ReportType.PUBLISHER], ReportType.PUBLISHER),
-            resource("advertiser_report", "report", REPORT_SCHEMA[ReportType.ADVERTISER], ReportType.ADVERTISER),
-            resource("advertiser_probabilistic_report", "probabilisticReport", probabilistic_report_columns, ReportType.ADVERTISER),
-            resource("advertiser_ska_report", "skaReport", ska_report_columns, ReportType.ADVERTISER),
-        ]
+            resource(
+                "publisher_report",
+                "report",
+                REPORT_SCHEMA[ReportType.PUBLISHER],
+                ReportType.PUBLISHER,
+            ),
+            resource(
+                "advertiser_report",
+                "report",
+                REPORT_SCHEMA[ReportType.ADVERTISER],
+                ReportType.ADVERTISER,
+            ),
+            resource(
+                "advertiser_probabilistic_report",
+                "probabilisticReport",
+                probabilistic_report_columns,
+                ReportType.ADVERTISER,
+            ),
+            resource(
+                "advertiser_ska_report",
+                "skaReport",
+                ska_report_columns,
+                ReportType.ADVERTISER,
+            ),
+        ],
     }
 
     if custom:
         custom_report = custom_report_from_spec(custom)
         config["resources"].append(custom_report)
-
 
     yield from rest_api_resources(config)
 
@@ -194,9 +221,9 @@ def applovin_source(
 def resource(
     name: str,
     endpoint: str,
-    dimensions: str,
+    dimensions: List[str],
     report_type: ReportType,
-):
+) -> EndpointResource:
     return {
         "name": name,
         "primary_key": primary_keys_from_cols(dimensions),
@@ -205,34 +232,32 @@ def resource(
             "path": endpoint,
             "params": {
                 "report_type": report_type.value,
-                "columns": ",".join(dimensions)
+                "columns": ",".join(dimensions),
             },
         },
     }
 
 
-
-def custom_report_from_spec(spec: str) -> dict:
+def custom_report_from_spec(spec: str) -> EndpointResource:
     parts = spec.split(":")
     if len(parts) != 4:
         raise InvalidCustomReportError()
 
-    _, endpoint, report_type, dimensions = parts
-    report_type = ReportType(report_type.strip())
-    dimensions = validate_dimensions(report_type, dimensions)
+    _, endpoint, report, dims = parts
+    report_type = ReportType(report.strip())
+    dimensions = validate_dimensions(report_type, dims)
     endpoint = endpoint.strip()
 
     return resource(
         name="custom_report",
         endpoint=endpoint,
         dimensions=dimensions,
-        report_type=report_type
+        report_type=report_type,
     )
 
+
 def validate_dimensions(report_type: ReportType, dimensions: str) -> List[str]:
-    dims = [
-        dim.strip() for dim in dimensions.split(",")
-    ]
+    dims = [dim.strip() for dim in dimensions.split(",")]
 
     schema = set(REPORT_SCHEMA[report_type])
     for dim in dims:
@@ -241,32 +266,26 @@ def validate_dimensions(report_type: ReportType, dimensions: str) -> List[str]:
 
     if "day" not in dims:
         dims.append("day")
-    
+
     return dims
 
-def exclude(source: List[str], excludes: List[str]) -> List[str]:
-    excludes = set(excludes)
-    return [
-        col for col in source
-        if col not in excludes
-    ]
+
+def exclude(source: List[str], exclude_list: List[str]) -> List[str]:
+    excludes = set(exclude_list)
+    return [col for col in source if col not in excludes]
+
 
 def build_type_hints(cols: List[str]) -> dict:
-    return {
-        col: TYPE_HINTS[col] for col in cols
-        if col in TYPE_HINTS
-    }
+    return {col: TYPE_HINTS[col] for col in cols if col in TYPE_HINTS}
+
 
 def primary_keys_from_cols(cols: List[str]) -> List[str]:
     """
-        Filter a column list by dropping all columns
-        that have type hints. We treat those columns
-        as metric types. 
+    Filter a column list by dropping all columns
+    that have type hints. We treat those columns
+    as metric types.
 
-        Exception: date is always considered a dimension.
+    Exception: date is always considered a dimension.
     """
 
-    return [
-        col for col in cols
-        if col not in TYPE_HINTS or col == "day"
-    ] 
+    return [col for col in cols if col not in TYPE_HINTS or col == "day"]

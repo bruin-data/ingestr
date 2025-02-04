@@ -50,6 +50,7 @@ from ingestr.src import blob
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
+from ingestr.src.applovin import applovin_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.appstore import app_store
 from ingestr.src.appstore.client import AppStoreConnectClient
@@ -98,7 +99,6 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-from ingestr.src.applovin import applovin_source, ReportType
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1739,6 +1739,7 @@ class LinkedInAdsSource:
             time_granularity=time_granularity,
         ).with_resources("custom_reports")
 
+
 class AppLovinSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -1748,19 +1749,21 @@ class AppLovinSource:
             raise ValueError(
                 "Google Ads takes care of incrementality on its own, you should not provide incremental_key"
             )
-        
+
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
 
         api_key = params.get("api_key", None)
         if api_key is None:
             raise MissingValueError("api_key", "AppLovin")
-        
+
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
 
         now = datetime.now()
-        start_date = interval_start if interval_start is not None else now - timedelta(days=30)
+        start_date = (
+            interval_start if interval_start is not None else now - timedelta(days=30)
+        )
         end_date = interval_end if interval_end is not None else now
 
         oldest_supported_date = now - timedelta(days=45)
@@ -1775,7 +1778,7 @@ class AppLovinSource:
             table = "custom_report"
 
         src = applovin_source(
-            api_key,
+            api_key[0],
             start_date.strftime("%Y-%m-%d"),
             end_date.strftime("%Y-%m-%d"),
             custom_report,
@@ -1783,8 +1786,5 @@ class AppLovinSource:
 
         if table not in src.resources:
             raise UnsupportedResourceError(table, "AppLovin")
-        
-        return src.with_resources(table)
 
-        
-        
+        return src.with_resources(table)
