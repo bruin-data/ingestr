@@ -99,6 +99,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+from ingestr.src.applovin_max import applovin_max_source
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1787,3 +1788,18 @@ class AppLovinSource:
             raise UnsupportedResourceError(table, "AppLovin")
 
         return src.with_resources(table)
+
+class ApplovinMaxSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        start_date = kwargs.get("interval_start")
+        end_date = kwargs.get("interval_end")
+        
+        if start_date is None:
+            start_date = pendulum.yesterday().date()
+        if end_date is None:
+            end_date = start_date
+        
+        return applovin_max_source()
