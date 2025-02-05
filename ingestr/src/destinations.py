@@ -7,7 +7,8 @@ import tempfile
 from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
-import pyarrow.parquet  # type: ignore
+from ingestr.src.loader import load_dlt_file
+
 from dlt.common.configuration.specs import AwsCredentials
 from dlt.destinations.impl.clickhouse.configuration import (
     ClickHouseCredentials,
@@ -184,11 +185,9 @@ class CsvDestination(GenericSqlDestination):
         if output_path.count("/") > 1:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        table = pyarrow.parquet.read_table(first_file_path)
-        rows = table.to_pylist()
         with open(output_path, "w", newline="") as csv_file:
             csv_writer = None
-            for row in rows:
+            for row in load_dlt_file(first_file_path):
                 row = filter_keys(row)
                 if csv_writer is None:
                     csv_writer = csv.DictWriter(csv_file, fieldnames=row.keys())
