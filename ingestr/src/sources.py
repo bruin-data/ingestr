@@ -1808,18 +1808,21 @@ class ApplovinMaxSource:
             raise ValueError("Application is required to connect to AppLovin Max API.")
         
         if kwargs.get("interval_start") is None:
-            start_date = pendulum.yesterday().date()
-            #start_date = start_date.subtract(days=45).date()
+            start_date_obj = pendulum.yesterday().date()
+            #start_date_obj = start_date.subtract(days=45)
         else:
-            start_date = ensure_pendulum_datetime("2025-01-03").date()
+            start_date_obj = ensure_pendulum_datetime(kwargs.get("interval_start"))
         
         if kwargs.get("interval_end") is None:
-            end_date = start_date
+            end_date_obj = start_date_obj
             #end_date =  start_date.add(days=44).date()
         else:
-            end_date = ensure_pendulum_datetime(kwargs.get("interval_end")).date()
+            end_date_obj = ensure_pendulum_datetime(kwargs.get("interval_end"))
         
-        if end_date - start_date > timedelta(days=45):
+        if (end_date_obj - start_date_obj).days > 45:
             raise ValueError("ApplovinMaxSource only supports a maximum of 45 days")
+        
+        start_date = start_date_obj.format("YYYY-MM-DD")
+        end_date = end_date_obj.format("YYYY-MM-DD")
        
         return applovin_max_source(start_date = start_date, end_date = end_date, api_key = api_key[0], application = application[0]).with_resources("ad_revenue_report")
