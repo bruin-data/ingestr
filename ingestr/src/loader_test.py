@@ -1,31 +1,22 @@
-import os
 import csv
 import gzip
 import json
+import os
 import tempfile
 from typing import List
 
-import pytest
 import pyarrow.parquet
-
+import pytest
 from loader import load_dlt_file
 
 TESTDATA = [
-    {
-        "name": "Jhon",
-        "email": "jhon@acme.com"
-    },
-    {
-        "name": "Lisa",
-        "email": "lisa@acme.com"
-    },
+    {"name": "Jhon", "email": "jhon@acme.com"},
+    {"name": "Lisa", "email": "lisa@acme.com"},
 ]
 
+
 def tojsonl(datalist: List[dict]):
-    return "\n".join([
-        json.dumps(data)
-        for data in datalist
-    ]).encode()
+    return "\n".join([json.dumps(data) for data in datalist]).encode()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -57,7 +48,6 @@ def testfiles():
             parquet.name,
         )
 
-
         files = [
             gzipped_jsonl.name,
             plain_csv.name,
@@ -69,9 +59,8 @@ def testfiles():
         for file in files:
             os.remove(file)
 
+
 def test_loader(testfiles):
     for testfile in testfiles:
-        data = [
-            row for row in load_dlt_file(testfile)
-        ]
+        data = [row for row in load_dlt_file(testfile)]
         assert data == TESTDATA

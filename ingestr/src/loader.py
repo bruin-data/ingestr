@@ -1,13 +1,18 @@
 import csv
-import json
 import gzip
+import json
 import subprocess
 from contextlib import contextmanager
 from typing import Generator
-import pyarrow.parquet
+
+from pyarrow.parquet import ParquetFile
+
+
+PARQUET_BATCH_SIZE = 64
 
 class UnsupportedLoaderFileFormat(Exception):
     pass
+
 
 def load_dlt_file(filepath: str) -> Generator:
     """
@@ -15,7 +20,7 @@ def load_dlt_file(filepath: str) -> Generator:
     automatically. It returns a generator that yield data items as a python dict
     """
     result = subprocess.run(
-        ['file', '-b', filepath],
+        ["file", "-b", filepath],
         check=True,
         capture_output=True,
         text=True,
@@ -27,7 +32,7 @@ def load_dlt_file(filepath: str) -> Generator:
 
 
 def factory(filetype: str, filepath: str):
-    # ???(turtledev): can dlt produce non-gizpped jsonl files? 
+    # ???(turtledev): can dlt produce non-gizpped jsonl files?
     if filetype.startswith("gzip"):
         return jsonlfile(filepath)
     elif filetype.startswith("CSV"):
@@ -37,24 +42,27 @@ def factory(filetype: str, filepath: str):
     else:
         raise UnsupportedLoaderFileFormat(filetype)
 
+
 @contextmanager
 def jsonlfile(filepath: str):
-    reader = lambda f: [
-        json.loads(line.decode().strip())
-        for line in f
-    ]
+    def reader(fd):
+        for line in fd:
+            yield json.loads(line.decode().strip())
     with gzip.open(filepath) as fd:
         yield reader(fd)
-    
+
+
 @contextmanager
 def csvfile(filepath: str):
     with open(filepath, "r") as fd:
         yield csv.DictReader(fd)
 
+
 @contextmanager
 def parquetfile(filepath: str):
-    reader = lambda t: t.to_pylist()
+    def reader(pf: ParquetFile):
+        for batch in pf.iter_batches(PARQUET_BATCH_SIZE):
+            yield from batch.to_pylist()
+        
     with open(filepath, "rb") as fd:
-        table = pyarrow.parquet.read_table(fd)
-        yield reader(table)
-
+        yield reader(ParquetFile(fd))

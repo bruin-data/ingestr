@@ -7,12 +7,12 @@ import tempfile
 from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
-from ingestr.src.loader import load_dlt_file
-
 from dlt.common.configuration.specs import AwsCredentials
 from dlt.destinations.impl.clickhouse.configuration import (
     ClickHouseCredentials,
 )
+
+from ingestr.src.loader import load_dlt_file
 
 
 class GenericSqlDestination:
