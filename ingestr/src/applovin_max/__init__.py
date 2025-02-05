@@ -16,9 +16,12 @@ from dlt.common.time import ensure_pendulum_datetime
 
 @dlt.source(max_table_nesting=0)
 def applovin_max_source(
+    start_date: Date,
+    application: str,
+    api_key: str,
+    end_date: Date|None,
 ) -> Iterator[DltResource]:
-    start_date = "2025-01-09"
-
+    
     @dlt.resource(name="ad_revenue_report",
                   write_disposition="merge",
                   merge_key="_partition_date",
@@ -27,47 +30,18 @@ def applovin_max_source(
         dateTime=(
             dlt.sources.incremental(
                 "_partition_date",
-                initial_value=start_date,
+                initial_value=start_date.format('YYYY-MM-DD'),
+                end_value=end_date.format('YYYY-MM-DD'),
+                range_start="closed",
+                range_end="closed",
             )
         ),
     ) -> Iterator[dict]:
         url = "https://r.applovin.com/max/userAdRevenueReport"
-        date = dateTime.last_value
-        if date is None:
-            date = start_date
+        start_date = dateTime.last_value
+        end_date = dateTime.end_value
         
-        platforms = ["ios","fireos", "android"]
-
-        for platform in platforms:
-            params = {
-                "api_key": "",
-                    "date": date,
-                    "platform": platform,
-                    "application": "",
-                    "aggregated": "false",
-            }
-        
-            print("creating client", pendulum.now())
-            client = create_client()
-            print("getting response", pendulum.now())
-            response = client.get(url=url, params=params)
-            print("repsone url", pendulum.now())
-            if response.status_code == 200:
-                response_url = response.json().get("ad_revenue_report_url")
-                print("read csv", pendulum.now())
-                df = pd.read_csv(response_url)
-                print("columnst", pendulum.now())
-                df.columns = df.columns.str.replace(" ", "_").str.lower()
-                print("to date", pendulum.now())
-                df["date"] = pd.to_datetime(df["date"])
-                print("partititon date", pendulum.now())
-                df["_partition_date"] = df["date"].dt.strftime("%Y-%m-%d")
-                print("above yield", pendulum.now())
-            else:
-                print("error", response.status_code)
-
-        yield df
-    
+        yield get_data(url=url, start_date=start_date, end_date=end_date, application=application, api_key=api_key)
     return fetch_applovin_report
     
 def create_client() -> requests.Session:
@@ -84,3 +58,32 @@ def retry_on_limit(
     if response is None:
         return False
     return response.status_code == 429
+
+def get_data(url: str, start_date:str, end_date:str, application: str, api_key: str):
+    platforms = ["android"]
+    
+    current_date = start_date
+    while current_date <= end_date:
+        for platform in platforms:
+            params = {
+                "api_key": api_key,
+                "date": current_date,
+                "platform": platform,
+                "application": application,
+                "aggregated": "false",
+            }
+        client = create_client()
+       
+        response = client.get(url=url, params=params)
+       
+        if response.status_code == 200:
+            response_url = response.json().get("ad_revenue_report_url")
+            df = pd.read_csv(response_url)
+            df.columns = df.columns.str.replace(" ", "_").str.lower()
+            df["date"] = pd.to_datetime(df["date"])
+            df["_partition_date"] = df["date"].dt.strftime("%Y-%m-%d")
+            yield df
+        else:
+            print("platform:", platform, " status code", response.status_code)
+        current_date = (pd.Timestamp(current_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+        print("current_date", current_date)

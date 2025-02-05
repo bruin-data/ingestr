@@ -133,11 +133,11 @@ class SqlSource:
 
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
-        
+
         if uri.startswith("clickhouse://"):
             uri = uri.replace("clickhouse://", "clickhouse+native://")
             if "secure=" not in uri:
-              uri += "?secure=1"
+                uri += "?secure=1"
 
         query_adapters = []
         if kwargs.get("sql_limit"):
@@ -1789,17 +1789,37 @@ class AppLovinSource:
 
         return src.with_resources(table)
 
+
 class ApplovinMaxSource:
     def handles_incrementality(self) -> bool:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        start_date = kwargs.get("interval_start")
-        end_date = kwargs.get("interval_end")
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
         
-        if start_date is None:
+        api_key = params.get("api_key")
+        if api_key is None:
+            raise ValueError("api_key is required to connect to AppLovin Max API.")
+        
+        application = params.get("application")
+        
+        if application is None:
+            raise ValueError("Application is required to connect to AppLovin Max API.")
+        
+        if kwargs.get("interval_start") is None:
             start_date = pendulum.yesterday().date()
-        if end_date is None:
-            end_date = start_date
+            #start_date = start_date.subtract(days=45).date()
+        else:
+            start_date = ensure_pendulum_datetime("2025-01-03").date()
         
-        return applovin_max_source()
+        if kwargs.get("interval_end") is None:
+            end_date = start_date
+            #end_date =  start_date.add(days=44).date()
+        else:
+            end_date = ensure_pendulum_datetime(kwargs.get("interval_end")).date()
+        
+        if end_date - start_date > timedelta(days=45):
+            raise ValueError("ApplovinMaxSource only supports a maximum of 45 days")
+       
+        return applovin_max_source(start_date = start_date, end_date = end_date, api_key = api_key[0], application = application[0]).with_resources("ad_revenue_report")
