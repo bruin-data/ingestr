@@ -5,10 +5,10 @@ import subprocess
 from contextlib import contextmanager
 from typing import Generator
 
-from pyarrow.parquet import ParquetFile
-
+from pyarrow.parquet import ParquetFile  # type: ignore
 
 PARQUET_BATCH_SIZE = 64
+
 
 class UnsupportedLoaderFileFormat(Exception):
     pass
@@ -48,6 +48,7 @@ def jsonlfile(filepath: str):
     def reader(fd):
         for line in fd:
             yield json.loads(line.decode().strip())
+
     with gzip.open(filepath) as fd:
         yield reader(fd)
 
@@ -63,6 +64,6 @@ def parquetfile(filepath: str):
     def reader(pf: ParquetFile):
         for batch in pf.iter_batches(PARQUET_BATCH_SIZE):
             yield from batch.to_pylist()
-        
+
     with open(filepath, "rb") as fd:
         yield reader(ParquetFile(fd))

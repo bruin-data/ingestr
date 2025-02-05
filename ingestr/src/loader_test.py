@@ -1,13 +1,17 @@
 import csv
 import gzip
 import json
+import logging
 import os
 import tempfile
 from typing import List
 
-import pyarrow.parquet
+import pyarrow.parquet  # type: ignore
 import pytest
-from loader import load_dlt_file
+
+from ingestr.src.loader import load_dlt_file
+
+logger = logging.getLogger(__name__)
 
 TESTDATA = [
     {"name": "Jhon", "email": "jhon@acme.com"},
@@ -57,7 +61,10 @@ def testfiles():
         yield files
 
         for file in files:
-            os.remove(file)
+            try:
+                os.remove(file)
+            except Exception as e:
+                logger.error(f"error removing temporary file {file}", exc_info=e)
 
 
 def test_loader(testfiles):
