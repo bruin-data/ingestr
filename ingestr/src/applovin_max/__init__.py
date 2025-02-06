@@ -6,6 +6,7 @@ import pendulum
 import requests
 from dlt.sources import DltResource
 from dlt.sources.helpers.requests import Client
+from pendulum.date import Date
 
 
 @dlt.source(max_table_nesting=0)
@@ -16,7 +17,7 @@ def applovin_max_source(
     end_date: str | None,
 ) -> DltResource:
     @dlt.resource(
-        name="ad_revenue_report",
+        name="ad_revenue",
         write_disposition="merge",
         merge_key="_partition_date",
     )
@@ -32,11 +33,11 @@ def applovin_max_source(
         ),
     ) -> Iterator[dict]:
         url = "https://r.applovin.com/max/userAdRevenueReport"
-        start_date = dateTime.last_value
+        start_date = pendulum.from_format(dateTime.last_value, "YYYY-MM-DD").date()
         if dateTime.end_value is None:
-            end_date = pendulum.yesterday().date().strftime("%Y-%m-%d")
+            end_date = pendulum.yesterday().date()
         else:
-            end_date = dateTime.end_value
+            end_date = pendulum.from_format(dateTime.end_value, "YYYY-MM-DD").date()
         yield get_data(
             url=url,
             start_date=start_date,
@@ -65,15 +66,18 @@ def retry_on_limit(
     return response.status_code == 429
 
 
-def get_data(url: str, start_date: str, end_date: str, application: str, api_key: str):
+def get_data(
+    url: str, start_date: Date, end_date: Date, application: str, api_key: str
+):
     client = create_client()
     platforms = ["ios", "android", "fireos"]
     current_date = start_date
     while current_date <= end_date:
+        print(f"Fetching data for {current_date}")
         for platform in platforms:
             params = {
                 "api_key": api_key,
-                "date": current_date,
+                "date": current_date.strftime("%Y-%m-%d"),
                 "platform": platform,
                 "application": application,
                 "aggregated": "false",
@@ -90,8 +94,4 @@ def get_data(url: str, start_date: str, end_date: str, application: str, api_key
             df["_partition_date"] = df["Date"].dt.strftime("%Y-%m-%d")
             yield df
 
-        current_date = (
-            pendulum.from_format(current_date, "YYYY-MM-DD")
-            .add(days=1)
-            .strftime("%Y-%m-%d")
-        )
+        current_date = current_date.add(days=1)
