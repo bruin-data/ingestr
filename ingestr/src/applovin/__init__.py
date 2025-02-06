@@ -120,11 +120,6 @@ def applovin_source(
     custom: Optional[str],
 ):
 
-    probabilistic_report_columns = exclude(
-        REPORT_SCHEMA[ReportType.ADVERTISER],
-        PROBABILISTIC_REPORT_EXCLUDE,
-    )
-
     backfill = False
     if end_date is None:
         backfill = True
@@ -156,10 +151,7 @@ def applovin_source(
                 },
                 "paginator": "single_page",
                 "response_actions": [
-                    {
-                        "status_code": 400,
-                        "action": client_error_handler,
-                    }
+                    http_error_handler,
                 ]
             },
         },
@@ -179,7 +171,10 @@ def applovin_source(
             resource(
                 "advertiser-probabilistic-report",
                 "probabilisticReport",
-                probabilistic_report_columns,
+                exclude(
+                    REPORT_SCHEMA[ReportType.ADVERTISER],
+                    PROBABILISTIC_REPORT_EXCLUDE
+                ),
                 ReportType.ADVERTISER,
             ),
             resource(
@@ -256,5 +251,6 @@ def exclude(source: List[str], exclude_list: List[str]) -> List[str]:
 def build_type_hints(cols: List[str]) -> dict:
     return {col: TYPE_HINTS[col] for col in cols if col in TYPE_HINTS}
 
-def client_error_handler(resp: Response):
-    raise ClientError(f"HTTP Status {resp.status_code}: {resp.text}")
+def http_error_handler(resp: Response):
+    if not resp.ok:
+        raise ClientError(f"HTTP Status {resp.status_code}: {resp.text}")
