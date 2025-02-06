@@ -154,7 +154,10 @@ Homepage = "https://github.com/bruin-data/ingestr"
 Issues = "https://github.com/bruin-data/ingestr/issues"
 
 [tool.hatch.version]
+source = "code"
 path = "ingestr/src/version.py"
+expression = "__version__"
+search-paths = ["."]
 
 [tool.hatch.build.targets.wheel]
 packages = ["ingestr"]
