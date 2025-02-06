@@ -123,7 +123,12 @@ def applovin_source(
     backfill = False
     if end_date is None:
         backfill = True
-        end_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # use the greatest of yesterday and start_date
+        end_date = max(
+            datetime.now(timezone.utc) - timedelta(days=1),
+            datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+        ).strftime("%Y-%m-%d")
 
     config: RESTAPIConfig = {
         "client": {
