@@ -73,7 +73,6 @@ def get_data(
     platforms = ["ios", "android", "fireos"]
     current_date = start_date
     while current_date <= end_date:
-        print(f"Fetching data for {current_date}")
         for platform in platforms:
             params = {
                 "api_key": api_key,
