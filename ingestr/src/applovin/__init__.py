@@ -1,6 +1,7 @@
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Dict, List, Optional
+from requests import Response
 
 import dlt
 from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
@@ -12,11 +13,8 @@ class InvalidCustomReportError(Exception):
             "Custom report should be in the format 'custom:{endpoint}:{report_type}:{dimensions}"
         )
 
-
-class InvalidDimensionError(Exception):
-    def __init__(self, dim: str, report_type: str):
-        super().__init__(f"Unknown dimension {dim} for report type {report_type}")
-
+class ClientError(Exception):
+    pass
 
 TYPE_HINTS = {
     "application_is_hidden": {"data_type": "bool"},
@@ -157,6 +155,12 @@ def applovin_source(
                     "end": end_date,
                 },
                 "paginator": "single_page",
+                "response_actions": [
+                    {
+                        "status_code": 400,
+                        "action": client_error_handler,
+                    }
+                ]
             },
         },
         "resources": [
@@ -251,3 +255,6 @@ def exclude(source: List[str], exclude_list: List[str]) -> List[str]:
 
 def build_type_hints(cols: List[str]) -> dict:
     return {col: TYPE_HINTS[col] for col in cols if col in TYPE_HINTS}
+
+def client_error_handler(resp: Response):
+    raise ClientError(f"HTTP Status {resp.status_code}: {resp.text}")
