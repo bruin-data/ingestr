@@ -26,18 +26,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: install uv
-        run: pip install uv
-      - name: setup venv
-        run: uv venv
-      - name: activate venv
-        run: echo PATH=${GITHUB_WORKSPACE}/.venv/bin:$PATH >> $GITHUB_ENV
-      - name: install dependencies
-        run: uv pip install -r requirements-dev.txt
-      - name: build
-        run: make build
-      - name: release
-        run: make upload-release
+        
+        # github actions invoke a fresh shell
+        # for each step. This causes us to lose our
+        # venv context. So we run all our build commands
+        # in a single step to simplify our pipeline.
+      - name: build and release
+        run: |
+          pip install uv
+          uv venv
+          source .venv/bin/activate
+          uv pip install -r requirements-dev.txt
+          make build
+          make upload-release
 
   docker-release:
     needs: tests
