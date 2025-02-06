@@ -16,7 +16,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: tests
     env:
-      # TODO: TWINE_USERNAME 
       TWINE_PASSWORD: ${{ secrets.PYPI_INGESTR_TOKEN }}
     steps:
       - name: checkout
