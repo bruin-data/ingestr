@@ -20,6 +20,7 @@ from ingestr.src.sources import (
     AdjustSource,
     AirtableSource,
     AppleAppStoreSource,
+    ApplovinMaxSource,
     AppLovinSource,
     AppsflyerSource,
     ArrowMemoryMappedSource,
@@ -47,7 +48,6 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
-    ApplovinMaxSource,
 )
 
 SQL_SOURCE_SCHEMES = [
