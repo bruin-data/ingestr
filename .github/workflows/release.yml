@@ -35,7 +35,7 @@ jobs:
       - name: build
         run: make build
       - name: release
-        run: make upload
+        run: make upload-release
 
   docker-release:
     needs: tests
