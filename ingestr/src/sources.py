@@ -1809,6 +1809,13 @@ class ApplovinMaxSource:
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
 
+        if "ad_revenue" in table:
+            table = "ad_revenue"
+        else:
+            raise ValueError(
+                f"Table name '{table}' is not supported for AppLovin Max source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
         start_date = (
             interval_start
             if interval_start is not None
@@ -1824,4 +1831,4 @@ class ApplovinMaxSource:
             end_date=end_date,
             api_key=api_key[0],
             application=application[0],
-        ).with_resources("ad_revenue_report")
+        ).with_resources(table)
