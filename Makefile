@@ -1,5 +1,8 @@
+SHELL := /bin/bash
 .ONESHELL:
 .PHONY: test lint format test-ci lint-ci build upload-release setup docker-shell
+
+BUILDINFO=ingestr/src/buildinfo.py
 
 venv: venv/touchfile
 
@@ -36,7 +39,9 @@ lint-docs:
 tl: test lint
 
 build:
+	cat > ${BUILDINFO} <<< "version = \"$$(git describe --tags --abbrev=0)\""
 	rm -rf dist && python3 -m build
+	rm -f ${BUILDINFO}
 
 upload-release:
 	twine upload --verbose dist/*
