@@ -1809,18 +1809,16 @@ class ApplovinMaxSource:
         
         if kwargs.get("interval_start") is None:
             start_date_obj = pendulum.yesterday().date()
-            #start_date_obj = start_date.subtract(days=45)
         else:
             start_date_obj = ensure_pendulum_datetime(kwargs.get("interval_start"))
         
         if kwargs.get("interval_end") is None:
             end_date_obj = start_date_obj
-            #end_date =  start_date.add(days=44).date()
         else:
             end_date_obj = ensure_pendulum_datetime(kwargs.get("interval_end"))
         
         if (end_date_obj - start_date_obj).days > 45:
-            raise ValueError("ApplovinMaxSource only supports a maximum of 45 days")
+            raise ValueError("Please select a shorter date range (maximum 45 days allowed) for Applovin Max data.")
         
         start_date = start_date_obj.format("YYYY-MM-DD")
         end_date = end_date_obj.format("YYYY-MM-DD")
