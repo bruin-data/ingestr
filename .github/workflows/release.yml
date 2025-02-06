@@ -29,13 +29,15 @@ jobs:
       - name: install uv
         run: pip install uv
       - name: setup venv
-        run: uv venv && . .venv/bin/activate
+        run: uv venv
       - name: install dependencies
         run: uv pip install -r requirements-dev.txt
       - name: build
         run: make build
       - name: release
-        run: make upload-release
+        run: |
+          source .venv/bin/activate
+          make upload-release
 
   docker-release:
     needs: tests
