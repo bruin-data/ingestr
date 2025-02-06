@@ -137,7 +137,7 @@ class SqlSource:
         if uri.startswith("clickhouse://"):
             uri = uri.replace("clickhouse://", "clickhouse+native://")
             if "secure=" not in uri:
-                uri += "?secure=1"
+              uri += "?secure=1"
 
         query_adapters = []
         if kwargs.get("sql_limit"):

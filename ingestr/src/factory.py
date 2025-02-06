@@ -68,6 +68,7 @@ SQL_SOURCE_SCHEMES = [
     "oracle+cx_oracle",
     "hana",
     "clickhouse",
+    
 ]
 
 
