@@ -30,14 +30,14 @@ jobs:
         run: pip install uv
       - name: setup venv
         run: uv venv
+      - name: activate venv
+        run: echo PATH=${GITHUB_WORKSPACE}/.venv/bin:$PATH >> $GITHUB_ENV
       - name: install dependencies
         run: uv pip install -r requirements-dev.txt
       - name: build
         run: make build
       - name: release
-        run: |
-          source .venv/bin/activate
-          make upload-release
+        run: make upload-release
 
   docker-release:
     needs: tests
