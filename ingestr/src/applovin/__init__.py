@@ -108,32 +108,6 @@ REPORT_SCHEMA: Dict[ReportType, List[str]] = {
     ],
 }
 
-# NOTE(turtledev): These values are valid columns,
-# but often don't produce a value. Find a way to either add
-# a default value, or use an alternative strategy to de-duplicate
-# OR make them nullable
-SKA_REPORT_EXCLUDE = [
-    "ad",
-    "ad_id",
-    "ad_type",
-    "average_cpc",
-    "campaign_ad_type",
-    "clicks",
-    "conversions",
-    "conversion_rate",
-    "creative_set",
-    "creative_set_id",
-    "ctr",
-    "custom_page_id",
-    "device_type",
-    "first_purchase",
-    "impressions",
-    "placement_type",
-    "sales",
-    "size",
-    "traffic_source",
-]
-
 PROBABILISTIC_REPORT_EXCLUDE = [
     "installs",
     "redownloads",
@@ -147,15 +121,12 @@ def applovin_source(
     end_date: Optional[str],
     custom: Optional[str],
 ):
-    ska_report_columns = exclude(
-        REPORT_SCHEMA[ReportType.ADVERTISER],
-        SKA_REPORT_EXCLUDE,
-    )
 
     probabilistic_report_columns = exclude(
         REPORT_SCHEMA[ReportType.ADVERTISER],
         PROBABILISTIC_REPORT_EXCLUDE,
     )
+
     backfill = False
     if end_date is None:
         backfill = True
@@ -210,7 +181,7 @@ def applovin_source(
             resource(
                 "advertiser-ska-report",
                 "skaReport",
-                ska_report_columns,
+                REPORT_SCHEMA[ReportType.ADVERTISER],
                 ReportType.ADVERTISER,
             ),
         ],
