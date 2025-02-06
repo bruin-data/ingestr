@@ -1,30 +1,26 @@
-from datetime import datetime
-import io
-from typing import Iterable
-import pandas as pd
-import pendulum
-import requests
+from typing import Iterator
 
 import dlt
-from dlt.common.typing import TDataItem
+import pandas as pd  # type: ignore[import-untyped]
+import pendulum
+import requests
 from dlt.sources import DltResource
-from pendulum import Date
 from dlt.sources.helpers.requests import Client
-from typing import Iterator
+
 
 @dlt.source(max_table_nesting=0)
 def applovin_max_source(
     start_date: str,
     application: str,
     api_key: str,
-    end_date: str,
-) -> Iterator[DltResource]:
-    
-    @dlt.resource(name="ad_revenue_report",
-                  write_disposition="merge",
-                  merge_key="_partition_date",
-                  )  
-    def fetch_applovin_report(
+    end_date: str | None,
+) -> DltResource:
+    @dlt.resource(
+        name="ad_revenue_report",
+        write_disposition="merge",
+        merge_key="_partition_date",
+    )
+    def fetch_ad_revenue_report(
         dateTime=(
             dlt.sources.incremental(
                 "_partition_date",
@@ -37,12 +33,21 @@ def applovin_max_source(
     ) -> Iterator[dict]:
         url = "https://r.applovin.com/max/userAdRevenueReport"
         start_date = dateTime.last_value
-        end_date = dateTime.end_value
-        
-        yield get_data(url=url, start_date=start_date, end_date=end_date, application=application, api_key=api_key)
-    
-    return fetch_applovin_report
-    
+        if dateTime.end_value is None:
+            end_date = pendulum.yesterday().date().strftime("%Y-%m-%d")
+        else:
+            end_date = dateTime.end_value
+        yield get_data(
+            url=url,
+            start_date=start_date,
+            end_date=end_date,
+            application=application,
+            api_key=api_key,
+        )
+
+    return fetch_ad_revenue_report
+
+
 def create_client() -> requests.Session:
     return Client(
         request_timeout=10.0,
@@ -51,6 +56,7 @@ def create_client() -> requests.Session:
         request_max_attempts=12,
     ).session
 
+
 def retry_on_limit(
     response: requests.Response | None, exception: BaseException | None
 ) -> bool:
@@ -58,31 +64,34 @@ def retry_on_limit(
         return False
     return response.status_code == 429
 
-client = create_client()
-def get_data(url: str, start_date:str, end_date:str, application: str, api_key: str):
-    platforms = ["android","ios","fireos"]
-    current_date_obj = pendulum.parse(start_date)
-    end_date_obj = pendulum.parse(end_date)
-    
-    while current_date_obj <= end_date_obj:
+
+def get_data(url: str, start_date: str, end_date: str, application: str, api_key: str):
+    client = create_client()
+    platforms = ["ios", "android", "fireos"]
+    current_date = start_date
+    while current_date <= end_date:
         for platform in platforms:
             params = {
                 "api_key": api_key,
-                "date": current_date_obj.format("YYYY-MM-DD"),
+                "date": current_date,
                 "platform": platform,
                 "application": application,
                 "aggregated": "false",
             }
-        
+
             response = client.get(url=url, params=params)
-        
-            if response.status_code == 200:
-                response_url = response.json().get("ad_revenue_report_url")
-                df = pd.read_csv(response_url)
-                df.columns = df.columns.str.replace(" ", "_").str.lower()
-                df["date"] = pd.to_datetime(df["date"])
-                df["_partition_date"] = df["date"].dt.strftime("%Y-%m-%d")
-                yield df
-        
-        current_date_obj = current_date_obj.add(days=1)
-        
+
+            if response.status_code != 200:
+                continue
+
+            response_url = response.json().get("ad_revenue_report_url")
+            df = pd.read_csv(response_url)
+            df["Date"] = pd.to_datetime(df["Date"])
+            df["_partition_date"] = df["Date"].dt.strftime("%Y-%m-%d")
+            yield df
+
+        current_date = (
+            pendulum.from_format(current_date, "YYYY-MM-DD")
+            .add(days=1)
+            .strftime("%Y-%m-%d")
+        )

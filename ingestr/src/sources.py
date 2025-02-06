@@ -51,6 +51,7 @@ from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.applovin import applovin_source
+from ingestr.src.applovin_max import applovin_max_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.appstore import app_store
 from ingestr.src.appstore.client import AppStoreConnectClient
@@ -99,7 +100,6 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-from ingestr.src.applovin_max import applovin_max_source
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1797,30 +1797,31 @@ class ApplovinMaxSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
-        
+
         api_key = params.get("api_key")
         if api_key is None:
             raise ValueError("api_key is required to connect to AppLovin Max API.")
-        
+
         application = params.get("application")
-        
         if application is None:
-            raise ValueError("Application is required to connect to AppLovin Max API.")
-        
-        if kwargs.get("interval_start") is None:
-            start_date_obj = pendulum.yesterday().date()
-        else:
-            start_date_obj = ensure_pendulum_datetime(kwargs.get("interval_start"))
-        
-        if kwargs.get("interval_end") is None:
-            end_date_obj = start_date_obj
-        else:
-            end_date_obj = ensure_pendulum_datetime(kwargs.get("interval_end"))
-        
-        if (end_date_obj - start_date_obj).days > 45:
-            raise ValueError("Please select a shorter date range (maximum 45 days allowed) for Applovin Max data.")
-        
-        start_date = start_date_obj.format("YYYY-MM-DD")
-        end_date = end_date_obj.format("YYYY-MM-DD")
-       
-        return applovin_max_source(start_date = start_date, end_date = end_date, api_key = api_key[0], application = application[0]).with_resources("ad_revenue_report")
+            raise ValueError("application is required to connect to AppLovin Max API.")
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        start_date = (
+            interval_start
+            if interval_start is not None
+            else pendulum.yesterday().date()
+        ).strftime("%Y-%m-%d")
+
+        end_date = (
+            interval_end.strftime("%Y-%m-%d") if interval_end is not None else None
+        )
+
+        return applovin_max_source(
+            start_date=start_date,
+            end_date=end_date,
+            api_key=api_key[0],
+            application=application[0],
+        ).with_resources("ad_revenue_report")
