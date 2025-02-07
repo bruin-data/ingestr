@@ -36,4 +36,4 @@ For a custom date range, use the `--interval-start` and `--interval-end` paramet
 <img alt="applovin_max_img" src="../media/applovin_max.png"/>
 
 ## Table
-| `[ad_revenue](https://developers.applovin.com/en/max/reporting-apis/user-level-ad-revenue-api/)`: Provides daily metrics from the user-level ad revenue API. 
+[ad_revenue](https://developers.applovin.com/en/max/reporting-apis/user-level-ad-revenue-api/): Provides daily metrics from the user-level ad revenue API. 
