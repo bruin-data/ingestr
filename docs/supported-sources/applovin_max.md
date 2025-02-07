@@ -28,12 +28,9 @@ ingestr ingest \
     --dest-uri "duckdb:///applovin_max.db"  \
     --dest-table "dest.ad_revenue"
 ```
-By default, `ingestr` retrieves data based on the current UTC time:
-- If run after 08:00 UTC, it fetches the previous day's data
-- If run before 08:00 UTC, it fetches data from two days ago
-For a custom date range, use the `--interval-start` and `--interval-end` parameters.
+By default, `ingestr` retrieves data for the last 30 days. For a custom date range, use the `--interval-start` and `--interval-end` parameters.
 
 <img alt="applovin_max_img" src="../media/applovin_max.png"/>
 
 ## Table
-[ad_revenue](https://developers.applovin.com/en/max/reporting-apis/user-level-ad-revenue-api/): Provides daily metrics from the user-level ad revenue API. 
+[ad_revenue](https://developers.applovin.com/en/max/reporting-apis/user-level-ad-revenue-api/): Provides daily metrics from the user-level ad revenue API.User-level revenue data is available eight hours after UTC day end. So, for example, data for UTC 2025-01-01 is available on UTC 2025-01-02 after 08:00.
