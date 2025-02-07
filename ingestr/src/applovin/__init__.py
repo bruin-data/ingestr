@@ -1,6 +1,7 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Dict, List, Optional
+from requests import Response
 
 import dlt
 from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
@@ -12,11 +13,8 @@ class InvalidCustomReportError(Exception):
             "Custom report should be in the format 'custom:{endpoint}:{report_type}:{dimensions}"
         )
 
-
-class InvalidDimensionError(Exception):
-    def __init__(self, dim: str, report_type: str):
-        super().__init__(f"Unknown dimension {dim} for report type {report_type}")
-
+class ClientError(Exception):
+    pass
 
 TYPE_HINTS = {
     "application_is_hidden": {"data_type": "bool"},
@@ -108,32 +106,6 @@ REPORT_SCHEMA: Dict[ReportType, List[str]] = {
     ],
 }
 
-# NOTE(turtledev): These values are valid columns,
-# but often don't produce a value. Find a way to either add
-# a default value, or use an alternative strategy to de-duplicate
-# OR make them nullable
-SKA_REPORT_EXCLUDE = [
-    "ad",
-    "ad_id",
-    "ad_type",
-    "average_cpc",
-    "campaign_ad_type",
-    "clicks",
-    "conversions",
-    "conversion_rate",
-    "creative_set",
-    "creative_set_id",
-    "ctr",
-    "custom_page_id",
-    "device_type",
-    "first_purchase",
-    "impressions",
-    "placement_type",
-    "sales",
-    "size",
-    "traffic_source",
-]
-
 PROBABILISTIC_REPORT_EXCLUDE = [
     "installs",
     "redownloads",
@@ -147,19 +119,16 @@ def applovin_source(
     end_date: Optional[str],
     custom: Optional[str],
 ):
-    ska_report_columns = exclude(
-        REPORT_SCHEMA[ReportType.ADVERTISER],
-        SKA_REPORT_EXCLUDE,
-    )
 
-    probabilistic_report_columns = exclude(
-        REPORT_SCHEMA[ReportType.ADVERTISER],
-        PROBABILISTIC_REPORT_EXCLUDE,
-    )
     backfill = False
     if end_date is None:
         backfill = True
-        end_date = datetime.now(timezone.utc).date().strftime("%Y-%m-%d")
+
+        # use the greatest of yesterday and start_date
+        end_date = max(
+            datetime.now(timezone.utc) - timedelta(days=1),
+            datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+        ).strftime("%Y-%m-%d")
 
     config: RESTAPIConfig = {
         "client": {
@@ -186,6 +155,9 @@ def applovin_source(
                     "end": end_date,
                 },
                 "paginator": "single_page",
+                "response_actions": [
+                    http_error_handler,
+                ]
             },
         },
         "resources": [
@@ -204,13 +176,16 @@ def applovin_source(
             resource(
                 "advertiser-probabilistic-report",
                 "probabilisticReport",
-                probabilistic_report_columns,
+                exclude(
+                    REPORT_SCHEMA[ReportType.ADVERTISER],
+                    PROBABILISTIC_REPORT_EXCLUDE
+                ),
                 ReportType.ADVERTISER,
             ),
             resource(
                 "advertiser-ska-report",
                 "skaReport",
-                ska_report_columns,
+                REPORT_SCHEMA[ReportType.ADVERTISER],
                 ReportType.ADVERTISER,
             ),
         ],
@@ -280,3 +255,7 @@ def exclude(source: List[str], exclude_list: List[str]) -> List[str]:
 
 def build_type_hints(cols: List[str]) -> dict:
     return {col: TYPE_HINTS[col] for col in cols if col in TYPE_HINTS}
+
+def http_error_handler(resp: Response):
+    if not resp.ok:
+        raise ClientError(f"HTTP Status {resp.status_code}: {resp.text}")
