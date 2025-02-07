@@ -35,7 +35,12 @@ def applovin_max_source(
         url = "https://r.applovin.com/max/userAdRevenueReport"
         start_date = pendulum.from_format(dateTime.last_value, "YYYY-MM-DD").date()
         if dateTime.end_value is None:
-            end_date = pendulum.yesterday().date()
+            now = pendulum.now('UTC')
+            end_date = (
+                pendulum.yesterday('UTC')
+                if now.hour >= 8
+                else pendulum.yesterday('UTC').subtract(days=1)
+            ).date()
         else:
             end_date = pendulum.from_format(dateTime.end_value, "YYYY-MM-DD").date()
         yield get_data(
