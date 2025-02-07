@@ -89,9 +89,12 @@ def get_data(
 
             response = client.get(url=url, params=params)
 
+            if response.status_code == 400:
+                raise ValueError(response.text)
+
             if response.status_code != 200:
                 continue
-
+            
             response_url = response.json().get("ad_revenue_report_url")
             df = pd.read_csv(response_url)
             df["Date"] = pd.to_datetime(df["Date"])
