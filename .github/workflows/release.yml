@@ -1,3 +1,5 @@
+# WARN: this is used as a notification filter in our slack.
+# When updating this, make sure to update the workflow subscription as well.
 name: "Release ingestr on pip and ghcr.io"
 
 on:
