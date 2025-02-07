@@ -137,7 +137,7 @@ class SqlSource:
         if uri.startswith("clickhouse://"):
             uri = uri.replace("clickhouse://", "clickhouse+native://")
             if "secure=" not in uri:
-              uri += "?secure=1"
+                uri += "?secure=1"
 
         query_adapters = []
         if kwargs.get("sql_limit"):
@@ -1815,18 +1815,12 @@ class ApplovinMaxSource:
             raise ValueError(
                 f"Table name '{table}' is not supported for AppLovin Max source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
-        
-        now = pendulum.now('UTC')
-        default_start = (
-            pendulum.yesterday('UTC')
-            if now.hour >= 8
-            else pendulum.yesterday('UTC').subtract(days=1)
-        ).date()
+
+        now = pendulum.now("UTC")
+        default_start = now.subtract(days=30).date()
 
         start_date = (
-            interval_start
-            if interval_start is not None
-            else default_start
+            interval_start if interval_start is not None else default_start
         ).strftime("%Y-%m-%d")
 
         end_date = (
