@@ -20,6 +20,7 @@ from ingestr.src.sources import (
     AdjustSource,
     AirtableSource,
     AppleAppStoreSource,
+    ApplovinMaxSource,
     AppLovinSource,
     AppsflyerSource,
     ArrowMemoryMappedSource,
@@ -134,6 +135,7 @@ class SourceDestinationFactory:
         "gs": GCSSource,
         "linkedinads": LinkedInAdsSource,
         "applovin": AppLovinSource,
+        "applovinmax": ApplovinMaxSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

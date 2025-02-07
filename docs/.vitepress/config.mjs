@@ -97,6 +97,7 @@ export default defineConfig({
               { text: "AppsFlyer", link: "/supported-sources/appsflyer.md" },
               { text: "Apple App Store", link: "/supported-sources/appstore.md"},
               { text: "Applovin", link: "/supported-sources/applovin.md"},
+              { text: "Applovin Max", link: "/supported-sources/applovin_max.md"},
               { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               { text: "DynamoDB", link: "/supported-sources/dynamodb.md" },

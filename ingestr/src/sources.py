@@ -51,6 +51,7 @@ from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.applovin import applovin_source
+from ingestr.src.applovin_max import applovin_max_source
 from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.appstore import app_store
 from ingestr.src.appstore.client import AppStoreConnectClient
@@ -1787,3 +1788,48 @@ class AppLovinSource:
             raise UnsupportedResourceError(table, "AppLovin")
 
         return src.with_resources(table)
+
+
+class ApplovinMaxSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        api_key = params.get("api_key")
+        if api_key is None:
+            raise ValueError("api_key is required to connect to AppLovin Max API.")
+
+        application = params.get("application")
+        if application is None:
+            raise ValueError("application is required to connect to AppLovin Max API.")
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        if "ad_revenue" in table:
+            table = "ad_revenue"
+        else:
+            raise ValueError(
+                f"Table name '{table}' is not supported for AppLovin Max source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        now = pendulum.now("UTC")
+        default_start = now.subtract(days=30).date()
+
+        start_date = (
+            interval_start if interval_start is not None else default_start
+        ).strftime("%Y-%m-%d")
+
+        end_date = (
+            interval_end.strftime("%Y-%m-%d") if interval_end is not None else None
+        )
+
+        return applovin_max_source(
+            start_date=start_date,
+            end_date=end_date,
+            api_key=api_key[0],
+            application=application[0],
+        ).with_resources(table)
