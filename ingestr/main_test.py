@@ -63,6 +63,8 @@ from ingestr.src.appstore.models import (
 from ingestr.src.destinations import ClickhouseDestination
 from ingestr.src.errors import (
     InvalidBlobTableError,
+    MissingValueError,
+    UnsupportedResourceError,
 )
 
 
@@ -2893,3 +2895,34 @@ def test_gcs(dest, test_case):
 def test_s3(dest, test_case):
     test_case(dest.start())
     dest.stop()
+
+def applovin_test_cases() -> Iterable[Callable]:
+    def missing_api_key():
+        result = invoke_ingest_command(
+            "applovin://",
+            "publisher-report",
+            "duckdb:///out.db",
+            "public.publisher_report",
+        )
+        assert result.exit_code != 0
+        assert has_exception(result.exception, MissingValueError)
+    def invalid_source_table():
+        result = invoke_ingest_command(
+            "applovin://?api_key=123",
+            "unknown-report",
+            "duckdb:///out.db",
+            "public.unknown_report"
+        )
+        assert result.exit_code != 0
+        assert has_exception(result.exception, UnsupportedResourceError)
+
+    return [
+        missing_api_key,
+        invalid_source_table,
+    ]
+
+@pytest.mark.parametrize(
+        "testcase", applovin_test_cases()
+)
+def test_applovin_source(testcase):
+    testcase() 
