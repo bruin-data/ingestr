@@ -60,9 +60,14 @@ class BigQueryDestination:
                 base64.b64decode(credentials_base64[0]).decode("utf-8")
             )
 
+        project_id = None
+        if source_fields.hostname:
+            project_id = source_fields.hostname
+
         return dlt.destinations.bigquery(
             credentials=credentials,  # type: ignore
             location=location,
+            project_id=project_id,
             **kwargs,
         )
 

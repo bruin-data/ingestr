@@ -67,8 +67,8 @@ SQL_SOURCE_SCHEMES = [
     "oracle+cx_oracle",
     "hana",
     "clickhouse",
-    
 ]
+
 
 class SourceProtocol(Protocol):
     def dlt_source(self, uri: str, table: str, **kwargs):
