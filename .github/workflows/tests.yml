@@ -59,8 +59,6 @@ jobs:
         env:
           TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: /var/run/docker.sock
           DOCKER_HOST: unix:///Users/runner/.colima/docker.sock
-      - name: debug
-        uses: lhotari/action-upterm@v1
       - name: run tests (other OS)
         if: matrix.os != 'macos-13'
         run: make test-ci
