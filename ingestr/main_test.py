@@ -2852,6 +2852,28 @@ def fs_test_cases(
             )
             assert result.exit_code == 0
             assert_rows(dest_uri, dest_table, 6)
+    
+    def test_uri_precedence(dest_uri):
+        """
+        When file glob is present in both URI and Source Table,
+        the URI glob should be used
+        """
+
+        with (
+            patch(target_fs) as target_fs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://bucket/*.csv?{auth}",
+                "/path/to/file", # if this is used, it should result in an error
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 6)
 
     return [
         test_empty_source_uri,
@@ -2862,6 +2884,7 @@ def fs_test_cases(
         test_jsonl_load,
         test_glob_load,
         test_compound_table_name,
+        test_uri_precedence,
     ]
 
 
