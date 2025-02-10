@@ -26,7 +26,7 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
     table = table.strip()
     host = uri.netloc.strip()
 
-    if table == "":
+    if table == "" or uri.path.strip() != "":
         warnings.warn(
             f"Using the form '{uri.scheme}://bucket-name/file-glob' is deprecated and will be removed in future versions.",
             DeprecationWarning,
