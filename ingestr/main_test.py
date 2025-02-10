@@ -37,6 +37,7 @@ from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
+from testcontainers.mssql import SqlServerContainer # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
@@ -475,7 +476,7 @@ class DuckDb:
 
 POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
 MYSQL8_IMAGE = "mysql:8.4.1"
-MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04"
+MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-CU13-ubuntu-22.04"
 CLICKHOUSE_IMAGE = "clickhouse/clickhouse-server:24.12"
 
 pgDocker = DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start())
@@ -488,10 +489,10 @@ SOURCES = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
     "mysql8": mysqlDocker,
-    # "sqlserver": DockerImage(
-    #     lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
-    #     "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
-    # ),
+    "sqlserver": DockerImage(
+        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+    ),
 }
 
 
