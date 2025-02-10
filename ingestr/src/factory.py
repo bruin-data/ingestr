@@ -48,6 +48,7 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
+    SalesforceSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -136,6 +137,7 @@ class SourceDestinationFactory:
         "linkedinads": LinkedInAdsSource,
         "applovin": AppLovinSource,
         "applovinmax": ApplovinMaxSource,
+        "salesforce": SalesforceSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
