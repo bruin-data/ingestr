@@ -100,6 +100,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+from ingestr.src.salesforce import salesforce_source
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1753,7 +1754,7 @@ class AppLovinSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key") is not None:
             raise ValueError(
-                "Google Ads takes care of incrementality on its own, you should not provide incremental_key"
+                "Applovin takes care of incrementality on its own, you should not provide incremental_key"
             )
 
         parsed_uri = urlparse(uri)
@@ -1833,3 +1834,30 @@ class ApplovinMaxSource:
             api_key=api_key[0],
             application=application[0],
         ).with_resources(table)
+
+class SalesforceSource:
+    def handles_incrementality(self) -> bool:
+        return True
+    
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Salesforce takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        params = parse_qs(urlparse(uri).query)
+        creds = {
+            "username": params.get("username", [None])[0],
+            "password": params.get("password", [None])[0],
+            "token": params.get("token", [None])[0],
+        }
+        for k, v in creds.items():
+            if v is None:
+                raise MissingValueError(k)
+        
+        src = salesforce_source(**creds)
+
+        if table not in src.resources:
+            raise UnsupportedResourceError(table, "Salesforce")
+        
+        return src.with_resources(table)
