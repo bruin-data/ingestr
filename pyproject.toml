@@ -166,6 +166,10 @@ packages = ["ingestr"]
 ingestr = "ingestr.main:main"
 
 [tool.hatch.build.targets.sdist]
+artifacts = [
+  "ingestr/src/buildinfo.py",
+]
+
 exclude = [
   "*_test.py",
   "*.db"
