@@ -33,7 +33,7 @@ def salesforce_source(
 
     # define resources
     @dlt.resource(write_disposition="replace")
-    def sf_user() -> Iterable[TDataItem]:
+    def user() -> Iterable[TDataItem]:
         yield get_records(client, "User")
 
     @dlt.resource(write_disposition="replace")
@@ -106,11 +106,11 @@ def salesforce_source(
         )
 
     @dlt.resource(write_disposition="replace")
-    def product_2() -> Iterable[TDataItem]:
+    def product() -> Iterable[TDataItem]:
         yield get_records(client, "Product2")
 
     @dlt.resource(write_disposition="replace")
-    def pricebook_2() -> Iterable[TDataItem]:
+    def pricebook() -> Iterable[TDataItem]:
         yield get_records(client, "Pricebook2")
 
     @dlt.resource(write_disposition="replace")
@@ -134,7 +134,7 @@ def salesforce_source(
         yield get_records(client, "Event", last_timestamp.last_value, "SystemModstamp")
 
     return (
-        sf_user,
+        user,
         user_role,
         opportunity,
         opportunity_line_item,
@@ -144,8 +144,8 @@ def salesforce_source(
         lead,
         campaign,
         campaign_member,
-        product_2,
-        pricebook_2,
+        product,
+        pricebook,
         pricebook_entry,
         task,
         event,
