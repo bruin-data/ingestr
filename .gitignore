@@ -20,4 +20,3 @@ node_modules
 *.db
 *.db.wal
 *.sql
-ingestr/src/buildinfo.py
