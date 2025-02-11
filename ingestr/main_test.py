@@ -2950,3 +2950,17 @@ def applovin_test_cases() -> Iterable[Callable]:
 )
 def test_applovin_source(testcase):
     testcase() 
+
+
+def test_version_cmd():
+    """
+    This should always be 0.0.0-dev.
+    """
+    from ingestr.src.version import __version__
+
+    msg = """
+    You maybe have commited ingestr/src/buildinfo.py to git.
+    Remove it to fix this error.
+    """
+
+    assert __version__ == "0.0.0-dev", msg
