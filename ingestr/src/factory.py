@@ -42,6 +42,7 @@ from ingestr.src.sources import (
     MongoDbSource,
     NotionSource,
     S3Source,
+    SalesforceSource,
     ShopifySource,
     SlackSource,
     SqlSource,
@@ -136,6 +137,7 @@ class SourceDestinationFactory:
         "linkedinads": LinkedInAdsSource,
         "applovin": AppLovinSource,
         "applovinmax": ApplovinMaxSource,
+        "salesforce": SalesforceSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

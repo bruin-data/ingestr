@@ -1,10 +1,10 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, List, Optional
-from requests import Response
 
 import dlt
 from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
+from requests import Response
 
 
 class InvalidCustomReportError(Exception):
@@ -13,8 +13,10 @@ class InvalidCustomReportError(Exception):
             "Custom report should be in the format 'custom:{endpoint}:{report_type}:{dimensions}"
         )
 
+
 class ClientError(Exception):
     pass
+
 
 TYPE_HINTS = {
     "application_is_hidden": {"data_type": "bool"},
@@ -119,7 +121,6 @@ def applovin_source(
     end_date: Optional[str],
     custom: Optional[str],
 ):
-
     backfill = False
     if end_date is None:
         backfill = True
@@ -127,7 +128,7 @@ def applovin_source(
         # use the greatest of yesterday and start_date
         end_date = max(
             datetime.now(timezone.utc) - timedelta(days=1),
-            datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+            datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc),
         ).strftime("%Y-%m-%d")
 
     config: RESTAPIConfig = {
@@ -157,7 +158,7 @@ def applovin_source(
                 "paginator": "single_page",
                 "response_actions": [
                     http_error_handler,
-                ]
+                ],
             },
         },
         "resources": [
@@ -177,8 +178,7 @@ def applovin_source(
                 "advertiser-probabilistic-report",
                 "probabilisticReport",
                 exclude(
-                    REPORT_SCHEMA[ReportType.ADVERTISER],
-                    PROBABILISTIC_REPORT_EXCLUDE
+                    REPORT_SCHEMA[ReportType.ADVERTISER], PROBABILISTIC_REPORT_EXCLUDE
                 ),
                 ReportType.ADVERTISER,
             ),
@@ -255,6 +255,7 @@ def exclude(source: List[str], exclude_list: List[str]) -> List[str]:
 
 def build_type_hints(cols: List[str]) -> dict:
     return {col: TYPE_HINTS[col] for col in cols if col in TYPE_HINTS}
+
 
 def http_error_handler(resp: Response):
     if not resp.ok:

@@ -2853,7 +2853,7 @@ def fs_test_cases(
             )
             assert result.exit_code == 0
             assert_rows(dest_uri, dest_table, 6)
-    
+
     def test_uri_precedence(dest_uri):
         """
         When file glob is present in both URI and Source Table,
@@ -2869,7 +2869,7 @@ def fs_test_cases(
             dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
             result = invoke_ingest_command(
                 f"{protocol}://bucket/*.csv?{auth}",
-                "/path/to/file", # if this is used, it should result in an error
+                "/path/to/file",  # if this is used, it should result in an error
                 dest_uri,
                 dest_table,
             )
@@ -2920,6 +2920,7 @@ def test_s3(dest, test_case):
     test_case(dest.start())
     dest.stop()
 
+
 def applovin_test_cases() -> Iterable[Callable]:
     def missing_api_key():
         result = invoke_ingest_command(
@@ -2930,12 +2931,13 @@ def applovin_test_cases() -> Iterable[Callable]:
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, MissingValueError)
+
     def invalid_source_table():
         result = invoke_ingest_command(
             "applovin://?api_key=123",
             "unknown-report",
             "duckdb:///out.db",
-            "public.unknown_report"
+            "public.unknown_report",
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, UnsupportedResourceError)
@@ -2945,9 +2947,8 @@ def applovin_test_cases() -> Iterable[Callable]:
         invalid_source_table,
     ]
 
-@pytest.mark.parametrize(
-        "testcase", applovin_test_cases()
-)
+
+@pytest.mark.parametrize("testcase", applovin_test_cases())
 def test_applovin_source(testcase):
     testcase() 
 
