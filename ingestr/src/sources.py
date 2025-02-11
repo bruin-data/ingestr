@@ -83,6 +83,7 @@ from ingestr.src.linkedin_ads.dimension_time_enum import (
 )
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
+from ingestr.src.salesforce import salesforce_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
@@ -100,7 +101,6 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
-from ingestr.src.salesforce import salesforce_source
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1835,10 +1835,11 @@ class ApplovinMaxSource:
             application=application[0],
         ).with_resources(table)
 
+
 class SalesforceSource:
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
@@ -1853,11 +1854,11 @@ class SalesforceSource:
         }
         for k, v in creds.items():
             if v is None:
-                raise MissingValueError(k)
-        
-        src = salesforce_source(**creds)
+                raise MissingValueError(k, "Salesforce")
+
+        src = salesforce_source(**creds)  # type: ignore
 
         if table not in src.resources:
             raise UnsupportedResourceError(table, "Salesforce")
-        
+
         return src.with_resources(table)

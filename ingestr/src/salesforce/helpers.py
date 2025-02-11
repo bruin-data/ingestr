@@ -1,11 +1,11 @@
 """Salesforce source helpers"""
 
+from typing import Iterable, Optional
+
 import pendulum
-
-from typing import Optional, Iterable
-
-from simple_salesforce import Salesforce
 from dlt.common.typing import TDataItem
+from simple_salesforce import Salesforce
+
 
 def get_records(
     sf: Salesforce,

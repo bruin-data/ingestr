@@ -1,19 +1,16 @@
-from dlt.sources import DltResource
-from dlt.sources import incremental
-
 from typing import Iterable
 
 import dlt
-from simple_salesforce import Salesforce
 from dlt.common.typing import TDataItem
-
+from dlt.sources import DltResource, incremental
+from simple_salesforce import Salesforce
 
 from .helpers import get_records
 
 
 @dlt.source(name="salesforce")
 def salesforce_source(
-    username: str, 
+    username: str,
     password: str,
     token: str,
 ) -> Iterable[DltResource]:
@@ -22,8 +19,8 @@ def salesforce_source(
 
     Args:
         username (str): The username for authentication.
-        password (str): The password for authentication. 
-        token (str): The security token for authentication. 
+        password (str): The password for authentication.
+        token (str): The security token for authentication.
 
     Yields:
         DltResource: Data resources from Salesforce.
@@ -44,7 +41,7 @@ def salesforce_source(
     def opportunity(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
-        )
+        ),
     ) -> Iterable[TDataItem]:
         yield get_records(
             client, "Opportunity", last_timestamp.last_value, "SystemModstamp"
@@ -54,7 +51,7 @@ def salesforce_source(
     def opportunity_line_item(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
-        )
+        ),
     ) -> Iterable[TDataItem]:
         yield get_records(
             client, "OpportunityLineItem", last_timestamp.last_value, "SystemModstamp"
@@ -64,7 +61,7 @@ def salesforce_source(
     def opportunity_contact_role(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
-        )
+        ),
     ) -> Iterable[TDataItem]:
         yield get_records(
             client,
@@ -77,7 +74,7 @@ def salesforce_source(
     def account(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "LastModifiedDate", initial_value=None
-        )
+        ),
     ) -> Iterable[TDataItem]:
         yield get_records(
             client, "Account", last_timestamp.last_value, "LastModifiedDate"
@@ -99,7 +96,7 @@ def salesforce_source(
     def campaign_member(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
-        )
+        ),
     ) -> Iterable[TDataItem]:
         yield get_records(
             client, "CampaignMember", last_timestamp.last_value, "SystemModstamp"
@@ -121,7 +118,7 @@ def salesforce_source(
     def task(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
-        )
+        ),
     ) -> Iterable[TDataItem]:
         yield get_records(client, "Task", last_timestamp.last_value, "SystemModstamp")
 
@@ -129,7 +126,7 @@ def salesforce_source(
     def event(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
-        )
+        ),
     ) -> Iterable[TDataItem]:
         yield get_records(client, "Event", last_timestamp.last_value, "SystemModstamp")
 

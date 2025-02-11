@@ -42,13 +42,13 @@ from ingestr.src.sources import (
     MongoDbSource,
     NotionSource,
     S3Source,
+    SalesforceSource,
     ShopifySource,
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
-    SalesforceSource,
 )
 
 SQL_SOURCE_SCHEMES = [
