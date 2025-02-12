@@ -361,6 +361,17 @@ class LocalCsvSource:
                                 f"incremental_key '{incremental_key}' not found in the CSV file"
                             )
 
+                        # Convert both values to the same type for comparison
+                        try:
+                            if isinstance(incremental.start_value, int):
+                                inc_value = int(inc_value)
+                            elif isinstance(incremental.start_value, float):
+                                inc_value = float(inc_value)
+                        except ValueError:
+                            raise ValueError(
+                                f"Cannot convert incremental_key value '{inc_value}' to {type(incremental.start_value).__name__}"
+                            )
+
                         if inc_value < incremental.start_value:
                             continue
 
