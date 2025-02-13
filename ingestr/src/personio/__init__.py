@@ -165,7 +165,7 @@ def personio_source(
         Returns:
             Iterable: A generator of attendances.
         """
-        print(start_date, end_date)
+        
         end_date = end_date or pendulum.now()
         if updated_at.last_value:
             updated_iso = updated_at.last_value.format("YYYY-MM-DDTHH:mm:ss")
