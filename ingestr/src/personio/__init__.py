@@ -16,7 +16,7 @@ from .helpers import PersonioAPI
 def personio_source(
     client_id: str = dlt.secrets.value,
     client_secret: str = dlt.secrets.value,
-    items_per_page: int = 500,
+    items_per_page: int = 200,
 ) -> Iterable[DltResource]:
     """
     The source for the Personio pipeline. Available resources are employees, absences, and attendances.
@@ -24,7 +24,7 @@ def personio_source(
     Args:
         client_id: The client ID of your app.
         client_secret: The client secret of your app.
-        items_per_page: The max number of items to fetch per page. Defaults to 500.
+        items_per_page: The max number of items to fetch per page. Defaults to 200.
     Returns:
         Iterable: A list of DltResource objects representing the data resources.
     """
@@ -71,7 +71,7 @@ def personio_source(
             last_value = updated_at.last_value.format("YYYY-MM-DDTHH:mm:ss")
         else:
             last_value = None
-
+       
         params = {"limit": items_per_page, "updated_since": last_value}
 
         pages = client.get_pages("company/employees", params=params)

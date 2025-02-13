@@ -1851,7 +1851,6 @@ class PersonioSource:
             raise MissingValueError("client_id", "Personio")
         if client_secret is None:
             raise MissingValueError("client_secret", "Personio")
-        print(table)
         if table not in ["employees", "absences", "absence_types", "attendances", "projects", "document_categories", "employees_absences_balance", "custom_reports_list","custom_reports"]:
             raise UnsupportedResourceError(table, "Personio")
         
