@@ -251,7 +251,7 @@ def personio_source(
     @dlt.transformer(
         data_from=employees,
         write_disposition="merge",
-        primary_key=["employee_id", "id"],x
+        primary_key=["employee_id", "id"],
     )
     @dlt.defer
     def employees_absences_balance(employees_item: TDataItem) -> Iterable[TDataItem]:

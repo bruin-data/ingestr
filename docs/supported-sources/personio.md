@@ -44,4 +44,8 @@ Personio source allows ingesting the following resources into separate tables:
 - [employees_absences_balance](https://developer.personio.de/reference/get_company-employees-employee-id-absences-balance) : Retrieves the absence balance for a specific employee
 - [custom_reports_list](https://developer.personio.de/reference/listreports) : Retrieves metadata about existing custom reports in your Personio account, such as report name, report type, report date / timeframe.
 
-Use these as `--source-table` parameter in the `ingestr ingest` command.
+Use these as `--source-table` parameter in the `ingestr ingest` command.\
+
+
+> [!WARNING]
+> Personio does not support incremental loading for many endpoints, which means ingestr will load endpoints incrementally if they support it, and do a full-refresh if not.
