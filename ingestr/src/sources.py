@@ -100,6 +100,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+from ingestr.src.personio import personio_source
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1833,3 +1834,25 @@ class ApplovinMaxSource:
             api_key=api_key[0],
             application=application[0],
         ).with_resources(table)
+
+class PersonioSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+     #applovin://?client_id=123&client_secret=123
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        client_id = params.get("client_id")
+        client_secret = params.get("client_secret")
+
+        if client_id is None:
+            raise MissingValueError("client_id", "Personio")
+        if client_secret is None:
+            raise MissingValueError("client_secret", "Personio")
+        print(table)
+        if table not in ["employees", "absences", "absence_types", "attendances", "projects", "document_categories", "employees_absences_balance", "custom_reports_list","custom_reports"]:
+            raise UnsupportedResourceError(table, "Personio")
+        
+        return personio_source(client_id[0], client_secret[0]).with_resources(table)
