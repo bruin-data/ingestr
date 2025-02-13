@@ -13,6 +13,8 @@ from .helpers import PersonioAPI
 
 @dlt.source(name="personio", max_table_nesting=0)
 def personio_source(
+    start_date: TAnyDateTime,
+    end_date: Optional[TAnyDateTime] = None,
     client_id: str = dlt.secrets.value,
     client_secret: str = dlt.secrets.value,
     items_per_page: int = 200,
@@ -142,8 +144,8 @@ def personio_source(
 
     @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
     def attendances(
-        start_date: TAnyDateTime = "2018-01-01",
-        end_date: Optional[TAnyDateTime] = None,
+        start_date: TAnyDateTime = start_date,
+        end_date: Optional[TAnyDateTime] = end_date,
         updated_at: dlt.sources.incremental[
             pendulum.DateTime
         ] = dlt.sources.incremental(
@@ -163,7 +165,7 @@ def personio_source(
         Returns:
             Iterable: A generator of attendances.
         """
-
+        print(start_date, end_date)
         end_date = end_date or pendulum.now()
         if updated_at.last_value:
             updated_iso = updated_at.last_value.format("YYYY-MM-DDTHH:mm:ss")
@@ -249,7 +251,7 @@ def personio_source(
     @dlt.transformer(
         data_from=employees,
         write_disposition="merge",
-        primary_key=["employee_id", "id"],
+        primary_key=["employee_id", "id"],x
     )
     @dlt.defer
     def employees_absences_balance(employees_item: TDataItem) -> Iterable[TDataItem]:

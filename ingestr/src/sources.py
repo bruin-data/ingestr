@@ -1848,6 +1848,17 @@ class PersonioSource:
         client_id = params.get("client_id")
         client_secret = params.get("client_secret")
 
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        interval_start_date = (
+            interval_start if interval_start is not None else "2018-01-01"
+        )
+
+        interval_end_date = (
+            interval_end.strftime("%Y-%m-%d") if interval_end is not None else None
+        )
+
         if client_id is None:
             raise MissingValueError("client_id", "Personio")
         if client_secret is None:
@@ -1863,5 +1874,10 @@ class PersonioSource:
             "custom_reports_list",
         ]:
             raise UnsupportedResourceError(table, "Personio")
-
-        return personio_source(client_id[0], client_secret[0]).with_resources(table)
+        
+        return personio_source(
+            client_id=client_id[0],
+            client_secret=client_secret[0],
+            start_date=interval_start_date,
+            end_date=interval_end_date,
+        ).with_resources(table)
