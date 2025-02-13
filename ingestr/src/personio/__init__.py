@@ -11,8 +11,7 @@ from dlt.sources import DltResource
 from .helpers import PersonioAPI
 
 
-
-@dlt.source(name="personio")
+@dlt.source(name="personio", max_table_nesting=0)
 def personio_source(
     client_id: str = dlt.secrets.value,
     client_secret: str = dlt.secrets.value,
@@ -31,7 +30,7 @@ def personio_source(
 
     client = PersonioAPI(client_id, client_secret)
 
-    @dlt.resource(primary_key="id", write_disposition="merge")
+    @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
     def employees(
         updated_at: dlt.sources.incremental[
             pendulum.DateTime
@@ -71,14 +70,14 @@ def personio_source(
             last_value = updated_at.last_value.format("YYYY-MM-DDTHH:mm:ss")
         else:
             last_value = None
-       
+
         params = {"limit": items_per_page, "updated_since": last_value}
 
         pages = client.get_pages("company/employees", params=params)
         for page in pages:
             yield [convert_item(item) for item in page]
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    @dlt.resource(primary_key="id", write_disposition="replace", max_table_nesting=0)
     def absence_types(items_per_page: int = items_per_page) -> Iterable[TDataItem]:
         """
         The resource for absence types (time-off-types), supports pagination.
@@ -97,7 +96,7 @@ def personio_source(
         for page in pages:
             yield [item.get("attributes", {}) for item in page]
 
-    @dlt.resource(primary_key="id", write_disposition="merge")
+    @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
     def absences(
         updated_at: dlt.sources.incremental[
             pendulum.DateTime
@@ -141,7 +140,7 @@ def personio_source(
         for page in pages:
             yield [convert_item(item) for item in page]
 
-    @dlt.resource(primary_key="id", write_disposition="merge")
+    @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
     def attendances(
         start_date: TAnyDateTime = "2018-01-01",
         end_date: Optional[TAnyDateTime] = None,
@@ -193,7 +192,7 @@ def personio_source(
         for page in pages:
             yield [convert_item(item) for item in page]
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    @dlt.resource(primary_key="id", write_disposition="replace", max_table_nesting=0)
     def projects() -> Iterable[TDataItem]:
         """
         The resource for projects.
@@ -214,7 +213,7 @@ def personio_source(
         for page in pages:
             yield [convert_item(item) for item in page]
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    @dlt.resource(primary_key="id", write_disposition="replace", max_table_nesting=0)
     def document_categories() -> Iterable[TDataItem]:
         """
         The resource for document_categories.
@@ -233,7 +232,7 @@ def personio_source(
         for page in pages:
             yield [convert_item(item) for item in page]
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    @dlt.resource(primary_key="id", write_disposition="replace", max_table_nesting=0)
     def custom_reports_list() -> Iterable[TDataItem]:
         """
         The resource for custom_reports.
