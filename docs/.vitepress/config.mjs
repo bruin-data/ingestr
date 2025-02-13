@@ -62,6 +62,7 @@ export default defineConfig({
               { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
               { text: "Databricks", link: "/supported-sources/databricks.md" },
               { text: "DuckDB", link: "/supported-sources/duckdb.md" },
+              { text: "DynamoDB", link: "/supported-sources/dynamodb.md" },
               {
                 text: "Google BigQuery",
                 link: "/supported-sources/bigquery.md",
@@ -100,7 +101,6 @@ export default defineConfig({
               { text: "Applovin Max", link: "/supported-sources/applovin_max.md"},
               { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
-              { text: "DynamoDB", link: "/supported-sources/dynamodb.md" },
               {
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
