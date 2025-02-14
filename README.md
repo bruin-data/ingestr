@@ -249,6 +249,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Salesforce</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Shopify</td>
         <td>✅</td>
         <td>-</td>
