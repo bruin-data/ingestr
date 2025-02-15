@@ -42,12 +42,14 @@ from ingestr.src.sources import (
     MongoDbSource,
     NotionSource,
     S3Source,
+    SalesforceSource,
     ShopifySource,
     SlackSource,
     SqlSource,
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
+    PersonioSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -136,6 +138,8 @@ class SourceDestinationFactory:
         "linkedinads": LinkedInAdsSource,
         "applovin": AppLovinSource,
         "applovinmax": ApplovinMaxSource,
+        "salesforce": SalesforceSource,
+        "personio": PersonioSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

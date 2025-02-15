@@ -83,6 +83,8 @@ from ingestr.src.linkedin_ads.dimension_time_enum import (
 )
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
+from ingestr.src.salesforce import salesforce_source
+from ingestr.src.personio import personio_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
@@ -1782,7 +1784,7 @@ class AppLovinSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key") is not None:
             raise ValueError(
-                "Google Ads takes care of incrementality on its own, you should not provide incremental_key"
+                "Applovin takes care of incrementality on its own, you should not provide incremental_key"
             )
 
         parsed_uri = urlparse(uri)
@@ -1862,3 +1864,78 @@ class ApplovinMaxSource:
             api_key=api_key[0],
             application=application[0],
         ).with_resources(table)
+
+
+class SalesforceSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Salesforce takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        params = parse_qs(urlparse(uri).query)
+        creds = {
+            "username": params.get("username", [None])[0],
+            "password": params.get("password", [None])[0],
+            "token": params.get("token", [None])[0],
+        }
+        for k, v in creds.items():
+            if v is None:
+                raise MissingValueError(k, "Salesforce")
+
+        src = salesforce_source(**creds)  # type: ignore
+
+        if table not in src.resources:
+            raise UnsupportedResourceError(table, "Salesforce")
+
+        return src.with_resources(table)
+
+class PersonioSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    # applovin://?client_id=123&client_secret=123
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        client_id = params.get("client_id")
+        client_secret = params.get("client_secret")
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        interval_start_date = (
+            interval_start if interval_start is not None else "2018-01-01"
+        )
+
+        interval_end_date = (
+            interval_end.strftime("%Y-%m-%d") if interval_end is not None else None
+        )
+
+        if client_id is None:
+            raise MissingValueError("client_id", "Personio")
+        if client_secret is None:
+            raise MissingValueError("client_secret", "Personio")
+        if table not in [
+            "employees",
+            "absences",
+            "absence_types",
+            "attendances",
+            "projects",
+            "document_categories",
+            "employees_absences_balance",
+            "custom_reports_list",
+        ]:
+            raise UnsupportedResourceError(table, "Personio")
+        
+        return personio_source(
+            client_id=client_id[0],
+            client_secret=client_secret[0],
+            start_date=interval_start_date,
+            end_date=interval_end_date,
+        ).with_resources(table)
+

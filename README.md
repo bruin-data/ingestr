@@ -98,6 +98,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
+        <td>DynamoDB</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Local CSV file</td>
         <td>✅</td>
         <td>✅</td>
@@ -184,11 +189,6 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
-        <td>DynamoDB</td>
-        <td>✅</td>
-        <td>-</td>
-    </tr>
-    <tr>
         <td>Facebook Ads</td>
         <td>✅</td>
         <td>-</td>
@@ -238,8 +238,18 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
         <td>-</td>
     </tr>
+    <tr>
+        <td>Personio</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
      <tr>
         <td>S3</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Salesforce</td>
         <td>✅</td>
         <td>-</td>
     </tr>
