@@ -15,7 +15,7 @@ from typing import (
     Optional,
     Union,
 )
-from urllib.parse import ParseResult, parse_qs, quote, urlparse
+from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
 
 import dlt
 import gcsfs  # type: ignore
@@ -139,12 +139,13 @@ class SqlSource:
         #clickhouse://<username>:<password>@<host>:<port>?secure=<secure>
         if uri.startswith("clickhouse://"):
             parsed_uri = urlparse(uri)
+
             username = parsed_uri.username
             if not username:
                 raise ValueError(
                     "A username is required to connect to the ClickHouse database."
                 )
-
+            
             password = parsed_uri.password
             if not password:
                 raise ValueError(
@@ -163,13 +164,19 @@ class SqlSource:
                     "The TCP port of the ClickHouse server is required to establish a connection."
                 )
 
-            uri = uri.replace("clickhouse://", "clickhouse+native://")
-            if "secure=" not in uri:
-                if "http_port" in uri:
-                    uri += "&secure=1"
-                else:
-                    uri += "?secure=1"
+            query_params = parse_qs(parsed_uri.query)
 
+            if "http_port" in query_params:
+                del query_params["http_port"]
+            
+            if "secure" not in query_params:
+                query_params['secure'] = '1'
+            else:
+                query_params['secure'] = query_params['secure'][0]
+            
+            uri = parsed_uri._replace(scheme = "clickhouse+native",
+                                    query=urlencode(query_params)).geturl()
+            
         query_adapters = []
         if kwargs.get("sql_limit"):
             query_adapters.append(
