@@ -36,8 +36,8 @@ from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
+from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
-from testcontainers.mssql import SqlServerContainer # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
 
@@ -2950,7 +2950,7 @@ def applovin_test_cases() -> Iterable[Callable]:
 
 @pytest.mark.parametrize("testcase", applovin_test_cases())
 def test_applovin_source(testcase):
-    testcase() 
+    testcase()
 
 
 def test_version_cmd():
