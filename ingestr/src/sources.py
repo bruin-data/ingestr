@@ -15,7 +15,7 @@ from typing import (
     Optional,
     Union,
 )
-from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
+from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse, urlunparse
 
 import dlt
 import gcsfs  # type: ignore
@@ -171,13 +171,17 @@ class SqlSource:
 
             if "secure" not in query_params:
                 query_params["secure"] = ["1"]
-            else:
-                query_params["secure"] = [query_params["secure"][0]]
 
-            uri = parsed_uri._replace(
-                scheme="clickhouse+native", query=urlencode(query_params, doseq=True)
-            ).geturl()
-
+            uri = urlunparse(
+                (
+                    "clickhouse+native",
+                    parsed_uri.netloc,
+                    "",
+                    "",
+                    urlencode(query_params, doseq=True),
+                    "",
+                )
+            )
         query_adapters = []
         if kwargs.get("sql_limit"):
             query_adapters.append(
