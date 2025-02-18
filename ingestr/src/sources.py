@@ -1811,7 +1811,6 @@ class ApplovinMaxSource:
             )
 
         application = fields[1].split("=")[1].split(",")
-        print(application)
 
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
@@ -1827,12 +1826,10 @@ class ApplovinMaxSource:
         default_start = now.subtract(days=30).date()
 
         start_date = (
-            interval_start if interval_start is not None else default_start
-        ).strftime("%Y-%m-%d")
-
-        end_date = (
-            interval_end.strftime("%Y-%m-%d") if interval_end is not None else None
+            interval_start.date() if interval_start is not None else default_start
         )
+
+        end_date = interval_end.date() if interval_end is not None else None
 
         return applovin_max_source(
             start_date=start_date,
