@@ -83,8 +83,8 @@ from ingestr.src.linkedin_ads.dimension_time_enum import (
 )
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
-from ingestr.src.salesforce import salesforce_source
 from ingestr.src.personio import personio_source
+from ingestr.src.salesforce import salesforce_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
@@ -1804,9 +1804,14 @@ class ApplovinMaxSource:
         if api_key is None:
             raise ValueError("api_key is required to connect to AppLovin Max API.")
 
-        application = params.get("application")
-        if application is None:
-            raise ValueError("application is required to connect to AppLovin Max API.")
+        fields = table.split("?")
+        if len(fields) != 2:
+            raise ValueError(
+                "Invalid table format. Expected format: user_ad_revenue?applications=app_id_1,app_id_2"
+            )
+
+        application = fields[1].split("=")[1].split(",")
+        print(application)
 
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
@@ -1833,7 +1838,7 @@ class ApplovinMaxSource:
             start_date=start_date,
             end_date=end_date,
             api_key=api_key[0],
-            application=application[0],
+            application=application,
         ).with_resources(table)
 
 
@@ -1863,6 +1868,7 @@ class SalesforceSource:
             raise UnsupportedResourceError(table, "Salesforce")
 
         return src.with_resources(table)
+
 
 class PersonioSource:
     def handles_incrementality(self) -> bool:
@@ -1902,11 +1908,10 @@ class PersonioSource:
             "custom_reports_list",
         ]:
             raise UnsupportedResourceError(table, "Personio")
-        
+
         return personio_source(
             client_id=client_id[0],
             client_secret=client_secret[0],
             start_date=interval_start_date,
             end_date=interval_end_date,
         ).with_resources(table)
-

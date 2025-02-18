@@ -12,7 +12,7 @@ from pendulum.date import Date
 @dlt.source(max_table_nesting=0)
 def applovin_max_source(
     start_date: str,
-    application: str,
+    application: list[str],
     api_key: str,
     end_date: str | None,
 ) -> DltResource:
@@ -38,13 +38,15 @@ def applovin_max_source(
             end_date = (pendulum.yesterday("UTC")).date()
         else:
             end_date = pendulum.from_format(dateTime.end_value, "YYYY-MM-DD").date()
-        yield get_data(
-            url=url,
-            start_date=start_date,
-            end_date=end_date,
-            application=application,
-            api_key=api_key,
-        )
+
+        for app in application:
+            yield get_data(
+                url=url,
+                start_date=start_date,
+                end_date=end_date,
+                application=app,
+                api_key=api_key,
+            )
 
     return fetch_ad_revenue_report
 
