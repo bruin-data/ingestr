@@ -1,3 +1,4 @@
+from datetime import timedelta
 from typing import Iterator
 
 import dlt
@@ -11,10 +12,10 @@ from pendulum.date import Date
 
 @dlt.source(max_table_nesting=0)
 def applovin_max_source(
-    start_date: str,
+    start_date: Date,
     application: list[str],
     api_key: str,
-    end_date: str | None,
+    end_date: Date | None,
 ) -> DltResource:
     @dlt.resource(
         name="user_ad_revenue",
@@ -33,11 +34,11 @@ def applovin_max_source(
         ),
     ) -> Iterator[dict]:
         url = "https://r.applovin.com/max/userAdRevenueReport"
-        start_date = pendulum.from_format(dateTime.last_value, "YYYY-MM-DD").date()
+        start_date = dateTime.last_value
         if dateTime.end_value is None:
             end_date = (pendulum.yesterday("UTC")).date()
         else:
-            end_date = pendulum.from_format(dateTime.end_value, "YYYY-MM-DD").date()
+            end_date = dateTime.end_value
 
         for app in application:
             yield get_data(
@@ -78,7 +79,7 @@ def get_data(
         for platform in platforms:
             params = {
                 "api_key": api_key,
-                "date": current_date.strftime("%Y-%m-%d"),
+                "date": current_date.isoformat(),
                 "platform": platform,
                 "application": application,
                 "aggregated": "false",
@@ -95,7 +96,7 @@ def get_data(
             response_url = response.json().get("ad_revenue_report_url")
             df = pd.read_csv(response_url)
             df["Date"] = pd.to_datetime(df["Date"])
-            df["partition_date"] = df["Date"].dt.strftime("%Y-%m-%d")
+            df["partition_date"] = df["Date"].dt.date
             yield df
 
-        current_date = current_date.add(days=1)
+        current_date = current_date + timedelta(days=1)
