@@ -17,14 +17,14 @@ def applovin_max_source(
     end_date: str | None,
 ) -> DltResource:
     @dlt.resource(
-        name="ad_revenue",
+        name="user_ad_revenue",
         write_disposition="merge",
-        merge_key="_partition_date",
+        merge_key="partition_date",
     )
     def fetch_ad_revenue_report(
         dateTime=(
             dlt.sources.incremental(
-                "_partition_date",
+                "partition_date",
                 initial_value=start_date,
                 end_value=end_date,
                 range_start="closed",
@@ -93,7 +93,7 @@ def get_data(
             response_url = response.json().get("ad_revenue_report_url")
             df = pd.read_csv(response_url)
             df["Date"] = pd.to_datetime(df["Date"])
-            df["_partition_date"] = df["Date"].dt.strftime("%Y-%m-%d")
+            df["partition_date"] = df["Date"].dt.strftime("%Y-%m-%d")
             yield df
 
         current_date = current_date.add(days=1)
