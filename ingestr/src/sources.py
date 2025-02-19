@@ -15,7 +15,7 @@ from typing import (
     Optional,
     Union,
 )
-from urllib.parse import ParseResult, parse_qs, quote, urlparse
+from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
 
 import dlt
 import gcsfs  # type: ignore
@@ -83,8 +83,8 @@ from ingestr.src.linkedin_ads.dimension_time_enum import (
 )
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
-from ingestr.src.salesforce import salesforce_source
 from ingestr.src.personio import personio_source
+from ingestr.src.salesforce import salesforce_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
@@ -136,10 +136,46 @@ class SqlSource:
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
+        # clickhouse://<username>:<password>@<host>:<port>?secure=<secure>
         if uri.startswith("clickhouse://"):
-            uri = uri.replace("clickhouse://", "clickhouse+native://")
-            if "secure=" not in uri:
-                uri += "?secure=1"
+            parsed_uri = urlparse(uri)
+
+            username = parsed_uri.username
+            if not username:
+                raise ValueError(
+                    "A username is required to connect to the ClickHouse database."
+                )
+
+            password = parsed_uri.password
+            if not password:
+                raise ValueError(
+                    "A password is required to authenticate with the ClickHouse database."
+                )
+
+            host = parsed_uri.hostname
+            if not host:
+                raise ValueError(
+                    "The hostname or IP address of the ClickHouse server is required to establish a connection."
+                )
+
+            port = parsed_uri.port
+            if not port:
+                raise ValueError(
+                    "The TCP port of the ClickHouse server is required to establish a connection."
+                )
+
+            query_params = parse_qs(parsed_uri.query)
+
+            if "http_port" in query_params:
+                del query_params["http_port"]
+
+            if "secure" not in query_params:
+                query_params["secure"] = ["1"]
+
+            uri = parsed_uri._replace(
+                scheme="clickhouse+native",
+                query=urlencode(query_params, doseq=True),
+            ).geturl()
 
         query_adapters = []
         if kwargs.get("sql_limit"):
@@ -1864,6 +1900,7 @@ class SalesforceSource:
 
         return src.with_resources(table)
 
+
 class PersonioSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -1902,11 +1939,10 @@ class PersonioSource:
             "custom_reports_list",
         ]:
             raise UnsupportedResourceError(table, "Personio")
-        
+
         return personio_source(
             client_id=client_id[0],
             client_secret=client_secret[0],
             start_date=interval_start_date,
             end_date=interval_end_date,
         ).with_resources(table)
-
