@@ -1815,9 +1815,8 @@ class ApplovinMaxSource:
                 "Invalid table format. Expected format is user_ad_revenue:app_id_1,app_id_2"
             )
         table = table_fields[0]
-        applications = table_fields[1].replace(" ", "").split(",")
-
-        applications = [i for i in applications if i.strip()]
+        
+        applications = [i for i in table_fields[1].replace(" ", "").split(",") if i.strip()]
         if len(applications) == 0:
             raise ValueError(
                 "At least one application id is required"
