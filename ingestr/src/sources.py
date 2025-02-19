@@ -1817,11 +1817,11 @@ class ApplovinMaxSource:
         table = table_fields[0]
         applications = table_fields[1].replace(" ", "").split(",")
 
-        if len(applications) == 0:
+        if applications == [""]:
             raise ValueError(
                 "At least one application id is required"
             )
-       
+    
         if len(applications) != len(set(applications)):
             raise ValueError(
                 "Application ids must be unique."
