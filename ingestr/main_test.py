@@ -201,7 +201,7 @@ def test_create_replace_csv_to_duckdb():
         reader = csv.reader(f, delimiter=",", quotechar='"')
         next(reader, None)
         for row in reader:
-            actual_rows.append(row)
+            actual_rows.append([None if v.strip() == "" else v for v in row])
 
     # compare the CSV file with the DuckDB table
     assert len(res) == len(actual_rows)
