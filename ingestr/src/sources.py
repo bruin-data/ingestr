@@ -402,6 +402,7 @@ class LocalCsvSource:
                         if inc_value < incremental.start_value:
                             continue
 
+                    dictionary = self.remove_empty_columns(dictionary)
                     page.append(dictionary)
                     current_items += 1
                 else:
@@ -424,6 +425,9 @@ class LocalCsvSource:
                 range_start="closed",
             )
         )
+
+    def remove_empty_columns(self, row: Dict[str, str]) -> Dict[str, str]:
+        return {k: v for k, v in row.items() if v.strip() != ""}
 
 
 class NotionSource:
