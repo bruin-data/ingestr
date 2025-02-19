@@ -1803,24 +1803,32 @@ class ApplovinMaxSource:
         api_key = params.get("api_key")
         if api_key is None:
             raise ValueError("api_key is required to connect to AppLovin Max API.")
-
-        fields = table.split("?")
-        if len(fields) != 2:
-            raise ValueError(
-                "Invalid table format. Expected format: user_ad_revenue?applications=app_id_1,app_id_2"
-            )
-
-        application = fields[1].split("=")[1].split(",")
-
-        interval_start = kwargs.get("interval_start")
-        interval_end = kwargs.get("interval_end")
-
-        if "user_ad_revenue" in table:
-            table = "user_ad_revenue"
-        else:
+        
+        if "user_ad_revenue" not in table:
             raise ValueError(
                 f"Table name '{table}' is not supported for AppLovin Max source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
+
+        table_fields = table.split(":")
+        if len(table_fields) != 2:
+            raise ValueError(
+                "Invalid table format. Expected format is user_ad_revenue:app_id_1,app_id_2"
+            )
+        table = table_fields[0]
+        applications = table_fields[1].replace(" ", "").split(",")
+
+        if len(applications) == 0:
+            raise ValueError(
+                "At least one application id is required"
+            )
+       
+        if len(applications) != len(set(applications)):
+            raise ValueError(
+                "Application ids must be unique."
+            )
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
 
         now = pendulum.now("UTC")
         default_start = now.subtract(days=30).date()
@@ -1835,7 +1843,7 @@ class ApplovinMaxSource:
             start_date=start_date,
             end_date=end_date,
             api_key=api_key[0],
-            application=application,
+            applications=applications,
         ).with_resources(table)
 
 

@@ -13,7 +13,7 @@ from pendulum.date import Date
 @dlt.source(max_table_nesting=0)
 def applovin_max_source(
     start_date: Date,
-    application: list[str],
+    applications: list[str],
     api_key: str,
     end_date: Date | None,
 ) -> DltResource:
@@ -44,7 +44,7 @@ def applovin_max_source(
         else:
             end_date = dateTime.end_value
 
-        for app in application:
+        for app in applications:
             yield get_data(
                 url=url,
                 start_date=start_date,
