@@ -1807,7 +1807,7 @@ class ApplovinMaxSource:
         if api_key is None:
             raise ValueError("api_key is required to connect to AppLovin Max API.")
         
-        TABLE_NAME = ["user_ad_revenue"]
+        AVAILABLE_TABLES = ["user_ad_revenue"]
 
         table_fields = table.split(":")
         requested_table = table_fields[0]
@@ -1817,10 +1817,10 @@ class ApplovinMaxSource:
                 "Invalid table format. Expected format is user_ad_revenue:app_id_1,app_id_2"
             )
         
-        if requested_table not in TABLE_NAME:
+        if requested_table not in AVAILABLE_TABLES:
             raise ValueError(
                 f"Table name '{requested_table}' is not supported for AppLovin Max source yet."
-                f"Only '{TABLE_NAME}' is currently supported. "
+                f"Only '{AVAILABLE_TABLES}' are currently supported. "
                 "If you need additional tables, please create a GitHub issue at "
                 "https://github.com/bruin-data/ingestr"
             )
