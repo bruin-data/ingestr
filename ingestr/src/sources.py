@@ -1793,6 +1793,9 @@ class AppLovinSource:
 
 
 class ApplovinMaxSource:
+    #expected uri format: applovinmax://?api_key=<api_key>
+    #expected table format: user_ad_revenue:app_id_1,app_id_2
+
     def handles_incrementality(self) -> bool:
         return True
 
@@ -1804,17 +1807,23 @@ class ApplovinMaxSource:
         if api_key is None:
             raise ValueError("api_key is required to connect to AppLovin Max API.")
         
-        if "user_ad_revenue" not in table:
-            raise ValueError(
-                f"Table name '{table}' is not supported for AppLovin Max source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
-            )
+        TABLE_NAME = ["user_ad_revenue"]
 
         table_fields = table.split(":")
+        requested_table = table_fields[0]
+
         if len(table_fields) != 2:
             raise ValueError(
                 "Invalid table format. Expected format is user_ad_revenue:app_id_1,app_id_2"
             )
-        table = table_fields[0]
+        
+        if requested_table not in TABLE_NAME:
+            raise ValueError(
+                f"Table name '{requested_table}' is not supported for AppLovin Max source yet."
+                f"Only '{TABLE_NAME}' is currently supported. "
+                "If you need additional tables, please create a GitHub issue at "
+                "https://github.com/bruin-data/ingestr"
+            )
         
         applications = [i for i in table_fields[1].replace(" ", "").split(",") if i.strip()]
         if len(applications) == 0:
@@ -1844,7 +1853,7 @@ class ApplovinMaxSource:
             end_date=end_date,
             api_key=api_key[0],
             applications=applications,
-        ).with_resources(table)
+        ).with_resources(requested_table)
 
 
 class SalesforceSource:
