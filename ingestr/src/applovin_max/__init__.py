@@ -44,14 +44,24 @@ def applovin_max_source(
         else:
             end_date = dateTime.end_value
 
+        client = create_client()
+        current_date = start_date
+        platforms = ["ios", "android", "fireos"]
+
         for app in applications:
-            yield get_data(
-                url=url,
-                start_date=start_date,
-                end_date=end_date,
-                application=app,
-                api_key=api_key,
-            )
+            while current_date <= end_date:
+                for platform in platforms:
+                    df = get_data(
+                        url=url,
+                        current_date=current_date,
+                        application=app,
+                        api_key=api_key,
+                        client=client,
+                        platform=platform,
+                    )
+                    if df is not None:
+                        yield df
+                current_date = current_date + timedelta(days=1)
 
     return fetch_ad_revenue_report
 
@@ -74,33 +84,31 @@ def retry_on_limit(
 
 
 def get_data(
-    url: str, start_date: Date, end_date: Date, application: str, api_key: str
+    url: str,
+    current_date: Date,
+    application: str,
+    api_key: str,
+    platform: str,
+    client: requests.Session,
 ):
-    client = create_client()
-    platforms = ["ios", "android", "fireos"]
-    current_date = start_date
-    while current_date <= end_date:
-        for platform in platforms:
-            params = {
-                "api_key": api_key,
-                "date": current_date.isoformat(),
-                "platform": platform,
-                "application": application,
-                "aggregated": "false",
-            }
+    params = {
+        "api_key": api_key,
+        "date": current_date.isoformat(),
+        "platform": platform,
+        "application": application,
+        "aggregated": "false",
+    }
 
-            response = client.get(url=url, params=params)
+    response = client.get(url=url, params=params)
 
-            if response.status_code == 400:
-                raise ValueError(response.text)
+    if response.status_code == 400:
+        raise ValueError(response.text)
 
-            if response.status_code != 200:
-                continue
+    if response.status_code != 200:
+        return None
 
-            response_url = response.json().get("ad_revenue_report_url")
-            df = pd.read_csv(response_url)
-            df["Date"] = pd.to_datetime(df["Date"])
-            df["partition_date"] = df["Date"].dt.date
-            yield df
-
-        current_date = current_date + timedelta(days=1)
+    response_url = response.json().get("ad_revenue_report_url")
+    df = pd.read_csv(response_url)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df["partition_date"] = df["Date"].dt.date
+    return df
