@@ -34,12 +34,8 @@ stripe==10.7.0
 tqdm==4.67.1
 typer==0.13.1
 types-requests==2.32.0.20240907
-s3fs==2024.10.0
-pyarrow==18.1.0
 google-analytics-data==0.18.17
-asana==3.2.3
 flatten_json==0.1.14
-dataclasses-json==0.6.7
 gcsfs==2024.10.0
 clickhouse-connect==0.8.14
 clickhouse-driver==0.2.9
