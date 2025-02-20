@@ -6,12 +6,29 @@
 ## URI Format
 The URI format for Applovin Max is as follows:
 ```
-applovinmax://?api_key=<your_api_key>&application=<application_name>
+applovinmax://?api_key=<your_api_key>
 ```
 
 URI Parameters:
 - `api_key`: It is the `report key` which is used for authenticating the request.
-- `application`: The application package name (for Android and Fire OS) or bundle ID (for iOS).
+
+## Source Table Format
+The source table format should be specified as:
+```
+<table_name>:<application_ids>
+```
+
+Example:
+```
+user_ad_revenue:com.example.app1
+```
+
+For multiple applications, specify multiple source tables:
+```
+user_ad_revenue:com.example.app1,com.example.app2
+```
+
+- `application_id` should be the application package name (for Android and Fire OS) or bundle ID (for iOS).
 
 ## Setting up Applovin Integration
 
@@ -23,8 +40,8 @@ To retrieve `ad revenue` data for an application `com.example.app` with api key 
 
 ```sh
 ingestr ingest \
-    --source-uri "applovinmax://?api_key=key_123&application=com.example.app" \
-    --source-table "ad_revenue" \
+    --source-uri "applovinmax://?api_key=key_123" \
+    --source-table "ad_revenue:com.example.app" \
     --dest-uri "duckdb:///applovin_max.db"  \
     --dest-table "dest.ad_revenue"
 ```
@@ -33,4 +50,4 @@ By default, `ingestr` retrieves data for the last 30 days. For a custom date ran
 <img alt="applovin_max_img" src="../media/applovin_max.png"/>
 
 ## Table
-[ad_revenue](https://developers.applovin.com/en/max/reporting-apis/user-level-ad-revenue-api/): Provides daily metrics from the user-level ad revenue API.User-level revenue data is available eight hours after UTC day end. So, for example, data for UTC 2025-01-01 is available on UTC 2025-01-02 after 08:00.
+[user_ad_revenue](https://developers.applovin.com/en/max/reporting-apis/user-level-ad-revenue-api/): Provides daily metrics from the user level ad revenue API.User-level revenue data is available eight hours after UTC day end. So, for example, data for UTC 2025-01-01 is available on UTC 2025-01-02 after 08:00.
