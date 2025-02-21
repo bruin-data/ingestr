@@ -20,11 +20,6 @@ The source table format should be specified as:
 
 Example:
 ```
-user_ad_revenue:com.example.app1
-```
-
-For multiple applications, specify multiple source tables:
-```
 user_ad_revenue:com.example.app1,com.example.app2
 ```
 
@@ -36,12 +31,12 @@ user_ad_revenue:com.example.app1,com.example.app2
 You can generate a report key from your [AppLovin dashboard](https://developers.applovin.com/en/max/max-dashboard/account/account-info/#keys).
 
 ### Example:
-To retrieve `ad revenue` data for an application `com.example.app` with api key `key_123`, and to store it in a DuckDB database, use the following command:
+To retrieve `user ad revenue` data for an application `com.example.app` with api key `key_123`, and to store it in a DuckDB database, use the following command:
 
 ```sh
 ingestr ingest \
     --source-uri "applovinmax://?api_key=key_123" \
-    --source-table "ad_revenue:com.example.app" \
+    --source-table "user_ad_revenue:com.example.app" \
     --dest-uri "duckdb:///applovin_max.db"  \
     --dest-table "dest.ad_revenue"
 ```
