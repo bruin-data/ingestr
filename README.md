@@ -164,6 +164,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Amazon Kinesis</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Apache Kafka</td>
         <td>✅</td>
         <td>-</td>
