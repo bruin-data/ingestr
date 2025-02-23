@@ -1,11 +1,12 @@
 """Reads messages from Kinesis queue."""
-from typing import Any, Dict, Iterable, List, Optional
+
+from typing import Iterable, List, Optional
 
 import dlt
 from dlt.common import json, pendulum
 from dlt.common.configuration.specs import AwsCredentials
 from dlt.common.time import ensure_pendulum_datetime
-from dlt.common.typing import TDataItem, StrStr, TAnyDateTime
+from dlt.common.typing import StrStr, TAnyDateTime, TDataItem
 from dlt.common.utils import digest128
 
 from .helpers import get_shard_iterator, max_sequence_by_shard
@@ -23,7 +24,7 @@ def kinesis_stream(
         "kinesis", last_value_func=max_sequence_by_shard
     ),
     initial_at_timestamp: TAnyDateTime = 0.0,
-    max_number_of_messages: int = None,
+    max_number_of_messages: int = None,  # type: ignore
     milliseconds_behind_latest: int = 1000,
     parse_json: bool = True,
     chunk_size: int = 1000,
@@ -74,7 +75,11 @@ def kinesis_stream(
     # get next shard to fetch messages from
     while shard_id := shard_ids.pop(0) if shard_ids else None:
         shard_iterator, _ = get_shard_iterator(
-            kinesis_client, stream_name, shard_id, last_msg, initial_at_datetime
+            kinesis_client,
+            stream_name,
+            shard_id,
+            last_msg,  # type: ignore
+            initial_at_datetime,  # type: ignore
         )
         # fetch messages from shard iterator or exit loop if not present
         while shard_iterator:
@@ -124,7 +129,7 @@ def kinesis_stream(
             records_ms_behind_latest = records_response.get("MillisBehindLatest", 0)
             if records_ms_behind_latest < milliseconds_behind_latest:
                 # stop taking messages from shard
-                shard_iterator = None
+                shard_iterator = None  # type: ignore
             else:
                 # continue taking messages
                 shard_iterator = records_response["NextShardIterator"]

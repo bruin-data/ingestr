@@ -36,6 +36,7 @@ from ingestr.src.sources import (
     GorgiasSource,
     HubspotSource,
     KafkaSource,
+    KinesisSource,
     KlaviyoSource,
     LinkedInAdsSource,
     LocalCsvSource,
@@ -50,7 +51,6 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
-    KinesisSource,
 )
 
 SQL_SOURCE_SCHEMES = [
