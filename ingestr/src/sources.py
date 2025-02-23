@@ -102,6 +102,7 @@ from ingestr.src.zendesk.helpers.credentials import (
     ZendeskCredentialsOAuth,
     ZendeskCredentialsToken,
 )
+from ingestr.src.kinesis import kinesis_stream
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1950,3 +1951,28 @@ class PersonioSource:
             start_date=interval_start_date,
             end_date=interval_end_date,
         ).with_resources(table)
+    
+class KinesisSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        # kinesis://?aws_access_key_id=<AccessKeyId>&aws_secret_access_key=<SecretAccessKey>&region_name=<Region>
+        #source table = stream name
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        aws_access_key_id = params.get("aws_access_key_id")
+        if aws_access_key_id is None:
+            raise MissingValueError("aws_access_key_id", "Kinesis")
+        
+        aws_secret_access_key = params.get("aws_secret_access_key")
+        if aws_secret_access_key is None:
+            raise MissingValueError("aws_secret_access_key", "Kinesis")
+        
+        region_name = params.get("region_name") 
+        if region_name is None:
+            raise MissingValueError("region_name", "Kinesis")
+        
+        credentials = AwsCredentials(aws_access_key_id=aws_access_key_id[0], aws_secret_access_key=aws_secret_access_key[0], region_name=region_name[0])
+        return kinesis_stream(stream_name=table, credentials=credentials)
