@@ -18,12 +18,12 @@ from .helpers import get_shard_iterator, max_sequence_by_shard
     standalone=True,
 )
 def kinesis_stream(
-    stream_name: str = dlt.config.value,
-    credentials: AwsCredentials = dlt.secrets.value,
+    initial_at_timestamp: TAnyDateTime,
+    stream_name: str,
+    credentials: AwsCredentials,
     last_msg: Optional[dlt.sources.incremental[StrStr]] = dlt.sources.incremental(
         "kinesis", last_value_func=max_sequence_by_shard
     ),
-    initial_at_timestamp: TAnyDateTime = 0.0,
     max_number_of_messages: int = None,  # type: ignore
     milliseconds_behind_latest: int = 1000,
     parse_json: bool = True,
@@ -92,18 +92,21 @@ def kinesis_stream(
                 sequence_number = record["SequenceNumber"]
                 content = record["Data"]
 
+                arrival_time = record["ApproximateArrivalTimestamp"]
+                timestamp_str = arrival_time.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
+                arrival_timestamp = pendulum.parse(timestamp_str)
+
                 message = {
                     "kinesis": {
                         "shard_id": shard_id,
                         "seq_no": sequence_number,
-                        "ts": ensure_pendulum_datetime(
-                            record["ApproximateArrivalTimestamp"]
-                        ),
+                        "ts": arrival_timestamp,
                         "partition": record["PartitionKey"],
                         "stream_name": stream_name,
                     },
                     "kinesis_msg_id": digest128(shard_id + sequence_number),
                 }
+                print(message)
                 if parse_json:
                     message.update(json.loadb(content))
                 else:

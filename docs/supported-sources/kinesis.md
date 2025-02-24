@@ -31,6 +31,13 @@ ingestr ingest --source-uri 'kinesis://?aws_access_key_id=id_123&aws_secret_acce
 
 When using Kinesis as a source, specify the `stream name` you want to read from as the `--source-table` parameter. For example, if you want to read from a Kinesis stream named "customer_events", you would use `--source-table 'customer_events'`.
 
+If initial_at_timestamp is present, the resource will read all messages after this timestamp.
+If initial_at_timestamp is 0, only the messages at the tip of the stream are read.
+If no initial timestamp is provided, all messages will be retrieved (from the TRIM HORIZON).
+he resource stores all message sequences per shard in the state. If you run the resource again, it will load messages incrementally:
+The resource stores all message sequences per shard in the state. If you run the resource again, it will load messages incrementally:
 
 
+For all shards that had messages, only messages after the last message are retrieved.
+For shards that didn't have messages (or new shards), the last run time is used to get messages
 

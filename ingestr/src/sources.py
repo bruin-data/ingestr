@@ -1975,9 +1975,19 @@ class KinesisSource:
         if region_name is None:
             raise MissingValueError("region_name", "Kinesis")
 
+        start_date = kwargs.get("interval_start")
+        if start_date is not None:
+            # the resource will read all messages after this timestamp.
+            start_date = ensure_pendulum_datetime(start_date)
+        else:
+            #will sets to latest i.e only the messages at the tip of the stream are read
+            start_date = 0.0
+
         credentials = AwsCredentials(
             aws_access_key_id=aws_access_key_id[0],
             aws_secret_access_key=aws_secret_access_key[0],
             region_name=region_name[0],
         )
-        return kinesis_stream(stream_name=table, credentials=credentials)
+        return kinesis_stream(
+            stream_name=table, credentials=credentials, initial_at_timestamp=start_date
+        )
