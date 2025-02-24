@@ -74,6 +74,9 @@ def kinesis_stream(
 
     # get next shard to fetch messages from
     while shard_id := shard_ids.pop(0) if shard_ids else None:
+
+        #print logs and record count are used to check incremntal loading
+        #print(f"Last saved state: {last_msg.last_value if last_msg else 'None'}") 
         shard_iterator, _ = get_shard_iterator(
             kinesis_client,
             stream_name,
@@ -82,12 +85,15 @@ def kinesis_stream(
             initial_at_datetime,  # type: ignore
         )
         # fetch messages from shard iterator or exit loop if not present
+        #record_count = 0
         while shard_iterator:
             records = []
             records_response = kinesis_client.get_records(
                 ShardIterator=shard_iterator,
                 Limit=chunk_size,  # The size of data can be up to 1 MB, it must be controlled by the user
             )
+            #record_count += len(records_response["Records"])
+           # print(f"Records fetched: {record_count}")
             for record in records_response["Records"]:
                 sequence_number = record["SequenceNumber"]
                 content = record["Data"]
@@ -106,7 +112,7 @@ def kinesis_stream(
                     },
                     "kinesis_msg_id": digest128(shard_id + sequence_number),
                 }
-                print(message)
+                
                 if parse_json:
                     message.update(json.loadb(content))
                 else:
