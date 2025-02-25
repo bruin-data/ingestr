@@ -10,7 +10,7 @@ def get_shard_iterator(
     stream_name: str,
     shard_id: str,
     last_msg: dlt.sources.incremental[StrStr],
-    initial_at_timestamp: pendulum.DateTime,
+    initial_at_timestamp: pendulum.DateTime | None,
 ) -> Tuple[str, StrAny]:
     """Gets shard `shard_id` of `stream_name` iterator. If `last_msg` incremental is present it may
     contain last message sequence for shard_id. in that case AFTER_SEQUENCE_NUMBER is created.
@@ -30,7 +30,9 @@ def get_shard_iterator(
     elif initial_at_timestamp is None:
         # Fetch all records from the beginning
         iterator_params = dict(ShardIteratorType="TRIM_HORIZON")
+
     elif initial_at_timestamp.timestamp() == 0.0:
+        #will sets to latest i.e only the messages at the tip of the stream are read
         iterator_params = dict(ShardIteratorType="LATEST")
     else:
         iterator_params = dict(

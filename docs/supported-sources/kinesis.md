@@ -16,6 +16,12 @@ URI parameters:
 - `aws_access_key_id`: the AWS access key ID used to authenticate the request
 - `aws_secret_access_key`: the AWS secret access key used to authenticate the request
 - `region_name`: the AWS region name where the stream is located
+- `starting_position`: the starting position of the stream to read from. Can be one of `latest`, `timestamp` and if not provided it will be `trim_horizon`.
+
+Note:
+- By default, will read all messages from beginning of the stream i.e Trim Horizon.
+- To read all messages after a specific timestamp, use the starting_position as `timestamp` and provide the `interval_start` flag.
+- To read all messages from the tip of the stream, use the starting_position as `latest`.
 
 ## Setting up a Kinesis Integration
 To get Kinesis credentials, please refer to the guide [here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/amazon_kinesis#grab-credentials)
@@ -33,5 +39,13 @@ When using Kinesis as a source, specify the `stream name` you want to read from 
 
 
 > [!NOTE]
-> By default, the resource will read messages from the tip of the stream i,e LATEST.
-> To read all messages after a specific timestamp, use the `interval-start` flag.
+> if start_position == "latest":
+            start_position = 0.0
+        elif start_position == "timestamp":
+            start_date = kwargs.get("interval_start")
+            if start_date is None:
+                raise ValueError("interval_start is required when start_position is 'at_timestamp'")
+            start_position = ensure_pendulum_datetime(start_date)
+        elif start_position is None:
+            #all messages will be retrieved (from the TRIM HORIZON)
+            start_position = None

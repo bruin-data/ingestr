@@ -1975,19 +1975,25 @@ class KinesisSource:
         if region_name is None:
             raise MissingValueError("region_name", "Kinesis")
 
-        start_date = kwargs.get("interval_start")
-        if start_date is not None:
-            # the resource will read all messages after this timestamp.
-            start_date = ensure_pendulum_datetime(start_date)
+        start_position = params.get("starting_position")[0]
+        if start_position == "latest":
+            start_position = 0.0
+        elif start_position == "timestamp":
+            start_date = kwargs.get("interval_start")
+            if start_date is None:
+                raise ValueError("interval_start is required when start_position is 'at_timestamp'")
+            start_position = ensure_pendulum_datetime(start_date)
+        elif start_position is None:
+            #all messages will be retrieved (from the TRIM HORIZON)
+            start_position = None
         else:
-            #will sets to latest i.e only the messages at the tip of the stream are read
-            start_date = 0.0
-
+            raise ValueError(f"Invalid starting position: Start position should be one of 'latest', 'timestamp' or if not provided it will be 'trim horizon'")
+        
         credentials = AwsCredentials(
             aws_access_key_id=aws_access_key_id[0],
             aws_secret_access_key=aws_secret_access_key[0],
             region_name=region_name[0],
         )
         return kinesis_stream(
-            stream_name=table, credentials=credentials, initial_at_timestamp=start_date
+            stream_name=table, credentials=credentials, initial_at_timestamp=start_position
         )
