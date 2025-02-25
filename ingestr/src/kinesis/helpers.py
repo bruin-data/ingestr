@@ -32,7 +32,7 @@ def get_shard_iterator(
         iterator_params = dict(ShardIteratorType="TRIM_HORIZON")
 
     elif initial_at_timestamp.timestamp() == 0.0:
-        #will sets to latest i.e only the messages at the tip of the stream are read
+        # will sets to latest i.e only the messages at the tip of the stream are read
         iterator_params = dict(ShardIteratorType="LATEST")
     else:
         iterator_params = dict(
