@@ -62,7 +62,7 @@ def kinesis_stream(
         "initial_at_timestamp", initial_at_datetime
     )
     # so next time we request shards at AT_TIMESTAMP that is now
-    resource_state["initial_at_timestamp"] = pendulum.now().subtract(seconds=1)
+    resource_state["initial_at_timestamp"] = pendulum.now("UTC").subtract(seconds=1)
 
     shards_list = kinesis_client.list_shards(StreamName=stream_name)
     shards: List[StrStr] = shards_list["Shards"]
@@ -74,8 +74,7 @@ def kinesis_stream(
 
     # get next shard to fetch messages from
     while shard_id := shard_ids.pop(0) if shard_ids else None:
-        # print logs and record count are used to check incremntal loading
-        # print(f"Last saved state: {last_msg.last_value if last_msg else 'None'}")
+     
         shard_iterator, _ = get_shard_iterator(
             kinesis_client,
             stream_name,
@@ -83,17 +82,14 @@ def kinesis_stream(
             last_msg,  # type: ignore
             initial_at_datetime,  # type: ignore
         )
-        # fetch messages from shard iterator or exit loop if not present
-        # record_count = 0
+       
         while shard_iterator:
             records = []
             records_response = kinesis_client.get_records(
                 ShardIterator=shard_iterator,
                 Limit=chunk_size,  # The size of data can be up to 1 MB, it must be controlled by the user
             )
-            # record_count += len(records_response["Records"])
-            # print(f"Records fetched: {record_count}")
-
+            
             for record in records_response["Records"]:
                 sequence_number = record["SequenceNumber"]
                 content = record["Data"]

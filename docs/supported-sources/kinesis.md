@@ -34,6 +34,6 @@ ingestr ingest --source-uri 'kinesis://?aws_access_key_id=id_123&aws_secret_acce
 When using Kinesis as a source, specify the `stream name` you want to read from as the `--source-table` parameter. For example, if you want to read from a Kinesis stream named "customer_events", you would use `--source-table 'customer_events'`.
 
 ### Initial Load Configuration
-By default, Ingestr reads from the beginning of the Kinesis stream. To start reading from a specific time, use the `interval_start` parameter.
+By default, ingestr reads from the beginning of the Kinesis stream. To start reading from a specific time, use the `interval_start` parameter.
 
 

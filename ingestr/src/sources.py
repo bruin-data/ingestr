@@ -1979,9 +1979,6 @@ class KinesisSource:
         if start_date is not None:
             # the resource will read all messages after this timestamp.
             start_date = ensure_pendulum_datetime(start_date)
-        else:
-            start_date = None
-
         credentials = AwsCredentials(
             aws_access_key_id=aws_access_key_id[0],
             aws_secret_access_key=aws_secret_access_key[0],
