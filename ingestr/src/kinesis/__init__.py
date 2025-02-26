@@ -28,7 +28,6 @@ def kinesis_stream(
     milliseconds_behind_latest: int = 1000,
     parse_json: bool = True,
     chunk_size: int = 1000,
-    
 ) -> Iterable[TDataItem]:
     """Reads a kinesis stream and yields messages. Supports incremental loading. Parses messages as json by default.
 
@@ -62,15 +61,12 @@ def kinesis_stream(
     initial_at_datetime = resource_state.get(
         "initial_at_timestamp", initial_at_datetime
     )
-    print(f"Initial at timestamp: {initial_at_datetime}")
     # so next time we request shards at AT_TIMESTAMP that is now
     resource_state["initial_at_timestamp"] = pendulum.now().subtract(seconds=1)
 
-    print(resource_state["initial_at_timestamp"])
     shards_list = kinesis_client.list_shards(StreamName=stream_name)
     shards: List[StrStr] = shards_list["Shards"]
     while next_token := shards_list.get("NextToken"):
-        print(f"Next token: {next_token}")
         shards_list = kinesis_client.list_shards(NextToken=next_token)
         shards.extend(shards_list)
 
@@ -80,7 +76,6 @@ def kinesis_stream(
     while shard_id := shard_ids.pop(0) if shard_ids else None:
         # print logs and record count are used to check incremntal loading
         # print(f"Last saved state: {last_msg.last_value if last_msg else 'None'}")
-        print(f"Shard id: {shard_id}")
         shard_iterator, _ = get_shard_iterator(
             kinesis_client,
             stream_name,
@@ -88,7 +83,6 @@ def kinesis_stream(
             last_msg,  # type: ignore
             initial_at_datetime,  # type: ignore
         )
-        print(f"Shard iterator: {shard_iterator}")
         # fetch messages from shard iterator or exit loop if not present
         # record_count = 0
         while shard_iterator:
@@ -99,19 +93,19 @@ def kinesis_stream(
             )
             # record_count += len(records_response["Records"])
             # print(f"Records fetched: {record_count}")
+
             for record in records_response["Records"]:
                 sequence_number = record["SequenceNumber"]
                 content = record["Data"]
-                
+
                 arrival_time = record["ApproximateArrivalTimestamp"]
-                timestamp_str = arrival_time.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
-                arrival_timestamp = pendulum.parse(timestamp_str)
+                arrival_timestamp = arrival_time.astimezone(pendulum.UTC)
 
                 message = {
                     "kinesis": {
                         "shard_id": shard_id,
                         "seq_no": sequence_number,
-                        "ts": arrival_timestamp,
+                        "ts": ensure_pendulum_datetime(arrival_timestamp),
                         "partition": record["PartitionKey"],
                         "stream_name": stream_name,
                     },
