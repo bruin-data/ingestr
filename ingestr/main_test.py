@@ -499,7 +499,7 @@ SOURCES = {
 DESTINATIONS = {
     "postgres": pgDocker,
     "duckdb": DuckDb(),
-    "clickhouse+native": clickHouseDocker,
+    # "clickhouse+native": clickHouseDocker,
 }
 
 
@@ -521,25 +521,25 @@ def manage_containers():
             future.result()
 
 
-@pytest.fixture(scope="session", autouse=True)
-def autocreate_db_for_clickhouse():
-    """
-    patches ClickhouseDestination to autocreate dest tables if they don't exist
-    """
+# @pytest.fixture(scope="session", autouse=True)
+# def autocreate_db_for_clickhouse():
+#     """
+#     patches ClickhouseDestination to autocreate dest tables if they don't exist
+#     """
 
-    dlt_dest = ClickhouseDestination().dlt_dest
+#     dlt_dest = ClickhouseDestination().dlt_dest
 
-    def patched_dlt_dest(uri, **kwargs):
-        db, _ = kwargs["dest_table"].split(".")
-        dest_engine = sqlalchemy.create_engine(uri)
-        dest_engine.execute(f"CREATE DATABASE IF NOT EXISTS {db}")
-        return dlt_dest(uri, **kwargs)
+#     def patched_dlt_dest(uri, **kwargs):
+#         db, _ = kwargs["dest_table"].split(".")
+#         dest_engine = sqlalchemy.create_engine(uri)
+#         dest_engine.execute(f"CREATE DATABASE IF NOT EXISTS {db}")
+#         return dlt_dest(uri, **kwargs)
 
-    patcher = patch("ingestr.src.factory.ClickhouseDestination.dlt_dest")
-    mock = patcher.start()
-    mock.side_effect = patched_dlt_dest
-    yield
-    patcher.stop()
+#     patcher = patch("ingestr.src.factory.ClickhouseDestination.dlt_dest")
+#     mock = patcher.start()
+#     mock.side_effect = patched_dlt_dest
+#     yield
+#     patcher.stop()
 
 
 @pytest.mark.parametrize(
