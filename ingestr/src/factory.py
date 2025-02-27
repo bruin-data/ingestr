@@ -6,7 +6,6 @@ from dlt.common.destination import Destination
 from ingestr.src.destinations import (
     AthenaDestination,
     BigQueryDestination,
-    ClickhouseDestination,
     CsvDestination,
     DatabricksDestination,
     DuckDBDestination,
@@ -69,7 +68,7 @@ SQL_SOURCE_SCHEMES = [
     "oracle",
     "oracle+cx_oracle",
     "hana",
-    "clickhouse",
+    # "clickhouse",
     "databricks",
 ]
 
@@ -157,8 +156,8 @@ class SourceDestinationFactory:
         "synapse": SynapseDestination,
         "csv": CsvDestination,
         "athena": AthenaDestination,
-        "clickhouse+native": ClickhouseDestination,
-        "clickhouse": ClickhouseDestination,
+        # "clickhouse+native": ClickhouseDestination,
+        # "clickhouse": ClickhouseDestination,
     }
 
     def __init__(self, source_uri: str, destination_uri: str):
