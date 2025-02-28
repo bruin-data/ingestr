@@ -75,6 +75,7 @@ from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
 from ingestr.src.kafka import kafka_consumer
 from ingestr.src.kafka.helpers import KafkaCredentials
+from ingestr.src.kinesis import kinesis_stream
 from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.linkedin_ads import linked_in_ads_source
 from ingestr.src.linkedin_ads.dimension_time_enum import (
@@ -1969,3 +1970,39 @@ class PersonioSource:
             start_date=interval_start_date,
             end_date=interval_end_date,
         ).with_resources(table)
+
+
+class KinesisSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        # kinesis://?aws_access_key_id=<AccessKeyId>&aws_secret_access_key=<SecretAccessKey>&region_name=<Region>
+        # source table = stream name
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        aws_access_key_id = params.get("aws_access_key_id")
+        if aws_access_key_id is None:
+            raise MissingValueError("aws_access_key_id", "Kinesis")
+
+        aws_secret_access_key = params.get("aws_secret_access_key")
+        if aws_secret_access_key is None:
+            raise MissingValueError("aws_secret_access_key", "Kinesis")
+
+        region_name = params.get("region_name")
+        if region_name is None:
+            raise MissingValueError("region_name", "Kinesis")
+
+        start_date = kwargs.get("interval_start")
+        if start_date is not None:
+            # the resource will read all messages after this timestamp.
+            start_date = ensure_pendulum_datetime(start_date)
+        credentials = AwsCredentials(
+            aws_access_key_id=aws_access_key_id[0],
+            aws_secret_access_key=aws_secret_access_key[0],
+            region_name=region_name[0],
+        )
+        return kinesis_stream(
+            stream_name=table, credentials=credentials, initial_at_timestamp=start_date
+        )

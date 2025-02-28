@@ -36,6 +36,7 @@ from ingestr.src.sources import (
     GorgiasSource,
     HubspotSource,
     KafkaSource,
+    KinesisSource,
     KlaviyoSource,
     LinkedInAdsSource,
     LocalCsvSource,
@@ -141,6 +142,7 @@ class SourceDestinationFactory:
         "applovinmax": ApplovinMaxSource,
         "salesforce": SalesforceSource,
         "personio": PersonioSource,
+        "kinesis": KinesisSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

@@ -95,6 +95,7 @@ export default defineConfig({
             items: [
               { text: "Adjust", link: "/supported-sources/adjust.md" },
               { text: "Airtable", link: "/supported-sources/airtable.md" },
+              { text: "Amazon Kinesis", link: "/supported-sources/kinesis.md" },
               { text: "AppsFlyer", link: "/supported-sources/appsflyer.md" },
               { text: "Apple App Store", link: "/supported-sources/appstore.md"},
               { text: "Applovin", link: "/supported-sources/applovin.md"},
