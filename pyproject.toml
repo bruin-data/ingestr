@@ -148,12 +148,6 @@ oracle = [
 odbc = [
     "pyodbc==5.1.0",
 ]
-clickhouse = [
-  "clickhouse-connect==0.8.14",
-  "clickhouse-driver==0.2.9",
-  "clickhouse-sqlalchemy==0.2.7",
-  "zstd==1.5.6.1",
-]
 
 [project.urls]
 Homepage = "https://github.com/bruin-data/ingestr"

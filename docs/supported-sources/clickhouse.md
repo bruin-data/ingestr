@@ -2,11 +2,6 @@
 ClickHouse is a fast, open-source, column-oriented database management system that allows for high performance data ingestion and querying.
 
 ingestr supports ClickHouse as a source and destination.
-> [!INFO]
-> To use clickhouse in `ingestr` you need to install it's dependencies using:
-> ```
-> $ pip install ingestr[clickhouse]
-> ```
 
 ## URI format
 The URI format for ClickHouse as a source is as follows:
