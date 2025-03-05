@@ -67,7 +67,7 @@ def fetch_property_history(
 
     params = dict(params or {})
     params["propertiesWithHistory"] = props
-    print(params)
+    print("props of history table",params)
     params["limit"] = 50
     # Make the API request
     r = requests.get(url, headers=headers, params=params)
@@ -79,7 +79,7 @@ def fetch_property_history(
     while _data is not None:
         if "results" in _data:
             yield list(extract_property_history(_data["results"]))
-       
+
         # Follow pagination links if they exist
         _next = _data.get("paging", {}).get("next", None)
         if _next:
@@ -199,26 +199,25 @@ def _get_property_names(api_key: str, object_type: str) -> List[str]:
     return properties
 
 
-
 def chunk_properties(props: List[str], max_length: int = 2000) -> List[str]:
     """
     Chunk a list of properties into a list of chunks of 2000 characters each.
     """
-    
-    current_chunk ='hs_object_id'
+
+    current_chunk = "hs_object_id"
     chunks = []
     for prop in props:
         if prop == "hs_object_id":
             continue
 
         test_chunk = current_chunk + "," + prop
-        if len(test_chunk) > max_length-1:
+        if len(test_chunk) > max_length - 1:
             chunks.append(current_chunk)
             # Start new chunk with hs_object_id and current prop
-            current_chunk = 'hs_object_id,' + prop
+            current_chunk = "hs_object_id," + prop
         else:
-            current_chunk += ',' + prop
-        
+            current_chunk += "," + prop
+
     if current_chunk:
         chunks.append(current_chunk)
     return chunks

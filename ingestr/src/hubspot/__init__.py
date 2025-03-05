@@ -24,6 +24,7 @@ python
 >>> resources = hubspot(api_key="your_api_key")
 """
 
+from collections import defaultdict
 from typing import Any, Dict, Iterator, List, Literal, Sequence
 from urllib.parse import quote
 
@@ -32,8 +33,12 @@ from dlt.common import pendulum
 from dlt.common.typing import TDataItems
 from dlt.sources import DltResource
 
-from .helpers import _get_property_names, fetch_data, fetch_property_history, chunk_properties
-from collections import defaultdict
+from .helpers import (
+    _get_property_names,
+    chunk_properties,
+    fetch_data,
+    fetch_property_history,
+)
 from .settings import (
     ALL,
     CRM_OBJECT_ENDPOINTS,
@@ -185,9 +190,9 @@ def hubspot(
 def crm_objects(
     object_type: str,
     api_key: str = dlt.secrets.value,
-    include_history: bool = False,
+    include_history: bool = True,
     props: Sequence[str] = None,
-    include_custom_props: bool = False,
+    include_custom_props: bool = True,
 ) -> Iterator[TDataItems]:
     """Building blocks for CRM resources."""
     if props == ALL:
@@ -199,24 +204,25 @@ def crm_objects(
         props = props + custom_props  # type: ignore
 
     chunks: list[str] = chunk_properties(list(set(props)))
-    chunks = chunks[0:1]
-   
+    
     if len(chunks) > 1:
-     all_data = defaultdict(dict)
-     
-     for chunk in chunks:
-        params = {"properties": ",".join(chunk), "limit": 100}
-        for record_chunk in fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params):
-            for record in record_chunk:
-                # print(record)
-                id = record['hs_object_id']
-                all_data[id].update(record)
+        chunks = chunks[1:]
+        all_data = defaultdict(dict)
+
+        for chunk in chunks:
+            params = {"properties": ",".join(chunk), "limit": 100}
+            for record_chunk in fetch_data(
+                CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params
+            ):
+                for record in record_chunk:
+                    id = record["hs_object_id"]
+                    all_data[id].update(record)
         yield from all_data.values()
 
-    else:
-        params = {"properties": chunks[0], "limit": 100}
-        yield from fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params)
-    include_history = True
+    
+    params = {"properties": chunks[0], "limit": 100}
+    yield from fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params)
+    
     if include_history:
         # Get history separately, as requesting both all properties and history together
         # is likely to hit hubspot's URL length limit
@@ -230,7 +236,7 @@ def crm_objects(
                 OBJECT_TYPE_PLURAL[object_type] + "_property_history",
             )
 
-#    
+#
 @dlt.resource
 def hubspot_events_for_objects(
     object_type: THubspotObjectType,
