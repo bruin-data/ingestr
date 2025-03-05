@@ -24,6 +24,7 @@ python
 >>> resources = hubspot(api_key="your_api_key")
 """
 
+from collections import defaultdict
 from typing import Any, Dict, Iterator, List, Literal, Sequence
 from urllib.parse import quote
 
@@ -32,7 +33,12 @@ from dlt.common import pendulum
 from dlt.common.typing import TDataItems
 from dlt.sources import DltResource
 
-from .helpers import _get_property_names, fetch_data, fetch_property_history
+from .helpers import (
+    _get_property_names,
+    chunk_properties,
+    fetch_data,
+    fetch_property_history,
+)
 from .settings import (
     ALL,
     CRM_OBJECT_ENDPOINTS,
@@ -50,10 +56,10 @@ from .settings import (
 THubspotObjectType = Literal["company", "contact", "deal", "ticket", "product", "quote"]
 
 
-@dlt.source(name="hubspot", max_table_nesting=0)
+@dlt.source(name="hubspot", max_table_nesting=1)
 def hubspot(
     api_key: str = dlt.secrets.value,
-    include_history: bool = False,
+    include_history: bool = True,
     include_custom_props: bool = True,
 ) -> Sequence[DltResource]:
     """
@@ -184,7 +190,7 @@ def hubspot(
 def crm_objects(
     object_type: str,
     api_key: str = dlt.secrets.value,
-    include_history: bool = False,
+    include_history: bool = True,
     props: Sequence[str] = None,
     include_custom_props: bool = True,
 ) -> Iterator[TDataItems]:
@@ -197,20 +203,29 @@ def crm_objects(
         custom_props = [prop for prop in all_props if not prop.startswith("hs_")]
         props = props + custom_props  # type: ignore
 
-    props = ",".join(sorted(list(set(props))))
+    chunks: list[str] = chunk_properties(list(set(props)))
+    
+    if len(chunks) > 1:
+        all_data = defaultdict(dict)
 
-    if len(props) > 2000:
-        raise ValueError(
-            "Your request to Hubspot is too long to process. "
-            "Maximum allowed query length is 2000 symbols, while "
-            f"your list of properties `{props[:200]}`... is {len(props)} "
-            "symbols long. Use the `props` argument of the resource to "
-            "set the list of properties to extract from the endpoint."
-        )
+        for chunk in chunks:
+            print("chunk",chunk)
+            params = {"properties": ",".join(chunk), "limit": 100}
+            for record_chunk in fetch_data(
+                CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params
+            ):
+                for record in record_chunk:
+                    print("record",record)
+                    
+                    id = record["hs_object_id"]
 
-    params = {"properties": props, "limit": 100}
-
-    yield from fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params)
+                    all_data[id].update(record)
+        yield from all_data.values()
+    else:
+     params = {"properties": chunks[0], "limit": 100}
+     yield from fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params)
+    
+    include_history = True
     if include_history:
         # Get history separately, as requesting both all properties and history together
         # is likely to hit hubspot's URL length limit
@@ -224,7 +239,7 @@ def crm_objects(
                 OBJECT_TYPE_PLURAL[object_type] + "_property_history",
             )
 
-
+#
 @dlt.resource
 def hubspot_events_for_objects(
     object_type: THubspotObjectType,
