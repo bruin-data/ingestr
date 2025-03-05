@@ -56,7 +56,7 @@ from .settings import (
 THubspotObjectType = Literal["company", "contact", "deal", "ticket", "product", "quote"]
 
 
-@dlt.source(name="hubspot", max_table_nesting=0)
+@dlt.source(name="hubspot", max_table_nesting=1)
 def hubspot(
     api_key: str = dlt.secrets.value,
     include_history: bool = True,
@@ -206,23 +206,26 @@ def crm_objects(
     chunks: list[str] = chunk_properties(list(set(props)))
     
     if len(chunks) > 1:
-        chunks = chunks[1:]
         all_data = defaultdict(dict)
 
         for chunk in chunks:
+            print("chunk",chunk)
             params = {"properties": ",".join(chunk), "limit": 100}
             for record_chunk in fetch_data(
                 CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params
             ):
                 for record in record_chunk:
+                    print("record",record)
+                    
                     id = record["hs_object_id"]
+
                     all_data[id].update(record)
         yield from all_data.values()
-
+    else:
+     params = {"properties": chunks[0], "limit": 100}
+     yield from fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params)
     
-    params = {"properties": chunks[0], "limit": 100}
-    yield from fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params)
-    
+    include_history = True
     if include_history:
         # Get history separately, as requesting both all properties and history together
         # is likely to hit hubspot's URL length limit
