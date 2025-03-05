@@ -12,7 +12,7 @@ venv/touchfile: requirements-dev.txt requirements.txt
 	touch venv/touchfile
 
 lock-deps:
-	uv pip compile requirements.in -o requirements.txt
+	@uv pip compile requirements.in --quiet -o requirements.txt 
 
 deps: lock-deps
 	uv pip install -r requirements-dev.txt
