@@ -11,7 +11,10 @@ venv/touchfile: requirements-dev.txt requirements.txt
 	. venv/bin/activate; pip install uv; $(MAKE) deps
 	touch venv/touchfile
 
-deps:
+lock-deps:
+	uv pip compile requirements.in -o requirements.txt
+
+deps: lock-deps
 	uv pip install -r requirements-dev.txt
 
 deps-ci:
