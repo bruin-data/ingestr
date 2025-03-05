@@ -54,8 +54,8 @@ THubspotObjectType = Literal["company", "contact", "deal", "ticket", "product", 
 @dlt.source(name="hubspot", max_table_nesting=0)
 def hubspot(
     api_key: str = dlt.secrets.value,
-    include_history: bool = False,
-    include_custom_props: bool = False,
+    include_history: bool = True,
+    include_custom_props: bool = True,
 ) -> Sequence[DltResource]:
     """
     A DLT source that retrieves data from the HubSpot API using the
@@ -201,23 +201,22 @@ def crm_objects(
     chunks: list[str] = chunk_properties(list(set(props)))
     chunks = chunks[0:1]
    
-    # if len(chunks) > 1:
-    #  all_data = defaultdict(dict)
+    if len(chunks) > 1:
+     all_data = defaultdict(dict)
      
-    #  for chunk in chunks:
-    #     params = {"properties": ",".join(chunk), "limit": 100}
-    #     for record_chunk in fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params):
-    #         for record in record_chunk:
-    #             # print(record)
-    #             id = record['hs_object_id']
-    #             all_data[id].update(record)
-    #     yield from all_data.values()
+     for chunk in chunks:
+        params = {"properties": ",".join(chunk), "limit": 100}
+        for record_chunk in fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params):
+            for record in record_chunk:
+                # print(record)
+                id = record['hs_object_id']
+                all_data[id].update(record)
+        yield from all_data.values()
 
-    # else:
-    #     params = {"properties": chunks[0], "limit": 100}
-    #     yield from fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params)
-
-        
+    else:
+        params = {"properties": chunks[0], "limit": 100}
+        yield from fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params)
+    include_history = True
     if include_history:
         # Get history separately, as requesting both all properties and history together
         # is likely to hit hubspot's URL length limit

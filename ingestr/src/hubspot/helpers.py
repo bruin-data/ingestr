@@ -67,6 +67,7 @@ def fetch_property_history(
 
     params = dict(params or {})
     params["propertiesWithHistory"] = props
+    print(params)
     params["limit"] = 50
     # Make the API request
     r = requests.get(url, headers=headers, params=params)
@@ -74,13 +75,18 @@ def fetch_property_history(
 
     # Parse the response JSON data
     _data = r.json()
+    page_count = 0
     while _data is not None:
         if "results" in _data:
             yield list(extract_property_history(_data["results"]))
-
+       
         # Follow pagination links if they exist
         _next = _data.get("paging", {}).get("next", None)
         if _next:
+            page_count += 1
+            print(f"page is  {page_count}")
+            if page_count > 2:
+                break
             next_url = _next["link"]
             # Get the next page response
             r = requests.get(next_url, headers=headers)
@@ -161,6 +167,8 @@ def fetch_data(
         if _next:
             print(f"finished page {page}")
             page += 1
+            if page > 2:
+                break
             next_url = _next["link"]
             # Get the next page response
             r = requests.get(next_url, headers=headers)
