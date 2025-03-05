@@ -121,6 +121,7 @@ def fetch_data(
     # Construct the URL and headers for the API request
     url = get_url(endpoint)
     headers = _get_headers(api_key)
+    page = 0
 
     # Make the API request
     r = requests.get(url, headers=headers, params=params)
@@ -158,6 +159,8 @@ def fetch_data(
         # Follow pagination links if they exist
         _next = _data.get("paging", {}).get("next", None)
         if _next:
+            print(f"finished page {page}")
+            page += 1
             next_url = _next["link"]
             # Get the next page response
             r = requests.get(next_url, headers=headers)
@@ -186,3 +189,28 @@ def _get_property_names(api_key: str, object_type: str) -> List[str]:
         properties.extend([prop["name"] for prop in page])
 
     return properties
+
+
+
+def chunk_properties(props: List[str], max_length: int = 2000) -> List[str]:
+    """
+    Chunk a list of properties into a list of chunks of 2000 characters each.
+    """
+    
+    current_chunk ='hs_object_id'
+    chunks = []
+    for prop in props:
+        if prop == "hs_object_id":
+            continue
+
+        test_chunk = current_chunk + "," + prop
+        if len(test_chunk) > max_length-1:
+            chunks.append(current_chunk)
+            # Start new chunk with hs_object_id and current prop
+            current_chunk = 'hs_object_id,' + prop
+        else:
+            current_chunk += ',' + prop
+        
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
