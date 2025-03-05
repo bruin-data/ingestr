@@ -11,7 +11,10 @@ venv/touchfile: requirements-dev.txt requirements.txt
 	. venv/bin/activate; pip install uv; $(MAKE) deps
 	touch venv/touchfile
 
-deps:
+lock-deps:
+	@uv pip compile requirements.in --quiet -o requirements.txt 
+
+deps: lock-deps
 	uv pip install -r requirements-dev.txt
 
 deps-ci:
@@ -20,17 +23,17 @@ deps-ci:
 test-ci:
 	TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto -x -rP -vv --tb=short --durations=10 --cov=ingestr --no-cov-on-fail
 
-test: venv
+test : venv lock-deps
 	. venv/bin/activate; $(MAKE) test-ci
 
-test-specific: venv
+test-specific: venv lock-deps
 	. venv/bin/activate; pytest -rP -vv --tb=short --capture=no -k $(test)
 
 lint-ci:
 	ruff format ingestr && ruff check ingestr --fix
 	mypy --config-file pyproject.toml --explicit-package-bases ingestr
 
-lint: venv
+lint: venv lock-deps
 	. venv/bin/activate; $(MAKE) lint-ci
 
 lint-docs:
@@ -38,7 +41,7 @@ lint-docs:
 
 tl: test lint
 
-build:
+build: lock-deps
 	cat > ${BUILDINFO} <<< "version = \"$$(git describe --tags --abbrev=0)\""
 	rm -rf dist && python3 -m build
 	rm -f ${BUILDINFO}
