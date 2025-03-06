@@ -39,7 +39,6 @@ HubSpot source allows ingesting the following sources into separate tables:
 - `products`: Retrieves pricing information of products.
 - `tickets`: Handles requests for help from customers or users.
 - `quotes`: Retrieves price proposals that salespeople can create and send to their contacts.
-- `hubspot_events_for_objects`: Retrieves web analytics events for a given object type and object IDs.
 - `contacts`: Retrieves information about visitors, potential customers, and leads.
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
