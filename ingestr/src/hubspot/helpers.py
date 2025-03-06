@@ -128,7 +128,6 @@ def fetch_data(
     # Parse the response JSON data
     _data = r.json()
     # Yield the properties of each result in the API response
-    page = 0
     while _data is not None:
         if "results" in _data:
             _objects: List[Dict[str, Any]] = []
@@ -159,10 +158,6 @@ def fetch_data(
         # Follow pagination links if they exist
         _next = _data.get("paging", {}).get("next", None)
         if _next:
-            page += 1
-            if page > 2:
-                print("page",page)
-                break
             next_url = _next["link"]
             # Get the next page response
             r = requests.get(next_url, headers=headers)
