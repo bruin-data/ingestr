@@ -16,6 +16,7 @@ from .helpers import get_shard_iterator, max_sequence_by_shard
     name=lambda args: args["stream_name"],
     primary_key="kinesis_msg_id",
     standalone=True,
+    max_table_nesting=0
 )
 def kinesis_stream(
     stream_name: str,
