@@ -2,8 +2,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import pytest
-
-from .blob import parse_uri
+from src.blob import parse_uri  # type: ignore
 
 
 @dataclass
