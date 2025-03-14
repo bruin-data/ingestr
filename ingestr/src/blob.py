@@ -1,9 +1,6 @@
 import warnings
 from typing import Tuple, TypeAlias
-from urllib.parse import (
-    ParseResult,
-    urlparse
-)
+from urllib.parse import ParseResult, urlparse
 
 BucketName: TypeAlias = str
 FileGlob: TypeAlias = str
@@ -29,7 +26,7 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
     The first form is the prefered method. Other forms are supported but discouraged.
     """
 
-    table = urlparse(table.strip())
+    table = table.strip()
     host = uri.netloc.strip()
 
     if table == "" or uri.path.strip() != "":
@@ -40,13 +37,15 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
         )
         return host, uri.path.lstrip("/")
 
-    if host != "":
-        return host, table.path.lstrip("/")
+    table_uri = urlparse(table)
 
-    if table.hostname:
-        return table.hostname, table.path.lstrip("/")
-    
-    parts = table.path.lstrip("/").split("/", maxsplit=1)
+    if host != "":
+        return host, table_uri.path.lstrip("/")
+
+    if table_uri.hostname:
+        return table_uri.hostname, table_uri.path.lstrip("/")
+
+    parts = table_uri.path.lstrip("/").split("/", maxsplit=1)
     if len(parts) != 2:
         return "", parts[0]
 
