@@ -1,6 +1,6 @@
 import warnings
 from typing import Tuple, TypeAlias
-from urllib.parse import ParseResult
+from urllib.parse import ParseResult, urlparse
 
 BucketName: TypeAlias = str
 FileGlob: TypeAlias = str
@@ -14,13 +14,16 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
     Supports the following Forms:
     - uri: "gs://"
       table: "bucket-name/file-glob"
+    - uri: "gs://uri-bucket-name" (uri-bucket-name is preferred)
+      table: "gs://table-bucket-name/file-glob"
+    - uri: "gs://"
+      table: "gs://bucket-name/file-glob"
     - uri: gs://bucket-name/file-glob
       table: None
     - uri: "gs://bucket-name"
       table: "file-glob"
 
-    The first form is the prefered method. Other forms are supported
-    for backward compatibility, but discouraged.
+    The first form is the prefered method. Other forms are supported but discouraged.
     """
 
     table = table.strip()
@@ -34,15 +37,15 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
         )
         return host, uri.path.lstrip("/")
 
-    if host != "":
-        warnings.warn(
-            f"Using the form '{uri.scheme}://bucket-name' is deprecated and will be removed in future versions.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return host, table.lstrip("/")
+    table_uri = urlparse(table)
 
-    parts = table.lstrip("/").split("/", maxsplit=1)
+    if host != "":
+        return host, table_uri.path.lstrip("/")
+
+    if table_uri.hostname:
+        return table_uri.hostname, table_uri.path.lstrip("/")
+
+    parts = table_uri.path.lstrip("/").split("/", maxsplit=1)
     if len(parts) != 2:
         return "", parts[0]
 
