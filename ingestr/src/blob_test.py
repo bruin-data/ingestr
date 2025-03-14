@@ -17,6 +17,8 @@ test_cases: list[URITestCase] = [
     URITestCase("s3://bucket/file", "", "bucket", "file"),
     URITestCase("s3://primary", "s3://secondary/file", "primary", "file"),
     URITestCase("s3://primary", "s3://secondary/path/to/file", "primary", "path/to/file"),
+    URITestCase("s3://primary", "path/to/file", "primary", "path/to/file"),
+    URITestCase("s3://", "s3://secondary/path/to/file", "secondary", "path/to/file"),
     URITestCase("s3://", "s3://bucket/file", "bucket", "file"),
 ]
 
