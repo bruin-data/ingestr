@@ -8,11 +8,11 @@ from rich.console import Console
 from rich.status import Status
 from typing_extensions import Annotated
 
+import ingestr.src.partition as partition
+import ingestr.src.resource as resource
+from ingestr.src.destinations import AthenaDestination
 from ingestr.src.filters import cast_set_to_list
 from ingestr.src.telemetry.event import track
-from ingestr.src.destinations import AthenaDestination
-
-from dlt.destinations.adapters import athena_adapter
 
 app = typer.Typer(
     name="ingestr",
@@ -360,14 +360,6 @@ def ingest(
             )
             raise typer.Abort()
 
-    def run_on_resource(source, executable):
-        if hasattr(source, "selected_resources") and source.selected_resources:
-            resource_names = list(source.selected_resources.keys())
-            for res in resource_names:
-                executable(source.resources[res])
-        else:
-            executable(source)
-
     def parse_columns(columns: list[str]) -> dict[str, TDataType]:
         from typing import cast, get_args
 
@@ -556,23 +548,23 @@ def ingest(
             sql_exclude_columns=sql_exclude_columns,
         )
 
-        run_on_resource(dlt_source, lambda x: x.add_map(cast_set_to_list))
+        resource.for_each(dlt_source, lambda x: x.add_map(cast_set_to_list))
 
         def col_h(x):
             if column_hints:
                 x.apply_hints(columns=column_hints)
 
-        run_on_resource(dlt_source, col_h)
+        resource.for_each(dlt_source, col_h)
 
         if isinstance(destination, AthenaDestination) and partition_by:
-            run_on_resource(dlt_source, lambda x: athena_adapter(x, partition_by))
+            partition.apply_athena_hints(dlt_source, partition_by)
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
 
             def set_primary_key(x):
                 x.incremental.primary_key = ()
 
-            run_on_resource(dlt_source, set_primary_key)
+            resource.for_each(dlt_source, set_primary_key)
 
         if (
             factory.destination_scheme in PARQUET_SUPPORTED_DESTINATIONS
