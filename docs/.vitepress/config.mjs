@@ -40,6 +40,7 @@ export default defineConfig({
             text: "Incremental Loading",
             link: "/getting-started/incremental-loading.md",
           },
+          { text: "Load Kinesis Data to BigQuery", link: "/tutorials/load-kinesis-bigquery.md" },
           { text: "Telemetry", link: "/getting-started/telemetry.md" },
         ],
       },
