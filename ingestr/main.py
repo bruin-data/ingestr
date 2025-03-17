@@ -10,6 +10,9 @@ from typing_extensions import Annotated
 
 from ingestr.src.filters import cast_set_to_list
 from ingestr.src.telemetry.event import track
+from ingestr.src.destinations import AthenaDestination
+
+from dlt.destinations.adapters import athena_adapter
 
 app = typer.Typer(
     name="ingestr",
@@ -560,6 +563,9 @@ def ingest(
                 x.apply_hints(columns=column_hints)
 
         run_on_resource(dlt_source, col_h)
+
+        if isinstance(destination, AthenaDestination) and partition_by:
+            run_on_resource(dlt_source, lambda x: athena_adapter(x, partition_by))
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
 
