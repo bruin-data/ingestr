@@ -557,7 +557,7 @@ def ingest(
         resource.for_each(dlt_source, col_h)
 
         if isinstance(destination, AthenaDestination) and partition_by:
-            partition.apply_athena_hints(dlt_source, partition_by)
+            partition.apply_athena_hints(dlt_source, partition_by, column_hints)
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
 
