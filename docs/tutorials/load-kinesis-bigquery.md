@@ -5,7 +5,7 @@ Welcome! 👋 This tutorial will guide you through loading data from `Amazon Kin
 Amazon Kinesis is a cloud-based service for real-time data streaming and analytics that processes large data streams in real-time. You often need to store this data in a data warehouse like BigQuery for analysis and reporting. This is where ingestr simplifies the process.
 
 ## Prerequisites
-- Install ingestr by following the instructions [here](./getting-started/quickstart.md#Installation)
+- Install ingestr by following the instructions [here](../getting-started/quickstart.md#Installation)
 - AWS credentials - Access key and Secret key
 - BigQuery service account
 
