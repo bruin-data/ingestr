@@ -5,10 +5,10 @@ Welcome! 👋 This tutorial will guide you through loading data from `Personio` 
 Personio is human resources management software that helps businesses streamline HR processes, including recruitment and employee data management. To analyze and report on this HR data effectively, you may often need to load it into an analytics database like DuckDB. This is where `ingestr` simplifies the process.
 
 ## Prerequisites
-- Install ingestr if not installed ([guide](../getting-started/quickstart.md#Installation)), 
-- Install DuckDB if not installed
-- Get Personio Credentials (client_id, client_secret) from this [guide](https://dlthub.com/docs/dlt-ecosystem/verified-sources/personio#grab-credentials) if you don’t have them
-
+Before you begin, ensure you have:
+- [ingestr](../getting-started/quickstart.md#Installation)
+- [Personio API credentials](https://dlthub.com/docs/dlt-ecosystem/verified-sources/personio#grab-credentials)
+- DuckDB
 
 ## Configuration Steps 
 ### Source Configuration - Personio
