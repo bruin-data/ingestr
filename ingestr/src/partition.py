@@ -13,6 +13,7 @@ def apply_athena_hints(
     additional_hints: Dict[str, TColumnSchema] = {},
 ) -> None:
     def _apply_partition_hint(resource: DltResource) -> None:
+        
         columns = resource.columns if resource.columns else {}
 
         partition_hint = (
@@ -20,13 +21,10 @@ def apply_athena_hints(
             or additional_hints.get(partition_column)
         )
 
-        if partition_hint is None:
-            return
-
         athena_adapter(
             resource,
             athena_partition.day(partition_column)
-            if partition_hint["data_type"] in ("timestamp", "date")
+            if partition_hint and partition_hint["data_type"] in ("timestamp", "date")
             else partition_column,
         )
 
