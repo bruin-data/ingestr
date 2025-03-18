@@ -1,18 +1,52 @@
-# Load Data From Personio to DuckDB
+# Load Data from Personio to DuckDB
 
 Welcome! 👋  
-This tutorial will guide you through loading data from `Personio` to `DuckDB` using `ingestr`, a command-line tool that enables data ingestion between any source and destination using simple flags, no coding required.
+This tutorial is for absolute beginners with no prior experience with `ingestr`. It provides a step-by-step guide to load employee data from `Personio` to `DuckDB` using `ingestr` — no coding required.
 
-Personio is human resources management software that helps businesses streamline HR processes, including recruitment and employee data management. To analyze and report on this HR data effectively, you may often need to load it into an analytics database like DuckDB. This is where `ingestr` simplifies the process.
+## Overview of ingestr
+`ingestr` is a command-line tool that simplifies data ingestion by allowing users to load data from a source to a destination.
 
-## Prerequisites
-Before you begin, ensure that the following are installed and configured:
-- [ingestr](../getting-started/quickstart.md#Installation)
-- [Personio API credentials](https://dlthub.com/docs/dlt-ecosystem/verified-sources/personio#grab-credentials)
-- DuckDB
+### `ingestr` Command
+```bash
+ingestr ingest \
+   --source-uri '<your-source-uri-here>' \
+   --source-table '<your-schema>.<your-table>' \
+   --dest-uri '<your-destination-uri-here>' \
+   --dest-table '<your-schema>.<your-table>'
+```
+- `ingestr ingest`: Load data from a source to a destination
+- `--source-uri TEXT`: Specifies the URI of the data source (Required).
+- `--dest-uri TEXT`: Specifies the URI of the destination (Required).
+- `--source-table TEXT`: Defines the table to fetch data from (Required).
+- `--dest-table TEXT`: Specifies the destination table. If not provided, it defaults to `--source-table`.
 
-## Ingest Data from Personio to DuckDB
-Run the following command to connect to Personio, read from the specified table, and load the data into DuckDB:
+## Let's Load Data from Personio to DuckDB Together!
+
+Personio is a human resources management platform that helps businesses handle recruitment and employee data. To analyze this data, you may need to load it into an analytics database like DuckDB. `ingestr` makes this process simple.
+
+### Step 1: Install `ingestr`
+Ensure `ingestr` is installed. If not ,follow the installation guide [here](../getting-started/quickstart.md#Installation).
+
+### Step 2: Get Personio Credentials
+Personio will be our data source.
+1. Log in to your Personio account.
+2. Ensure your user has API access.
+3. Navigate to **Settings > Integrations > API Credentials**.
+4. Click **Generate new credentials**.
+5. Assign **read access** to required attributes (e.g., last name, last modified).
+6. Copy the generated `client ID` and `client secret`.
+
+For more details, refer to [Personio API documentation](https://developer.personio.de/docs/getting-started-with-the-personio-api#21-employee-attendance-and-absence-endpoints).
+
+### Step 3: Install DuckDB
+DuckDB will be our data destination. If it’s not already installed, you can install it using pip:
+```bash
+pip install duckdb
+```  
+Alternatively, you can download the latest version from the [official DuckDB website](https://duckdb.org/docs/installation/?version=stable&environment=cli&platform=macos&download_method=direct).
+
+### Step 4: Run the `ingestr` Command
+Execute the following command to load data from Personio to DuckDB:
 ```bash
 ingestr ingest \
     --source-uri 'personio://?client_id=<YOUR_CLIENT_ID>&client_secret=<YOUR_CLIENT_SECRET>' \
@@ -20,23 +54,39 @@ ingestr ingest \
     --dest-uri 'duckdb:///personio.duckdb' \
     --dest-table 'dest.employees'
 ```
-- `--source-uri`: Connects to your data source.  
-  Example: `personio://?client_id=<ID>&client_secret=<SECRET>`  
-  This specifies the data source (Personio) and uses API credentials (client_id and client_secret) to authenticate with the Personio account.
+- `--source-uri 'personio://?client_id=<ID>&client_secret=<SECRET>'`: Connects to Personio using API credentials.
+- `--source-table 'employees'`: Specifies the table to fetch data from Personio.
+- `--dest-uri 'duckdb:///personio.duckdb'`: Specifies DuckDB as the destination database.
+- `--dest-table 'dest.employees'`: Defines where the data will be stored in DuckDB.
 
-- `--source-table`: Specifies the table from which to read data.  
-  In the above example, the `employees` table in Personio is selected, retrieving employee information.
 
-- `--dest-uri`: Connects to your destination, specifying where the data will be stored.
+## Verify Data in DuckDB
+Once the command runs successfully, your Personio data will be available in DuckDB. Follow these steps to verify the data:
 
-- `--dest-table`: Defines the table in DuckDB where the data will be stored.  
-  Example: `'dest.employees'`  
-  This stores the data in the `employees` table within the `dest` schema in DuckDB
+### Step 1: Open DuckDB
+If DuckDB is installed, you can open it using the following command:
+```bash
+duckdb personio.duckdb
+```
 
-## Verify the Data in DuckDB
-After running the above command with valid credentials, your `Personio` data will be successfully loaded into `DuckDB`. Here's what the data looks like in the destination:
+### Step 2: List Available Tables
+To check if the `employees` table has been created, run:
+```sql
+.tables;
+```
 
-<img alt="personio_duckdb" src="../media/personio_duckdb.png" />
+### Step 3: View Data in the `employees` Table
+To display all data from the `employees` table, run:
+```sql
+SELECT * FROM dest.employees;
+```
 
-🎉 Congratulations!   
-You've successfully loaded data from Personio to your desired destination.
+### Step 4: Validate Data
+Ensure that the retrieved data matches what was expected from Personio.
+
+Example output:
+
+![Personio to DuckDB](../media/personio_duckdb.png)
+
+🎉 **Congratulations!** You have successfully loaded data from Personio to DuckDB using `ingestr`. 
+
