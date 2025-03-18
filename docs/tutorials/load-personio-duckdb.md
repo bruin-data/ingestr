@@ -1,10 +1,12 @@
 # Load Data from Personio to DuckDB
 
 Welcome! 👋  
-This tutorial is for absolute beginners with no prior experience with `ingestr`. It provides a step-by-step guide to load employee data from `Personio` to `DuckDB` using `ingestr` — no coding required.
+ This beginner-friendly guide will help you load data from `Personio` into `DuckDB` using ingestr — a simple yet powerful command-line tool. No prior experience is needed, and best of all, no coding required!
+
+By the end of this guide, you'll have your Personio data securely stored in DuckDB. But before we dive in, let’s take a quick look at `ingestr`
 
 ## Overview of ingestr
-`ingestr` is a command-line tool that simplifies data ingestion by allowing users to load data from a source to a destination.
+`ingestr` is a command-line tool that simplifies data ingestion by allowing users to load data from a source to a destination using simple command-line flags.
 
 ### `ingestr` Command
 ```bash
@@ -14,18 +16,19 @@ ingestr ingest \
    --dest-uri '<your-destination-uri-here>' \
    --dest-table '<your-schema>.<your-table>'
 ```
-- `ingestr ingest`: Load data from a source to a destination
-- `--source-uri TEXT`: Specifies the URI of the data source (Required).
-- `--dest-uri TEXT`: Specifies the URI of the destination (Required).
-- `--source-table TEXT`: Defines the table to fetch data from (Required).
+- `ingestr ingest`: Executes the data ingestion process.
+- `--source-uri TEXT`: Specifies the URI of the data source.
+- `--dest-uri TEXT`: Specifies the URI of the destination.
+- `--source-table TEXT`: Defines the table to fetch data from.
 - `--dest-table TEXT`: Specifies the destination table. If not provided, it defaults to `--source-table`.
 
+With this command, we connect to the source, retrieve the specified data, and load it into the destination database.
 ## Let's Load Data from Personio to DuckDB Together!
 
 Personio is a human resources management platform that helps businesses handle recruitment and employee data. To analyze this data, you may need to load it into an analytics database like DuckDB. `ingestr` makes this process simple.
 
 ### Step 1: Install `ingestr`
-Ensure `ingestr` is installed. If not ,follow the installation guide [here](../getting-started/quickstart.md#Installation).
+Ensure `ingestr` is installed. If not, follow the installation guide [here](../getting-started/quickstart.md#Installation).
 
 ### Step 2: Get Personio Credentials
 Personio will be our data source.
