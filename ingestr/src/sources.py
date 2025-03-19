@@ -177,6 +177,27 @@ class SqlSource:
                 scheme="clickhouse+native",
                 query=urlencode(query_params, doseq=True),
             ).geturl()
+        
+        #db2+ibm_db://username:password@host:port/database
+        if uri.startswith("db2://"):
+            parsed_uri = urlparse(uri)
+            username = parsed_uri.username
+            password = parsed_uri.password
+            host = parsed_uri.hostname
+            port = parsed_uri.port
+            database = parsed_uri.path.lstrip('/')
+            if not username:
+                raise ValueError("Username is required to connect to the DB2 database.")
+            if not password:
+                raise ValueError("Password is required to authenticate with the DB2 database.")
+            if not host:
+                raise ValueError("The hostname or IP address of the DB2 server is required to establish a connection.")
+            if not port:
+                raise ValueError("The TCP port of the DB2 server is required to establish a connection.")
+            if not database:
+                raise ValueError("The database name is required to connect to the DB2 database.")
+            
+            uri = f"db2+ibm_db://{username}:{password}@{host}:{port}/{database}"
 
         query_adapters = []
         if kwargs.get("sql_limit"):
