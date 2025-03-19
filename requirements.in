@@ -47,3 +47,5 @@ clickhouse-connect==0.8.14
 clickhouse-driver==0.2.9
 clickhouse-sqlalchemy==0.2.7
 zstd==1.5.6.5
+ibm-db==3.2.6
+ibm-db-sa==0.4.1
