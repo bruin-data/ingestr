@@ -40,7 +40,6 @@ export default defineConfig({
             text: "Incremental Loading",
             link: "/getting-started/incremental-loading.md",
           },
-          { text: "Load Kinesis Data to BigQuery", link: "/tutorials/load-kinesis-bigquery.md" },
           { text: "Telemetry", link: "/getting-started/telemetry.md" },
         ],
       },
@@ -49,6 +48,13 @@ export default defineConfig({
         items: [
           { text: "ingest", link: "/commands/ingest.md" },
           { text: "example-uris", link: "/commands/example-uris.md" },
+        ],
+      },
+      {
+        text: "Tutorials",
+        items: [
+          { text: "Load Kinesis Data to BigQuery", link: "/tutorials/load-kinesis-bigquery.md" },
+          { text: "Load Personio Data to DuckDB", link: "/tutorials/load-personio-duckdb.md" },
         ],
       },
       {
