@@ -55,6 +55,7 @@ export default defineConfig({
         items: [
           { text: "Load Kinesis Data to BigQuery", link: "/tutorials/load-kinesis-bigquery.md" },
           { text: "Load Personio Data to DuckDB", link: "/tutorials/load-personio-duckdb.md" },
+          { text: "Load Stripe Data to Postgres", link: "/tutorials/load-stripe-postgres.md" },
         ],
       },
       {

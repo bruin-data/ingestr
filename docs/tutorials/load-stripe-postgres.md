@@ -2,7 +2,7 @@
 
 Welcome! 👋 This beginner-friendly guide will help you load data from `Stripe` into `PostgreSQL` using ingestr — a simple yet powerful command-line tool. No prior experience is needed, and best of all, no coding required! 🚀
 
-By the end of this guide, you'll have your Stripe data securely stored in PostgreSQL. But before we dive in, let’s take a quick look at ingestr and how it works.
+By the end of this guide, you'll have your Stripe data securely stored in PostgreSQL. But before we dive in, let’s take a quick look at ingestr.
 
 ## Overview of `ingestr`
 `ingestr` is a command-line tool that simplifies data ingestion by allowing users to load data from a source to a destination.
@@ -23,7 +23,7 @@ ingestr ingest \
 
 With this command, we connect to the source, retrieve the specified data, and load it into the destination database.
 
-## Let's Load Data from Stripe to PostgreSQL Together!
+## Let's Load Data from Stripe into PostgreSQL Together!
 
 Stripe is a popular payment processing platform used by e-commerce and SaaS applications. If you need to analyze Stripe data, you can load it into PostgreSQL, a reliable and widely used relational database.
 
