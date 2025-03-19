@@ -72,6 +72,7 @@ SQL_SOURCE_SCHEMES = [
     "hana",
     "clickhouse",
     "databricks",
+    "db2",
 ]
 
 
