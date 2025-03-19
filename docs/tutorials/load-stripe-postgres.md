@@ -46,6 +46,7 @@ Stripe will be our **data source**. To retrieve your API credentials:
 For detailed API documentation, visit the [Stripe API Docs](https://stripe.com/docs/api).
 
 ## Step 3: Retrieve PostgreSQL Credentials
+In this example, we are using a **cloud-hosted PostgreSQL instance**.
 1. Log in to your cloud provider (e.g., [Neon](https://neon.tech/)).
 2. Navigate to your **PostgreSQL instance** and retrieve:
    - **Host**: Example - `your-db-instance.aws.com`
