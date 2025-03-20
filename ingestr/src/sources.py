@@ -177,6 +177,9 @@ class SqlSource:
                 scheme="clickhouse+native",
                 query=urlencode(query_params, doseq=True),
             ).geturl()
+         
+        if uri.startswith("db2://"):
+            uri = uri.replace("db2://", "db2+ibm_db://")
 
         query_adapters = []
         if kwargs.get("sql_limit"):
