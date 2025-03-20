@@ -127,40 +127,44 @@ class SqlReflectionLevel(str, Enum):
 def ingest(
     source_uri: Annotated[
         str,
-        typer.Option(help="The URI of the [green]source[/green]", envvar="SOURCE_URI"),
+        typer.Option(
+            help="The URI of the [green]source[/green]",
+            envvar=["SOURCE_URI", "INGESTR_SOURCE_URI"],
+        ),
     ],  # type: ignore
     dest_uri: Annotated[
         str,
         typer.Option(
-            help="The URI of the [cyan]destination[/cyan]", envvar="DESTINATION_URI"
+            help="The URI of the [cyan]destination[/cyan]",
+            envvar=["DESTINATION_URI", "INGESTR_DESTINATION_URI"],
         ),
     ],  # type: ignore
     source_table: Annotated[
         str,
         typer.Option(
             help="The table name in the [green]source[/green] to fetch",
-            envvar="SOURCE_TABLE",
+            envvar=["SOURCE_TABLE", "INGESTR_SOURCE_TABLE"],
         ),
     ],  # type: ignore
     dest_table: Annotated[
         str,
         typer.Option(
             help="The table in the [cyan]destination[/cyan] to save the data into",
-            envvar="DESTINATION_TABLE",
+            envvar=["DESTINATION_TABLE", "INGESTR_DESTINATION_TABLE"],
         ),
     ] = None,  # type: ignore
     incremental_key: Annotated[
         Optional[str],
         typer.Option(
             help="The incremental key from the table to be used for incremental strategies",
-            envvar="INCREMENTAL_KEY",
+            envvar=["INCREMENTAL_KEY", "INGESTR_INCREMENTAL_KEY"],
         ),
     ] = None,  # type: ignore
     incremental_strategy: Annotated[
         IncrementalStrategy,
         typer.Option(
             help="The incremental strategy to use",
-            envvar="INCREMENTAL_STRATEGY",
+            envvar=["INCREMENTAL_STRATEGY", "INGESTR_INCREMENTAL_STRATEGY"],
         ),
     ] = IncrementalStrategy.create_replace,  # type: ignore
     interval_start: Annotated[
@@ -168,7 +172,7 @@ def ingest(
         typer.Option(
             help="The start of the interval the incremental key will cover",
             formats=DATE_FORMATS,
-            envvar="INTERVAL_START",
+            envvar=["INTERVAL_START", "INGESTR_INTERVAL_START"],
         ),
     ] = None,  # type: ignore
     interval_end: Annotated[
@@ -176,126 +180,126 @@ def ingest(
         typer.Option(
             help="The end of the interval the incremental key will cover",
             formats=DATE_FORMATS,
-            envvar="INTERVAL_END",
+            envvar=["INTERVAL_END", "INGESTR_INTERVAL_END"],
         ),
     ] = None,  # type: ignore
     primary_key: Annotated[
         Optional[list[str]],
         typer.Option(
             help="The key that will be used to deduplicate the resulting table",
-            envvar="PRIMARY_KEY",
+            envvar=["PRIMARY_KEY", "INGESTR_PRIMARY_KEY"],
         ),
     ] = None,  # type: ignore
     partition_by: Annotated[
         Optional[str],
         typer.Option(
             help="The partition key to be used for partitioning the destination table",
-            envvar="PARTITION_BY",
+            envvar=["PARTITION_BY", "INGESTR_PARTITION_BY"],
         ),
     ] = None,  # type: ignore
     cluster_by: Annotated[
         Optional[str],
         typer.Option(
             help="The clustering key to be used for clustering the destination table, not every destination supports clustering.",
-            envvar="CLUSTER_BY",
+            envvar=["CLUSTER_BY", "INGESTR_CLUSTER_BY"],
         ),
     ] = None,  # type: ignore
     yes: Annotated[
         Optional[bool],
         typer.Option(
             help="Skip the confirmation prompt and ingest right away",
-            envvar="SKIP_CONFIRMATION",
+            envvar=["SKIP_CONFIRMATION", "INGESTR_SKIP_CONFIRMATION"],
         ),
     ] = False,  # type: ignore
     full_refresh: Annotated[
         bool,
         typer.Option(
             help="Ignore the state and refresh the destination table completely",
-            envvar="FULL_REFRESH",
+            envvar=["FULL_REFRESH", "INGESTR_FULL_REFRESH"],
         ),
     ] = False,  # type: ignore
     progress: Annotated[
         Progress,
         typer.Option(
             help="The progress display type, must be one of 'interactive', 'log'",
-            envvar="PROGRESS",
+            envvar=["PROGRESS", "INGESTR_PROGRESS"],
         ),
     ] = Progress.interactive,  # type: ignore
     sql_backend: Annotated[
         SqlBackend,
         typer.Option(
             help="The SQL backend to use",
-            envvar="SQL_BACKEND",
+            envvar=["SQL_BACKEND", "INGESTR_SQL_BACKEND"],
         ),
     ] = SqlBackend.pyarrow,  # type: ignore
     loader_file_format: Annotated[
         Optional[LoaderFileFormat],
         typer.Option(
             help="The file format to use when loading data",
-            envvar="LOADER_FILE_FORMAT",
+            envvar=["LOADER_FILE_FORMAT", "INGESTR_LOADER_FILE_FORMAT"],
         ),
     ] = None,  # type: ignore
     page_size: Annotated[
         Optional[int],
         typer.Option(
             help="The page size to be used when fetching data from SQL sources",
-            envvar="PAGE_SIZE",
+            envvar=["PAGE_SIZE", "INGESTR_PAGE_SIZE"],
         ),
     ] = 50000,  # type: ignore
     loader_file_size: Annotated[
         Optional[int],
         typer.Option(
             help="The file size to be used by the loader to split the data into multiple files. This can be set independent of the page size, since page size is used for fetching the data from the sources whereas this is used for the processing/loading part.",
-            envvar="LOADER_FILE_SIZE",
+            envvar=["LOADER_FILE_SIZE", "INGESTR_LOADER_FILE_SIZE"],
         ),
     ] = 100000,  # type: ignore
     schema_naming: Annotated[
         SchemaNaming,
         typer.Option(
             help="The naming convention to use when moving the tables from source to destination. The default behavior is explained here: https://dlthub.com/docs/general-usage/schema#naming-convention",
-            envvar="SCHEMA_NAMING",
+            envvar=["SCHEMA_NAMING", "INGESTR_SCHEMA_NAMING"],
         ),
     ] = SchemaNaming.default,  # type: ignore
     pipelines_dir: Annotated[
         Optional[str],
         typer.Option(
             help="The path to store dlt-related pipeline metadata. By default, ingestr will create a temporary directory and delete it after the execution is done in order to make retries stateless.",
-            envvar="PIPELINES_DIR",
+            envvar=["PIPELINES_DIR", "INGESTR_PIPELINES_DIR"],
         ),
     ] = None,  # type: ignore
     extract_parallelism: Annotated[
         Optional[int],
         typer.Option(
             help="The number of parallel jobs to run for extracting data from the source, only applicable for certain sources",
-            envvar="EXTRACT_PARALLELISM",
+            envvar=["EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"],
         ),
     ] = 5,  # type: ignore
     sql_reflection_level: Annotated[
         SqlReflectionLevel,
         typer.Option(
             help="The reflection level to use when reflecting the table schema from the source",
-            envvar="SQL_REFLECTION_LEVEL",
+            envvar=["SQL_REFLECTION_LEVEL", "INGESTR_SQL_REFLECTION_LEVEL"],
         ),
     ] = SqlReflectionLevel.full,  # type: ignore
     sql_limit: Annotated[
         Optional[int],
         typer.Option(
             help="The limit to use when fetching data from the source",
-            envvar="SQL_LIMIT",
+            envvar=["SQL_LIMIT", "INGESTR_SQL_LIMIT"],
         ),
     ] = None,  # type: ignore
     sql_exclude_columns: Annotated[
         Optional[list[str]],
         typer.Option(
             help="The columns to exclude from the source table",
-            envvar="SQL_EXCLUDE_COLUMNS",
+            envvar=["SQL_EXCLUDE_COLUMNS", "INGESTR_SQL_EXCLUDE_COLUMNS"],
         ),
     ] = [],  # type: ignore
     columns: Annotated[
         Optional[list[str]],
         typer.Option(
             help="The column types to be used for the destination table in the format of 'column_name:column_type'",
-            envvar="COLUMNS",
+            envvar=["COLUMNS", "INGESTR_COLUMNS"],
         ),
     ] = None,  # type: ignore
 ):
