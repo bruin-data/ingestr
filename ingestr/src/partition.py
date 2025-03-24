@@ -1,17 +1,14 @@
 from typing import Dict
 
-from dlt.common.schema.typing import TColumnSchema
-from dlt.destinations.adapters import athena_adapter, athena_partition
-from dlt.sources import DltResource, DltSource
-
-import ingestr.src.resource as resource
-
-
 def apply_athena_hints(
-    source: DltSource | DltResource,
+    source,
     partition_column: str,
-    additional_hints: Dict[str, TColumnSchema] = {},
+    additional_hints: Dict[str, "TColumnSchema"] = {},
 ) -> None:
+    import ingestr.src.resource as resource
+    from dlt.destinations.adapters import athena_adapter, athena_partition
+    from dlt.sources import DltResource, DltSource
+
     def _apply_partition_hint(resource: DltResource) -> None:
 
         columns = resource.columns if resource.columns else {}
