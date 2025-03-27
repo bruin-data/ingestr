@@ -32,6 +32,7 @@ With this command, we connect to the source, retrieve the specified data, and lo
 Amazon Kinesis is a cloud-based service for real-time data streaming and analytics that processes large data streams. To analyze this data, you may need to load it into a data warehouse like Google BigQuery. `ingestr` makes this process simple.
 
 ### Step 1: Install ingestr
+
 Ensure `ingestr` is installed. If not, follow the installation guide [here](../getting-started/quickstart.md#Installation).
 
 ### Step 2: Get AWS Credentials
