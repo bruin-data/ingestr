@@ -51,6 +51,7 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
+    PipedriveSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -144,6 +145,7 @@ class SourceDestinationFactory:
         "salesforce": SalesforceSource,
         "personio": PersonioSource,
         "kinesis": KinesisSource,
+        "pipedrive": PipedriveSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

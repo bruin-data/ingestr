@@ -2009,3 +2009,8 @@ class KinesisSource:
         return kinesis_stream(
             stream_name=table, credentials=credentials, initial_at_timestamp=start_date
         )
+
+class PipedriveSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
