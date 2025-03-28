@@ -88,6 +88,7 @@ exclude = [
     'src/clickhouse/.*',
     'src/asana_source/.*',
     'src/tiktok_ads/.*',
+    'src/pipedrive/.*',
   ]
 
 [[tool.mypy.overrides]]
@@ -114,6 +115,7 @@ module = [
   "ingestr.src.tiktok_ads.*",
   "ingestr.src.github.*",
   "ingestr.src.clickhouse.*",
+  "ingestr.src.pipedrive.*",
 ]
 follow_imports = "skip"
 
