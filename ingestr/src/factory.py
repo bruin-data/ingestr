@@ -43,6 +43,7 @@ from ingestr.src.sources import (
     MongoDbSource,
     NotionSource,
     PersonioSource,
+    PipedriveSource,
     S3Source,
     SalesforceSource,
     ShopifySource,
@@ -144,6 +145,7 @@ class SourceDestinationFactory:
         "salesforce": SalesforceSource,
         "personio": PersonioSource,
         "kinesis": KinesisSource,
+        "pipedrive": PipedriveSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

@@ -85,6 +85,7 @@ from ingestr.src.linkedin_ads.dimension_time_enum import (
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.personio import personio_source
+from ingestr.src.pipedrive import pipedrive_source
 from ingestr.src.salesforce import salesforce_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
@@ -177,7 +178,7 @@ class SqlSource:
                 scheme="clickhouse+native",
                 query=urlencode(query_params, doseq=True),
             ).geturl()
-         
+
         if uri.startswith("db2://"):
             uri = uri.replace("db2://", "db2+ibm_db://")
 
@@ -1837,8 +1838,8 @@ class AppLovinSource:
 
 
 class ApplovinMaxSource:
-    #expected uri format: applovinmax://?api_key=<api_key>
-    #expected table format: user_ad_revenue:app_id_1,app_id_2
+    # expected uri format: applovinmax://?api_key=<api_key>
+    # expected table format: user_ad_revenue:app_id_1,app_id_2
 
     def handles_incrementality(self) -> bool:
         return True
@@ -1850,7 +1851,7 @@ class ApplovinMaxSource:
         api_key = params.get("api_key")
         if api_key is None:
             raise ValueError("api_key is required to connect to AppLovin Max API.")
-        
+
         AVAILABLE_TABLES = ["user_ad_revenue"]
 
         table_fields = table.split(":")
@@ -1860,7 +1861,7 @@ class ApplovinMaxSource:
             raise ValueError(
                 "Invalid table format. Expected format is user_ad_revenue:app_id_1,app_id_2"
             )
-        
+
         if requested_table not in AVAILABLE_TABLES:
             raise ValueError(
                 f"Table name '{requested_table}' is not supported for AppLovin Max source yet."
@@ -1868,17 +1869,15 @@ class ApplovinMaxSource:
                 "If you need additional tables, please create a GitHub issue at "
                 "https://github.com/bruin-data/ingestr"
             )
-        
-        applications = [i for i in table_fields[1].replace(" ", "").split(",") if i.strip()]
+
+        applications = [
+            i for i in table_fields[1].replace(" ", "").split(",") if i.strip()
+        ]
         if len(applications) == 0:
-            raise ValueError(
-                "At least one application id is required"
-            )
-    
+            raise ValueError("At least one application id is required")
+
         if len(applications) != len(set(applications)):
-            raise ValueError(
-                "Application ids must be unique."
-            )
+            raise ValueError("Application ids must be unique.")
 
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
@@ -2009,3 +2008,36 @@ class KinesisSource:
         return kinesis_stream(
             stream_name=table, credentials=credentials, initial_at_timestamp=start_date
         )
+
+
+class PipedriveSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        api_key = params.get("api_token")
+        if api_key is None:
+            raise MissingValueError("api_token", "Pipedrive")
+
+        start_date = kwargs.get("interval_start")
+        if start_date is not None:
+            start_date = ensure_pendulum_datetime(start_date)
+        else:
+            start_date = pendulum.parse("2000-01-01")
+
+        if table not in [
+            "users",
+            "activities",
+            "persons",
+            "organizations",
+            "products",
+            "stages",
+            "deals",
+        ]:
+            raise UnsupportedResourceError(table, "Pipedrive")
+
+        return pipedrive_source(
+            pipedrive_api_key=api_key, since_timestamp=start_date
+        ).with_resources(table)
