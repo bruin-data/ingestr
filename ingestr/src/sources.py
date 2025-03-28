@@ -85,6 +85,7 @@ from ingestr.src.linkedin_ads.dimension_time_enum import (
 from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.personio import personio_source
+from ingestr.src.pipedrive import pipedrive_source
 from ingestr.src.salesforce import salesforce_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
@@ -2013,4 +2014,21 @@ class KinesisSource:
 class PipedriveSource:
     def handles_incrementality(self) -> bool:
         return True
-
+    
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        api_key = params.get("api_token")
+        if api_key is None:
+            raise MissingValueError("api_token", "Pipedrive")
+        
+        start_date = kwargs.get("interval_start")
+        if start_date is not None:
+            start_date = ensure_pendulum_datetime(start_date)
+        else:
+            start_date = pendulum.parse("2000-01-01")
+        
+        if table not in ["users","activities","persons","organizations","products","stages","deals"]:
+            raise UnsupportedResourceError(table, "Pipedrive")
+        
+        return pipedrive_source(pipedrive_api_key=api_key, since_timestamp=start_date).with_resources(table)

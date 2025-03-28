@@ -23,7 +23,7 @@ from dlt.common.time import ensure_pendulum_datetime
 from dlt.sources import DltResource, TDataItems
 
 
-@dlt.source(name="pipedrive")
+@dlt.source(name="pipedrive", max_table_nesting=0)
 def pipedrive_source(
     pipedrive_api_key: str = dlt.secrets.value,
     since_timestamp: Optional[Union[pendulum.DateTime, str]] = "1970-01-01 00:00:00",
