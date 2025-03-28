@@ -43,6 +43,7 @@ from ingestr.src.sources import (
     MongoDbSource,
     NotionSource,
     PersonioSource,
+    PipedriveSource,
     S3Source,
     SalesforceSource,
     ShopifySource,
@@ -51,7 +52,6 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
-    PipedriveSource,
 )
 
 SQL_SOURCE_SCHEMES = [

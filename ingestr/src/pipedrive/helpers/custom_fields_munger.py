@@ -1,4 +1,4 @@
-from typing import Any, Dict, Iterable, Iterator, TypedDict, Optional
+from typing import Any, Dict, Optional, TypedDict
 
 import dlt
 

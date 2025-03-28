@@ -1,12 +1,10 @@
-from itertools import chain, groupby
+from itertools import chain
 from typing import (
     Any,
     Dict,
     Iterable,
     Iterator,
     List,
-    Optional,
-    Sequence,
     TypeVar,
     Union,
 )
@@ -14,8 +12,8 @@ from typing import (
 import dlt
 from dlt.sources.helpers import requests
 
-from .custom_fields_munger import rename_fields
 from ..typing import TDataPage
+from .custom_fields_munger import rename_fields
 
 
 def get_pages(
