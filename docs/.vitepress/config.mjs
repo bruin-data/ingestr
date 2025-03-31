@@ -126,6 +126,7 @@ export default defineConfig({
               { text: "LinkedIn Ads", link: "/supported-sources/linkedin_ads.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Personio", link: "/supported-sources/personio.md" },
+              { text: "Pipedrive", link: "/supported-sources/pipedrive.md" },
               { text: "S3", link: "/supported-sources/s3.md" },
               { text: "Salesforce", link: "/supported-sources/salesforce.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
