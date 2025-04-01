@@ -82,7 +82,9 @@ class AdjustAPI:
             items = result.get("rows", [])
             yield items
         else:
-            raise HTTPError(f"Request failed with status code: {response.status_code}, {response.text}.")
+            raise HTTPError(
+                f"Request failed with status code: {response.status_code}, {response.text}."
+            )
 
     def fetch_events(self):
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -93,7 +95,9 @@ class AdjustAPI:
             result = response.json()
             yield result
         else:
-            raise HTTPError(f"Request failed with status code: {response.status_code}, {response.text}.")
+            raise HTTPError(
+                f"Request failed with status code: {response.status_code}, {response.text}."
+            )
 
 
 def parse_filters(filters_raw: str) -> dict:
