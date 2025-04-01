@@ -23,7 +23,6 @@ pyrate-limiter==3.7.0
 redshift-connector==2.1.5
 rich==13.9.4
 rudder-sdk-python==2.1.4
-s3fs==2024.10.0
 snowflake-sqlalchemy==1.6.1
 sqlalchemy-bigquery==1.12.1
 sqlalchemy-hana==2.0.0
@@ -34,13 +33,13 @@ stripe==10.7.0
 tqdm==4.67.1
 typer==0.13.1
 types-requests==2.32.0.20240907
-s3fs==2024.10.0
+s3fs==2025.3.2
 pyarrow==18.1.0
 google-analytics-data==0.18.17
 asana==3.2.3
 flatten_json==0.1.14
 dataclasses-json==0.6.7
-gcsfs==2024.10.0
+gcsfs==2025.3.2
 simple-salesforce==1.12.6
 databricks-sqlalchemy==1.0.2
 clickhouse-connect==0.8.14
@@ -49,3 +48,4 @@ clickhouse-sqlalchemy==0.2.7
 zstd==1.5.6.5
 ibm-db==3.2.6
 ibm-db-sa==0.4.1
+aiohttp>=3.11.15

@@ -4,8 +4,9 @@ aiobotocore==2.21.1
     # via s3fs
 aiohappyeyeballs==2.4.8
     # via aiohttp
-aiohttp==3.11.13
+aiohttp==3.11.15
     # via
+    #   -r requirements.in
     #   aiobotocore
     #   facebook-business
     #   gcsfs
@@ -115,13 +116,13 @@ frozenlist==1.5.0
     # via
     #   aiohttp
     #   aiosignal
-fsspec==2024.10.0
+fsspec==2025.3.2
     # via
     #   dlt
     #   gcsfs
     #   pyathena
     #   s3fs
-gcsfs==2024.10.0
+gcsfs==2025.3.2
     # via -r requirements.in
 gitdb==4.0.12
     # via gitpython
@@ -205,6 +206,12 @@ httplib2==0.22.0
     #   google-auth-httplib2
 humanize==4.12.1
     # via dlt
+ibm-db==3.2.6
+    # via
+    #   -r requirements.in
+    #   ibm-db-sa
+ibm-db-sa==0.4.1
+    # via -r requirements.in
 idna==3.10
     # via
     #   requests
@@ -431,7 +438,7 @@ rsa==4.9
     # via google-auth
 rudder-sdk-python==2.1.4
     # via -r requirements.in
-s3fs==2024.10.0
+s3fs==2025.3.2
     # via -r requirements.in
 s3transfer==0.11.3
     # via boto3
@@ -474,6 +481,7 @@ sqlalchemy==1.4.52
     #   databricks-sql-connector
     #   databricks-sqlalchemy
     #   duckdb-engine
+    #   ibm-db-sa
     #   snowflake-sqlalchemy
     #   sqlalchemy-bigquery
     #   sqlalchemy-hana
