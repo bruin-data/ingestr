@@ -105,9 +105,11 @@ def get_data(
         if response.status_code == 404:
             if "No Mediation App Id found for platform" in response.text:
                 return None
-        error_message = f"AppLovin MAX API error (status {response.status_code}): {response.text}"
+        error_message = (
+            f"AppLovin MAX API error (status {response.status_code}): {response.text}"
+        )
         raise requests.HTTPError(error_message)
-    
+
     response_url = response.json().get("ad_revenue_report_url")
     df = pd.read_csv(response_url)
     df["Date"] = pd.to_datetime(df["Date"])

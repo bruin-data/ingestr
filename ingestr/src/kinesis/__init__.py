@@ -16,7 +16,7 @@ from .helpers import get_shard_iterator, max_sequence_by_shard
     name=lambda args: args["stream_name"],
     primary_key="kinesis_msg_id",
     standalone=True,
-    max_table_nesting=0
+    max_table_nesting=0,
 )
 def kinesis_stream(
     stream_name: str,
@@ -75,7 +75,6 @@ def kinesis_stream(
 
     # get next shard to fetch messages from
     while shard_id := shard_ids.pop(0) if shard_ids else None:
-     
         shard_iterator, _ = get_shard_iterator(
             kinesis_client,
             stream_name,
@@ -83,14 +82,14 @@ def kinesis_stream(
             last_msg,  # type: ignore
             initial_at_datetime,  # type: ignore
         )
-       
+
         while shard_iterator:
             records = []
             records_response = kinesis_client.get_records(
                 ShardIterator=shard_iterator,
                 Limit=chunk_size,  # The size of data can be up to 1 MB, it must be controlled by the user
             )
-            
+
             for record in records_response["Records"]:
                 sequence_number = record["SequenceNumber"]
                 content = record["Data"]

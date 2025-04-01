@@ -199,7 +199,6 @@ def crm_objects(
 
     props = ",".join(sorted(list(set(props))))
 
-
     params = {"properties": props, "limit": 100}
 
     yield from fetch_data(CRM_OBJECT_ENDPOINTS[object_type], api_key, params=params)
