@@ -3,6 +3,10 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY ./requirements.txt /app/requirements.txt
+COPY ./requirements_arm64.txt /app/requirements_arm64.txt
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+    cp /app/requirements_arm64.txt /app/requirements.txt; \
+fi
 
 # Setup dependencies for pyodbc
 RUN \
@@ -31,7 +35,10 @@ RUN /install.sh && rm /install.sh
 RUN $HOME/.local/bin/uv pip install --system --no-cache -r requirements.txt
 
 COPY . /app
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+    cp /app/requirements_arm64.txt /app/requirements.txt; \
+fi
 
-RUN pip3 install -e . && pip3 install pyodbc
+RUN $HOME/.local/bin/uv pip install --system . && $HOME/.local/bin/uv pip install --system pyodbc
 
 ENTRYPOINT ["ingestr"]
