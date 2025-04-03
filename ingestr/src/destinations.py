@@ -6,12 +6,6 @@ import shutil
 import tempfile
 from urllib.parse import parse_qs, quote, urlparse
 
-import dlt
-from dlt.common.configuration.specs import AwsCredentials
-from dlt.destinations.impl.clickhouse.configuration import (
-    ClickHouseCredentials,
-)
-
 from ingestr.src.loader import load_dlt_file
 
 
@@ -64,7 +58,8 @@ class BigQueryDestination:
         if source_fields.hostname:
             project_id = source_fields.hostname
 
-        return dlt.destinations.bigquery(
+        from dlt.destinations import bigquery
+        return bigquery(
             credentials=credentials,  # type: ignore
             location=location,
             project_id=project_id,
@@ -91,43 +86,46 @@ class BigQueryDestination:
 
 class PostgresDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.postgres(credentials=uri, **kwargs)
+        from dlt.destinations import postgres
+        return postgres(credentials=uri, **kwargs)
 
 
 class SnowflakeDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.snowflake(credentials=uri, **kwargs)
+        from dlt.destinations import snowflake
+        return snowflake(credentials=uri, **kwargs)
 
 
 class RedshiftDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.redshift(
+        from dlt.destinations import redshift
+        return redshift(
             credentials=uri.replace("redshift://", "postgresql://"), **kwargs
         )
 
 
 class DuckDBDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.duckdb(uri, **kwargs)
+        from dlt.destinations import duckdb
+        return duckdb(uri, **kwargs)
 
 
 class MsSQLDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.mssql(credentials=uri, **kwargs)
+        from dlt.destinations import mssql
+        return mssql(credentials=uri, **kwargs)
 
 
 class DatabricksDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.databricks(credentials=uri, **kwargs)
+        from dlt.destinations import databricks
+        return databricks(credentials=uri, **kwargs)
 
 
 class SynapseDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.synapse(credentials=uri, **kwargs)
-
-
-class CustomCsvDestination(dlt.destinations.filesystem):
-    pass
+        from dlt.destinations import synapse
+        return synapse(credentials=uri, **kwargs)
 
 
 class CsvDestination(GenericSqlDestination):
@@ -160,7 +158,8 @@ class CsvDestination(GenericSqlDestination):
         temp_path = tempfile.mkdtemp()
         self.actual_path = uri
         self.temp_path = temp_path
-        return CustomCsvDestination(bucket_url=f"file://{temp_path}", **kwargs)
+        from dlt.destinations import filesystem
+        return filesystem(bucket_url=f"file://{temp_path}", **kwargs)
 
     # I dislike this implementation quite a bit since it ties the implementation to some internal details on how dlt works
     # I would prefer a custom destination that allows me to do this easily but dlt seems to have a lot of internal details that are not documented
@@ -242,12 +241,14 @@ class AthenaDestination:
             secret_access_key
         )
 
+        from dlt.common.configuration.specs import AwsCredentials
         credentials = AwsCredentials(
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
             region_name=region_name,
         )
-        return dlt.destinations.athena(
+        from dlt.destinations import athena
+        return athena(
             query_result_bucket=query_result_path,
             athena_work_group=work_group,
             credentials=credentials,
@@ -318,6 +319,9 @@ class ClickhouseDestination:
                 "Invalid value for secure. Set to `1` for a secure HTTPS connection or `0` for a non-secure HTTP connection."
             )
 
+        from dlt.destinations.impl.clickhouse.configuration import (
+            ClickHouseCredentials,
+        )
         credentials = ClickHouseCredentials(
             {
                 "host": host,
@@ -329,7 +333,8 @@ class ClickhouseDestination:
                 "secure": secure,
             }
         )
-        return dlt.destinations.clickhouse(credentials=credentials)
+        from dlt.destinations import clickhouse
+        return clickhouse(credentials=credentials)
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
         table_fields = table.split(".")
