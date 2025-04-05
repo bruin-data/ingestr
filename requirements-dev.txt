@@ -1,9 +1,9 @@
 -r requirements.txt
 
-mypy==1.13.0
+mypy==1.15.0
 pytest-cov==4.1.0
-pytest==8.3.3
-ruff==0.8.6
+pytest==8.3.5
+ruff==0.11.4
 hatchling==1.27.0
 build==1.2.1
 pyodbc==5.2.0
