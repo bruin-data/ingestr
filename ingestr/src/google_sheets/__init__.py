@@ -70,9 +70,9 @@ def google_spreadsheet(
         spreadsheet_id=spreadsheet_id,
         range_names=list(all_range_names),
     )
-    assert len(all_range_names) == len(
-        all_range_data
-    ), "Google Sheets API must return values for all requested ranges"
+    assert len(all_range_names) == len(all_range_data), (
+        "Google Sheets API must return values for all requested ranges"
+    )
 
     # get metadata for two first rows of each range
     # first should contain headers
@@ -126,7 +126,7 @@ def google_spreadsheet(
         headers = get_range_headers(headers_metadata, name)
         if headers is None:
             # generate automatic headers and treat the first row as data
-            headers = [f"col_{idx+1}" for idx in range(len(headers_metadata))]
+            headers = [f"col_{idx + 1}" for idx in range(len(headers_metadata))]
             data_row_metadata = headers_metadata
             rows_data = values[0:]
             logger.warning(

@@ -149,12 +149,12 @@ def get_range_headers(headers_metadata: List[DictStrAny], range_name: str) -> Li
                     header_val = str(f"col_{idx + 1}")
                 else:
                     logger.warning(
-                        f"In range {range_name}, header value: {header_val} at position {idx+1} is not a string!"
+                        f"In range {range_name}, header value: {header_val} at position {idx + 1} is not a string!"
                     )
                     return None
         else:
             logger.warning(
-                f"In range {range_name}, header at position {idx+1} is not missing!"
+                f"In range {range_name}, header at position {idx + 1} is not missing!"
             )
             return None
         headers.append(header_val)

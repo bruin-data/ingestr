@@ -35,7 +35,7 @@ DATE_FORMATS = [
 
 # https://dlthub.com/docs/dlt-ecosystem/file-formats/parquet#supported-destinations
 PARQUET_SUPPORTED_DESTINATIONS = [
-    "athena" "bigquery",
+    "athenabigquery",
     "duckdb",
     "snowflake",
     "databricks",
