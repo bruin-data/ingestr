@@ -2974,7 +2974,7 @@ def test_version_cmd():
 )
 def test_mysql_zero_dates(dest):
     source_uri = mysqlDocker.start()
-    dest_uri = dest.start()
+    dest_uri = DuckDb().start()
 
     schema_rand_prefix = f"testschema_mysql_zero_dates_{get_random_string(5)}"
     try:
