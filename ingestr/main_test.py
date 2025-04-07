@@ -3,6 +3,7 @@ import csv
 import gzip
 import io
 import json
+import logging
 import os
 import random
 import shutil
@@ -68,6 +69,9 @@ from ingestr.src.errors import (
     UnsupportedResourceError,
 )
 
+logging.getLogger("testcontainers.core.waiting_utils").setLevel(logging.WARNING)
+logging.getLogger("testcontainers.core.container").setLevel(logging.WARNING)
+
 
 def has_exception(exception, exc_type):
     if isinstance(exception, pytest.ExceptionInfo):
@@ -100,6 +104,7 @@ def invoke_ingest_command(
     sql_exclude_columns=None,
     columns=None,
     sql_limit=None,
+    print_output=True,
 ):
     args = [
         "ingest",
@@ -163,7 +168,8 @@ def invoke_ingest_command(
         input="y\n",
         env={"DISABLE_TELEMETRY": "true"},
     )
-    if result.exit_code != 0:
+
+    if result.exit_code != 0 and print_output:
         traceback.print_exception(*result.exc_info)
 
     return result
@@ -2323,6 +2329,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table,
                 interval_start="2024-01-01",
                 interval_end="2024-01-02",
+                print_output=False,
             )
             assert has_exception(result.exception, NoReportsFoundError)
 
@@ -2365,6 +2372,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table,
                 interval_start="2024-01-01",
                 interval_end="2024-01-02",
+                print_output=False,
             )
             assert has_exception(result.exception, NoOngoingReportRequestsFoundError)
 
@@ -2407,6 +2415,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table,
                 interval_start="2024-01-01",
                 interval_end="2024-01-02",
+                print_output=False,
             )
             assert has_exception(result.exception, NoSuchReportError)
 
@@ -2717,7 +2726,11 @@ def fs_test_cases(
         """
         schema = f"testschema_fs_{get_random_string(5)}"
         result = invoke_ingest_command(
-            f"{protocol}://bucket?{auth}", "", dest_uri, f"{schema}.test"
+            f"{protocol}://bucket?{auth}",
+            "",
+            dest_uri,
+            f"{schema}.test",
+            print_output=False,
         )
         assert has_exception(result.exception, InvalidBlobTableError)
 
@@ -2737,6 +2750,7 @@ def fs_test_cases(
                 "/bin/data.bin",
                 dest_uri,
                 dest_table,
+                print_output=False,
             )
             assert result.exit_code != 0
             assert has_exception(result.exception, ValueError)
@@ -2752,6 +2766,7 @@ def fs_test_cases(
             "/data.csv",
             dest_uri,
             dest_table,
+            print_output=False,
         )
         assert result.exit_code != 0
 
