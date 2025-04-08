@@ -68,6 +68,7 @@ from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_sour
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
+from ingestr.src.frankfurter.helpers import validate_dates
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 from ingestr.src.google_ads import google_ads
 from ingestr.src.google_analytics import google_analytics
@@ -2042,35 +2043,19 @@ class PipedriveSource:
             pipedrive_api_key=api_key, since_timestamp=start_date
         ).with_resources(table)
 
-from ingestr.src.frankfurter.helpers import validate_dates, validate_currency_codes
-
 class FrankfurterSource:
     def handles_incrementality(self) -> bool:
         return True
     
     def dlt_source(self, uri: str, table: str, **kwargs):
 
-        parsed_uri = urlparse(uri)
-        query_params = parse_qs(parsed_uri.query)
-
-        # Extract query parameters
-        start_date_               = query_params.get("from",                  [None])[0]
-        end_date_                 = query_params.get("until",                 [None])[0]
-        base_currency_            = query_params.get("base",                  [None])[0]
-        target_currency_list_      = query_params.get("target",                [None])[0]
-
-
-        # Validate and format dates. NB the API does not produce data on weekends. If either of the dates is on the weekend, it will be adjusted to the previous Friday.
-        # TODO: Notify user if date is on weekend.
-        if not start_date_:
-            start_date_ = pendulum.today().format("YYYY-MM-DD")
-            if end_date_:
-                raise ValueError("End date must be empty if start date is not provided.")
-        else:
-            start_date_, end_date_ = validate_dates(start_date_, end_date_)
-        
-        # Validate currency codes. NB both base and target currencies are optional.
-        validate_currency_codes(base_currency_, target_currency_list_)
+        if table == "exchange_rates" and (kwargs.get("interval_start")):
+            start_date = kwargs.get("interval_start")
+            if kwargs.get("interval_end"):
+                end_date = kwargs.get("interval_end")
+            else:
+                end_date = start_date
+            validate_dates(start_date = start_date, end_date = end_date)
 
         # Validate table
         if table not in [
@@ -2081,9 +2066,7 @@ class FrankfurterSource:
             raise ValueError(f"Table '{table}' is not supported for Frankfurter source.")
     
         return frankfurter_source(
-            start_date              =   start_date_,
-            end_date                =   end_date_,
-            base_currency           =   base_currency_,
-            target_currency_list    =   target_currency_list_,
+            start_date              =   kwargs.get("interval_start"),
+            end_date                =   kwargs.get("interval_end"),
             table                   =   table  
         )  
