@@ -115,6 +115,7 @@ export default defineConfig({
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
               },
+              { text: "Frankfurter", link: "/supported-sources/frankfurter.md" },
               { text: "Google Cloud Storage (GCS)", link: "/supported-sources/gcs.md" },
               { text: "Google Analytics", link: "/supported-sources/google_analytics.md" },
               { text: "Google Ads", link: "/supported-sources/google-ads.md" },
