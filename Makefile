@@ -22,7 +22,7 @@ deps-ci:
 	uv pip install --system -r requirements-dev.txt
 
 test-ci:
-	TESTCONTAINERS_RYUK_DISABLED=true pytest -n 8 -x -rP -vv --tb=short --durations=10 --cov=ingestr --no-cov-on-fail
+	TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto -x -rP -vv --tb=short --durations=10 --cov=ingestr --no-cov-on-fail
 
 test : venv lock-deps
 	. venv/bin/activate; $(MAKE) test-ci
