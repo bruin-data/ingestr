@@ -2046,27 +2046,31 @@ class PipedriveSource:
 class FrankfurterSource:
     def handles_incrementality(self) -> bool:
         return True
-    
-    def dlt_source(self, uri: str, table: str, **kwargs):
 
+    def dlt_source(self, uri: str, table: str, **kwargs):
         if table == "exchange_rates" and (kwargs.get("interval_start")):
             start_date = kwargs.get("interval_start")
             if kwargs.get("interval_end"):
                 end_date = kwargs.get("interval_end")
             else:
                 end_date = start_date
-            validate_dates(start_date = start_date, end_date = end_date)
+            validate_dates(start_date=start_date, end_date=end_date)
 
         # Validate table
-        if table not in [
-            "currencies",           
-            "latest",
-            "exchange_rates"
-            ]:
-            raise ValueError(f"Table '{table}' is not supported for Frankfurter source.")
-    
+        if table not in ["currencies", "latest", "exchange_rates"]:
+            raise ValueError(
+                f"Table '{table}' is not supported for Frankfurter source."
+            )
+
         return frankfurter_source(
+<<<<<<< HEAD
             start_date              =   kwargs.get("interval_start"),
             end_date                =   kwargs.get("interval_end"),
             table                   =   table  
         )  
+=======
+            start_date=kwargs.get("interval_start"),
+            end_date=kwargs.get("interval_end"),
+            table=table,
+        )
+>>>>>>> 97babc77 (ran make lint)

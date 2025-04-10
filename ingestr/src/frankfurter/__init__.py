@@ -1,18 +1,20 @@
-from typing import Any, Optional, Iterator
-from ingestr.src.frankfurter.helpers import FRANKFURTER_API_URL, get_path_with_retry
+from typing import Any, Iterator, Optional
 
 import dlt
 from dlt.common.pendulum import pendulum
 from dlt.common.typing import TAnyDateTime, datetime
+
+from ingestr.src.frankfurter.helpers import get_path_with_retry
+
 
 @dlt.source(
     name="frankfurter",
     max_table_nesting=0,
 )
 def frankfurter_source(
-    start_date:             Optional[TAnyDateTime] = None,
-    end_date:               Optional[TAnyDateTime] = None,
-    table:                  str = None,
+    start_date: Optional[TAnyDateTime] = None,
+    end_date: Optional[TAnyDateTime] = None,
+    table: str = None,
 ) -> Any:
     """
     A dlt source for the frankfurter.dev API. It groups several resources (in this case frankfurter.dev API endpoints) containing
@@ -23,15 +25,13 @@ def frankfurter_source(
     # Determine which resource to return based on the `table` parameter
     if table == "currencies":
         return currencies()
-    
+
     elif table == "latest":
         return latest()
-        
+
     elif table == "exchange_rates":
-        return exchange_rates(
-            start_date          =   start_date,
-            end_date            =   end_date
-        )
+        return exchange_rates(start_date=start_date, end_date=end_date)
+
 
 @dlt.resource(
     write_disposition="replace",
@@ -46,13 +46,9 @@ def currencies() -> Iterator[dict]:
     """
     # Retrieve the list of currencies from the API
     currencies_data = get_path_with_retry("currencies")
-    
-    for currency_code, currency_name in currencies_data.items():
-        yield {
-            "currency_code": currency_code,
-            "currency_name": currency_name
-        }
 
+    for currency_code, currency_name in currencies_data.items():
+        yield {"currency_code": currency_code, "currency_name": currency_name}
 
 
 @dlt.resource(
@@ -69,7 +65,7 @@ def latest() -> Iterator[dict]:
     Fetches the latest exchange rates and yields them as rows.
     """
     # Base URL
-    url = f"latest?"
+    url = "latest?"
 
     # Fetch data
     latest_data = get_path_with_retry(url)
@@ -95,8 +91,6 @@ def latest() -> Iterator[dict]:
             "rate": rate,
         }
 
-   
-
 
 @dlt.resource(
     write_disposition="replace",
@@ -119,12 +113,20 @@ def exchange_rates(
 
     # Normalize start_date and end_date to strings in "YYYY-MM-DD" format
     if start_date:
-        start_date = start_date.strftime("%Y-%m-%d") if isinstance(start_date, datetime) else pendulum.parse(start_date).format("YYYY-MM-DD")
+        start_date = (
+            start_date.strftime("%Y-%m-%d")
+            if isinstance(start_date, datetime)
+            else pendulum.parse(start_date).format("YYYY-MM-DD")
+        )
     else:
         start_date = pendulum.now().strftime("%Y-%m-%d")
 
     if end_date:
-        end_date = end_date.strftime("%Y-%m-%d") if isinstance(end_date, datetime) else pendulum.parse(end_date).format("YYYY-MM-DD")
+        end_date = (
+            end_date.strftime("%Y-%m-%d")
+            if isinstance(end_date, datetime)
+            else pendulum.parse(end_date).format("YYYY-MM-DD")
+        )
     else:
         end_date = start_date
 
