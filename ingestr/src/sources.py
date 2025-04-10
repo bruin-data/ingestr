@@ -2063,14 +2063,7 @@ class FrankfurterSource:
             )
 
         return frankfurter_source(
-<<<<<<< HEAD
-            start_date              =   kwargs.get("interval_start"),
-            end_date                =   kwargs.get("interval_end"),
-            table                   =   table  
-        )  
-=======
             start_date=kwargs.get("interval_start"),
             end_date=kwargs.get("interval_end"),
             table=table,
         )
->>>>>>> 97babc77 (ran make lint)
