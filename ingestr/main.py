@@ -11,7 +11,7 @@ from typing_extensions import Annotated
 import ingestr.src.partition as partition
 import ingestr.src.resource as resource
 from ingestr.src.destinations import AthenaDestination
-from ingestr.src.filters import cast_set_to_list
+from ingestr.src.filters import cast_set_to_list, handle_mysql_empty_dates
 from ingestr.src.telemetry.event import track
 
 app = typer.Typer(
@@ -35,7 +35,7 @@ DATE_FORMATS = [
 
 # https://dlthub.com/docs/dlt-ecosystem/file-formats/parquet#supported-destinations
 PARQUET_SUPPORTED_DESTINATIONS = [
-    "athena" "bigquery",
+    "athenabigquery",
     "duckdb",
     "snowflake",
     "databricks",
@@ -553,6 +553,8 @@ def ingest(
         )
 
         resource.for_each(dlt_source, lambda x: x.add_map(cast_set_to_list))
+        if factory.source_scheme.startswith("mysql"):
+            resource.for_each(dlt_source, lambda x: x.add_map(handle_mysql_empty_dates))
 
         def col_h(x):
             if column_hints:
