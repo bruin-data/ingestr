@@ -132,16 +132,27 @@ def fetch_data(
         if "results" in _data:
             _objects: List[Dict[str, Any]] = []
             for _result in _data["results"]:
-                _obj = _result.get("properties", _result)
-                if "id" not in _obj and "id" in _result:
-                    # Move id from properties to top level
-                    _obj["id"] = _result["id"]
-                if "associations" in _result:
-                    for association in _result["associations"]:
-                        __values = [
-                            {
-                                "value": _obj["hs_object_id"],
-                                f"{association}_id": __r["id"],
+                if endpoint == "/crm/v3/schemas":
+                    _objects.append({
+                        "name": _result["labels"].get("singular", ""),
+                        "objectTypeId": _result.get("objectTypeId", ""),
+                        "id": _result.get("id", ""),
+                        "fullyQualifiedName": _result.get("fullyQualifiedName", ""),
+                        "properties": _result.get("properties", ""),
+                        "createdAt": _result.get("createdAt", ""),
+                        "updatedAt": _result.get("updatedAt", "")
+                    })
+                else:
+                    _obj = _result.get("properties", _result)
+                    if "id" not in _obj and "id" in _result:
+                        # Move id from properties to top level
+                        _obj["id"] = _result["id"]
+                    if "associations" in _result:
+                        for association in _result["associations"]:
+                            __values = [
+                                {
+                                    "value": _obj["hs_object_id"],
+                                    f"{association}_id": __r["id"],
                             }
                             for __r in _result["associations"][association]["results"]
                         ]
@@ -152,7 +163,7 @@ def fetch_data(
                         ]
 
                         _obj[association] = __values
-                _objects.append(_obj)
+                    _objects.append(_obj)
             yield _objects
 
         # Follow pagination links if they exist
