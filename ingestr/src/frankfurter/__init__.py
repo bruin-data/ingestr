@@ -2,7 +2,8 @@ from typing import Any, Iterator, Optional
 
 import dlt
 from dlt.common.pendulum import pendulum
-from dlt.common.typing import TAnyDateTime, datetime
+from dlt.common.time import ensure_pendulum_datetime
+from dlt.common.typing import TAnyDateTime
 
 from ingestr.src.frankfurter.helpers import get_path_with_retry
 
@@ -102,36 +103,19 @@ def latest() -> Iterator[dict]:
     primary_key=["date", "currency_name"],  # Composite primary key
 )
 def exchange_rates(
-    start_date: Optional[TAnyDateTime] = None,
-    end_date: Optional[TAnyDateTime] = None,
+    start_date: TAnyDateTime,
+    end_date: TAnyDateTime,
 ) -> Iterator[dict]:
     """
     Fetches exchange rates for a specified date range.
     If only start_date is provided, fetches data for that date.
     If both start_date and end_date are provided, fetches data for each day in the range.
     """
-
-    # Normalize start_date and end_date to strings in "YYYY-MM-DD" format
-    if start_date:
-        start_date = (
-            start_date.strftime("%Y-%m-%d")
-            if isinstance(start_date, datetime)
-            else pendulum.parse(start_date).format("YYYY-MM-DD")
-        )
-    else:
-        start_date = pendulum.now().strftime("%Y-%m-%d")
-
-    if end_date:
-        end_date = (
-            end_date.strftime("%Y-%m-%d")
-            if isinstance(end_date, datetime)
-            else pendulum.parse(end_date).format("YYYY-MM-DD")
-        )
-    else:
-        end_date = start_date
+    start_date_str = ensure_pendulum_datetime(start_date).format("YYYY-MM-DD")
+    end_date_str = ensure_pendulum_datetime(end_date).format("YYYY-MM-DD")
 
     # Compose the URL
-    url = f"{start_date}..{end_date}?"
+    url = f"{start_date_str}..{end_date_str}?"
 
     # Fetch data from the API
     data = get_path_with_retry(url)

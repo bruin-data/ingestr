@@ -2050,12 +2050,18 @@ class FrankfurterSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        if table == "exchange_rates" and (kwargs.get("interval_start")):
-            start_date = kwargs.get("interval_start")
-            if kwargs.get("interval_end"):
-                end_date = kwargs.get("interval_end")
+        # start and end dates only assigned and validated for exchange_rates table
+        # Note: if an end date but no start date is provided, start date and end date will be set to current date
+        if table == "exchange_rates":
+            if kwargs.get("interval_start"):
+                start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
+                if kwargs.get("interval_end"):
+                    end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
+                else:
+                    end_date = start_date
             else:
-                end_date = start_date
+                start_date = pendulum.now()
+                end_date = pendulum.now()
             validate_dates(start_date=start_date, end_date=end_date)
 
         # Validate table
@@ -2066,6 +2072,6 @@ class FrankfurterSource:
 
         return frankfurter_source(
             table=table,
-            start_date=kwargs.get("interval_start"),
-            end_date=kwargs.get("interval_end"),
+            start_date=start_date,
+            end_date=end_date,
         )

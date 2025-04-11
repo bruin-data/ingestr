@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import Optional
 
+from dlt.common.pendulum import pendulum
 from dlt.common.typing import StrAny
 from dlt.sources.helpers import requests
 
@@ -16,20 +16,17 @@ def get_path_with_retry(path: str) -> StrAny:
     return get_url_with_retry(f"{FRANKFURTER_API_URL}{path}")
 
 
-def validate_dates(
-    start_date: Optional[datetime], end_date: Optional[datetime]
-) -> None:
-    current_date = datetime.now()
-
-    # Check if end_date is after start_date
-    if start_date and end_date:
-        if start_date > end_date:
-            raise ValueError("End date must be after start date.")
+def validate_dates(start_date: datetime, end_date: datetime) -> None:
+    current_date = pendulum.now()
 
     # Check if start_date is in the future
-    if start_date and start_date > current_date:
-        raise ValueError("Start date cannot be in the future.")
+    if start_date > current_date:
+        raise ValueError("Interval-start cannot be in the future.")
 
     # Check if end_date is in the future
-    if end_date and end_date > current_date:
-        raise ValueError("End date cannot be in the future.")
+    if end_date > current_date:
+        raise ValueError("Interval-end cannot be in the future.")
+
+    # Check if start_date is before end_date
+    if start_date > end_date:
+        raise ValueError("Interval-end cannot be before interval-start.")
