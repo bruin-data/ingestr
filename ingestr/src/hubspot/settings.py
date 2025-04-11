@@ -14,6 +14,7 @@ CRM_DEALS_ENDPOINT = "/crm/v3/objects/deals"
 CRM_PRODUCTS_ENDPOINT = "/crm/v3/objects/products"
 CRM_TICKETS_ENDPOINT = "/crm/v3/objects/tickets"
 CRM_QUOTES_ENDPOINT = "/crm/v3/objects/quotes"
+CRM_SCHEMAS_ENDPOINT = "/crm/v3/schemas"
 
 CRM_OBJECT_ENDPOINTS = {
     "contact": CRM_CONTACTS_ENDPOINT,

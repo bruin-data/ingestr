@@ -36,6 +36,7 @@ from .helpers import _get_property_names, fetch_data, fetch_property_history
 from .settings import (
     ALL,
     CRM_OBJECT_ENDPOINTS,
+    CRM_SCHEMAS_ENDPOINT,
     DEFAULT_COMPANY_PROPS,
     DEFAULT_CONTACT_PROPS,
     DEFAULT_DEAL_PROPS,
@@ -161,6 +162,13 @@ def hubspot(
             props,
             include_custom_props,
         )
+      
+    @dlt.resource(name="schemas", write_disposition="merge", primary_key="id")
+    def schemas(
+        api_key: str = api_key,
+    ) -> Iterator[TDataItems]:
+        """Hubspot schemas resource"""
+        yield from fetch_data(CRM_SCHEMAS_ENDPOINT, api_key)
 
     @dlt.resource(name="quotes", write_disposition="replace")
     def quotes(
@@ -178,7 +186,7 @@ def hubspot(
             include_custom_props,
         )
 
-    return companies, contacts, deals, tickets, products, quotes
+    return companies, contacts, deals, tickets, products, quotes, schemas
 
 
 def crm_objects(
