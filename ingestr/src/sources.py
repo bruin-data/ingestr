@@ -2064,6 +2064,11 @@ class FrankfurterSource:
                 end_date = pendulum.now()
             validate_dates(start_date=start_date, end_date=end_date)
 
+        # For currencies and latest tables, set start and end dates to current date
+        else:
+            start_date = pendulum.now()
+            end_date = pendulum.now()
+
         # Validate table
         if table not in ["currencies", "latest", "exchange_rates"]:
             raise ValueError(
