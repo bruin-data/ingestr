@@ -2011,6 +2011,7 @@ class KinesisSource:
             stream_name=table, credentials=credentials, initial_at_timestamp=start_date
         )
 
+
 class PipedriveSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -2043,6 +2044,7 @@ class PipedriveSource:
             pipedrive_api_key=api_key, since_timestamp=start_date
         ).with_resources(table)
 
+
 class FrankfurterSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -2063,7 +2065,7 @@ class FrankfurterSource:
             )
 
         return frankfurter_source(
+            table=table,
             start_date=kwargs.get("interval_start"),
             end_date=kwargs.get("interval_end"),
-            table=table,
         )

@@ -12,9 +12,9 @@ from ingestr.src.frankfurter.helpers import get_path_with_retry
     max_table_nesting=0,
 )
 def frankfurter_source(
+    table: str,
     start_date: Optional[TAnyDateTime] = None,
     end_date: Optional[TAnyDateTime] = None,
-    table: str = None,
 ) -> Any:
     """
     A dlt source for the frankfurter.dev API. It groups several resources (in this case frankfurter.dev API endpoints) containing
