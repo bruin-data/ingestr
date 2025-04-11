@@ -67,6 +67,8 @@ from ingestr.src.errors import (
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
+from ingestr.src.frankfurter import frankfurter_source
+from ingestr.src.frankfurter.helpers import validate_dates
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 from ingestr.src.google_ads import google_ads
 from ingestr.src.google_analytics import google_analytics
@@ -2041,3 +2043,35 @@ class PipedriveSource:
         return pipedrive_source(
             pipedrive_api_key=api_key, since_timestamp=start_date
         ).with_resources(table)
+
+
+class FrankfurterSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        # start and end dates only assigned and validated for exchange_rates table
+        # Note: if an end date but no start date is provided, start date and end date will be set to current date
+        if table == "exchange_rates":
+            if kwargs.get("interval_start"):
+                start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
+                if kwargs.get("interval_end"):
+                    end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
+                else:
+                    end_date = start_date
+            else:
+                start_date = pendulum.now()
+                end_date = pendulum.now()
+            validate_dates(start_date=start_date, end_date=end_date)
+
+        # Validate table
+        if table not in ["currencies", "latest", "exchange_rates"]:
+            raise ValueError(
+                f"Table '{table}' is not supported for Frankfurter source."
+            )
+
+        return frankfurter_source(
+            table=table,
+            start_date=start_date,
+            end_date=end_date,
+        )
