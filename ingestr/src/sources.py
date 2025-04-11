@@ -801,7 +801,7 @@ class HubspotSource:
             raise ValueError("api_key in the URI is required to connect to Hubspot")
 
         endpoint = None
-        if table in ["contacts", "companies", "deals", "tickets", "products", "quotes"]:
+        if table in ["contacts", "companies", "deals", "tickets", "products", "quotes", "schemas"]:
             endpoint = table
         else:
             raise ValueError(
