@@ -185,8 +185,27 @@ def hubspot(
             props,
             include_custom_props,
         )
+    
+    @dlt.resource(write_disposition="replace")
+    def license(
+        api_key: str = api_key
+    ) -> Iterator[TDataItems]:
+        
+        get_custom_object =  schemas(api_key)
+        object_type_id = None
+        for custom_object in get_custom_object:
+            print(custom_object["name"])
+            if custom_object["name"] == "License":
+                object_type_id = custom_object["objectTypeId"]
+                break
+        if object_type_id is None:
+            raise ValueError("No custom object id is found")
+       
+        custom_object_endpoint= f"crm/v3/objects/{object_type_id}"
+        """Hubspot custom object details resource"""
+        yield from fetch_data(custom_object_endpoint, api_key)
 
-    return companies, contacts, deals, tickets, products, quotes, schemas
+    return companies, contacts, deals, tickets, products, quotes, schemas, license
 
 
 def crm_objects(
