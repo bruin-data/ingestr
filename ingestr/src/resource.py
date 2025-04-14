@@ -1,11 +1,7 @@
 from typing import Callable
 
-from dlt.sources import DltResource, DltSource
 
-
-def for_each(
-    source: DltSource | DltResource, ex: Callable[[DltResource], None | DltResource]
-):
+def for_each(source):
     """
     Apply a function to each resource in a source.
     """

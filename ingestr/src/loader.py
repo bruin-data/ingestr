@@ -3,9 +3,7 @@ import gzip
 import json
 import subprocess
 from contextlib import contextmanager
-from typing import Generator
-
-from pyarrow.parquet import ParquetFile  # type: ignore
+from typing import Generator  # type: ignore
 
 PARQUET_BATCH_SIZE = 64
 
@@ -61,6 +59,8 @@ def csvfile(filepath: str):
 
 @contextmanager
 def parquetfile(filepath: str):
+    from pyarrow.parquet import ParquetFile
+    
     def reader(pf: ParquetFile):
         for batch in pf.iter_batches(PARQUET_BATCH_SIZE):
             yield from batch.to_pylist()
