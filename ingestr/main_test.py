@@ -2953,6 +2953,82 @@ def test_applovin_source(testcase):
     testcase()
 
 
+def frankfurter_test_cases() -> Iterable[Callable]:
+    def invalid_source_table():
+        result = invoke_ingest_command(
+            "frankfurter://",
+            "invalid_table",
+            "duckdb:///out.db",
+            "public.unknown_report",
+        )
+        assert result.exit_code != 0
+        assert has_exception(result.exception, ValueError)
+
+    def interval_start_does_not_exceed_interval_end():
+        result = invoke_ingest_command(
+            "frankfurter://",
+            "exchange_rates",
+            "duckdb:///out.db",
+            "public.unknown_report",
+            interval_start="2025-04-11",
+            interval_end="2025-04-10",
+        )
+        assert result.exit_code != 0
+        assert has_exception(result.exception, ValueError)
+        assert "Interval-end cannot be before interval-start." in str(result.exception)
+
+    def interval_start_can_equal_interval_end():
+        result = invoke_ingest_command(
+            "frankfurter://",
+            "exchange_rates",
+            "duckdb:///out.db",
+            "public.unknown_report",
+            interval_start="2025-04-10",
+            interval_end="2025-04-10",
+        )
+        assert result.exit_code == 0
+    
+    def interval_start_does_not_exceed_current_date():
+        start_date = pendulum.now().add(days=1).format("YYYY-MM-DD")
+        result = invoke_ingest_command(
+            "frankfurter://",
+            "exchange_rates",
+            "duckdb:///out.db",
+            "public.unknown_report",
+            interval_start=start_date,
+        )
+        assert result.exit_code != 0
+        assert has_exception(result.exception, ValueError)
+        assert "Interval-start cannot be in the future." in str(result.exception)
+
+   
+    def interval_end_does_not_exceed_current_date():
+        start_date = pendulum.now().subtract(days=1).format("YYYY-MM-DD")
+        end_date = pendulum.now().add(days=1).format("YYYY-MM-DD")
+        result = invoke_ingest_command(
+            "frankfurter://",
+            "exchange_rates",
+            "duckdb:///out.db",
+            "public.unknown_report",
+            interval_start=start_date,
+            interval_end=end_date,
+        )
+        assert result.exit_code != 0
+        assert has_exception(result.exception, ValueError)
+        assert "Interval-end cannot be in the future." in str(result.exception)
+
+    return [
+        invalid_source_table,
+        interval_start_does_not_exceed_interval_end,
+        interval_start_can_equal_interval_end,
+        interval_start_does_not_exceed_current_date,
+        interval_end_does_not_exceed_current_date,
+    ]
+
+@pytest.mark.parametrize("testcase", frankfurter_test_cases())
+def test_frankfurter_source(testcase):
+    testcase()
+
 def test_version_cmd():
     """
     This should always be 0.0.0-dev.
