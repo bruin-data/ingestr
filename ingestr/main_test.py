@@ -3,6 +3,7 @@ import csv
 import gzip
 import io
 import json
+import logging
 import os
 import random
 import shutil
@@ -68,6 +69,9 @@ from ingestr.src.errors import (
     UnsupportedResourceError,
 )
 
+logging.getLogger("testcontainers.core.waiting_utils").setLevel(logging.WARNING)
+logging.getLogger("testcontainers.core.container").setLevel(logging.WARNING)
+
 
 def has_exception(exception, exc_type):
     if isinstance(exception, pytest.ExceptionInfo):
@@ -100,6 +104,8 @@ def invoke_ingest_command(
     sql_exclude_columns=None,
     columns=None,
     sql_limit=None,
+    print_output=True,
+    run_in_subprocess=False,
 ):
     args = [
         "ingest",
@@ -157,14 +163,41 @@ def invoke_ingest_command(
         args.append("--sql-limit")
         args.append(sql_limit)
 
-    result = CliRunner().invoke(
-        app,
-        args,
-        input="y\n",
-        env={"DISABLE_TELEMETRY": "true"},
-    )
-    if result.exit_code != 0:
-        traceback.print_exception(*result.exc_info)
+    if not run_in_subprocess:
+        result = CliRunner().invoke(
+            app,
+            args,
+            input="y\n",
+            env={"DISABLE_TELEMETRY": "true"},
+        )
+        if result.exit_code != 0 and print_output:
+            traceback.print_exception(*result.exc_info)
+
+        return result
+
+    import subprocess
+    import sys
+
+    cmd = [sys.executable, "-m", "ingestr.main"] + args
+    env = os.environ.copy()
+    env["DISABLE_TELEMETRY"] = "true"
+
+    process = subprocess.run(cmd, input="y\n", text=True, capture_output=True, env=env)
+
+    # Create a result object similar to what CliRunner returns
+    class Result:
+        def __init__(self, exit_code, stdout, stderr, exc_info=None):
+            self.exit_code = exit_code
+            self.stdout = stdout
+            self.stderr = stderr
+            self.exc_info = exc_info
+
+    result = Result(process.returncode, process.stdout, process.stderr)
+
+    if result.exit_code != 0 and print_output:
+        print(result.stdout)
+        print(result.stderr)
+        # traceback.print_exception(result.exc_info)
 
     return result
 
@@ -412,66 +445,85 @@ def test_delete_insert_without_primary_key_csv_to_duckdb():
 
 
 class DockerImage:
-    def __init__(self, container_creator, connection_suffix: str = "") -> None:
+    def __init__(self, id: str, container_creator, connection_suffix: str = "") -> None:
+        self.id = id
         self.container_creator = container_creator
         self.connection_suffix = connection_suffix
+        self.container_lock_dir = None
         self.container = None
-        self.starting = False
 
     def start(self) -> str:
-        if self.container:
-            return self.container.get_connection_url() + self.connection_suffix
+        file_path = f"{self.container_lock_dir}/{self.id}"
+        attempts = 0
+        while self.container_lock_dir is None or not os.path.exists(file_path):
+            time.sleep(1)
+            attempts += 1
+            if attempts > 20:
+                raise Exception("Failed to start container after bunch of attempts")
 
-        if self.starting:
-            while self.container is None:
-                time.sleep(0.1)
+        with open(file_path, "r") as f:
+            res = f.read()
+            return res
 
-            return self.container.get_connection_url() + self.connection_suffix
-
-        self.starting = True
+    def start_fully(self) -> str:
         self.container = self.container_creator()
-        self.starting = False
-        if self.container:
-            return self.container.get_connection_url() + self.connection_suffix
+        if self.container is None:
+            raise ValueError("Container is not initialized.")
 
-        raise Exception("Failed to start container")
+        conn_url = self.container.get_connection_url() + self.connection_suffix
+
+        with open(f"{self.container_lock_dir}/{self.id}", "w") as f:
+            f.write(conn_url)
+
+        return conn_url
 
     def stop(self):
         pass
 
     def stop_fully(self):
-        if self.container:
-            self.container.stop()
+        self.container.stop()
 
 
 class ClickhouseDockerImage(DockerImage):
-    def __init__(self, container_creator, connection_suffix: str = "") -> None:
-        super().__init__(container_creator, connection_suffix)
-
-    def start(self) -> str:
-        url = super().start()
+    def start_fully(self) -> str:
+        self.container = self.container_creator()
         if self.container is None:
             raise ValueError("Container is not initialized.")
+
         port = self.container.get_exposed_port(8123)
-        return (
-            url.replace("clickhouse://", "clickhouse+native://")
+        conn_url = (
+            self.container.get_connection_url().replace(
+                "clickhouse://", "clickhouse+native://"
+            )
             + f"?http_port={port}&secure=0"
         )
+        # raise ValueError(conn_url)
+        with open(f"{self.container_lock_dir}/{self.id}", "w") as f:
+            f.write(conn_url)
+
+        return conn_url
 
 
-class DuckDb:
+class EphemeralDuckDb:
     def start(self) -> str:
-        self.abs_path = get_abs_path(f"./testdata/duckdb_{get_random_string(5)}.db")
-        return f"duckdb:///{self.abs_path}"
+        abs_path = get_abs_path(f"./testdata/duckdb_{get_random_string(5)}.db")
+        return f"duckdb:///{abs_path}"
+
+    def start_fully(self) -> str:  # type: ignore
+        pass
 
     def stop(self):
-        try:
-            os.remove(self.abs_db_path)
-        except Exception:
-            pass
+        pass
 
     def stop_fully(self):
-        self.stop()
+        # Get all duckdb_*.db files in the testdata directory and delete them
+        testdata_dir = get_abs_path("./testdata/")
+        for file in os.listdir(testdata_dir):
+            if file.startswith("duckdb_") and file.endswith(".db"):
+                try:
+                    os.remove(os.path.join(testdata_dir, file))
+                except Exception:
+                    pass
 
 
 POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
@@ -479,46 +531,59 @@ MYSQL8_IMAGE = "mysql:8.4.1"
 MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-CU13-ubuntu-22.04"
 CLICKHOUSE_IMAGE = "clickhouse/clickhouse-server:24.12"
 
-pgDocker = DockerImage(lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start())
-clickHouseDocker = ClickhouseDockerImage(
-    lambda: ClickHouseContainer(CLICKHOUSE_IMAGE).start()
+pgDocker = DockerImage(
+    "postgres", lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()
 )
-mysqlDocker = DockerImage(lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start())
+clickHouseDocker = ClickhouseDockerImage(
+    "clickhouse", lambda: ClickHouseContainer(CLICKHOUSE_IMAGE).start()
+)
+mysqlDocker = DockerImage(
+    "mysql", lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
+)
 
 SOURCES = {
     "postgres": pgDocker,
-    "duckdb": DuckDb(),
+    "duckdb": EphemeralDuckDb(),
     "mysql8": mysqlDocker,
     "sqlserver": DockerImage(
+        "sqlserver",
         lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
         "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
     ),
 }
 
-
 DESTINATIONS = {
     "postgres": pgDocker,
-    "duckdb": DuckDb(),
+    "duckdb": EphemeralDuckDb(),
     "clickhouse+native": clickHouseDocker,
 }
 
 
 @pytest.fixture(scope="session", autouse=True)
-def manage_containers():
-    # Run all tests
-    yield
-
-    # Get unique containers since some sources and destinations share containers
+def manage_containers(request):
+    shared_dir = request.config.workerinput["shared_directory"]
     unique_containers = set(SOURCES.values()) | set(DESTINATIONS.values())
+    for container in unique_containers:
+        container.container_lock_dir = shared_dir
 
-    # Stop containers in parallel after tests complete
-    with ThreadPoolExecutor() as executor:
-        futures = [
-            executor.submit(container.stop_fully) for container in unique_containers
-        ]
-        # Wait for all futures to complete
-        for future in futures:
-            future.result()
+
+#     should_manage_containers = os.environ.get("PYTEST_XDIST_WORKER", "gw0") == "gw0"
+#     if not should_manage_containers:
+#         yield
+#         return
+
+#     with ThreadPoolExecutor() as executor:
+#         futures = [
+#             executor.submit(container.start_fully) for container in unique_containers
+#         ]
+#         # Wait for all futures to complete
+#         for future in futures:
+#             future.result()
+
+#     yield
+
+#     for container in unique_containers:
+#         container.stop_fully()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -526,7 +591,6 @@ def autocreate_db_for_clickhouse():
     """
     patches ClickhouseDestination to autocreate dest tables if they don't exist
     """
-
     dlt_dest = ClickhouseDestination().dlt_dest
 
     def patched_dlt_dest(uri, **kwargs):
@@ -547,7 +611,6 @@ def autocreate_db_for_clickhouse():
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_create_replace(source, dest):
-    # Run source.start() and dest.start() in parallel
     with ThreadPoolExecutor() as executor:
         source_future = executor.submit(source.start)
         dest_future = executor.submit(dest.start)
@@ -563,7 +626,6 @@ def test_create_replace(source, dest):
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_append(source, dest):
-    # Run source.start() and dest.start() in parallel
     with ThreadPoolExecutor() as executor:
         source_future = executor.submit(source.start)
         dest_future = executor.submit(dest.start)
@@ -579,7 +641,6 @@ def test_append(source, dest):
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_merge_with_primary_key(source, dest):
-    # Run source.start() and dest.start() in parallel
     with ThreadPoolExecutor() as executor:
         source_future = executor.submit(source.start)
         dest_future = executor.submit(dest.start)
@@ -595,7 +656,6 @@ def test_merge_with_primary_key(source, dest):
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_delete_insert_without_primary_key(source, dest):
-    # Run source.start() and dest.start() in parallel
     with ThreadPoolExecutor() as executor:
         source_future = executor.submit(source.start)
         dest_future = executor.submit(dest.start)
@@ -611,7 +671,6 @@ def test_delete_insert_without_primary_key(source, dest):
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_delete_insert_with_time_range(source, dest):
-    # Run source.start() and dest.start() in parallel
     with ThreadPoolExecutor() as executor:
         source_future = executor.submit(source.start)
         dest_future = executor.submit(dest.start)
@@ -1214,7 +1273,6 @@ def as_datetime2(date_str: str) -> datetime:
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_kafka_to_db(dest):
-    # Run source.start() and dest.start() in parallel
     with ThreadPoolExecutor() as executor:
         dest_future = executor.submit(dest.start)
         source_future = executor.submit(
@@ -1245,12 +1303,14 @@ def test_kafka_to_db(dest):
         )
         assert res.exit_code == 0
 
-    dest_engine = sqlalchemy.create_engine(dest_uri)
-
     def get_output_table():
-        return dest_engine.execute(
-            "select _kafka__data from testschema.output order by _kafka_msg_id asc"
-        ).fetchall()
+        dest_engine = sqlalchemy.create_engine(dest_uri)
+        with dest_engine.connect() as conn:
+            res = conn.execute(
+                "select _kafka__data from testschema.output order by _kafka_msg_id asc"
+            ).fetchall()
+        dest_engine.dispose()
+        return res
 
     run()
 
@@ -1259,7 +1319,6 @@ def test_kafka_to_db(dest):
     assert res[0] == ("message1",)
     assert res[1] == ("message2",)
     assert res[2] == ("message3",)
-    dest_engine.dispose()
 
     # run again, nothing should be inserted into the output table
     run()
@@ -1269,7 +1328,6 @@ def test_kafka_to_db(dest):
     assert res[0] == ("message1",)
     assert res[1] == ("message2",)
     assert res[2] == ("message3",)
-    dest_engine.dispose()
 
     # add a new message
     producer.produce(topic, "message4".encode("utf-8"))
@@ -1283,7 +1341,6 @@ def test_kafka_to_db(dest):
     assert res[1] == ("message2",)
     assert res[2] == ("message3",)
     assert res[3] == ("message4",)
-    dest_engine.dispose()
 
     kafka.stop()
 
@@ -1607,7 +1664,6 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
 )
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 def test_db_to_db_exclude_columns(source, dest):
-    # Run source.start() and dest.start() in parallel
     with ThreadPoolExecutor() as executor:
         source_future = executor.submit(source.start)
         dest_future = executor.submit(dest.start)
@@ -1662,8 +1718,8 @@ def test_db_to_db_exclude_columns(source, dest):
 
 
 def test_sql_limit():
-    source_instance = DuckDb()
-    dest_instance = DuckDb()
+    source_instance = EphemeralDuckDb()
+    dest_instance = EphemeralDuckDb()
 
     source_uri = source_instance.start()
     dest_uri = dest_instance.start()
@@ -1724,8 +1780,8 @@ def test_date_coercion_issue():
     In order to eliminate this, we have introduced a new option to ingestr, --columns, which allows the user to specify the column types for the destination table.
     This way, ingestr will know the data type of the incremental field, and will be able to convert the start and end dates to the correct data type before running the ingestion.
     """
-    source_instance = DuckDb()
-    dest_instance = DuckDb()
+    source_instance = EphemeralDuckDb()
+    dest_instance = EphemeralDuckDb()
 
     source_uri = source_instance.start()
     dest_uri = dest_instance.start()
@@ -1801,12 +1857,14 @@ def test_csv_dest():
         csv_dest.close()
         try:
             conn = duckdb.connect(duck_src.name)
-            conn.sql("""
+            conn.sql(
+                """
                 CREATE SCHEMA public;
                 CREATE TABLE public.testdata(name varchar, age integer);
                 INSERT INTO public.testdata(name, age)
                 VALUES ('Jhon', 42), ('Lisa', 21), ('Mike', 24), ('Mary', 27);
-            """)
+            """
+            )
             conn.close()
             result = invoke_ingest_command(
                 f"duckdb:///{duck_src.name}",
@@ -1904,15 +1962,15 @@ def dynamodb_tests() -> Iterable[Callable]:
 
     def smoke_test(dest_uri, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
-        dest_engine = sqlalchemy.create_engine(dest_uri)
 
         result = invoke_ingest_command(
             dynamodb.uri, dynamodb.db_name, dest_uri, dest_table, "append", "updated_at"
         )
         assert_success(result)
-        result = dest_engine.execute(
-            f"SELECT id, updated_at from {dest_table} ORDER BY id"
-        ).fetchall()
+
+        result = get_query_result(
+            dest_uri, f"select id, updated_at from {dest_table} ORDER BY id"
+        )
         assert len(result) == 3
         for i in range(len(result)):
             assert result[i][0] == dynamodb.data[i]["id"]
@@ -1920,9 +1978,6 @@ def dynamodb_tests() -> Iterable[Callable]:
 
     def append_test(dest_uri, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
-        # connection pooling causes issues with duckdb, when the connection
-        # is reused below, so we disable pooling.
-        dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
 
         # we run it twice to assert that the data in destination doesn't change
         for i in range(2):
@@ -1936,9 +1991,9 @@ def dynamodb_tests() -> Iterable[Callable]:
             )
 
             assert_success(result)
-            result = dest_engine.execute(
-                f"SELECT id, updated_at from {dest_table} ORDER BY id"
-            ).fetchall()
+            result = get_query_result(
+                dest_uri, f"select id, updated_at from {dest_table} ORDER BY id"
+            )
             assert len(result) == 3
             for i in range(len(result)):
                 assert result[i][0] == dynamodb.data[i]["id"]
@@ -1947,7 +2002,6 @@ def dynamodb_tests() -> Iterable[Callable]:
     def incremental_test_factory(strategy):
         def incremental_test(dest_uri, dynamodb):
             dest_table = f"public.dynamodb_{get_random_string(5)}"
-            dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
 
             result = invoke_ingest_command(
                 dynamodb.uri,
@@ -1960,9 +2014,9 @@ def dynamodb_tests() -> Iterable[Callable]:
                 interval_end="2024-02-01T00:01:00",  # upto the second entry
             )
             assert_success(result)
-            rows = dest_engine.execute(
-                f"SELECT id, updated_at from {dest_table} ORDER BY id"
-            ).fetchall()
+            rows = get_query_result(
+                dest_uri, f"select id, updated_at from {dest_table} ORDER BY id"
+            )
             assert len(rows) == 2
             for i in range(len(rows)):
                 assert rows[i][0] == dynamodb.data[i]["id"]
@@ -1982,9 +2036,9 @@ def dynamodb_tests() -> Iterable[Callable]:
                 )
                 assert_success(result)
 
-                rows = dest_engine.execute(
-                    f"SELECT id, updated_at from {dest_table} ORDER BY id"
-                ).fetchall()
+                rows = get_query_result(
+                    dest_uri, f"select id, updated_at from {dest_table} ORDER BY id"
+                )
                 rows_expected = 3
                 if strategy == "replace":
                     # old rows are removed in replace
@@ -2023,47 +2077,58 @@ def test_dynamodb(dest, dynamodb, testcase):
     dest.stop()
 
 
+def get_query_result(uri: str, query: str):
+    engine = sqlalchemy.create_engine(uri, poolclass=NullPool)
+    with engine.connect() as conn:
+        res = conn.execute(query).fetchall()
+
+    return res
+
+
 def custom_query_tests():
     def replace(source_connection_url, dest_connection_url):
-        schema_rand_prefix = f"testschema_create_replace_cust_{get_random_string(5)}"
-        source_engine = sqlalchemy.create_engine(source_connection_url)
-        with source_engine.begin() as conn:
-            conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
-            conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+        schema = f"testschema_cr_cust_{get_random_string(5)}"
+        with sqlalchemy.create_engine(
+            source_connection_url, poolclass=NullPool
+        ).connect() as conn:
+            conn.execute(f"DROP SCHEMA IF EXISTS {schema}")
+            conn.execute(f"CREATE SCHEMA {schema}")
             conn.execute(
-                f"CREATE TABLE {schema_rand_prefix}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at DATE)"
+                f"CREATE TABLE {schema}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at DATE)"
             )
             conn.execute(
-                f"CREATE TABLE {schema_rand_prefix}.order_items (id INTEGER, order_id INTEGER NOT NULL, subname VARCHAR(255) NOT NULL)"
+                f"CREATE TABLE {schema}.order_items (id INTEGER, order_id INTEGER NOT NULL, subname VARCHAR(255) NOT NULL)"
             )
             conn.execute(
-                f"INSERT INTO {schema_rand_prefix}.orders (id, name, updated_at) VALUES (1, 'First Order', '2024-01-01'), (2, 'Second Order', '2024-01-01'), (3, 'Third Order', '2024-01-01'), (4, 'Fourth Order', '2024-01-01')"
+                f"INSERT INTO {schema}.orders (id, name, updated_at) VALUES (1, 'First Order', '2024-01-01'), (2, 'Second Order', '2024-01-01'), (3, 'Third Order', '2024-01-01'), (4, 'Fourth Order', '2024-01-01')"
             )
             conn.execute(
-                f"INSERT INTO {schema_rand_prefix}.order_items (id, order_id, subname) VALUES (1, 1, 'Item 1 for First Order'), (2, 1, 'Item 2 for First Order'), (3, 2, 'Item 1 for Second Order'), (4, 3, 'Item 1 for Third Order')"
+                f"INSERT INTO {schema}.order_items (id, order_id, subname) VALUES (1, 1, 'Item 1 for First Order'), (2, 1, 'Item 2 for First Order'), (3, 2, 'Item 1 for Second Order'), (4, 3, 'Item 1 for Third Order')"
             )
-            res = conn.execute(
-                f"select count(*) from {schema_rand_prefix}.orders"
-            ).fetchall()
+            res = conn.execute(f"select count(*) from {schema}.orders").fetchall()
             assert res[0][0] == 4
-            res = conn.execute(
-                f"select count(*) from {schema_rand_prefix}.order_items"
-            ).fetchall()
+            res = conn.execute(f"select count(*) from {schema}.order_items").fetchall()
             assert res[0][0] == 4
+
+        if dest_connection_url.startswith("clickhouse"):
+            get_query_result(
+                dest_connection_url, f"CREATE DATABASE IF NOT EXISTS {schema}"
+            )
 
         result = invoke_ingest_command(
             source_connection_url,
-            f"query:select oi.*, o.updated_at from {schema_rand_prefix}.order_items oi join {schema_rand_prefix}.orders o on oi.order_id = o.id",
+            f"query:select oi.*, o.updated_at from {schema}.order_items oi join {schema}.orders o on oi.order_id = o.id",
             dest_connection_url,
-            f"{schema_rand_prefix}.output",
+            f"{schema}.output",
+            run_in_subprocess=True,
         )
 
         assert result.exit_code == 0
 
-        dest_engine = sqlalchemy.create_engine(dest_connection_url)
-        res = dest_engine.execute(
-            f"select id, order_id, subname, updated_at from {schema_rand_prefix}.output order by id asc"
-        ).fetchall()
+        res = get_query_result(
+            dest_connection_url,
+            f"select id, order_id, subname, updated_at from {schema}.output order by id asc",
+        )
 
         assert len(res) == 4
         assert res[0] == (1, 1, "Item 1 for First Order", as_datetime("2024-01-01"))
@@ -2072,45 +2137,51 @@ def custom_query_tests():
         assert res[3] == (4, 3, "Item 1 for Third Order", as_datetime("2024-01-01"))
 
     def merge(source_connection_url, dest_connection_url):
-        schema_rand_prefix = f"testschema_merge_{get_random_string(5)}"
+        schema = f"testschema_merge_cust_{get_random_string(5)}"
         source_engine = sqlalchemy.create_engine(
             source_connection_url, poolclass=NullPool
         )
         with source_engine.begin() as conn:
-            conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
-            conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+            conn.execute(f"DROP SCHEMA IF EXISTS {schema}")
+            conn.execute(f"CREATE SCHEMA {schema}")
             conn.execute(
-                f"CREATE TABLE {schema_rand_prefix}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at DATE)"
+                f"CREATE TABLE {schema}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at DATE)"
             )
             conn.execute(
-                f"CREATE TABLE {schema_rand_prefix}.order_items (id INTEGER, order_id INTEGER NOT NULL, subname VARCHAR(255) NOT NULL)"
+                f"CREATE TABLE {schema}.order_items (id INTEGER, order_id INTEGER NOT NULL, subname VARCHAR(255) NOT NULL)"
             )
             conn.execute(
-                f"INSERT INTO {schema_rand_prefix}.orders (id, name, updated_at) VALUES (1, 'First Order', '2024-01-01'), (2, 'Second Order', '2024-01-01'), (3, 'Third Order', '2024-01-01'), (4, 'Fourth Order', '2024-01-01')"
+                f"INSERT INTO {schema}.orders (id, name, updated_at) VALUES (1, 'First Order', '2024-01-01'), (2, 'Second Order', '2024-01-01'), (3, 'Third Order', '2024-01-01'), (4, 'Fourth Order', '2024-01-01')"
             )
             conn.execute(
-                f"INSERT INTO {schema_rand_prefix}.order_items (id, order_id, subname) VALUES (1, 1, 'Item 1 for First Order'), (2, 1, 'Item 2 for First Order'), (3, 2, 'Item 1 for Second Order'), (4, 3, 'Item 1 for Third Order')"
+                f"INSERT INTO {schema}.order_items (id, order_id, subname) VALUES (1, 1, 'Item 1 for First Order'), (2, 1, 'Item 2 for First Order'), (3, 2, 'Item 1 for Second Order'), (4, 3, 'Item 1 for Third Order')"
+            )
+
+        if dest_connection_url.startswith("clickhouse"):
+            get_query_result(
+                dest_connection_url, f"CREATE DATABASE IF NOT EXISTS {schema}"
             )
 
         def run():
             result = invoke_ingest_command(
                 source_connection_url,
-                f"query:select oi.*, o.updated_at from {schema_rand_prefix}.order_items oi join {schema_rand_prefix}.orders o on oi.order_id = o.id where o.updated_at > :interval_start",
+                f"query:select oi.*, o.updated_at from {schema}.order_items oi join {schema}.orders o on oi.order_id = o.id where o.updated_at > :interval_start",
                 dest_connection_url,
-                f"{schema_rand_prefix}.output",
+                f"{schema}.output",
                 inc_strategy="merge",
                 inc_key="updated_at",
                 primary_key="id",
+                run_in_subprocess=True,
             )
             assert result.exit_code == 0
 
         # Initial run to get all data
         run()
 
-        dest_engine = sqlalchemy.create_engine(dest_connection_url, poolclass=NullPool)
-        res = dest_engine.execute(
-            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema_rand_prefix}.output order by id asc"
-        ).fetchall()
+        res = get_query_result(
+            dest_connection_url,
+            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema}.output order by id asc",
+        )
 
         assert len(res) == 4
         initial_load_id = res[0][4]
@@ -2146,26 +2217,28 @@ def custom_query_tests():
 
         # Run again - should get same load_id since no changes
         run()
-        res = dest_engine.execute(
-            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema_rand_prefix}.output order by id asc"
-        ).fetchall()
+        res = get_query_result(
+            dest_connection_url,
+            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema}.output order by id asc",
+        )
         assert len(res) == 4
         assert all(r[4] == initial_load_id for r in res)
 
         # Update an order item and its order's updated_at
         with source_engine.begin() as conn:
             conn.execute(
-                f"UPDATE {schema_rand_prefix}.order_items SET subname = 'Item 1 for Second Order - new' WHERE id = 3"
+                f"UPDATE {schema}.order_items SET subname = 'Item 1 for Second Order - new' WHERE id = 3"
             )
             conn.execute(
-                f"UPDATE {schema_rand_prefix}.orders SET updated_at = '2024-01-02' WHERE id = 2"
+                f"UPDATE {schema}.orders SET updated_at = '2024-01-02' WHERE id = 2"
             )
 
         # Run again - should see updated data with new load_id
         run()
-        res = dest_engine.execute(
-            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema_rand_prefix}.output order by id asc"
-        ).fetchall()
+        res = get_query_result(
+            dest_connection_url,
+            f"select id, order_id, subname, updated_at, _dlt_load_id from {schema}.output order by id asc",
+        )
 
         assert len(res) == 4
         assert res[0] == (
@@ -2321,6 +2394,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table,
                 interval_start="2024-01-01",
                 interval_end="2024-01-02",
+                print_output=False,
             )
             assert has_exception(result.exception, NoReportsFoundError)
 
@@ -2363,6 +2437,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table,
                 interval_start="2024-01-01",
                 interval_end="2024-01-02",
+                print_output=False,
             )
             assert has_exception(result.exception, NoOngoingReportRequestsFoundError)
 
@@ -2405,6 +2480,7 @@ def appstore_test_cases() -> Iterable[Callable]:
                 dest_table,
                 interval_start="2024-01-01",
                 interval_end="2024-01-02",
+                print_output=False,
             )
             assert has_exception(result.exception, NoSuchReportError)
 
@@ -2705,9 +2781,10 @@ def fs_test_cases(
 
     def assert_rows(dest_uri, dest_table, n):
         engine = sqlalchemy.create_engine(dest_uri)
-        rows = engine.execute(f"select count(*) from {dest_table}").fetchall()
-        assert len(rows) == 1
-        assert rows[0] == (n,)
+        with engine.connect() as conn:
+            rows = conn.execute(f"select count(*) from {dest_table}").fetchall()
+            assert len(rows) == 1
+            assert rows[0] == (n,)
 
     def test_empty_source_uri(dest_uri):
         """
@@ -2715,7 +2792,11 @@ def fs_test_cases(
         """
         schema = f"testschema_fs_{get_random_string(5)}"
         result = invoke_ingest_command(
-            f"{protocol}://bucket?{auth}", "", dest_uri, f"{schema}.test"
+            f"{protocol}://bucket?{auth}",
+            "",
+            dest_uri,
+            f"{schema}.test",
+            print_output=False,
         )
         assert has_exception(result.exception, InvalidBlobTableError)
 
@@ -2735,6 +2816,7 @@ def fs_test_cases(
                 "/bin/data.bin",
                 dest_uri,
                 dest_table,
+                print_output=False,
             )
             assert result.exit_code != 0
             assert has_exception(result.exception, ValueError)
@@ -2750,6 +2832,7 @@ def fs_test_cases(
             "/data.csv",
             dest_uri,
             dest_table,
+            print_output=False,
         )
         assert result.exit_code != 0
 
@@ -2928,6 +3011,7 @@ def applovin_test_cases() -> Iterable[Callable]:
             "publisher-report",
             "duckdb:///out.db",
             "public.publisher_report",
+            print_output=False,
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, MissingValueError)
@@ -2938,6 +3022,7 @@ def applovin_test_cases() -> Iterable[Callable]:
             "unknown-report",
             "duckdb:///out.db",
             "public.unknown_report",
+            print_output=False,
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, UnsupportedResourceError)
@@ -2965,3 +3050,81 @@ def test_version_cmd():
     """
 
     assert __version__ == "0.0.0-dev", msg
+
+
+@pytest.mark.parametrize("source", [mysqlDocker], ids=["mysql8"])
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_mysql_zero_dates(source, dest):
+    source_uri = source.start()
+    dest_uri = dest.start()
+
+    schema_rand_prefix = f"testschema_mysql_zero_dates_{get_random_string(5)}"
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    source_engine = sqlalchemy.create_engine(source_uri)
+    with source_engine.begin() as conn:
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+        conn.execute(
+            f"""
+            CREATE TABLE {schema_rand_prefix}.input (
+                name VARCHAR(255),
+                created_at DATETIME
+            );"""
+        )
+        conn.execute(
+            f"INSERT INTO {schema_rand_prefix}.input VALUES ('Row 1', null), ('Row 2', '2024-01-01 12:00:00'), ('Row 3', null), ('Row 4', '2025-04-05 08:30:00'), ('Row 5', null)"
+        )
+
+        conn.execute("SET sql_mode = '';")
+
+        # this is the crucial step of this test: once the field becomes non-nullable, MySQL starts returning `0000-00-00 00:00:00` for empty dates.
+        conn.execute(
+            f"ALTER TABLE {schema_rand_prefix}.input MODIFY created_at DATETIME NOT NULL"
+        )
+
+        res = conn.execute(
+            f"select count(*) from {schema_rand_prefix}.input"
+        ).fetchall()
+        assert res[0][0] == 5
+
+    result = invoke_ingest_command(
+        source_uri,
+        f"{schema_rand_prefix}.input",
+        dest_uri,
+        f"{schema_rand_prefix}.output",
+        sql_backend="sqlalchemy",
+    )
+
+    assert result.exit_code == 0
+
+    dest_engine = sqlalchemy.create_engine(dest_uri)
+    res = dest_engine.execute(f"select * from {schema_rand_prefix}.output").fetchall()
+
+    # assert there are no new rows, since DBs like DuckDB accept NULL and dlt adds a separate string column for the value `0000-00-00 00:00:00`
+    # we want 4 columns: name, created_at, _dlt_load_id, _dlt_id
+    assert len(res[0]) == 4
+
+    # import pdb; pdb.set_trace()
+
+    res = [
+        (
+            row[0],
+            row[1].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(row[1], datetime)
+            else row[1],
+        )
+        for row in res
+    ]
+
+    assert len(res) == 5
+    assert res[0] == ("Row 1", "1970-01-01 00:00:00")
+    assert res[1] == ("Row 2", "2024-01-01 12:00:00")
+    assert res[2] == ("Row 3", "1970-01-01 00:00:00")
+    assert res[3] == ("Row 4", "2025-04-05 08:30:00")
+    assert res[4] == ("Row 5", "1970-01-01 00:00:00")

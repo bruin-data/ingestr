@@ -28,6 +28,7 @@ from ingestr.src.sources import (
     ChessSource,
     DynamoDBSource,
     FacebookAdsSource,
+    FrankfurterSource,
     GCSSource,
     GitHubSource,
     GoogleAdsSource,
@@ -146,6 +147,7 @@ class SourceDestinationFactory:
         "personio": PersonioSource,
         "kinesis": KinesisSource,
         "pipedrive": PipedriveSource,
+        "frankfurter": FrankfurterSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

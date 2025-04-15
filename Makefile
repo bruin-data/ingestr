@@ -28,7 +28,7 @@ test : venv lock-deps
 	. venv/bin/activate; $(MAKE) test-ci
 
 test-specific: venv lock-deps
-	. venv/bin/activate; pytest -rP -vv --tb=short --capture=no -k $(test)
+	. venv/bin/activate; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto  -rP -vv --tb=short --capture=no -k $(test)
 
 lint-ci:
 	ruff format ingestr && ruff check ingestr --fix
