@@ -3029,6 +3029,14 @@ def frankfurter_test_cases() -> Iterable[Callable]:
 def test_frankfurter_source(testcase):
     testcase()
 
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+@pytest.mark.parametrize("test_case", frankfurter_test_cases())
+def test_frankfurter(dest, test_case):
+    test_case(dest.start())
+    dest.stop()
+
 def test_version_cmd():
     """
     This should always be 0.0.0-dev.

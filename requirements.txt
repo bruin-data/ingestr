@@ -187,6 +187,8 @@ googleapis-common-protos==1.69.0
     #   google-ads
     #   google-api-core
     #   grpcio-status
+greenlet==3.1.1
+    # via sqlalchemy
 grpcio==1.70.0
     # via
     #   google-ads
