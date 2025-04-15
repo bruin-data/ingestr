@@ -169,7 +169,7 @@ def hubspot(
         api_key: str = api_key,
     ) -> Iterator[TDataItems]:
         """Hubspot schemas resource"""
-        yield from fetch_data(CRM_SCHEMAS_ENDPOINT, api_key)
+        yield from fetch_data(CRM_SCHEMAS_ENDPOINT, api_key,resource_name="schemas")
 
     @dlt.resource(name="quotes", write_disposition="replace")
     def quotes(
@@ -196,7 +196,6 @@ def hubspot(
         get_custom_object =  schemas(api_key)
         object_type_id = None
         for custom_object in get_custom_object:
-            print(custom_object["name"].capitalize())
             if custom_object["name"] == custom_object_name.capitalize():
                 object_type_id = custom_object["objectTypeId"]
                 break
@@ -205,7 +204,7 @@ def hubspot(
        
         custom_object_endpoint= f"crm/v3/objects/{object_type_id}"
         """Hubspot custom object details resource"""
-        yield from fetch_data(custom_object_endpoint, api_key)
+        yield from fetch_data(custom_object_endpoint, api_key,resource_name="custom")
 
     return companies, contacts, deals, tickets, products, quotes, schemas, custom
 

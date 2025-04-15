@@ -90,7 +90,7 @@ def fetch_property_history(
 
 
 def fetch_data(
-    endpoint: str, api_key: str, params: Optional[Dict[str, Any]] = None
+    endpoint: str, api_key: str, params: Optional[Dict[str, Any]] = None,resource_name: str = None
 ) -> Iterator[List[Dict[str, Any]]]:
     """
     Fetch data from HUBSPOT endpoint using a specified API key and yield the properties of each result.
@@ -132,7 +132,7 @@ def fetch_data(
         if "results" in _data:
             _objects: List[Dict[str, Any]] = []
             for _result in _data["results"]:
-                if endpoint == "/crm/v3/schemas":
+                if resource_name == "schemas":
                     _objects.append({
                         "name": _result["labels"].get("singular", ""),
                         "objectTypeId": _result.get("objectTypeId", ""),
@@ -141,6 +141,14 @@ def fetch_data(
                         "properties": _result.get("properties", ""),
                         "createdAt": _result.get("createdAt", ""),
                         "updatedAt": _result.get("updatedAt", "")
+                    })
+                elif resource_name == "custom":
+                    _objects.append({
+                        "id": _result.get("id", ""),
+                        "properties": _result.get("properties", ""),
+                        "createdAt": _result.get("createdAt", ""),
+                        "updatedAt": _result.get("updatedAt", ""),
+                        "archived": _result.get("archived", ""),
                     })
                 else:
                     _obj = _result.get("properties", _result)
