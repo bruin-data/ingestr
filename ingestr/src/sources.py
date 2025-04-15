@@ -809,6 +809,10 @@ class HubspotSource:
                     "Invalid Hubspot custom table format. Expected format: custom:<custom_object_type>"
                 )
             endpoint = fields[1]
+            return hubspot(
+                api_key=api_key[0],
+                custom_object=endpoint,
+            ).with_resources("custom")
             
         elif table in ["contacts", "companies", "deals", "tickets", "products", "quotes", "schemas"]:
             endpoint = table

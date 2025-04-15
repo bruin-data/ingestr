@@ -56,6 +56,7 @@ def hubspot(
     api_key: str = dlt.secrets.value,
     include_history: bool = False,
     include_custom_props: bool = True,
+    custom_object: str = None,
 ) -> Sequence[DltResource]:
     """
     A DLT source that retrieves data from the HubSpot API using the
@@ -186,26 +187,27 @@ def hubspot(
             include_custom_props,
         )
     
-    @dlt.resource(write_disposition="replace")
-    def license(
-        api_key: str = api_key
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def custom(
+        api_key: str = api_key,
+        custom_object_name: str = custom_object,
     ) -> Iterator[TDataItems]:
         
         get_custom_object =  schemas(api_key)
         object_type_id = None
         for custom_object in get_custom_object:
-            print(custom_object["name"])
-            if custom_object["name"] == "License":
+            print(custom_object["name"].capitalize())
+            if custom_object["name"] == custom_object_name.capitalize():
                 object_type_id = custom_object["objectTypeId"]
                 break
         if object_type_id is None:
-            raise ValueError("No custom object id is found")
+            raise ValueError(f"There is no such custom object as {custom_object_name}")
        
         custom_object_endpoint= f"crm/v3/objects/{object_type_id}"
         """Hubspot custom object details resource"""
         yield from fetch_data(custom_object_endpoint, api_key)
 
-    return companies, contacts, deals, tickets, products, quotes, schemas, license
+    return companies, contacts, deals, tickets, products, quotes, schemas, custom
 
 
 def crm_objects(
