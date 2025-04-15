@@ -41,7 +41,9 @@ ingestr ingest \
 ### **`--interval-end` (Optional)**
 - **Description**: The end date for fetching historical exchange rates.
 - **Value**: A date in the format `YYYY-MM-DD` (e.g., `'2025-03-28'`).
-- **Purpose**: Defines the ending point for fetching historical data. If not provided, it defaults to the value of `--interval-start`.
+- **Purpose**: Defines the ending point for fetching historical data. 
+    - If not provided, it defaults to the value of `--interval-start`.
+    - If `--interval-end` is provided without `--interval-start`, it will be ignored and the call will retrieve the last published data.
     - For `latest` and `currencies` this parameter is ignored.
 
 ---
