@@ -1398,13 +1398,19 @@ class GoogleAnalyticsSource:
         parse_uri = urlparse(uri)
         source_fields = parse_qs(parse_uri.query)
         cred_path = source_fields.get("credentials_path")
+        cred_base64 = source_fields.get("credentials_base64")
 
-        if not cred_path:
-            raise ValueError("credentials_path is required to connect Google Analytics")
+        if not cred_path and not cred_base64:
+            raise ValueError("credentials_path or credentials_base64 is required to connect Google Analytics")
+
         credentials = {}
-
-        with open(cred_path[0], "r") as f:
-            credentials = json.load(f)
+        if cred_path:
+            with open(cred_path[0], "r") as f:
+                credentials = json.load(f)
+        elif cred_base64:
+            credentials = json.loads(
+                base64.b64decode(cred_base64[0]).decode("utf-8")
+            )
 
         property_id = source_fields.get("property_id")
         if not property_id:
