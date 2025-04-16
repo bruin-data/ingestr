@@ -1398,7 +1398,6 @@ class GoogleAnalyticsSource:
         parse_uri = urlparse(uri)
         source_fields = parse_qs(parse_uri.query)
         cred_path = source_fields.get("credentials_path")
-        print(f"cred_path: {cred_path}")
         cred_base64 = source_fields.get("credentials_base64")
 
         if not cred_path and not cred_base64:
