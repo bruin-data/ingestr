@@ -187,7 +187,7 @@ def hubspot(
             include_custom_props,
         )
 
-    @dlt.resource(write_disposition="merge", primary_key="id")
+    @dlt.resource(write_disposition="merge", primary_key="hs_object_id")
     def custom(
         api_key: str = api_key,
         custom_object_name: str = custom_object,
