@@ -201,8 +201,16 @@ def hubspot(
                 break
         if object_type_id is None:
             raise ValueError(f"There is no such custom object as {custom_object_name}")
-
-        custom_object_endpoint= f"crm/v3/objects/{object_type_id}"
+        custom_object_properties= f"crm/v3/properties/{object_type_id}"
+        
+        props_pages = fetch_data(custom_object_properties, api_key)
+        props = []
+        for page in props_pages:
+            props.extend([prop["name"] for prop in page])
+        props = ",".join(sorted(list(set(props))))
+       
+        custom_object_endpoint= f"crm/v3/objects/{object_type_id}/?properties={props}"
+        
         """Hubspot custom object details resource"""
         yield from fetch_data(custom_object_endpoint, api_key,resource_name="custom")
 
