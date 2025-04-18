@@ -52,7 +52,6 @@ from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.airtable import airtable_source
 from ingestr.src.applovin import applovin_source
 from ingestr.src.applovin_max import applovin_max_source
-from ingestr.src.appsflyer._init_ import appsflyer_source
 from ingestr.src.appstore import app_store
 from ingestr.src.appstore.client import AppStoreConnectClient
 from ingestr.src.arrow import memory_mapped_arrow
@@ -816,7 +815,15 @@ class HubspotSource:
                 custom_object=endpoint,
             ).with_resources("custom")
 
-        elif table in ["contacts", "companies", "deals", "tickets", "products", "quotes", "schemas"]:
+        elif table in [
+            "contacts",
+            "companies",
+            "deals",
+            "tickets",
+            "products",
+            "quotes",
+            "schemas",
+        ]:
             endpoint = table
         else:
             raise ValueError(
@@ -1035,6 +1042,8 @@ class AppsflyerSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        from ingestr.src.appsflyer import appsflyer_source
+
         if kwargs.get("incremental_key"):
             raise ValueError(
                 "Appsflyer_Source takes care of incrementality on its own, you should not provide incremental_key"
@@ -1047,22 +1056,27 @@ class AppsflyerSource:
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Appsflyer")
 
-        resource = None
-        if table in ["campaigns", "creatives"]:
-            resource = table
-        else:
-            raise ValueError(
-                f"Resource '{table}' is not supported for Appsflyer source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
-            )
-
-        start_date = kwargs.get("interval_start") or "2024-01-02"
-        end_date = kwargs.get("interval_end") or "2024-01-29"
+        start_date = kwargs.get("interval_start")
+        end_date = kwargs.get("interval_end")
+        dimensions = []
+        metrics = []
+        if table.startswith("custom:"):
+            fields = table.split(":", 3)
+            if len(fields) != 3:
+                raise ValueError(
+                    "Invalid Adjust custom table format. Expected format: custom:<dimensions>:<metrics>"
+                )
+            dimensions = fields[1].split(",")
+            metrics = fields[2].split(",")
+            table = "custom"
 
         return appsflyer_source(
             api_key=api_key[0],
-            start_date=start_date,
-            end_date=end_date,
-        ).with_resources(resource)
+            start_date=start_date.strftime("%Y-%m-%d") if start_date else None,  # type: ignore
+            end_date=end_date.strftime("%Y-%m-%d") if end_date else None,  # type: ignore
+            dimensions=dimensions,
+            metrics=metrics,
+        ).with_resources(table)
 
 
 class ZendeskSource:
@@ -1414,16 +1428,16 @@ class GoogleAnalyticsSource:
         cred_base64 = source_fields.get("credentials_base64")
 
         if not cred_path and not cred_base64:
-            raise ValueError("credentials_path or credentials_base64 is required to connect Google Analytics")
+            raise ValueError(
+                "credentials_path or credentials_base64 is required to connect Google Analytics"
+            )
 
         credentials = {}
         if cred_path:
             with open(cred_path[0], "r") as f:
                 credentials = json.load(f)
         elif cred_base64:
-            credentials = json.loads(
-                base64.b64decode(cred_base64[0]).decode("utf-8")
-            )
+            credentials = json.loads(base64.b64decode(cred_base64[0]).decode("utf-8"))
 
         property_id = source_fields.get("property_id")
         if not property_id:
