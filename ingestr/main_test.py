@@ -481,7 +481,8 @@ class DockerImage:
         pass
 
     def stop_fully(self):
-        self.container.stop()
+        if self.container is not None:
+            self.container.stop()
 
 
 class ClickhouseDockerImage(DockerImage):
@@ -565,25 +566,6 @@ def manage_containers(request):
     unique_containers = set(SOURCES.values()) | set(DESTINATIONS.values())
     for container in unique_containers:
         container.container_lock_dir = shared_dir
-
-
-#     should_manage_containers = os.environ.get("PYTEST_XDIST_WORKER", "gw0") == "gw0"
-#     if not should_manage_containers:
-#         yield
-#         return
-
-#     with ThreadPoolExecutor() as executor:
-#         futures = [
-#             executor.submit(container.start_fully) for container in unique_containers
-#         ]
-#         # Wait for all futures to complete
-#         for future in futures:
-#             future.result()
-
-#     yield
-
-#     for container in unique_containers:
-#         container.stop_fully()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -3128,3 +3110,163 @@ def test_mysql_zero_dates(source, dest):
     assert res[2] == ("Row 3", "1970-01-01 00:00:00")
     assert res[3] == ("Row 4", "2025-04-05 08:30:00")
     assert res[4] == ("Row 5", "1970-01-01 00:00:00")
+
+
+def appsflyer_test_cases():
+    source_uri = "appsflyer://?api_key=" + os.environ.get(
+        "INGESTR_TEST_APPSFLYER_TOKEN"
+    )
+
+    def creatives(dest_uri: str):
+        schema_rand_prefix = f"testschema_appsflyer_{get_random_string(5)}"
+        result = invoke_ingest_command(
+            source_uri,
+            "creatives",
+            dest_uri,
+            f"{schema_rand_prefix}.creatives",
+            interval_start="2025-04-01",
+            interval_end="2025-04-15",
+            print_output=False,
+        )
+        assert result.exit_code == 0
+
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(
+                f"select * from {schema_rand_prefix}.creatives"
+            ).fetchall()
+            assert len(res) == 26508  # this is for our specific test account.
+            columns = [
+                col[0]
+                for col in conn.execute(
+                    f"select * from {schema_rand_prefix}.creatives limit 0"
+                ).cursor.description
+            ]
+            expected_columns = [
+                "_dlt_load_id",
+                "_dlt_id",
+                "campaign",
+                "geo",
+                "app_id",
+                "install_time",
+                "adset_id",
+                "adset",
+                "ad_id",
+                "impressions",
+                "clicks",
+                "installs",
+                "cost",
+                "revenue",
+                "average_ecpi",
+                "loyal_users",
+                "uninstalls",
+                "roi",
+            ]
+            assert sorted(columns) == sorted(expected_columns)
+
+    def campaigns(dest_uri: str):
+        schema_rand_prefix = f"testschema_appsflyer_{get_random_string(5)}"
+        result = invoke_ingest_command(
+            source_uri,
+            "campaigns",
+            dest_uri,
+            f"{schema_rand_prefix}.campaigns",
+            interval_start="2025-04-01",
+            interval_end="2025-04-15",
+            print_output=False,
+        )
+        assert result.exit_code == 0
+
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(
+                f"select * from {schema_rand_prefix}.campaigns"
+            ).fetchall()
+            assert len(res) == 6764  # this is for our specific test account.
+            columns = [
+                col[0]
+                for col in conn.execute(
+                    f"select * from {schema_rand_prefix}.campaigns limit 0"
+                ).cursor.description
+            ]
+            expected_columns = [
+                "_dlt_load_id",
+                "_dlt_id",
+                "campaign",
+                "geo",
+                "app_id",
+                "install_time",
+                "impressions",
+                "clicks",
+                "installs",
+                "cost",
+                "revenue",
+                "average_ecpi",
+                "loyal_users",
+                "uninstalls",
+                "roi",
+                "cohort_day_14_revenue_per_user",
+                "cohort_day_14_total_revenue_per_user",
+                "cohort_day_1_revenue_per_user",
+                "cohort_day_1_total_revenue_per_user",
+                "cohort_day_21_revenue_per_user",
+                "cohort_day_21_total_revenue_per_user",
+                "cohort_day_3_revenue_per_user",
+                "cohort_day_3_total_revenue_per_user",
+                "cohort_day_7_revenue_per_user",
+                "cohort_day_7_total_revenue_per_user",
+                "retention_day_7",
+            ]
+            assert sorted(columns) == sorted(expected_columns)
+
+    def custom(dest_uri: str):
+        schema_rand_prefix = f"testschema_appsflyer_{get_random_string(5)}"
+        result = invoke_ingest_command(
+            source_uri,
+            "custom:c,geo,app_id,install_time:impressions,clicks,installs,cost,revenue,average_ecpi,loyal_users",
+            dest_uri,
+            f"{schema_rand_prefix}.custom",
+            interval_start="2025-04-01",
+            interval_end="2025-04-15",
+            print_output=False,
+        )
+        assert result.exit_code == 0
+
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(f"select * from {schema_rand_prefix}.custom").fetchall()
+            assert len(res) == 6292  # this is for our specific test account.
+            columns = [
+                col[0]
+                for col in conn.execute(
+                    f"select * from {schema_rand_prefix}.custom limit 0"
+                ).cursor.description
+            ]
+            expected_columns = [
+                "_dlt_load_id",
+                "_dlt_id",
+                "campaign",
+                "geo",
+                "app_id",
+                "install_time",
+                "impressions",
+                "clicks",
+                "installs",
+                "cost",
+                "revenue",
+                "average_ecpi",
+                "loyal_users",
+            ]
+            assert sorted(columns) == sorted(expected_columns)
+
+    return [campaigns, creatives, custom]
+
+
+@pytest.mark.skipif(
+    not os.environ.get("INGESTR_TEST_APPSFLYER_TOKEN"),
+    reason="INGESTR_TEST_APPSFLYER_TOKEN environment variable is not set",
+)
+@pytest.mark.parametrize("testcase", appsflyer_test_cases())
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_appsflyer_source(testcase, dest):
+    testcase(dest.start())
+    dest.stop()
