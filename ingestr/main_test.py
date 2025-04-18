@@ -3114,7 +3114,7 @@ def test_mysql_zero_dates(source, dest):
 
 def appsflyer_test_cases():
     source_uri = "appsflyer://?api_key=" + os.environ.get(
-        "INGESTR_TEST_APPSFLYER_TOKEN"
+        "INGESTR_TEST_APPSFLYER_TOKEN", ""
     )
 
     def creatives(dest_uri: str):
