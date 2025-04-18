@@ -7,13 +7,19 @@ STARTDATE = pendulum.datetime(year=2000, month=1, day=1)
 CRM_CONTACTS_ENDPOINT = (
     "/crm/v3/objects/contacts?associations=companies,deals,products,tickets,quotes"
 )
-CRM_COMPANIES_ENDPOINT = (
-    "/crm/v3/objects/companies?associations=products"
+CRM_COMPANIES_ENDPOINT = "/crm/v3/objects/companies?associations=products"
+CRM_DEALS_ENDPOINT = (
+    "/crm/v3/objects/deals?associations=companies,contacts,products,tickets,quotes"
 )
-CRM_DEALS_ENDPOINT = "/crm/v3/objects/deals?associations=companies,contacts,products,tickets,quotes"
-CRM_PRODUCTS_ENDPOINT = "/crm/v3/objects/products?associations=companies,contacts,deals,tickets,quotes"
-CRM_TICKETS_ENDPOINT = "/crm/v3/objects/tickets?associations=companies,contacts,deals,products,quotes"
-CRM_QUOTES_ENDPOINT = "/crm/v3/objects/quotes?associations=companies,contacts,deals,products,tickets"
+CRM_PRODUCTS_ENDPOINT = (
+    "/crm/v3/objects/products?associations=companies,contacts,deals,tickets,quotes"
+)
+CRM_TICKETS_ENDPOINT = (
+    "/crm/v3/objects/tickets?associations=companies,contacts,deals,products,quotes"
+)
+CRM_QUOTES_ENDPOINT = (
+    "/crm/v3/objects/quotes?associations=companies,contacts,deals,products,tickets"
+)
 CRM_SCHEMAS_ENDPOINT = "/crm/v3/schemas"
 
 CRM_OBJECT_ENDPOINTS = {
