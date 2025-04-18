@@ -302,6 +302,13 @@ def ingest(
             envvar=["COLUMNS", "INGESTR_COLUMNS"],
         ),
     ] = None,  # type: ignore
+    yield_limit: Annotated[
+        Optional[int],
+        typer.Option(
+            help="Limit the number of pages yielded from the source",
+            envvar=["YIELD_LIMIT", "INGESTR_YIELD_LIMIT"],
+        ),
+    ] = None,  # type: ignore
 ):
     import hashlib
     import tempfile
@@ -555,6 +562,9 @@ def ingest(
         resource.for_each(dlt_source, lambda x: x.add_map(cast_set_to_list))
         if factory.source_scheme.startswith("mysql"):
             resource.for_each(dlt_source, lambda x: x.add_map(handle_mysql_empty_dates))
+
+        if yield_limit:
+            resource.for_each(dlt_source, lambda x: x.add_limit(yield_limit))
 
         def col_h(x):
             if column_hints:
