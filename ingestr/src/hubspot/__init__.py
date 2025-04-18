@@ -169,7 +169,7 @@ def hubspot(
         api_key: str = api_key,
     ) -> Iterator[TDataItems]:
         """Hubspot schemas resource"""
-        yield from fetch_data(CRM_SCHEMAS_ENDPOINT, api_key,resource_name="schemas")
+        yield from fetch_data(CRM_SCHEMAS_ENDPOINT, api_key, resource_name="schemas")
 
     @dlt.resource(name="quotes", write_disposition="replace")
     def quotes(
@@ -192,8 +192,7 @@ def hubspot(
         api_key: str = api_key,
         custom_object_name: str = custom_object,
     ) -> Iterator[TDataItems]:
-
-        get_custom_object =  schemas(api_key)
+        get_custom_object = schemas(api_key)
         object_type_id = None
         for custom_object in get_custom_object:
             if custom_object["name"] == custom_object_name.capitalize():
@@ -201,18 +200,18 @@ def hubspot(
                 break
         if object_type_id is None:
             raise ValueError(f"There is no such custom object as {custom_object_name}")
-        custom_object_properties= f"crm/v3/properties/{object_type_id}"
-        
+        custom_object_properties = f"crm/v3/properties/{object_type_id}"
+
         props_pages = fetch_data(custom_object_properties, api_key)
         props = []
         for page in props_pages:
             props.extend([prop["name"] for prop in page])
         props = ",".join(sorted(list(set(props))))
-       
-        custom_object_endpoint= f"crm/v3/objects/{object_type_id}/?properties={props}"
-        
+
+        custom_object_endpoint = f"crm/v3/objects/{object_type_id}/?properties={props}"
+
         """Hubspot custom object details resource"""
-        yield from fetch_data(custom_object_endpoint, api_key,resource_name="custom")
+        yield from fetch_data(custom_object_endpoint, api_key, resource_name="custom")
 
     return companies, contacts, deals, tickets, products, quotes, schemas, custom
 

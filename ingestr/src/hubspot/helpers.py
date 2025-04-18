@@ -90,7 +90,10 @@ def fetch_property_history(
 
 
 def fetch_data(
-    endpoint: str, api_key: str, params: Optional[Dict[str, Any]] = None,resource_name: str = None
+    endpoint: str,
+    api_key: str,
+    params: Optional[Dict[str, Any]] = None,
+    resource_name: str = None,
 ) -> Iterator[List[Dict[str, Any]]]:
     """
     Fetch data from HUBSPOT endpoint using a specified API key and yield the properties of each result.
@@ -133,15 +136,17 @@ def fetch_data(
             _objects: List[Dict[str, Any]] = []
             for _result in _data["results"]:
                 if resource_name == "schemas":
-                    _objects.append({
-                        "name": _result["labels"].get("singular", ""),
-                        "objectTypeId": _result.get("objectTypeId", ""),
-                        "id": _result.get("id", ""),
-                        "fullyQualifiedName": _result.get("fullyQualifiedName", ""),
-                        "properties": _result.get("properties", ""),
-                        "createdAt": _result.get("createdAt", ""),
-                        "updatedAt": _result.get("updatedAt", "")
-                    })
+                    _objects.append(
+                        {
+                            "name": _result["labels"].get("singular", ""),
+                            "objectTypeId": _result.get("objectTypeId", ""),
+                            "id": _result.get("id", ""),
+                            "fullyQualifiedName": _result.get("fullyQualifiedName", ""),
+                            "properties": _result.get("properties", ""),
+                            "createdAt": _result.get("createdAt", ""),
+                            "updatedAt": _result.get("updatedAt", ""),
+                        }
+                    )
                 elif resource_name == "custom":
                     _objects.append(
                         _result.get("properties", ""),
@@ -157,9 +162,11 @@ def fetch_data(
                                 {
                                     "value": _obj["hs_object_id"],
                                     f"{association}_id": __r["id"],
-                            }
-                            for __r in _result["associations"][association]["results"]
-                        ]
+                                }
+                                for __r in _result["associations"][association][
+                                    "results"
+                                ]
+                            ]
 
                         # remove duplicates from list of dicts
                         __values = [
