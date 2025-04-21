@@ -29,6 +29,9 @@ export default defineConfig({
       { text: "Getting started", link: "/getting-started/quickstart.md" },
     ],
     outline: "deep",
+    search: {
+      provider: 'local'
+    },
 
     sidebar: [
       {
