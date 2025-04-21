@@ -200,13 +200,8 @@ def hubspot(
         get_custom_object = fetch_data_raw(CRM_SCHEMAS_ENDPOINT, api_key)
         object_type_id = None
 
-        import json
-
-        print(f"Available custom objects: {json.dumps(get_custom_object, indent=2)}")
-
         custom_object_lowercase = custom_object_name.lower()
         for custom_object in get_custom_object["results"]:
-            print(f"Custom object: {json.dumps(custom_object, indent=2)}")
             if custom_object["name"].lower() == custom_object_lowercase:
                 object_type_id = custom_object["objectTypeId"]
                 break
