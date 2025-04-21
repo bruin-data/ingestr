@@ -208,3 +208,12 @@ def _get_property_names(api_key: str, object_type: str) -> List[str]:
         properties.extend([prop["name"] for prop in page])
 
     return properties
+
+
+def fetch_data_raw(
+    endpoint: str, api_key: str, params: Optional[Dict[str, Any]] = None
+) -> Iterator[List[Dict[str, Any]]]:
+    url = get_url(endpoint)
+    headers = _get_headers(api_key)
+    r = requests.get(url, headers=headers, params=params)
+    return r.json()

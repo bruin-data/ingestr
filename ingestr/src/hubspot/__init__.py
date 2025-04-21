@@ -32,7 +32,12 @@ from dlt.common import pendulum
 from dlt.common.typing import TDataItems
 from dlt.sources import DltResource
 
-from .helpers import _get_property_names, fetch_data, fetch_property_history
+from .helpers import (
+    _get_property_names,
+    fetch_data,
+    fetch_data_raw,
+    fetch_property_history,
+)
 from .settings import (
     ALL,
     CRM_OBJECT_ENDPOINTS,
@@ -192,12 +197,26 @@ def hubspot(
         api_key: str = api_key,
         custom_object_name: str = custom_object,
     ) -> Iterator[TDataItems]:
-        get_custom_object = schemas(api_key)
+        get_custom_object = fetch_data_raw(CRM_SCHEMAS_ENDPOINT, api_key)
         object_type_id = None
-        for custom_object in get_custom_object:
-            if custom_object["name"] == custom_object_name.capitalize():
+
+        import json
+
+        print(f"Available custom objects: {json.dumps(get_custom_object, indent=2)}")
+
+        custom_object_lowercase = custom_object_name.lower()
+        for custom_object in get_custom_object["results"]:
+            print(f"Custom object: {json.dumps(custom_object, indent=2)}")
+            if custom_object["name"].lower() == custom_object_lowercase:
                 object_type_id = custom_object["objectTypeId"]
                 break
+
+            # sometimes people use the plural name of the object type by accident, we should try to match that if we can
+            if "labels" in custom_object:
+                if custom_object_lowercase == custom_object["labels"]["plural"].lower():
+                    object_type_id = custom_object["objectTypeId"]
+                    break
+
         if object_type_id is None:
             raise ValueError(f"There is no such custom object as {custom_object_name}")
         custom_object_properties = f"crm/v3/properties/{object_type_id}"
