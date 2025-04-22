@@ -130,6 +130,7 @@ def fetch_data(
     # Parse the API response and yield the properties of each result
     # Parse the response JSON data
     _data = r.json()
+
     # Yield the properties of each result in the API response
     while _data is not None:
         if "results" in _data:
@@ -156,6 +157,7 @@ def fetch_data(
                     if "id" not in _obj and "id" in _result:
                         # Move id from properties to top level
                         _obj["id"] = _result["id"]
+
                     if "associations" in _result:
                         for association in _result["associations"]:
                             __values = [
@@ -168,12 +170,13 @@ def fetch_data(
                                 ]
                             ]
 
-                        # remove duplicates from list of dicts
-                        __values = [
-                            dict(t) for t in {tuple(d.items()) for d in __values}
-                        ]
+                            # remove duplicates from list of dicts
+                            __values = [
+                                dict(t) for t in {tuple(d.items()) for d in __values}
+                            ]
 
-                        _obj[association] = __values
+                            _obj[association] = __values
+
                     _objects.append(_obj)
             yield _objects
 
