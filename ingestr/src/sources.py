@@ -96,7 +96,7 @@ from ingestr.src.sql_database.callbacks import (
     limit_callback,
     type_adapter_callback,
 )
-from ingestr.src.stripe_analytics import stripe_source
+
 from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
 from ingestr.src.tiktok_ads import tiktok_source
 from ingestr.src.time import isotime
@@ -685,6 +685,7 @@ class StripeAnalyticsSource:
         if kwargs.get("interval_end"):
             date_args["end_date"] = kwargs.get("interval_end")
 
+        from ingestr.src.stripe_analytics import stripe_source
         return stripe_source(
             endpoints=[
                 endpoint,
