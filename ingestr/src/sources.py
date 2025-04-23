@@ -18,7 +18,6 @@ from typing import (
 from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
 
 import dlt
-import gcsfs  # type: ignore
 import pendulum
 import s3fs  # type: ignore
 from dlt.common.configuration.specs import (
@@ -1640,6 +1639,7 @@ class GCSSource:
         # (The RECOMMENDED way of passing service account credentials)
         # directly with gcsfs. As a workaround, we construct the GCSFileSystem
         # and pass it directly to filesystem.readers.
+        import gcsfs  # type: ignore
         fs = gcsfs.GCSFileSystem(
             token=credentials,
         )
