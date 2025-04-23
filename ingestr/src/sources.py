@@ -73,7 +73,6 @@ from ingestr.src.linkedin_ads.dimension_time_enum import (
 )
 from ingestr.src.notion import notion_databases
 from ingestr.src.personio import personio_source
-from ingestr.src.pipedrive import pipedrive_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
@@ -2095,6 +2094,8 @@ class PipedriveSource:
             "deals",
         ]:
             raise UnsupportedResourceError(table, "Pipedrive")
+
+        from ingestr.src.pipedrive import pipedrive_source
 
         return pipedrive_source(
             pipedrive_api_key=api_key, since_timestamp=start_date
