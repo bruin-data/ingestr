@@ -63,7 +63,6 @@ from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
 from ingestr.src.frankfurter.helpers import validate_dates
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
-from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
 from ingestr.src.kafka import kafka_consumer
@@ -549,7 +548,12 @@ class GorgiasSource:
 class GoogleSheetsSource:
     table_builder: Callable
 
-    def __init__(self, table_builder=google_spreadsheet) -> None:
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.google_sheets import google_spreadsheet
+
+            table_builder = google_spreadsheet
+
         self.table_builder = table_builder
 
     def handles_incrementality(self) -> bool:
