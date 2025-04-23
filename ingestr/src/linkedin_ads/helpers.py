@@ -18,7 +18,6 @@ def retry_on_limit(
 
 def create_client() -> requests.Session:
     return Client(
-        request_timeout=10.0,
         raise_for_status=False,
         retry_condition=retry_on_limit,
         request_max_attempts=12,
