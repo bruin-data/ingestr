@@ -46,7 +46,6 @@ from sqlalchemy import types as sa
 from ingestr.src import blob
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
-from ingestr.src.airtable import airtable_source
 from ingestr.src.applovin import applovin_source
 from ingestr.src.applovin_max import applovin_max_source
 from ingestr.src.appstore import app_store
@@ -66,7 +65,6 @@ from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
 from ingestr.src.frankfurter.helpers import validate_dates
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
-from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -857,6 +855,8 @@ class AirtableSource:
                 "base_id and access_token in the URI are required to connect to Airtable"
             )
 
+        from ingestr.src.airtable import airtable_source
+
         return airtable_source(
             base_id=base_id[0], table_names=tables, access_token=access_token[0]
         )
@@ -1472,6 +1472,8 @@ class GoogleAnalyticsSource:
         end_date = pendulum.now()
         if kwargs.get("interval_end") is not None:
             end_date = pendulum.instance(kwargs.get("interval_end"))  # type: ignore
+
+        from ingestr.src.google_analytics import google_analytics
 
         return google_analytics(
             property_id=property_id[0],
