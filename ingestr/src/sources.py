@@ -52,7 +52,6 @@ from ingestr.src.appstore import app_store
 from ingestr.src.appstore.client import AppStoreConnectClient
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.chess import source
-from ingestr.src.dynamodb import dynamodb
 from ingestr.src.errors import (
     InvalidBlobTableError,
     MissingValueError,
@@ -1348,6 +1347,7 @@ class AsanaSource:
 
         dlt.secrets["sources.asana_source.access_token"] = access_token[0]
         from ingestr.src.asana_source import asana_source
+
         src = asana_source()
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)
         return src.with_resources(table)
@@ -1411,6 +1411,8 @@ class DynamoDBSource:
                 range_end="closed",
                 range_start="closed",
             )
+
+        from ingestr.src.dynamodb import dynamodb
 
         # bug: we never validate table.
         return dynamodb(table, creds, incremental)
