@@ -48,8 +48,6 @@ from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.applovin import applovin_source
 from ingestr.src.applovin_max import applovin_max_source
-from ingestr.src.appstore import app_store
-from ingestr.src.appstore.client import AppStoreConnectClient
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.chess import source
 from ingestr.src.errors import (
@@ -1554,6 +1552,8 @@ class AppleAppStoreSource:
         else:
             key = base64.b64decode(key_base64[0]).decode()  # type: ignore
 
+        from ingestr.src.appstore.client import AppStoreConnectClient
+
         return AppStoreConnectClient(key.encode(), key_id, issuer_id)
 
     def dlt_source(self, uri: str, table: str, **kwargs):
@@ -1593,6 +1593,8 @@ class AppleAppStoreSource:
 
         if app_ids is None:
             raise MissingValueError("app_id", "App Store")
+
+        from ingestr.src.appstore import app_store
 
         src = app_store(
             client,
