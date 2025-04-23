@@ -18,9 +18,7 @@ from typing import (
 from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
 
 import dlt
-import gcsfs  # type: ignore
 import pendulum
-import s3fs  # type: ignore
 from dlt.common.configuration.specs import (
     AwsCredentials,
 )
@@ -42,14 +40,12 @@ from dlt.sources.sql_database.schema_types import (
     Table,
     TTypeAdapter,
 )
-from google.ads.googleads.client import GoogleAdsClient  # type: ignore
 from sqlalchemy import Column
 from sqlalchemy import types as sa
 
 from ingestr.src import blob
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
-from ingestr.src.airtable import airtable_source
 from ingestr.src.applovin import applovin_source
 from ingestr.src.applovin_max import applovin_max_source
 from ingestr.src.appstore import app_store
@@ -69,8 +65,6 @@ from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
 from ingestr.src.frankfurter.helpers import validate_dates
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
-from ingestr.src.google_ads import google_ads
-from ingestr.src.google_analytics import google_analytics
 from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
@@ -96,7 +90,6 @@ from ingestr.src.sql_database.callbacks import (
     limit_callback,
     type_adapter_callback,
 )
-from ingestr.src.stripe_analytics import stripe_source
 from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
 from ingestr.src.tiktok_ads import tiktok_source
 from ingestr.src.time import isotime
@@ -685,6 +678,8 @@ class StripeAnalyticsSource:
         if kwargs.get("interval_end"):
             date_args["end_date"] = kwargs.get("interval_end")
 
+        from ingestr.src.stripe_analytics import stripe_source
+
         return stripe_source(
             endpoints=[
                 endpoint,
@@ -859,6 +854,8 @@ class AirtableSource:
             raise ValueError(
                 "base_id and access_token in the URI are required to connect to Airtable"
             )
+
+        from ingestr.src.airtable import airtable_source
 
         return airtable_source(
             base_id=base_id[0], table_names=tables, access_token=access_token[0]
@@ -1189,6 +1186,8 @@ class S3Source:
 
         bucket_url = f"s3://{bucket_name}/"
 
+        import s3fs  # type: ignore
+
         fs = s3fs.S3FileSystem(
             key=access_key_id[0],
             secret=secret_access_key[0],
@@ -1474,6 +1473,8 @@ class GoogleAnalyticsSource:
         if kwargs.get("interval_end") is not None:
             end_date = pendulum.instance(kwargs.get("interval_end"))  # type: ignore
 
+        from ingestr.src.google_analytics import google_analytics
+
         return google_analytics(
             property_id=property_id[0],
             start_date=start_date,
@@ -1639,6 +1640,8 @@ class GCSSource:
         # (The RECOMMENDED way of passing service account credentials)
         # directly with gcsfs. As a workaround, we construct the GCSFileSystem
         # and pass it directly to filesystem.readers.
+        import gcsfs  # type: ignore
+
         fs = gcsfs.GCSFileSystem(
             token=credentials,
         )
@@ -1662,7 +1665,9 @@ class GoogleAdsSource:
     def handles_incrementality(self) -> bool:
         return True
 
-    def init_client(self, params: Dict[str, List[str]]) -> GoogleAdsClient:
+    def init_client(self, params: Dict[str, List[str]]):
+        from google.ads.googleads.client import GoogleAdsClient  # type: ignore
+
         dev_token = params.get("dev_token")
         if dev_token is None or len(dev_token) == 0:
             raise MissingValueError("dev_token", "Google Ads")
@@ -1716,6 +1721,7 @@ class GoogleAdsSource:
             raise MissingValueError("customer_id", "Google Ads")
 
         params = parse_qs(parsed_uri.query)
+
         client = self.init_client(params)
 
         start_date = kwargs.get("interval_start") or datetime.now(
@@ -1736,6 +1742,8 @@ class GoogleAdsSource:
         if table.startswith("daily:"):
             report_spec = table
             table = "daily_report"
+
+        from ingestr.src.google_ads import google_ads
 
         src = google_ads(
             client,

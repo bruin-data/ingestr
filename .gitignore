@@ -22,3 +22,4 @@ node_modules
 *.sql
 ingest.sh
 test.env
+*.log
