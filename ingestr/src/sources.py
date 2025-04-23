@@ -51,7 +51,6 @@ from ingestr.src.applovin_max import applovin_max_source
 from ingestr.src.appstore import app_store
 from ingestr.src.appstore.client import AppStoreConnectClient
 from ingestr.src.arrow import memory_mapped_arrow
-from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
 from ingestr.src.dynamodb import dynamodb
 from ingestr.src.errors import (
@@ -1348,6 +1347,7 @@ class AsanaSource:
             )
 
         dlt.secrets["sources.asana_source.access_token"] = access_token[0]
+        from ingestr.src.asana_source import asana_source
         src = asana_source()
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)
         return src.with_resources(table)
