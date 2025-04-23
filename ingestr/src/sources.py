@@ -19,7 +19,6 @@ from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
 
 import dlt
 import pendulum
-import s3fs  # type: ignore
 from dlt.common.configuration.specs import (
     AwsCredentials,
 )
@@ -1189,6 +1188,7 @@ class S3Source:
 
         bucket_url = f"s3://{bucket_name}/"
 
+        import s3fs  # type: ignore
         fs = s3fs.S3FileSystem(
             key=access_key_id[0],
             secret=secret_access_key[0],
