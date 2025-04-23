@@ -48,12 +48,8 @@ from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.applovin import applovin_source
 from ingestr.src.applovin_max import applovin_max_source
-from ingestr.src.appstore import app_store
-from ingestr.src.appstore.client import AppStoreConnectClient
 from ingestr.src.arrow import memory_mapped_arrow
-from ingestr.src.asana_source import asana_source
 from ingestr.src.chess import source
-from ingestr.src.dynamodb import dynamodb
 from ingestr.src.errors import (
     InvalidBlobTableError,
     MissingValueError,
@@ -65,23 +61,18 @@ from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
 from ingestr.src.frankfurter.helpers import validate_dates
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
-from ingestr.src.google_sheets import google_spreadsheet
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
 from ingestr.src.kafka import kafka_consumer
 from ingestr.src.kafka.helpers import KafkaCredentials
-from ingestr.src.kinesis import kinesis_stream
 from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.linkedin_ads import linked_in_ads_source
 from ingestr.src.linkedin_ads.dimension_time_enum import (
     Dimension,
     TimeGranularity,
 )
-from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.personio import personio_source
-from ingestr.src.pipedrive import pipedrive_source
-from ingestr.src.salesforce import salesforce_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
@@ -331,7 +322,12 @@ class ArrowMemoryMappedSource:
 class MongoDbSource:
     table_builder: Callable
 
-    def __init__(self, table_builder=mongodb_collection) -> None:
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.mongodb import mongodb_collection
+
+            table_builder = mongodb_collection
+
         self.table_builder = table_builder
 
     def handles_incrementality(self) -> bool:
@@ -547,7 +543,12 @@ class GorgiasSource:
 class GoogleSheetsSource:
     table_builder: Callable
 
-    def __init__(self, table_builder=google_spreadsheet) -> None:
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.google_sheets import google_spreadsheet
+
+            table_builder = google_spreadsheet
+
         self.table_builder = table_builder
 
     def handles_incrementality(self) -> bool:
@@ -1348,6 +1349,8 @@ class AsanaSource:
             )
 
         dlt.secrets["sources.asana_source.access_token"] = access_token[0]
+        from ingestr.src.asana_source import asana_source
+
         src = asana_source()
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)
         return src.with_resources(table)
@@ -1411,6 +1414,8 @@ class DynamoDBSource:
                 range_end="closed",
                 range_start="closed",
             )
+
+        from ingestr.src.dynamodb import dynamodb
 
         # bug: we never validate table.
         return dynamodb(table, creds, incremental)
@@ -1544,6 +1549,8 @@ class AppleAppStoreSource:
         else:
             key = base64.b64decode(key_base64[0]).decode()  # type: ignore
 
+        from ingestr.src.appstore.client import AppStoreConnectClient
+
         return AppStoreConnectClient(key.encode(), key_id, issuer_id)
 
     def dlt_source(self, uri: str, table: str, **kwargs):
@@ -1583,6 +1590,8 @@ class AppleAppStoreSource:
 
         if app_ids is None:
             raise MissingValueError("app_id", "App Store")
+
+        from ingestr.src.appstore import app_store
 
         src = app_store(
             client,
@@ -1962,6 +1971,8 @@ class SalesforceSource:
             if v is None:
                 raise MissingValueError(k, "Salesforce")
 
+        from ingestr.src.salesforce import salesforce_source
+
         src = salesforce_source(**creds)  # type: ignore
 
         if table not in src.resources:
@@ -2048,6 +2059,9 @@ class KinesisSource:
             aws_secret_access_key=aws_secret_access_key[0],
             region_name=region_name[0],
         )
+
+        from ingestr.src.kinesis import kinesis_stream
+
         return kinesis_stream(
             stream_name=table, credentials=credentials, initial_at_timestamp=start_date
         )
@@ -2080,6 +2094,8 @@ class PipedriveSource:
             "deals",
         ]:
             raise UnsupportedResourceError(table, "Pipedrive")
+
+        from ingestr.src.pipedrive import pipedrive_source
 
         return pipedrive_source(
             pipedrive_api_key=api_key, since_timestamp=start_date
