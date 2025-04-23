@@ -3,15 +3,9 @@ from enum import Enum
 from typing import Optional
 
 import typer
-from dlt.common.runtime.collector import Collector
 from rich.console import Console
-from rich.status import Status
 from typing_extensions import Annotated
 
-import ingestr.src.partition as partition
-import ingestr.src.resource as resource
-from ingestr.src.destinations import AthenaDestination
-from ingestr.src.filters import cast_set_to_list, handle_mysql_empty_dates
 from ingestr.src.telemetry.event import track
 
 app = typer.Typer(
@@ -44,45 +38,6 @@ PARQUET_SUPPORTED_DESTINATIONS = [
 
 # these sources would return a JSON for sure, which means they cannot be used with Parquet loader for BigQuery
 JSON_RETURNING_SOURCES = ["notion"]
-
-
-class SpinnerCollector(Collector):
-    status: Status
-    current_step: str
-    started: bool
-
-    def __init__(self) -> None:
-        self.status = Status("Ingesting data...", spinner="dots")
-        self.started = False
-
-    def update(
-        self,
-        name: str,
-        inc: int = 1,
-        total: Optional[int] = None,
-        message: Optional[str] = None,  # type: ignore
-        label: str = "",
-        **kwargs,
-    ) -> None:
-        self.status.update(self.current_step)
-
-    def _start(self, step: str) -> None:
-        self.current_step = self.__step_to_label(step)
-        self.status.start()
-
-    def __step_to_label(self, step: str) -> str:
-        verb = step.split(" ")[0].lower()
-        if verb.startswith("normalize"):
-            return "Normalizing the data"
-        elif verb.startswith("load"):
-            return "Loading the data to the destination"
-        elif verb.startswith("extract"):
-            return "Extracting the data from the source"
-
-        return f"{verb.capitalize()} the data"
-
-    def _stop(self) -> None:
-        self.status.stop()
 
 
 class IncrementalStrategy(str, Enum):
@@ -323,8 +278,12 @@ def ingest(
     from dlt.common.runtime.collector import Collector, LogCollector
     from dlt.common.schema.typing import TColumnSchema
 
+    import ingestr.src.partition as partition
+    import ingestr.src.resource as resource
+    from ingestr.src.collector.spinner import SpinnerCollector
+    from ingestr.src.destinations import AthenaDestination
     from ingestr.src.factory import SourceDestinationFactory
-    from ingestr.src.telemetry.event import track
+    from ingestr.src.filters import cast_set_to_list, handle_mysql_empty_dates
 
     def report_errors(run_info: LoadInfo):
         for load_package in run_info.load_packages:
