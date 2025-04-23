@@ -75,7 +75,6 @@ from ingestr.src.linkedin_ads.dimension_time_enum import (
     Dimension,
     TimeGranularity,
 )
-from ingestr.src.mongodb import mongodb_collection
 from ingestr.src.notion import notion_databases
 from ingestr.src.personio import personio_source
 from ingestr.src.pipedrive import pipedrive_source
@@ -329,7 +328,12 @@ class ArrowMemoryMappedSource:
 class MongoDbSource:
     table_builder: Callable
 
-    def __init__(self, table_builder=mongodb_collection) -> None:
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.mongodb import mongodb_collection
+
+            table_builder = mongodb_collection
+
         self.table_builder = table_builder
 
     def handles_incrementality(self) -> bool:
