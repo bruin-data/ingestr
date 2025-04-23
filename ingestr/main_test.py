@@ -2961,7 +2961,7 @@ def fs_test_cases(
     "test_case",
     fs_test_cases(
         "gs",
-        "ingestr.src.sources.gcsfs.GCSFileSystem",
+        "gcsfs.GCSFileSystem",
         "credentials_base64=e30K",  # base 64 for "{}"
     ),
 )
@@ -2977,7 +2977,7 @@ def test_gcs(dest, test_case):
     "test_case",
     fs_test_cases(
         "s3",
-        "ingestr.src.sources.s3fs.S3FileSystem",
+        "s3fs.S3FileSystem",
         "access_key_id=KEY&secret_access_key=SECRET",
     ),
 )
