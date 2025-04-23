@@ -365,6 +365,7 @@ def ingest(
     dlt.config["data_writer.file_max_items"] = loader_file_size
     dlt.config["extract.workers"] = extract_parallelism
     dlt.config["extract.max_parallel_items"] = extract_parallelism
+    dlt.config["load.raise_on_max_retries"] = 15
     if schema_naming != SchemaNaming.default:
         dlt.config["schema.naming"] = schema_naming.value
 
