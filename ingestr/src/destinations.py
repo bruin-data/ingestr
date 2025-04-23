@@ -225,15 +225,24 @@ class AthenaDestination:
         access_key_id = source_params.get("access_key_id", [None])[0]
         secret_access_key = source_params.get("secret_access_key", [None])[0]
         session_token = source_params.get("session_token", [None])[0]
+        profile_name = source_params.get("profile", ["default"])[0]
+        region_name = source_params.get("region_name", [None])[0]
 
         if not (access_key_id and secret_access_key) and not session_token:
-            raise ValueError(
-                "Either access_key_id and secret_access_key pair or session_token is required to connect to Athena."
-            )
+            import botocore.session  # type: ignore
 
-        work_group = source_params.get("workgroup", [None])[0]
+            session = botocore.session.Session(profile=profile_name)
+            default = session.get_credentials()
+            if not profile_name:
+                raise ValueError(
+                    "You have to either provide access_key_id and secret_access_key pair or a valid AWS profile name."
+                )
+            access_key_id = default.access_key
+            secret_access_key = default.secret_key
+            session_token = default.token
+            if region_name is None:
+                region_name = session.get_config_variable("region")
 
-        region_name = source_params.get("region_name", [None])[0]
         if not region_name:
             raise ValueError("The region_name is required to connect to Athena.")
 
@@ -246,16 +255,15 @@ class AthenaDestination:
         if session_token:
             os.environ["DESTINATION__CREDENTIALS__AWS_SESSION_TOKEN"] = session_token
 
-        credentials = AwsCredentials(
-            aws_access_key_id=access_key_id,  # type: ignore
-            aws_secret_access_key=secret_access_key,  # type: ignore
-            aws_session_token=session_token,
-            region_name=region_name,
-        )
         return dlt.destinations.athena(
             query_result_bucket=query_result_path,
-            athena_work_group=work_group,
-            credentials=credentials,
+            athena_work_group=source_params.get("workgroup", [None])[0],
+            credentials=AwsCredentials(
+                aws_access_key_id=access_key_id,  # type: ignore
+                aws_secret_access_key=secret_access_key,  # type: ignore
+                aws_session_token=session_token,
+                region_name=region_name,
+            ),
             destination_name=bucket,
         )
 
