@@ -223,12 +223,13 @@ class AthenaDestination:
             query_result_path = bucket
 
         access_key_id = source_params.get("access_key_id", [None])[0]
-        if not access_key_id:
-            raise ValueError("The AWS access_key_id is required to connect to Athena.")
-
         secret_access_key = source_params.get("secret_access_key", [None])[0]
-        if not secret_access_key:
-            raise ValueError("The AWS secret_access_key is required to connect Athena")
+        session_token = source_params.get("session_token", [None])[0]
+
+        if not (access_key_id and secret_access_key) and not session_token:
+            raise ValueError(
+                "Either access_key_id and secret_access_key pair or session_token is required to connect to Athena."
+            )
 
         work_group = source_params.get("workgroup", [None])[0]
 
@@ -237,14 +238,18 @@ class AthenaDestination:
             raise ValueError("The region_name is required to connect to Athena.")
 
         os.environ["DESTINATION__BUCKET_URL"] = bucket
-        os.environ["DESTINATION__CREDENTIALS__AWS_ACCESS_KEY_ID"] = access_key_id
-        os.environ["DESTINATION__CREDENTIALS__AWS_SECRET_ACCESS_KEY"] = (
-            secret_access_key
-        )
+        if access_key_id and secret_access_key:
+            os.environ["DESTINATION__CREDENTIALS__AWS_ACCESS_KEY_ID"] = access_key_id
+            os.environ["DESTINATION__CREDENTIALS__AWS_SECRET_ACCESS_KEY"] = (
+                secret_access_key
+            )
+        if session_token:
+            os.environ["DESTINATION__CREDENTIALS__AWS_SESSION_TOKEN"] = session_token
 
         credentials = AwsCredentials(
-            aws_access_key_id=access_key_id,
-            aws_secret_access_key=secret_access_key,
+            aws_access_key_id=access_key_id,  # type: ignore
+            aws_secret_access_key=secret_access_key,  # type: ignore
+            aws_session_token=session_token,
             region_name=region_name,
         )
         return dlt.destinations.athena(
