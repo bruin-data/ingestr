@@ -36,7 +36,7 @@ class AdjustAPI:
     def __init__(self, api_key):
         self.api_key = api_key
         self.request_client = Client(
-            request_timeout=8.0,
+            request_timeout=1000,  # Adjust support recommends 1000 seconds of read timeout.
             raise_for_status=False,
             retry_condition=retry_on_limit,
             request_max_attempts=12,
