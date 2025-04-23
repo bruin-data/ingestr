@@ -228,7 +228,7 @@ class AthenaDestination:
         profile_name = source_params.get("profile", ["default"])[0]
         region_name = source_params.get("region_name", [None])[0]
 
-        if not (access_key_id and secret_access_key) and not session_token:
+        if not access_key_id and not secret_access_key:
             import botocore.session  # type: ignore
 
             session = botocore.session.Session(profile=profile_name)
