@@ -65,7 +65,6 @@ from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
 from ingestr.src.kafka import kafka_consumer
 from ingestr.src.kafka.helpers import KafkaCredentials
-from ingestr.src.kinesis import kinesis_stream
 from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.linkedin_ads import linked_in_ads_source
 from ingestr.src.linkedin_ads.dimension_time_enum import (
@@ -75,7 +74,6 @@ from ingestr.src.linkedin_ads.dimension_time_enum import (
 from ingestr.src.notion import notion_databases
 from ingestr.src.personio import personio_source
 from ingestr.src.pipedrive import pipedrive_source
-from ingestr.src.salesforce import salesforce_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
@@ -1974,6 +1972,8 @@ class SalesforceSource:
             if v is None:
                 raise MissingValueError(k, "Salesforce")
 
+        from ingestr.src.salesforce import salesforce_source
+
         src = salesforce_source(**creds)  # type: ignore
 
         if table not in src.resources:
@@ -2060,6 +2060,9 @@ class KinesisSource:
             aws_secret_access_key=aws_secret_access_key[0],
             region_name=region_name[0],
         )
+
+        from ingestr.src.kinesis import kinesis_stream
+
         return kinesis_stream(
             stream_name=table, credentials=credentials, initial_at_timestamp=start_date
         )
