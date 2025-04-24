@@ -57,7 +57,6 @@ from ingestr.src.sql_database.callbacks import (
     type_adapter_callback,
 )
 from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
-from ingestr.src.time import isotime
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1419,6 +1418,9 @@ class DynamoDBSource:
         incremental = None
         incremental_key = kwargs.get("incremental_key")
 
+        from ingestr.src.time import isotime
+        from ingestr.src.dynamodb import dynamodb
+
         if incremental_key:
             incremental = dlt.sources.incremental(
                 incremental_key.strip(),
@@ -1427,8 +1429,6 @@ class DynamoDBSource:
                 range_end="closed",
                 range_start="closed",
             )
-
-        from ingestr.src.dynamodb import dynamodb
 
         # bug: we never validate table.
         return dynamodb(table, creds, incremental)
