@@ -64,7 +64,6 @@ from ingestr.src.sql_database.callbacks import (
     type_adapter_callback,
 )
 from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
-from ingestr.src.tiktok_ads import tiktok_source
 from ingestr.src.time import isotime
 from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
 from ingestr.src.zendesk.helpers.credentials import (
@@ -1307,6 +1306,8 @@ class TikTokSource:
                 filter_name = list(filters.keys())[0]
                 filter_value = list(map(int, filters[list(filters.keys())[0]]))
 
+        from ingestr.src.tiktok_ads import tiktok_source
+        
         return tiktok_source(
             start_date=start_date,
             end_date=end_date,
