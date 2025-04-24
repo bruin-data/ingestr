@@ -45,7 +45,6 @@ from sqlalchemy import types as sa
 
 from ingestr.src import blob
 from ingestr.src.arrow import memory_mapped_arrow
-from ingestr.src.chess import source
 from ingestr.src.errors import (
     InvalidBlobTableError,
     MissingValueError,
@@ -621,6 +620,8 @@ class ChessSource:
             raise ValueError(
                 f"Resource '{table}' is not supported for Chess source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
+
+        from ingestr.src.chess import source
 
         return source(players=list_players, **date_args).with_resources(
             table_mapping[table]
