@@ -55,7 +55,6 @@ from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
 from ingestr.src.frankfurter.helpers import validate_dates
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
-from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
 from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.linkedin_ads import linked_in_ads_source
@@ -524,6 +523,8 @@ class GorgiasSource:
         if kwargs.get("interval_end"):
             date_args["end_date"] = kwargs.get("interval_end")
 
+        from ingestr.src.gorgias import gorgias_source
+        
         return gorgias_source(
             domain=source_fields.netloc,
             email=email[0],
