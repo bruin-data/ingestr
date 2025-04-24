@@ -58,11 +58,6 @@ from ingestr.src.sql_database.callbacks import (
 )
 from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
 from ingestr.src.time import isotime
-from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
-from ingestr.src.zendesk.helpers.credentials import (
-    ZendeskCredentialsOAuth,
-    ZendeskCredentialsToken,
-)
 
 TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
 TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
@@ -1106,6 +1101,12 @@ class ZendeskSource:
         subdomain = source_fields.hostname
         if not subdomain:
             raise ValueError("Subdomain is required to connect with Zendesk")
+        
+        from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
+        from ingestr.src.zendesk.helpers.credentials import (
+            ZendeskCredentialsOAuth,
+            ZendeskCredentialsToken,
+        )
 
         if not source_fields.username and source_fields.password:
             oauth_token = source_fields.password
