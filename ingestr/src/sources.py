@@ -44,8 +44,6 @@ from sqlalchemy import Column
 from sqlalchemy import types as sa
 
 from ingestr.src import blob
-from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
-from ingestr.src.adjust.adjust_helpers import parse_filters
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.chess import source
 from ingestr.src.errors import (
@@ -995,6 +993,9 @@ class AdjustSource:
         end_date = pendulum.now()
         if kwargs.get("interval_end"):
             end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
+
+        from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
+        from ingestr.src.adjust.adjust_helpers import parse_filters
 
         dimensions = None
         metrics = None
