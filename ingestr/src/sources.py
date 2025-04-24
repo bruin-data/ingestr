@@ -51,7 +51,6 @@ from ingestr.src.errors import (
 )
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
-from ingestr.src.personio import personio_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
@@ -2046,6 +2045,8 @@ class PersonioSource:
         ]:
             raise UnsupportedResourceError(table, "Personio")
 
+        from ingestr.src.personio import personio_source
+        
         return personio_source(
             client_id=client_id[0],
             client_secret=client_secret[0],
@@ -2137,7 +2138,7 @@ class FrankfurterSource:
         # Note: if an end date but no start date is provided, start date and end date will be set to current date
         from ingestr.src.frankfurter import frankfurter_source
         from ingestr.src.frankfurter.helpers import validate_dates
-        
+
         if table == "exchange_rates":
             if kwargs.get("interval_start"):
                 start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
