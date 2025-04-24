@@ -55,7 +55,7 @@ def airtable_resource(
         field for field in table["fields"] if field["id"] == primary_key_id
     ][0]
     table_name: str = table["name"]
-    primary_key: List[str] = [primary_key_field["name"]]
+    primary_key: List[str] = [f"fields__{primary_key_field['name']}"]
     air_table = api.table(base_id, table["id"])
 
     # Table.iterate() supports rich customization options, such as chunk size, fields, cell format, timezone, locale, and view
