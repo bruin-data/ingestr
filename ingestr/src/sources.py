@@ -53,11 +53,6 @@ from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
 from ingestr.src.frankfurter.helpers import validate_dates
-from ingestr.src.linkedin_ads import linked_in_ads_source
-from ingestr.src.linkedin_ads.dimension_time_enum import (
-    Dimension,
-    TimeGranularity,
-)
 from ingestr.src.notion import notion_databases
 from ingestr.src.personio import personio_source
 from ingestr.src.shopify import shopify_source
@@ -1831,6 +1826,12 @@ class LinkedInAdsSource:
             raise ValueError(
                 "'date' or 'month' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
             )
+        
+        from ingestr.src.linkedin_ads import linked_in_ads_source
+        from ingestr.src.linkedin_ads.dimension_time_enum import (
+            Dimension,
+            TimeGranularity,
+        )
 
         if "date" in dimensions:
             time_granularity = TimeGranularity.daily
