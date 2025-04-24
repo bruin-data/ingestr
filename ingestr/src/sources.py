@@ -53,7 +53,6 @@ from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
 from ingestr.src.frankfurter.helpers import validate_dates
-from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 from ingestr.src.hubspot import hubspot
 from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.linkedin_ads import linked_in_ads_source
@@ -1526,6 +1525,8 @@ class GitHubSource:
             )
 
         access_token = source_fields.get("access_token", [""])[0]
+
+        from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 
         if table in ["issues", "pull_requests"]:
             return github_reactions(
