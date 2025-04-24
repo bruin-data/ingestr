@@ -328,8 +328,9 @@ def ingest(
             )
             raise typer.Abort()
 
-    def parse_columns(columns: list[str]) -> dict[str, "TDataType"]:
+    def parse_columns(columns: list[str]) -> dict:
         from typing import cast, get_args
+
         from dlt.common.data_types import TDataType
 
         possible_types = get_args(TDataType)
