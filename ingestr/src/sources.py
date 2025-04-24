@@ -50,7 +50,6 @@ from ingestr.src.errors import (
     UnsupportedResourceError,
 )
 from ingestr.src.filters import table_adapter_exclude_columns
-from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
     chained_query_adapter_callback,
     custom_query_variable_subsitution,
@@ -766,6 +765,8 @@ class SlackSource:
         if kwargs.get("interval_end"):
             date_args["end_date"] = kwargs.get("interval_end")
 
+        from ingestr.src.slack import slack_source
+        
         return slack_source(
             access_token=api_key[0],
             table_per_channel=False,
