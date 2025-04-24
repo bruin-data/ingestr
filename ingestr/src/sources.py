@@ -51,7 +51,6 @@ from ingestr.src.errors import (
 )
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
-from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
     chained_query_adapter_callback,
@@ -475,6 +474,8 @@ class ShopifySource:
                 f"Table name '{table}' is not supported for Shopify source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
+        from ingestr.src.shopify import shopify_source
+        
         return shopify_source(
             private_app_password=api_key[0],
             shop_url=f"https://{source_fields.netloc}",
