@@ -56,10 +56,10 @@ def currencies() -> Iterator[dict]:
     write_disposition="replace",
     columns={
         "date": {"data_type": "text"},
-        "currency_name": {"data_type": "text"},
+        "currency_code": {"data_type": "text"},
         "rate": {"data_type": "double"},
     },
-    primary_key=["date", "currency_name"],  # Composite primary key
+    primary_key=["date", "currency_code"],  # Composite primary key
 )
 def latest() -> Iterator[dict]:
     """
@@ -75,20 +75,20 @@ def latest() -> Iterator[dict]:
     rates = latest_data["rates"]
 
     # Prepare the date
-    date = pendulum.now().to_date_string()
+    date = pendulum.now("Europe/Berlin").to_date_string()
 
     # Add the base currency (EUR) with a rate of 1.0
     yield {
         "date": date,
-        "currency_name": "EUR",
+        "currency_code": "EUR",
         "rate": 1.0,
     }
 
     # Add all currencies and their rates
-    for currency_name, rate in rates.items():
+    for currency_code, rate in rates.items():
         yield {
             "date": date,
-            "currency_name": currency_name,
+            "currency_code": currency_code,
             "rate": rate,
         }
 
@@ -97,10 +97,10 @@ def latest() -> Iterator[dict]:
     write_disposition="replace",
     columns={
         "date": {"data_type": "text"},
-        "currency_name": {"data_type": "text"},
+        "currency_code": {"data_type": "text"},
         "rate": {"data_type": "double"},
     },
-    primary_key=["date", "currency_name"],  # Composite primary key
+    primary_key=["date", "currency_code"],  # Composite primary key
 )
 def exchange_rates(
     start_date: TAnyDateTime,
@@ -129,14 +129,14 @@ def exchange_rates(
         # Add the base currency with a rate of 1.0
         yield {
             "date": date,
-            "currency_name": base_currency,
+            "currency_code": base_currency,
             "rate": 1.0,
         }
 
         # Add all other currencies and their rates
-        for currency_name, rate in daily_rates.items():
+        for currency_code, rate in daily_rates.items():
             yield {
                 "date": date,
-                "currency_name": currency_name,
+                "currency_code": currency_code,
                 "rate": rate,
             }

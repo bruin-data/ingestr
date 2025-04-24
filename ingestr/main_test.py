@@ -2964,7 +2964,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_table,
         )
         assert result.exit_code != 0
-        assert has_exception(result.exception, ValueError)
+        assert has_exception(result.exception, UnsupportedResourceError)
 
     def interval_start_does_not_exceed_interval_end(dest_uri):
         schema = f"testschema_frankfurter_{get_random_string(5)}"
@@ -2993,11 +2993,11 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             interval_end="2025-04-10",
         )
         assert result.exit_code == 0
-    
+
     def interval_start_does_not_exceed_current_date(dest_uri):
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
-        start_date = pendulum.now().add(days=1).format("YYYY-MM-DD")
+        start_date = pendulum.now("Europe/Berlin").add(days=1).format("YYYY-MM-DD")
         result = invoke_ingest_command(
             "frankfurter://",
             "exchange_rates",
@@ -3009,12 +3009,11 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         assert has_exception(result.exception, ValueError)
         assert "Interval-start cannot be in the future." in str(result.exception)
 
-   
     def interval_end_does_not_exceed_current_date(dest_uri):
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
-        start_date = pendulum.now().subtract(days=1).format("YYYY-MM-DD")
-        end_date = pendulum.now().add(days=1).format("YYYY-MM-DD")
+        start_date = pendulum.now("Europe/Berlin").subtract(days=1).format("YYYY-MM-DD")
+        end_date = pendulum.now("Europe/Berlin").add(days=1).format("YYYY-MM-DD")
         result = invoke_ingest_command(
             "frankfurter://",
             "exchange_rates",
@@ -3026,7 +3025,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         assert result.exit_code != 0
         assert has_exception(result.exception, ValueError)
         assert "Interval-end cannot be in the future." in str(result.exception)
-    
+
     def exchange_rate_on_specific_date(dest_uri):
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
@@ -3058,6 +3057,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         exchange_rate_on_specific_date,
     ]
 
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
@@ -3065,6 +3065,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
 def test_frankfurter(dest, test_case):
     test_case(dest.start())
     dest.stop()
+
 
 def test_version_cmd():
     """

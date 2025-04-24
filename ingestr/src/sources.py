@@ -2060,20 +2060,18 @@ class FrankfurterSource:
                 else:
                     end_date = start_date
             else:
-                start_date = pendulum.now()
-                end_date = pendulum.now()
+                start_date = pendulum.now("Europe/Berlin")
+                end_date = pendulum.now("Europe/Berlin")
             validate_dates(start_date=start_date, end_date=end_date)
 
         # For currencies and latest tables, set start and end dates to current date
         else:
-            start_date = pendulum.now()
-            end_date = pendulum.now()
+            start_date = pendulum.now("Europe/Berlin")
+            end_date = pendulum.now("Europe/Berlin")
 
         # Validate table
         if table not in ["currencies", "latest", "exchange_rates"]:
-            raise ValueError(
-                f"Table '{table}' is not supported for Frankfurter source."
-            )
+            raise UnsupportedResourceError(table, "Frankfurter")
 
         return frankfurter_source(
             table=table,
