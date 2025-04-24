@@ -55,7 +55,6 @@ from ingestr.src.errors import (
     MissingValueError,
     UnsupportedResourceError,
 )
-from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
@@ -710,6 +709,11 @@ class FacebookAdsSource:
             raise ValueError(
                 "access_token and accound_id are required to connect to Facebook Ads."
             )
+
+        from ingestr.src.facebook_ads import (
+            facebook_ads_source,
+            facebook_insights_source,
+        )
 
         endpoint = None
         if table in ["campaigns", "ad_sets", "ad_creatives", "ads", "leads"]:
