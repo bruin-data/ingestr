@@ -63,8 +63,6 @@ from ingestr.src.frankfurter.helpers import validate_dates
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 from ingestr.src.gorgias import gorgias_source
 from ingestr.src.hubspot import hubspot
-from ingestr.src.kafka import kafka_consumer
-from ingestr.src.kafka.helpers import KafkaCredentials
 from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.linkedin_ads import linked_in_ads_source
 from ingestr.src.linkedin_ads.dimension_time_enum import (
@@ -938,6 +936,9 @@ class KafkaSource:
             raise ValueError("group_id in the URI is required to connect to kafka")
 
         start_date = kwargs.get("interval_start")
+        from ingestr.src.kafka import kafka_consumer
+        from ingestr.src.kafka.helpers import KafkaCredentials
+
         return kafka_consumer(
             topics=[table],
             credentials=KafkaCredentials(
