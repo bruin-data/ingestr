@@ -523,7 +523,7 @@ class GorgiasSource:
             date_args["end_date"] = kwargs.get("interval_end")
 
         from ingestr.src.gorgias import gorgias_source
-        
+
         return gorgias_source(
             domain=source_fields.netloc,
             email=email[0],
@@ -908,7 +908,7 @@ class KlaviyoSource:
         start_date = kwargs.get("interval_start") or "2000-01-01"
 
         from ingestr.src.klaviyo import klaviyo_source
-        
+
         return klaviyo_source(
             api_key=api_key[0],
             start_date=start_date,
@@ -1311,7 +1311,7 @@ class TikTokSource:
                 filter_value = list(map(int, filters[list(filters.keys())[0]]))
 
         from ingestr.src.tiktok_ads import tiktok_source
-        
+
         return tiktok_source(
             start_date=start_date,
             end_date=end_date,
@@ -1529,7 +1529,11 @@ class GitHubSource:
 
         access_token = source_fields.get("access_token", [""])[0]
 
-        from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
+        from ingestr.src.github import (
+            github_reactions,
+            github_repo_events,
+            github_stargazers,
+        )
 
         if table in ["issues", "pull_requests"]:
             return github_reactions(
@@ -1831,7 +1835,7 @@ class LinkedInAdsSource:
             raise ValueError(
                 "'date' or 'month' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
             )
-        
+
         from ingestr.src.linkedin_ads import linked_in_ads_source
         from ingestr.src.linkedin_ads.dimension_time_enum import (
             Dimension,
