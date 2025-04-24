@@ -53,7 +53,6 @@ from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
 from ingestr.src.frankfurter.helpers import validate_dates
-from ingestr.src.notion import notion_databases
 from ingestr.src.personio import personio_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
@@ -414,7 +413,12 @@ class LocalCsvSource:
 class NotionSource:
     table_builder: Callable
 
-    def __init__(self, table_builder=notion_databases) -> None:
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.notion import notion_databases
+
+            table_builder = notion_databases
+
         self.table_builder = table_builder
 
     def handles_incrementality(self) -> bool:
