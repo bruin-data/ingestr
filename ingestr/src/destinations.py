@@ -60,6 +60,22 @@ class BigQueryDestination:
                 base64.b64decode(credentials_base64[0]).decode("utf-8")
             )
 
+        staging_bucket = kwargs.get("staging_bucket", None)
+        if staging_bucket:
+            if not staging_bucket.startswith("gs://"):
+                raise ValueError("Staging bucket must start with gs://")
+
+            os.environ["DESTINATION__FILESYSTEM__BUCKET_URL"] = staging_bucket
+            os.environ["DESTINATION__FILESYSTEM__CREDENTIALS__PROJECT_ID"] = (
+                credentials.get("project_id", None)
+            )
+            os.environ["DESTINATION__FILESYSTEM__CREDENTIALS__PRIVATE_KEY"] = (
+                credentials.get("private_key", None)
+            )
+            os.environ["DESTINATION__FILESYSTEM__CREDENTIALS__CLIENT_EMAIL"] = (
+                credentials.get("client_email", None)
+            )
+
         project_id = None
         if source_fields.hostname:
             project_id = source_fields.hostname
@@ -82,6 +98,10 @@ class BigQueryDestination:
             "dataset_name": table_fields[-2],
             "table_name": table_fields[-1],
         }
+
+        staging_bucket = kwargs.get("staging_bucket", None)
+        if staging_bucket:
+            res["staging"] = "filesystem"
 
         return res
 

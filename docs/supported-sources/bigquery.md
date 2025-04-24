@@ -17,4 +17,16 @@ URI parameters:
 
 The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's BigQuery dialect [here](https://github.com/googleapis/python-bigquery-sqlalchemy?tab=readme-ov-file#connection-string-parameters).
 
+### Using GCS as a staging area
+
+ingestr can use GCS as a staging area for BigQuery. To do this, you need to set the `--staging-bucket` flag when you are running the command.
+
+```bash
+ingestr ingest 
+    --source-uri $SOURCE_URI
+    --dest-uri $BIGQUERY_URI
+    --source-table raw.input 
+    --dest-table raw.output
+    --staging-bucket "gs://your-bucket-name" # [!code focus]
+```
 

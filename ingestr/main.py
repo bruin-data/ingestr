@@ -264,6 +264,13 @@ def ingest(
             envvar=["YIELD_LIMIT", "INGESTR_YIELD_LIMIT"],
         ),
     ] = None,  # type: ignore
+    staging_bucket: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The staging bucket to be used for the ingestion, must be prefixed with 'gs://' or 's3://'",
+            envvar=["STAGING_BUCKET", "INGESTR_STAGING_BUCKET"],
+        ),
+    ] = None,  # type: ignore
 ):
     import hashlib
     import tempfile
@@ -417,7 +424,9 @@ def ingest(
             pipelines_dir = tempfile.mkdtemp()
             is_pipelines_dir_temp = True
 
-        dlt_dest = destination.dlt_dest(uri=dest_uri, dest_table=dest_table)
+        dlt_dest = destination.dlt_dest(
+            uri=dest_uri, dest_table=dest_table, staging_bucket=staging_bucket
+        )
         validate_loader_file_format(dlt_dest, loader_file_format)
 
         if partition_by:
@@ -566,6 +575,7 @@ def ingest(
             **destination.dlt_run_params(
                 uri=dest_uri,
                 table=dest_table,
+                staging_bucket=staging_bucket,
             ),
             write_disposition=write_disposition,  # type: ignore
             primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
