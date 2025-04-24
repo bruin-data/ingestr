@@ -13,91 +13,37 @@ from typing import (
     List,
     Literal,
     Optional,
+    TypeAlias,
     Union,
 )
 from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
 
-import dlt
 import pendulum
-from dlt.common.configuration.specs import (
-    AwsCredentials,
-)
-from dlt.common.libs.sql_alchemy import (
-    Engine,
-    MetaData,
-)
 from dlt.common.time import ensure_pendulum_datetime
-from dlt.common.typing import TDataItem, TSecretStrValue
 from dlt.extract import Incremental
+from dlt.sources import incremental as dlt_incremental
 from dlt.sources.credentials import (
     ConnectionStringCredentials,
 )
-from dlt.sources.sql_database import sql_table
-from dlt.sources.sql_database.helpers import TableLoader
-from dlt.sources.sql_database.schema_types import (
-    ReflectionLevel,
-    SelectAny,
-    Table,
-    TTypeAdapter,
-)
-from sqlalchemy import Column
-from sqlalchemy import types as sa
 
 from ingestr.src import blob
-from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
-from ingestr.src.adjust.adjust_helpers import parse_filters
-from ingestr.src.applovin import applovin_source
-from ingestr.src.applovin_max import applovin_max_source
-from ingestr.src.arrow import memory_mapped_arrow
-from ingestr.src.chess import source
 from ingestr.src.errors import (
     InvalidBlobTableError,
     MissingValueError,
     UnsupportedResourceError,
 )
-from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
-from ingestr.src.filesystem import readers
-from ingestr.src.filters import table_adapter_exclude_columns
-from ingestr.src.frankfurter import frankfurter_source
-from ingestr.src.frankfurter.helpers import validate_dates
-from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
-from ingestr.src.gorgias import gorgias_source
-from ingestr.src.hubspot import hubspot
-from ingestr.src.kafka import kafka_consumer
-from ingestr.src.kafka.helpers import KafkaCredentials
-from ingestr.src.klaviyo._init_ import klaviyo_source
-from ingestr.src.linkedin_ads import linked_in_ads_source
-from ingestr.src.linkedin_ads.dimension_time_enum import (
-    Dimension,
-    TimeGranularity,
-)
-from ingestr.src.notion import notion_databases
-from ingestr.src.personio import personio_source
-from ingestr.src.shopify import shopify_source
-from ingestr.src.slack import slack_source
-from ingestr.src.sql_database.callbacks import (
-    chained_query_adapter_callback,
-    custom_query_variable_subsitution,
-    limit_callback,
-    type_adapter_callback,
-)
 from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
-from ingestr.src.tiktok_ads import tiktok_source
-from ingestr.src.time import isotime
-from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
-from ingestr.src.zendesk.helpers.credentials import (
-    ZendeskCredentialsOAuth,
-    ZendeskCredentialsToken,
-)
-
-TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
-TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
 
 
 class SqlSource:
     table_builder: Callable
 
-    def __init__(self, table_builder=sql_table) -> None:
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from dlt.sources.sql_database import sql_table
+
+            table_builder = sql_table
+
         self.table_builder = table_builder
 
     def handles_incrementality(self) -> bool:
@@ -112,7 +58,7 @@ class SqlSource:
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
-            incremental = dlt.sources.incremental(
+            incremental = dlt_incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
@@ -167,6 +113,27 @@ class SqlSource:
         if uri.startswith("db2://"):
             uri = uri.replace("db2://", "db2+ibm_db://")
 
+        from dlt.common.libs.sql_alchemy import (
+            Engine,
+            MetaData,
+        )
+        from dlt.sources.sql_database.schema_types import (
+            ReflectionLevel,
+            SelectAny,
+            Table,
+            TTypeAdapter,
+        )
+        from sqlalchemy import Column
+        from sqlalchemy import types as sa
+
+        from ingestr.src.filters import table_adapter_exclude_columns
+        from ingestr.src.sql_database.callbacks import (
+            chained_query_adapter_callback,
+            custom_query_variable_subsitution,
+            limit_callback,
+            type_adapter_callback,
+        )
+
         query_adapters = []
         if kwargs.get("sql_limit"):
             query_adapters.append(
@@ -184,6 +151,13 @@ class SqlSource:
             sql_backend = "sqlalchemy"
             defer_table_reflect = True
             query_value = table.split(":", 1)[1]
+
+            TableBackend: TypeAlias = Literal[
+                "sqlalchemy", "pyarrow", "pandas", "connectorx"
+            ]
+            TQueryAdapter: TypeAlias = Callable[[SelectAny, Table], SelectAny]
+            import dlt
+            from dlt.common.typing import TDataItem
 
             # this is a very hacky version of the table_rows function. it is built this way to go around the dlt's table loader.
             # I didn't want to write a full fledged sqlalchemy source for now, and wanted to benefit from the existing stuff to begin with.
@@ -235,6 +209,8 @@ class SqlSource:
                     *cols,
                 )
 
+                from dlt.sources.sql_database.helpers import TableLoader
+
                 loader = TableLoader(
                     engine,
                     backend,
@@ -277,7 +253,12 @@ class SqlSource:
 class ArrowMemoryMappedSource:
     table_builder: Callable
 
-    def __init__(self, table_builder=memory_mapped_arrow) -> None:
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.arrow import memory_mapped_arrow
+
+            table_builder = memory_mapped_arrow
+
         self.table_builder = table_builder
 
     def handles_incrementality(self) -> bool:
@@ -289,7 +270,7 @@ class ArrowMemoryMappedSource:
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
 
-            incremental = dlt.sources.incremental(
+            incremental = dlt_incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
@@ -341,7 +322,7 @@ class MongoDbSource:
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
 
-            incremental = dlt.sources.incremental(
+            incremental = dlt_incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
@@ -366,7 +347,7 @@ class LocalCsvSource:
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         def csv_file(
-            incremental: Optional[dlt.sources.incremental[Any]] = None,
+            incremental: Optional[dlt_incremental[Any]] = None,
         ):
             file_path = uri.split("://")[1]
             myFile = open(file_path, "r")
@@ -408,11 +389,13 @@ class LocalCsvSource:
             if page:
                 yield page
 
-        return dlt.resource(
+        from dlt import resource
+
+        return resource(
             csv_file,
             merge_key=kwargs.get("merge_key"),  # type: ignore
         )(
-            incremental=dlt.sources.incremental(
+            incremental=dlt_incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=kwargs.get("interval_start"),
                 end_value=kwargs.get("interval_end"),
@@ -428,7 +411,12 @@ class LocalCsvSource:
 class NotionSource:
     table_builder: Callable
 
-    def __init__(self, table_builder=notion_databases) -> None:
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.notion import notion_databases
+
+            table_builder = notion_databases
+
         self.table_builder = table_builder
 
     def handles_incrementality(self) -> bool:
@@ -488,6 +476,8 @@ class ShopifySource:
                 f"Table name '{table}' is not supported for Shopify source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
+        from ingestr.src.shopify import shopify_source
+
         return shopify_source(
             private_app_password=api_key[0],
             shop_url=f"https://{source_fields.netloc}",
@@ -531,6 +521,8 @@ class GorgiasSource:
 
         if kwargs.get("interval_end"):
             date_args["end_date"] = kwargs.get("interval_end")
+
+        from ingestr.src.gorgias import gorgias_source
 
         return gorgias_source(
             domain=source_fields.netloc,
@@ -629,6 +621,8 @@ class ChessSource:
                 f"Resource '{table}' is not supported for Chess source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
+        from ingestr.src.chess import source
+
         return source(players=list_players, **date_args).with_resources(
             table_mapping[table]
         )
@@ -713,6 +707,11 @@ class FacebookAdsSource:
                 "access_token and accound_id are required to connect to Facebook Ads."
             )
 
+        from ingestr.src.facebook_ads import (
+            facebook_ads_source,
+            facebook_insights_source,
+        )
+
         endpoint = None
         if table in ["campaigns", "ad_sets", "ad_creatives", "ads", "leads"]:
             endpoint = table
@@ -770,6 +769,8 @@ class SlackSource:
         if kwargs.get("interval_end"):
             date_args["end_date"] = kwargs.get("interval_end")
 
+        from ingestr.src.slack import slack_source
+
         return slack_source(
             access_token=api_key[0],
             table_per_channel=False,
@@ -798,6 +799,8 @@ class HubspotSource:
             raise ValueError("api_key in the URI is required to connect to Hubspot")
 
         endpoint = None
+
+        from ingestr.src.hubspot import hubspot
 
         if table.startswith("custom:"):
             fields = table.split(":", 2)
@@ -905,6 +908,9 @@ class KlaviyoSource:
             )
 
         start_date = kwargs.get("interval_start") or "2000-01-01"
+
+        from ingestr.src.klaviyo import klaviyo_source
+
         return klaviyo_source(
             api_key=api_key[0],
             start_date=start_date,
@@ -938,6 +944,9 @@ class KafkaSource:
             raise ValueError("group_id in the URI is required to connect to kafka")
 
         start_date = kwargs.get("interval_start")
+        from ingestr.src.kafka import kafka_consumer
+        from ingestr.src.kafka.helpers import KafkaCredentials
+
         return kafka_consumer(
             topics=[table],
             credentials=KafkaCredentials(
@@ -992,6 +1001,9 @@ class AdjustSource:
         end_date = pendulum.now()
         if kwargs.get("interval_end"):
             end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
+
+        from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
+        from ingestr.src.adjust.adjust_helpers import parse_filters
 
         dimensions = None
         metrics = None
@@ -1098,6 +1110,12 @@ class ZendeskSource:
         subdomain = source_fields.hostname
         if not subdomain:
             raise ValueError("Subdomain is required to connect with Zendesk")
+
+        from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
+        from ingestr.src.zendesk.helpers.credentials import (
+            ZendeskCredentialsOAuth,
+            ZendeskCredentialsToken,
+        )
 
         if not source_fields.username and source_fields.password:
             oauth_token = source_fields.password
@@ -1206,6 +1224,8 @@ class S3Source:
                 "S3 Source only supports specific formats files: csv, jsonl, parquet"
             )
 
+        from ingestr.src.filesystem import readers
+
         return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
 
 
@@ -1300,6 +1320,8 @@ class TikTokSource:
                 filter_name = list(filters.keys())[0]
                 filter_value = list(map(int, filters[list(filters.keys())[0]]))
 
+        from ingestr.src.tiktok_ads import tiktok_source
+
         return tiktok_source(
             start_date=start_date,
             end_date=end_date,
@@ -1348,8 +1370,11 @@ class AsanaSource:
                 f"Resource '{table}' is not supported for Asana source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
-        dlt.secrets["sources.asana_source.access_token"] = access_token[0]
+        import dlt
+
         from ingestr.src.asana_source import asana_source
+
+        dlt.secrets["sources.asana_source.access_token"] = access_token[0]
 
         src = asana_source()
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)
@@ -1396,6 +1421,9 @@ class DynamoDBSource:
         if not secret_key:
             raise ValueError("secret_access_key is required to connect to Dynamodb")
 
+        from dlt.common.configuration.specs import AwsCredentials
+        from dlt.common.typing import TSecretStrValue
+
         creds = AwsCredentials(
             aws_access_key_id=access_key[0],
             aws_secret_access_key=TSecretStrValue(secret_key[0]),
@@ -1406,16 +1434,17 @@ class DynamoDBSource:
         incremental = None
         incremental_key = kwargs.get("incremental_key")
 
+        from ingestr.src.dynamodb import dynamodb
+        from ingestr.src.time import isotime
+
         if incremental_key:
-            incremental = dlt.sources.incremental(
+            incremental = dlt_incremental(
                 incremental_key.strip(),
                 initial_value=isotime(kwargs.get("interval_start")),
                 end_value=isotime(kwargs.get("interval_end")),
                 range_end="closed",
                 range_start="closed",
             )
-
-        from ingestr.src.dynamodb import dynamodb
 
         # bug: we never validate table.
         return dynamodb(table, creds, incremental)
@@ -1516,6 +1545,12 @@ class GitHubSource:
             )
 
         access_token = source_fields.get("access_token", [""])[0]
+
+        from ingestr.src.github import (
+            github_reactions,
+            github_repo_events,
+            github_stargazers,
+        )
 
         if table in ["issues", "pull_requests"]:
             return github_reactions(
@@ -1666,6 +1701,8 @@ class GCSSource:
             raise ValueError(
                 "GCS Source only supports specific formats files: csv, jsonl, parquet"
             )
+
+        from ingestr.src.filesystem import readers
 
         return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
 
@@ -1818,6 +1855,12 @@ class LinkedInAdsSource:
                 "'date' or 'month' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
             )
 
+        from ingestr.src.linkedin_ads import linked_in_ads_source
+        from ingestr.src.linkedin_ads.dimension_time_enum import (
+            Dimension,
+            TimeGranularity,
+        )
+
         if "date" in dimensions:
             time_granularity = TimeGranularity.daily
             dimensions.remove("date")
@@ -1875,6 +1918,8 @@ class AppLovinSource:
         if table.startswith("custom:"):
             custom_report = table
             table = "custom_report"
+
+        from ingestr.src.applovin import applovin_source
 
         src = applovin_source(
             api_key[0],
@@ -1942,6 +1987,8 @@ class ApplovinMaxSource:
         )
 
         end_date = interval_end.date() if interval_end is not None else None
+
+        from ingestr.src.applovin_max import applovin_max_source
 
         return applovin_max_source(
             start_date=start_date,
@@ -2020,6 +2067,8 @@ class PersonioSource:
         ]:
             raise UnsupportedResourceError(table, "Personio")
 
+        from ingestr.src.personio import personio_source
+
         return personio_source(
             client_id=client_id[0],
             client_secret=client_secret[0],
@@ -2054,13 +2103,16 @@ class KinesisSource:
         if start_date is not None:
             # the resource will read all messages after this timestamp.
             start_date = ensure_pendulum_datetime(start_date)
+
+        from dlt.common.configuration.specs import AwsCredentials
+
+        from ingestr.src.kinesis import kinesis_stream
+
         credentials = AwsCredentials(
             aws_access_key_id=aws_access_key_id[0],
             aws_secret_access_key=aws_secret_access_key[0],
             region_name=region_name[0],
         )
-
-        from ingestr.src.kinesis import kinesis_stream
 
         return kinesis_stream(
             stream_name=table, credentials=credentials, initial_at_timestamp=start_date
@@ -2109,6 +2161,9 @@ class FrankfurterSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         # start and end dates only assigned and validated for exchange_rates table
         # Note: if an end date but no start date is provided, start date and end date will be set to current date
+        from ingestr.src.frankfurter import frankfurter_source
+        from ingestr.src.frankfurter.helpers import validate_dates
+
         if table == "exchange_rates":
             if kwargs.get("interval_start"):
                 start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))

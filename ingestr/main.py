@@ -272,8 +272,6 @@ def ingest(
     import dlt
     import humanize
     import typer
-    from dlt.common.data_types import TDataType
-    from dlt.common.destination import Destination
     from dlt.common.pipeline import LoadInfo
     from dlt.common.runtime.collector import Collector, LogCollector
     from dlt.common.schema.typing import TColumnSchema
@@ -318,7 +316,7 @@ def ingest(
         return (source_table, dest_table)
 
     def validate_loader_file_format(
-        dlt_dest: Destination, loader_file_format: Optional[LoaderFileFormat]
+        dlt_dest, loader_file_format: Optional[LoaderFileFormat]
     ):
         if (
             loader_file_format
@@ -330,8 +328,10 @@ def ingest(
             )
             raise typer.Abort()
 
-    def parse_columns(columns: list[str]) -> dict[str, TDataType]:
+    def parse_columns(columns: list[str]) -> dict:
         from typing import cast, get_args
+
+        from dlt.common.data_types import TDataType
 
         possible_types = get_args(TDataType)
 
