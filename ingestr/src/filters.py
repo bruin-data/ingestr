@@ -1,6 +1,3 @@
-from dlt.common.libs.sql_alchemy import Table
-
-
 def cast_set_to_list(row):
     # this handles just the sqlalchemy backend for now
     if isinstance(row, dict):
@@ -32,6 +29,8 @@ def handle_mysql_empty_dates(row):
 
 
 def table_adapter_exclude_columns(cols: list[str]):
+    from dlt.common.libs.sql_alchemy import Table
+    
     def excluder(table: Table):
         cols_to_remove = [col for col in table._columns if col.name in cols]  # type: ignore
         for col in cols_to_remove:
