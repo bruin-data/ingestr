@@ -53,7 +53,6 @@ from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
 from ingestr.src.frankfurter.helpers import validate_dates
-from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.linkedin_ads import linked_in_ads_source
 from ingestr.src.linkedin_ads.dimension_time_enum import (
     Dimension,
@@ -909,6 +908,9 @@ class KlaviyoSource:
             )
 
         start_date = kwargs.get("interval_start") or "2000-01-01"
+
+        from ingestr.src.klaviyo import klaviyo_source
+        
         return klaviyo_source(
             api_key=api_key[0],
             start_date=start_date,
