@@ -53,7 +53,6 @@ from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.frankfurter import frankfurter_source
 from ingestr.src.frankfurter.helpers import validate_dates
-from ingestr.src.hubspot import hubspot
 from ingestr.src.klaviyo._init_ import klaviyo_source
 from ingestr.src.linkedin_ads import linked_in_ads_source
 from ingestr.src.linkedin_ads.dimension_time_enum import (
@@ -801,6 +800,8 @@ class HubspotSource:
             raise ValueError("api_key in the URI is required to connect to Hubspot")
 
         endpoint = None
+
+        from ingestr.src.hubspot import hubspot
 
         if table.startswith("custom:"):
             fields = table.split(":", 2)
