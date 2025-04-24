@@ -51,8 +51,6 @@ from ingestr.src.errors import (
 )
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
-from ingestr.src.frankfurter import frankfurter_source
-from ingestr.src.frankfurter.helpers import validate_dates
 from ingestr.src.personio import personio_source
 from ingestr.src.shopify import shopify_source
 from ingestr.src.slack import slack_source
@@ -2137,6 +2135,9 @@ class FrankfurterSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         # start and end dates only assigned and validated for exchange_rates table
         # Note: if an end date but no start date is provided, start date and end date will be set to current date
+        from ingestr.src.frankfurter import frankfurter_source
+        from ingestr.src.frankfurter.helpers import validate_dates
+        
         if table == "exchange_rates":
             if kwargs.get("interval_start"):
                 start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
