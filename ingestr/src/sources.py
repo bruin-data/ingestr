@@ -13,35 +13,22 @@ from typing import (
     List,
     Literal,
     Optional,
+    TypeAlias,
     Union,
 )
 from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
 
-import dlt
+
 import pendulum
 from dlt.common.configuration.specs import (
     AwsCredentials,
 )
-from dlt.common.libs.sql_alchemy import (
-    Engine,
-    MetaData,
-)
+from dlt.sources import incremental as dlt_incremental
 from dlt.common.time import ensure_pendulum_datetime
-from dlt.common.typing import TDataItem, TSecretStrValue
 from dlt.extract import Incremental
 from dlt.sources.credentials import (
     ConnectionStringCredentials,
 )
-from dlt.sources.sql_database import sql_table
-from dlt.sources.sql_database.helpers import TableLoader
-from dlt.sources.sql_database.schema_types import (
-    ReflectionLevel,
-    SelectAny,
-    Table,
-    TTypeAdapter,
-)
-from sqlalchemy import Column
-from sqlalchemy import types as sa
 
 from ingestr.src import blob
 from ingestr.src.errors import (
@@ -49,23 +36,19 @@ from ingestr.src.errors import (
     MissingValueError,
     UnsupportedResourceError,
 )
-from ingestr.src.filters import table_adapter_exclude_columns
-from ingestr.src.sql_database.callbacks import (
-    chained_query_adapter_callback,
-    custom_query_variable_subsitution,
-    limit_callback,
-    type_adapter_callback,
-)
-from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
 
-TableBackend = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
-TQueryAdapter = Callable[[SelectAny, Table], SelectAny]
+from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
 
 
 class SqlSource:
     table_builder: Callable
 
-    def __init__(self, table_builder=sql_table) -> None:
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from dlt.sources.sql_database import sql_table
+
+            table_builder = sql_table
+
         self.table_builder = table_builder
 
     def handles_incrementality(self) -> bool:
@@ -80,7 +63,7 @@ class SqlSource:
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
-            incremental = dlt.sources.incremental(
+            incremental = dlt_incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
@@ -135,6 +118,26 @@ class SqlSource:
         if uri.startswith("db2://"):
             uri = uri.replace("db2://", "db2+ibm_db://")
 
+        from dlt.common.libs.sql_alchemy import (
+            Engine,
+            MetaData,
+        )
+        from dlt.sources.sql_database.schema_types import (
+            ReflectionLevel,
+            SelectAny,
+            Table,
+            TTypeAdapter,
+        )
+        from sqlalchemy import Column
+        from sqlalchemy import types as sa
+        from ingestr.src.filters import table_adapter_exclude_columns
+        from ingestr.src.sql_database.callbacks import (
+            chained_query_adapter_callback,
+            custom_query_variable_subsitution,
+            limit_callback,
+            type_adapter_callback,
+        )
+
         query_adapters = []
         if kwargs.get("sql_limit"):
             query_adapters.append(
@@ -152,6 +155,10 @@ class SqlSource:
             sql_backend = "sqlalchemy"
             defer_table_reflect = True
             query_value = table.split(":", 1)[1]
+
+            TableBackend: TypeAlias = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
+            TQueryAdapter: TypeAlias = Callable[[SelectAny, Table], SelectAny]
+            from dlt.common.typing import TDataItem
 
             # this is a very hacky version of the table_rows function. it is built this way to go around the dlt's table loader.
             # I didn't want to write a full fledged sqlalchemy source for now, and wanted to benefit from the existing stuff to begin with.
@@ -202,6 +209,8 @@ class SqlSource:
                     metadata,
                     *cols,
                 )
+
+                from dlt.sources.sql_database.helpers import TableLoader
 
                 loader = TableLoader(
                     engine,
@@ -262,7 +271,7 @@ class ArrowMemoryMappedSource:
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
 
-            incremental = dlt.sources.incremental(
+            incremental = dlt_incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
@@ -314,7 +323,7 @@ class MongoDbSource:
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
 
-            incremental = dlt.sources.incremental(
+            incremental = dlt_incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
                 end_value=end_value,
@@ -339,7 +348,7 @@ class LocalCsvSource:
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         def csv_file(
-            incremental: Optional[dlt.sources.incremental[Any]] = None,
+            incremental: Optional[dlt_incremental[Any]] = None,
         ):
             file_path = uri.split("://")[1]
             myFile = open(file_path, "r")
@@ -385,7 +394,7 @@ class LocalCsvSource:
             csv_file,
             merge_key=kwargs.get("merge_key"),  # type: ignore
         )(
-            incremental=dlt.sources.incremental(
+            incremental=dlt_incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=kwargs.get("interval_start"),
                 end_value=kwargs.get("interval_end"),
@@ -1408,6 +1417,7 @@ class DynamoDBSource:
         if not secret_key:
             raise ValueError("secret_access_key is required to connect to Dynamodb")
 
+        from dlt.common.typing import TSecretStrValue
         creds = AwsCredentials(
             aws_access_key_id=access_key[0],
             aws_secret_access_key=TSecretStrValue(secret_key[0]),
@@ -1422,7 +1432,7 @@ class DynamoDBSource:
         from ingestr.src.time import isotime
 
         if incremental_key:
-            incremental = dlt.sources.incremental(
+            incremental = dlt_incremental(
                 incremental_key.strip(),
                 initial_value=isotime(kwargs.get("interval_start")),
                 end_value=isotime(kwargs.get("interval_end")),
