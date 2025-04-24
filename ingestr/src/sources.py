@@ -760,7 +760,7 @@ class SlackSource:
             date_args["end_date"] = kwargs.get("interval_end")
 
         from ingestr.src.slack import slack_source
-        
+
         return slack_source(
             access_token=api_key[0],
             table_per_channel=False,
@@ -1100,7 +1100,7 @@ class ZendeskSource:
         subdomain = source_fields.hostname
         if not subdomain:
             raise ValueError("Subdomain is required to connect with Zendesk")
-        
+
         from ingestr.src.zendesk import zendesk_chat, zendesk_support, zendesk_talk
         from ingestr.src.zendesk.helpers.credentials import (
             ZendeskCredentialsOAuth,
@@ -1418,8 +1418,8 @@ class DynamoDBSource:
         incremental = None
         incremental_key = kwargs.get("incremental_key")
 
-        from ingestr.src.time import isotime
         from ingestr.src.dynamodb import dynamodb
+        from ingestr.src.time import isotime
 
         if incremental_key:
             incremental = dlt.sources.incremental(
