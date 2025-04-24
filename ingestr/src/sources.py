@@ -46,8 +46,6 @@ from sqlalchemy import types as sa
 from ingestr.src import blob
 from ingestr.src.adjust import REQUIRED_CUSTOM_DIMENSIONS, adjust_source
 from ingestr.src.adjust.adjust_helpers import parse_filters
-from ingestr.src.applovin import applovin_source
-from ingestr.src.applovin_max import applovin_max_source
 from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.chess import source
 from ingestr.src.errors import (
@@ -1881,6 +1879,8 @@ class AppLovinSource:
             custom_report = table
             table = "custom_report"
 
+        from ingestr.src.applovin import applovin_source
+
         src = applovin_source(
             api_key[0],
             start_date.strftime("%Y-%m-%d"),
@@ -1947,6 +1947,8 @@ class ApplovinMaxSource:
         )
 
         end_date = interval_end.date() if interval_end is not None else None
+
+        from ingestr.src.applovin_max import applovin_max_source
 
         return applovin_max_source(
             start_date=start_date,
