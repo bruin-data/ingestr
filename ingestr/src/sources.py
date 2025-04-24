@@ -18,14 +18,10 @@ from typing import (
 )
 from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
 
-
 import pendulum
-from dlt.common.configuration.specs import (
-    AwsCredentials,
-)
-from dlt.sources import incremental as dlt_incremental
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.extract import Incremental
+from dlt.sources import incremental as dlt_incremental
 from dlt.sources.credentials import (
     ConnectionStringCredentials,
 )
@@ -36,7 +32,6 @@ from ingestr.src.errors import (
     MissingValueError,
     UnsupportedResourceError,
 )
-
 from ingestr.src.table_definition import TableDefinition, table_string_to_dataclass
 
 
@@ -130,6 +125,7 @@ class SqlSource:
         )
         from sqlalchemy import Column
         from sqlalchemy import types as sa
+
         from ingestr.src.filters import table_adapter_exclude_columns
         from ingestr.src.sql_database.callbacks import (
             chained_query_adapter_callback,
@@ -156,8 +152,11 @@ class SqlSource:
             defer_table_reflect = True
             query_value = table.split(":", 1)[1]
 
-            TableBackend: TypeAlias = Literal["sqlalchemy", "pyarrow", "pandas", "connectorx"]
+            TableBackend: TypeAlias = Literal[
+                "sqlalchemy", "pyarrow", "pandas", "connectorx"
+            ]
             TQueryAdapter: TypeAlias = Callable[[SelectAny, Table], SelectAny]
+            import dlt
             from dlt.common.typing import TDataItem
 
             # this is a very hacky version of the table_rows function. it is built this way to go around the dlt's table loader.
@@ -390,7 +389,9 @@ class LocalCsvSource:
             if page:
                 yield page
 
-        return dlt.resource(
+        from dlt import resource
+
+        return resource(
             csv_file,
             merge_key=kwargs.get("merge_key"),  # type: ignore
         )(
@@ -1369,8 +1370,11 @@ class AsanaSource:
                 f"Resource '{table}' is not supported for Asana source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
-        dlt.secrets["sources.asana_source.access_token"] = access_token[0]
+        import dlt
+
         from ingestr.src.asana_source import asana_source
+
+        dlt.secrets["sources.asana_source.access_token"] = access_token[0]
 
         src = asana_source()
         src.workspaces.add_filter(lambda w: w["gid"] == workspace)
@@ -1417,7 +1421,9 @@ class DynamoDBSource:
         if not secret_key:
             raise ValueError("secret_access_key is required to connect to Dynamodb")
 
+        from dlt.common.configuration.specs import AwsCredentials
         from dlt.common.typing import TSecretStrValue
+
         creds = AwsCredentials(
             aws_access_key_id=access_key[0],
             aws_secret_access_key=TSecretStrValue(secret_key[0]),
@@ -2097,13 +2103,16 @@ class KinesisSource:
         if start_date is not None:
             # the resource will read all messages after this timestamp.
             start_date = ensure_pendulum_datetime(start_date)
+
+        from dlt.common.configuration.specs import AwsCredentials
+
+        from ingestr.src.kinesis import kinesis_stream
+
         credentials = AwsCredentials(
             aws_access_key_id=aws_access_key_id[0],
             aws_secret_access_key=aws_secret_access_key[0],
             region_name=region_name[0],
         )
-
-        from ingestr.src.kinesis import kinesis_stream
 
         return kinesis_stream(
             stream_name=table, credentials=credentials, initial_at_timestamp=start_date
