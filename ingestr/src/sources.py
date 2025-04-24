@@ -44,7 +44,6 @@ from sqlalchemy import Column
 from sqlalchemy import types as sa
 
 from ingestr.src import blob
-from ingestr.src.arrow import memory_mapped_arrow
 from ingestr.src.errors import (
     InvalidBlobTableError,
     MissingValueError,
@@ -268,7 +267,12 @@ class SqlSource:
 class ArrowMemoryMappedSource:
     table_builder: Callable
 
-    def __init__(self, table_builder=memory_mapped_arrow) -> None:
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.arrow import memory_mapped_arrow
+
+            table_builder = memory_mapped_arrow
+
         self.table_builder = table_builder
 
     def handles_incrementality(self) -> bool:
