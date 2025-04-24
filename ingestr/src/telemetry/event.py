@@ -1,13 +1,4 @@
 import os
-import platform
-
-import machineid
-import rudderstack.analytics as rudder_analytics  # type: ignore
-
-from ingestr.src.version import __version__  # type: ignore
-
-rudder_analytics.write_key = "2cUr13DDQcX2x2kAfMEfdrKvrQa"
-rudder_analytics.dataPlaneUrl = "https://getbruinbumlky.dataplane.rudderstack.com"
 
 
 def track(event_name, event_properties: dict):
@@ -15,6 +6,16 @@ def track(event_name, event_properties: dict):
         "INGESTR_DISABLE_TELEMETRY", False
     ):
         return
+
+    import platform
+
+    import machineid
+    import rudderstack.analytics as rudder_analytics  # type: ignore
+
+    from ingestr.src.version import __version__  # type: ignore
+
+    rudder_analytics.write_key = "2cUr13DDQcX2x2kAfMEfdrKvrQa"
+    rudder_analytics.dataPlaneUrl = "https://getbruinbumlky.dataplane.rudderstack.com"
 
     try:
         if not event_properties:
