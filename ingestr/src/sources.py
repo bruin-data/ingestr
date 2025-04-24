@@ -49,7 +49,6 @@ from ingestr.src.errors import (
     MissingValueError,
     UnsupportedResourceError,
 )
-from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
 from ingestr.src.slack import slack_source
 from ingestr.src.sql_database.callbacks import (
@@ -475,7 +474,7 @@ class ShopifySource:
             )
 
         from ingestr.src.shopify import shopify_source
-        
+
         return shopify_source(
             private_app_password=api_key[0],
             shop_url=f"https://{source_fields.netloc}",
@@ -1214,6 +1213,8 @@ class S3Source:
                 "S3 Source only supports specific formats files: csv, jsonl, parquet"
             )
 
+        from ingestr.src.filesystem import readers
+
         return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
 
 
@@ -1683,6 +1684,8 @@ class GCSSource:
                 "GCS Source only supports specific formats files: csv, jsonl, parquet"
             )
 
+        from ingestr.src.filesystem import readers
+
         return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
 
 
@@ -2047,7 +2050,7 @@ class PersonioSource:
             raise UnsupportedResourceError(table, "Personio")
 
         from ingestr.src.personio import personio_source
-        
+
         return personio_source(
             client_id=client_id[0],
             client_secret=client_secret[0],
