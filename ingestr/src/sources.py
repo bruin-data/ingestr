@@ -722,7 +722,7 @@ class FacebookAdsSource:
             ).with_resources("facebook_insights")
         else:
             raise ValueError(
-                "fResource '{table}' is not supported for Facebook Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+                f"Resource '{table}' is not supported for Facebook Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
         return facebook_ads_source(
@@ -1175,7 +1175,7 @@ class ZendeskSource:
             ).with_resources(table)
         else:
             raise ValueError(
-                "fResource '{table}' is not supported for Zendesk source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+                f"Resource '{table}' is not supported for Zendesk source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
 
