@@ -24,6 +24,7 @@ try:
         MetricType,
         RunReportRequest,
         RunReportResponse,
+        RunRealtimeReportRequest,
     )
 except ImportError:
     raise MissingDependencyException(
@@ -58,8 +59,9 @@ def get_report(
     dimension_list: List[Dimension],
     metric_list: List[Metric],
     per_page: int,
-    start_date: pendulum.DateTime,
-    end_date: pendulum.DateTime,
+    start_date: pendulum.DateTime | None = None,
+    end_date: pendulum.DateTime | None = None,
+    report_type: str|None = None,
 ) -> Iterator[TDataItem]:
     """
     Gets all the possible pages of reports with the given query parameters.
@@ -79,27 +81,38 @@ def get_report(
         Generator of all rows of data in the report.
     """
 
-    print(
-        "fetching for daterange", start_date.to_date_string(), end_date.to_date_string()
-    )
+    if start_date is not None and end_date is not None:
+        print("fetching for daterange", start_date.to_date_string(), end_date.to_date_string())
+    else:
+        print("fetching real-time report")
 
     offset = 0
     while True:
-        request = RunReportRequest(
-            property=f"properties/{property_id}",
-            dimensions=dimension_list,
-            metrics=metric_list,
-            limit=per_page,
-            offset=offset,
+        if report_type == "realtime":
+            request = RunRealtimeReportRequest(
+                property=f"properties/{property_id}",
+                dimensions=dimension_list,
+                metrics=metric_list,
+                limit=per_page
+            )
+            response = client.run_realtime_report(request)
+        else:
+            request = RunReportRequest(
+                property=f"properties/{property_id}",
+                dimensions=dimension_list,
+                metrics=metric_list,
+                limit=per_page,
+                offset=offset,
             date_ranges=[
                 DateRange(
                     start_date=start_date.to_date_string(),
                     end_date=end_date.to_date_string(),
                 )
             ],
-        )
+        )   
+            response = client.run_report(request)
+
         # process request
-        response = client.run_report(request)
         processed_response_generator = process_report(response=response)
         # import pdb; pdb.set_trace()
         yield from processed_response_generator
