@@ -148,10 +148,6 @@ def fetch_data(
                             "updatedAt": _result.get("updatedAt", ""),
                         }
                     )
-                elif resource_name == "custom":
-                    _objects.append(
-                        _result.get("properties", ""),
-                    )
                 else:
                     _obj = _result.get("properties", _result)
                     if "id" not in _obj and "id" in _result:
