@@ -1,4 +1,4 @@
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator
 
 import dlt
 from dlt.common.pendulum import pendulum
@@ -13,25 +13,26 @@ from ingestr.src.frankfurter.helpers import get_path_with_retry
     max_table_nesting=0,
 )
 def frankfurter_source(
-    table: str,
-    start_date: Optional[TAnyDateTime] = None,
-    end_date: Optional[TAnyDateTime] = None,
+    start_date: TAnyDateTime,
+    end_date: TAnyDateTime,
 ) -> Any:
     """
     A dlt source for the frankfurter.dev API. It groups several resources (in this case frankfurter.dev API endpoints) containing
     various types of data: currencies, latest rates, historical rates.
-
-    Returns the appropriate resource based on the provided parameters.
     """
-    # Determine which resource to return based on the `table` parameter
-    if table == "currencies":
-        return currencies()
+    dateTime = dlt.sources.incremental(
+        "date",
+        initial_value=start_date,
+        end_value=end_date,
+        range_start="closed",
+        range_end="closed",
+    )
 
-    elif table == "latest":
-        return latest()
-
-    elif table == "exchange_rates":
-        return exchange_rates(start_date=start_date, end_date=end_date)
+    return (
+        currencies(),
+        latest(),
+        exchange_rates(start_date=dateTime, end_date=end_date),
+    )
 
 
 @dlt.resource(
@@ -53,7 +54,7 @@ def currencies() -> Iterator[dict]:
 
 
 @dlt.resource(
-    write_disposition="replace",
+    write_disposition="merge",
     columns={
         "date": {"data_type": "text"},
         "currency_code": {"data_type": "text"},
@@ -69,13 +70,12 @@ def latest() -> Iterator[dict]:
     url = "latest?"
 
     # Fetch data
-    latest_data = get_path_with_retry(url)
+    data = get_path_with_retry(url)
 
     # Extract rates and base currency
-    rates = latest_data["rates"]
+    rates = data["rates"]
 
-    # Prepare the date
-    date = pendulum.now("Europe/Berlin").to_date_string()
+    date = pendulum.parse(data["date"])
 
     # Add the base currency (EUR) with a rate of 1.0
     yield {
@@ -94,25 +94,34 @@ def latest() -> Iterator[dict]:
 
 
 @dlt.resource(
-    write_disposition="replace",
+    write_disposition="merge",
     columns={
         "date": {"data_type": "text"},
         "currency_code": {"data_type": "text"},
         "rate": {"data_type": "double"},
     },
-    primary_key=["date", "currency_code"],  # Composite primary key
+    primary_key=("date", "currency_code"),  # Composite primary key
 )
 def exchange_rates(
-    start_date: TAnyDateTime,
     end_date: TAnyDateTime,
+    start_date: dlt.sources.incremental[TAnyDateTime] = dlt.sources.incremental("date"),
 ) -> Iterator[dict]:
     """
     Fetches exchange rates for a specified date range.
-    If only start_date is provided, fetches data for that date.
+    If only start_date is provided, fetches data until now.
     If both start_date and end_date are provided, fetches data for each day in the range.
     """
-    start_date_str = ensure_pendulum_datetime(start_date).format("YYYY-MM-DD")
-    end_date_str = ensure_pendulum_datetime(end_date).format("YYYY-MM-DD")
+    # Ensure start_date.last_value is not None
+    if start_date.last_value is None:
+        raise ValueError("start_date.last_value cannot be None")
+
+    # Ensure start_date.last_value is a pendulum.DateTime object
+    start_date_obj = ensure_pendulum_datetime(start_date.last_value)
+    start_date_str = start_date_obj.format("YYYY-MM-DD")
+
+    # Ensure end_date is a pendulum.DateTime object
+    end_date_obj = ensure_pendulum_datetime(end_date)
+    end_date_str = end_date_obj.format("YYYY-MM-DD")
 
     # Compose the URL
     url = f"{start_date_str}..{end_date_str}?"
@@ -121,22 +130,23 @@ def exchange_rates(
     data = get_path_with_retry(url)
 
     # Extract base currency and rates from the API response
-    base_currency = data["base"]
     rates = data["rates"]
 
     # Iterate over the rates dictionary (one entry per date)
     for date, daily_rates in rates.items():
+        formatted_date = pendulum.parse(date)
+
         # Add the base currency with a rate of 1.0
         yield {
-            "date": date,
-            "currency_code": base_currency,
+            "date": formatted_date,
+            "currency_code": "EUR",
             "rate": 1.0,
         }
 
         # Add all other currencies and their rates
         for currency_code, rate in daily_rates.items():
             yield {
-                "date": date,
+                "date": formatted_date,
                 "currency_code": currency_code,
                 "rate": rate,
             }

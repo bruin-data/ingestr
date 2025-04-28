@@ -8,7 +8,7 @@ FRANKFURTER_API_URL = "https://api.frankfurter.dev/v1/"
 
 
 def get_url_with_retry(url: str) -> StrAny:
-    r = requests.get(url)
+    r = requests.get(url, timeout=5)
     return r.json()  # type: ignore
 
 

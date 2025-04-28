@@ -106,7 +106,7 @@ ingestr ingest \
 - **Primary Key**: Composite key of `date` and `currency_name`.
 - **Notes**:
   - An optional start and end date can be added via the arguments `--interval-start` and optionally `--interval-end` to define the date range (see examples below). If no start date is specified, the date will default today's date (and thus return the latest exchange rates).
-  - If a start date but no end date is specified, then the end date will default to the start date and ingestr will retrieve data for the specified start date only.
+  - If a start date but no end date is specified, then the end date will default to today's date and ingestr will retrieve data up until the latest published data.
   - Note that the [Frankfurter API](https://www.frankfurter.dev/) only publishes updates Monday-Friday. If the given date is on the weekend, the date will default to the previous Friday. The source is however implemented in ingestr in such a way as to avoid duplicating rows of data in this case (see [Incremental Loading - Replace](https://bruin-data.github.io/ingestr/getting-started/incremental-loading.html)).
 
 #### **Example Table: Handling Weekend Dates**

@@ -67,8 +67,6 @@ from ingestr.src.errors import (
 from ingestr.src.facebook_ads import facebook_ads_source, facebook_insights_source
 from ingestr.src.filesystem import readers
 from ingestr.src.filters import table_adapter_exclude_columns
-from ingestr.src.frankfurter import frankfurter_source
-from ingestr.src.frankfurter.helpers import validate_dates
 from ingestr.src.github import github_reactions, github_repo_events, github_stargazers
 from ingestr.src.google_ads import google_ads
 from ingestr.src.google_analytics import google_analytics
@@ -2050,31 +2048,32 @@ class FrankfurterSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        # start and end dates only assigned and validated for exchange_rates table
-        # Note: if an end date but no start date is provided, start date and end date will be set to current date
-        if table == "exchange_rates":
-            if kwargs.get("interval_start"):
-                start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
-                if kwargs.get("interval_end"):
-                    end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
-                else:
-                    end_date = start_date
-            else:
-                start_date = pendulum.now("Europe/Berlin")
-                end_date = pendulum.now("Europe/Berlin")
-            validate_dates(start_date=start_date, end_date=end_date)
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Frankfurter takes care of incrementality on its own, you should not provide incremental_key"
+            )
 
-        # For currencies and latest tables, set start and end dates to current date
+        if kwargs.get("interval_start"):
+            start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
+            if kwargs.get("interval_end"):
+                end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
+            else:
+                end_date = pendulum.now("Europe/Berlin")
         else:
             start_date = pendulum.now("Europe/Berlin")
             end_date = pendulum.now("Europe/Berlin")
 
-        # Validate table
-        if table not in ["currencies", "latest", "exchange_rates"]:
-            raise UnsupportedResourceError(table, "Frankfurter")
+        from ingestr.src.frankfurter import frankfurter_source
+        from ingestr.src.frankfurter.helpers import validate_dates
 
-        return frankfurter_source(
-            table=table,
+        validate_dates(start_date=start_date, end_date=end_date)
+
+        src = frankfurter_source(
             start_date=start_date,
             end_date=end_date,
         )
+
+        if table not in src.resources:
+            raise UnsupportedResourceError(table, "Frankfurter")
+
+        return src.with_resources(table)
