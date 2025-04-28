@@ -29,6 +29,7 @@ def google_analytics(
     start_date: Optional[pendulum.DateTime] = pendulum.datetime(2024, 1, 1),
     end_date: Optional[pendulum.DateTime] = None,
     rows_per_page: int = 10000,
+    minute_ranges: List[int] | None = None,
 ) -> List[DltResource]:
     try:
         property_id = int(property_id)
@@ -90,6 +91,8 @@ def google_analytics(
     # real time report
     @dlt.resource(
         name="realtime",
+        merge_key="ingest_at",
+        write_disposition="merge",
     )
     def real_time_report() -> Iterator[TDataItem]:
         yield from get_realtime_report(
@@ -98,6 +101,7 @@ def google_analytics(
             dimension_list=[Dimension(name=dimension) for dimension in dimensions],
             metric_list=[Metric(name=metric) for metric in query["metrics"]],
             per_page=rows_per_page,
+            minute_ranges=minute_ranges,
         )
 
     # res = dlt.resource(

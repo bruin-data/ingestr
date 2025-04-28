@@ -1477,9 +1477,9 @@ class GoogleAnalyticsSource:
             raise ValueError("property_id is required to connect to Google Analytics")
 
         fields = table.split(":")
-        if len(fields) != 3:
+        if len(fields) != 3 and len(fields) != 4:
             raise ValueError(
-                "Invalid table format. Expected format: <report_type>:<dimensions>:<metrics>"
+                "Invalid table format. Expected format: <report_type>:<dimensions>:<metrics> or <report_type>:<dimensions>:<metrics>:<filters>"
             )
         report_type = fields[0]
         if report_type not in ["custom", "realtime"]:
@@ -1489,6 +1489,15 @@ class GoogleAnalyticsSource:
         resource_name = fields[0].lower()
 
         dimensions = fields[1].replace(" ", "").split(",")
+        #<report_type>:<dimensions>:<metrics>:<1-2,2-3>
+        #how to get 1-2 and 2-3 so 
+        minute_ranges = []
+        if len(fields) == 4:
+            minutes = fields[3].replace(" ", "").split(",")
+            for min in minutes:
+                parts = min.split("-")
+                for part in parts:
+                    minute_ranges.append(int(part)) 
 
         datetime = ""
         if resource_name == "custom":
@@ -1523,8 +1532,8 @@ class GoogleAnalyticsSource:
             datetime_dimension=datetime,
             queries=queries,
             credentials=credentials,
+            minute_ranges=minute_ranges if google_analytics else None,
         ).with_resources(resource_name)
-
 
 class GitHubSource:
     def handles_incrementality(self) -> bool:

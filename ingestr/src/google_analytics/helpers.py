@@ -60,6 +60,7 @@ def get_realtime_report(
     dimension_list: List[Dimension],
     metric_list: List[Metric],
     per_page: int,
+    minute_ranges: List[int] | None = None,
 ) -> Iterator[TDataItem]:
     """
     Gets all the possible pages of reports with the given query parameters.
@@ -80,14 +81,24 @@ def get_realtime_report(
 
     offset = 0
     ingest_at = pendulum.now().to_date_string()
+    minute_range_objects = [
+        MinuteRange(name=f"{minute_ranges[0]}-{minute_ranges[1]} minutes ago", start_minutes_ago=minute_ranges[1])
+    ]
+    if minute_ranges and len(minute_ranges) == 4:
+        minute_range_objects.append(
+            MinuteRange(name=f"{minute_ranges[2]}-{minute_ranges[3]} minutes ago", start_minutes_ago=minute_ranges[3])
+        )
+
     while True:
         request = RunRealtimeReportRequest(
                 property=f"properties/{property_id}",
                 dimensions=dimension_list,
                 metrics=metric_list,
                 limit=per_page,
+                minute_ranges= minute_range_objects,
             )
         response = client.run_realtime_report(request)
+        print("response", response)
     
         # process request
         processed_response_generator = process_report(response=response, ingest_at=ingest_at)
