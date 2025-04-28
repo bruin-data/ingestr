@@ -15,7 +15,7 @@ from google.analytics.data_v1beta.types import (
     Metric,
 )
 
-from .helpers import get_report
+from .helpers import get_report, get_realtime_report
 
 
 @dlt.source(max_table_nesting=0)
@@ -87,23 +87,19 @@ def google_analytics(
             end_date=end_date,
         )
 
-#real time report
+    # real time report
     @dlt.resource(
         name="realtime",
-        merge_key=datetime_dimension,
-        write_disposition="merge",
     )
     def real_time_report() -> Iterator[TDataItem]:
-        yield from get_report(
+        yield from get_realtime_report(
             client=client,
             property_id=property_id,
             dimension_list=[Dimension(name=dimension) for dimension in dimensions],
             metric_list=[Metric(name=metric) for metric in query["metrics"]],
             per_page=rows_per_page,
-            report_type="realtime",
         )
 
-    
     # res = dlt.resource(
     #     basic_report, name="basic_report", merge_key=datetime_dimension, write_disposition="merge"
     # )(

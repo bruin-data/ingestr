@@ -22,9 +22,10 @@ try:
         Metric,
         MetricMetadata,  # noqa: F401
         MetricType,
+        RunRealtimeReportRequest,
         RunReportRequest,
         RunReportResponse,
-        RunRealtimeReportRequest,
+        MinuteRange,
     )
 except ImportError:
     raise MissingDependencyException(
@@ -53,15 +54,56 @@ def to_dict(item: Any) -> Iterator[TDataItem]:
     yield item
 
 
+def get_realtime_report(
+    client: Resource,
+    property_id: int,
+    dimension_list: List[Dimension],
+    metric_list: List[Metric],
+    per_page: int,
+) -> Iterator[TDataItem]:
+    """
+    Gets all the possible pages of reports with the given query parameters.
+    Processes every page and yields a dictionary for every row of the report.
+
+    Args:
+        client: The Google Analytics client used to make requests.
+        property_id: A reference to the Google Analytics project.
+            More info: https://developers.google.com/analytics/devguides/reporting/data/v1/property-id
+        dimension_list: A list of all the dimensions requested in the query.
+        metric_list: A list of all the metrics requested in the query.
+        limit: Describes how many rows there should be per page.
+
+    Yields:
+        Generator of all rows of data in the report.
+    """
+    print("fetching real-time report")
+
+    offset = 0
+    while True:
+        request = RunRealtimeReportRequest(
+                property=f"properties/{property_id}",
+                dimensions=dimension_list,
+                metrics=metric_list,
+                limit=per_page,
+            )
+        response = client.run_realtime_report(request)
+    
+        # process request
+        processed_response_generator = process_report(response=response)
+        # import pdb; pdb.set_trace()
+        yield from processed_response_generator
+        offset += per_page
+        if len(response.rows) < per_page or offset > 1000000:
+            break
+
 def get_report(
     client: Resource,
     property_id: int,
     dimension_list: List[Dimension],
     metric_list: List[Metric],
     per_page: int,
-    start_date: pendulum.DateTime | None = None,
-    end_date: pendulum.DateTime | None = None,
-    report_type: str|None = None,
+    start_date: pendulum.DateTime,
+    end_date: pendulum.DateTime
 ) -> Iterator[TDataItem]:
     """
     Gets all the possible pages of reports with the given query parameters.
@@ -81,36 +123,28 @@ def get_report(
         Generator of all rows of data in the report.
     """
 
-    if start_date is not None and end_date is not None:
-        print("fetching for daterange", start_date.to_date_string(), end_date.to_date_string())
-    else:
-        print("fetching real-time report")
-
+    print(
+            "fetching for daterange",
+            start_date.to_date_string(),
+            end_date.to_date_string(),
+        )
+    
     offset = 0
     while True:
-        if report_type == "realtime":
-            request = RunRealtimeReportRequest(
-                property=f"properties/{property_id}",
-                dimensions=dimension_list,
-                metrics=metric_list,
-                limit=per_page
-            )
-            response = client.run_realtime_report(request)
-        else:
-            request = RunReportRequest(
+        request = RunReportRequest(
                 property=f"properties/{property_id}",
                 dimensions=dimension_list,
                 metrics=metric_list,
                 limit=per_page,
                 offset=offset,
-            date_ranges=[
-                DateRange(
-                    start_date=start_date.to_date_string(),
-                    end_date=end_date.to_date_string(),
-                )
-            ],
-        )   
-            response = client.run_report(request)
+                date_ranges=[
+                    DateRange(
+                        start_date=start_date.to_date_string(),
+                        end_date=end_date.to_date_string(),
+                    )
+                ],
+            )
+        response = client.run_report(request)
 
         # process request
         processed_response_generator = process_report(response=response)
@@ -120,14 +154,14 @@ def get_report(
         if len(response.rows) < per_page or offset > 1000000:
             break
 
-
 def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
     metrics_headers = [header.name for header in response.metric_headers]
     dimensions_headers = [header.name for header in response.dimension_headers]
 
     distinct_key_combinations = {}
-
+    
     for row in response.rows:
+        print("row", row)
         response_dict: DictStrAny = {
             dimension_header: _resolve_dimension_value(
                 dimension_header, dimension_value.value
