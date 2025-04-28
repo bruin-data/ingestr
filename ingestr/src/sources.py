@@ -1482,7 +1482,7 @@ class GoogleAnalyticsSource:
                 "Invalid table format. Expected format: <report_type>:<dimensions>:<metrics>"
             )
         report_type = fields[0]
-        if report_type not in ["basic", "realtime"]:
+        if report_type not in ["custom", "realtime"]:
             raise ValueError(
                 "Invalid report type. Expected format: <report_type>:<dimensions>:<metrics>"
             )
