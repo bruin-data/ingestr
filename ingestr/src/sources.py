@@ -804,11 +804,16 @@ class HubspotSource:
 
         if table.startswith("custom:"):
             fields = table.split(":", 2)
-            if len(fields) != 2:
+            if len(fields) != 2 and len(fields) != 3:
                 raise ValueError(
-                    "Invalid Hubspot custom table format. Expected format: custom:<custom_object_type>"
+                    "Invalid Hubspot custom table format. Expected format: custom:<custom_object_type> or custom:<custom_object_type>:<associations>"
                 )
-            endpoint = fields[1]
+
+            if len(fields) == 2:
+                endpoint = fields[1]
+            else:
+                endpoint = f"{fields[1]}:{fields[2]}"
+
             return hubspot(
                 api_key=api_key[0],
                 custom_object=endpoint,

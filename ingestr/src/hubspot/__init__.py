@@ -197,11 +197,18 @@ def hubspot(
         api_key: str = api_key,
         custom_object_name: str = custom_object,
     ) -> Iterator[TDataItems]:
-        get_custom_object = fetch_data_raw(CRM_SCHEMAS_ENDPOINT, api_key)
+        custom_objects = fetch_data_raw(CRM_SCHEMAS_ENDPOINT, api_key)
         object_type_id = None
+        associations = None
+        if ":" in custom_object_name:
+            fields = custom_object_name.split(":")
+            if len(fields) == 2:
+                custom_object_name = fields[0]
+                associations = fields[1]
 
         custom_object_lowercase = custom_object_name.lower()
-        for custom_object in get_custom_object["results"]:
+
+        for custom_object in custom_objects["results"]:
             if custom_object["name"].lower() == custom_object_lowercase:
                 object_type_id = custom_object["objectTypeId"]
                 break
@@ -223,6 +230,8 @@ def hubspot(
         props = ",".join(sorted(list(set(props))))
 
         custom_object_endpoint = f"crm/v3/objects/{object_type_id}/?properties={props}"
+        if associations:
+            custom_object_endpoint += f"&associations={associations}"
 
         """Hubspot custom object details resource"""
         yield from fetch_data(custom_object_endpoint, api_key, resource_name="custom")
