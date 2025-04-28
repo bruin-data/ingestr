@@ -1479,24 +1479,31 @@ class GoogleAnalyticsSource:
         fields = table.split(":")
         if len(fields) != 3:
             raise ValueError(
-                "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
+                "Invalid table format. Expected format: <report_type>:<dimensions>:<metrics>"
             )
+        report_type = fields[0]
+        if report_type not in ["basic", "realtime"]:
+            raise ValueError(
+                "Invalid report type. Expected format: <report_type>:<dimensions>:<metrics>"
+            )
+        resource_name = fields[0].lower()
 
         dimensions = fields[1].replace(" ", "").split(",")
 
         datetime = ""
-        for dimension_datetime in ["date", "dateHourMinute", "dateHour"]:
-            if dimension_datetime in dimensions:
-                datetime = dimension_datetime
-                break
-        else:
-            raise ValueError(
-                "You must provide at least one dimension: [dateHour, dateHourMinute, date]"
-            )
+        if resource_name == "custom":
+            for dimension_datetime in ["date", "dateHourMinute", "dateHour"]:
+                if dimension_datetime in dimensions:
+                    datetime = dimension_datetime
+                    break
+            else:
+                raise ValueError(
+                    "You must provide at least one dimension: [dateHour, dateHourMinute, date]"
+                )
 
         metrics = fields[2].replace(" ", "").split(",")
         queries = [
-            {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
+            {"resource_name": resource_name, "dimensions": dimensions, "metrics": metrics}
         ]
 
         start_date = pendulum.now().subtract(days=30).start_of("day")
@@ -1516,7 +1523,7 @@ class GoogleAnalyticsSource:
             datetime_dimension=datetime,
             queries=queries,
             credentials=credentials,
-        ).with_resources("basic_report")
+        ).with_resources(resource_name)
 
 
 class GitHubSource:
