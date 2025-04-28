@@ -58,7 +58,7 @@ def google_analytics(
     dimensions = query["dimensions"]
 
     @dlt.resource(
-        name="basic_report",
+        name="custom",
         merge_key=datetime_dimension,
         write_disposition="merge",
     )
@@ -87,6 +87,23 @@ def google_analytics(
             end_date=end_date,
         )
 
+#real time report
+    @dlt.resource(
+        name="realtime",
+        merge_key=datetime_dimension,
+        write_disposition="merge",
+    )
+    def real_time_report() -> Iterator[TDataItem]:
+        yield from get_report(
+            client=client,
+            property_id=property_id,
+            dimension_list=[Dimension(name=dimension) for dimension in dimensions],
+            metric_list=[Metric(name=metric) for metric in query["metrics"]],
+            per_page=rows_per_page,
+            report_type="realtime",
+        )
+
+    
     # res = dlt.resource(
     #     basic_report, name="basic_report", merge_key=datetime_dimension, write_disposition="merge"
     # )(
@@ -103,4 +120,4 @@ def google_analytics(
     #     ),
     # )
 
-    return [basic_report]
+    return [basic_report, real_time_report]
