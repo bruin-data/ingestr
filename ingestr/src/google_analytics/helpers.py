@@ -79,6 +79,7 @@ def get_realtime_report(
     print("fetching real-time report")
 
     offset = 0
+    ingest_at = pendulum.now().to_date_string()
     while True:
         request = RunRealtimeReportRequest(
                 property=f"properties/{property_id}",
@@ -89,7 +90,7 @@ def get_realtime_report(
         response = client.run_realtime_report(request)
     
         # process request
-        processed_response_generator = process_report(response=response)
+        processed_response_generator = process_report(response=response, ingest_at=ingest_at)
         # import pdb; pdb.set_trace()
         yield from processed_response_generator
         offset += per_page
@@ -154,12 +155,12 @@ def get_report(
         if len(response.rows) < per_page or offset > 1000000:
             break
 
-def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
+def process_report(response: RunReportResponse, ingest_at: str|None = None) -> Iterator[TDataItems]:
     metrics_headers = [header.name for header in response.metric_headers]
     dimensions_headers = [header.name for header in response.dimension_headers]
 
     distinct_key_combinations = {}
-    
+
     for row in response.rows:
         print("row", row)
         response_dict: DictStrAny = {
@@ -178,7 +179,9 @@ def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
                 metric_type=metric_type, value=row.metric_values[i].value
             )
             response_dict[metrics_headers[i]] = metric_value
-
+        if ingest_at is not None:
+            response_dict["ingest_at"] = ingest_at
+        
         unique_key = "-".join(list(response_dict.keys()))
         if unique_key not in distinct_key_combinations:
             distinct_key_combinations[unique_key] = True
