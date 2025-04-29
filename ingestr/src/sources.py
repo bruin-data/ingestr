@@ -1455,50 +1455,33 @@ class GoogleAnalyticsSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        parse_uri = urlparse(uri)
-        source_fields = parse_qs(parse_uri.query)
-        cred_path = source_fields.get("credentials_path")
-        cred_base64 = source_fields.get("credentials_base64")
-
-        if not cred_path and not cred_base64:
-            raise ValueError(
-                "credentials_path or credentials_base64 is required to connect Google Analytics"
-            )
-
-        credentials = {}
-        if cred_path:
-            with open(cred_path[0], "r") as f:
-                credentials = json.load(f)
-        elif cred_base64:
-            credentials = json.loads(base64.b64decode(cred_base64[0]).decode("utf-8"))
-
-        property_id = source_fields.get("property_id")
-        if not property_id:
-            raise ValueError("property_id is required to connect to Google Analytics")
-
+        import ingestr.src.google_analytics.helpers as helpers
+        result = helpers.parse_google_analytics_uri(uri)
+        credentials = result["credentials"]
+        property_id = result["property_id"][0]
+        
         fields = table.split(":")
         if len(fields) != 3 and len(fields) != 4:
             raise ValueError(
                 "Invalid table format. Expected format: <report_type>:<dimensions>:<metrics> or <report_type>:<dimensions>:<metrics>:<minute_ranges>"
             )
+        
         report_type = fields[0]
         if report_type not in ["custom", "realtime"]:
             raise ValueError(
                 "Invalid report type. Expected format: <report_type>:<dimensions>:<metrics>. Available report types: custom, realtime"
             )
-        resource_name = fields[0].lower()
+        
 
         dimensions = fields[1].replace(" ", "").split(",")
+        metrics = fields[2].replace(" ", "").split(",")
         
         minute_ranges = []
         if len(fields) == 4:
-            minutes = fields[3].replace(" ", "").split(",")
-            for min in minutes:
-                parts = min.split("-")
-                for part in parts:
-                    minute_ranges.append(int(part)) 
-
+            minute_ranges = helpers.convert_minutes_ranges_to_int_list(fields[3])
+        
         datetime = ""
+        resource_name = fields[0].lower()
         if resource_name == "custom":
             for dimension_datetime in ["date", "dateHourMinute", "dateHour"]:
                 if dimension_datetime in dimensions:
@@ -1509,7 +1492,6 @@ class GoogleAnalyticsSource:
                     "You must provide at least one dimension: [dateHour, dateHourMinute, date]"
                 )
 
-        metrics = fields[2].replace(" ", "").split(",")
         queries = [
             {"resource_name": resource_name, "dimensions": dimensions, "metrics": metrics}
         ]
@@ -1525,7 +1507,7 @@ class GoogleAnalyticsSource:
         from ingestr.src.google_analytics import google_analytics
 
         return google_analytics(
-            property_id=property_id[0],
+            property_id=property_id,
             start_date=start_date,
             end_date=end_date,
             datetime_dimension=datetime,
