@@ -1484,12 +1484,12 @@ class GoogleAnalyticsSource:
         report_type = fields[0]
         if report_type not in ["custom", "realtime"]:
             raise ValueError(
-                "Invalid report type. Expected format: <report_type>:<dimensions>:<metrics>"
+                "Invalid report type. Expected format: <report_type>:<dimensions>:<metrics>. Available report types: custom, realtime"
             )
         resource_name = fields[0].lower()
 
         dimensions = fields[1].replace(" ", "").split(",")
-        #<report_type>:<dimensions>:<metrics>:<1-2,2-3>
+        
         minute_ranges = []
         if len(fields) == 4:
             minutes = fields[3].replace(" ", "").split(",")

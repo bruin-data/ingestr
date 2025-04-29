@@ -77,8 +77,6 @@ def get_realtime_report(
     Yields:
         Generator of all rows of data in the report.
     """
-    print("fetching real-time report")
-
     offset = 0
     ingest_at = pendulum.now().to_date_string()
     minute_range_objects = []
@@ -100,7 +98,6 @@ def get_realtime_report(
                     limit=per_page,
                     minute_ranges= minute_range_objects,
             )
-            print("minute_ranges", request)
         else:
             request = RunRealtimeReportRequest(
                     property=f"properties/{property_id}",
@@ -109,7 +106,6 @@ def get_realtime_report(
                     limit=per_page,
             )
         response = client.run_realtime_report(request)
-        print("response", response)
     
         # process request
         processed_response_generator = process_report(response=response, ingest_at=ingest_at)
@@ -184,7 +180,6 @@ def process_report(response: RunReportResponse, ingest_at: str|None = None) -> I
     distinct_key_combinations = {}
 
     for row in response.rows:
-        print("row", row)
         response_dict: DictStrAny = {
             dimension_header: _resolve_dimension_value(
                 dimension_header, dimension_value.value
