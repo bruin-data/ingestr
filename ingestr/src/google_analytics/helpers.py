@@ -199,7 +199,7 @@ def process_report(response: RunReportResponse, ingest_at: str|None = None) -> I
             )
             response_dict[metrics_headers[i]] = metric_value
         if ingest_at is not None:
-            response_dict["ingest_at"] = ingest_at
+            response_dict["ingested_at"] = ingest_at
         
         unique_key = "-".join(list(response_dict.keys()))
         if unique_key not in distinct_key_combinations:

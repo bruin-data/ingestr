@@ -91,7 +91,7 @@ def google_analytics(
     # real time report
     @dlt.resource(
         name="realtime",
-        merge_key="ingest_at",
+        merge_key="ingested_at",
         write_disposition="merge",
     )
     def real_time_report() -> Iterator[TDataItem]:
