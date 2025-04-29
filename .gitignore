@@ -21,3 +21,5 @@ node_modules
 *.db.wal
 *.sql
 ingest.sh
+test.env
+*.log

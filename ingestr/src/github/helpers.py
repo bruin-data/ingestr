@@ -103,9 +103,9 @@ def get_reactions_data(
 
 
 def _extract_top_connection(data: StrAny, node_type: str) -> StrAny:
-    assert (
-        isinstance(data, dict) and len(data) == 1
-    ), f"The data with list of {node_type} must be a dictionary and contain only one element"
+    assert isinstance(data, dict) and len(data) == 1, (
+        f"The data with list of {node_type} must be a dictionary and contain only one element"
+    )
     data = next(iter(data.values()))
     return data[node_type]  # type: ignore
 
@@ -158,7 +158,7 @@ def _get_graphql_pages(
         )
         items_count += len(data_items)
         print(
-            f'Got {len(data_items)}/{items_count} {node_type}s, query cost {rate_limit["cost"]}, remaining credits: {rate_limit["remaining"]}'
+            f"Got {len(data_items)}/{items_count} {node_type}s, query cost {rate_limit['cost']}, remaining credits: {rate_limit['remaining']}"
         )
         if data_items:
             yield data_items
@@ -187,7 +187,7 @@ def _get_comment_reaction(comment_ids: List[str], access_token: str) -> StrAny:
         # print(query)
         page, rate_limit = _run_graphql_query(access_token, query, {})
         print(
-            f'Got {len(page)} comments, query cost {rate_limit["cost"]}, remaining credits: {rate_limit["remaining"]}'
+            f"Got {len(page)} comments, query cost {rate_limit['cost']}, remaining credits: {rate_limit['remaining']}"
         )
         data.update(page)
     return data

@@ -90,7 +90,10 @@ def fetch_property_history(
 
 
 def fetch_data(
-    endpoint: str, api_key: str, params: Optional[Dict[str, Any]] = None
+    endpoint: str,
+    api_key: str,
+    params: Optional[Dict[str, Any]] = None,
+    resource_name: str = None,
 ) -> Iterator[List[Dict[str, Any]]]:
     """
     Fetch data from HUBSPOT endpoint using a specified API key and yield the properties of each result.
@@ -127,32 +130,50 @@ def fetch_data(
     # Parse the API response and yield the properties of each result
     # Parse the response JSON data
     _data = r.json()
+
     # Yield the properties of each result in the API response
     while _data is not None:
         if "results" in _data:
             _objects: List[Dict[str, Any]] = []
             for _result in _data["results"]:
-                _obj = _result.get("properties", _result)
-                if "id" not in _obj and "id" in _result:
-                    # Move id from properties to top level
-                    _obj["id"] = _result["id"]
-                if "associations" in _result:
-                    for association in _result["associations"]:
-                        __values = [
-                            {
-                                "value": _obj["hs_object_id"],
-                                f"{association}_id": __r["id"],
-                            }
-                            for __r in _result["associations"][association]["results"]
-                        ]
+                if resource_name == "schemas":
+                    _objects.append(
+                        {
+                            "name": _result["labels"].get("singular", ""),
+                            "objectTypeId": _result.get("objectTypeId", ""),
+                            "id": _result.get("id", ""),
+                            "fullyQualifiedName": _result.get("fullyQualifiedName", ""),
+                            "properties": _result.get("properties", ""),
+                            "createdAt": _result.get("createdAt", ""),
+                            "updatedAt": _result.get("updatedAt", ""),
+                        }
+                    )
+                else:
+                    _obj = _result.get("properties", _result)
+                    if "id" not in _obj and "id" in _result:
+                        # Move id from properties to top level
+                        _obj["id"] = _result["id"]
 
-                        # remove duplicates from list of dicts
-                        __values = [
-                            dict(t) for t in {tuple(d.items()) for d in __values}
-                        ]
+                    if "associations" in _result:
+                        for association in _result["associations"]:
+                            __values = [
+                                {
+                                    "value": _obj["hs_object_id"],
+                                    f"{association}_id": __r["id"],
+                                }
+                                for __r in _result["associations"][association][
+                                    "results"
+                                ]
+                            ]
 
-                        _obj[association] = __values
-                _objects.append(_obj)
+                            # remove duplicates from list of dicts
+                            __values = [
+                                dict(t) for t in {tuple(d.items()) for d in __values}
+                            ]
+
+                            _obj[association] = __values
+
+                    _objects.append(_obj)
             yield _objects
 
         # Follow pagination links if they exist
@@ -186,3 +207,12 @@ def _get_property_names(api_key: str, object_type: str) -> List[str]:
         properties.extend([prop["name"] for prop in page])
 
     return properties
+
+
+def fetch_data_raw(
+    endpoint: str, api_key: str, params: Optional[Dict[str, Any]] = None
+) -> Iterator[List[Dict[str, Any]]]:
+    url = get_url(endpoint)
+    headers = _get_headers(api_key)
+    r = requests.get(url, headers=headers, params=params)
+    return r.json()

@@ -32,10 +32,16 @@ from dlt.common import pendulum
 from dlt.common.typing import TDataItems
 from dlt.sources import DltResource
 
-from .helpers import _get_property_names, fetch_data, fetch_property_history
+from .helpers import (
+    _get_property_names,
+    fetch_data,
+    fetch_data_raw,
+    fetch_property_history,
+)
 from .settings import (
     ALL,
     CRM_OBJECT_ENDPOINTS,
+    CRM_SCHEMAS_ENDPOINT,
     DEFAULT_COMPANY_PROPS,
     DEFAULT_CONTACT_PROPS,
     DEFAULT_DEAL_PROPS,
@@ -55,6 +61,7 @@ def hubspot(
     api_key: str = dlt.secrets.value,
     include_history: bool = False,
     include_custom_props: bool = True,
+    custom_object: str = None,
 ) -> Sequence[DltResource]:
     """
     A DLT source that retrieves data from the HubSpot API using the
@@ -162,6 +169,13 @@ def hubspot(
             include_custom_props,
         )
 
+    @dlt.resource(name="schemas", write_disposition="merge", primary_key="id")
+    def schemas(
+        api_key: str = api_key,
+    ) -> Iterator[TDataItems]:
+        """Hubspot schemas resource"""
+        yield from fetch_data(CRM_SCHEMAS_ENDPOINT, api_key, resource_name="schemas")
+
     @dlt.resource(name="quotes", write_disposition="replace")
     def quotes(
         api_key: str = api_key,
@@ -178,7 +192,51 @@ def hubspot(
             include_custom_props,
         )
 
-    return companies, contacts, deals, tickets, products, quotes
+    @dlt.resource(write_disposition="merge", primary_key="hs_object_id")
+    def custom(
+        api_key: str = api_key,
+        custom_object_name: str = custom_object,
+    ) -> Iterator[TDataItems]:
+        custom_objects = fetch_data_raw(CRM_SCHEMAS_ENDPOINT, api_key)
+        object_type_id = None
+        associations = None
+        if ":" in custom_object_name:
+            fields = custom_object_name.split(":")
+            if len(fields) == 2:
+                custom_object_name = fields[0]
+                associations = fields[1]
+
+        custom_object_lowercase = custom_object_name.lower()
+
+        for custom_object in custom_objects["results"]:
+            if custom_object["name"].lower() == custom_object_lowercase:
+                object_type_id = custom_object["objectTypeId"]
+                break
+
+            # sometimes people use the plural name of the object type by accident, we should try to match that if we can
+            if "labels" in custom_object:
+                if custom_object_lowercase == custom_object["labels"]["plural"].lower():
+                    object_type_id = custom_object["objectTypeId"]
+                    break
+
+        if object_type_id is None:
+            raise ValueError(f"There is no such custom object as {custom_object_name}")
+        custom_object_properties = f"crm/v3/properties/{object_type_id}"
+
+        props_pages = fetch_data(custom_object_properties, api_key)
+        props = []
+        for page in props_pages:
+            props.extend([prop["name"] for prop in page])
+        props = ",".join(sorted(list(set(props))))
+
+        custom_object_endpoint = f"crm/v3/objects/{object_type_id}/?properties={props}"
+        if associations:
+            custom_object_endpoint += f"&associations={associations}"
+
+        """Hubspot custom object details resource"""
+        yield from fetch_data(custom_object_endpoint, api_key, resource_name="custom")
+
+    return companies, contacts, deals, tickets, products, quotes, schemas, custom
 
 
 def crm_objects(

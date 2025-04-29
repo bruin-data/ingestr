@@ -9,10 +9,15 @@ The URI format for Google Analytics is as follows:
 ```plaintext
 googleanalytics://?credentials_path=/path/to/service/account.json&property_id=<property_id>
 ```
+Alternatively, you can use base64 encoded credentials:
+
+```
+googleanalytics://?credentials_base64=<base64_encoded_credentials>&property_id=<property_id>
+```
 
 URI parameters:
 - `credentials_path`: The path to the service account JSON file.
-- `property_id`: It is a unique number that identifies a particular property on Google Analytics. [Follow this guide](https://developers.google.com/analytics/devguides/reporting/data/v1/property-id#what_is_my_property_id) if you don't know your property ID.
+- `property_id`: It is a unique number that identifies a particular property on Google Analytics. [Follow this guide](https://developers.google.com/analytics/devguides/reporting/data/v1/property-id#what_is_my_property_id) to know more about property ID.
 
 ## Setting up an Google Analytics Integration
 Google Analytics requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/google_analytics#grab-google-service-account-credentials). Once you complete the guide, you should have an `.json` file  and `project_id`. 

@@ -3,15 +3,9 @@ from enum import Enum
 from typing import Optional
 
 import typer
-from dlt.common.runtime.collector import Collector
 from rich.console import Console
-from rich.status import Status
 from typing_extensions import Annotated
 
-import ingestr.src.partition as partition
-import ingestr.src.resource as resource
-from ingestr.src.destinations import AthenaDestination
-from ingestr.src.filters import cast_set_to_list
 from ingestr.src.telemetry.event import track
 
 app = typer.Typer(
@@ -35,7 +29,7 @@ DATE_FORMATS = [
 
 # https://dlthub.com/docs/dlt-ecosystem/file-formats/parquet#supported-destinations
 PARQUET_SUPPORTED_DESTINATIONS = [
-    "athena" "bigquery",
+    "athenabigquery",
     "duckdb",
     "snowflake",
     "databricks",
@@ -44,45 +38,6 @@ PARQUET_SUPPORTED_DESTINATIONS = [
 
 # these sources would return a JSON for sure, which means they cannot be used with Parquet loader for BigQuery
 JSON_RETURNING_SOURCES = ["notion"]
-
-
-class SpinnerCollector(Collector):
-    status: Status
-    current_step: str
-    started: bool
-
-    def __init__(self) -> None:
-        self.status = Status("Ingesting data...", spinner="dots")
-        self.started = False
-
-    def update(
-        self,
-        name: str,
-        inc: int = 1,
-        total: Optional[int] = None,
-        message: Optional[str] = None,  # type: ignore
-        label: str = "",
-        **kwargs,
-    ) -> None:
-        self.status.update(self.current_step)
-
-    def _start(self, step: str) -> None:
-        self.current_step = self.__step_to_label(step)
-        self.status.start()
-
-    def __step_to_label(self, step: str) -> str:
-        verb = step.split(" ")[0].lower()
-        if verb.startswith("normalize"):
-            return "Normalizing the data"
-        elif verb.startswith("load"):
-            return "Loading the data to the destination"
-        elif verb.startswith("extract"):
-            return "Extracting the data from the source"
-
-        return f"{verb.capitalize()} the data"
-
-    def _stop(self) -> None:
-        self.status.stop()
 
 
 class IncrementalStrategy(str, Enum):
@@ -302,6 +257,20 @@ def ingest(
             envvar=["COLUMNS", "INGESTR_COLUMNS"],
         ),
     ] = None,  # type: ignore
+    yield_limit: Annotated[
+        Optional[int],
+        typer.Option(
+            help="Limit the number of pages yielded from the source",
+            envvar=["YIELD_LIMIT", "INGESTR_YIELD_LIMIT"],
+        ),
+    ] = None,  # type: ignore
+    staging_bucket: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The staging bucket to be used for the ingestion, must be prefixed with 'gs://' or 's3://'",
+            envvar=["STAGING_BUCKET", "INGESTR_STAGING_BUCKET"],
+        ),
+    ] = None,  # type: ignore
 ):
     import hashlib
     import tempfile
@@ -310,14 +279,16 @@ def ingest(
     import dlt
     import humanize
     import typer
-    from dlt.common.data_types import TDataType
-    from dlt.common.destination import Destination
     from dlt.common.pipeline import LoadInfo
     from dlt.common.runtime.collector import Collector, LogCollector
     from dlt.common.schema.typing import TColumnSchema
 
+    import ingestr.src.partition as partition
+    import ingestr.src.resource as resource
+    from ingestr.src.collector.spinner import SpinnerCollector
+    from ingestr.src.destinations import AthenaDestination
     from ingestr.src.factory import SourceDestinationFactory
-    from ingestr.src.telemetry.event import track
+    from ingestr.src.filters import cast_set_to_list, handle_mysql_empty_dates
 
     def report_errors(run_info: LoadInfo):
         for load_package in run_info.load_packages:
@@ -352,7 +323,7 @@ def ingest(
         return (source_table, dest_table)
 
     def validate_loader_file_format(
-        dlt_dest: Destination, loader_file_format: Optional[LoaderFileFormat]
+        dlt_dest, loader_file_format: Optional[LoaderFileFormat]
     ):
         if (
             loader_file_format
@@ -364,8 +335,10 @@ def ingest(
             )
             raise typer.Abort()
 
-    def parse_columns(columns: list[str]) -> dict[str, TDataType]:
+    def parse_columns(columns: list[str]) -> dict:
         from typing import cast, get_args
+
+        from dlt.common.data_types import TDataType
 
         possible_types = get_args(TDataType)
 
@@ -399,6 +372,7 @@ def ingest(
     dlt.config["data_writer.file_max_items"] = loader_file_size
     dlt.config["extract.workers"] = extract_parallelism
     dlt.config["extract.max_parallel_items"] = extract_parallelism
+    dlt.config["load.raise_on_max_retries"] = 15
     if schema_naming != SchemaNaming.default:
         dlt.config["schema.naming"] = schema_naming.value
 
@@ -450,7 +424,9 @@ def ingest(
             pipelines_dir = tempfile.mkdtemp()
             is_pipelines_dir_temp = True
 
-        dlt_dest = destination.dlt_dest(uri=dest_uri, dest_table=dest_table)
+        dlt_dest = destination.dlt_dest(
+            uri=dest_uri, dest_table=dest_table, staging_bucket=staging_bucket
+        )
         validate_loader_file_format(dlt_dest, loader_file_format)
 
         if partition_by:
@@ -553,6 +529,11 @@ def ingest(
         )
 
         resource.for_each(dlt_source, lambda x: x.add_map(cast_set_to_list))
+        if factory.source_scheme.startswith("mysql"):
+            resource.for_each(dlt_source, lambda x: x.add_map(handle_mysql_empty_dates))
+
+        if yield_limit:
+            resource.for_each(dlt_source, lambda x: x.add_limit(yield_limit))
 
         def col_h(x):
             if column_hints:
@@ -594,6 +575,7 @@ def ingest(
             **destination.dlt_run_params(
                 uri=dest_uri,
                 table=dest_table,
+                staging_bucket=staging_bucket,
             ),
             write_disposition=write_disposition,  # type: ignore
             primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
