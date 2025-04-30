@@ -81,16 +81,15 @@ def get_realtime_report(
     """
     offset = 0
     ingest_at = pendulum.now().to_date_string()
-    
 
     while True:
         request = RunRealtimeReportRequest(
-                  property=f"properties/{property_id}",
-                  dimensions=dimension_list,
-                  metrics=metric_list,
-                  limit=per_page,
-                  minute_ranges=minute_range_objects if minute_range_objects else None,
-          )
+            property=f"properties/{property_id}",
+            dimensions=dimension_list,
+            metrics=metric_list,
+            limit=per_page,
+            minute_ranges=minute_range_objects if minute_range_objects else None,
+        )
         response = client.run_realtime_report(request)
 
         # process request
@@ -230,19 +229,27 @@ def convert_minutes_ranges_to_int_list(minutes_ranges: str) -> List[MinuteRange]
     minutes = minutes_ranges.replace(" ", "").split(",")
 
     if minutes_ranges == "":
-        raise ValueError("Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6")
+        raise ValueError(
+            "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
+        )
 
     if "-" not in minutes_ranges:
-        raise ValueError("Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6")
+        raise ValueError(
+            "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
+        )
 
     if minutes_ranges.count("-") > 2 or minutes_ranges.count(",") > 1:
-        raise ValueError("You can define up to two time minutes ranges, formatted as comma-separated values `0-5,25-29`")
+        raise ValueError(
+            "You can define up to two time minutes ranges, formatted as comma-separated values `0-5,25-29`"
+        )
 
     minute_ranges = []
     for min in minutes:
         parts = min.split("-")
         if len(parts) != 2 or not parts[0] or not parts[1]:
-            raise ValueError("Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6")
+            raise ValueError(
+                "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
+            )
         for part in parts:
             minute_ranges.append(int(part))
 
@@ -250,8 +257,8 @@ def convert_minutes_ranges_to_int_list(minutes_ranges: str) -> List[MinuteRange]
     for i in range(0, len(minute_ranges), 2):
         minute_range_objects.append(
             MinuteRange(
-                name=f"{minute_ranges[i]}-{minute_ranges[i+1]} minutes ago",
-                start_minutes_ago=minute_ranges[i+1],
+                name=f"{minute_ranges[i]}-{minute_ranges[i + 1]} minutes ago",
+                start_minutes_ago=minute_ranges[i + 1],
             )
         )
     return minute_range_objects

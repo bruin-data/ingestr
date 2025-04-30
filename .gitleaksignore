@@ -2,4 +2,4 @@ ingestr/src/telemetry/event.py:generic-api-key:17
 ingestr/src/testdata/fakebqcredentials.json:private-key:5
 docs/supported-sources/shopify.md:generic-api-key:26
 ingestr/src/google_analytics/helpers_test.py:generic-api-key:17
-ingestr/src/google_analytics/helpers_test.py:generic-api-key:33
+ingestr/src/google_analytics/helpers_test.py:generic-api-key:41

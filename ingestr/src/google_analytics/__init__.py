@@ -16,7 +16,7 @@ from google.analytics.data_v1beta.types import (
     MinuteRange,
 )
 
-from .helpers import get_report, get_realtime_report
+from .helpers import get_realtime_report, get_report
 
 
 @dlt.source(max_table_nesting=0)

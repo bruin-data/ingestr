@@ -1517,7 +1517,7 @@ class GoogleAnalyticsSource:
             datetime_dimension=datetime,
             queries=queries,
             credentials=credentials,
-            minute_range_objects = minute_range_objects if minute_range_objects else None,
+            minute_range_objects=minute_range_objects if minute_range_objects else None,
         ).with_resources(resource_name)
 
 
