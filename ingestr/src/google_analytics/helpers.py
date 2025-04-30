@@ -24,10 +24,10 @@ try:
         Metric,
         MetricMetadata,  # noqa: F401
         MetricType,
+        MinuteRange,
         RunRealtimeReportRequest,
         RunReportRequest,
         RunReportResponse,
-        MinuteRange,
     )
 except ImportError:
     raise MissingDependencyException(
@@ -62,7 +62,7 @@ def get_realtime_report(
     dimension_list: List[Dimension],
     metric_list: List[Metric],
     per_page: int,
-    minute_ranges: List[int] | None = None, #1-2,3-4
+    minute_ranges: List[int] | None = None,  # 1-2,3-4
 ) -> Iterator[TDataItem]:
     """
     Gets all the possible pages of reports with the given query parameters.
@@ -84,38 +84,39 @@ def get_realtime_report(
     minute_range_objects = []
     if minute_ranges and len(minute_ranges) >= 2:
         minute_range_objects.append(
-            MinuteRange(name=f"{minute_ranges[0]}-{minute_ranges[1]} minutes ago", start_minutes_ago=minute_ranges[1])
+            MinuteRange(
+                name=f"{minute_ranges[0]}-{minute_ranges[1]} minutes ago",
+                start_minutes_ago=minute_ranges[1],
+            )
         )
     if minute_ranges and len(minute_ranges) == 4:
         minute_range_objects.append(
-            MinuteRange(name=f"{minute_ranges[2]}-{minute_ranges[3]} minutes ago", start_minutes_ago=minute_ranges[3])
+            MinuteRange(
+                name=f"{minute_ranges[2]}-{minute_ranges[3]} minutes ago",
+                start_minutes_ago=minute_ranges[3],
+            )
         )
-   
+
     while True:
-        if minute_range_objects:
-            request = RunRealtimeReportRequest(
-                    property=f"properties/{property_id}",
-                    dimensions=dimension_list,
-                    metrics=metric_list,
-                    limit=per_page,
-                    minute_ranges= minute_range_objects,
-            )
-        else:
-            request = RunRealtimeReportRequest(
-                    property=f"properties/{property_id}",
-                    dimensions=dimension_list,
-                    metrics=metric_list,
-                    limit=per_page,
-            )
+        request = RunRealtimeReportRequest(
+                  property=f"properties/{property_id}",
+                  dimensions=dimension_list,
+                  metrics=metric_list,
+                  limit=per_page,
+                  minute_ranges=minute_range_objects if minute_range_objects else None,
+          )
         response = client.run_realtime_report(request)
-    
+
         # process request
-        processed_response_generator = process_report(response=response, ingest_at=ingest_at)
+        processed_response_generator = process_report(
+            response=response, ingest_at=ingest_at
+        )
         # import pdb; pdb.set_trace()
         yield from processed_response_generator
         offset += per_page
         if len(response.rows) < per_page or offset > 1000000:
             break
+
 
 def get_report(
     client: Resource,
@@ -124,7 +125,7 @@ def get_report(
     metric_list: List[Metric],
     per_page: int,
     start_date: pendulum.DateTime,
-    end_date: pendulum.DateTime
+    end_date: pendulum.DateTime,
 ) -> Iterator[TDataItem]:
     """
     Gets all the possible pages of reports with the given query parameters.
@@ -144,27 +145,21 @@ def get_report(
         Generator of all rows of data in the report.
     """
 
-    print(
-            "fetching for daterange",
-            start_date.to_date_string(),
-            end_date.to_date_string(),
-        )
-    
     offset = 0
     while True:
         request = RunReportRequest(
-                property=f"properties/{property_id}",
-                dimensions=dimension_list,
-                metrics=metric_list,
-                limit=per_page,
-                offset=offset,
-                date_ranges=[
-                    DateRange(
-                        start_date=start_date.to_date_string(),
-                        end_date=end_date.to_date_string(),
-                    )
-                ],
-            )
+            property=f"properties/{property_id}",
+            dimensions=dimension_list,
+            metrics=metric_list,
+            limit=per_page,
+            offset=offset,
+            date_ranges=[
+                DateRange(
+                    start_date=start_date.to_date_string(),
+                    end_date=end_date.to_date_string(),
+                )
+            ],
+        )
         response = client.run_report(request)
 
         # process request
@@ -175,7 +170,10 @@ def get_report(
         if len(response.rows) < per_page or offset > 1000000:
             break
 
-def process_report(response: RunReportResponse, ingest_at: str|None = None) -> Iterator[TDataItems]:
+
+def process_report(
+    response: RunReportResponse, ingest_at: str | None = None
+) -> Iterator[TDataItems]:
     metrics_headers = [header.name for header in response.metric_headers]
     dimensions_headers = [header.name for header in response.dimension_headers]
 
@@ -200,7 +198,7 @@ def process_report(response: RunReportResponse, ingest_at: str|None = None) -> I
             response_dict[metrics_headers[i]] = metric_value
         if ingest_at is not None:
             response_dict["ingested_at"] = ingest_at
-        
+
         unique_key = "-".join(list(response_dict.keys()))
         if unique_key not in distinct_key_combinations:
             distinct_key_combinations[unique_key] = True
@@ -239,27 +237,28 @@ def _resolve_dimension_value(dimension_name: str, dimension_value: str) -> Any:
         return pendulum.from_format(dimension_value, "YYYYMMDDHHmm", tz="UTC")
     else:
         return dimension_value
-    
-def convert_minutes_ranges_to_int_list(minutes_ranges: str) -> List[int]:
-        minutes_ranges = minutes_ranges.strip()
-        minutes = minutes_ranges.replace(" ", "").split(",")
 
-        if minutes_ranges == "":
-            return "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
-        
-        if "-" not in minutes_ranges:
-            return "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
-        
-        if minutes_ranges.count("-") > 2 or minutes_ranges.count(",") > 1:
-            return "You can define up to two time minutes ranges, formatted as comma-separated values `0-5,25-29`"
-        
-        minute_ranges = []
-        for min in minutes:
-            parts = min.split("-")
-            for part in parts:
-                minute_ranges.append(int(part))
-        
-        return minute_ranges
+
+def convert_minutes_ranges_to_int_list(minutes_ranges: str) -> List[int]:
+    minutes_ranges = minutes_ranges.strip()
+    minutes = minutes_ranges.replace(" ", "").split(",")
+
+    if minutes_ranges == "":
+        return "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
+
+    if "-" not in minutes_ranges:
+        return "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
+
+    if minutes_ranges.count("-") > 2 or minutes_ranges.count(",") > 1:
+        return "You can define up to two time minutes ranges, formatted as comma-separated values `0-5,25-29`"
+
+    minute_ranges = []
+    for min in minutes:
+        parts = min.split("-")
+        for part in parts:
+            minute_ranges.append(int(part))
+
+    return minute_ranges
 
 
 def parse_google_analytics_uri(uri: str):
@@ -269,9 +268,9 @@ def parse_google_analytics_uri(uri: str):
     cred_base64 = source_fields.get("credentials_base64")
 
     if not cred_path and not cred_base64:
-            raise ValueError(
-                "credentials_path or credentials_base64 is required to connect Google Analytics"
-    )
+        raise ValueError(
+            "credentials_path or credentials_base64 is required to connect Google Analytics"
+        )
     credentials = {}
     if cred_path:
         with open(cred_path[0], "r") as f:
@@ -282,11 +281,10 @@ def parse_google_analytics_uri(uri: str):
     property_id = source_fields.get("property_id")
     if not property_id:
         raise ValueError("property_id is required to connect to Google Analytics")
-    
+
     if (not cred_path and not cred_base64) or (not property_id):
-        raise ValueError("credentials_path or credentials_base64 and property_id are required to connect Google Analytics")
-    
-    return {
-        "credentials": credentials,
-        "property_id": property_id
-    }
+        raise ValueError(
+            "credentials_path or credentials_base64 and property_id are required to connect Google Analytics"
+        )
+
+    return {"credentials": credentials, "property_id": property_id[0]}
