@@ -1456,30 +1456,30 @@ class GoogleAnalyticsSource:
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         import ingestr.src.google_analytics.helpers as helpers
+
         result = helpers.parse_google_analytics_uri(uri)
         credentials = result["credentials"]
-        property_id = result["property_id"][0]
-        
+        property_id = result["property_id"]
+
         fields = table.split(":")
         if len(fields) != 3 and len(fields) != 4:
             raise ValueError(
                 "Invalid table format. Expected format: <report_type>:<dimensions>:<metrics> or <report_type>:<dimensions>:<metrics>:<minute_ranges>"
             )
-        
+
         report_type = fields[0]
         if report_type not in ["custom", "realtime"]:
             raise ValueError(
                 "Invalid report type. Expected format: <report_type>:<dimensions>:<metrics>. Available report types: custom, realtime"
             )
-        
 
         dimensions = fields[1].replace(" ", "").split(",")
         metrics = fields[2].replace(" ", "").split(",")
-        
+
         minute_ranges = []
         if len(fields) == 4:
             minute_ranges = helpers.convert_minutes_ranges_to_int_list(fields[3])
-        
+
         datetime = ""
         resource_name = fields[0].lower()
         if resource_name == "custom":
@@ -1493,7 +1493,11 @@ class GoogleAnalyticsSource:
                 )
 
         queries = [
-            {"resource_name": resource_name, "dimensions": dimensions, "metrics": metrics}
+            {
+                "resource_name": resource_name,
+                "dimensions": dimensions,
+                "metrics": metrics,
+            }
         ]
 
         start_date = pendulum.now().subtract(days=30).start_of("day")
@@ -1515,6 +1519,7 @@ class GoogleAnalyticsSource:
             credentials=credentials,
             minute_ranges=minute_ranges if minute_ranges else None,
         ).with_resources(resource_name)
+
 
 class GitHubSource:
     def handles_incrementality(self) -> bool:

@@ -40,7 +40,7 @@ custom:<dimensions>:<metrics>
 ```sh
 ingestr ingest \
     --source-uri "googleanalytics://?credentials_path="ingestr/src/g_analytics.json&property_id=id123" \
-    --source-table "realtime:date:activeUsers" \
+    --source-table "custom:date:activeUsers" \
     --dest-uri "duckdb:///analytics.duckdb" \
     --dest-table "dest.custom"
 ```
