@@ -1478,7 +1478,7 @@ class GoogleAnalyticsSource:
 
         minute_range_objects = []
         if len(fields) == 4:
-            minute_range_objects = helpers.convert_minutes_ranges_to_int_list(fields[3])
+            minute_range_objects = helpers.convert_minutes_ranges_to_minute_range_objects(fields[3])
 
         datetime = ""
         resource_name = fields[0].lower()

@@ -2,34 +2,34 @@ import pytest
 from google.analytics.data_v1beta.types import MinuteRange
 
 from ingestr.src.google_analytics.helpers import (
-    convert_minutes_ranges_to_int_list,
+    convert_minutes_ranges_to_minute_range_objects,
     parse_google_analytics_uri,
 )
 
 
-def test_convert_minutes_ranges_to_int_list():
+def test_convert_minutes_ranges_to_minute_range_objects():
     user_input = "1-2,5-6"
     expected_result = [
         MinuteRange(name="1-2 minutes ago", start_minutes_ago=2),
         MinuteRange(name="5-6 minutes ago", start_minutes_ago=6),
     ]
-    result = convert_minutes_ranges_to_int_list(user_input)
+    result = convert_minutes_ranges_to_minute_range_objects(user_input)
     assert result == expected_result
 
     user_input_2 = "1-2,5-6,6-8"
     expected_result_2 = "You can define up to two time minutes ranges, formatted as comma-separated values `0-5,25-29`"
     with pytest.raises(ValueError, match=expected_result_2):
-        convert_minutes_ranges_to_int_list(user_input_2)
+        convert_minutes_ranges_to_minute_range_objects(user_input_2)
 
     user_input_3 = "12,56"
     expected_result_3 = "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
     with pytest.raises(ValueError, match=expected_result_3):
-        convert_minutes_ranges_to_int_list(user_input_3)
+        convert_minutes_ranges_to_minute_range_objects(user_input_3)
 
     user_input_4 = "1-2,5-"
     expected_result_4 = "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
     with pytest.raises(ValueError, match=expected_result_4):
-        convert_minutes_ranges_to_int_list(user_input_4)
+        convert_minutes_ranges_to_minute_range_objects(user_input_4)
 
 
 def test_parse_google_analytics_uri():

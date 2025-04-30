@@ -224,7 +224,7 @@ def _resolve_dimension_value(dimension_name: str, dimension_value: str) -> Any:
         return dimension_value
 
 
-def convert_minutes_ranges_to_int_list(minutes_ranges: str) -> List[MinuteRange]:
+def convert_minutes_ranges_to_minute_range_objects(minutes_ranges: str) -> List[MinuteRange]:
     minutes_ranges = minutes_ranges.strip()
     minutes = minutes_ranges.replace(" ", "").split(",")
 
