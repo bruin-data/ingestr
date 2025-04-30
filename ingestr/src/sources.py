@@ -1476,9 +1476,9 @@ class GoogleAnalyticsSource:
         dimensions = fields[1].replace(" ", "").split(",")
         metrics = fields[2].replace(" ", "").split(",")
 
-        minute_ranges = []
+        minute_range_objects = []
         if len(fields) == 4:
-            minute_ranges = helpers.convert_minutes_ranges_to_int_list(fields[3])
+            minute_range_objects = helpers.convert_minutes_ranges_to_int_list(fields[3])
 
         datetime = ""
         resource_name = fields[0].lower()
@@ -1517,7 +1517,7 @@ class GoogleAnalyticsSource:
             datetime_dimension=datetime,
             queries=queries,
             credentials=credentials,
-            minute_ranges=minute_ranges if minute_ranges else None,
+            minute_range_objects = minute_range_objects if minute_range_objects else None,
         ).with_resources(resource_name)
 
 

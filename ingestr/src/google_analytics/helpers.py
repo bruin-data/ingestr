@@ -62,7 +62,7 @@ def get_realtime_report(
     dimension_list: List[Dimension],
     metric_list: List[Metric],
     per_page: int,
-    minute_ranges: List[int] | None = None,  # 1-2,3-4
+    minute_range_objects: List[MinuteRange] | None = None,
 ) -> Iterator[TDataItem]:
     """
     Gets all the possible pages of reports with the given query parameters.
@@ -81,21 +81,7 @@ def get_realtime_report(
     """
     offset = 0
     ingest_at = pendulum.now().to_date_string()
-    minute_range_objects = []
-    if minute_ranges and len(minute_ranges) >= 2:
-        minute_range_objects.append(
-            MinuteRange(
-                name=f"{minute_ranges[0]}-{minute_ranges[1]} minutes ago",
-                start_minutes_ago=minute_ranges[1],
-            )
-        )
-    if minute_ranges and len(minute_ranges) == 4:
-        minute_range_objects.append(
-            MinuteRange(
-                name=f"{minute_ranges[2]}-{minute_ranges[3]} minutes ago",
-                start_minutes_ago=minute_ranges[3],
-            )
-        )
+    
 
     while True:
         request = RunRealtimeReportRequest(
@@ -239,26 +225,36 @@ def _resolve_dimension_value(dimension_name: str, dimension_value: str) -> Any:
         return dimension_value
 
 
-def convert_minutes_ranges_to_int_list(minutes_ranges: str) -> List[int]:
+def convert_minutes_ranges_to_int_list(minutes_ranges: str) -> List[MinuteRange]:
     minutes_ranges = minutes_ranges.strip()
     minutes = minutes_ranges.replace(" ", "").split(",")
 
     if minutes_ranges == "":
-        return "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
+        raise ValueError("Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6")
 
     if "-" not in minutes_ranges:
-        return "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
+        raise ValueError("Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6")
 
     if minutes_ranges.count("-") > 2 or minutes_ranges.count(",") > 1:
-        return "You can define up to two time minutes ranges, formatted as comma-separated values `0-5,25-29`"
+        raise ValueError("You can define up to two time minutes ranges, formatted as comma-separated values `0-5,25-29`")
 
     minute_ranges = []
     for min in minutes:
         parts = min.split("-")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise ValueError("Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6")
         for part in parts:
             minute_ranges.append(int(part))
 
-    return minute_ranges
+    minute_range_objects = []
+    for i in range(0, len(minute_ranges), 2):
+        minute_range_objects.append(
+            MinuteRange(
+                name=f"{minute_ranges[i]}-{minute_ranges[i+1]} minutes ago",
+                start_minutes_ago=minute_ranges[i+1],
+            )
+        )
+    return minute_range_objects
 
 
 def parse_google_analytics_uri(uri: str):
