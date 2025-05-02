@@ -10,7 +10,6 @@ The URI format for Athena is as follows:
 
 ```plaintext
 athena://?bucket=<your-destination-bucket> \
-    query_results_path=<your-query-results-location> \
     access_key_id=<your-aws-access-key-id> \
     secret_access_key=<your-aws-secret-access-key> \
     region_name=<your-aws-region>
@@ -20,7 +19,6 @@ URI parameters:
 - `access_key_id` and `secret_access_key` (required): These are AWS credentials that will be used to authenticate with AWS services like S3 and Athena.
 - `session_token` (optional): The session token for temporary credentials.
 - `region_name` (required if there's no local profile found): The AWS region of the Athena service and S3 buckets, e.g. `eu-central-1`
-- `query_results_path` (optional): The query location path where the results of Athena queries will be saved, e.g. `dest_path` or `s3://dest_path`. If not provided, it will default to the bucket specified in the `bucket` parameter.
 - `workgroup` (optional): The name of the Athena workgroup, e.g. `my_group`
 - `profile` (optional): The name of the AWS profile to use, e.g. `my_profile`
 
