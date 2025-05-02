@@ -9,7 +9,7 @@ import pyairtable
 from dlt.sources import DltResource
 
 
-@dlt.source
+@dlt.source(max_table_nesting=0)
 def airtable_source(
     base_id: str = dlt.config.value,
     table_names: Optional[List[str]] = dlt.config.value,
