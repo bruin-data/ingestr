@@ -2174,10 +2174,10 @@ class FrankfurterSource:
             if kwargs.get("interval_end"):
                 end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
             else:
-                end_date = pendulum.now("Europe/Berlin")
+                end_date = pendulum.now()
         else:
-            start_date = pendulum.now("Europe/Berlin")
-            end_date = pendulum.now("Europe/Berlin")
+            start_date = pendulum.now()
+            end_date = pendulum.now()
 
         from ingestr.src.frankfurter import frankfurter_source
         from ingestr.src.frankfurter.helpers import validate_dates

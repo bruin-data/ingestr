@@ -3064,7 +3064,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
     def interval_start_does_not_exceed_current_date(dest_uri):
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
-        start_date = pendulum.now("Europe/Berlin").add(days=1).format("YYYY-MM-DD")
+        start_date = pendulum.now().add(days=1).format("YYYY-MM-DD")
         result = invoke_ingest_command(
             "frankfurter://",
             "exchange_rates",
@@ -3079,8 +3079,8 @@ def frankfurter_test_cases() -> Iterable[Callable]:
     def interval_end_does_not_exceed_current_date(dest_uri):
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
-        start_date = pendulum.now("Europe/Berlin").subtract(days=1).format("YYYY-MM-DD")
-        end_date = pendulum.now("Europe/Berlin").add(days=1).format("YYYY-MM-DD")
+        start_date = pendulum.now().subtract(days=1).format("YYYY-MM-DD")
+        end_date = pendulum.now().add(days=1).format("YYYY-MM-DD")
         result = invoke_ingest_command(
             "frankfurter://",
             "exchange_rates",
@@ -3109,14 +3109,16 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         assert result.exit_code == 0, f"Ingestion failed: {result.output}"
 
         dest_engine = sqlalchemy.create_engine(dest_uri)
-    
+
         query = f"SELECT rate FROM {dest_table} WHERE currency_code = 'GBP'"
         with dest_engine.connect() as conn:
             rows = conn.execute(query).fetchall()
 
         # Assert that the rate for GBP is 0.82993
         assert len(rows) > 0, "No data found for GBP"
-        assert abs(rows[0][0] - 0.82993) <= 1e-6, f"Expected rate 0.82993, but got {rows[0][0]}"
+        assert abs(rows[0][0] - 0.82993) <= 1e-6, (
+            f"Expected rate 0.82993, but got {rows[0][0]}"
+        )
 
     return [
         invalid_source_table,
