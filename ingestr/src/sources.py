@@ -852,22 +852,31 @@ class AirtableSource:
         if not table:
             raise ValueError("Source table is required to connect to Airtable")
 
-        tables = table.split(",")
-
         source_parts = urlparse(uri)
         source_fields = parse_qs(source_parts.query)
-        base_id = source_fields.get("base_id")
         access_token = source_fields.get("access_token")
 
-        if not base_id or not access_token:
+        if not access_token:
             raise ValueError(
-                "base_id and access_token in the URI are required to connect to Airtable"
+                "access_token in the URI is required to connect to Airtable"
             )
+
+        base_id = source_fields.get("base_id", [None])[0]
+        clean_table = table
+
+        table_fields = table.split("/")
+        if len(table_fields) == 2:
+            clean_table = table_fields[1]
+            if not base_id:
+                base_id = table_fields[0]
+
+        if not base_id:
+            raise ValueError("base_id in the URI is required to connect to Airtable")
 
         from ingestr.src.airtable import airtable_source
 
         return airtable_source(
-            base_id=base_id[0], table_names=tables, access_token=access_token[0]
+            base_id=base_id, table_names=[clean_table], access_token=access_token[0]
         )
 
 

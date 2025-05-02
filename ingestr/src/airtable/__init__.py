@@ -9,7 +9,7 @@ import pyairtable
 from dlt.sources import DltResource
 
 
-@dlt.source(max_table_nesting=0)
+@dlt.source(max_table_nesting=1)
 def airtable_source(
     base_id: str = dlt.config.value,
     table_names: Optional[List[str]] = dlt.config.value,
@@ -50,12 +50,13 @@ def airtable_resource(
             It starts with "app". See https://support.airtable.com/docs/finding-airtable-ids
         table (Dict[str, Any]): Metadata about an airtable, does not contain the actual records
     """
+
     primary_key_id = table["primaryFieldId"]
     primary_key_field = [
         field for field in table["fields"] if field["id"] == primary_key_id
     ][0]
     table_name: str = table["name"]
-    primary_key: List[str] = [f"fields__{primary_key_field['name']}"]
+    primary_key: List[str] = [f"fields__{primary_key_field['name']}".lower()]
     air_table = api.table(base_id, table["id"])
 
     # Table.iterate() supports rich customization options, such as chunk size, fields, cell format, timezone, locale, and view
