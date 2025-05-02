@@ -111,12 +111,8 @@ def exchange_rates(
     If only start_date is provided, fetches data until now.
     If both start_date and end_date are provided, fetches data for each day in the range.
     """
-    # Ensure start_date.last_value is not None
-    if start_date.last_value is None:
-        raise ValueError("start_date.last_value cannot be None")
-
     # Ensure start_date.last_value is a pendulum.DateTime object
-    start_date_obj = ensure_pendulum_datetime(start_date.last_value)
+    start_date_obj = ensure_pendulum_datetime(start_date.last_value)  # type: ignore
     start_date_str = start_date_obj.format("YYYY-MM-DD")
 
     # Ensure end_date is a pendulum.DateTime object
