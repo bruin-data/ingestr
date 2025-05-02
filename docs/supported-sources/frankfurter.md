@@ -41,7 +41,9 @@ ingestr ingest \
 ### **`--interval-end` (Optional)**
 - **Description**: The end date for fetching historical exchange rates.
 - **Value**: A date in the format `YYYY-MM-DD` (e.g., `'2025-03-28'`).
-- **Purpose**: Defines the ending point for fetching historical data. If not provided, it defaults to the value of `--interval-start`.
+- **Purpose**: Defines the end point for fetching historical data. 
+    - If `--interval-start` is provided without `--interval-end`, `--interval-end` defaults to the current date and retrieves up until the latest published data.
+    - If `--interval-end` is provided without `--interval-start`, it will be ignored and the call will retrieve the last published data.
     - For `latest` and `currencies` this parameter is ignored.
 
 ---
@@ -104,7 +106,7 @@ ingestr ingest \
 - **Primary Key**: Composite key of `date` and `currency_name`.
 - **Notes**:
   - An optional start and end date can be added via the arguments `--interval-start` and optionally `--interval-end` to define the date range (see examples below). If no start date is specified, the date will default today's date (and thus return the latest exchange rates).
-  - If a start date but no end date is specified, then the end date will default to the start date and ingestr will retrieve data for the specified start date only.
+  - If a start date but no end date is specified, then the end date will default to today's date and ingestr will retrieve data up until the latest published data.
   - Note that the [Frankfurter API](https://www.frankfurter.dev/) only publishes updates Monday-Friday. If the given date is on the weekend, the date will default to the previous Friday. The source is however implemented in ingestr in such a way as to avoid duplicating rows of data in this case (see [Incremental Loading - Replace](https://bruin-data.github.io/ingestr/getting-started/incremental-loading.html)).
 
 #### **Example Table: Handling Weekend Dates**

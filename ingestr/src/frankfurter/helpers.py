@@ -8,7 +8,7 @@ FRANKFURTER_API_URL = "https://api.frankfurter.dev/v1/"
 
 
 def get_url_with_retry(url: str) -> StrAny:
-    r = requests.get(url)
+    r = requests.get(url, timeout=5)
     return r.json()  # type: ignore
 
 
@@ -19,7 +19,7 @@ def get_path_with_retry(path: str) -> StrAny:
 def validate_dates(start_date: datetime, end_date: datetime) -> None:
     current_date = pendulum.now()
 
-    # Check if start_date is in the future
+    # Check if start_date is in the futurep
     if start_date > current_date:
         raise ValueError("Interval-start cannot be in the future.")
 
