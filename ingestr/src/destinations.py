@@ -235,12 +235,19 @@ class AthenaDestination:
         if not bucket.startswith("s3://"):
             bucket = f"s3://{bucket}"
 
-        query_result_path = source_params.get("query_results_path", [None])[0]
-        if query_result_path:
-            if not query_result_path.startswith("s3://"):
-                query_result_path = f"s3://{query_result_path}"
-        else:
-            query_result_path = bucket
+        bucket = bucket.rstrip("/")
+
+        dest_table = kwargs.get("dest_table", None)
+        if not dest_table:
+            raise ValueError("A destination table is required to connect to Athena.")
+
+        dest_table_fields = dest_table.split(".")
+        if len(dest_table_fields) != 2:
+            raise ValueError(
+                f"Table name must be in the format <schema>.<table>, given: {dest_table}"
+            )
+
+        query_result_path = f"{bucket}/{dest_table_fields[0]}_staging/metadata"
 
         access_key_id = source_params.get("access_key_id", [None])[0]
         secret_access_key = source_params.get("secret_access_key", [None])[0]
@@ -285,6 +292,7 @@ class AthenaDestination:
                 region_name=region_name,
             ),
             destination_name=bucket,
+            force_iceberg=True,
         )
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
