@@ -20,7 +20,8 @@ def frankfurter_source(
     A dlt source for the frankfurter.dev API. It groups several resources (in this case frankfurter.dev API endpoints) containing
     various types of data: currencies, latest rates, historical rates.
     """
-    dateTime = dlt.sources.incremental(
+    date_time = dlt.sources.incremental(
+
         "date",
         initial_value=start_date,
         end_value=end_date,
