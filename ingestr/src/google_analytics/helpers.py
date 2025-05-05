@@ -228,12 +228,12 @@ def _resolve_dimension_value(dimension_name: str, dimension_value: str) -> Any:
 def convert_minutes_ranges_to_minute_range_objects(minutes_ranges: str) -> List[MinuteRange]:
     minutes_ranges = minutes_ranges.strip()
     minutes = minutes_ranges.replace(" ", "").split(",")
-    
-    if minutes_ranges == "":
+    if minutes == "":
         raise ValueError(
             "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
         )
 
+    
     minute_range_objects = []
     for min_range in minutes:
         if "-" not in min_range:
@@ -244,7 +244,7 @@ def convert_minutes_ranges_to_minute_range_objects(minutes_ranges: str) -> List[
 
         if not parts[0].isdigit() or not parts[1].isdigit():
             raise ValueError(
-                f"Invalid input '{min_range}'. Both start and end minutes must be integers. For example: 1-2,5-6"
+                f"Invalid input '{min_range}'. Both start and end minutes must be digits. For example: 1-2,5-6"
             )
         
         end_minutes_ago = int(parts[0])
