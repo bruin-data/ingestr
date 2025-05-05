@@ -1,5 +1,5 @@
-""" This source uses Freshdesk API and dlt to load data such as Agents, Companies, Tickets
-    etc. to the database"""
+"""This source uses Freshdesk API and dlt to load data such as Agents, Companies, Tickets
+etc. to the database"""
 
 from typing import Any, Dict, Generator, Iterable, List, Optional
 
@@ -49,7 +49,8 @@ def freshdesk_source(
         """
 
         # Retrieve the last updated timestamp to fetch only new or updated records.
-        updated_at = updated_at.last_value
+        if updated_at is not None:
+            updated_at = updated_at.last_value
 
         # Use the FreshdeskClient instance to fetch paginated responses
         yield from freshdesk.paginated_response(
