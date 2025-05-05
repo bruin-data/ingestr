@@ -2204,3 +2204,31 @@ class FrankfurterSource:
             raise UnsupportedResourceError(table, "Frankfurter")
 
         return src.with_resources(table)
+    
+class FreshdeskSource:
+     # freshdesk://domain?api_key=<api_key>
+    def handles_incrementality(self) -> bool:
+        return True
+    
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        domain = parsed_uri.netloc
+        query = parsed_uri.query
+        params = parse_qs(query)
+
+        if not domain:
+            raise MissingValueError("domain", "Freshdesk")
+
+        if '.' in domain:
+            domain = domain.split('.')[0]
+        
+        api_key = params.get("api_key")
+        if api_key is None:
+            raise MissingValueError("api_key", "Freshdesk")
+        
+        if table not in ["agents", "companies", "contacts", "groups", "roles", "tickets"]:
+            raise UnsupportedResourceError(table, "Freshdesk")
+        
+        from ingestr.src.freshdesk import freshdesk_source
+        return freshdesk_source(api_secret_key=api_key[0], domain=domain).with_resources(table)
+   
