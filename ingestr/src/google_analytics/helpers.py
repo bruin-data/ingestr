@@ -149,6 +149,7 @@ def get_report(
 
         # process request
         processed_response_generator = process_report(response=response)
+        
         # import pdb; pdb.set_trace()
         yield from processed_response_generator
         offset += per_page
@@ -227,40 +228,33 @@ def _resolve_dimension_value(dimension_name: str, dimension_value: str) -> Any:
 def convert_minutes_ranges_to_minute_range_objects(minutes_ranges: str) -> List[MinuteRange]:
     minutes_ranges = minutes_ranges.strip()
     minutes = minutes_ranges.replace(" ", "").split(",")
-
+    
     if minutes_ranges == "":
         raise ValueError(
             "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
         )
 
-    if "-" not in minutes_ranges:
-        raise ValueError(
-            "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
-        )
-
-    if minutes_ranges.count("-") > 2 or minutes_ranges.count(",") > 1:
-        raise ValueError(
-            "You can define up to two time minutes ranges, formatted as comma-separated values `0-5,25-29`"
-        )
-
-    minute_ranges = []
-    for min in minutes:
-        parts = min.split("-")
-        if len(parts) != 2 or not parts[0] or not parts[1]:
+    minute_range_objects = []
+    for min_range in minutes:
+        if "-" not in min_range:
             raise ValueError(
                 "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
             )
-        for part in parts:
-            minute_ranges.append(int(part))
+        parts = min_range.split("-")
 
-    minute_range_objects = []
-    for i in range(0, len(minute_ranges), 2):
-        minute_range_objects.append(
-            MinuteRange(
-                name=f"{minute_ranges[i]}-{minute_ranges[i + 1]} minutes ago",
-                start_minutes_ago=minute_ranges[i + 1],
+        if not parts[0].isdigit() or not parts[1].isdigit():
+            raise ValueError(
+                f"Invalid input '{min_range}'. Both start and end minutes must be integers. For example: 1-2,5-6"
             )
-        )
+        
+        end_minutes_ago = int(parts[0])
+        start_minutes_ago = int(parts[1])
+        minute_range_objects.append(MinuteRange(
+            name=f"{end_minutes_ago}-{start_minutes_ago} minutes ago",
+            start_minutes_ago= start_minutes_ago,
+            end_minutes_ago=end_minutes_ago
+        ))
+
     return minute_range_objects
 
 
