@@ -51,11 +51,6 @@ def freshdesk_source(
         # Retrieve the last updated timestamp to fetch only new or updated records.
         updated_at = updated_at.last_value
 
-        # Endpoint and last updated timestamp.
-        print(
-            f"Fetching data from endpoint: {endpoint} and the last `updated_at` is: {updated_at}"
-        )
-
         # Use the FreshdeskClient instance to fetch paginated responses
         yield from freshdesk.paginated_response(
             endpoint=endpoint,
