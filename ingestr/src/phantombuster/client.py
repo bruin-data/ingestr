@@ -13,9 +13,8 @@ class PhantombusterClient:
             "accept": "application/json",
         }
 
-    def fetch_containers_result(
-        self, session: requests.Session, url: str, agent_id: str
-    ):
+    def fetch_containers_result(self, session: requests.Session, agent_id: str):
+        url = "https://api.phantombuster.com/api/v2/containers/fetch-all/"
         before_ended_at = None
         limit = 1000
         while True:
@@ -24,28 +23,25 @@ class PhantombusterClient:
                 "limit": limit,
                 "mode": "all",
             }
+
             if before_ended_at:
                 params["beforeEndedAt"] = before_ended_at
+
             response = session.get(url=url, headers=self._get_headers(), params=params)
             data = response.json()
-
-            if not data.get("containers"):
-                break
-
             containers = data.get("containers", [])
             ended_times = []
             for container in containers:
                 try:
                     result = self.fetch_result_object(session, container["id"])
-                    row = {"container_id": container["id"], "result": result}
+                    row = {"container": container, "result": result}
                     yield row
+                    if "endedAt" in container:
+                        ended_times.append(container["endedAt"])
                 except requests.RequestException as e:
                     print(f"Error fetching result for container {container['id']}: {e}")
 
-                if "endedAt" in container:
-                    ended_times.append(container["endedAt"])
-
-            if not ended_times:
+            if data["maxLimitReached"] is False:
                 break
 
             before_ended_at = min(ended_times)
@@ -57,4 +53,5 @@ class PhantombusterClient:
         params = {"id": container_id}
         response = session.get(result_url, headers=self._get_headers(), params=params)
         response.raise_for_status()
+
         return response.json()

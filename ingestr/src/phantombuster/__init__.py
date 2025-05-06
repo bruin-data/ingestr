@@ -30,10 +30,8 @@ def create_client() -> requests.Session:
 def phantombuster_source(api_key: str, agent_id: str) -> Iterable[DltResource]:
     client = PhantombusterClient(api_key)
 
-    @dlt.resource(name="containers_result_object")
-    def fetch_containers_result_object() -> Iterable[TDataItem]:
-        url = "https://api.phantombuster.com/api/v2/containers/fetch-all/"
+    @dlt.resource()
+    def phantom_results() -> Iterable[TDataItem]:
+        yield client.fetch_containers_result(create_client(), agent_id)
 
-        yield client.fetch_containers_result(create_client(), url, agent_id)
-
-    return fetch_containers_result_object
+    return phantom_results
