@@ -2232,3 +2232,25 @@ class FreshdeskSource:
         from ingestr.src.freshdesk import freshdesk_source
         return freshdesk_source(api_secret_key=api_key[0], domain=domain).with_resources(table)
    
+class PhantombusterSource:
+    def handles_incrementality(self) -> bool:
+        return True
+    
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        #phantombuster://?api_key=<api_key>&agent_id=<agent_id>
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        api_key = params.get("api_key")
+        agent_id = params.get("agent_id")
+        if api_key is None:
+            raise MissingValueError("api_key", "Phantombuster")
+        
+        if agent_id is None:
+            raise MissingValueError("agent_id", "Phantombuster")
+        
+        if table not in ["containers_result_object"]:
+            raise UnsupportedResourceError(table, "Phantombuster")
+        
+        from ingestr.src.phantombuster import phantombuster_source
+        return phantombuster_source(api_key=api_key[0], agent_id=agent_id[0]).with_resources(table)
+    
