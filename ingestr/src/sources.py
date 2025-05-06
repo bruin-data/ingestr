@@ -2247,14 +2247,14 @@ class PhantombusterSource:
         
         table_fields = table.replace(" ", "").split(":")
         table_name = table_fields[0]
-        agent_id = table_fields[1]
         
-        if table_name not in ["phantom_results"]:
+        agent_id = table_fields[1] if len(table_fields) > 1 else None
+        
+        if table_name not in ["completed_phantoms"]:
             raise UnsupportedResourceError(table_name, "Phantombuster")
         
-        if agent_id is None:
+        if not agent_id:
             raise MissingValueError("agent_id", "Phantombuster")
         
         from ingestr.src.phantombuster import phantombuster_source
         return phantombuster_source(api_key=api_key[0], agent_id=agent_id).with_resources(table_name)
-    
