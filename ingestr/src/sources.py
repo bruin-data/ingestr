@@ -2256,5 +2256,19 @@ class PhantombusterSource:
         if not agent_id:
             raise MissingValueError("agent_id", "Phantombuster")
         
+        start_date = kwargs.get("interval_start")
+        if start_date is not None:
+            start_date = ensure_pendulum_datetime(start_date)
+        else:
+            start_date = pendulum.parse("2018-01-01")
+
+        end_date = kwargs.get("interval_end")
+        
+        #doesnot support incremental loading
+        if end_date is not None:
+            end_date = ensure_pendulum_datetime(end_date)
+        else:
+            end_date = pendulum.now()
+        
         from ingestr.src.phantombuster import phantombuster_source
-        return phantombuster_source(api_key=api_key[0], agent_id=agent_id).with_resources(table_name)
+        return phantombuster_source(api_key=api_key[0], agent_id=agent_id, start_date=start_date, end_date=end_date).with_resources(table_name)

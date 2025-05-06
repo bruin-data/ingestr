@@ -1,5 +1,6 @@
 from typing import Union
 
+import pendulum
 import requests
 
 
@@ -13,7 +14,7 @@ class PhantombusterClient:
             "accept": "application/json",
         }
 
-    def fetch_containers_result(self, session: requests.Session, agent_id: str):
+    def fetch_containers_result(self, session: requests.Session, agent_id: str, start_date: pendulum.DateTime, end_date: pendulum.DateTime):
         url = "https://api.phantombuster.com/api/v2/containers/fetch-all/"
         before_ended_at = None
         limit = 1000
@@ -30,23 +31,29 @@ class PhantombusterClient:
             response = session.get(url=url, headers=self._get_headers(), params=params)
             data = response.json()
             containers = data.get("containers", [])
-            
+            started_at = start_date.int_timestamp * 1000 + int(start_date.microsecond / 1000)
+            ended_at = end_date.int_timestamp * 1000 + int(end_date.microsecond / 1000)
             for container in containers:
+                container_ended_at = container.get("endedAt")
+                if container_ended_at is None:
+                    continue
+                if not (started_at <= container_ended_at <= ended_at):
+                    continue
                 try:
                     result = self.fetch_result_object(session, container["id"])
-                    row = {"container": container, "result": result}
+                    partition_dt = pendulum.from_timestamp(container_ended_at / 1000, tz="UTC").to_date_string()
+                    row = {"container": container, "result": result, "partition_dt": partition_dt}
                     yield row
-                    if "endedAt" in container:
-                        if before_ended_at is None or before_ended_at > container["endedAt"]:
-                            before_ended_at = container["endedAt"]
-                            
+                 
+                    if before_ended_at is None or before_ended_at > container["endedAt"]:
+                        before_ended_at = container["endedAt"]
+
                 except requests.RequestException as e:
                     print(f"Error fetching result for container {container['id']}: {e}")
 
             if data["maxLimitReached"] is False:
                 break
-
-             
+ 
 
     def fetch_result_object(self, session: requests.Session, container_id: str):
         result_url = (
