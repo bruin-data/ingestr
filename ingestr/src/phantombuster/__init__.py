@@ -31,7 +31,7 @@ def phantombuster_source(api_key: str, agent_id: str) -> Iterable[DltResource]:
     client = PhantombusterClient(api_key)
 
     @dlt.resource()
-    def phantom_results() -> Iterable[TDataItem]:
+    def completed_phantoms() -> Iterable[TDataItem]:
         yield client.fetch_containers_result(create_client(), agent_id)
 
-    return phantom_results
+    return completed_phantoms

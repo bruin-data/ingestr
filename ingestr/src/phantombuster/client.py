@@ -30,21 +30,23 @@ class PhantombusterClient:
             response = session.get(url=url, headers=self._get_headers(), params=params)
             data = response.json()
             containers = data.get("containers", [])
-            ended_times = []
+            
             for container in containers:
                 try:
                     result = self.fetch_result_object(session, container["id"])
                     row = {"container": container, "result": result}
                     yield row
                     if "endedAt" in container:
-                        ended_times.append(container["endedAt"])
+                        if before_ended_at is None or before_ended_at > container["endedAt"]:
+                            before_ended_at = container["endedAt"]
+                            
                 except requests.RequestException as e:
                     print(f"Error fetching result for container {container['id']}: {e}")
 
             if data["maxLimitReached"] is False:
                 break
 
-            before_ended_at = min(ended_times)
+             
 
     def fetch_result_object(self, session: requests.Session, container_id: str):
         result_url = (
