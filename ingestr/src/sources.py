@@ -2177,7 +2177,22 @@ class FrankfurterSource:
             raise ValueError(
                 "Frankfurter takes care of incrementality on its own, you should not provide incremental_key"
             )
+        
+        from ingestr.src.frankfurter import frankfurter_source
+        from ingestr.src.frankfurter.helpers import validate_dates, CURRENCY_LIST
+        
+        parsed_uri = urlparse(uri)
+        source_params = parse_qs(parsed_uri.query)
+        base_currency = source_params.get("base", [None])[0]
+        
+        if not base_currency:
+            base_currency = "USD"
 
+        if base_currency not in CURRENCY_LIST:
+            raise ValueError(
+                f"Invalid base currency '{base_currency}'. Supported currencies are: {CURRENCY_LIST}"
+            )
+    
         if kwargs.get("interval_start"):
             start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
             if kwargs.get("interval_end"):
@@ -2188,14 +2203,12 @@ class FrankfurterSource:
             start_date = pendulum.now()
             end_date = pendulum.now()
 
-        from ingestr.src.frankfurter import frankfurter_source
-        from ingestr.src.frankfurter.helpers import validate_dates
-
         validate_dates(start_date=start_date, end_date=end_date)
 
         src = frankfurter_source(
             start_date=start_date,
             end_date=end_date,
+            base_currency=base_currency,
         )
 
         if table not in src.resources:

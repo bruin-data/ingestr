@@ -6,6 +6,40 @@ from dlt.sources.helpers import requests
 
 FRANKFURTER_API_URL = "https://api.frankfurter.dev/v1/"
 
+CURRENCY_LIST = (
+    "AUD",
+    "BGN",
+    "BRL",
+    "CAD",
+    "CHF",
+    "CNY",
+    "CZK",
+    "DKK",
+    "EUR",
+    "GBP",
+    "HKD",
+    "HUF",
+    "IDR",
+    "ILS",
+    "INR",
+    "ISK",
+    "JPY",
+    "KRW",
+    "MXN",
+    "MYR",
+    "NOK",
+    "NZD",
+    "PHP",
+    "PLN",
+    "RON",
+    "SEK",
+    "SGD",
+    "THB",
+    "TRY",
+    "USD",
+    "ZAR",
+)
+
 
 def get_url_with_retry(url: str) -> StrAny:
     r = requests.get(url, timeout=5)
