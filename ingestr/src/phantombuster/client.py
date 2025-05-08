@@ -18,8 +18,10 @@ class PhantombusterClient:
         url = "https://api.phantombuster.com/api/v2/containers/fetch-all/"
         before_ended_at = None
         limit = 100
+
         started_at = start_date.int_timestamp * 1000 + int(start_date.microsecond / 1000)
         ended_at = end_date.int_timestamp * 1000 + int(end_date.microsecond / 1000)
+       
         while True:
             params: dict[str, Union[str, int, float, bytes, None]] = {
                 "agentId": agent_id,
@@ -36,15 +38,18 @@ class PhantombusterClient:
 
             for container in containers:
                 container_ended_at = container.get("endedAt")
-                if before_ended_at is None or before_ended_at > container["endedAt"]:
-                        before_ended_at = container["endedAt"]
-                        
-                if not (started_at <= container_ended_at <= ended_at):
+
+                if before_ended_at is None or before_ended_at > container_ended_at:
+                        before_ended_at = container_ended_at
+                
+                if container_ended_at < started_at or container_ended_at > ended_at:
                     continue
+              
                 try:
                     result = self.fetch_result_object(session, container["id"])
-                    partition_dt = pendulum.from_timestamp(container_ended_at / 1000, tz="UTC").to_date_string()
-                    row = {"container": container, "result": result, "partition_dt": partition_dt}
+                    partition_dt = pendulum.from_timestamp(container_ended_at / 1000, tz="UTC").date()
+                    container_ended_at_datetime = pendulum.from_timestamp(container_ended_at / 1000, tz="UTC")
+                    row = {"container_id": container["id"],"container": container, "result": result, "partition_dt": partition_dt, "ended_at": container_ended_at_datetime}
                     yield row
                     
                 except requests.RequestException as e:
