@@ -31,12 +31,12 @@ def create_client() -> requests.Session:
 @dlt.source(max_table_nesting=0)
 def phantombuster_source(api_key: str, agent_id: str, start_date: TAnyDateTime, end_date: TAnyDateTime | None) -> Iterable[DltResource]:
     client = PhantombusterClient(api_key)
-
-    @dlt.resource(write_disposition="merge",
+    @dlt.resource(
+        write_disposition="merge",
         primary_key="container_id"
     )
-
-    def completed_phantoms(dateTime=(
+    def completed_phantoms(
+        dateTime=(
             dlt.sources.incremental(
                 "ended_at",
                 initial_value=start_date,
@@ -44,18 +44,14 @@ def phantombuster_source(api_key: str, agent_id: str, start_date: TAnyDateTime, 
                 range_start="closed",
                 range_end="closed",
             )
-        ),) -> Iterable[TDataItem]:
-
-        if end_date is not None:
-            end_dt = dateTime.end_value
-        else:
+        ),
+    ) -> Iterable[TDataItem]:
+        if dateTime.end_value is None:
             end_dt = pendulum.now(tz="UTC")
-
-        if dateTime.last_value:
-            start_dt = dateTime.last_value
         else:
-            start_dt = start_date
+            end_dt = dateTime.end_value
 
+        start_dt = dateTime.last_value
 
         yield client.fetch_containers_result(create_client(), agent_id, start_date=start_dt, end_date=end_dt)
 
