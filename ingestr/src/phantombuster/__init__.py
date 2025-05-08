@@ -6,7 +6,6 @@ import requests
 from dlt.common.typing import TDataItem, TAnyDateTime
 from dlt.sources import DltResource
 from dlt.sources.helpers.requests import Client
-from dlt.common.time import ensure_pendulum_datetime
 
 
 from ingestr.src.phantombuster.client import PhantombusterClient
@@ -33,7 +32,10 @@ def phantombuster_source(api_key: str, agent_id: str, start_date: TAnyDateTime, 
     client = PhantombusterClient(api_key)
     @dlt.resource(
         write_disposition="merge",
-        primary_key="container_id"
+        primary_key="container_id",
+        columns={
+            "partition_dt": {"data_type": "date", "partition": True},
+        },
     )
     def completed_phantoms(
         dateTime=(
