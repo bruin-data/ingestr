@@ -29,6 +29,7 @@ from ingestr.src.sources import (
     DynamoDBSource,
     FacebookAdsSource,
     FrankfurterSource,
+    FreshdeskSource,
     GCSSource,
     GitHubSource,
     GoogleAdsSource,
@@ -44,6 +45,7 @@ from ingestr.src.sources import (
     MongoDbSource,
     NotionSource,
     PersonioSource,
+    PhantombusterSource,
     PipedriveSource,
     S3Source,
     SalesforceSource,
@@ -53,8 +55,6 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
-    FreshdeskSource,
-    PhantombusterSource,
 )
 
 SQL_SOURCE_SCHEMES = [
