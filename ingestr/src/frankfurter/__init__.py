@@ -15,7 +15,7 @@ from ingestr.src.frankfurter.helpers import get_path_with_retry
 def frankfurter_source(
     start_date: TAnyDateTime,
     end_date: TAnyDateTime,
-    base_currency: Optional[str] = "",
+    base_currency: str,
 ) -> Any:
     """
     A dlt source for the frankfurter.dev API. It groups several resources (in this case frankfurter.dev API endpoints) containing
@@ -79,7 +79,6 @@ def latest(base_currency: Optional[str] = "") -> Iterator[dict]:
 
     # Extract rates and base currency
     rates = data["rates"]
-
     date = pendulum.parse(data["date"])
 
     # Add the base currency with a rate of 1.0
@@ -101,7 +100,7 @@ def latest(base_currency: Optional[str] = "") -> Iterator[dict]:
 
 
 @dlt.resource(
-    write_disposition="merge",
+    write_disposition="replace",
     columns={
         "date": {"data_type": "text"},
         "currency_code": {"data_type": "text"},
@@ -144,7 +143,7 @@ def exchange_rates(
     for date, daily_rates in rates.items():
         formatted_date = pendulum.parse(date)
 
-        # Add the base currency with a rate of 1.0
+        #Add the base currency with a rate of 1.0
         yield {
             "date": formatted_date,
             "currency_code": base_currency,
