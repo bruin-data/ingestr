@@ -2179,14 +2179,14 @@ class FrankfurterSource:
             raise ValueError(
                 "Frankfurter takes care of incrementality on its own, you should not provide incremental_key"
             )
-        
+
         from ingestr.src.frankfurter import frankfurter_source
-        from ingestr.src.frankfurter.helpers import validate_dates, CURRENCY_LIST
-        
+        from ingestr.src.frankfurter.helpers import CURRENCY_LIST, validate_dates
+
         parsed_uri = urlparse(uri)
         source_params = parse_qs(parsed_uri.query)
         base_currency = source_params.get("base", [None])[0]
-        
+
         if not base_currency:
             base_currency = "USD"
 
@@ -2194,7 +2194,7 @@ class FrankfurterSource:
             raise ValueError(
                 f"Invalid base currency '{base_currency}'. Supported currencies are: {CURRENCY_LIST}"
             )
-    
+
         if kwargs.get("interval_start"):
             start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
             if kwargs.get("interval_end"):
@@ -2217,7 +2217,8 @@ class FrankfurterSource:
             raise UnsupportedResourceError(table, "Frankfurter")
 
         return src.with_resources(table)
-    
+
+
 class FreshdeskSource:
      # freshdesk://domain?api_key=<api_key>
     def handles_incrementality(self) -> bool:

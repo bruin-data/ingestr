@@ -32,7 +32,9 @@ def frankfurter_source(
     return (
         currencies(),
         latest(base_currency=base_currency),
-        exchange_rates(start_date=date_time, end_date=end_date, base_currency=base_currency),
+        exchange_rates(
+            start_date=date_time, end_date=end_date, base_currency=base_currency
+        ),
     )
 
 
@@ -62,7 +64,7 @@ def currencies() -> Iterator[dict]:
         "rate": {"data_type": "double"},
         "base_currency": {"data_type": "text"},
     },
-    primary_key=["date", "currency_code", "base_currency"], 
+    primary_key=["date", "currency_code", "base_currency"],
 )
 def latest(base_currency: Optional[str] = "") -> Iterator[dict]:
     """
@@ -72,7 +74,7 @@ def latest(base_currency: Optional[str] = "") -> Iterator[dict]:
     url = "latest?"
 
     if base_currency:
-        url += f"base={base_currency}" 
+        url += f"base={base_currency}"
 
     # Fetch data
     data = get_path_with_retry(url)
@@ -143,7 +145,7 @@ def exchange_rates(
     for date, daily_rates in rates.items():
         formatted_date = pendulum.parse(date)
 
-        #Add the base currency with a rate of 1.0
+        # Add the base currency with a rate of 1.0
         yield {
             "date": formatted_date,
             "currency_code": base_currency,
