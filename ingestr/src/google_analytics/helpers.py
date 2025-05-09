@@ -2,8 +2,10 @@
 This module contains helpers that process data and make it ready for loading into the database
 """
 
+import base64
 import json
 from typing import Any, Iterator, List, Union
+from urllib.parse import parse_qs, urlparse
 
 import proto
 from dlt.common.exceptions import MissingDependencyException
@@ -22,6 +24,8 @@ try:
         Metric,
         MetricMetadata,  # noqa: F401
         MetricType,
+        MinuteRange,
+        RunRealtimeReportRequest,
         RunReportRequest,
         RunReportResponse,
     )
@@ -52,6 +56,53 @@ def to_dict(item: Any) -> Iterator[TDataItem]:
     yield item
 
 
+def get_realtime_report(
+    client: Resource,
+    property_id: int,
+    dimension_list: List[Dimension],
+    metric_list: List[Metric],
+    per_page: int,
+    minute_range_objects: List[MinuteRange] | None = None,
+) -> Iterator[TDataItem]:
+    """
+    Gets all the possible pages of reports with the given query parameters.
+    Processes every page and yields a dictionary for every row of the report.
+
+    Args:
+        client: The Google Analytics client used to make requests.
+        property_id: A reference to the Google Analytics project.
+            More info: https://developers.google.com/analytics/devguides/reporting/data/v1/property-id
+        dimension_list: A list of all the dimensions requested in the query.
+        metric_list: A list of all the metrics requested in the query.
+        limit: Describes how many rows there should be per page.
+
+    Yields:
+        Generator of all rows of data in the report.
+    """
+    offset = 0
+    ingest_at = pendulum.now().to_date_string()
+
+    while True:
+        request = RunRealtimeReportRequest(
+            property=f"properties/{property_id}",
+            dimensions=dimension_list,
+            metrics=metric_list,
+            limit=per_page,
+            minute_ranges=minute_range_objects if minute_range_objects else None,
+        )
+        response = client.run_realtime_report(request)
+
+        # process request
+        processed_response_generator = process_report(
+            response=response, ingest_at=ingest_at
+        )
+        # import pdb; pdb.set_trace()
+        yield from processed_response_generator
+        offset += per_page
+        if len(response.rows) < per_page or offset > 1000000:
+            break
+
+
 def get_report(
     client: Resource,
     property_id: int,
@@ -79,10 +130,6 @@ def get_report(
         Generator of all rows of data in the report.
     """
 
-    print(
-        "fetching for daterange", start_date.to_date_string(), end_date.to_date_string()
-    )
-
     offset = 0
     while True:
         request = RunReportRequest(
@@ -98,9 +145,11 @@ def get_report(
                 )
             ],
         )
-        # process request
         response = client.run_report(request)
+
+        # process request
         processed_response_generator = process_report(response=response)
+        
         # import pdb; pdb.set_trace()
         yield from processed_response_generator
         offset += per_page
@@ -108,7 +157,9 @@ def get_report(
             break
 
 
-def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
+def process_report(
+    response: RunReportResponse, ingest_at: str | None = None
+) -> Iterator[TDataItems]:
     metrics_headers = [header.name for header in response.metric_headers]
     dimensions_headers = [header.name for header in response.dimension_headers]
 
@@ -131,6 +182,8 @@ def process_report(response: RunReportResponse) -> Iterator[TDataItems]:
                 metric_type=metric_type, value=row.metric_values[i].value
             )
             response_dict[metrics_headers[i]] = metric_value
+        if ingest_at is not None:
+            response_dict["ingested_at"] = ingest_at
 
         unique_key = "-".join(list(response_dict.keys()))
         if unique_key not in distinct_key_combinations:
@@ -170,3 +223,65 @@ def _resolve_dimension_value(dimension_name: str, dimension_value: str) -> Any:
         return pendulum.from_format(dimension_value, "YYYYMMDDHHmm", tz="UTC")
     else:
         return dimension_value
+
+
+def convert_minutes_ranges_to_minute_range_objects(minutes_ranges: str) -> List[MinuteRange]:
+    minutes_ranges = minutes_ranges.strip()
+    minutes = minutes_ranges.replace(" ", "").split(",")
+    if minutes == "":
+        raise ValueError(
+            "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
+        )
+
+    
+    minute_range_objects = []
+    for min_range in minutes:
+        if "-" not in min_range:
+            raise ValueError(
+                "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
+            )
+        parts = min_range.split("-")
+
+        if not parts[0].isdigit() or not parts[1].isdigit():
+            raise ValueError(
+                f"Invalid input '{min_range}'. Both start and end minutes must be digits. For example: 1-2,5-6"
+            )
+        
+        end_minutes_ago = int(parts[0])
+        start_minutes_ago = int(parts[1])
+        minute_range_objects.append(MinuteRange(
+            name=f"{end_minutes_ago}-{start_minutes_ago} minutes ago",
+            start_minutes_ago= start_minutes_ago,
+            end_minutes_ago=end_minutes_ago
+        ))
+
+    return minute_range_objects
+
+
+def parse_google_analytics_uri(uri: str):
+    parse_uri = urlparse(uri)
+    source_fields = parse_qs(parse_uri.query)
+    cred_path = source_fields.get("credentials_path")
+    cred_base64 = source_fields.get("credentials_base64")
+
+    if not cred_path and not cred_base64:
+        raise ValueError(
+            "credentials_path or credentials_base64 is required to connect Google Analytics"
+        )
+    credentials = {}
+    if cred_path:
+        with open(cred_path[0], "r") as f:
+            credentials = json.load(f)
+    elif cred_base64:
+        credentials = json.loads(base64.b64decode(cred_base64[0]).decode("utf-8"))
+
+    property_id = source_fields.get("property_id")
+    if not property_id:
+        raise ValueError("property_id is required to connect to Google Analytics")
+
+    if (not cred_path and not cred_base64) or (not property_id):
+        raise ValueError(
+            "credentials_path or credentials_base64 and property_id are required to connect Google Analytics"
+        )
+
+    return {"credentials": credentials, "property_id": property_id[0]}

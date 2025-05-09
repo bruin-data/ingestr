@@ -1469,48 +1469,49 @@ class GoogleAnalyticsSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        parse_uri = urlparse(uri)
-        source_fields = parse_qs(parse_uri.query)
-        cred_path = source_fields.get("credentials_path")
-        cred_base64 = source_fields.get("credentials_base64")
+        import ingestr.src.google_analytics.helpers as helpers
 
-        if not cred_path and not cred_base64:
-            raise ValueError(
-                "credentials_path or credentials_base64 is required to connect Google Analytics"
-            )
-
-        credentials = {}
-        if cred_path:
-            with open(cred_path[0], "r") as f:
-                credentials = json.load(f)
-        elif cred_base64:
-            credentials = json.loads(base64.b64decode(cred_base64[0]).decode("utf-8"))
-
-        property_id = source_fields.get("property_id")
-        if not property_id:
-            raise ValueError("property_id is required to connect to Google Analytics")
+        result = helpers.parse_google_analytics_uri(uri)
+        credentials = result["credentials"]
+        property_id = result["property_id"]
 
         fields = table.split(":")
-        if len(fields) != 3:
+        if len(fields) != 3 and len(fields) != 4:
             raise ValueError(
-                "Invalid table format. Expected format: custom:<dimensions>:<metrics>"
+                "Invalid table format. Expected format: <report_type>:<dimensions>:<metrics> or <report_type>:<dimensions>:<metrics>:<minute_ranges>"
+            )
+
+        report_type = fields[0]
+        if report_type not in ["custom", "realtime"]:
+            raise ValueError(
+                "Invalid report type. Expected format: <report_type>:<dimensions>:<metrics>. Available report types: custom, realtime"
             )
 
         dimensions = fields[1].replace(" ", "").split(",")
+        metrics = fields[2].replace(" ", "").split(",")
+
+        minute_range_objects = []
+        if len(fields) == 4:
+            minute_range_objects = helpers.convert_minutes_ranges_to_minute_range_objects(fields[3])
 
         datetime = ""
-        for dimension_datetime in ["date", "dateHourMinute", "dateHour"]:
-            if dimension_datetime in dimensions:
-                datetime = dimension_datetime
-                break
-        else:
-            raise ValueError(
-                "You must provide at least one dimension: [dateHour, dateHourMinute, date]"
-            )
+        resource_name = fields[0].lower()
+        if resource_name == "custom":
+            for dimension_datetime in ["date", "dateHourMinute", "dateHour"]:
+                if dimension_datetime in dimensions:
+                    datetime = dimension_datetime
+                    break
+            else:
+                raise ValueError(
+                    "You must provide at least one dimension: [dateHour, dateHourMinute, date]"
+                )
 
-        metrics = fields[2].replace(" ", "").split(",")
         queries = [
-            {"resource_name": "custom", "dimensions": dimensions, "metrics": metrics}
+            {
+                "resource_name": resource_name,
+                "dimensions": dimensions,
+                "metrics": metrics,
+            }
         ]
 
         start_date = pendulum.now().subtract(days=30).start_of("day")
@@ -1524,13 +1525,14 @@ class GoogleAnalyticsSource:
         from ingestr.src.google_analytics import google_analytics
 
         return google_analytics(
-            property_id=property_id[0],
+            property_id=property_id,
             start_date=start_date,
             end_date=end_date,
             datetime_dimension=datetime,
             queries=queries,
             credentials=credentials,
-        ).with_resources("basic_report")
+            minute_range_objects=minute_range_objects if minute_range_objects else None,
+        ).with_resources(resource_name)
 
 
 class GitHubSource:
@@ -2215,3 +2217,71 @@ class FrankfurterSource:
             raise UnsupportedResourceError(table, "Frankfurter")
 
         return src.with_resources(table)
+    
+class FreshdeskSource:
+     # freshdesk://domain?api_key=<api_key>
+    def handles_incrementality(self) -> bool:
+        return True
+    
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        domain = parsed_uri.netloc
+        query = parsed_uri.query
+        params = parse_qs(query)
+
+        if not domain:
+            raise MissingValueError("domain", "Freshdesk")
+
+        if '.' in domain:
+            domain = domain.split('.')[0]
+        
+        api_key = params.get("api_key")
+        if api_key is None:
+            raise MissingValueError("api_key", "Freshdesk")
+        
+        if table not in ["agents", "companies", "contacts", "groups", "roles", "tickets"]:
+            raise UnsupportedResourceError(table, "Freshdesk")
+        
+        from ingestr.src.freshdesk import freshdesk_source
+        return freshdesk_source(api_secret_key=api_key[0], domain=domain).with_resources(table)
+
+class PhantombusterSource:
+    def handles_incrementality(self) -> bool:
+        return True
+    
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        #phantombuster://?api_key=<api_key>
+        #source table = phantom_results:agent_id
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        api_key = params.get("api_key")
+        if api_key is None:
+            raise MissingValueError("api_key", "Phantombuster")
+        
+        table_fields = table.replace(" ", "").split(":")
+        table_name = table_fields[0]
+        
+        agent_id = table_fields[1] if len(table_fields) > 1 else None
+        
+        if table_name not in ["completed_phantoms"]:
+            raise UnsupportedResourceError(table_name, "Phantombuster")
+        
+        if not agent_id:
+            raise MissingValueError("agent_id", "Phantombuster")
+        
+        start_date = kwargs.get("interval_start")
+        if start_date is not None:
+            start_date = ensure_pendulum_datetime(start_date)
+        else:
+            start_date = pendulum.parse("2018-01-01")
+
+        end_date = kwargs.get("interval_end")
+        
+        #doesnot support incremental loading
+        if end_date is not None:
+            end_date = ensure_pendulum_datetime(end_date)
+        else:
+            end_date = pendulum.now()
+        
+        from ingestr.src.phantombuster import phantombuster_source
+        return phantombuster_source(api_key=api_key[0], agent_id=agent_id, start_date=start_date, end_date=end_date).with_resources(table_name)

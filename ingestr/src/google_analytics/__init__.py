@@ -13,9 +13,10 @@ from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
     Dimension,
     Metric,
+    MinuteRange,
 )
 
-from .helpers import get_report
+from .helpers import get_realtime_report, get_report
 
 
 @dlt.source(max_table_nesting=0)
@@ -29,6 +30,7 @@ def google_analytics(
     start_date: Optional[pendulum.DateTime] = pendulum.datetime(2024, 1, 1),
     end_date: Optional[pendulum.DateTime] = None,
     rows_per_page: int = 10000,
+    minute_range_objects: List[MinuteRange] | None = None,
 ) -> List[DltResource]:
     try:
         property_id = int(property_id)
@@ -58,7 +60,7 @@ def google_analytics(
     dimensions = query["dimensions"]
 
     @dlt.resource(
-        name="basic_report",
+        name="custom",
         merge_key=datetime_dimension,
         write_disposition="merge",
     )
@@ -87,6 +89,22 @@ def google_analytics(
             end_date=end_date,
         )
 
+    # real time report
+    @dlt.resource(
+        name="realtime",
+        merge_key="ingested_at",
+        write_disposition="merge",
+    )
+    def real_time_report() -> Iterator[TDataItem]:
+        yield from get_realtime_report(
+            client=client,
+            property_id=property_id,
+            dimension_list=[Dimension(name=dimension) for dimension in dimensions],
+            metric_list=[Metric(name=metric) for metric in query["metrics"]],
+            per_page=rows_per_page,
+            minute_range_objects=minute_range_objects,
+        )
+
     # res = dlt.resource(
     #     basic_report, name="basic_report", merge_key=datetime_dimension, write_disposition="merge"
     # )(
@@ -103,4 +121,4 @@ def google_analytics(
     #     ),
     # )
 
-    return [basic_report]
+    return [basic_report, real_time_report]
