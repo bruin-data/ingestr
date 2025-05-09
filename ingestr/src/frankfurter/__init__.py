@@ -102,7 +102,7 @@ def latest(base_currency: Optional[str] = "") -> Iterator[dict]:
 
 
 @dlt.resource(
-    write_disposition="replace",
+    write_disposition="merge",
     columns={
         "date": {"data_type": "text"},
         "currency_code": {"data_type": "text"},

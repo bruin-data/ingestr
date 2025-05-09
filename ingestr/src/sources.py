@@ -2181,7 +2181,7 @@ class FrankfurterSource:
             )
 
         from ingestr.src.frankfurter import frankfurter_source
-        from ingestr.src.frankfurter.helpers import CURRENCY_LIST, validate_dates
+        from ingestr.src.frankfurter.helpers import validate_currency, validate_dates
 
         parsed_uri = urlparse(uri)
         source_params = parse_qs(parsed_uri.query)
@@ -2190,10 +2190,7 @@ class FrankfurterSource:
         if not base_currency:
             base_currency = "USD"
 
-        if base_currency not in CURRENCY_LIST:
-            raise ValueError(
-                f"Invalid base currency '{base_currency}'. Supported currencies are: {CURRENCY_LIST}"
-            )
+        validate_currency(base_currency)
 
         if kwargs.get("interval_start"):
             start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))

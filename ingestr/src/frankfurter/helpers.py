@@ -6,40 +6,6 @@ from dlt.sources.helpers import requests
 
 FRANKFURTER_API_URL = "https://api.frankfurter.dev/v1/"
 
-CURRENCY_LIST = (
-    "AUD",
-    "BGN",
-    "BRL",
-    "CAD",
-    "CHF",
-    "CNY",
-    "CZK",
-    "DKK",
-    "EUR",
-    "GBP",
-    "HKD",
-    "HUF",
-    "IDR",
-    "ILS",
-    "INR",
-    "ISK",
-    "JPY",
-    "KRW",
-    "MXN",
-    "MYR",
-    "NOK",
-    "NZD",
-    "PHP",
-    "PLN",
-    "RON",
-    "SEK",
-    "SGD",
-    "THB",
-    "TRY",
-    "USD",
-    "ZAR",
-)
-
 
 def get_url_with_retry(url: str) -> StrAny:
     r = requests.get(url, timeout=5)
@@ -64,3 +30,19 @@ def validate_dates(start_date: datetime, end_date: datetime) -> None:
     # Check if start_date is before end_date
     if start_date > end_date:
         raise ValueError("Interval-end cannot be before interval-start.")
+
+
+def validate_currency(currency_code: str) -> bool:
+    url = "https://api.frankfurter.dev/v1/currencies"
+
+    response = requests.get(url, timeout=5)
+    currencies = response.json()
+
+    if currency_code.upper() in currencies:
+        return True
+    else:
+        supported_currencies = list(currencies.keys())
+        print(
+            f"Invalid base currency '{currency_code}'. Supported currencies are: {supported_currencies}"
+        )
+        return False
