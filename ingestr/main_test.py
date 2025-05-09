@@ -3099,7 +3099,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         start_date = "2025-01-03"
         end_date = "2025-01-03"
         result = invoke_ingest_command(
-            "frankfurter://",
+            "frankfurter://?base=EUR",
             "exchange_rates",
             dest_uri,
             dest_table,

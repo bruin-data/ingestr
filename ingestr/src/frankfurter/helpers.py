@@ -30,3 +30,19 @@ def validate_dates(start_date: datetime, end_date: datetime) -> None:
     # Check if start_date is before end_date
     if start_date > end_date:
         raise ValueError("Interval-end cannot be before interval-start.")
+
+
+def validate_currency(currency_code: str) -> bool:
+    url = "https://api.frankfurter.dev/v1/currencies"
+
+    response = requests.get(url, timeout=5)
+    currencies = response.json()
+
+    if currency_code.upper() in currencies:
+        return True
+    else:
+        supported_currencies = list(currencies.keys())
+        print(
+            f"Invalid base currency '{currency_code}'. Supported currencies are: {supported_currencies}"
+        )
+        return False
