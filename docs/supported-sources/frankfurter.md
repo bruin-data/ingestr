@@ -10,7 +10,7 @@ The `ingestr` command to use the `frankfurter` source is as follows:
 
 ```bash
 ingestr ingest \
---source-uri 'frankfurter://' \
+--source-uri 'frankfurter://?base=IDR' \
 --interval-start '2025-03-27' \     # Optional. See 'exchange_rates'.
 --interval-end '2025-03-28' \       # Optional.
 --source-table '<table_name>' \     # E.g 'currencies', 'latest', 'exchange_rates'. See below.
@@ -25,7 +25,9 @@ ingestr ingest \
 ### **`--source-uri`**
 - **Description**: Specifies the source URI for the Frankfurter API.
 - **Value**: `'frankfurter://'`
-- **Purpose**: Indicates that the data will be fetched from the Frankfurter API.
+- **Purpose**: Indicates that the data will be fetched from the Frankfurter API. 
+  - An optional base currency can be added `?base={base_currency}`.
+  - If no base currency is included, base currency defaults to USD.
 
 ---
 
@@ -89,9 +91,10 @@ ingestr ingest \
 - **Description**: Fetches the latest exchange rates.
 - **Columns**:
   - `date`: The date of the exchange rates.
-  - `currency_name`: The ISO 4217 currency code (e.g., `USD`, `EUR`).
+  - `currency_code`: The ISO 4217 currency code (e.g., `USD`, `EUR`).
   - `rate`: The exchange rate relative to the base currency.
-- **Primary Key**: Composite key of `date` and `currency_name`.
+  - `base_currency`: The base currency used to calculate the exchange rate.
+- **Primary Key**: Composite key of `date`, `currency_code` and `base_currency`.
 - **Notes**:
   - The base currency (e.g., `EUR`) is included with a rate of `1.0`.
 
@@ -101,9 +104,10 @@ ingestr ingest \
 - **Description**: Fetches historical exchange rates for a specified date range.
 - **Columns**:
   - `date`: The date of the exchange rates.
-  - `currency_name`: The ISO 4217 currency code (e.g., `USD`, `EUR`).
+  - `currency_code`: The ISO 4217 currency code (e.g., `USD`, `EUR`).
   - `rate`: The exchange rate relative to the base currency.
-- **Primary Key**: Composite key of `date` and `currency_name`.
+  - `base_currency`: The base currency used to calculate the exchange rate.
+- **Primary Key**: Composite key of `date`, `currency_code` and `base_currency`.
 - **Notes**:
   - An optional start and end date can be added via the arguments `--interval-start` and optionally `--interval-end` to define the date range (see examples below). If no start date is specified, the date will default today's date (and thus return the latest exchange rates).
   - If a start date but no end date is specified, then the end date will default to today's date and ingestr will retrieve data up until the latest published data.
@@ -114,24 +118,24 @@ Here `--interval-start` is set to a weekend date (e.g., `2025-03-29` -- a Saturd
 
 `--interval-start` defaults to the previous Friday (`2025-03-28`) and the next data is from the following Monday (for simplicity, only a subset of currencies is shown below):
 
-| **date**     | **currency_name** | **rate** |
-|--------------|-------------------|----------|
-| 2025-03-28   | EUR               | 1.0      | 
-| 2025-03-28   | USD               | 1.0783   | 
-| 2025-03-28   | GBP               | 0.8571   | 
-| 2025-03-31   | EUR               | 1.0      | 
-| 2025-03-31   | USD               | 1.0783   |
-| 2025-03-31   | GBP               | 0.8571   |
+| **date**     | **currency_code** | **rate** | **base_currency** |
+|--------------|-------------------|----------|-------------------|
+| 2025-03-28   | EUR               | 1.0      | EUR               |
+| 2025-03-28   | USD               | 1.0783   | EUR               |
+| 2025-03-28   | GBP               | 0.8571   | EUR               |
+| 2025-03-31   | EUR               | 1.0      | EUR               |
+| 2025-03-31   | USD               | 1.0783   | EUR               |
+| 2025-03-31   | GBP               | 0.8571   | EUR               |
 
 
 ---
 
 ## **Examples**
 
-### **1. Fetch the Latest Exchange Rates**
+### **1. Fetch the Latest Exchange Rates with GBP as Base Currency**
 ```bash
 ingestr ingest \
---source-uri 'frankfurter://' \
+--source-uri 'frankfurter://?base=GBP' \
 --source-table 'latest' \
 --dest-uri 'duckdb.db' \
 --dest-table 'schema.latest_new_scheme'
@@ -139,7 +143,7 @@ ingestr ingest \
 
 ---
 
-### **2. Fetch Historical Exchange Rates**
+### **2. Fetch Historical Exchange Rates with USD as Default Base Currency**
 ```bash
 ingestr ingest \
 --source-uri 'frankfurter://' \
