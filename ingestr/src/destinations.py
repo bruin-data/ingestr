@@ -397,9 +397,14 @@ class S3FS(dlt.destinations.filesystem):
         return S3FSClient
 
 class S3Destination:
+
     def dlt_dest(self, uri: str, dest_table: str, **kwargs):
+
+        table = self.validate_table(dest_table)
+
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
+
         access_key_id = params.get("access_key_id", [None])[0]
         if access_key_id is None:
             raise MissingValueError("access_key_id", "S3")
@@ -413,14 +418,33 @@ class S3Destination:
             aws_secret_access_key=secret_access_key,
         )
 
+        table_parts = dest_table.split("/")
+        base_path = "/".join(table_parts[:-1])
+
         return S3FS(
-            bucket_url=f"s3://{dest_table.strip('/ ')}",
+            bucket_url=f"s3://{base_path}",
             credentials=creds,
             layout="{table_name}.{ext}",
+
+            # supresses dlt warnings about dataset name normalization.
+            # we don't use dataset names in S3 so it's fine to disable this.
+            enable_dataset_name_normalization=False,
         )
+    
+    def validate_table(self, table: str):
+        table = table.strip("/ ")
+        if len(table.split("/")) < 2:
+            raise ValueError(
+                "Table name must be in the format {bucket-name}/{path}"
+            )
+        return table
 
     def dlt_run_params(self, uri: str, table: str, **kwargs):
-        return {}
+        table = self.validate_table(table)
+        table_parts = table.split("/")
+        return {
+            "table_name": table_parts[-1],
+        }
 
     def post_load(self) -> None:
         pass
