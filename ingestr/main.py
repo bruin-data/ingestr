@@ -34,6 +34,7 @@ PARQUET_SUPPORTED_DESTINATIONS = [
     "snowflake",
     "databricks",
     "synapse",
+    "s3",
 ]
 
 # these sources would return a JSON for sure, which means they cannot be used with Parquet loader for BigQuery
