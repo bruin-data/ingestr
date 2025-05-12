@@ -2279,3 +2279,46 @@ class PhantombusterSource:
         
         from ingestr.src.phantombuster import phantombuster_source
         return phantombuster_source(api_key=api_key[0], agent_id=agent_id, start_date=start_date, end_date=end_date).with_resources(table_name)
+    
+
+class ElasticsearchSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        
+        from ingestr.src.elasticsearch import elasticsearch_source
+        #elasticsearch://localhost:9200/my-database?secure=true&verify_certs=false
+        parsed = urlparse(uri)
+       
+        index = parsed.path.lstrip("/")
+        if not index:
+            raise MissingValueError("index name", "Elasticsearch")
+        
+        query_params = parsed.query
+        params = parse_qs(query_params)
+    
+        secure = params.get("secure")
+        if secure:
+            secure = secure[0].capitalize() == "True"
+        else:
+            secure = True
+
+        verify_certs = params.get("verify_certs")
+        if verify_certs:
+            verify_certs = verify_certs[0].capitalize() == "True"
+        else:
+            verify_certs = True
+
+        scheme = "https" if secure else "http"
+        netloc = parsed.netloc
+        connection_url = f"{scheme}://{netloc}"
+        
+        if table not in ["get_documents"]:
+            raise UnsupportedResourceError(table, "Elasticsearch")
+
+        return elasticsearch_source(
+            connection_url=connection_url,
+            index=index,
+            verify_certs=verify_certs
+        ).with_resources(table)
