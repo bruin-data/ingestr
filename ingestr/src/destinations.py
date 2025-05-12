@@ -7,12 +7,14 @@ import tempfile
 from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
+import dlt.destinations.impl.filesystem.filesystem
 from dlt.common.configuration.specs import AwsCredentials
 from dlt.destinations.impl.clickhouse.configuration import (
     ClickHouseCredentials,
 )
 
 from ingestr.src.loader import load_dlt_file
+from ingestr.src.errors import MissingValueError
 
 
 class GenericSqlDestination:
@@ -381,4 +383,44 @@ class ClickhouseDestination:
         }
 
     def post_load(self):
+        pass
+
+class S3FSClient(dlt.destinations.impl.filesystem.filesystem.FilesystemClient):
+    @property
+    def dataset_path(self):
+        # override to remove dataset path
+        return self.bucket_path
+
+class S3FS(dlt.destinations.filesystem):
+    @property
+    def client_class(self):
+        return S3FSClient
+
+class S3Destination:
+    def dlt_dest(self, uri: str, dest_table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        access_key_id = params.get("access_key_id", [None])[0]
+        if access_key_id is None:
+            raise MissingValueError("access_key_id", "S3")
+
+        secret_access_key = params.get("secret_access_key", [None])[0]
+        if secret_access_key is None:
+            raise MissingValueError("secret_access_key", "S3")
+
+        creds = AwsCredentials(
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
+        )
+
+        return S3FS(
+            bucket_url=f"s3://{dest_table.strip('/ ')}",
+            credentials=creds,
+            layout="{table_name}.{ext}",
+        )
+
+    def dlt_run_params(self, uri: str, table: str, **kwargs):
+        return {}
+
+    def post_load(self) -> None:
         pass
