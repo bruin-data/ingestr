@@ -55,6 +55,7 @@ from ingestr.src.sources import (
     ZendeskSource,
     FreshdeskSource,
     PhantombusterSource,
+    ElasticsearchSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -152,6 +153,7 @@ class SourceDestinationFactory:
         "frankfurter": FrankfurterSource,
         "freshdesk": FreshdeskSource,
         "phantombuster": PhantombusterSource,
+        "elasticsearch": ElasticsearchSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
