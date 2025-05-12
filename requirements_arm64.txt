@@ -25,6 +25,8 @@ asn1crypto==1.5.1
     # via
     #   scramp
     #   snowflake-connector-python
+async-timeout==5.0.1
+    # via aiohttp
 asynch==0.2.4
     # via clickhouse-sqlalchemy
 attrs==25.3.0
@@ -51,6 +53,7 @@ cachetools==5.5.2
 certifi==2025.1.31
     # via
     #   clickhouse-connect
+    #   elastic-transport
     #   requests
     #   snowflake-connector-python
 cffi==1.17.1
@@ -103,6 +106,10 @@ duckdb==1.2.1
     #   -r requirements.in
     #   duckdb-engine
 duckdb-engine==0.17.0
+    # via -r requirements.in
+elastic-transport==8.17.1
+    # via elasticsearch
+elasticsearch==8.10.1
     # via -r requirements.in
 et-xmlfile==2.0.0
     # via openpyxl
@@ -518,10 +525,12 @@ typing-extensions==4.13.0
     #   alembic
     #   beautifulsoup4
     #   dlt
+    #   multidict
     #   pyairtable
     #   pydantic
     #   pydantic-core
     #   pyopenssl
+    #   rich
     #   simple-salesforce
     #   snowflake-connector-python
     #   sqlalchemy2-stubs
@@ -549,6 +558,7 @@ urllib3==2.3.0
     #   botocore
     #   clickhouse-connect
     #   databricks-sql-connector
+    #   elastic-transport
     #   pyairtable
     #   requests
     #   types-requests
