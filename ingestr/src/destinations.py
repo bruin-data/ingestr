@@ -412,6 +412,7 @@ class S3Destination:
         secret_access_key = params.get("secret_access_key", [None])[0]
         if secret_access_key is None:
             raise MissingValueError("secret_access_key", "S3")
+        
 
         creds = AwsCredentials(
             aws_access_key_id=access_key_id,
@@ -421,15 +422,19 @@ class S3Destination:
         table_parts = dest_table.split("/")
         base_path = "/".join(table_parts[:-1])
 
-        return S3FS(
-            bucket_url=f"s3://{base_path}",
-            credentials=creds,
-            layout="{table_name}.{ext}",
+        opts = {
+            "bucket_url": f"s3://{base_path}",
+            "credentials": creds,
 
             # supresses dlt warnings about dataset name normalization.
             # we don't use dataset names in S3 so it's fine to disable this.
-            enable_dataset_name_normalization=False,
-        )
+            "enable_dataset_name_normalization": False,
+        }
+        layout = params.get("layout", [None])[0]
+        if layout is not None:
+            opts["layout"] = layout
+
+        return S3FS(**opts)
     
     def validate_table(self, table: str):
         table = table.strip("/ ")
