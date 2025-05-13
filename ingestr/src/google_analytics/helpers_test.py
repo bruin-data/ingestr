@@ -20,7 +20,7 @@ def test_convert_minutes_ranges_to_minute_range_objects():
     expected_result_3 = "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
     with pytest.raises(ValueError, match=expected_result_3):
         convert_minutes_ranges_to_minute_range_objects(user_input_3)
-    
+
     user_input_4 = "1-2,5-"
     expected_result_4 = "Invalid input '.*'\. Both start and end minutes must be digits. For example: 1-2,5-6"
     with pytest.raises(ValueError, match=expected_result_4):

@@ -149,7 +149,7 @@ def get_report(
 
         # process request
         processed_response_generator = process_report(response=response)
-        
+
         # import pdb; pdb.set_trace()
         yield from processed_response_generator
         offset += per_page
@@ -225,7 +225,9 @@ def _resolve_dimension_value(dimension_name: str, dimension_value: str) -> Any:
         return dimension_value
 
 
-def convert_minutes_ranges_to_minute_range_objects(minutes_ranges: str) -> List[MinuteRange]:
+def convert_minutes_ranges_to_minute_range_objects(
+    minutes_ranges: str,
+) -> List[MinuteRange]:
     minutes_ranges = minutes_ranges.strip()
     minutes = minutes_ranges.replace(" ", "").split(",")
     if minutes == "":
@@ -233,7 +235,6 @@ def convert_minutes_ranges_to_minute_range_objects(minutes_ranges: str) -> List[
             "Invalid input. Minutes range should be startminute-endminute format. For example: 1-2,5-6"
         )
 
-    
     minute_range_objects = []
     for min_range in minutes:
         if "-" not in min_range:
@@ -246,14 +247,16 @@ def convert_minutes_ranges_to_minute_range_objects(minutes_ranges: str) -> List[
             raise ValueError(
                 f"Invalid input '{min_range}'. Both start and end minutes must be digits. For example: 1-2,5-6"
             )
-        
+
         end_minutes_ago = int(parts[0])
         start_minutes_ago = int(parts[1])
-        minute_range_objects.append(MinuteRange(
-            name=f"{end_minutes_ago}-{start_minutes_ago} minutes ago",
-            start_minutes_ago= start_minutes_ago,
-            end_minutes_ago=end_minutes_ago
-        ))
+        minute_range_objects.append(
+            MinuteRange(
+                name=f"{end_minutes_ago}-{start_minutes_ago} minutes ago",
+                start_minutes_ago=start_minutes_ago,
+                end_minutes_ago=end_minutes_ago,
+            )
+        )
 
     return minute_range_objects
 

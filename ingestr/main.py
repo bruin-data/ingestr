@@ -34,6 +34,7 @@ PARQUET_SUPPORTED_DESTINATIONS = [
     "snowflake",
     "databricks",
     "synapse",
+    "s3",
 ]
 
 # these sources would return a JSON for sure, which means they cannot be used with Parquet loader for BigQuery
@@ -485,9 +486,7 @@ def ingest(
         print(
             f"[bold yellow]  Primary Key:[/bold yellow] {primary_key if primary_key else 'None'}"
         )
-        print(
-            f"[bold yellow]  Pipeline ID:[/bold yellow] {m.hexdigest()}"
-        )
+        print(f"[bold yellow]  Pipeline ID:[/bold yellow] {m.hexdigest()}")
         print()
 
         if not yes:
