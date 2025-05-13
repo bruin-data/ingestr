@@ -14,7 +14,7 @@ def elasticsearch_source(
 ):
     client = Elasticsearch(connection_url, verify_certs=verify_certs)
 
-    @dlt.resource(primary_key="id", write_disposition="merge", incremental=incremental,columns={"updated_at": {"data_type": "date"}} )
+    @dlt.resource(primary_key="id", write_disposition="merge", incremental=incremental)
     def get_documents(incremental=incremental):
         body = {"query": {"match_all": {}}}
 
