@@ -413,10 +413,12 @@ class S3Destination:
         if secret_access_key is None:
             raise MissingValueError("secret_access_key", "S3")
         
+        endpoint_url = params.get("endpoint_url", [None])[0]
 
         creds = AwsCredentials(
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
+            endpoint_url=endpoint_url,
         )
 
         table_parts = dest_table.split("/")
