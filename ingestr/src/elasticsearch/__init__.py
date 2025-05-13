@@ -1,8 +1,10 @@
-from typing import Optional
+from typing import Any, Optional
 
 import dlt
 
 from elasticsearch import Elasticsearch
+from dlt.common.time import ensure_pendulum_datetime
+from pendulum import _datetime, parse
 
 
 @dlt.source
@@ -35,7 +37,10 @@ def elasticsearch_source(
 
         # fetching first page (via .search)
         for doc in hits:
-            yield {"id": doc["_id"], **doc["_source"]}
+            doc_data = {"id": doc["_id"], **doc["_source"]}
+            if incremental:
+                doc_data[incremental.cursor_path] = convert_elasticsearch_objs(doc_data[incremental.cursor_path])
+            yield doc_data
 
         while True:
             # fetching page 2 and other pages (via .scroll)
@@ -45,8 +50,21 @@ def elasticsearch_source(
             if not hits:
                 break
             for doc in hits:
-                yield {"id": doc["_id"], **doc["_source"]}
+                doc_data = {"id": doc["_id"], **doc["_source"]}
+                if incremental:
+                    doc_data[incremental.cursor_path] = convert_elasticsearch_objs(doc_data[incremental.cursor_path])
+                    print("doc_data[incremental.cursor_path", doc_data[incremental.cursor_path])
+                yield doc_data
             
         client.clear_scroll(scroll_id=sid)
 
     return get_documents
+
+def convert_elasticsearch_objs(value: Any) -> Any:
+    if isinstance(value, _datetime.datetime):
+        return ensure_pendulum_datetime(value)
+    if isinstance(value, str):
+        parsed_date = parse(value, strict=False)
+        if parsed_date is not None:
+            return ensure_pendulum_datetime(parsed_date)
+    return value
