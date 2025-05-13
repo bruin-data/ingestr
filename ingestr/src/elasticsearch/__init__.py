@@ -1,15 +1,29 @@
+from typing import Optional
+
 import dlt
 
 from elasticsearch import Elasticsearch
 
 
 @dlt.source
-def elasticsearch_source(connection_url: str, index: str, verify_certs: bool):
+def elasticsearch_source(
+    connection_url: str,
+    index: str,
+    verify_certs: bool,
+    incremental: Optional[dlt.sources.incremental] = None,
+):
     client = Elasticsearch(connection_url, verify_certs=verify_certs)
 
-    @dlt.resource(primary_key="id", write_disposition="merge")
+    @dlt.resource(primary_key="id", write_disposition="merge", incremental=incremental)
     def get_documents():
         body = {"query": {"match_all": {}}}
+
+        if incremental:
+            start_value = incremental.last_value
+            range_filter = {"gte": start_value}
+            if incremental.end_value is not None:
+                range_filter["lt"] = incremental.end_value
+            body = {"query": {"range": {incremental.cursor_path: range_filter}}}
 
         page = client.search(index=index, scroll="5m", size=5, body=body)
 

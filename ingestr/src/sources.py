@@ -2307,6 +2307,24 @@ class ElasticsearchSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         from ingestr.src.elasticsearch import elasticsearch_source
 
+        incremental = None
+        if kwargs.get("incremental_key"):
+            start_value = kwargs.get("interval_start")
+            end_value = kwargs.get("interval_end")
+
+            if start_value:
+                start_value = ensure_pendulum_datetime(start_value).isoformat()
+            if end_value:
+                end_value = ensure_pendulum_datetime(end_value).isoformat()
+
+            incremental = dlt_incremental(
+                kwargs.get("incremental_key", ""),
+                initial_value=start_value,
+                end_value=end_value,
+                range_end="closed",
+                range_start="closed",
+            )
+
         # elasticsearch://localhost:9200/my-database?secure=true&verify_certs=false
         parsed = urlparse(uri)
 
@@ -2331,7 +2349,7 @@ class ElasticsearchSource:
 
         if table not in ["get_documents"]:
             raise UnsupportedResourceError(table, "Elasticsearch")
-
+        
         return elasticsearch_source(
-            connection_url=connection_url, index=index, verify_certs=verify_certs
+            connection_url=connection_url, index=index, verify_certs=verify_certs, incremental=incremental
         ).with_resources(table)
