@@ -2312,11 +2312,6 @@ class ElasticsearchSource:
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
 
-            if start_value:
-                start_value = ensure_pendulum_datetime(start_value).isoformat()
-            if end_value:
-                end_value = ensure_pendulum_datetime(end_value).isoformat()
-
             incremental = dlt_incremental(
                 kwargs.get("incremental_key", ""),
                 initial_value=start_value,
@@ -2349,7 +2344,6 @@ class ElasticsearchSource:
 
         if table not in ["get_documents"]:
             raise UnsupportedResourceError(table, "Elasticsearch")
-        
         return elasticsearch_source(
             connection_url=connection_url, index=index, verify_certs=verify_certs, incremental=incremental
         ).with_resources(table)

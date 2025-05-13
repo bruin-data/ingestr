@@ -14,8 +14,8 @@ def elasticsearch_source(
 ):
     client = Elasticsearch(connection_url, verify_certs=verify_certs)
 
-    @dlt.resource(primary_key="id", write_disposition="merge", incremental=incremental)
-    def get_documents():
+    @dlt.resource(primary_key="id", write_disposition="merge", incremental=incremental,columns={"updated_at": {"data_type": "date"}} )
+    def get_documents(incremental=incremental):
         body = {"query": {"match_all": {}}}
 
         if incremental:
@@ -46,6 +46,7 @@ def elasticsearch_source(
                 break
             for doc in hits:
                 yield {"id": doc["_id"], **doc["_source"]}
+            
         client.clear_scroll(scroll_id=sid)
 
     return get_documents
