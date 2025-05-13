@@ -399,9 +399,6 @@ class S3FS(dlt.destinations.filesystem):
 class S3Destination:
 
     def dlt_dest(self, uri: str, dest_table: str, **kwargs):
-
-        table = self.validate_table(dest_table)
-
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
 
