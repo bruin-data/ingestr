@@ -13,6 +13,7 @@ from ingestr.src.destinations import (
     MsSQLDestination,
     PostgresDestination,
     RedshiftDestination,
+    S3Destination,
     SnowflakeDestination,
     SynapseDestination,
 )
@@ -29,6 +30,7 @@ from ingestr.src.sources import (
     DynamoDBSource,
     FacebookAdsSource,
     FrankfurterSource,
+    FreshdeskSource,
     GCSSource,
     GitHubSource,
     GoogleAdsSource,
@@ -44,6 +46,7 @@ from ingestr.src.sources import (
     MongoDbSource,
     NotionSource,
     PersonioSource,
+    PhantombusterSource,
     PipedriveSource,
     S3Source,
     SalesforceSource,
@@ -53,8 +56,6 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
-    FreshdeskSource,
-    PhantombusterSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -170,6 +171,7 @@ class SourceDestinationFactory:
         "athena": AthenaDestination,
         "clickhouse+native": ClickhouseDestination,
         "clickhouse": ClickhouseDestination,
+        "s3": S3Destination,
     }
 
     def __init__(self, source_uri: str, destination_uri: str):

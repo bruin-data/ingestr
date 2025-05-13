@@ -1492,7 +1492,9 @@ class GoogleAnalyticsSource:
 
         minute_range_objects = []
         if len(fields) == 4:
-            minute_range_objects = helpers.convert_minutes_ranges_to_minute_range_objects(fields[3])
+            minute_range_objects = (
+                helpers.convert_minutes_ranges_to_minute_range_objects(fields[3])
+            )
 
         datetime = ""
         resource_name = fields[0].lower()
@@ -2217,10 +2219,10 @@ class FrankfurterSource:
 
 
 class FreshdeskSource:
-     # freshdesk://domain?api_key=<api_key>
+    # freshdesk://domain?api_key=<api_key>
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
         domain = parsed_uri.netloc
@@ -2230,43 +2232,54 @@ class FreshdeskSource:
         if not domain:
             raise MissingValueError("domain", "Freshdesk")
 
-        if '.' in domain:
-            domain = domain.split('.')[0]
-        
+        if "." in domain:
+            domain = domain.split(".")[0]
+
         api_key = params.get("api_key")
         if api_key is None:
             raise MissingValueError("api_key", "Freshdesk")
-        
-        if table not in ["agents", "companies", "contacts", "groups", "roles", "tickets"]:
+
+        if table not in [
+            "agents",
+            "companies",
+            "contacts",
+            "groups",
+            "roles",
+            "tickets",
+        ]:
             raise UnsupportedResourceError(table, "Freshdesk")
-        
+
         from ingestr.src.freshdesk import freshdesk_source
-        return freshdesk_source(api_secret_key=api_key[0], domain=domain).with_resources(table)
+
+        return freshdesk_source(
+            api_secret_key=api_key[0], domain=domain
+        ).with_resources(table)
+
 
 class PhantombusterSource:
     def handles_incrementality(self) -> bool:
         return True
-    
+
     def dlt_source(self, uri: str, table: str, **kwargs):
-        #phantombuster://?api_key=<api_key>
-        #source table = phantom_results:agent_id
+        # phantombuster://?api_key=<api_key>
+        # source table = phantom_results:agent_id
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
         api_key = params.get("api_key")
         if api_key is None:
             raise MissingValueError("api_key", "Phantombuster")
-        
+
         table_fields = table.replace(" ", "").split(":")
         table_name = table_fields[0]
-        
+
         agent_id = table_fields[1] if len(table_fields) > 1 else None
-        
+
         if table_name not in ["completed_phantoms"]:
             raise UnsupportedResourceError(table_name, "Phantombuster")
-        
+
         if not agent_id:
             raise MissingValueError("agent_id", "Phantombuster")
-        
+
         start_date = kwargs.get("interval_start")
         if start_date is None:
             start_date = ensure_pendulum_datetime("2018-01-01").in_tz("UTC")
@@ -2276,6 +2289,12 @@ class PhantombusterSource:
         end_date = kwargs.get("interval_end")
         if end_date is not None:
             end_date = ensure_pendulum_datetime(end_date).in_tz("UTC")
-        
+
         from ingestr.src.phantombuster import phantombuster_source
-        return phantombuster_source(api_key=api_key[0], agent_id=agent_id, start_date=start_date, end_date=end_date).with_resources(table_name)
+
+        return phantombuster_source(
+            api_key=api_key[0],
+            agent_id=agent_id,
+            start_date=start_date,
+            end_date=end_date,
+        ).with_resources(table_name)

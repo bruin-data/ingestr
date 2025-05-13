@@ -3,10 +3,9 @@ from typing import Iterable, Optional
 import dlt
 import pendulum
 import requests
-from dlt.common.typing import TDataItem, TAnyDateTime
+from dlt.common.typing import TAnyDateTime, TDataItem
 from dlt.sources import DltResource
 from dlt.sources.helpers.requests import Client
-
 
 from ingestr.src.phantombuster.client import PhantombusterClient
 
@@ -27,9 +26,13 @@ def create_client() -> requests.Session:
         request_backoff_factor=2,
     ).session
 
+
 @dlt.source(max_table_nesting=0)
-def phantombuster_source(api_key: str, agent_id: str, start_date: TAnyDateTime, end_date: TAnyDateTime | None) -> Iterable[DltResource]:
+def phantombuster_source(
+    api_key: str, agent_id: str, start_date: TAnyDateTime, end_date: TAnyDateTime | None
+) -> Iterable[DltResource]:
     client = PhantombusterClient(api_key)
+
     @dlt.resource(
         write_disposition="merge",
         primary_key="container_id",
@@ -55,6 +58,8 @@ def phantombuster_source(api_key: str, agent_id: str, start_date: TAnyDateTime, 
 
         start_dt = dateTime.last_value
 
-        yield client.fetch_containers_result(create_client(), agent_id, start_date=start_dt, end_date=end_dt)
+        yield client.fetch_containers_result(
+            create_client(), agent_id, start_date=start_dt, end_date=end_dt
+        )
 
     return completed_phantoms
