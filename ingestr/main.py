@@ -486,9 +486,7 @@ def ingest(
         print(
             f"[bold yellow]  Primary Key:[/bold yellow] {primary_key if primary_key else 'None'}"
         )
-        print(
-            f"[bold yellow]  Pipeline ID:[/bold yellow] {m.hexdigest()}"
-        )
+        print(f"[bold yellow]  Pipeline ID:[/bold yellow] {m.hexdigest()}")
         print()
 
         if not yes:

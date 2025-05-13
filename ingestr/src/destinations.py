@@ -13,8 +13,8 @@ from dlt.destinations.impl.clickhouse.configuration import (
     ClickHouseCredentials,
 )
 
-from ingestr.src.loader import load_dlt_file
 from ingestr.src.errors import MissingValueError
+from ingestr.src.loader import load_dlt_file
 
 
 class GenericSqlDestination:
@@ -385,20 +385,22 @@ class ClickhouseDestination:
     def post_load(self):
         pass
 
+
 class S3FSClient(dlt.destinations.impl.filesystem.filesystem.FilesystemClient):
     @property
     def dataset_path(self):
         # override to remove dataset path
         return self.bucket_path
 
+
 class S3FS(dlt.destinations.filesystem):
     @property
     def client_class(self):
         return S3FSClient
 
-class S3Destination:
 
-    def dlt_dest(self, uri: str, dest_table: str, **kwargs):
+class S3Destination:
+    def dlt_dest(self, uri: str, **kwargs):
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
 
@@ -409,7 +411,7 @@ class S3Destination:
         secret_access_key = params.get("secret_access_key", [None])[0]
         if secret_access_key is None:
             raise MissingValueError("secret_access_key", "S3")
-        
+
         endpoint_url = params.get("endpoint_url", [None])[0]
 
         creds = AwsCredentials(
@@ -418,13 +420,13 @@ class S3Destination:
             endpoint_url=endpoint_url,
         )
 
+        dest_table = self.validate_table(kwargs["dest_table"])
         table_parts = dest_table.split("/")
         base_path = "/".join(table_parts[:-1])
 
         opts = {
             "bucket_url": f"s3://{base_path}",
             "credentials": creds,
-
             # supresses dlt warnings about dataset name normalization.
             # we don't use dataset names in S3 so it's fine to disable this.
             "enable_dataset_name_normalization": False,
@@ -433,14 +435,12 @@ class S3Destination:
         if layout is not None:
             opts["layout"] = layout
 
-        return S3FS(**opts)
-    
+        return S3FS(**opts)  # type: ignore
+
     def validate_table(self, table: str):
         table = table.strip("/ ")
         if len(table.split("/")) < 2:
-            raise ValueError(
-                "Table name must be in the format {bucket-name}/{path}"
-            )
+            raise ValueError("Table name must be in the format {bucket-name}/{path}")
         return table
 
     def dlt_run_params(self, uri: str, table: str, **kwargs):
