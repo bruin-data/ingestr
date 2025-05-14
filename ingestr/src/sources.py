@@ -2345,5 +2345,8 @@ class ElasticsearchSource:
         if table not in ["get_documents"]:
             raise UnsupportedResourceError(table, "Elasticsearch")
         return elasticsearch_source(
-            connection_url=connection_url, index=index, verify_certs=verify_certs, incremental=incremental
+            connection_url=connection_url,
+            index=index,
+            verify_certs=verify_certs,
+            incremental=incremental,
         ).with_resources(table)

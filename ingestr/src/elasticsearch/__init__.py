@@ -1,10 +1,12 @@
+from datetime import date, datetime
 from typing import Any, Optional
 
 import dlt
-
-from elasticsearch import Elasticsearch
+import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from pendulum import _datetime, parse
+
+from elasticsearch import Elasticsearch
 
 
 @dlt.source
@@ -39,7 +41,9 @@ def elasticsearch_source(
         for doc in hits:
             doc_data = {"id": doc["_id"], **doc["_source"]}
             if incremental:
-                doc_data[incremental.cursor_path] = convert_elasticsearch_objs(doc_data[incremental.cursor_path])
+                doc_data[incremental.cursor_path] = convert_elasticsearch_objs(
+                    doc_data[incremental.cursor_path]
+                )
             yield doc_data
 
         while True:
@@ -52,13 +56,15 @@ def elasticsearch_source(
             for doc in hits:
                 doc_data = {"id": doc["_id"], **doc["_source"]}
                 if incremental:
-                    doc_data[incremental.cursor_path] = convert_elasticsearch_objs(doc_data[incremental.cursor_path])
-                    print("doc_data[incremental.cursor_path", doc_data[incremental.cursor_path])
+                    doc_data[incremental.cursor_path] = convert_elasticsearch_objs(
+                        doc_data[incremental.cursor_path]
+                    )
                 yield doc_data
-            
+
         client.clear_scroll(scroll_id=sid)
 
     return get_documents
+
 
 def convert_elasticsearch_objs(value: Any) -> Any:
     if isinstance(value, _datetime.datetime):
@@ -66,5 +72,9 @@ def convert_elasticsearch_objs(value: Any) -> Any:
     if isinstance(value, str):
         parsed_date = parse(value, strict=False)
         if parsed_date is not None:
-            return ensure_pendulum_datetime(parsed_date)
+            if isinstance(
+                parsed_date,
+                (pendulum.DateTime, pendulum.Date, datetime, date, str, float, int),
+            ):
+                return ensure_pendulum_datetime(parsed_date)
     return value

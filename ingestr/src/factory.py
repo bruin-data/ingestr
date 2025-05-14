@@ -28,6 +28,7 @@ from ingestr.src.sources import (
     AsanaSource,
     ChessSource,
     DynamoDBSource,
+    ElasticsearchSource,
     FacebookAdsSource,
     FrankfurterSource,
     FreshdeskSource,
@@ -56,9 +57,6 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
-    FreshdeskSource,
-    PhantombusterSource,
-    ElasticsearchSource,
 )
 
 SQL_SOURCE_SCHEMES = [
