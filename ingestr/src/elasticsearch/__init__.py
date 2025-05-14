@@ -4,7 +4,7 @@ from typing import Any, Optional
 import dlt
 import pendulum
 from dlt.common.time import ensure_pendulum_datetime
-from pendulum import _datetime, parse
+from pendulum import parse
 
 from elasticsearch import Elasticsearch
 
@@ -18,7 +18,9 @@ def elasticsearch_source(
 ):
     client = Elasticsearch(connection_url, verify_certs=verify_certs)
 
-    @dlt.resource(primary_key="id", write_disposition="merge", incremental=incremental)
+    @dlt.resource(
+        name=index, primary_key="id", write_disposition="merge", incremental=incremental
+    )
     def get_documents(incremental=incremental):
         body = {"query": {"match_all": {}}}
 
@@ -67,8 +69,6 @@ def elasticsearch_source(
 
 
 def convert_elasticsearch_objs(value: Any) -> Any:
-    if isinstance(value, _datetime.datetime):
-        return ensure_pendulum_datetime(value)
     if isinstance(value, str):
         parsed_date = parse(value, strict=False)
         if parsed_date is not None:

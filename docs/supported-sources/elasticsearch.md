@@ -7,7 +7,7 @@ ingestr supports Elasticsearch as a source.
 The URI format for Elasticsearch is as follows:
 
 ```plaintext
-elasticsearch://username:password@host:port/index-name?secure=<secure>&verify_certs=<verify_certs>
+elasticsearch://username:password@host:port?secure=<secure>&verify_certs=<verify_certs>
 ```
 
 URI parameters:
@@ -15,18 +15,16 @@ URI parameters:
 - `password`: The password associated with the specified username.
 - `host`: The host address of the Elasticsearch server.
 - `port`: The port number used by the Elasticsearch server.
-- `index-name`: The name of the Elasticsearch index from which documents will be extracted.
 -  `secure`: Enables HTTPS when set to true. By default, it is true.
 - `verify_certs`: Verifies TLS certificates when set to true. By default, it is true.
 
 Source Table
 
-`get_documents`: Fetches all available documents from the specified index.
-
+`<index-name>`: Fetches all available documents from the specified index.
 
 ```ingestr ingest \
-    --source-uri "elasticsearch://elastic:changeme@localhost:9200/test-index?secure=false&verify_certs=false" \
-    --source-table 'get_documents' \
+    --source-uri "elasticsearch://elastic:changeme@localhost:9200?secure=false&verify_certs=false" \
+    --source-table 'test-index' \
     --dest-uri "duckdb:///users.duckdb" \
     --dest-table 'dest.users_detail'
 ```

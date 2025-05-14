@@ -2320,12 +2320,12 @@ class ElasticsearchSource:
                 range_start="closed",
             )
 
-        # elasticsearch://localhost:9200/my-database?secure=true&verify_certs=false
+        # elasticsearch://localhost:9200?secure=true&verify_certs=false
         parsed = urlparse(uri)
 
-        index = parsed.path.lstrip("/")
+        index = table
         if not index:
-            raise MissingValueError("index name", "Elasticsearch")
+            raise ValueError("Table name must be provided which is the index name in elasticsearch")
 
         query_params = parsed.query
         params = parse_qs(query_params)
@@ -2342,8 +2342,6 @@ class ElasticsearchSource:
         netloc = parsed.netloc
         connection_url = f"{scheme}://{netloc}"
 
-        if table not in ["get_documents"]:
-            raise UnsupportedResourceError(table, "Elasticsearch")
         return elasticsearch_source(
             connection_url=connection_url,
             index=index,
