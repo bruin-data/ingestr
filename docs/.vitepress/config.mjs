@@ -74,6 +74,7 @@ export default defineConfig({
               { text: "Databricks", link: "/supported-sources/databricks.md" },
               { text: "DuckDB", link: "/supported-sources/duckdb.md" },
               { text: "DynamoDB", link: "/supported-sources/dynamodb.md" },
+              { text: "Elasticsearch", link: "/supported-sources/elasticsearch.md" },
               {
                 text: "Google BigQuery",
                 link: "/supported-sources/bigquery.md",

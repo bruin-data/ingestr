@@ -49,3 +49,4 @@ zstd==1.5.6.5
 ibm-db==3.2.6; platform_machine != "aarch64"
 ibm-db-sa==0.4.1; platform_machine != "aarch64"
 aiohttp>=3.11.15
+elasticsearch==8.10.1
