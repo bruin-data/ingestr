@@ -50,3 +50,5 @@ ibm-db==3.2.6; platform_machine != "aarch64"
 ibm-db-sa==0.4.1; platform_machine != "aarch64"
 aiohttp>=3.11.15
 elasticsearch==8.10.1
+sqlalchemy-spanner==1.11.0
+google-cloud-spanner==3.54.0

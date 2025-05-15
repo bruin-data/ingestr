@@ -79,6 +79,7 @@ SQL_SOURCE_SCHEMES = [
     "clickhouse",
     "databricks",
     "db2",
+    "spanner",
 ]
 
 
