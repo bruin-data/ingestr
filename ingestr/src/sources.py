@@ -52,7 +52,10 @@ class SqlSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         table_fields = TableDefinition(dataset="custom", table="custom")
         if not table.startswith("query:"):
-            table_fields = table_string_to_dataclass(table)
+            if uri.startswith("spanner://"):
+                table_fields = TableDefinition(dataset="", table=table)
+            else:
+                table_fields = table_string_to_dataclass(table)
 
         incremental = None
         if kwargs.get("incremental_key"):
@@ -112,6 +115,35 @@ class SqlSource:
 
         if uri.startswith("db2://"):
             uri = uri.replace("db2://", "db2+ibm_db://")
+        
+        if uri.startswith("spanner://"):
+             parsed_uri = urlparse(uri)
+             query_params = parse_qs(parsed_uri.query)
+
+             project_id = query_params.get("project_id")[0]
+             instance_id = query_params.get("instance_id")[0]
+             database = query_params.get("database")[0]
+            
+             cred_path = query_params.get("credentials_path")
+             cred_base64 = query_params.get("credentials_base64")
+             if not cred_path and not cred_base64:
+                    raise ValueError(
+                    "credentials_path or credentials_base64 is required in the URI to get data from Google Sheets"
+                )
+             if cred_path:
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path[0]
+             elif cred_base64:
+                credentials = json.loads(
+                base64.b64decode(cred_base64[0]).decode("utf-8")
+                )
+                temp = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json')
+                json.dump(credentials, temp)
+                temp.close()
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp.name
+                print(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+          
+        uri = f"spanner+spanner:///projects/{project_id}/instances/{instance_id}/databases/{database}"
+            
 
         from dlt.common.libs.sql_alchemy import (
             Engine,
@@ -125,7 +157,7 @@ class SqlSource:
         )
         from sqlalchemy import Column
         from sqlalchemy import types as sa
-
+        
         from ingestr.src.filters import table_adapter_exclude_columns
         from ingestr.src.sql_database.callbacks import (
             chained_query_adapter_callback,
