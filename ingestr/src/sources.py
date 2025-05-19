@@ -152,7 +152,6 @@ class SqlSource:
                 json.dump(credentials, temp)
                 temp.close()
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp.name
-                print(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
 
             uri = f"spanner+spanner:///projects/{project_id}/instances/{instance_id}/databases/{database}"
 
