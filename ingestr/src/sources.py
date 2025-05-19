@@ -52,7 +52,10 @@ class SqlSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         table_fields = TableDefinition(dataset="custom", table="custom")
         if not table.startswith("query:"):
-            table_fields = table_string_to_dataclass(table)
+            if uri.startswith("spanner://"):
+                table_fields = TableDefinition(dataset="", table=table)
+            else:
+                table_fields = table_string_to_dataclass(table)
 
         incremental = None
         if kwargs.get("incremental_key"):
@@ -112,6 +115,45 @@ class SqlSource:
 
         if uri.startswith("db2://"):
             uri = uri.replace("db2://", "db2+ibm_db://")
+
+        if uri.startswith("spanner://"):
+            parsed_uri = urlparse(uri)
+            query_params = parse_qs(parsed_uri.query)
+
+            project_id_param = query_params.get("project_id")
+            instance_id_param = query_params.get("instance_id")
+            database_param = query_params.get("database")
+
+            cred_path = query_params.get("credentials_path")
+            cred_base64 = query_params.get("credentials_base64")
+
+            if not project_id_param or not instance_id_param or not database_param:
+                raise ValueError(
+                    "project_id, instance_id and database are required in the URI to get data from Google Spanner"
+                )
+
+            project_id = project_id_param[0]
+            instance_id = instance_id_param[0]
+            database = database_param[0]
+
+            if not cred_path and not cred_base64:
+                raise ValueError(
+                    "credentials_path or credentials_base64 is required in the URI to get data from Google Sheets"
+                )
+            if cred_path:
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path[0]
+            elif cred_base64:
+                credentials = json.loads(
+                    base64.b64decode(cred_base64[0]).decode("utf-8")
+                )
+                temp = tempfile.NamedTemporaryFile(
+                    mode="w", delete=False, suffix=".json"
+                )
+                json.dump(credentials, temp)
+                temp.close()
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp.name
+
+            uri = f"spanner+spanner:///projects/{project_id}/instances/{instance_id}/databases/{database}"
 
         from dlt.common.libs.sql_alchemy import (
             Engine,
@@ -2325,7 +2367,9 @@ class ElasticsearchSource:
 
         index = table
         if not index:
-            raise ValueError("Table name must be provided which is the index name in elasticsearch")
+            raise ValueError(
+                "Table name must be provided which is the index name in elasticsearch"
+            )
 
         query_params = parsed.query
         params = parse_qs(query_params)
