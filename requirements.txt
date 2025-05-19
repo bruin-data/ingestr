@@ -16,7 +16,9 @@ aioitertools==0.12.0
 aiosignal==1.3.2
     # via aiohttp
 alembic==1.15.1
-    # via databricks-sql-connector
+    # via
+    #   databricks-sql-connector
+    #   sqlalchemy-spanner
 annotated-types==0.7.0
     # via pydantic
 asana==3.2.3
@@ -149,6 +151,7 @@ google-api-core==2.24.1
     #   google-cloud-bigquery
     #   google-cloud-bigquery-storage
     #   google-cloud-core
+    #   google-cloud-spanner
     #   google-cloud-storage
     #   sqlalchemy-bigquery
 google-api-python-client==2.130.0
@@ -178,7 +181,12 @@ google-cloud-bigquery-storage==2.24.0
 google-cloud-core==2.4.2
     # via
     #   google-cloud-bigquery
+    #   google-cloud-spanner
     #   google-cloud-storage
+google-cloud-spanner==3.54.0
+    # via
+    #   -r requirements.in
+    #   sqlalchemy-spanner
 google-cloud-storage==3.1.0
     # via gcsfs
 google-crc32c==1.6.0
@@ -193,11 +201,19 @@ googleapis-common-protos==1.69.0
     # via
     #   google-ads
     #   google-api-core
+    #   grpc-google-iam-v1
     #   grpcio-status
+grpc-google-iam-v1==0.14.2
+    # via google-cloud-spanner
+grpc-interceptor==0.15.4
+    # via google-cloud-spanner
 grpcio==1.70.0
     # via
     #   google-ads
     #   google-api-core
+    #   googleapis-common-protos
+    #   grpc-google-iam-v1
+    #   grpc-interceptor
     #   grpcio-status
 grpcio-status==1.62.3
     # via
@@ -321,13 +337,16 @@ proto-plus==1.26.0
     #   google-analytics-data
     #   google-api-core
     #   google-cloud-bigquery-storage
+    #   google-cloud-spanner
 protobuf==4.25.6
     # via
     #   google-ads
     #   google-analytics-data
     #   google-api-core
     #   google-cloud-bigquery-storage
+    #   google-cloud-spanner
     #   googleapis-common-protos
+    #   grpc-google-iam-v1
     #   grpcio-status
     #   proto-plus
 psutil==6.1.1
@@ -493,16 +512,21 @@ sqlalchemy==1.4.52
     #   sqlalchemy-bigquery
     #   sqlalchemy-hana
     #   sqlalchemy-redshift
+    #   sqlalchemy-spanner
 sqlalchemy-bigquery==1.12.1
     # via -r requirements.in
 sqlalchemy-hana==2.0.0
     # via -r requirements.in
 sqlalchemy-redshift==0.8.14
     # via -r requirements.in
+sqlalchemy-spanner==1.11.0
+    # via -r requirements.in
 sqlalchemy2-stubs==0.0.2a38
     # via -r requirements.in
 sqlglot==26.12.1
     # via dlt
+sqlparse==0.5.3
+    # via google-cloud-spanner
 stripe==10.7.0
     # via -r requirements.in
 tenacity==9.0.0
