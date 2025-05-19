@@ -154,7 +154,7 @@ class SqlSource:
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp.name
                 print(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
 
-        uri = f"spanner+spanner:///projects/{project_id}/instances/{instance_id}/databases/{database}"
+            uri = f"spanner+spanner:///projects/{project_id}/instances/{instance_id}/databases/{database}"
 
         from dlt.common.libs.sql_alchemy import (
             Engine,
