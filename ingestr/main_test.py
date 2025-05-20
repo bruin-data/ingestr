@@ -40,6 +40,7 @@ from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
+from testcontainers.mongodb import MongoDbContainer  # type: ignore
 from typer.testing import CliRunner
 
 from ingestr.main import app
@@ -3431,3 +3432,49 @@ def airtable_test_cases():
 def test_airtable_source(testcase, dest):
     testcase(dest.start())
     dest.stop()
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_mongodb_source(dest):
+    mongo = MongoDbContainer("mongo:7.0.7")
+    mongo.start()
+    
+    db = mongo.get_connection_client()
+    test_collection = db.test_db.test_collection
+    test_collection.insert_many([
+        {"id": 1, "name": "Document 1", "value": 100},
+        {"id": 2, "name": "Document 2", "value": 200},
+        {"id": 3, "name": "Document 3", "value": 300},
+        {"id": 4, "name": "Document 4", "value": 400},
+        {"id": 5, "name": "Document 5", "value": 500}
+    ])
+
+    dest_uri = dest.start()
+    print(">>>>>>>>>>>>>>>>>>>>>>>")
+    print(mongo.get_connection_url())
+    print(">>>>>>>>>>>>>>>>>>>>>>>")
+
+    try:
+            
+        invoke_ingest_command(
+            mongo.get_connection_url(),
+            "test_db.test_collection",
+            dest_uri,
+            "raw.test_collection",
+        )
+
+
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(f"select id, name, value from raw.test_collection").fetchall()
+            
+            assert len(res) == 5
+            assert res[0] == (1, "Document 1", 100)
+            assert res[1] == (2, "Document 2", 200)
+            assert res[2] == (3, "Document 3", 300)
+            assert res[3] == (4, "Document 4", 400)
+            assert res[4] == (5, "Document 5", 500)
+    finally:
+        dest.stop()
+        mongo.stop()
+
