@@ -57,6 +57,7 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
+    AttioSource
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -156,6 +157,7 @@ class SourceDestinationFactory:
         "freshdesk": FreshdeskSource,
         "phantombuster": PhantombusterSource,
         "elasticsearch": ElasticsearchSource,
+        "attio": AttioSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

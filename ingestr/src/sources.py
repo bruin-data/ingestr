@@ -2392,3 +2392,26 @@ class ElasticsearchSource:
             verify_certs=verify_certs,
             incremental=incremental,
         ).with_resources(table)
+    
+
+class AttioSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        api_key = params.get("api_key")
+        
+        if api_key is None:
+            raise MissingValueError("api_key", "Attio")
+        
+        table_name = table.replace(" ", "")
+
+        if table_name not in ["objects"]:
+            raise UnsupportedResourceError(table_name, "Attio")
+
+        from ingestr.src.attio import attio_source
+        return attio_source(
+            api_key=api_key[0],
+        ).with_resources(table_name)
