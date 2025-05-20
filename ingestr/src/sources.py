@@ -2408,7 +2408,7 @@ class AttioSource:
         
         table_name = table.replace(" ", "")
 
-        if table_name not in ["objects"]:
+        if table_name not in ["objects", "records"]:
             raise UnsupportedResourceError(table_name, "Attio")
 
         from ingestr.src.attio import attio_source

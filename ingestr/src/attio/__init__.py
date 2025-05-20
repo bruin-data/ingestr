@@ -39,6 +39,19 @@ def attio_source(
     def fetch_objects() -> Iterator[dict]:
         url = f"{base_url}/objects"
         attio_client = AttioClient(api_key)
-        yield attio_client.fetch_all_pages(url, create_client())
+        yield attio_client.fetch_all_objects(url, create_client())
+
+    @dlt.resource(
+        name="records",
+        primary_key="id",
+        write_disposition="merge",
+        columns={
+            "partition_dt": {"data_type": "date", "partition": True},
+        },
+    )
+    def fetch_records(object_id: str) -> Iterator[dict]:
+        url = f"{base_url}/objects/{object_id}/records"
+        attio_client = AttioClient(api_key)
+        yield attio_client.fetch_all_records_of_object(url, create_client())
     
-    return fetch_objects
+    return fetch_objects, fetch_records

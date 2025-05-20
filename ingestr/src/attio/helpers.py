@@ -10,7 +10,7 @@ class AttioClient:
             "Authorization": f"Bearer {self.api_key}",
         }
 
-    def fetch_all_pages(self, url: str, client: requests.Session, limit: int = 100, params = None):
+    def fetch_all_objects(self, url: str, client: requests.Session, limit: int = 100, params = None):
         if params is None:
             params = {}
         offset = 0
@@ -30,9 +30,33 @@ class AttioClient:
                 break
             offset += limit
 
+    
+    def fetch_all_records_of_object(self, url: str, client: requests.Session, limit: int = 100, params = None):
+        if params is None:
+            params = {}
+        offset = 0
+        while True:
+            query_params = {**params, "limit": limit, "offset": offset}
+            response = client.post(url, headers=self.headers, params=query_params)
+         
+            data = response.json()["data"]
+            if not data:
+                break
+
+            for item in data:
+                created_at = pendulum.parse(item["created_at"])
+                item["partition_dt"] = created_at.date()
+                yield item
+
+            if len(data) < limit:
+                break
+            offset += limit
+
 def flat_attributes(item: dict) -> dict:
     item["workspace_id"] = item["id"]["workspace_id"]
     item["object_id"] = item["id"]["object_id"]
     created_at = pendulum.parse(item["created_at"])
     item["partition_dt"] = created_at.date()
     return item
+
+
