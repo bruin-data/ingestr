@@ -120,6 +120,7 @@ class SourceDestinationFactory:
     sources: Dict[str, Type[SourceProtocol]] = {
         "csv": LocalCsvSource,
         "mongodb": MongoDbSource,
+        "mongodb+srv": MongoDbSource,
         "notion": NotionSource,
         "gsheets": GoogleSheetsSource,
         "shopify": ShopifySource,
