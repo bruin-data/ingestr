@@ -34,7 +34,7 @@ class AttioClient:
                 break
             offset += limit
 
-    def fetch_all_records_of_object(
+    def fetch_all_records(
         self, url: str, client: requests.Session, limit: int = 1000, params=None
     ):
         if params is None:
@@ -64,5 +64,7 @@ def flat_attributes(item: dict) -> dict:
         item["record_id"] = item["id"]["record_id"]
     if item["id"].get("list_id") is not None:
         item["list_id"] = item["id"]["list_id"]
+    if item["id"].get("entry_id") is not None:
+        item["entry_id"] = item["id"]["entry_id"]
     item["partition_dt"] = pendulum.parse(item["created_at"]).date()  # type: ignore
     return item

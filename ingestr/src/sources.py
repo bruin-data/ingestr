@@ -2408,8 +2408,9 @@ class AttioSource:
 
         table_name = table.replace(" ", "").split(":")
         object_id = None
+        list_id = None
 
-        if table_name[0] not in ["objects", "records", "lists"]:
+        if table_name[0] not in ["objects", "records", "lists", "list_entries"]:
             raise UnsupportedResourceError(table_name, "Attio")
 
         if table_name[0] == "records":
@@ -2418,10 +2419,17 @@ class AttioSource:
                     "Records table must be in the format `records:object_id`"
                 )
             object_id = table_name[1]
+        elif table_name[0] == "list_entries":
+            if len(table_name) != 2:
+                raise ValueError(
+                    "Lists table must be in the format `list_entries:list_id`"
+                )
+            list_id = table_name[1]
 
         from ingestr.src.attio import attio_source
 
         return attio_source(
             api_key=api_key[0],
             object_id=object_id,
+            list_id=list_id,
         ).with_resources(table_name[0])

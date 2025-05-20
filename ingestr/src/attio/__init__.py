@@ -28,6 +28,7 @@ def retry_on_limit(
 def attio_source(
     api_key: str,
     object_id: str | None,
+    list_id: str | None,
 ) -> Iterable[DltResource]:
     base_url = "https://api.attio.com/v2"
 
@@ -56,7 +57,7 @@ def attio_source(
         url = f"{base_url}/objects/{object_id}/records/query"
         attio_client = AttioClient(api_key)
 
-        yield attio_client.fetch_all_records_of_object(url, create_client())
+        yield attio_client.fetch_all_records(url, create_client())
 
     @dlt.resource(
         name="lists",
@@ -71,4 +72,17 @@ def attio_source(
         attio_client = AttioClient(api_key)
         yield attio_client.fetch_attributes(url, create_client())
 
-    return fetch_objects, fetch_records, fetch_lists
+    @dlt.resource(
+        name="list_entries",
+        primary_key=["workspace_id", "list_id", "entry_id"],
+        write_disposition="merge",
+        columns={
+            "partition_dt": {"data_type": "date", "partition": True},
+        },
+    )
+    def fetch_list_entries() -> Iterator[dict]:
+        url = f"{base_url}/lists/{list_id}/entries/query"
+        attio_client = AttioClient(api_key)
+        yield attio_client.fetch_all_records(url, create_client())
+
+    return fetch_objects, fetch_records, fetch_lists, fetch_list_entries
