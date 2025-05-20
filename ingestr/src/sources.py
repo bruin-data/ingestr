@@ -2409,7 +2409,7 @@ class AttioSource:
         table_name = table.replace(" ", "").split(":")
         object_id = None
 
-        if table_name[0] not in ["objects", "records"]:
+        if table_name[0] not in ["objects", "records", "lists"]:
             raise UnsupportedResourceError(table_name, "Attio")
 
         if table_name[0] == "records":

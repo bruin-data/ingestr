@@ -42,7 +42,7 @@ def attio_source(
     def fetch_objects() -> Iterator[dict]:
         url = f"{base_url}/objects"
         attio_client = AttioClient(api_key)
-        yield attio_client.fetch_all_objects(url, create_client())
+        yield attio_client.fetch_attributes(url, create_client())
 
     @dlt.resource(
         name="records",
@@ -58,4 +58,17 @@ def attio_source(
 
         yield attio_client.fetch_all_records_of_object(url, create_client())
 
-    return fetch_objects, fetch_records
+    @dlt.resource(
+        name="lists",
+        primary_key=["workspace_id", "list_id"],
+        write_disposition="merge",
+        columns={
+            "partition_dt": {"data_type": "date", "partition": True},
+        },
+    )
+    def fetch_lists() -> Iterator[dict]:
+        url = f"{base_url}/lists"
+        attio_client = AttioClient(api_key)
+        yield attio_client.fetch_attributes(url, create_client())
+
+    return fetch_objects, fetch_records, fetch_lists

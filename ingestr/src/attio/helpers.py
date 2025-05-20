@@ -12,8 +12,8 @@ class AttioClient:
             "Authorization": f"Bearer {self.api_key}",
         }
 
-    def fetch_all_objects(
-        self, url: str, client: requests.Session, limit: int = 100, params=None
+    def fetch_attributes(
+        self, url: str, client: requests.Session, limit: int = 1000, params=None
     ):
         if params is None:
             params = {}
@@ -58,8 +58,11 @@ class AttioClient:
 
 def flat_attributes(item: dict) -> dict:
     item["workspace_id"] = item["id"]["workspace_id"]
-    item["object_id"] = item["id"]["object_id"]
+    if item["id"].get("object_id") is not None:
+        item["object_id"] = item["id"]["object_id"]
     if item["id"].get("record_id") is not None:
         item["record_id"] = item["id"]["record_id"]
+    if item["id"].get("list_id") is not None:
+        item["list_id"] = item["id"]["list_id"]
     item["partition_dt"] = pendulum.parse(item["created_at"]).date()  # type: ignore
     return item
