@@ -2392,7 +2392,7 @@ class ElasticsearchSource:
             verify_certs=verify_certs,
             incremental=incremental,
         ).with_resources(table)
-    
+
 
 class AttioSource:
     def handles_incrementality(self) -> bool:
@@ -2402,16 +2402,26 @@ class AttioSource:
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
         api_key = params.get("api_key")
-        
+
         if api_key is None:
             raise MissingValueError("api_key", "Attio")
-        
-        table_name = table.replace(" ", "")
 
-        if table_name not in ["objects", "records"]:
+        table_name = table.replace(" ", "").split(":")
+        object_id = None
+
+        if table_name[0] not in ["objects", "records"]:
             raise UnsupportedResourceError(table_name, "Attio")
 
+        if table_name[0] == "records":
+            if len(table_name) != 2:
+                raise ValueError(
+                    "Records table must be in the format `records:object_id`"
+                )
+            object_id = table_name[1]
+
         from ingestr.src.attio import attio_source
+
         return attio_source(
             api_key=api_key[0],
-        ).with_resources(table_name)
+            object_id=object_id,
+        ).with_resources(table_name[0])
