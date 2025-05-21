@@ -31,32 +31,25 @@ class AttioClient:
 
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code} error: {response.text}")
-            
+
             response_data = response.json()
             if "data" not in response_data:
-                raise Exception(f"Attio API returned a response without the expected data")
-            
+                raise Exception(
+                    "Attio API returned a response without the expected data"
+                )
+
             data = response_data["data"]
 
             for item in data:
-                flat_item = flat_attributes(item)
+                flat_item = flatten_item(item)
                 yield flat_item
 
             if len(data) < limit:
                 break
             offset += limit
 
-        
 
-def flat_attributes(item: dict) -> dict:
-    item["workspace_id"] = item["id"]["workspace_id"]
-    if item["id"].get("object_id") is not None:
-        item["object_id"] = item["id"]["object_id"]
-    if item["id"].get("record_id") is not None:
-        item["record_id"] = item["id"]["record_id"]
-    if item["id"].get("list_id") is not None:
-        item["list_id"] = item["id"]["list_id"]
-    if item["id"].get("entry_id") is not None:
-        item["entry_id"] = item["id"]["entry_id"]
-    item["created_at"] = pendulum.parse(item["created_at"])  # type: ignore
+def flatten_item(item: dict) -> dict:
+    for key, value in item["id"].items():
+        item[key] = value
     return item
