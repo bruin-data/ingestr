@@ -1,16 +1,13 @@
-import pendulum
-
-from ..utility import create_client
+from ingestr.src.http_client import create_client
 
 base_url = "https://api.attio.com/v2"
 
 
 class AttioClient:
     def __init__(self, api_key: str):
-        self.api_key = api_key
         self.headers = {
             "Accept": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
         }
         self.client = create_client()
 
@@ -34,6 +31,7 @@ class AttioClient:
 
             response_data = response.json()
             if "data" not in response_data:
+                print(f"API Response: {response_data}") 
                 raise Exception(
                     "Attio API returned a response without the expected data"
                 )
