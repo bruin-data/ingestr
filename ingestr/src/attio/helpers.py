@@ -1,8 +1,5 @@
 from ingestr.src.http_client import create_client
 
-base_url = "https://api.attio.com/v2"
-
-
 class AttioClient:
     def __init__(self, api_key: str):
         self.headers = {

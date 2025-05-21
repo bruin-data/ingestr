@@ -21,6 +21,7 @@ from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
 import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.extract import Incremental
+from dlt.extract.exceptions import ResourcesNotFoundError
 from dlt.sources import incremental as dlt_incremental
 from dlt.sources.credentials import (
     ConnectionStringCredentials,
@@ -2412,6 +2413,9 @@ class AttioSource:
 
         from ingestr.src.attio import attio_source
 
-        return attio_source(api_key=api_key[0], params=params).with_resources(
-            table_name
-        )
+        try:
+            return attio_source(api_key=api_key[0], params=params).with_resources(
+                table_name
+            )
+        except ResourcesNotFoundError:
+            raise UnsupportedResourceError(table_name, "Attio")
