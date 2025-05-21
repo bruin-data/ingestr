@@ -2400,48 +2400,27 @@ class AttioSource:
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
-        params = parse_qs(parsed_uri.query)
-        api_key = params.get("api_key")
+        query_params = parse_qs(parsed_uri.query)
+        api_key = query_params.get("api_key")
 
         if api_key is None:
             raise MissingValueError("api_key", "Attio")
 
-        table_name = table.replace(" ", "").split(":")
-        object_id = None
-        list_id = None
+        parts = table.replace(" ", "").split(":")
+        table_name = parts[0]
+        params = parts[1:]
 
-        if table_name[0] not in [
+        if table_name not in [
             "objects",
             "records",
             "lists",
             "list_entries",
             "all_list_entries",
         ]:
-            raise UnsupportedResourceError(table_name, "Attio")
-
-        if table_name[0] == "records":
-            if len(table_name) != 2:
-                raise ValueError(
-                    "Records table must be in the format `records:object_api_slug`"
-                )
-            object_id = table_name[1]
-        elif table_name[0] == "list_entries":
-            if len(table_name) != 2:
-                raise ValueError(
-                    "Lists table must be in the format `list_entries:list_id`"
-                )
-            list_id = table_name[1]
-        elif table_name[0] == "all_list_entries":
-            if len(table_name) != 2:
-                raise ValueError(
-                    "All list entries table must be in the format `all_list_entries:object_api_slug`"
-                )
-            object_id = table_name[1]
+            raise UnsupportedResourceError(table, "Attio")
 
         from ingestr.src.attio import attio_source
 
-        return attio_source(
-            api_key=api_key[0],
-            object_id=object_id,
-            list_id=list_id,
-        ).with_resources(table_name[0])
+        return attio_source(api_key=api_key[0], params=params).with_resources(
+            table_name
+        )

@@ -1,5 +1,6 @@
 import pendulum
-import requests
+
+from ..utility import create_client
 
 base_url = "https://api.attio.com/v2"
 
@@ -11,18 +12,27 @@ class AttioClient:
             "Accept": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
+        self.client = create_client()
 
-    def fetch_attributes(
-        self, url: str, client: requests.Session, limit: int = 1000, params=None
-    ):
+    def fetch_attributes(self, url: str, method: str, limit: int = 1000, params=None):
         if params is None:
             params = {}
         offset = 0
         while True:
             query_params = {**params, "limit": limit, "offset": offset}
-            response = client.get(url, headers=self.headers, params=query_params)
+            if method == "get":
+                response = self.client.get(
+                    url, headers=self.headers, params=query_params
+                )
+            else:
+                response = self.client.post(
+                    url, headers=self.headers, params=query_params
+                )
 
-            data = response.json()["data"]
+            response_data = response.json()
+            if "data" not in response_data:
+                break
+            data = response_data["data"]
             if not data:
                 break
 
@@ -34,35 +44,12 @@ class AttioClient:
                 break
             offset += limit
 
-    def fetch_all_records(
-        self, url: str, client: requests.Session, limit: int = 1000, params=None
-    ):
-        if params is None:
-            params = {}
-        offset = 0
-        while True:
-            query_params = {**params, "limit": limit, "offset": offset}
-            response = client.post(url, headers=self.headers, params=query_params)
-            data = response.json()["data"]
-            if not data:
-                break
-
-            for item in data:
-                flat_item = flat_attributes(item)
-                yield flat_item
-
-            if len(data) < limit:
-                break
-            offset += limit
-
-    def fetch_all_list_entries_for_object(
-        self, client: requests.Session, object_id: str | None
-    ):
+    def fetch_all_list_entries_for_object(self, object_id: str | None):
         url = f"{base_url}/lists"
-        for lst in self.fetch_attributes(url, client):
+        for lst in self.fetch_attributes(url, "get"):
             if object_id in lst["parent_object"]:
                 url = f"{base_url}/lists/{lst['id']['list_id']}/entries/query"
-                for entry in self.fetch_all_records(url, client):
+                for entry in self.fetch_attributes(url, "post"):
                     yield entry
 
 
@@ -76,5 +63,5 @@ def flat_attributes(item: dict) -> dict:
         item["list_id"] = item["id"]["list_id"]
     if item["id"].get("entry_id") is not None:
         item["entry_id"] = item["id"]["entry_id"]
-    item["partition_dt"] = pendulum.parse(item["created_at"]).date()  # type: ignore
+    item["created_at"] = pendulum.parse(item["created_at"])  # type: ignore
     return item
