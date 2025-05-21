@@ -114,6 +114,7 @@ export default defineConfig({
               { text: "Applovin", link: "/supported-sources/applovin.md"},
               { text: "Applovin Max", link: "/supported-sources/applovin_max.md"},
               { text: "Asana", link: "/supported-sources/asana.md" },
+              { text: "Attio", link: "/supported-sources/attio.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               {
                 text: "Facebook Ads",
