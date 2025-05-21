@@ -37,8 +37,6 @@ class AttioClient:
                 raise Exception(f"Attio API returned a response without the expected data")
             
             data = response_data["data"]
-            if not data:
-                break
 
             for item in data:
                 flat_item = flat_attributes(item)
@@ -48,6 +46,7 @@ class AttioClient:
                 break
             offset += limit
 
+        
 
 def flat_attributes(item: dict) -> dict:
     item["workspace_id"] = item["id"]["workspace_id"]
