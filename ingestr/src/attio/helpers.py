@@ -29,9 +29,13 @@ class AttioClient:
                     url, headers=self.headers, params=query_params
                 )
 
+            if response.status_code != 200:
+                raise Exception(f"HTTP {response.status_code} error: {response.text}")
+            
             response_data = response.json()
             if "data" not in response_data:
-                break
+                raise Exception(f"Attio API returned a response without the expected data")
+            
             data = response_data["data"]
             if not data:
                 break
