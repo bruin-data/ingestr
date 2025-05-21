@@ -16,8 +16,7 @@ def attio_source(
 
     @dlt.resource(
         name="objects",
-        primary_key=["workspace_id", "object_id"],
-        write_disposition="merge",
+        write_disposition="replace",
         columns={
             "created_at": {"data_type": "timestamp", "partition": True},
         },
@@ -31,8 +30,7 @@ def attio_source(
 
     @dlt.resource(
         name="records",
-        primary_key=["workspace_id", "object_id", "record_id"],
-        write_disposition="merge",
+        write_disposition="replace",
         columns={
             "created_at": {"data_type": "timestamp", "partition": True},
         },
@@ -50,8 +48,7 @@ def attio_source(
 
     @dlt.resource(
         name="lists",
-        primary_key=["workspace_id", "list_id"],
-        write_disposition="merge",
+        write_disposition="replace",
         columns={
             "created_at": {"data_type": "timestamp", "partition": True},
         },
@@ -62,8 +59,7 @@ def attio_source(
 
     @dlt.resource(
         name="list_entries",
-        primary_key=["workspace_id", "list_id", "entry_id"],
-        write_disposition="merge",
+        write_disposition="replace",
         columns={
             "created_at": {"data_type": "timestamp", "partition": True},
         },
@@ -79,8 +75,7 @@ def attio_source(
 
     @dlt.resource(
         name="all_list_entries",
-        primary_key=["workspace_id", "list_id", "entry_id"],
-        write_disposition="merge",
+        write_disposition="replace",
         columns={
             "created_at": {"data_type": "timestamp", "partition": True},
         },
