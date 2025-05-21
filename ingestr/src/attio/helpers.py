@@ -50,6 +50,7 @@ class AttioClient:
 
 
 def flatten_item(item: dict) -> dict:
-    for key, value in item["id"].items():
-        item[key] = value
+    if "id" in item:
+        for key, value in item["id"].items():
+            item[key] = value
     return item
