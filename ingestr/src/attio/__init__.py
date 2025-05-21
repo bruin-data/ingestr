@@ -85,4 +85,16 @@ def attio_source(
         attio_client = AttioClient(api_key)
         yield attio_client.fetch_all_records(url, create_client())
 
-    return fetch_objects, fetch_records, fetch_lists, fetch_list_entries
+    @dlt.resource(
+        name="all_list_entries",
+        primary_key=["workspace_id", "list_id", "entry_id"],
+        write_disposition="merge",
+        columns={
+            "partition_dt": {"data_type": "date", "partition": True},
+        },
+    )
+    def fetch_all_list_entries() -> Iterator[dict]:
+        attio_client = AttioClient(api_key)
+        yield attio_client.fetch_all_list_entries_for_object(create_client(), object_id)
+
+    return fetch_objects, fetch_records, fetch_lists, fetch_list_entries, fetch_all_list_entries

@@ -56,6 +56,14 @@ class AttioClient:
             offset += limit
 
 
+    def fetch_all_list_entries_for_object(self, client: requests.Session, object_id: str):
+        url = f"{base_url}/lists"
+        for lst in self.fetch_attributes(url, client):
+            if object_id in lst["parent_object"]:
+                url = f"{base_url}/lists/{lst['id']['list_id']}/entries/query"
+                for entry in self.fetch_all_records(url, client):
+                    yield entry
+        
 def flat_attributes(item: dict) -> dict:
     item["workspace_id"] = item["id"]["workspace_id"]
     if item["id"].get("object_id") is not None:

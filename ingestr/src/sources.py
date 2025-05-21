@@ -2410,13 +2410,13 @@ class AttioSource:
         object_id = None
         list_id = None
 
-        if table_name[0] not in ["objects", "records", "lists", "list_entries"]:
+        if table_name[0] not in ["objects", "records", "lists", "list_entries","all_list_entries"]:
             raise UnsupportedResourceError(table_name, "Attio")
 
         if table_name[0] == "records":
             if len(table_name) != 2:
                 raise ValueError(
-                    "Records table must be in the format `records:object_id`"
+                    "Records table must be in the format `records:object_api_slug`"
                 )
             object_id = table_name[1]
         elif table_name[0] == "list_entries":
@@ -2425,6 +2425,13 @@ class AttioSource:
                     "Lists table must be in the format `list_entries:list_id`"
                 )
             list_id = table_name[1]
+        elif table_name[0] == "all_list_entries":
+            if len(table_name) != 2:
+                raise ValueError(
+                    "All list entries table must be in the format `all_list_entries:object_api_slug`"
+                )
+            object_id = table_name[1]
+            
 
         from ingestr.src.attio import attio_source
 
