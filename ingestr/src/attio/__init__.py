@@ -26,7 +26,7 @@ def attio_source(
             raise ValueError("Objects table must be in the format `objects`")
 
         url = f"{base_url}/objects"
-        yield attio_client.fetch_attributes(url, "get")
+        yield attio_client.fetch_data(url, "get")
 
     @dlt.resource(
         name="records",
@@ -44,7 +44,7 @@ def attio_source(
         object_id = params[0]
         url = f"{base_url}/objects/{object_id}/records/query"
 
-        yield attio_client.fetch_attributes(url, "post")
+        yield attio_client.fetch_data(url, "post")
 
     @dlt.resource(
         name="lists",
@@ -55,7 +55,7 @@ def attio_source(
     )
     def fetch_lists() -> Iterator[dict]:
         url = f"{base_url}/lists"
-        yield attio_client.fetch_attributes(url, "get")
+        yield attio_client.fetch_data(url, "get")
 
     @dlt.resource(
         name="list_entries",
@@ -71,7 +71,7 @@ def attio_source(
             )
         url = f"{base_url}/lists/{params[0]}/entries/query"
 
-        yield attio_client.fetch_attributes(url, "post")
+        yield attio_client.fetch_data(url, "post")
 
     @dlt.resource(
         name="all_list_entries",
@@ -86,11 +86,11 @@ def attio_source(
                 "All list entries table must be in the format `all_list_entries:{object_api_slug}`"
             )
         url = f"{base_url}/lists"
-        for lst in attio_client.fetch_attributes(url, "get"):
+        for lst in attio_client.fetch_data(url, "get"):
             if params[0] in lst["parent_object"]:
                 url = f"{base_url}/lists/{lst['id']['list_id']}/entries/query"
-                yield from attio_client.fetch_attributes(url, "post")
-                   
+                yield from attio_client.fetch_data(url, "post")
+
     return (
         fetch_objects,
         fetch_records,

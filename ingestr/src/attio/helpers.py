@@ -14,7 +14,7 @@ class AttioClient:
         }
         self.client = create_client()
 
-    def fetch_attributes(self, url: str, method: str, limit: int = 1000, params=None):
+    def fetch_data(self, url: str, method: str, limit: int = 1000, params=None):
         if params is None:
             params = {}
         offset = 0
