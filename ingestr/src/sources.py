@@ -2410,15 +2410,6 @@ class AttioSource:
         table_name = parts[0]
         params = parts[1:]
 
-        if table_name not in [
-            "objects",
-            "records",
-            "lists",
-            "list_entries",
-            "all_list_entries",
-        ]:
-            raise UnsupportedResourceError(table, "Attio")
-
         from ingestr.src.attio import attio_source
 
         return attio_source(api_key=api_key[0], params=params).with_resources(
