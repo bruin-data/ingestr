@@ -97,4 +97,10 @@ def attio_source(
         attio_client = AttioClient(api_key)
         yield attio_client.fetch_all_list_entries_for_object(create_client(), object_id)
 
-    return fetch_objects, fetch_records, fetch_lists, fetch_list_entries, fetch_all_list_entries
+    return (
+        fetch_objects,
+        fetch_records,
+        fetch_lists,
+        fetch_list_entries,
+        fetch_all_list_entries,
+    )
