@@ -48,14 +48,6 @@ class AttioClient:
                 break
             offset += limit
 
-    def fetch_all_list_entries_for_object(self, object_id: str | None):
-        url = f"{base_url}/lists"
-        for lst in self.fetch_attributes(url, "get"):
-            if object_id in lst["parent_object"]:
-                url = f"{base_url}/lists/{lst['id']['list_id']}/entries/query"
-                for entry in self.fetch_attributes(url, "post"):
-                    yield entry
-
 
 def flat_attributes(item: dict) -> dict:
     item["workspace_id"] = item["id"]["workspace_id"]

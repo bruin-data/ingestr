@@ -85,8 +85,12 @@ def attio_source(
             raise ValueError(
                 "All list entries table must be in the format `all_list_entries:{object_api_slug}`"
             )
-        yield attio_client.fetch_all_list_entries_for_object(params[0])
-
+        url = f"{base_url}/lists"
+        for lst in attio_client.fetch_attributes(url, "get"):
+            if params[0] in lst["parent_object"]:
+                url = f"{base_url}/lists/{lst['id']['list_id']}/entries/query"
+                yield from attio_client.fetch_attributes(url, "post")
+                   
     return (
         fetch_objects,
         fetch_records,
