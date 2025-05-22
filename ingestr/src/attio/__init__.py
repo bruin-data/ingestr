@@ -11,7 +11,7 @@ def attio_source(
     api_key: str,
     params: list[str],
 ) -> Iterable[DltResource]:
-    base_url = "https://api.attio.com/v2"
+    
     attio_client = AttioClient(api_key)
 
     @dlt.resource(
@@ -25,8 +25,8 @@ def attio_source(
         if len(params) != 0:
             raise ValueError("Objects table must be in the format `objects`")
 
-        url = f"{base_url}/objects"
-        yield attio_client.fetch_data(url, "get")
+        path = "objects"
+        yield attio_client.fetch_data(path, "get")
 
     @dlt.resource(
         name="records",
@@ -42,9 +42,9 @@ def attio_source(
             )
 
         object_id = params[0]
-        url = f"{base_url}/objects/{object_id}/records/query"
+        path = f"objects/{object_id}/records/query"
 
-        yield attio_client.fetch_data(url, "post")
+        yield attio_client.fetch_data(path, "post")
 
     @dlt.resource(
         name="lists",
@@ -54,8 +54,8 @@ def attio_source(
         },
     )
     def fetch_lists() -> Iterator[dict]:
-        url = f"{base_url}/lists"
-        yield attio_client.fetch_data(url, "get")
+        path = "lists"
+        yield attio_client.fetch_data(path, "get")
 
     @dlt.resource(
         name="list_entries",
@@ -69,9 +69,9 @@ def attio_source(
             raise ValueError(
                 "List entries table must be in the format `list_entries:{list_id}`"
             )
-        url = f"{base_url}/lists/{params[0]}/entries/query"
+        path = f"lists/{params[0]}/entries/query"
 
-        yield attio_client.fetch_data(url, "post")
+        yield attio_client.fetch_data(path, "post")
 
     @dlt.resource(
         name="all_list_entries",
@@ -85,11 +85,11 @@ def attio_source(
             raise ValueError(
                 "All list entries table must be in the format `all_list_entries:{object_api_slug}`"
             )
-        url = f"{base_url}/lists"
-        for lst in attio_client.fetch_data(url, "get"):
+        path = "lists"
+        for lst in attio_client.fetch_data(path, "get"):
             if params[0] in lst["parent_object"]:
-                url = f"{base_url}/lists/{lst['id']['list_id']}/entries/query"
-                yield from attio_client.fetch_data(url, "post")
+                path = f"lists/{lst['id']['list_id']}/entries/query"
+                yield from attio_client.fetch_data(path, "post")
 
     return (
         fetch_objects,

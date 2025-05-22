@@ -1,14 +1,17 @@
 from ingestr.src.http_client import create_client
 
+
 class AttioClient:
     def __init__(self, api_key: str):
+        self.base_url = "https://api.attio.com/v2"
         self.headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {api_key}",
         }
         self.client = create_client()
 
-    def fetch_data(self, url: str, method: str, limit: int = 1000, params=None):
+    def fetch_data(self, path: str, method: str, limit: int = 1000, params=None):
+        url = f"{self.base_url}/{path}"
         if params is None:
             params = {}
         offset = 0
@@ -28,7 +31,7 @@ class AttioClient:
 
             response_data = response.json()
             if "data" not in response_data:
-                print(f"API Response: {response_data}") 
+                print(f"API Response: {response_data}")
                 raise Exception(
                     "Attio API returned a response without the expected data"
                 )
