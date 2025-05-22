@@ -26,6 +26,7 @@ from ingestr.src.sources import (
     AppsflyerSource,
     ArrowMemoryMappedSource,
     AsanaSource,
+    AttioSource,
     ChessSource,
     DynamoDBSource,
     ElasticsearchSource,
@@ -157,6 +158,7 @@ class SourceDestinationFactory:
         "freshdesk": FreshdeskSource,
         "phantombuster": PhantombusterSource,
         "elasticsearch": ElasticsearchSource,
+        "attio": AttioSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
