@@ -413,6 +413,10 @@ class S3Destination:
             raise MissingValueError("secret_access_key", "S3")
 
         endpoint_url = params.get("endpoint_url", [None])[0]
+        if endpoint_url is not None:
+            parsed_endpoint = urlparse(endpoint_url)
+            if not parsed_endpoint.scheme or not parsed_endpoint.netloc:
+                raise ValueError("Invalid endpoint_url. Must be a valid URL.")
 
         creds = AwsCredentials(
             aws_access_key_id=access_key_id,
@@ -420,8 +424,21 @@ class S3Destination:
             endpoint_url=endpoint_url,
         )
 
-        dest_table = self.validate_table(kwargs["dest_table"])
+        dest_table = kwargs["dest_table"]
+
+        # only validate if dest_table is not a full URI
+        if not parsed_uri.netloc:
+            dest_table = self.validate_table(dest_table)
+
         table_parts = dest_table.split("/")
+
+        if parsed_uri.path.strip("/"):
+            path_parts = parsed_uri.path.strip("/ ").split("/")
+            table_parts = path_parts + table_parts
+
+        if parsed_uri.netloc:
+            table_parts.insert(0, parsed_uri.netloc.strip())
+            
         base_path = "/".join(table_parts[:-1])
 
         opts = {
@@ -444,10 +461,9 @@ class S3Destination:
         return table
 
     def dlt_run_params(self, uri: str, table: str, **kwargs):
-        table = self.validate_table(table)
         table_parts = table.split("/")
         return {
-            "table_name": table_parts[-1],
+            "table_name": table_parts[-1].strip(),
         }
 
     def post_load(self) -> None:
