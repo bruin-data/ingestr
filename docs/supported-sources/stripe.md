@@ -43,6 +43,7 @@ Stripe source allows ingesting the following sources into separate tables:
 - `balancetransaction`: Records transactions that affect the Stripe account balance, such as charges, refunds, and payouts.
 - `invoice`: Represents invoices sent to customers, detailing line items, amounts, and payment status.
 - `event`: Logs all events in the Stripe account, including customer actions, account updates, and system-generated events.
+- `charge`: Returns a list of charges.
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
