@@ -702,6 +702,7 @@ class StripeAnalyticsSource:
             "BalanceTransaction",
             "Invoice",
             "Event",
+            "Charge",
         ]:
             endpoint = table
         else:
