@@ -715,6 +715,14 @@ class StripeAnalyticsSource:
             "Invoice",
             "Event",
             "Charge",
+            "CustomerBalanceTransaction",
+            "ApplicationFee",
+            "SetupAttempt",
+            "ShippingRate",
+            "Dispute",
+            "SubscriptionItem",
+            "CheckoutSession",
+            "CreditNote",
         ]:
             endpoint = table
         else:

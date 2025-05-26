@@ -9,6 +9,19 @@ ENDPOINTS = (
     "Customer",
     "Product",
     "Price",
+    "ShippingRate",
+    "Dispute",
+    "SubscriptionItem",
+    "CheckoutSession",
 )
 # possible incremental endpoints
-INCREMENTAL_ENDPOINTS = ("Event", "Invoice", "BalanceTransaction", "Charge")
+INCREMENTAL_ENDPOINTS = (
+    "Event",
+    "Invoice",
+    "BalanceTransaction",
+    "Charge",
+    "CustomerBalanceTransaction",
+    "ApplicationFee",
+    "SetupAttempt",
+    "CreditNote",
+)
