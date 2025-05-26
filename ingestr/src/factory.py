@@ -16,6 +16,7 @@ from ingestr.src.destinations import (
     S3Destination,
     SnowflakeDestination,
     SynapseDestination,
+    SqliteDestination,
 )
 from ingestr.src.sources import (
     AdjustSource,
@@ -159,6 +160,7 @@ class SourceDestinationFactory:
         "phantombuster": PhantombusterSource,
         "elasticsearch": ElasticsearchSource,
         "attio": AttioSource,
+        "sqlite": SqliteDestination,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
