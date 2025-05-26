@@ -11,7 +11,6 @@ def attio_source(
     api_key: str,
     params: list[str],
 ) -> Iterable[DltResource]:
-    
     attio_client = AttioClient(api_key)
 
     @dlt.resource(
