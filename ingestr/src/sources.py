@@ -70,6 +70,8 @@ class SqlSource:
                 range_start="closed",
             )
 
+        engine_adapter_callback = None
+
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
@@ -155,6 +157,11 @@ class SqlSource:
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp.name
 
             uri = f"spanner+spanner:///projects/{project_id}/instances/{instance_id}/databases/{database}"
+
+            def eng_callback(engine):
+                return engine.execution_options(read_only=True)
+
+            engine_adapter_callback = eng_callback
 
         from dlt.common.libs.sql_alchemy import (
             Engine,
@@ -288,6 +295,7 @@ class SqlSource:
                 kwargs.get("sql_exclude_columns", [])
             ),
             defer_table_reflect=defer_table_reflect,
+            engine_adapter_callback=engine_adapter_callback,
         )
 
         return builder_res
