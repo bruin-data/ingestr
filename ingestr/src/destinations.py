@@ -438,7 +438,7 @@ class S3Destination:
 
         if parsed_uri.netloc:
             table_parts.insert(0, parsed_uri.netloc.strip())
-            
+
         base_path = "/".join(table_parts[:-1])
 
         opts = {

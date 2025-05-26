@@ -1,6 +1,7 @@
 import requests
 from dlt.sources.helpers.requests import Client
 
+
 def create_client() -> requests.Session:
     return Client(
         raise_for_status=False,

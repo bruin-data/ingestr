@@ -3484,6 +3484,7 @@ def test_mongodb_source(dest):
         dest.stop()
         mongo.stop()
 
+
 def test_s3_destination():
     # should raise an error if endpoint_url doesn't have a scheme or a host
     with pytest.raises(ValueError, match="Invalid endpoint_url"):
