@@ -2449,11 +2449,11 @@ class SolidgateSource:
         if secret_key is None:
             raise MissingValueError("secret_key", "Solidgate")
 
-        table_name = table.replace(" ", "").split(":")[0]
+        table_name = table.replace(" ", "")
 
         start_date = kwargs.get("interval_start")
         if start_date is None:
-            start_date = ensure_pendulum_datetime("yesterday").in_tz("UTC")
+            start_date = pendulum.yesterday().in_tz("UTC")
         else:
             start_date = ensure_pendulum_datetime(start_date).in_tz("UTC")
 
