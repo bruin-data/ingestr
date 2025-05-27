@@ -698,7 +698,6 @@ class StripeAnalyticsSource:
             raise ValueError("api_key in the URI is required to connect to Stripe")
 
         endpoint = None
-        table = str.capitalize(table)
 
         if table in [
             "Subscription",
