@@ -21,7 +21,10 @@ class SolidgateClient:
         date_from: pendulum.DateTime,
         date_to: pendulum.DateTime,
     ):
-        request_payload = {"date_from": date_from.format("YYYY-MM-DD HH:mm:ss"), "date_to": date_to.format("YYYY-MM-DD HH:mm:ss")}
+        request_payload = {
+            "date_from": date_from.format("YYYY-MM-DD HH:mm:ss"),
+            "date_to": date_to.format("YYYY-MM-DD HH:mm:ss"),
+        }
         json_string = json.dumps(request_payload)
         signature = self.generateSignature(json_string)
 
@@ -49,11 +52,12 @@ class SolidgateClient:
                 print(f"API Response: {response_json}")
                 raise Exception(
                     "Solidgate API returned a response without the expected data"
-             
-               )
+                )
             for _, subscription in data.items():
                 if "updated_at" in subscription:
-                    subscription["updated_at"] = pendulum.parse(subscription["updated_at"])
+                    subscription["updated_at"] = pendulum.parse(
+                        subscription["updated_at"]
+                    )
                 yield subscription
 
             next_page_iterator = response_json.get("metadata", {}).get(

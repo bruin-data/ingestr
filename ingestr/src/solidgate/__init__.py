@@ -13,7 +13,6 @@ def solidgate_source(
     end_date: pendulum.DateTime | None,
     public_key: str,
     secret_key: str,
-   
 ) -> Iterable[DltResource]:
     solidgate_client = SolidgateClient(public_key, secret_key)
 
