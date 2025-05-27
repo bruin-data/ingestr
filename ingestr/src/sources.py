@@ -698,7 +698,11 @@ class StripeAnalyticsSource:
             raise ValueError("api_key in the URI is required to connect to Stripe")
 
         endpoint = None
-
+        if table == "balancetransaction":
+            table = "BalanceTransaction"
+        else:
+            table = table.capitalize()
+        
         if table in [
             "Subscription",
             "Account",
