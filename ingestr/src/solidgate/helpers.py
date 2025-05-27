@@ -46,19 +46,29 @@ class SolidgateClient:
             response.raise_for_status()
             response_json = response.json()
             print(response_json, "response_json")
-            data = response_json["subscriptions"]
-            print(data, "data")
-            if "subscriptions" not in response_json:
+            if path == "subscriptions":
+                data = response_json["subscriptions"]
+                for _, value in data.items():
+                    if "updated_at" in value:
+                        value["updated_at"] = pendulum.parse(
+                            value["updated_at"]
+                        )
+                    yield value
+            elif path == "apm-orders" or path == "card-orders":
+                data = response_json["orders"]
+                print(data, "data")
+                for value in data:
+                    if "updated_at" in value:
+                        value["updated_at"] = pendulum.parse(
+                        value["updated_at"]
+                    )
+                yield value
+            else:
                 print(f"API Response: {response_json}")
                 raise Exception(
                     "Solidgate API returned a response without the expected data"
                 )
-            for _, subscription in data.items():
-                if "updated_at" in subscription:
-                    subscription["updated_at"] = pendulum.parse(
-                        subscription["updated_at"]
-                    )
-                yield subscription
+            
 
             next_page_iterator = response_json.get("metadata", {}).get(
                 "next_page_iterator"

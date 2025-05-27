@@ -42,7 +42,7 @@ def solidgate_source(
     @dlt.resource(
         name="apm-orders",
         write_disposition="merge",
-        primary_key="id",
+        primary_key="order_id",
     )
     def fetch_apm_orders(
         dateTime=dlt.sources.incremental(
@@ -65,7 +65,7 @@ def solidgate_source(
     @dlt.resource(
         name="card-orders",
         write_disposition="merge",
-        primary_key="id",
+        primary_key="order_id",
     )
     def fetch_card_orders(
         dateTime=dlt.sources.incremental(
