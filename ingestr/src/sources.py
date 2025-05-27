@@ -702,7 +702,7 @@ class StripeAnalyticsSource:
             table = "BalanceTransaction"
         else:
             table = table.capitalize()
-        
+
         if table in [
             "Subscription",
             "Account",
