@@ -25,9 +25,9 @@ class SolidgateClient:
             "date_from": date_from.format("YYYY-MM-DD HH:mm:ss"),
             "date_to": date_to.format("YYYY-MM-DD HH:mm:ss"),
         }
+
         json_string = json.dumps(request_payload)
         signature = self.generateSignature(json_string)
-
         headers = {
             "merchant": self.public_key,
             "Signature": signature,
@@ -45,7 +45,7 @@ class SolidgateClient:
             response = self.client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             response_json = response.json()
-            print(response_json, "response_json")
+
             if path == "subscriptions":
                 data = response_json["subscriptions"]
                 for _, value in data.items():
@@ -54,21 +54,15 @@ class SolidgateClient:
                             value["updated_at"]
                         )
                     yield value
-            elif path == "apm-orders" or path == "card-orders":
+
+            else:
                 data = response_json["orders"]
-                print(data, "data")
                 for value in data:
                     if "updated_at" in value:
                         value["updated_at"] = pendulum.parse(
                         value["updated_at"]
                     )
                 yield value
-            else:
-                print(f"API Response: {response_json}")
-                raise Exception(
-                    "Solidgate API returned a response without the expected data"
-                )
-            
 
             next_page_iterator = response_json.get("metadata", {}).get(
                 "next_page_iterator"
