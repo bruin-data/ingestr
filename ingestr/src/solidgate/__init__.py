@@ -20,6 +20,9 @@ def solidgate_source(
         name="subscriptions",
         write_disposition="merge",
         primary_key="id",
+        columns={
+            "created_at": {"data_type": "timestamp", "partition": True},
+        },
     )
     def fetch_all_subscriptions(
         dateTime=dlt.sources.incremental(
@@ -43,6 +46,9 @@ def solidgate_source(
         name="apm-orders",
         write_disposition="merge",
         primary_key="order_id",
+        columns={
+            "created_at": {"data_type": "timestamp", "partition": True},
+        },
     )
     def fetch_apm_orders(
         dateTime=dlt.sources.incremental(
@@ -66,6 +72,9 @@ def solidgate_source(
         name="card-orders",
         write_disposition="merge",
         primary_key="order_id",
+        columns={
+            "created_at": {"data_type": "timestamp", "partition": True},
+        },
     )
     def fetch_card_orders(
         dateTime=dlt.sources.incremental(
