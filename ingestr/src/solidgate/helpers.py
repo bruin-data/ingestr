@@ -50,18 +50,14 @@ class SolidgateClient:
                 data = response_json["subscriptions"]
                 for _, value in data.items():
                     if "updated_at" in value:
-                        value["updated_at"] = pendulum.parse(
-                            value["updated_at"]
-                        )
+                        value["updated_at"] = pendulum.parse(value["updated_at"])
                     yield value
 
             else:
                 data = response_json["orders"]
                 for value in data:
                     if "updated_at" in value:
-                        value["updated_at"] = pendulum.parse(
-                        value["updated_at"]
-                    )
+                        value["updated_at"] = pendulum.parse(value["updated_at"])
                     yield value
 
             next_page_iterator = response_json.get("metadata", {}).get(

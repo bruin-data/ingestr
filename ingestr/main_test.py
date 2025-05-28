@@ -3610,3 +3610,44 @@ def test_s3_destination():
             uri="s3://?access_key_id=KEY&secret_access_key=SECRET&endpoint_url=localhost:9000",
             dest_table="bucket/test_table",
         )
+
+
+@pytest.mark.parametrize("stripe_table", ["subscription", "customer", "charge"])
+def test_stripe_source(stripe_table):
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    # Get Stripe token from environment
+    stripe_token = os.environ.get("INGESTR_TEST_STRIPE_TOKEN")
+    if not stripe_token:
+        pytest.skip("INGESTR_TEST_STRIPE_TOKEN not set")
+
+    # Create test database
+    dbname = f"test_stripe_{stripe_table}{get_random_string(5)}.db"
+    abs_db_path = get_abs_path(f"./testdata/{dbname}")
+    rel_db_path_to_command = f"ingestr/testdata/{dbname}"
+    uri = f"duckdb:///{rel_db_path_to_command}"
+
+    conn = duckdb.connect(abs_db_path)
+
+    # Run ingest command
+    result = invoke_ingest_command(
+        f"stripe://{stripe_table}s?api_key={stripe_token}",
+        stripe_table,
+        uri,
+        f"raw.{stripe_table}s",
+    )
+
+    assert result.exit_code == 0
+
+    # Verify data was loaded
+    res = conn.sql(f"select count(*) from raw.{stripe_table}s").fetchone()
+    assert res[0] > 0, f"No {stripe_table} records found"
+
+    # Clean up
+    try:
+        os.remove(abs_db_path)
+    except Exception:
+        pass
