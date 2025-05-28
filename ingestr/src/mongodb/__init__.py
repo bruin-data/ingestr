@@ -14,7 +14,7 @@ from .helpers import (
 )
 
 
-@dlt.source
+@dlt.source(max_table_nesting=0)
 def mongodb(
     connection_url: str = dlt.secrets.value,
     database: Optional[str] = dlt.config.value,
@@ -75,6 +75,7 @@ def mongodb(
             primary_key="_id",
             write_disposition=write_disposition,
             spec=MongoDbCollectionConfiguration,
+            max_table_nesting=0,
         )(
             client,
             collection,

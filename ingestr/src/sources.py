@@ -388,6 +388,7 @@ class MongoDbSource:
             parallel=True,
             incremental=incremental,
         )
+        table_instance.max_table_nesting = 0
 
         return table_instance
 
@@ -702,7 +703,7 @@ class StripeAnalyticsSource:
             table = "BalanceTransaction"
         else:
             table = table.capitalize()
-        
+
         if table in [
             "Subscription",
             "Account",
