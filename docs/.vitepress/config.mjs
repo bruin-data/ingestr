@@ -139,6 +139,7 @@ export default defineConfig({
               { text: "Salesforce", link: "/supported-sources/salesforce.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
               { text: "Slack", link: "/supported-sources/slack.md" },
+              { text: "Smartsheet", link: "/supported-sources/smartsheets.md" },
               { text: "Spanner", link: "/supported-sources/spanner.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
               { text: "TikTok Ads", link: "/supported-sources/tiktok-ads.md" },
