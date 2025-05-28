@@ -54,6 +54,7 @@ from ingestr.src.sources import (
     SalesforceSource,
     ShopifySource,
     SlackSource,
+    SolidgateSource,
     SqlSource,
     StripeAnalyticsSource,
     TikTokSource,
@@ -159,6 +160,7 @@ class SourceDestinationFactory:
         "phantombuster": PhantombusterSource,
         "elasticsearch": ElasticsearchSource,
         "attio": AttioSource,
+        "solidgate": SolidgateSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
