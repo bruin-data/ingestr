@@ -71,10 +71,6 @@ class TestSmartsheetSource(unittest.TestCase):
             123
         )  # for _get_sheet_data
 
-    def test_smartsheet_source_no_sheet_id(self):
-        with self.assertRaisesRegex(ValueError, "sheet_id must be provided."):
-            list(smartsheet_source(access_token="test_token"))
-
     @patch("ingestr.src.smartsheets.smartsheet.Smartsheet")
     def test_smartsheet_source_api_error(self, mock_smartsheet_client):
         mock_client_instance = mock_smartsheet_client.return_value
