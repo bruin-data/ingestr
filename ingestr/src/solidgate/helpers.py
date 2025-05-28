@@ -62,7 +62,7 @@ class SolidgateClient:
                         value["updated_at"] = pendulum.parse(
                         value["updated_at"]
                     )
-                yield value
+                    yield value
 
             next_page_iterator = response_json.get("metadata", {}).get(
                 "next_page_iterator"
