@@ -141,6 +141,7 @@ export default defineConfig({
               { text: "Slack", link: "/supported-sources/slack.md" },
               { text: "Smartsheet", link: "/supported-sources/smartsheets.md" },
               { text: "Spanner", link: "/supported-sources/spanner.md" },
+              { text: "Solidgate", link: "/supported-sources/solidgate.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
               { text: "TikTok Ads", link: "/supported-sources/tiktok-ads.md" },
               { text: "Zendesk", link: "/supported-sources/zendesk.md" },

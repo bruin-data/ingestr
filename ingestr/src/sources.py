@@ -698,7 +698,10 @@ class StripeAnalyticsSource:
             raise ValueError("api_key in the URI is required to connect to Stripe")
 
         endpoint = None
-        table = str.capitalize(table)
+        if table == "balancetransaction":
+            table = "BalanceTransaction"
+        else:
+            table = table.capitalize()
 
         if table in [
             "Subscription",
@@ -2459,3 +2462,44 @@ class SmartsheetSource:
             access_token=access_token[0],
             sheet_id=table,  # table is now a single sheet_id
         )
+
+class SolidgateSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        query_params = parse_qs(parsed_uri.query)
+        public_key = query_params.get("public_key")
+        secret_key = query_params.get("secret_key")
+
+        if public_key is None:
+            raise MissingValueError("public_key", "Solidgate")
+
+        if secret_key is None:
+            raise MissingValueError("secret_key", "Solidgate")
+
+        table_name = table.replace(" ", "")
+
+        start_date = kwargs.get("interval_start")
+        if start_date is None:
+            start_date = pendulum.yesterday().in_tz("UTC")
+        else:
+            start_date = ensure_pendulum_datetime(start_date).in_tz("UTC")
+
+        end_date = kwargs.get("interval_end")
+
+        if end_date is not None:
+            end_date = ensure_pendulum_datetime(end_date).in_tz("UTC")
+
+        from ingestr.src.solidgate import solidgate_source
+
+        try:
+            return solidgate_source(
+                public_key=public_key[0],
+                secret_key=secret_key[0],
+                start_date=start_date,
+                end_date=end_date,
+            ).with_resources(table_name)
+        except ResourcesNotFoundError:
+            raise UnsupportedResourceError(table_name, "Solidgate")
