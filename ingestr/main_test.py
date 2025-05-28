@@ -3220,9 +3220,11 @@ def test_mysql_zero_dates(source, dest):
     res = [
         (
             row[0],
-            row[1].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            if isinstance(row[1], datetime)
-            else row[1],
+            (
+                row[1].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                if isinstance(row[1], datetime)
+                else row[1]
+            ),
         )
         for row in res
     ]
@@ -3437,6 +3439,12 @@ def test_airtable_source(testcase, dest):
     dest.stop()
 
 
+def pp(x):
+    import sys
+
+    print(x, file=sys.stderr)
+
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
@@ -3448,18 +3456,65 @@ def test_mongodb_source(dest):
     test_collection = db.test_db.test_collection
     test_collection.insert_many(
         [
-            {"id": 1, "name": "Document 1", "value": 100},
-            {"id": 2, "name": "Document 2", "value": 200},
-            {"id": 3, "name": "Document 3", "value": 300},
-            {"id": 4, "name": "Document 4", "value": 400},
-            {"id": 5, "name": "Document 5", "value": 500},
+            {
+                "id": 1,
+                "name": "Document 1",
+                "nested_parent": {
+                    "key1": "value1",
+                    "key2": {"nested1": "value1"},
+                    "key3": [{"nested3": "value1"}],
+                },
+                "key4": ["value1", "value2", "value3"],
+                "value": 100,
+            },
+            {
+                "id": 2,
+                "name": "Document 2",
+                "nested_parent": {
+                    "key1": "value2",
+                    "key2": {"nested1": "value2"},
+                    "key3": [{"nested3": "value2"}],
+                },
+                "key4": ["value1", "value2", "value3"],
+                "value": 200,
+            },
+            {
+                "id": 3,
+                "name": "Document 3",
+                "nested_parent": {
+                    "key1": "value3",
+                    "key2": {"nested1": "value3"},
+                    "key3": [{"nested3": "value3"}],
+                },
+                "key4": ["value1", "value2", "value3"],
+                "value": 300,
+            },
+            {
+                "id": 4,
+                "name": "Document 4",
+                "nested_parent": {
+                    "key1": "value4",
+                    "key2": {"nested1": "value4"},
+                    "key3": [{"nested3": "value4"}],
+                },
+                "key4": ["value1", "value2", "value3"],
+                "value": 400,
+            },
+            {
+                "id": 5,
+                "name": "Document 5",
+                "nested_parent": {
+                    "key1": "value5",
+                    "key2": {"nested1": "value5"},
+                    "key3": [{"nested3": "value5"}],
+                },
+                "key4": ["value1", "value2", "value3"],
+                "value": 500,
+            },
         ]
     )
 
     dest_uri = dest.start()
-    print(">>>>>>>>>>>>>>>>>>>>>>>")
-    print(mongo.get_connection_url())
-    print(">>>>>>>>>>>>>>>>>>>>>>>")
 
     try:
         invoke_ingest_command(
@@ -3471,15 +3526,78 @@ def test_mongodb_source(dest):
 
         with sqlalchemy.create_engine(dest_uri).connect() as conn:
             res = conn.execute(
-                "select id, name, value from raw.test_collection"
+                "select id, name, nested_parent, key4, value from raw.test_collection"
             ).fetchall()
 
             assert len(res) == 5
-            assert res[0] == (1, "Document 1", 100)
-            assert res[1] == (2, "Document 2", 200)
-            assert res[2] == (3, "Document 3", 300)
-            assert res[3] == (4, "Document 4", 400)
-            assert res[4] == (5, "Document 5", 500)
+
+            # convert string to json if needed. this is a particular case for Clickhouse which does not have json types by default.
+            res = [
+                (
+                    row[0],
+                    row[1],
+                    json.loads(row[2]) if isinstance(row[2], str) else row[2],
+                    json.loads(row[3]) if isinstance(row[3], str) else row[3],
+                    row[4],
+                )
+                for row in res
+            ]
+
+            assert res[0] == (
+                1,
+                "Document 1",
+                {
+                    "key1": "value1",
+                    "key2": {"nested1": "value1"},
+                    "key3": [{"nested3": "value1"}],
+                },
+                ["value1", "value2", "value3"],
+                100,
+            )
+            assert res[1] == (
+                2,
+                "Document 2",
+                {
+                    "key1": "value2",
+                    "key2": {"nested1": "value2"},
+                    "key3": [{"nested3": "value2"}],
+                },
+                ["value1", "value2", "value3"],
+                200,
+            )
+            assert res[2] == (
+                3,
+                "Document 3",
+                {
+                    "key1": "value3",
+                    "key2": {"nested1": "value3"},
+                    "key3": [{"nested3": "value3"}],
+                },
+                ["value1", "value2", "value3"],
+                300,
+            )
+            assert res[3] == (
+                4,
+                "Document 4",
+                {
+                    "key1": "value4",
+                    "key2": {"nested1": "value4"},
+                    "key3": [{"nested3": "value4"}],
+                },
+                ["value1", "value2", "value3"],
+                400,
+            )
+            assert res[4] == (
+                5,
+                "Document 5",
+                {
+                    "key1": "value5",
+                    "key2": {"nested1": "value5"},
+                    "key3": [{"nested3": "value5"}],
+                },
+                ["value1", "value2", "value3"],
+                500,
+            )
     finally:
         dest.stop()
         mongo.stop()
