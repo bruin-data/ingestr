@@ -264,6 +264,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Smartsheet</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Stripe</td>
         <td>✅</td>
         <td>-</td>
