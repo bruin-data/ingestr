@@ -290,6 +290,7 @@ def ingest(
     from ingestr.src.destinations import AthenaDestination
     from ingestr.src.factory import SourceDestinationFactory
     from ingestr.src.filters import cast_set_to_list, handle_mysql_empty_dates
+    from ingestr.src.sources import MongoDbSource
 
     def report_errors(run_info: LoadInfo):
         for load_package in run_info.load_packages:
@@ -536,6 +537,13 @@ def ingest(
 
         if yield_limit:
             resource.for_each(dlt_source, lambda x: x.add_limit(yield_limit))
+
+        if isinstance(source, MongoDbSource):
+            from ingestr.src.resource import TypeHintMap
+
+            resource.for_each(
+                dlt_source, lambda x: x.add_map(TypeHintMap().type_hint_map)
+            )
 
         def col_h(x):
             if column_hints:
