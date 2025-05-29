@@ -698,46 +698,47 @@ class StripeAnalyticsSource:
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Stripe")
 
-        endpoint = None
-        if table == "balancetransaction":
-            table = "BalanceTransaction"
-        else:
-            table = table.capitalize()
+        table = table.lower()
 
-        if table in [
-            "Subscription",
-            "Account",
-            "Coupon",
-            "Customer",
-            "Product",
-            "Price",
-            "BalanceTransaction",
-            "Invoice",
-            "Event",
-            "Charge",
-        ]:
-            endpoint = table
-        else:
-            raise ValueError(
-                f"Resource '{table}' is not supported for stripe source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
-            )
+        from ingestr.src.stripe_analytics.settings import (
+            ENDPOINTS,
+            INCREMENTAL_ENDPOINTS,
+        )
 
-        date_args = {}
-        if kwargs.get("interval_start"):
-            date_args["start_date"] = kwargs.get("interval_start")
+        if table in ENDPOINTS:
+            endpoint = ENDPOINTS[table]
+            from ingestr.src.stripe_analytics import stripe_source
 
-        if kwargs.get("interval_end"):
-            date_args["end_date"] = kwargs.get("interval_end")
+            return stripe_source(
+                endpoints=[
+                    endpoint,
+                ],
+                stripe_secret_key=api_key[0],
+                start_date=kwargs.get("interval_start", None),
+                end_date=kwargs.get("interval_end", None),
+            ).with_resources(endpoint)
 
-        from ingestr.src.stripe_analytics import stripe_source
+        elif table in INCREMENTAL_ENDPOINTS:
+            endpoint = INCREMENTAL_ENDPOINTS[table]
+            from ingestr.src.stripe_analytics import incremental_stripe_source
 
-        return stripe_source(
-            endpoints=[
-                endpoint,
-            ],
-            stripe_secret_key=api_key[0],
-            **date_args,
-        ).with_resources(endpoint)
+            def nullable_date(date_str: Optional[str]):
+                if date_str:
+                    return ensure_pendulum_datetime(date_str)
+                return None
+
+            return incremental_stripe_source(
+                endpoints=[
+                    endpoint,
+                ],
+                stripe_secret_key=api_key[0],
+                initial_start_date=nullable_date(kwargs.get("interval_start", None)),
+                end_date=nullable_date(kwargs.get("interval_end", None)),
+            ).with_resources(endpoint)
+
+        raise ValueError(
+            f"Resource '{table}' is not supported for stripe source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+        )
 
 
 class FacebookAdsSource:
@@ -2463,6 +2464,7 @@ class SmartsheetSource:
             access_token=access_token[0],
             sheet_id=table,  # table is now a single sheet_id
         )
+
 
 class SolidgateSource:
     def handles_incrementality(self) -> bool:

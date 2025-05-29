@@ -8,12 +8,11 @@ from dlt.sources import DltResource
 from pendulum import DateTime
 
 from .helpers import pagination, transform_date
-from .settings import ENDPOINTS, INCREMENTAL_ENDPOINTS
 
 
 @dlt.source(max_table_nesting=0)
 def stripe_source(
-    endpoints: Tuple[str, ...] = ENDPOINTS,
+    endpoints: Tuple[str, ...],
     stripe_secret_key: str = dlt.secrets.value,
     start_date: Optional[DateTime] = None,
     end_date: Optional[DateTime] = None,
@@ -53,7 +52,7 @@ def stripe_source(
 
 @dlt.source
 def incremental_stripe_source(
-    endpoints: Tuple[str, ...] = INCREMENTAL_ENDPOINTS,
+    endpoints: Tuple[str, ...],
     stripe_secret_key: str = dlt.secrets.value,
     initial_start_date: Optional[DateTime] = None,
     end_date: Optional[DateTime] = None,

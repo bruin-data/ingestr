@@ -3612,13 +3612,20 @@ def test_s3_destination():
         )
 
 
-@pytest.mark.parametrize("stripe_table", ["subscription", "customer", "charge"])
-def test_stripe_source(stripe_table):
-    try:
-        shutil.rmtree(get_abs_path("../pipeline_data"))
-    except Exception:
-        pass
-
+@pytest.mark.parametrize(
+    "stripe_table",
+    [
+        "subscription",
+        "customer",
+        "product",
+        "price",
+        "event",
+        "invoice",
+        "charge",
+        "balancetransaction",
+    ],
+)
+def test_stripe_source_full_refresh(stripe_table):
     # Get Stripe token from environment
     stripe_token = os.environ.get("INGESTR_TEST_STRIPE_TOKEN")
     if not stripe_token:
@@ -3638,6 +3645,46 @@ def test_stripe_source(stripe_table):
         stripe_table,
         uri,
         f"raw.{stripe_table}s",
+    )
+
+    assert result.exit_code == 0
+
+    # Verify data was loaded
+    res = conn.sql(f"select count(*) from raw.{stripe_table}s").fetchone()
+    assert res[0] > 0, f"No {stripe_table} records found"
+
+    # Clean up
+    try:
+        os.remove(abs_db_path)
+    except Exception:
+        pass
+
+
+@pytest.mark.parametrize(
+    "stripe_table", ["event", "invoice", "charge", "balancetransaction"]
+)
+def test_stripe_source_incremental(stripe_table):
+    # Get Stripe token from environment
+    stripe_token = os.environ.get("INGESTR_TEST_STRIPE_TOKEN")
+    if not stripe_token:
+        pytest.skip("INGESTR_TEST_STRIPE_TOKEN not set")
+
+    # Create test database
+    dbname = f"test_stripe_{stripe_table}{get_random_string(5)}.db"
+    abs_db_path = get_abs_path(f"./testdata/{dbname}")
+    rel_db_path_to_command = f"ingestr/testdata/{dbname}"
+    uri = f"duckdb:///{rel_db_path_to_command}"
+
+    conn = duckdb.connect(abs_db_path)
+
+    # Run ingest command
+    result = invoke_ingest_command(
+        f"stripe://{stripe_table}s?api_key={stripe_token}",
+        stripe_table,
+        uri,
+        f"raw.{stripe_table}s",
+        interval_start="2025-04-01",
+        interval_end="2025-05-30",
     )
 
     assert result.exit_code == 0
