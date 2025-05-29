@@ -3526,7 +3526,7 @@ def test_mongodb_source(dest):
 
         with sqlalchemy.create_engine(dest_uri).connect() as conn:
             res = conn.execute(
-                "select id, name, nested_parent, key4, value from raw.test_collection"
+                "select id, name, nested_parent__key1, nested_parent__key2, nested_parent__key3, key4, value from raw.test_collection"
             ).fetchall()
 
             assert len(res) == 5
@@ -3536,9 +3536,11 @@ def test_mongodb_source(dest):
                 (
                     row[0],
                     row[1],
-                    json.loads(row[2]) if isinstance(row[2], str) else row[2],
+                    row[2],
                     json.loads(row[3]) if isinstance(row[3], str) else row[3],
-                    row[4],
+                    json.loads(row[4]) if isinstance(row[4], str) else row[4],
+                    json.loads(row[5]) if isinstance(row[5], str) else row[5],
+                    row[6],
                 )
                 for row in res
             ]
@@ -3546,55 +3548,45 @@ def test_mongodb_source(dest):
             assert res[0] == (
                 1,
                 "Document 1",
-                {
-                    "key1": "value1",
-                    "key2": {"nested1": "value1"},
-                    "key3": [{"nested3": "value1"}],
-                },
+                "value1",
+                {"nested1": "value1"},
+                [{"nested3": "value1"}],
                 ["value1", "value2", "value3"],
                 100,
             )
             assert res[1] == (
                 2,
                 "Document 2",
-                {
-                    "key1": "value2",
-                    "key2": {"nested1": "value2"},
-                    "key3": [{"nested3": "value2"}],
-                },
+                "value2",
+                {"nested1": "value2"},
+                [{"nested3": "value2"}],
                 ["value1", "value2", "value3"],
                 200,
             )
             assert res[2] == (
                 3,
                 "Document 3",
-                {
-                    "key1": "value3",
-                    "key2": {"nested1": "value3"},
-                    "key3": [{"nested3": "value3"}],
-                },
+                "value3",
+                {"nested1": "value3"},
+                [{"nested3": "value3"}],
                 ["value1", "value2", "value3"],
                 300,
             )
             assert res[3] == (
                 4,
                 "Document 4",
-                {
-                    "key1": "value4",
-                    "key2": {"nested1": "value4"},
-                    "key3": [{"nested3": "value4"}],
-                },
+                "value4",
+                {"nested1": "value4"},
+                [{"nested3": "value4"}],
                 ["value1", "value2", "value3"],
                 400,
             )
             assert res[4] == (
                 5,
                 "Document 5",
-                {
-                    "key1": "value5",
-                    "key2": {"nested1": "value5"},
-                    "key3": [{"nested3": "value5"}],
-                },
+                "value5",
+                {"nested1": "value5"},
+                [{"nested3": "value5"}],
                 ["value1", "value2", "value3"],
                 500,
             )
