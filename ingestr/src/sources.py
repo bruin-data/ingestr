@@ -2506,3 +2506,95 @@ class SolidgateSource:
             ).with_resources(table_name)
         except ResourcesNotFoundError:
             raise UnsupportedResourceError(table_name, "Solidgate")
+
+
+class CriteoSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Criteo takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        source_part = urlparse(uri)
+        source_params = parse_qs(source_part.query)
+        client_id = source_params.get("client_id")
+        client_secret = source_params.get("client_secret")
+        access_token = source_params.get("access_token")
+
+        if not client_id:
+            raise ValueError("client_id in the URI is required to connect to Criteo")
+        if not client_secret:
+            raise ValueError("client_secret in the URI is required to connect to Criteo")
+
+        # Get currency from URI params, default to USD
+        currency = source_params.get("currency", ["USD"])[0]
+        
+        # Get advertiser IDs if provided
+        advertiser_ids = source_params.get("advertiser_ids")
+        advertiser_ids_list = None
+        if advertiser_ids:
+            advertiser_ids_list = advertiser_ids[0].split(",") if advertiser_ids[0] else None
+
+        lookback_days = int(source_params.get("lookback_days", [30])[0])
+
+        start_date = (
+            pendulum.now()
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .subtract(days=lookback_days)
+        )
+        if kwargs.get("interval_start"):
+            start_date = (
+                ensure_pendulum_datetime(str(kwargs.get("interval_start")))
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+                .subtract(days=lookback_days)
+            )
+
+        end_date = pendulum.now()
+        if kwargs.get("interval_end"):
+            end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
+
+        from ingestr.src.criteo import REQUIRED_CUSTOM_DIMENSIONS, criteo_source
+
+        dimensions = None
+        metrics = None
+        
+        # Parse table format: either 'custom:dimensions:metrics' or use default
+        if table.startswith("custom:"):
+            fields = table.split(":", 3)
+            if len(fields) != 3:
+                raise ValueError(
+                    "Invalid Criteo custom table format. Expected format: custom:<dimensions>:<metrics>"
+                )
+
+            dimensions = fields[1].split(",")
+            metrics = fields[2].split(",")
+
+            # Validate that at least one required dimension is present
+            found = False
+            for dimension in dimensions:
+                if dimension in REQUIRED_CUSTOM_DIMENSIONS:
+                    found = True
+                    break
+
+            if not found:
+                raise ValueError(
+                    f"At least one of the required dimensions is missing for custom Criteo report: {REQUIRED_CUSTOM_DIMENSIONS}"
+                )
+
+        src = criteo_source(
+            start_date=start_date,
+            end_date=end_date,
+            client_id=client_id[0],
+            client_secret=client_secret[0],
+            access_token=access_token[0] if access_token else None,
+            dimensions=dimensions,
+            metrics=metrics,
+            currency=currency,
+            advertiser_ids=advertiser_ids_list,
+            merge_key=kwargs.get("merge_key"),
+        )
+
+        return src.with_resources("custom")
