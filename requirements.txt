@@ -27,6 +27,8 @@ asn1crypto==1.5.1
     # via
     #   scramp
     #   snowflake-connector-python
+async-timeout==5.0.1
+    # via aiohttp
 asynch==0.2.4
     # via clickhouse-sqlalchemy
 attrs==25.1.0
@@ -202,6 +204,8 @@ googleapis-common-protos==1.69.0
     #   google-api-core
     #   grpc-google-iam-v1
     #   grpcio-status
+greenlet==3.2.2
+    # via sqlalchemy
 grpc-google-iam-v1==0.14.2
     # via google-cloud-spanner
 grpc-interceptor==0.15.4
@@ -514,6 +518,7 @@ sqlalchemy==1.4.52
     #   databricks-sqlalchemy
     #   duckdb-engine
     #   ibm-db-sa
+    #   pyathena
     #   snowflake-sqlalchemy
     #   sqlalchemy-bigquery
     #   sqlalchemy-hana
@@ -560,10 +565,12 @@ typing-extensions==4.12.2
     #   alembic
     #   beautifulsoup4
     #   dlt
+    #   multidict
     #   pyairtable
     #   pydantic
     #   pydantic-core
     #   pyopenssl
+    #   rich
     #   simple-salesforce
     #   snowflake-connector-python
     #   sqlalchemy2-stubs
