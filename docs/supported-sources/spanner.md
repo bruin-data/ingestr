@@ -1,7 +1,7 @@
-# Spanner
-[Spanner](https://cloud.google.com/spanner) is a fully managed, scalable, and strongly consistent database service.
+# GCP Spanner
+[GCP Spanner](https://cloud.google.com/spanner) is a fully managed, scalable, and strongly consistent database service.
 
-ingestr supports Spanner as a source.
+ingestr supports GCP Spanner as a source.
 
 ## URI format
 The URI format for Spanner is as follows:
@@ -33,7 +33,7 @@ ingestr ingest \
 
 ```
 
-<img alt="pipedrive_img" src="../media/spanner_ingestion.png"/>
+<img alt="GCP Spanner Ingestion Example" src="../media/gcp_spanner_ingestion.png"/>
 
 > [!NOTE]
 > Currently, only GoogleSQL databases are supported.
