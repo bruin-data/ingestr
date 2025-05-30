@@ -2527,16 +2527,20 @@ class CriteoSource:
         if not client_id:
             raise ValueError("client_id in the URI is required to connect to Criteo")
         if not client_secret:
-            raise ValueError("client_secret in the URI is required to connect to Criteo")
+            raise ValueError(
+                "client_secret in the URI is required to connect to Criteo"
+            )
 
         # Get currency from URI params, default to USD
         currency = source_params.get("currency", ["USD"])[0]
-        
+
         # Get advertiser IDs if provided
         advertiser_ids = source_params.get("advertiser_ids")
         advertiser_ids_list = None
         if advertiser_ids:
-            advertiser_ids_list = advertiser_ids[0].split(",") if advertiser_ids[0] else None
+            advertiser_ids_list = (
+                advertiser_ids[0].split(",") if advertiser_ids[0] else None
+            )
 
         lookback_days = int(source_params.get("lookback_days", [30])[0])
 
@@ -2560,7 +2564,7 @@ class CriteoSource:
 
         dimensions = None
         metrics = None
-        
+
         # Parse table format: either 'custom:dimensions:metrics' or use default
         if table.startswith("custom:"):
             fields = table.split(":", 3)

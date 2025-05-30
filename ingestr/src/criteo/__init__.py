@@ -5,16 +5,14 @@ import pendulum
 from dlt.sources import DltResource
 
 from .criteo_helpers import (
-    DEFAULT_DIMENSIONS, 
-    DEFAULT_METRICS, 
-    AVAILABLE_DIMENSIONS,
-    AVAILABLE_METRICS,
-    CriteoAPI
+    DEFAULT_DIMENSIONS,
+    DEFAULT_METRICS,
+    CriteoAPI,
 )
 
 REQUIRED_CUSTOM_DIMENSIONS = [
     "Hour",
-    "Day", 
+    "Day",
     "Week",
     "Month",
     "Year",
@@ -27,31 +25,26 @@ KNOWN_TYPE_HINTS = {
     "Week": {"data_type": "text"},
     "Month": {"data_type": "text"},
     "Year": {"data_type": "text"},
-    
-    # ID dimensions  
+    # ID dimensions
     "AdsetId": {"data_type": "text"},
     "CampaignId": {"data_type": "text"},
     "AdvertiserId": {"data_type": "text"},
     "CategoryId": {"data_type": "text"},
     "ProductId": {"data_type": "text"},
-    
     # Geo dimensions
     "Country": {"data_type": "text"},
     "Region": {"data_type": "text"},
     "City": {"data_type": "text"},
-    
     # Tech dimensions
     "Device": {"data_type": "text"},
     "Os": {"data_type": "text"},
     "Browser": {"data_type": "text"},
     "Environment": {"data_type": "text"},
-    
     # Metrics - integers
     "Displays": {"data_type": "bigint"},
     "Clicks": {"data_type": "bigint"},
     "PostViewConversions": {"data_type": "bigint"},
     "PostClickConversions": {"data_type": "bigint"},
-    
     # Metrics - decimals
     "AdvertiserCost": {"data_type": "decimal"},
     "Ctr": {"data_type": "decimal"},
@@ -80,7 +73,7 @@ def criteo_source(
 ) -> Sequence[DltResource]:
     """
     Criteo Marketing Solutions API source for campaign statistics
-    
+
     Args:
         start_date: Start date for the report
         end_date: End date for the report
@@ -93,16 +86,14 @@ def criteo_source(
         advertiser_ids: Optional list of advertiser IDs to filter
         merge_key: Optional merge key for custom reports
     """
-    
+
     # Use default dimensions and metrics if not provided
     final_dimensions = dimensions or DEFAULT_DIMENSIONS
     final_metrics = metrics or DEFAULT_METRICS
-    
+
     # Validate custom dimensions and metrics
     criteo_api = CriteoAPI(
-        client_id=client_id,
-        client_secret=client_secret,
-        access_token=access_token
+        client_id=client_id, client_secret=client_secret, access_token=access_token
     )
     criteo_api.validate_dimensions_and_metrics(final_dimensions, final_metrics)
 
@@ -125,7 +116,8 @@ def criteo_source(
         if metric in KNOWN_TYPE_HINTS:
             type_hints[metric] = KNOWN_TYPE_HINTS[metric]
 
-    @dlt.resource(
+    @dlt.resource(  # type: ignore
+        name="custom",
         write_disposition={"disposition": "merge", "strategy": "delete-insert"},
         merge_key=final_merge_key,
         primary_key=final_dimensions,
@@ -140,7 +132,7 @@ def criteo_source(
             metrics=final_metrics,
             currency=currency,
             advertiser_ids=advertiser_ids,
-            timezone="UTC"  # Always use UTC as requested
+            timezone="UTC",  # Always use UTC as requested
         )
 
-    return custom, 
+    return (custom,)
