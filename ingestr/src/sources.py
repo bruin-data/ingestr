@@ -79,30 +79,6 @@ class SqlSource:
         if uri.startswith("clickhouse://"):
             parsed_uri = urlparse(uri)
 
-            username = parsed_uri.username
-            if not username:
-                raise ValueError(
-                    "A username is required to connect to the ClickHouse database."
-                )
-
-            password = parsed_uri.password
-            if not password:
-                raise ValueError(
-                    "A password is required to authenticate with the ClickHouse database."
-                )
-
-            host = parsed_uri.hostname
-            if not host:
-                raise ValueError(
-                    "The hostname or IP address of the ClickHouse server is required to establish a connection."
-                )
-
-            port = parsed_uri.port
-            if not port:
-                raise ValueError(
-                    "The TCP port of the ClickHouse server is required to establish a connection."
-                )
-
             query_params = parse_qs(parsed_uri.query)
 
             if "http_port" in query_params:
@@ -130,19 +106,10 @@ class SqlSource:
             cred_path = query_params.get("credentials_path")
             cred_base64 = query_params.get("credentials_base64")
 
-            if not project_id_param or not instance_id_param or not database_param:
-                raise ValueError(
-                    "project_id, instance_id and database are required in the URI to get data from Google Spanner"
-                )
-
             project_id = project_id_param[0]
             instance_id = instance_id_param[0]
             database = database_param[0]
 
-            if not cred_path and not cred_base64:
-                raise ValueError(
-                    "credentials_path or credentials_base64 is required in the URI to get data from Google Sheets"
-                )
             if cred_path:
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path[0]
             elif cred_base64:
