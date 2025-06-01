@@ -93,7 +93,7 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
-        <td>DB2</td>
+        <td>IBM Db2</td>
         <td>✅</td>
         <td>-</td>
     </tr>
