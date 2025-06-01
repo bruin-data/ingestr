@@ -1,6 +1,7 @@
 import requests
 from dlt.sources.helpers.requests import Client
 
+
 def create_client(status_code: int = 502) -> requests.Session:
     return Client(
         raise_for_status=False,
@@ -17,4 +18,5 @@ def retry_on_status(status_code: int):
         if response is None:
             return False
         return response.status_code == status_code
+
     return retry_on_limit

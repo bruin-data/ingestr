@@ -2464,6 +2464,7 @@ class SmartsheetSource:
             sheet_id=table,  # table is now a single sheet_id
         )
 
+
 class SolidgateSource:
     def handles_incrementality(self) -> bool:
         return True
