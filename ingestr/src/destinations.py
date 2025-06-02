@@ -473,5 +473,8 @@ class S3Destination:
 
 class MySqlDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.sqlalchemy(credentials=uri, **kwargs)
-
+        table = kwargs["dest_table"]
+        database = table.split(".")[0]
+        url = uri+"/"+database
+        return dlt.destinations.sqlalchemy(credentials=url, **kwargs)
+    
