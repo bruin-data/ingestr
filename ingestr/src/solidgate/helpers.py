@@ -92,6 +92,7 @@ class SolidgateClient:
         if not report_url:
             return f"Report URL not found in the response: {post_response.json()}", 400
 
+        # Wait for 5 seconds before attempting to download the report as report may not be immediately available
         time.sleep(5)
 
         data = self.public_key + self.public_key
