@@ -399,6 +399,7 @@ class S3FS(dlt.destinations.filesystem):
         return S3FSClient
 
 
+
 class S3Destination:
     def dlt_dest(self, uri: str, **kwargs):
         parsed_uri = urlparse(uri)
@@ -468,3 +469,9 @@ class S3Destination:
 
     def post_load(self) -> None:
         pass
+
+
+class MySqlDestination(GenericSqlDestination):
+    def dlt_dest(self, uri: str, **kwargs):
+        return dlt.destinations.sqlalchemy(credentials=uri, **kwargs)
+

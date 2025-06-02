@@ -16,6 +16,7 @@ from ingestr.src.destinations import (
     S3Destination,
     SnowflakeDestination,
     SynapseDestination,
+    MySqlDestination,
 )
 from ingestr.src.sources import (
     AdjustSource,
@@ -180,6 +181,8 @@ class SourceDestinationFactory:
         "clickhouse+native": ClickhouseDestination,
         "clickhouse": ClickhouseDestination,
         "s3": S3Destination,
+        "mysql": MySqlDestination,
+        "mysql+pymysql": MySqlDestination,
     }
 
     def __init__(self, source_uri: str, destination_uri: str):
