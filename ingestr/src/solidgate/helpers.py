@@ -16,7 +16,7 @@ class SolidgateClient:
         self.base_url = "https://reports.solidgate.com/api/v1"
         self.public_key = public_key
         self.secret_key = secret_key
-        self.client = create_client(retry_status_code=204)
+        self.client = create_client(retry_status_code=[204])
 
     def fetch_data(
         self,
