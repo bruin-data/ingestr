@@ -54,12 +54,12 @@ from ingestr.src.sources import (
     SalesforceSource,
     ShopifySource,
     SlackSource,
+    SmartsheetSource,
     SolidgateSource,
     SqlSource,
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
-    SmartsheetSource,
 )
 
 SQL_SOURCE_SCHEMES = [

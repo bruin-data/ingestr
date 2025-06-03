@@ -58,6 +58,7 @@ class LoaderFileFormat(str, Enum):
 
 
 class SqlBackend(str, Enum):
+    default = "default"
     sqlalchemy = "sqlalchemy"
     pyarrow = "pyarrow"
     connectorx = "connectorx"
@@ -187,7 +188,7 @@ def ingest(
             help="The SQL backend to use",
             envvar=["SQL_BACKEND", "INGESTR_SQL_BACKEND"],
         ),
-    ] = SqlBackend.pyarrow,  # type: ignore
+    ] = SqlBackend.default,  # type: ignore
     loader_file_format: Annotated[
         Optional[LoaderFileFormat],
         typer.Option(
@@ -289,7 +290,11 @@ def ingest(
     from ingestr.src.collector.spinner import SpinnerCollector
     from ingestr.src.destinations import AthenaDestination
     from ingestr.src.factory import SourceDestinationFactory
-    from ingestr.src.filters import cast_set_to_list, handle_mysql_empty_dates
+    from ingestr.src.filters import (
+        cast_set_to_list,
+        cast_spanner_types,
+        handle_mysql_empty_dates,
+    )
     from ingestr.src.sources import MongoDbSource
 
     def report_errors(run_info: LoadInfo):
@@ -517,6 +522,15 @@ def ingest(
             if interval_end:
                 interval_end = interval_end.date()  # type: ignore
 
+        if factory.source_scheme.startswith("spanner"):
+            # we tend to use the 'pyarrow' backend in general, however, it has issues with JSON objects, so we override it to 'sqlalchemy' for Spanner.
+            if sql_backend.value == SqlBackend.default:
+                sql_backend = SqlBackend.sqlalchemy
+
+        # this allows us to identify the cases where the user does not have a preference, so that for some sources we can override it.
+        if sql_backend == SqlBackend.default:
+            sql_backend = SqlBackend.pyarrow
+
         dlt_source = source.dlt_source(
             uri=source_uri,
             table=source_table,
@@ -534,6 +548,9 @@ def ingest(
         resource.for_each(dlt_source, lambda x: x.add_map(cast_set_to_list))
         if factory.source_scheme.startswith("mysql"):
             resource.for_each(dlt_source, lambda x: x.add_map(handle_mysql_empty_dates))
+
+        if factory.source_scheme.startswith("spanner"):
+            resource.for_each(dlt_source, lambda x: x.add_map(cast_spanner_types))
 
         if yield_limit:
             resource.for_each(dlt_source, lambda x: x.add_limit(yield_limit))
