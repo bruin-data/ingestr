@@ -26,8 +26,15 @@ def get_records(
         Dict[TDataItem]: A dictionary representing a record from the Salesforce sObject.
     """
 
+    # Handle custom objects
+    if sobject.startswith("custom:"):
+        object_name = sobject.split(":")[1]
+        salesforce_object_name = f"{object_name}__c"
+    else:
+        salesforce_object_name = sobject
+
     # Get all fields for the sobject
-    desc = getattr(sf, sobject).describe()
+    desc = getattr(sf, salesforce_object_name).describe()
     # Salesforce returns compound fields as separate fields, so we need to filter them out
     compound_fields = {
         f["compoundFieldName"]
@@ -47,10 +54,10 @@ def get_records(
         if last_state:
             predicate = f"WHERE {replication_key} > {last_state}"
         order_by = f"ORDER BY {replication_key} ASC"
-    query = f"SELECT {', '.join(fields)} FROM {sobject} {predicate} {order_by}"
+    query = f"SELECT {', '.join(fields)} FROM {salesforce_object_name} {predicate} {order_by}"
 
     # Query all records in batches
-    for page in getattr(sf.bulk, sobject).query_all(query, lazy_operation=True):
+    for page in getattr(sf.bulk, salesforce_object_name).query_all(query, lazy_operation=True):
         for record in page:
             # Strip out the attributes field
             record.pop("attributes", None)
