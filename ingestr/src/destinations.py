@@ -468,3 +468,14 @@ class S3Destination:
 
     def post_load(self) -> None:
         pass
+
+
+class SqliteDestination(GenericSqlDestination):
+    def dlt_dest(self, uri: str, **kwargs):
+        return dlt.destinations.sqlalchemy(credentials=uri)
+
+    def dlt_run_params(self, uri: str, table: str, **kwargs):
+        return {
+            "dataset_name": "main",
+            "table_name": table,
+        }
