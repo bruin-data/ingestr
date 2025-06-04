@@ -84,6 +84,9 @@ SQL_SOURCE_SCHEMES = [
     "databricks",
     "db2",
     "spanner",
+    "athena",
+    "athena+pyathena",
+    "pyathena",
 ]
 
 

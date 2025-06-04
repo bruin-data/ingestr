@@ -26,6 +26,10 @@ from dlt.sources import incremental as dlt_incremental
 from dlt.sources.credentials import (
     ConnectionStringCredentials,
 )
+import pyathena.sqlalchemy_athena  # noqa: F401 # For SQLAlchemy dialect registration
+from sqlalchemy import create_engine # For direct Athena connection logic
+
+# pyathena.connect will be imported locally in the Athena-specific block
 
 from ingestr.src import blob
 from ingestr.src.errors import (
@@ -71,97 +75,114 @@ class SqlSource:
             )
 
         engine_adapter_callback = None
+        credentials_param = None
 
-        if uri.startswith("mysql://"):
-            uri = uri.replace("mysql://", "mysql+pymysql://")
+        parsed_uri_for_scheme = urlparse(uri)
+        if parsed_uri_for_scheme.scheme == "athena":
+            from pyathena.connection import connect as pyathena_connect # Local import for direct use
+            query_params = parse_qs(parsed_uri_for_scheme.query)
 
-        # clickhouse://<username>:<password>@<host>:<port>?secure=<secure>
-        if uri.startswith("clickhouse://"):
-            parsed_uri = urlparse(uri)
+            aws_access_key_id = parsed_uri_for_scheme.username
+            aws_secret_access_key = parsed_uri_for_scheme.password
+            # Conventionally, hostname is region for Athena in such URI patterns
+            region_name = parsed_uri_for_scheme.hostname
 
-            username = parsed_uri.username
-            if not username:
+            s3_staging_dir = query_params.get("s3_staging_dir", [None])[0]
+            # Path is usually /<schema_name> or just / if schema is in query_params
+            schema_name = parsed_uri_for_scheme.path.strip("/") if parsed_uri_for_scheme.path else query_params.get("schema_name", ["default"])[0]
+            work_group = query_params.get("work_group", [None])[0]
+
+            if not all([aws_access_key_id, aws_secret_access_key, region_name, s3_staging_dir]):
                 raise ValueError(
-                    "A username is required to connect to the ClickHouse database."
+                    "For Athena, URI must include AWS access/secret keys in userinfo, region as hostname, " +
+                    "and s3_staging_dir query parameter. " +
+                    "Format: athena://<key>:<secret>@<region>/<schema_name>?s3_staging_dir=<s3_uri>"
                 )
 
-            password = parsed_uri.password
-            if not password:
-                raise ValueError(
-                    "A password is required to authenticate with the ClickHouse database."
-                )
+            athena_connection_params = {
+                "aws_access_key_id": aws_access_key_id,
+                "aws_secret_access_key": aws_secret_access_key,
+                "s3_staging_dir": s3_staging_dir,
+                "region_name": region_name,
+                "schema_name": schema_name,
+            }
+            if work_group:
+                athena_connection_params["work_group"] = work_group
 
-            host = parsed_uri.hostname
-            if not host:
-                raise ValueError(
-                    "The hostname or IP address of the ClickHouse server is required to establish a connection."
-                )
+            engine = create_engine(
+                f"athena://{aws_access_key_id}@{region_name}/{schema_name}",
+                creator=lambda: pyathena_connect(**athena_connection_params).connection
+            )
+            credentials_param = engine
+        else:
+            # Existing logic for other SQL sources
+            modified_uri = uri # Use a new variable to avoid confusion
+            if modified_uri.startswith("mysql://"):
+                modified_uri = modified_uri.replace("mysql://", "mysql+pymysql://")
 
-            port = parsed_uri.port
-            if not port:
-                raise ValueError(
-                    "The TCP port of the ClickHouse server is required to establish a connection."
-                )
+            if modified_uri.startswith("clickhouse://"):
+                parsed_uri = urlparse(modified_uri)
+                username = parsed_uri.username
+                if not username:
+                    raise ValueError("A username is required to connect to the ClickHouse database.")
+                password = parsed_uri.password
+                if not password:
+                    raise ValueError("A password is required to authenticate with the ClickHouse database.")
+                host = parsed_uri.hostname
+                if not host:
+                    raise ValueError("The hostname or IP address of the ClickHouse server is required to establish a connection.")
+                port = parsed_uri.port
+                if not port:
+                    raise ValueError("The TCP port of the ClickHouse server is required to establish a connection.")
 
-            query_params = parse_qs(parsed_uri.query)
+                clickhouse_query_params = parse_qs(parsed_uri.query)
+                if "http_port" in clickhouse_query_params:
+                    del clickhouse_query_params["http_port"]
+                if "secure" not in clickhouse_query_params:
+                    clickhouse_query_params["secure"] = ["1"]
+                modified_uri = parsed_uri._replace(
+                    scheme="clickhouse+native",
+                    query=urlencode(clickhouse_query_params, doseq=True),
+                ).geturl()
 
-            if "http_port" in query_params:
-                del query_params["http_port"]
+            if modified_uri.startswith("db2://"):
+                modified_uri = modified_uri.replace("db2://", "db2+ibm_db://")
 
-            if "secure" not in query_params:
-                query_params["secure"] = ["1"]
+            if modified_uri.startswith("spanner://"):
+                parsed_uri = urlparse(modified_uri)
+                spanner_query_params = parse_qs(parsed_uri.query)
+                project_id_param = spanner_query_params.get("project_id")
+                instance_id_param = spanner_query_params.get("instance_id")
+                database_param = spanner_query_params.get("database")
+                cred_path = spanner_query_params.get("credentials_path")
+                cred_base64 = spanner_query_params.get("credentials_base64")
 
-            uri = parsed_uri._replace(
-                scheme="clickhouse+native",
-                query=urlencode(query_params, doseq=True),
-            ).geturl()
+                if not project_id_param or not instance_id_param or not database_param:
+                    raise ValueError("project_id, instance_id and database are required in the URI to get data from Google Spanner")
 
-        if uri.startswith("db2://"):
-            uri = uri.replace("db2://", "db2+ibm_db://")
+                project_id = project_id_param[0]
+                instance_id = instance_id_param[0]
+                database = database_param[0]
 
-        if uri.startswith("spanner://"):
-            parsed_uri = urlparse(uri)
-            query_params = parse_qs(parsed_uri.query)
+                if not cred_path and not cred_base64:
+                    raise ValueError("credentials_path or credentials_base64 is required in the URI to get data from Google Spanner")
+                if cred_path:
+                    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path[0]
+                elif cred_base64:
+                    credentials_json = json.loads(base64.b64decode(cred_base64[0]).decode("utf-8"))
+                    temp_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json")
+                    json.dump(credentials_json, temp_file)
+                    temp_file.close()
+                    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_file.name
 
-            project_id_param = query_params.get("project_id")
-            instance_id_param = query_params.get("instance_id")
-            database_param = query_params.get("database")
+                modified_uri = f"spanner+spanner:///projects/{project_id}/instances/{instance_id}/databases/{database}"
 
-            cred_path = query_params.get("credentials_path")
-            cred_base64 = query_params.get("credentials_base64")
+                def eng_callback(engine):
+                    return engine.execution_options(read_only=True)
+                engine_adapter_callback = eng_callback
 
-            if not project_id_param or not instance_id_param or not database_param:
-                raise ValueError(
-                    "project_id, instance_id and database are required in the URI to get data from Google Spanner"
-                )
+            credentials_param = ConnectionStringCredentials(modified_uri)
 
-            project_id = project_id_param[0]
-            instance_id = instance_id_param[0]
-            database = database_param[0]
-
-            if not cred_path and not cred_base64:
-                raise ValueError(
-                    "credentials_path or credentials_base64 is required in the URI to get data from Google Sheets"
-                )
-            if cred_path:
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path[0]
-            elif cred_base64:
-                credentials = json.loads(
-                    base64.b64decode(cred_base64[0]).decode("utf-8")
-                )
-                temp = tempfile.NamedTemporaryFile(
-                    mode="w", delete=False, suffix=".json"
-                )
-                json.dump(credentials, temp)
-                temp.close()
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp.name
-
-            uri = f"spanner+spanner:///projects/{project_id}/instances/{instance_id}/databases/{database}"
-
-            def eng_callback(engine):
-                return engine.execution_options(read_only=True)
-
-            engine_adapter_callback = eng_callback
 
         from dlt.common.libs.sql_alchemy import (
             Engine,
@@ -282,7 +303,7 @@ class SqlSource:
             query_adapters = [custom_query_variable_subsitution(query_value, kwargs)]
 
         builder_res = self.table_builder(
-            credentials=ConnectionStringCredentials(uri),
+            credentials=credentials_param,
             schema=table_fields.dataset,
             table=table_fields.table,
             incremental=incremental,
