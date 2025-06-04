@@ -43,7 +43,7 @@ def solidgate_source(
         yield solidgate_client.fetch_data(path, date_from=start_dt, date_to=end_dt)
 
     @dlt.resource(
-        name="apm-orders",
+        name="apm_orders",
         write_disposition="merge",
         primary_key="order_id",
         columns={
@@ -69,7 +69,7 @@ def solidgate_source(
         yield solidgate_client.fetch_data(path, date_from=start_dt, date_to=end_dt)
 
     @dlt.resource(
-        name="card-orders",
+        name="card_orders",
         write_disposition="merge",
         primary_key="order_id",
         columns={
@@ -95,7 +95,7 @@ def solidgate_source(
         yield solidgate_client.fetch_data(path, date_from=start_dt, date_to=end_dt)
 
     @dlt.resource(
-        name="financial-entries",
+        name="financial_entries",
         write_disposition="merge",
         primary_key="id",
         columns={
