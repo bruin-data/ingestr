@@ -11,12 +11,12 @@ from ingestr.src.destinations import (
     DatabricksDestination,
     DuckDBDestination,
     MsSQLDestination,
+    MySqlDestination,
     PostgresDestination,
     RedshiftDestination,
     S3Destination,
     SnowflakeDestination,
     SynapseDestination,
-    MySqlDestination,
 )
 from ingestr.src.sources import (
     AdjustSource,
