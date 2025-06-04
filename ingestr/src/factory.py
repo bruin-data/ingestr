@@ -15,6 +15,7 @@ from ingestr.src.destinations import (
     RedshiftDestination,
     S3Destination,
     SnowflakeDestination,
+    SqliteDestination,
     SynapseDestination,
 )
 from ingestr.src.sources import (
@@ -182,6 +183,7 @@ class SourceDestinationFactory:
         "clickhouse+native": ClickhouseDestination,
         "clickhouse": ClickhouseDestination,
         "s3": S3Destination,
+        "sqlite": SqliteDestination,
     }
 
     def __init__(self, source_uri: str, destination_uri: str):
