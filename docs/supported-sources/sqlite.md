@@ -1,7 +1,7 @@
 # SQLite
 SQLite is a C-language library that implements a small, fast, self-contained, high-reliability, full-featured, SQL database engine.
 
-ingestr supports SQLite as a source.
+ingestr supports SQLite as a source and a destination.
 
 ## URI format
 The URI format for SQLite is as follows:
