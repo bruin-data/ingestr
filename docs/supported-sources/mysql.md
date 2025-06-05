@@ -7,7 +7,7 @@ ingestr supports MySQL as a source and a destination.
 The URI format for MySQL is as follows:
 
 ```plaintext
-mysql://user:password@host:port
+mysql://user:password@host:port/dbname
 ```
 
 URI parameters:
@@ -15,7 +15,6 @@ URI parameters:
 - `password`: the password for the user
 - `host`: the host address of the database server
 - `port`: the port number the database server is listening on, the default is 3306
+- `dbname`: the name of the database to connect to
 
-Source table and destination table names should be in the format `database_name.table_name`.
-
-The same URI structure and table can be used both for sources and destinations. You can read more about SQLAlchemy's MySQL dialect [here](https://docs.sqlalchemy.org/en/20/core/engines.html#mysql). 
+The same URI structure and table can be used both for sources and destinations. You can read more about SQLAlchemy's MySQL dialect [here](https://docs.sqlalchemy.org/en/20/core/engines.html#mysql).
