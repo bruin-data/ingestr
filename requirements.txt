@@ -27,6 +27,8 @@ asn1crypto==1.5.1
     # via
     #   scramp
     #   snowflake-connector-python
+async-timeout==5.0.1
+    # via aiohttp
 asynch==0.2.4
     # via clickhouse-sqlalchemy
 attrs==25.1.0
@@ -50,6 +52,8 @@ botocore==1.37.1
     #   s3transfer
 cachetools==5.5.2
     # via google-auth
+cassandra-driver==3.29.0
+    # via -r requirements.in
 certifi==2025.1.31
     # via
     #   clickhouse-connect
@@ -70,6 +74,7 @@ ciso8601==2.3.2
 click==8.1.8
     # via
     #   dlt
+    #   geomet
     #   typer
 clickhouse-connect==0.8.14
     # via -r requirements.in
@@ -132,6 +137,8 @@ fsspec==2025.3.2
     #   s3fs
 gcsfs==2025.3.2
     # via -r requirements.in
+geomet==0.2.1.post1
+    # via cassandra-driver
 gitdb==4.0.12
     # via gitpython
 gitpython==3.1.44
@@ -490,6 +497,7 @@ six==1.17.0
     # via
     #   facebook-business
     #   flatten-json
+    #   geomet
     #   python-dateutil
     #   smartsheet-python-sdk
     #   thrift
@@ -560,10 +568,12 @@ typing-extensions==4.12.2
     #   alembic
     #   beautifulsoup4
     #   dlt
+    #   multidict
     #   pyairtable
     #   pydantic
     #   pydantic-core
     #   pyopenssl
+    #   rich
     #   simple-salesforce
     #   snowflake-connector-python
     #   sqlalchemy2-stubs
