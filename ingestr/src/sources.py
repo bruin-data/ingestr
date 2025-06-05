@@ -2506,23 +2506,41 @@ class SolidgateSource:
             ).with_resources(table_name)
         except ResourcesNotFoundError:
             raise UnsupportedResourceError(table_name, "Solidgate")
-        
+
+
 class CassandraSource:
     def handles_incrementality(self) -> bool:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
-        query_params = parse_qs(parsed_uri.query)
-        username = query_params.get("username")
-        if username is not None:
+        username = parsed_uri.username
+        if username:
             username = username[0]
-        password = query_params.get("password")
-        if password is not None:
+
+        password = parsed_uri.password
+        if password:
             password = password[0]
-        host = query_params.get("host")[0]
-        port = query_params.get("port")[0]
-        keyspace = query_params.get("keyspace")[0]
-       
+
+        host = parsed_uri.hostname
+        if not host:
+            raise MissingValueError("host", "Cassandra")
+
+        port = parsed_uri.port
+        if not port:
+            port = 9042
+
+        keyspace = parsed_uri.path.lstrip("/")
+        if not keyspace:
+            raise MissingValueError("keyspace", "Cassandra")
+
         from ingestr.src.cassandra import cassandra_source
-        return cassandra_source(host=host, port=port, keyspace=keyspace, table=table, username=username, password=password)
+
+        return cassandra_source(
+            host=host,
+            port=port,
+            keyspace=keyspace,
+            table=table,
+            username=username,
+            password=password,
+        ).with_resources("fetch_data")

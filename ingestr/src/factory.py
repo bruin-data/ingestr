@@ -28,6 +28,7 @@ from ingestr.src.sources import (
     ArrowMemoryMappedSource,
     AsanaSource,
     AttioSource,
+    CassandraSource,
     ChessSource,
     DynamoDBSource,
     ElasticsearchSource,
@@ -61,7 +62,6 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
-    CassandraSource,
 )
 
 SQL_SOURCE_SCHEMES = [
