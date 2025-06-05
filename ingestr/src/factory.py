@@ -16,6 +16,7 @@ from ingestr.src.destinations import (
     RedshiftDestination,
     S3Destination,
     SnowflakeDestination,
+    SqliteDestination,
     SynapseDestination,
 )
 from ingestr.src.sources import (
@@ -55,6 +56,7 @@ from ingestr.src.sources import (
     SalesforceSource,
     ShopifySource,
     SlackSource,
+    SmartsheetSource,
     SolidgateSource,
     SqlSource,
     StripeAnalyticsSource,
@@ -162,6 +164,7 @@ class SourceDestinationFactory:
         "elasticsearch": ElasticsearchSource,
         "attio": AttioSource,
         "solidgate": SolidgateSource,
+        "smartsheet": SmartsheetSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
@@ -181,6 +184,7 @@ class SourceDestinationFactory:
         "clickhouse+native": ClickhouseDestination,
         "clickhouse": ClickhouseDestination,
         "s3": S3Destination,
+        "sqlite": SqliteDestination,
         "mysql": MySqlDestination,
         "mysql+pymysql": MySqlDestination,
     }

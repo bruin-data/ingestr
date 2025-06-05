@@ -7,6 +7,20 @@ def cast_set_to_list(row):
     return row
 
 
+def cast_spanner_types(row):
+    if not isinstance(row, dict):
+        return row
+
+    from google.cloud.spanner_v1.data_types import JsonObject
+
+    for key in row.keys():
+        if isinstance(row[key], JsonObject):
+            import json
+
+            row[key] = json.loads(row[key].serialize())
+    return row
+
+
 def handle_mysql_empty_dates(row):
     # MySQL returns empty dates as 0000-00-00, which is not a valid date, we handle them here.
     if not isinstance(row, dict):

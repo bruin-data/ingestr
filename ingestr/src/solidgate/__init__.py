@@ -43,7 +43,7 @@ def solidgate_source(
         yield solidgate_client.fetch_data(path, date_from=start_dt, date_to=end_dt)
 
     @dlt.resource(
-        name="apm-orders",
+        name="apm_orders",
         write_disposition="merge",
         primary_key="order_id",
         columns={
@@ -69,7 +69,7 @@ def solidgate_source(
         yield solidgate_client.fetch_data(path, date_from=start_dt, date_to=end_dt)
 
     @dlt.resource(
-        name="card-orders",
+        name="card_orders",
         write_disposition="merge",
         primary_key="order_id",
         columns={
@@ -94,4 +94,34 @@ def solidgate_source(
         start_dt = dateTime.last_value
         yield solidgate_client.fetch_data(path, date_from=start_dt, date_to=end_dt)
 
-    return fetch_all_subscriptions, fetch_apm_orders, fetch_card_orders
+    @dlt.resource(
+        name="financial_entries",
+        write_disposition="merge",
+        primary_key="id",
+        columns={
+            "created_at": {"data_type": "timestamp", "partition": True},
+        },
+    )
+    def fetch_financial_entries(
+        dateTime=dlt.sources.incremental(
+            "created_at",
+            initial_value=start_date,
+            end_value=end_date,
+            range_start="closed",
+            range_end="closed",
+        ),
+    ):
+        if dateTime.end_value is None:
+            end_date = pendulum.now(tz="UTC")
+        else:
+            end_date = dateTime.end_value
+
+        start_date = dateTime.last_value
+        yield solidgate_client.fetch_financial_entry_data(start_date, end_date)
+
+    return (
+        fetch_all_subscriptions,
+        fetch_apm_orders,
+        fetch_card_orders,
+        fetch_financial_entries,
+    )
