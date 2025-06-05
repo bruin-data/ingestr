@@ -61,6 +61,7 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     ZendeskSource,
+    CassandraSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -164,6 +165,7 @@ class SourceDestinationFactory:
         "attio": AttioSource,
         "solidgate": SolidgateSource,
         "smartsheet": SmartsheetSource,
+        "cassandra": CassandraSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
