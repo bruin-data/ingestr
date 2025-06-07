@@ -12,8 +12,8 @@ venv/touchfile: requirements-dev.txt requirements.txt
 	touch venv/touchfile
 
 lock-deps:
-	@uv pip compile requirements.in --quiet -o requirements.txt 
-	@uv pip compile requirements.in --quiet -o requirements_arm64.txt --python-platform aarch64-unknown-linux-gnu
+	@uv pip compile requirements.in --quiet -o requirements.txt --no-emit-package marshmallow
+	@uv pip compile requirements.in --quiet -o requirements_arm64.txt --python-platform aarch64-unknown-linux-gnu --no-emit-package marshmallow
 
 deps: lock-deps
 	uv pip install -r requirements-dev.txt
