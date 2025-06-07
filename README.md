@@ -88,6 +88,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
+        <td>CrateDB</td>
+        <td>✅</td>
+        <td>❌</td>
+    </tr>
+    <tr>
         <td>Databricks</td>
         <td>✅</td>
         <td>✅</td>
