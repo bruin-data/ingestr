@@ -2506,3 +2506,53 @@ class SolidgateSource:
             ).with_resources(table_name)
         except ResourcesNotFoundError:
             raise UnsupportedResourceError(table_name, "Solidgate")
+
+
+class QuickBooksSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    # quickbooks://company_id?client_id=<client_id>&client_secret=<client_secret>&refresh_token=<refresh>&access_token=<access_token>&environment=<env>&minor_version=<version>
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        company_id = parsed_uri.netloc
+        params = parse_qs(parsed_uri.query)
+
+        client_id = params.get("client_id")
+        client_secret = params.get("client_secret")
+        refresh_token = params.get("refresh_token")
+        access_token = params.get("access_token", [None])[0]
+        environment = params.get("environment", ["production"])[0]
+        minor_version = params.get("minor_version", [None])[0]
+
+        if client_id is None:
+            raise MissingValueError("client_id", "QuickBooks")
+
+        if client_secret is None:
+            raise MissingValueError("client_secret", "QuickBooks")
+
+        if refresh_token is None:
+            raise MissingValueError("refresh_token", "QuickBooks")
+
+        if not company_id:
+            raise MissingValueError("company_id", "QuickBooks")
+
+        table_name = table.replace(" ", "")
+        from ingestr.src.quickbooks import DEFAULT_OBJECTS, quickbooks_source
+
+        objects = [table_name]
+        if table_name == "default":
+            objects = DEFAULT_OBJECTS
+
+        minor = int(minor_version) if minor_version else None
+
+        return quickbooks_source(
+            company_id=company_id,
+            client_id=client_id[0],
+            client_secret=client_secret[0],
+            refresh_token=refresh_token[0],
+            access_token=access_token,
+            environment=environment,
+            minor_version=minor,
+            objects=objects,
+        ).with_resources(*[o.lower() for o in objects])

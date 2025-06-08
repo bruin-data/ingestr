@@ -51,6 +51,7 @@ from ingestr.src.sources import (
     PersonioSource,
     PhantombusterSource,
     PipedriveSource,
+    QuickBooksSource,
     S3Source,
     SalesforceSource,
     ShopifySource,
@@ -163,6 +164,7 @@ class SourceDestinationFactory:
         "elasticsearch": ElasticsearchSource,
         "attio": AttioSource,
         "solidgate": SolidgateSource,
+        "quickbooks": QuickBooksSource,
         "smartsheet": SmartsheetSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
