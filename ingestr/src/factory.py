@@ -7,6 +7,7 @@ from ingestr.src.destinations import (
     AthenaDestination,
     BigQueryDestination,
     ClickhouseDestination,
+    CrateDBDestination,
     CsvDestination,
     DatabricksDestination,
     DuckDBDestination,
@@ -171,6 +172,7 @@ class SourceDestinationFactory:
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
+        "cratedb": CrateDBDestination,
         "databricks": DatabricksDestination,
         "duckdb": DuckDBDestination,
         "mssql": MsSQLDestination,

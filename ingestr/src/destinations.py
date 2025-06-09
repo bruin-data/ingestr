@@ -111,6 +111,12 @@ class BigQueryDestination:
         pass
 
 
+class CrateDBDestination(GenericSqlDestination):
+    def dlt_dest(self, uri: str, **kwargs):
+        uri = uri.replace("cratedb://", "postgres://")
+        return dlt.destinations.cratedb(credentials=uri, **kwargs)
+
+
 class PostgresDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
         return dlt.destinations.postgres(credentials=uri, **kwargs)
