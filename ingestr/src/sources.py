@@ -988,6 +988,39 @@ class KlaviyoSource:
         ).with_resources(resource)
 
 
+class MixpanelSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Mixpanel takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        parsed = urlparse(uri)
+        params = parse_qs(parsed.query)
+        api_secret = params.get("api_secret")
+        project_id = params.get("project_id")
+
+        if not api_secret or not project_id:
+            raise ValueError("api_secret and project_id are required to connect to Mixpanel")
+
+        if table not in ["events", "profiles"]:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Mixpanel source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        from ingestr.src.mixpanel import mixpanel_source
+
+        return mixpanel_source(
+            api_secret=api_secret[0],
+            project_id=project_id[0],
+            start_date=kwargs.get("interval_start"),
+            end_date=kwargs.get("interval_end"),
+        ).with_resources(table)
+
+
 class KafkaSource:
     def handles_incrementality(self) -> bool:
         return False
