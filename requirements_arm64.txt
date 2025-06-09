@@ -98,6 +98,10 @@ decorator==5.2.1
 deprecation==2.1.0
     # via rudder-sdk-python
 dlt==1.10.0
+    # via
+    #   -r requirements.in
+    #   dlt-cratedb
+dlt-cratedb==0.0.1
     # via -r requirements.in
 dnspython==2.7.0
     # via pymongo
