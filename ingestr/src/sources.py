@@ -2538,17 +2538,12 @@ class SFTPSource:
             raise ConnectionError(
                 f"Failed to connect or authenticate to sftp server {host}:{port}. Error: {e}"
             )
-
         bucket_url = f"sftp://{host}:{port}"
 
-        base_path_from_uri = parsed_uri.path
-        if not base_path_from_uri:
-            base_path_from_uri = "/"
-
-        if not base_path_from_uri.startswith("/"):
-            base_path_from_uri = "/" + base_path_from_uri
-
-        file_glob = posixpath.join(base_path_from_uri, table)
+        if table.startswith("/"):
+            file_glob = table
+        else:
+            file_glob = f"/{table}"
 
         file_extension = table.split(".")[-1].lower()
         endpoint: str
@@ -2565,4 +2560,4 @@ class SFTPSource:
         from ingestr.src.filesystem import readers
 
         dlt_source_resource = readers(bucket_url, fs, file_glob)
-        return dlt_source_resource.with_resources(endpoint).a
+        return dlt_source_resource.with_resources(endpoint)
