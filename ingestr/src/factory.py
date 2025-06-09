@@ -53,6 +53,7 @@ from ingestr.src.sources import (
     PipedriveSource,
     S3Source,
     SalesforceSource,
+    SFTPSource,
     ShopifySource,
     SlackSource,
     SmartsheetSource,
@@ -164,6 +165,7 @@ class SourceDestinationFactory:
         "attio": AttioSource,
         "solidgate": SolidgateSource,
         "smartsheet": SmartsheetSource,
+        "sftp": SFTPSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

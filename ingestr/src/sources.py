@@ -2,6 +2,7 @@ import base64
 import csv
 import json
 import os
+import posixpath
 import re
 import tempfile
 from datetime import date, datetime, timedelta, timezone
@@ -18,6 +19,7 @@ from typing import (
 )
 from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
 
+import fsspec  # type: ignore
 import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.extract import Incremental
@@ -2506,3 +2508,61 @@ class SolidgateSource:
             ).with_resources(table_name)
         except ResourcesNotFoundError:
             raise UnsupportedResourceError(table_name, "Solidgate")
+
+
+class SFTPSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        host = parsed_uri.hostname
+        if not host:
+            raise MissingValueError("host", "SFTP URI")
+        port = parsed_uri.port or 22
+        username = parsed_uri.username
+        password = parsed_uri.password
+
+        params: Dict[str, Any] = {
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "look_for_keys": False,
+            "allow_agent": False,
+        }
+
+        try:
+            fs = fsspec.filesystem("sftp", **params)
+        except Exception as e:
+            raise ConnectionError(
+                f"Failed to connect or authenticate to sftp server {host}:{port}. Error: {e}"
+            )
+
+        bucket_url = f"sftp://{host}:{port}"
+
+        base_path_from_uri = parsed_uri.path
+        if not base_path_from_uri:
+            base_path_from_uri = "/"
+
+        if not base_path_from_uri.startswith("/"):
+            base_path_from_uri = "/" + base_path_from_uri
+
+        file_glob = posixpath.join(base_path_from_uri, table)
+
+        file_extension = table.split(".")[-1].lower()
+        endpoint: str
+        if file_extension == "csv":
+            endpoint = "read_csv"
+        elif file_extension == "jsonl":
+            endpoint = "read_jsonl"
+        elif file_extension == "parquet":
+            endpoint = "read_parquet"
+        else:
+            raise ValueError(
+                "FTPServer Source only supports specific file formats: csv, jsonl, parquet."
+            )
+        from ingestr.src.filesystem import readers
+
+        dlt_source_resource = readers(bucket_url, fs, file_glob)
+        return dlt_source_resource.with_resources(endpoint).a
