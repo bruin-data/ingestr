@@ -27,6 +27,8 @@ asn1crypto==1.5.1
     # via
     #   scramp
     #   snowflake-connector-python
+async-timeout==5.0.1
+    # via aiohttp
 asynch==0.2.4
     # via clickhouse-sqlalchemy
 attrs==25.3.0
@@ -35,6 +37,8 @@ attrs==25.3.0
     #   zeep
 backoff==2.2.1
     # via rudder-sdk-python
+bcrypt==4.3.0
+    # via paramiko
 beautifulsoup4==4.13.3
     # via redshift-connector
 boto3==1.37.1
@@ -60,6 +64,7 @@ certifi==2025.1.31
 cffi==1.17.1
     # via
     #   cryptography
+    #   pynacl
     #   snowflake-connector-python
 charset-normalizer==3.4.1
     # via
@@ -83,6 +88,7 @@ confluent-kafka==2.8.0
     # via -r requirements.in
 cryptography==44.0.2
     # via
+    #   paramiko
     #   pyjwt
     #   pyopenssl
     #   snowflake-connector-python
@@ -308,6 +314,8 @@ packaging==24.2
     #   sqlalchemy-redshift
 pandas==2.2.3
     # via databricks-sql-connector
+paramiko==3.5.1
+    # via -r requirements.in
 pathvalidate==3.2.3
     # via dlt
 pendulum==3.0.0
@@ -382,6 +390,8 @@ pymongo==4.11.1
     # via -r requirements.in
 pymysql==1.1.1
     # via -r requirements.in
+pynacl==1.5.0
+    # via paramiko
 pyopenssl==25.0.0
     # via snowflake-connector-python
 pyparsing==3.2.3
@@ -555,10 +565,12 @@ typing-extensions==4.13.0
     #   alembic
     #   beautifulsoup4
     #   dlt
+    #   multidict
     #   pyairtable
     #   pydantic
     #   pydantic-core
     #   pyopenssl
+    #   rich
     #   simple-salesforce
     #   snowflake-connector-python
     #   sqlalchemy2-stubs

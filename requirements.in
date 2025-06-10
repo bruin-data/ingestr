@@ -53,3 +53,4 @@ elasticsearch==8.10.1
 sqlalchemy-spanner==1.11.0
 google-cloud-spanner==3.54.0
 smartsheet-python-sdk==3.0.5
+paramiko==3.5.1
