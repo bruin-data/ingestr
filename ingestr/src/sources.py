@@ -2,7 +2,6 @@ import base64
 import csv
 import json
 import os
-import posixpath
 import re
 import tempfile
 from datetime import date, datetime, timedelta, timezone
