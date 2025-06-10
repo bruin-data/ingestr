@@ -2522,7 +2522,7 @@ class QuickBooksSource:
         client_secret = params.get("client_secret")
         refresh_token = params.get("refresh_token")
         access_token = params.get("access_token", [None])[0]
-        environment = params.get("environment", ["production"])[0]
+        environment = params.get("environment", ["sandbox"])[0]
         minor_version = params.get("minor_version", [None])[0]
 
         if client_id is None:
@@ -2544,10 +2544,23 @@ class QuickBooksSource:
         if table_name == "default":
             objects = DEFAULT_OBJECTS
 
+        start_date = kwargs.get("interval_start")
+        if start_date is None:
+            start_date = ensure_pendulum_datetime("2025-01-01").in_tz("UTC")
+        else:
+            start_date = ensure_pendulum_datetime(start_date).in_tz("UTC")
+
+        end_date = kwargs.get("interval_end")
+
+        if end_date is not None:
+            end_date = ensure_pendulum_datetime(end_date).in_tz("UTC")
+
         minor = int(minor_version) if minor_version else None
 
         return quickbooks_source(
             company_id=company_id,
+            start_date=start_date,
+            end_date=end_date,
             client_id=client_id[0],
             client_secret=client_secret[0],
             refresh_token=refresh_token[0],
