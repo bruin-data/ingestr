@@ -67,6 +67,7 @@ from ingestr.src.sources import (
 
 SQL_SOURCE_SCHEMES = [
     "bigquery",
+    "crate",
     "duckdb",
     "mssql",
     "mysql",

@@ -86,6 +86,8 @@ clickhouse-sqlalchemy==0.2.7
     # via -r requirements.in
 confluent-kafka==2.8.0
     # via -r requirements.in
+crate==2.0.0
+    # via sqlalchemy-cratedb
 cryptography==44.0.2
     # via
     #   paramiko
@@ -138,6 +140,8 @@ fsspec==2025.3.2
     #   s3fs
 gcsfs==2025.3.2
     # via -r requirements.in
+geojson==3.2.0
+    # via sqlalchemy-cratedb
 gitdb==4.0.12
     # via gitpython
 gitpython==3.1.44
@@ -299,7 +303,9 @@ oauthlib==3.2.2
 openpyxl==3.1.5
     # via databricks-sql-connector
 orjson==3.10.16
-    # via dlt
+    # via
+    #   crate
+    #   dlt
 packaging==24.2
     # via
     #   deprecation
@@ -521,10 +527,13 @@ sqlalchemy==1.4.52
     #   duckdb-engine
     #   snowflake-sqlalchemy
     #   sqlalchemy-bigquery
+    #   sqlalchemy-cratedb
     #   sqlalchemy-hana
     #   sqlalchemy-redshift
     #   sqlalchemy-spanner
 sqlalchemy-bigquery==1.12.1
+    # via -r requirements.in
+sqlalchemy-cratedb==0.42.0.dev2
     # via -r requirements.in
 sqlalchemy-hana==2.0.0
     # via -r requirements.in
@@ -597,11 +606,16 @@ urllib3==2.3.0
     # via
     #   botocore
     #   clickhouse-connect
+    #   crate
     #   databricks-sql-connector
     #   elastic-transport
     #   pyairtable
     #   requests
     #   types-requests
+verlib2==0.3.1
+    # via
+    #   crate
+    #   sqlalchemy-cratedb
 wrapt==1.17.2
     # via aiobotocore
 yarl==1.18.3
