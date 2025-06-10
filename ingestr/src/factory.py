@@ -11,6 +11,7 @@ from ingestr.src.destinations import (
     DatabricksDestination,
     DuckDBDestination,
     MsSQLDestination,
+    MySqlDestination,
     PostgresDestination,
     RedshiftDestination,
     S3Destination,
@@ -186,6 +187,8 @@ class SourceDestinationFactory:
         "clickhouse": ClickhouseDestination,
         "s3": S3Destination,
         "sqlite": SqliteDestination,
+        "mysql": MySqlDestination,
+        "mysql+pymysql": MySqlDestination,
     }
 
     def __init__(self, source_uri: str, destination_uri: str):
