@@ -2512,12 +2512,12 @@ class QuickBooksSource:
     def handles_incrementality(self) -> bool:
         return False
 
-    # quickbooks://company_id?client_id=<client_id>&client_secret=<client_secret>&refresh_token=<refresh>&access_token=<access_token>&environment=<env>&minor_version=<version>
+    # quickbooks://?company_id=<company_id>&client_id=<client_id>&client_secret=<client_secret>&refresh_token=<refresh>&access_token=<access_token>&environment=<env>&minor_version=<version>
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
-        company_id = parsed_uri.netloc
+        
         params = parse_qs(parsed_uri.query)
-
+        company_id = params.get("company_id") 
         client_id = params.get("client_id")
         client_secret = params.get("client_secret")
         refresh_token = params.get("refresh_token")
@@ -2564,7 +2564,7 @@ class QuickBooksSource:
         minor = int(minor_version) if minor_version else None
 
         return quickbooks_source(
-            company_id=company_id,
+            company_id=company_id[0],
             start_date=start_date,
             end_date=end_date,
             client_id=client_id[0],
