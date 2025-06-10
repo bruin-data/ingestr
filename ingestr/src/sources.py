@@ -79,31 +79,7 @@ class SqlSource:
         # clickhouse://<username>:<password>@<host>:<port>?secure=<secure>
         if uri.startswith("clickhouse://"):
             parsed_uri = urlparse(uri)
-
-            username = parsed_uri.username
-            if not username:
-                raise ValueError(
-                    "A username is required to connect to the ClickHouse database."
-                )
-
-            password = parsed_uri.password
-            if not password:
-                raise ValueError(
-                    "A password is required to authenticate with the ClickHouse database."
-                )
-
-            host = parsed_uri.hostname
-            if not host:
-                raise ValueError(
-                    "The hostname or IP address of the ClickHouse server is required to establish a connection."
-                )
-
-            port = parsed_uri.port
-            if not port:
-                raise ValueError(
-                    "The TCP port of the ClickHouse server is required to establish a connection."
-                )
-
+            
             query_params = parse_qs(parsed_uri.query)
 
             if "http_port" in query_params:
