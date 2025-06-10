@@ -2,7 +2,7 @@ asana==3.2.3
 confluent-kafka==2.8.0
 databricks-sql-connector==2.9.3
 dataclasses-json==0.6.7
-dlt==1.10.0
+dlt==1.11.0
 duckdb_engine==0.17.0
 duckdb==1.2.1
 google-ads==25.1.0
