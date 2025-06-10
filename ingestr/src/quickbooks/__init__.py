@@ -11,20 +11,11 @@ from intuitlib.client import AuthClient  # type: ignore
 
 from quickbooks import QuickBooks  # type: ignore
 
-# default QuickBooks objects we expose
-DEFAULT_OBJECTS = [
-    "Customer",
-    "Invoice",
-    "Account",
-    "Vendor",
-    "Payment",
-]
-
-
 @dlt.source(name="quickbooks", max_table_nesting=0)
 def quickbooks_source(
     company_id: str,
     start_date: pendulum.DateTime,
+    object: str,
     end_date: pendulum.DateTime | None,
     client_id: str = dlt.secrets.value,
     client_secret: str = dlt.secrets.value,
@@ -32,7 +23,6 @@ def quickbooks_source(
     access_token: Optional[str] = dlt.secrets.value,
     environment: str = "production",
     minor_version: Optional[int] = None,
-    objects: Optional[List[str]] = None,
 ) -> Iterable[DltResource]:
     """Create dlt resources for QuickBooks objects.
 
@@ -53,8 +43,6 @@ def quickbooks_source(
         Either ``"production"`` or ``"sandbox"``.
     minor_version: Optional[int]
         QuickBooks API minor version if needed.
-    objects: Optional[List[str]]
-        List of object names to pull. Defaults to ``DEFAULT_OBJECTS``.
     """
 
     auth_client = AuthClient(
@@ -72,14 +60,13 @@ def quickbooks_source(
         minorversion=minor_version,
     )
 
-    objects = objects or DEFAULT_OBJECTS
 
     def fetch_object(
         obj_name: str,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "lastupdatedtime",
-            initial_value=start_date,  # type: ignore
-            end_value=end_date,  # type: ignore
+            initial_value=start_date, # type: ignore
+            end_value=end_date, # type: ignore
             range_start="closed",
             range_end="closed",
             allow_external_schedulers=True,
@@ -102,7 +89,7 @@ def quickbooks_source(
 
             result = client.query(query)
 
-            items = result.get("QueryResponse", {}).get("Account", [])
+            items = result.get("QueryResponse", {}).get(obj_name.capitalize(), [])
             if not items:
                 break
 
@@ -120,11 +107,10 @@ def quickbooks_source(
                 break
 
             start_pos += 1000
-
-    for obj in objects:
-        yield dlt.resource(
-            fetch_object,
-            name=obj.lower(),
-            write_disposition="merge",
-            primary_key="id",
-        )(obj)
+    
+    yield dlt.resource(
+        fetch_object,
+        name=object.lower(),
+        write_disposition="merge",
+        primary_key="id",
+        )(object)

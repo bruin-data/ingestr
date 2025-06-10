@@ -2537,12 +2537,18 @@ class QuickBooksSource:
         if not company_id:
             raise MissingValueError("company_id", "QuickBooks")
 
-        table_name = table.replace(" ", "")
-        from ingestr.src.quickbooks import DEFAULT_OBJECTS, quickbooks_source
+        from ingestr.src.quickbooks import quickbooks_source
 
-        objects = [table_name]
-        if table_name == "default":
-            objects = DEFAULT_OBJECTS
+        table_name = table.replace(" ", "")
+        table_mapping = {
+            "customers": "customer",
+            "invoices": "invoice",
+            "accounts": "account",
+            "vendors": "vendor",
+            "payments": "payment",
+        }
+        if table_name in table_mapping:
+            table_name = table_mapping[table_name]
 
         start_date = kwargs.get("interval_start")
         if start_date is None:
@@ -2567,5 +2573,5 @@ class QuickBooksSource:
             access_token=access_token,
             environment=environment,
             minor_version=minor,
-            objects=objects,
-        ).with_resources(*[o.lower() for o in objects])
+            object=table_name,
+        ).with_resources(table_name)
