@@ -3,6 +3,7 @@
 from typing import Iterable, Iterator, List, Optional
 
 import dlt
+import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
@@ -23,6 +24,8 @@ DEFAULT_OBJECTS = [
 @dlt.source(name="quickbooks", max_table_nesting=0)
 def quickbooks_source(
     company_id: str,
+    start_date: pendulum.DateTime,
+    end_date: pendulum.DateTime | None,
     client_id: str = dlt.secrets.value,
     client_secret: str = dlt.secrets.value,
     refresh_token: str = dlt.secrets.value,
@@ -74,27 +77,48 @@ def quickbooks_source(
     def fetch_object(
         obj_name: str,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "MetaData.LastUpdatedTime",
-            initial_value=None,
+            "lastupdatedtime",
+            initial_value=start_date,  # type: ignore
+            end_value=end_date,  # type: ignore
+            range_start="closed",
+            range_end="closed",
             allow_external_schedulers=True,
         ),
     ) -> Iterator[List[TDataItem]]:
         start_pos = 1
+
+        end_dt = updated_at.end_value or pendulum.now(tz="UTC")
+        start_dt = ensure_pendulum_datetime(str(updated_at.last_value)).in_tz("UTC")
+
+        start_str = start_dt.isoformat()
+        end_str = end_dt.isoformat()
+
+        where_clause = f"WHERE MetaData.LastUpdatedTime >= '{start_str}' AND MetaData.LastUpdatedTime < '{end_str}'"
         while True:
             query = (
-                f"SELECT * FROM {obj_name} STARTPOSITION {start_pos} MAXRESULTS 1000"
+                f"SELECT * FROM {obj_name} {where_clause} "
+                f"ORDERBY MetaData.LastUpdatedTime ASC STARTPOSITION {start_pos} MAXRESULTS 1000"
             )
-            if updated_at.last_value:
-                last = ensure_pendulum_datetime(str(updated_at.last_value))
-                query = (
-                    f"SELECT * FROM {obj_name} WHERE MetaData.LastUpdatedTime >= '{last}' "
-                    f"STARTPOSITION {start_pos} MAXRESULTS 1000"
-                )
+
             result = client.query(query)
-            items = result.get("QueryResponse", {}).get(obj_name, [])
+
+            items = result.get("QueryResponse", {}).get("Account", [])
             if not items:
                 break
-            yield items
+
+            for item in items:
+                if item.get("MetaData") and item["MetaData"].get("LastUpdatedTime"):
+                    item["lastupdatedtime"] = ensure_pendulum_datetime(
+                        item["MetaData"]["LastUpdatedTime"]
+                    )
+                    item["id"] = item["Id"]
+                    del item["Id"]
+
+                yield item
+
+            if len(items) < 1000:
+                break
+
             start_pos += 1000
 
     for obj in objects:
@@ -102,5 +126,5 @@ def quickbooks_source(
             fetch_object,
             name=obj.lower(),
             write_disposition="merge",
-            primary_key="Id",
+            primary_key="id",
         )(obj)
