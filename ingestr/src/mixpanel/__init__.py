@@ -11,23 +11,39 @@ from .client import MixpanelClient
 
 
 @dlt.source(max_table_nesting=0)
-def mixpanel_source(api_secret: str, project_id: str, start_date: str | None = None, end_date: str | None = None) -> Iterable[DltResource]:
-    client = MixpanelClient(api_secret, project_id)
-    start = pendulum.parse(start_date) if start_date else pendulum.datetime(2000, 1, 1)
+def mixpanel_source(
+    username: str,
+    password: str,
+    project_id: str,
+    start_date: str,
+    end_date: str | None = None,
+) -> Iterable[DltResource]:
+    client = MixpanelClient(username, password, project_id)
+    start = pendulum.parse(start_date) if start_date else pendulum.datetime(2020, 1, 1)
 
-    @dlt.resource(write_disposition="append", name="events")
+    @dlt.resource(write_disposition="merge", name="events", primary_key="distinct_id")
     def events(
         date=dlt.sources.incremental(
-            "date",
-            start.format("YYYY-MM-DD"),
+            "time",
+            initial_value=start.int_timestamp,
+            end_value=pendulum.parse(end_date).int_timestamp if end_date else None,
             range_end="closed",
             range_start="closed",
         ),
     ) -> Iterable[TDataItem]:
-        end = pendulum.parse(end_date) if end_date else pendulum.now()
-        intervals = split_date_range(pendulum.parse(date.start_value), end)
+        if date.end_value is None:
+            end_dt = pendulum.now(tz="UTC")
+        else:
+            end_dt = pendulum.from_timestamp(date.end_value)
+
+        start_dt = pendulum.from_timestamp(date.last_value)
+
+        intervals = split_date_range(start_dt, end_dt)
         for s, e in intervals:
-            yield from client.fetch_events(pendulum.parse(s), pendulum.parse(e))
+            yield from client.fetch_events(
+                pendulum.parse(s).format("YYYY-MM-DD"),
+                pendulum.parse(e).format("YYYY-MM-DD"),
+            )
 
     @dlt.resource(write_disposition="merge", primary_key="distinct_id", name="profiles")
     def profiles(
