@@ -1000,24 +1000,38 @@ class MixpanelSource:
 
         parsed = urlparse(uri)
         params = parse_qs(parsed.query)
-        api_secret = params.get("api_secret")
+        username = params.get("username")
+        password = params.get("password")
         project_id = params.get("project_id")
 
-        if not api_secret or not project_id:
-            raise ValueError("api_secret and project_id are required to connect to Mixpanel")
+        if not username or not password or not project_id:
+            raise ValueError(
+                "username, password and project_id are required to connect to Mixpanel"
+            )
 
         if table not in ["events", "profiles"]:
             raise ValueError(
                 f"Resource '{table}' is not supported for Mixpanel source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
+        start_date = kwargs.get("interval_start")
+        if start_date:
+            start_date = ensure_pendulum_datetime(start_date).format("YYYY-MM-DD")
+        else:
+            start_date = pendulum.datetime(2020, 1, 1).format("YYYY-MM-DD")
+
+        end_date = kwargs.get("interval_end")
+        if end_date:
+            end_date = ensure_pendulum_datetime(end_date).format("YYYY-MM-DD")
+
         from ingestr.src.mixpanel import mixpanel_source
 
         return mixpanel_source(
-            api_secret=api_secret[0],
+            username=username[0],
+            password=password[0],
             project_id=project_id[0],
-            start_date=kwargs.get("interval_start"),
-            end_date=kwargs.get("interval_end"),
+            start_date=start_date,
+            end_date=end_date,
         ).with_resources(table)
 
 
