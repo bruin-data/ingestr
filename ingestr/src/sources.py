@@ -2515,14 +2515,14 @@ class QuickBooksSource:
     # quickbooks://?company_id=<company_id>&client_id=<client_id>&client_secret=<client_secret>&refresh_token=<refresh>&access_token=<access_token>&environment=<env>&minor_version=<version>
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
-        
+
         params = parse_qs(parsed_uri.query)
-        company_id = params.get("company_id") 
+        company_id = params.get("company_id")
         client_id = params.get("client_id")
         client_secret = params.get("client_secret")
         refresh_token = params.get("refresh_token")
         access_token = params.get("access_token", [None])[0]
-        environment = params.get("environment", ["sandbox"])[0]
+        environment = params.get("environment", ["production"])[0]
         minor_version = params.get("minor_version", [None])[0]
 
         if client_id is None:

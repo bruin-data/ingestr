@@ -11,6 +11,7 @@ from intuitlib.client import AuthClient  # type: ignore
 
 from quickbooks import QuickBooks  # type: ignore
 
+
 @dlt.source(name="quickbooks", max_table_nesting=0)
 def quickbooks_source(
     company_id: str,
@@ -60,13 +61,12 @@ def quickbooks_source(
         minorversion=minor_version,
     )
 
-
     def fetch_object(
         obj_name: str,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "lastupdatedtime",
-            initial_value=start_date, # type: ignore
-            end_value=end_date, # type: ignore
+            initial_value=start_date,  # type: ignore
+            end_value=end_date,  # type: ignore
             range_start="closed",
             range_end="closed",
             allow_external_schedulers=True,
@@ -107,10 +107,10 @@ def quickbooks_source(
                 break
 
             start_pos += 1000
-    
+
     yield dlt.resource(
         fetch_object,
         name=object.lower(),
         write_disposition="merge",
         primary_key="id",
-        )(object)
+    )(object)
