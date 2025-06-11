@@ -691,8 +691,6 @@ class StripeAnalyticsSource:
                     endpoint,
                 ],
                 stripe_secret_key=api_key[0],
-                start_date=kwargs.get("interval_start", None),
-                end_date=kwargs.get("interval_end", None),
             ).with_resources(endpoint)
 
         elif table in INCREMENTAL_ENDPOINTS:
