@@ -88,9 +88,19 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
+        <td>CrateDB</td>
+        <td>✅</td>
+        <td>❌</td>
+    </tr>
+    <tr>
         <td>Databricks</td>
         <td>✅</td>
         <td>✅</td>
+    </tr>
+    <tr>
+        <td>IBM Db2</td>
+        <td>✅</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>DuckDB</td>
@@ -99,6 +109,16 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>DynamoDB</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Elasticsearch</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+     <tr>
+        <td>GCP Spanner</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -189,6 +209,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Attio</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Chess.com</td>
         <td>✅</td>
         <td>-</td>
@@ -199,7 +224,7 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
-        <td>Github</td>
+        <td>GitHub</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -244,6 +269,16 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
      <tr>
+        <td>Phantombuster</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Pipedrive</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+     <tr>
         <td>S3</td>
         <td>✅</td>
         <td>-</td>
@@ -264,7 +299,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
-        <td>Smartsheet</td>
+        <td>Smartsheets</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Solidgate</td>
         <td>✅</td>
         <td>-</td>
     </tr>

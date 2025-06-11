@@ -3,6 +3,7 @@ __pycache__
 .env
 venv
 !.gitkeep
+.idea
 .vscode/*
 .metals/*
 .coverage.*

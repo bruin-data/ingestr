@@ -11,6 +11,7 @@ from ingestr.src.destinations import (
     DatabricksDestination,
     DuckDBDestination,
     MsSQLDestination,
+    MySqlDestination,
     PostgresDestination,
     RedshiftDestination,
     S3Destination,
@@ -54,6 +55,7 @@ from ingestr.src.sources import (
     QuickBooksSource,
     S3Source,
     SalesforceSource,
+    SFTPSource,
     ShopifySource,
     SlackSource,
     SmartsheetSource,
@@ -66,6 +68,7 @@ from ingestr.src.sources import (
 
 SQL_SOURCE_SCHEMES = [
     "bigquery",
+    "crate",
     "duckdb",
     "mssql",
     "mysql",
@@ -166,6 +169,7 @@ class SourceDestinationFactory:
         "solidgate": SolidgateSource,
         "quickbooks": QuickBooksSource,
         "smartsheet": SmartsheetSource,
+        "sftp": SFTPSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
@@ -186,6 +190,8 @@ class SourceDestinationFactory:
         "clickhouse": ClickhouseDestination,
         "s3": S3Destination,
         "sqlite": SqliteDestination,
+        "mysql": MySqlDestination,
+        "mysql+pymysql": MySqlDestination,
     }
 
     def __init__(self, source_uri: str, destination_uri: str):
