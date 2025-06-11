@@ -630,3 +630,5 @@ zstd==1.5.6.5
     # via
     #   -r requirements.in
     #   asynch
+criteo-marketing==1.0.171
+    # via -r requirements.in

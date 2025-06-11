@@ -62,6 +62,7 @@ from ingestr.src.sources import (
     SqlSource,
     StripeAnalyticsSource,
     TikTokSource,
+    CriteoSource,
     ZendeskSource,
 )
 
@@ -168,6 +169,7 @@ class SourceDestinationFactory:
         "solidgate": SolidgateSource,
         "smartsheet": SmartsheetSource,
         "sftp": SFTPSource,
+        "criteo": CriteoSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

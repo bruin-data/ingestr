@@ -2536,3 +2536,50 @@ class SFTPSource:
 
         dlt_source_resource = readers(bucket_url, fs, file_glob)
         return dlt_source_resource.with_resources(endpoint)
+
+
+class CriteoSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Criteo handles incrementality internally, do not provide incremental_key"
+            )
+
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        client_id = params.get("client_id")
+        client_secret = params.get("client_secret")
+        advertiser_ids = params.get("advertiser_ids")
+
+        if not client_id or not client_secret:
+            raise ValueError("client_id and client_secret are required for Criteo source")
+
+        if not advertiser_ids:
+            raise ValueError("advertiser_ids are required for Criteo source")
+
+        advertiser_ids_list = advertiser_ids[0].replace(" ", "").split(",")
+
+        start_date = kwargs.get("interval_start") or pendulum.yesterday().to_date_string()
+        end_date = kwargs.get("interval_end") or pendulum.today().to_date_string()
+
+        dimensions = params.get("dimensions")
+        metrics = params.get("metrics")
+
+        if not dimensions or not metrics:
+            raise ValueError("dimensions and metrics must be provided in the URI")
+
+        from ingestr.src.criteo import criteo_source
+
+        return criteo_source(
+            client_id=client_id[0],
+            client_secret=client_secret[0],
+            advertiser_ids=advertiser_ids_list,
+            dimensions=dimensions[0].split(","),
+            metrics=metrics[0].split(","),
+            start_date=start_date,
+            end_date=end_date,
+        ).with_resources(table)
