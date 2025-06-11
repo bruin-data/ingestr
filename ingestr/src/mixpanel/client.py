@@ -2,7 +2,6 @@ import json
 from typing import Iterable, Optional
 
 import pendulum
-import requests
 from dlt.sources.helpers.requests import Client
 
 
@@ -13,27 +12,34 @@ class MixpanelClient:
         self.project_id = project_id
         self.session = Client(raise_for_status=False).session
 
-    def fetch_events(self, start_date: pendulum.DateTime, end_date: pendulum.DateTime) -> Iterable[dict]:
+    def fetch_events(
+        self, start_date: pendulum.DateTime, end_date: pendulum.DateTime
+    ) -> Iterable[dict]:
         url = "https://data-eu.mixpanel.com/api/2.0/export/"
         params = {
             "project_id": self.project_id,
-            "from_date": start_date.format("2025-06-09"),
-            "to_date": end_date.format("2025-06-11"),
+            "from_date": start_date.format("YYYY-MM-DD"),
+            "to_date": end_date.format("YYYY-MM-DD"),
         }
         headers = {
             "accept": "text/plain",
         }
         from requests.auth import HTTPBasicAuth
+
         auth = HTTPBasicAuth(self.username, self.password)
         resp = self.session.get(url, params=params, headers=headers, auth=auth)
-        print("resp", resp.text)
-        print("resp", resp)
         resp.raise_for_status()
         for line in resp.iter_lines():
             if line:
-                yield json.loads(line.decode())
+                data = json.loads(line.decode())
+                if "properties" in data:
+                    data["time"] = data["properties"]["time"]
+                    data["distinct_id"] = data["properties"]["distinct_id"]
+                yield data
 
-    def fetch_profiles(self, last_seen: Optional[pendulum.DateTime] = None) -> Iterable[dict]:
+    def fetch_profiles(
+        self, last_seen: Optional[pendulum.DateTime] = None
+    ) -> Iterable[dict]:
         url = "https://mixpanel.com/api/2.0/engage"
         page = 0
         session_id = None
