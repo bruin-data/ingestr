@@ -5,8 +5,6 @@ import pendulum
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
 
-from ingestr.src.klaviyo.helpers import split_date_range
-
 from .client import MixpanelClient
 
 
@@ -36,16 +34,11 @@ def mixpanel_source(
             end_dt = pendulum.from_timestamp(date.end_value)
 
         start_dt = pendulum.from_timestamp(date.last_value)
-
-        intervals = split_date_range(start_dt, end_dt)
-        print(intervals)
-        for s, e in intervals:
-            print("fetching", s, e)
-
-            yield from client.fetch_events(
-                pendulum.parse(s).format("YYYY-MM-DD"),
-                pendulum.parse(e).format("YYYY-MM-DD"),
-            )
+      
+        yield from client.fetch_events(
+            start_dt.format("YYYY-MM-DD"),
+            end_dt.format("YYYY-MM-DD"),
+        )
 
     @dlt.resource(write_disposition="merge", primary_key="distinct_id", name="profiles")
     def profiles(
