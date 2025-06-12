@@ -22,12 +22,12 @@ class MixpanelClient:
             server = "data-in"
         else:
             server = "data-eu"
-        
+
         url = f"https://{server}.mixpanel.com/api/2.0/export/"
         params = {
             "project_id": self.project_id,
-            "from_date": start_date,
-            "to_date": end_date,
+            "from_date": start_date.format("YYYY-MM-DD"),
+            "to_date": end_date.format("YYYY-MM-DD"),
         }
         headers = {
             "accept": "text/plain",
@@ -59,8 +59,6 @@ class MixpanelClient:
         else:
             server = "eu."
         url = f"https://{server}mixpanel.com/api/query/engage"
-        print(url)
-        return
         headers = {
             "accept": "application/json",
             "content-type": "application/x-www-form-urlencoded",
@@ -71,7 +69,7 @@ class MixpanelClient:
         page = 0
         session_id = None
         while True:
-            params = {"project_id": self.project_id, "page": page}
+            params = {"project_id": self.project_id, "page": str(page)}
             if session_id:
                 params["session_id"] = session_id
             start_str = start_date.format("YYYY-MM-DDTHH:mm:ss")
@@ -82,7 +80,7 @@ class MixpanelClient:
 
             resp.raise_for_status()
             data = resp.json()
-        
+
             for result in data.get("results", []):
                 for key, value in result["$properties"].items():
                     if key.startswith("$"):
@@ -97,5 +95,5 @@ class MixpanelClient:
             if not data.get("results"):
                 break
             session_id = data.get("session_id", session_id)
-            
+
             page += 1

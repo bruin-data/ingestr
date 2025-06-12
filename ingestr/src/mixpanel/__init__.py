@@ -35,10 +35,10 @@ def mixpanel_source(
             end_dt = pendulum.from_timestamp(date.end_value)
 
         start_dt = pendulum.from_timestamp(date.last_value)
-      
+
         yield from client.fetch_events(
-            start_dt.format("YYYY-MM-DD"),
-            end_dt.format("YYYY-MM-DD"),
+            start_dt,
+            end_dt,
         )
 
     @dlt.resource(write_disposition="merge", primary_key="distinct_id", name="profiles")

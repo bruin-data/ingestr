@@ -79,7 +79,7 @@ class SqlSource:
         # clickhouse://<username>:<password>@<host>:<port>?secure=<secure>
         if uri.startswith("clickhouse://"):
             parsed_uri = urlparse(uri)
-            
+
             query_params = parse_qs(parsed_uri.query)
 
             if "http_port" in query_params:
