@@ -1016,13 +1016,15 @@ class MixpanelSource:
 
         start_date = kwargs.get("interval_start")
         if start_date:
-            start_date = ensure_pendulum_datetime(start_date).format("YYYY-MM-DD")
+            start_date = ensure_pendulum_datetime(start_date).in_timezone("UTC")
         else:
-            start_date = pendulum.datetime(2020, 1, 1).format("YYYY-MM-DD")
+            start_date = pendulum.datetime(2020, 1, 1).in_timezone("UTC")
 
         end_date = kwargs.get("interval_end")
         if end_date:
-            end_date = ensure_pendulum_datetime(end_date).format("YYYY-MM-DD")
+            end_date = ensure_pendulum_datetime(end_date).in_timezone("UTC")
+        else:
+            end_date = pendulum.now().in_timezone("UTC")
 
         from ingestr.src.mixpanel import mixpanel_source
 
