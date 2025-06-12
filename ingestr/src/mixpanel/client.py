@@ -16,8 +16,6 @@ class MixpanelClient:
         self, start_date: pendulum.DateTime, end_date: pendulum.DateTime
     ) -> Iterable[dict]:
         url = "https://data-eu.mixpanel.com/api/2.0/export/"
-        print("fetching", start_date)
-        print("to", end_date)
         params = {
             "project_id": self.project_id,
             "from_date": start_date,
@@ -29,12 +27,9 @@ class MixpanelClient:
         from requests.auth import HTTPBasicAuth
 
         auth = HTTPBasicAuth(self.username, self.password)
-        print("auth", auth)
         resp = self.session.get(url, params=params, headers=headers, auth=auth)
-        print(resp.text)
 
         resp.raise_for_status()
-        print("resp", resp)
         for line in resp.iter_lines():
             if line:
                 data = json.loads(line.decode())
@@ -61,7 +56,6 @@ class MixpanelClient:
             params = {"project_id": self.project_id, "page": page}
             if session_id:
                 params["session_id"] = session_id
-            print(start_date, end_date)
             start_str = start_date.format("YYYY-MM-DDTHH:mm:ss")
             end_str = end_date.format("YYYY-MM-DDTHH:mm:ss")
             where = f'properties["$last_seen"] >= "{start_str}" and properties["$last_seen"] <= "{end_str}"'
@@ -70,19 +64,20 @@ class MixpanelClient:
 
             resp.raise_for_status()
             data = resp.json()
-            print(data)
-            results = data.get("results", [])
-            print(results)
-            for result in results:
-                if result["$properties"]:
-                    result["last_seen"] = pendulum.parse(
-                        result["$properties"]["$last_seen"]
-                    )
-                    result["distinct_id"] = result["$distinct_id"]
-
-            if not results:
+        
+            for result in data.get("results", []):
+                for key, value in result["$properties"].items():
+                    if key.startswith("$"):
+                        if key == "$last_seen":
+                            result["last_seen"] = pendulum.parse(value)
+                        else:
+                            result[key[1:]] = value
+                result["distinct_id"] = result["$distinct_id"]
+                del result["$properties"]
+                del result["$distinct_id"]
+                yield result
+            if not data.get("results"):
                 break
             session_id = data.get("session_id", session_id)
-            for item in results:
-                yield item
+            
             page += 1
