@@ -2591,8 +2591,6 @@ class QuickBooksSource:
         if end_date is not None:
             end_date = ensure_pendulum_datetime(end_date).in_tz("UTC")
 
-        minor = minor_version if minor_version else None
-
         return quickbooks_source(
             company_id=company_id[0],
             start_date=start_date,
