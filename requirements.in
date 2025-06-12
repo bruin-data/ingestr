@@ -1,4 +1,5 @@
 asana==3.2.3
+click<8.2
 confluent-kafka==2.8.0
 databricks-sql-connector==2.9.3
 dataclasses-json==0.6.7
