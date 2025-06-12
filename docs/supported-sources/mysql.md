@@ -1,13 +1,13 @@
 # MySQL
 MySQL is an open source relational database management system, known for its speed and reliability.
 
-ingestr supports MySQL as a source.
+ingestr supports MySQL as a source and a destination.
 
 ## URI format
 The URI format for MySQL is as follows:
 
 ```plaintext
-mysql://user:password@host:port/dbname 
+mysql://user:password@host:port/dbname
 ```
 
 URI parameters:
@@ -17,4 +17,4 @@ URI parameters:
 - `port`: the port number the database server is listening on, the default is 3306
 - `dbname`: the name of the database to connect to
 
-The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's MySQL dialect [here](https://docs.sqlalchemy.org/en/20/core/engines.html#mysql).
+The same URI structure and table can be used both for sources and destinations. You can read more about SQLAlchemy's MySQL dialect [here](https://docs.sqlalchemy.org/en/20/core/engines.html#mysql).
