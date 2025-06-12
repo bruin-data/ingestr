@@ -2555,16 +2555,16 @@ class QuickBooksSource:
         environment = params.get("environment", ["production"])
         minor_version = params.get("minor_version", [None])
 
-        if client_id is None:
+        if not client_id or not client_id[0].strip():
             raise MissingValueError("client_id", "QuickBooks")
 
-        if client_secret is None:
+        if not client_secret or not client_secret[0].strip():
             raise MissingValueError("client_secret", "QuickBooks")
 
-        if refresh_token is None:
+        if not refresh_token or not refresh_token[0].strip():
             raise MissingValueError("refresh_token", "QuickBooks")
 
-        if not company_id:
+        if not company_id or not company_id[0].strip():
             raise MissingValueError("company_id", "QuickBooks")
 
         from ingestr.src.quickbooks import quickbooks_source
