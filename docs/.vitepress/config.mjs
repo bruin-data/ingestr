@@ -132,6 +132,7 @@ export default defineConfig({
               { text: "HubSpot", link: "/supported-sources/hubspot.md" },
               { text: "Klaviyo", link: "/supported-sources/klaviyo.md" },
               { text: "LinkedIn Ads", link: "/supported-sources/linkedin_ads.md" },
+              { text: "Mixpanel", link: "/supported-sources/mixpanel.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Personio", link: "/supported-sources/personio.md" },
               { text: "PhantomBuster", link: "/supported-sources/phantombuster.md" },

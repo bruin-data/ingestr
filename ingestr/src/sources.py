@@ -79,7 +79,7 @@ class SqlSource:
         # clickhouse://<username>:<password>@<host>:<port>?secure=<secure>
         if uri.startswith("clickhouse://"):
             parsed_uri = urlparse(uri)
-            
+
             query_params = parse_qs(parsed_uri.query)
 
             if "http_port" in query_params:
@@ -961,6 +961,57 @@ class KlaviyoSource:
             api_key=api_key[0],
             start_date=start_date,
         ).with_resources(resource)
+
+
+class MixpanelSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Mixpanel takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        parsed = urlparse(uri)
+        params = parse_qs(parsed.query)
+        username = params.get("username")
+        password = params.get("password")
+        project_id = params.get("project_id")
+        server = params.get("server", ["eu"])
+
+        if not username or not password or not project_id:
+            raise ValueError(
+                "username, password, project_id are required to connect to Mixpanel"
+            )
+
+        if table not in ["events", "profiles"]:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Mixpanel source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        start_date = kwargs.get("interval_start")
+        if start_date:
+            start_date = ensure_pendulum_datetime(start_date).in_timezone("UTC")
+        else:
+            start_date = pendulum.datetime(2020, 1, 1).in_timezone("UTC")
+
+        end_date = kwargs.get("interval_end")
+        if end_date:
+            end_date = ensure_pendulum_datetime(end_date).in_timezone("UTC")
+        else:
+            end_date = pendulum.now().in_timezone("UTC")
+
+        from ingestr.src.mixpanel import mixpanel_source
+
+        return mixpanel_source(
+            username=username[0],
+            password=password[0],
+            project_id=project_id[0],
+            start_date=start_date,
+            end_date=end_date,
+            server=server[0],
+        ).with_resources(table)
 
 
 class KafkaSource:
