@@ -6,16 +6,24 @@ from dlt.sources.helpers.requests import Client
 
 
 class MixpanelClient:
-    def __init__(self, username: str, password: str, project_id: str):
+    def __init__(self, username: str, password: str, project_id: str, server: str):
         self.username = username
         self.password = password
         self.project_id = project_id
+        self.server = server
         self.session = Client(raise_for_status=False).session
 
     def fetch_events(
         self, start_date: pendulum.DateTime, end_date: pendulum.DateTime
     ) -> Iterable[dict]:
-        url = "https://data-eu.mixpanel.com/api/2.0/export/"
+        if self.server == "us":
+            server = "data"
+        elif self.server == "in":
+            server = "data-in"
+        else:
+            server = "data-eu"
+        
+        url = f"https://{server}.mixpanel.com/api/2.0/export/"
         params = {
             "project_id": self.project_id,
             "from_date": start_date,
@@ -28,21 +36,31 @@ class MixpanelClient:
 
         auth = HTTPBasicAuth(self.username, self.password)
         resp = self.session.get(url, params=params, headers=headers, auth=auth)
-
         resp.raise_for_status()
         for line in resp.iter_lines():
             if line:
                 data = json.loads(line.decode())
                 if "properties" in data:
-                    data["time"] = data["properties"]["time"]
-                    data["distinct_id"] = data["properties"]["distinct_id"]
+                    for key, value in data["properties"].items():
+                        if key.startswith("$"):
+                            data[key[1:]] = value
+                        else:
+                            data[key] = value
+                    del data["properties"]
                 yield data
 
     def fetch_profiles(
         self, start_date: pendulum.DateTime, end_date: pendulum.DateTime
     ) -> Iterable[dict]:
-        url = "https://eu.mixpanel.com/api/query/engage"
-
+        if self.server == "us":
+            server = ""
+        elif self.server == "in":
+            server = "in."
+        else:
+            server = "eu."
+        url = f"https://{server}mixpanel.com/api/query/engage"
+        print(url)
+        return
         headers = {
             "accept": "application/json",
             "content-type": "application/x-www-form-urlencoded",

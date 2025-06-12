@@ -1003,10 +1003,11 @@ class MixpanelSource:
         username = params.get("username")
         password = params.get("password")
         project_id = params.get("project_id")
+        server = params.get("server", ["eu"])
 
         if not username or not password or not project_id:
             raise ValueError(
-                "username, password and project_id are required to connect to Mixpanel"
+                "username, password, project_id are required to connect to Mixpanel"
             )
 
         if table not in ["events", "profiles"]:
@@ -1034,6 +1035,7 @@ class MixpanelSource:
             project_id=project_id[0],
             start_date=start_date,
             end_date=end_date,
+            server=server[0],
         ).with_resources(table)
 
 
