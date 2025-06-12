@@ -7,15 +7,18 @@ ingestr supports Mixpanel as a source.
 ## URI format
 
 ```plaintext
-mixpanel://?api_secret=<api_secret>&project_id=<project_id>
+mixpanel://?username=<service_account_username>&password=<service_account_secret>&project_id=<project_id>&server=<server>
 ```
 
 URI parameters:
 
-- `api_secret`: The API secret for your Mixpanel project.
+- `username`: Mixpanel service account username.
+- `password`: Mixpanel service account secret. This is the secret associated with the service account.
 - `project_id`: The numeric project ID.
+- `server`: (Optional) The server region to use. Can be "us", "eu", or "in". Defaults to "eu".
 
-The URI is used to connect to the Mixpanel API for extracting data.
+
+To grab mixpanel credentials, please follow the guide [here](https://developer.mixpanel.com/reference/service-accounts).
 
 ## Example
 
@@ -23,18 +26,21 @@ Copy events from Mixpanel into a DuckDB database:
 
 ```sh
 ingestr ingest \
-    --source-uri 'mixpanel://?api_secret=secret&project_id=12345' \
+    --source-uri 'mixpanel://?username=my-service-account&password=my-secret&project_id=12345' \
     --source-table 'events' \
     --dest-uri duckdb:///mixpanel.duckdb \
-    --dest-table 'mixpanel.events' \
-    --interval-start 2024-01-01
+    --dest-table 'mixpanel.events'
 ```
+
+
+<img alt="mixpanel" src="../media/mixpanel_ingestion.png"/>
+
 
 ## Tables
 
 Mixpanel source allows ingesting the following tables:
 
-- `events`: Raw event data returned from the export API. Loaded incrementally.
-- `profiles`: User profiles from the Engage API. Loaded incrementally based on `$last_seen`.
+- `events`: Raw event data returned from the export API.
+- `profiles`: User profiles from the Engage API.
 
 Use these as `--source-table` values in the `ingestr ingest` command.
