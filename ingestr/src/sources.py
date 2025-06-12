@@ -2540,7 +2540,7 @@ class SFTPSource:
 
 class QuickBooksSource:
     def handles_incrementality(self) -> bool:
-        return False
+        return True
 
     # quickbooks://?company_id=<company_id>&client_id=<client_id>&client_secret=<client_secret>&refresh_token=<refresh>&access_token=<access_token>&environment=<env>&minor_version=<version>
     def dlt_source(self, uri: str, table: str, **kwargs):
@@ -2551,9 +2551,9 @@ class QuickBooksSource:
         client_id = params.get("client_id")
         client_secret = params.get("client_secret")
         refresh_token = params.get("refresh_token")
-        access_token = params.get("access_token", [None])[0]
-        environment = params.get("environment", ["production"])[0]
-        minor_version = params.get("minor_version", [None])[0]
+        access_token = params.get("access_token", [None])
+        environment = params.get("environment", ["production"])
+        minor_version = params.get("minor_version", [None])
 
         if client_id is None:
             raise MissingValueError("client_id", "QuickBooks")
@@ -2591,7 +2591,7 @@ class QuickBooksSource:
         if end_date is not None:
             end_date = ensure_pendulum_datetime(end_date).in_tz("UTC")
 
-        minor = int(minor_version) if minor_version else None
+        minor = minor_version if minor_version else None
 
         return quickbooks_source(
             company_id=company_id[0],
@@ -2600,8 +2600,8 @@ class QuickBooksSource:
             client_id=client_id[0],
             client_secret=client_secret[0],
             refresh_token=refresh_token[0],
-            access_token=access_token,
-            environment=environment,
-            minor_version=minor,
+            access_token=access_token[0],
+            environment=environment[0],
+            minor_version=minor_version[0],
             object=table_name,
         ).with_resources(table_name)

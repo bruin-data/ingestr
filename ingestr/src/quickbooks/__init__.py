@@ -23,7 +23,7 @@ def quickbooks_source(
     refresh_token: str = dlt.secrets.value,
     access_token: Optional[str] = dlt.secrets.value,
     environment: str = "production",
-    minor_version: Optional[int] = None,
+    minor_version: Optional[str] = None,
 ) -> Iterable[DltResource]:
     """Create dlt resources for QuickBooks objects.
 
