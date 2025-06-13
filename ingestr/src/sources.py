@@ -2566,6 +2566,9 @@ class QuickBooksSource:
 
         if not company_id or not company_id[0].strip():
             raise MissingValueError("company_id", "QuickBooks")
+        
+        if environment not in ["production", "sandbox"]:
+            raise ValueError("Invalid environment. Must be either 'production' or 'sandbox'.")
 
         from ingestr.src.quickbooks import quickbooks_source
 
