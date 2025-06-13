@@ -15,7 +15,6 @@ URI parameters:
 - `client_id`: OAuth client id from your Intuit application.
 - `client_secret`: OAuth client secret.
 - `refresh_token`: OAuth refresh token used to obtain access tokens.
-- `access_token`: Optional OAuth access token. If omitted it will be refreshed automatically.
 - `environment`: Optional environment name, either `production` or `sandbox`. Defaults to `production`.
 - `minor_version`: Optional API minor version.
 

@@ -18,10 +18,9 @@ def quickbooks_source(
     start_date: pendulum.DateTime,
     object: str,
     end_date: pendulum.DateTime | None,
-    client_id: str ,         
+    client_id: str,
     client_secret: str,
-    refresh_token: str, 
-    access_token: Optional[str],
+    refresh_token: str,
     environment: str = "production",
     minor_version: Optional[str] = None,
 ) -> Iterable[DltResource]:
@@ -49,7 +48,6 @@ def quickbooks_source(
     auth_client = AuthClient(
         client_id=client_id,
         client_secret=client_secret,
-        access_token=access_token,
         environment=environment,
         redirect_uri="http://localhost",
     )

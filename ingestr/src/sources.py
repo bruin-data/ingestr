@@ -2551,7 +2551,6 @@ class QuickBooksSource:
         client_id = params.get("client_id")
         client_secret = params.get("client_secret")
         refresh_token = params.get("refresh_token")
-        access_token = params.get("access_token", [None])
         environment = params.get("environment", ["production"])
         minor_version = params.get("minor_version", [None])
 
@@ -2566,9 +2565,11 @@ class QuickBooksSource:
 
         if not company_id or not company_id[0].strip():
             raise MissingValueError("company_id", "QuickBooks")
-        
-        if environment not in ["production", "sandbox"]:
-            raise ValueError("Invalid environment. Must be either 'production' or 'sandbox'.")
+
+        if environment[0] not in ["production", "sandbox"]:
+            raise ValueError(
+                "Invalid environment. Must be either 'production' or 'sandbox'."
+            )
 
         from ingestr.src.quickbooks import quickbooks_source
 
@@ -2601,7 +2602,6 @@ class QuickBooksSource:
             client_id=client_id[0],
             client_secret=client_secret[0],
             refresh_token=refresh_token[0],
-            access_token=access_token[0],
             environment=environment[0],
             minor_version=minor_version[0],
             object=table_name,
