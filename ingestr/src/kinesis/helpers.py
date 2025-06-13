@@ -2,7 +2,7 @@ from typing import Any, Sequence, Tuple
 
 import dlt
 from dlt.common import pendulum
-from dlt.common.typing import DictStrAny, StrAny, StrStr
+from dlt.common.typing import DictStrAny, DictStrStr, StrAny, StrStr
 
 
 def get_shard_iterator(
@@ -40,7 +40,7 @@ def get_shard_iterator(
         )
 
     shard_iterator: StrStr = kinesis_client.get_shard_iterator(
-        StreamName=stream_name, ShardId=shard_id, **iterator_params
+        **get_stream_address(stream_name), ShardId=shard_id, **iterator_params
     )
     return shard_iterator["ShardIterator"], iterator_params
 
@@ -63,3 +63,20 @@ def max_sequence_by_shard(values: Sequence[StrStr]) -> StrStr:
     # we compare message sequence at shard_id
     last_value[shard_id] = max(item["seq_no"], last_value.get(shard_id, ""))
     return last_value
+
+
+def get_stream_address(stream_name: str) -> DictStrStr:
+    """
+    Return address of stream, either as StreamName or StreamARN, when applicable.
+
+    Examples:
+    - customer_events
+    - arn:aws:kinesis:eu-central-1:842404475894:stream/customer_events
+
+    https://docs.aws.amazon.com/kinesis/latest/APIReference/API_StreamDescription.html#Streams-Type-StreamDescription-StreamName
+    https://docs.aws.amazon.com/kinesis/latest/APIReference/API_StreamDescription.html#Streams-Type-StreamDescription-StreamARN
+    """
+    if stream_name.startswith("arn:"):
+        return {"StreamARN": stream_name}
+    else:
+        return {"StreamName": stream_name}

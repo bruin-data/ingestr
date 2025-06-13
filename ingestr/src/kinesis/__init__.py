@@ -9,7 +9,7 @@ from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import StrStr, TAnyDateTime, TDataItem
 from dlt.common.utils import digest128
 
-from .helpers import get_shard_iterator, max_sequence_by_shard
+from .helpers import get_shard_iterator, get_stream_address, max_sequence_by_shard
 
 
 @dlt.resource(
@@ -42,7 +42,7 @@ def kinesis_stream(
         initial_at_timestamp (TAnyDateTime): An initial timestamp used to generate AT_TIMESTAMP or LATEST iterator when timestamp value is 0
         max_number_of_messages (int): Maximum number of messages to read in one run. Actual read may exceed that number by up to chunk_size. Defaults to None (no limit).
         milliseconds_behind_latest (int): The number of milliseconds behind the top of the shard to stop reading messages, defaults to 1000.
-        parse_json (bool): If True, assumes that messages are json strings, parses them and returns instead of `data` (otherwise). Defaults to False.
+        parse_json (bool): If True, assumes that messages are json strings, parses them and returns instead of `data` (otherwise). Defaults to True.
         chunk_size (int): The number of records to fetch at once. Defaults to 1000.
     Yields:
             Iterable[TDataItem]: Messages. Contain Kinesis envelope in `kinesis` and bytes data in `data` (if `parse_json` disabled)
@@ -65,7 +65,7 @@ def kinesis_stream(
     # so next time we request shards at AT_TIMESTAMP that is now
     resource_state["initial_at_timestamp"] = pendulum.now("UTC").subtract(seconds=1)
 
-    shards_list = kinesis_client.list_shards(StreamName=stream_name)
+    shards_list = kinesis_client.list_shards(**get_stream_address(stream_name))
     shards: List[StrStr] = shards_list["Shards"]
     while next_token := shards_list.get("NextToken"):
         shards_list = kinesis_client.list_shards(NextToken=next_token)
