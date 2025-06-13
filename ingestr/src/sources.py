@@ -2290,6 +2290,34 @@ class FreshdeskSource:
         ).with_resources(table)
 
 
+class TrustpilotSource:
+    # trustpilot://<business_unit_id>?api_key=<api_key>
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        business_unit_id = parsed_uri.netloc
+        params = parse_qs(parsed_uri.query)
+
+        if not business_unit_id:
+            raise MissingValueError("business_unit_id", "Trustpilot")
+
+        api_key = params.get("api_key")
+        if api_key is None:
+            raise MissingValueError("api_key", "Trustpilot")
+
+        if table not in ["reviews"]:
+            raise UnsupportedResourceError(table, "Trustpilot")
+
+        from ingestr.src.trustpilot import trustpilot_source
+
+        return trustpilot_source(
+            business_unit_id=business_unit_id,
+            api_key=api_key[0],
+        ).with_resources(table)
+
+
 class PhantombusterSource:
     def handles_incrementality(self) -> bool:
         return True
