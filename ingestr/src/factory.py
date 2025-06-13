@@ -53,6 +53,7 @@ from ingestr.src.sources import (
     PersonioSource,
     PhantombusterSource,
     PipedriveSource,
+    QuickBooksSource,
     S3Source,
     SalesforceSource,
     SFTPSource,
@@ -168,6 +169,7 @@ class SourceDestinationFactory:
         "elasticsearch": ElasticsearchSource,
         "attio": AttioSource,
         "solidgate": SolidgateSource,
+        "quickbooks": QuickBooksSource,
         "smartsheet": SmartsheetSource,
         "sftp": SFTPSource,
     }
