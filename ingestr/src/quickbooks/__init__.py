@@ -7,9 +7,8 @@ import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
-from intuitlib.client import AuthClient  # type: ignore
-
-from quickbooks import QuickBooks  # type: ignore
+from intuitlib.client import AuthClient # type-ignore
+from quickbooks import QuickBooks # type-ignore
 
 
 @dlt.source(name="quickbooks", max_table_nesting=0)
@@ -49,9 +48,12 @@ def quickbooks_source(
         client_id=client_id,
         client_secret=client_secret,
         environment=environment,
-        redirect_uri="http://localhost",
+        # redirect_uri is not used since we authenticate using refresh token which skips the step of redirect callback.
+        # as redirect_uri is required param, we are passing empty string.
+        redirect_uri="",
     )
 
+    # https://help.developer.intuit.com/s/article/Validity-of-Refresh-Token
     client = QuickBooks(
         auth_client=auth_client,
         refresh_token=refresh_token,
