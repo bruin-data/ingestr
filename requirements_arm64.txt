@@ -353,7 +353,7 @@ proto-plus==1.26.1
     #   google-api-core
     #   google-cloud-bigquery-storage
     #   google-cloud-spanner
-protobuf==4.25.6
+protobuf==4.25.8
     # via
     #   google-ads
     #   google-analytics-data
