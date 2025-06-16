@@ -7,8 +7,9 @@ import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
-from intuitlib.client import AuthClient # type-ignore
-from quickbooks import QuickBooks # type-ignore
+from intuitlib.client import AuthClient  # type: ignore
+
+from quickbooks import QuickBooks  # type:   ingestr/src/destinations.pyignore
 
 
 @dlt.source(name="quickbooks", max_table_nesting=0)
