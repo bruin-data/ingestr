@@ -9,7 +9,7 @@ from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
 from intuitlib.client import AuthClient  # type: ignore
 
-from quickbooks import QuickBooks  # type:   ingestr/src/destinations.pyignore
+from quickbooks import QuickBooks  # type: ignore
 
 
 @dlt.source(name="quickbooks", max_table_nesting=0)
