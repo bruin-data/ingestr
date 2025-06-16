@@ -751,6 +751,8 @@ class FacebookAdsSource:
             return facebook_insights_source(
                 access_token=access_token[0],
                 account_id=account_id[0],
+                start_date=kwargs.get("interval_start"),
+                end_date=kwargs.get("interval_end"),
             ).with_resources("facebook_insights")
         else:
             raise ValueError(

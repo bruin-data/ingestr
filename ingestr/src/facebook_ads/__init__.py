@@ -116,6 +116,8 @@ def facebook_insights_source(
     batch_size: int = 50,
     request_timeout: int = 300,
     app_api_version: str = None,
+    start_date: pendulum.DateTime = None,
+    end_date: pendulum.DateTime = None,
 ) -> DltResource:
     """Incrementally loads insight reports with defined granularity level, fields, breakdowns etc.
 
@@ -148,9 +150,13 @@ def facebook_insights_source(
         account_id, access_token, request_timeout, app_api_version
     )
 
-    # we load with a defined lag
-    initial_load_start_date = pendulum.today().subtract(days=initial_load_past_days)
-    initial_load_start_date_str = initial_load_start_date.isoformat()
+    print("_____---_____")
+    print("interval start", start_date)
+    print("interval end", end_date)
+    print("_____---_____")
+
+    if start_date is None:
+        start_date = pendulum.today().subtract(days=initial_load_past_days)
 
     @dlt.resource(
         primary_key=INSIGHTS_PRIMARY_KEY,
@@ -160,16 +166,24 @@ def facebook_insights_source(
     def facebook_insights(
         date_start: dlt.sources.incremental[str] = dlt.sources.incremental(
             "date_start",
-            initial_value=initial_load_start_date_str,
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
             range_end="closed",
             range_start="closed",
+            lag=attribution_window_days_lag * 24 * 60 * 60,  # Convert days to seconds
         ),
     ) -> Iterator[TDataItems]:
-        start_date = get_start_date(date_start, attribution_window_days_lag)
+        start_date = get_start_date(date_start)
         end_date = pendulum.now()
+        print("============")
+        print("inc last_value", date_start.last_value)
+        print("inc end_value", date_start.end_value)
+        print("derived start date", start_date)
+        print("============")
 
         # fetch insights in incremental day steps
         while start_date <= end_date:
+            print("loop start_date", start_date)
             query = {
                 "level": level,
                 "action_breakdowns": list(action_breakdowns),
@@ -193,8 +207,12 @@ def facebook_insights_source(
                     }
                 ],
             }
-            job = execute_job(account.get_insights(params=query, is_async=True))
-            yield list(map(process_report_item, job.get_result()))
+            print("executing job", start_date)
+            # job = execute_job(account.get_insights(params=query, is_async=False), insights_max_async_sleep_seconds=10)
+            job = account.get_insights(params=query, is_async=False)
+            print("finished job", start_date)
+            yield list(map(process_report_item, job))
+            print("loop start_date FINISHED", start_date)
             start_date = start_date.add(days=time_increment_days)
 
     return facebook_insights
