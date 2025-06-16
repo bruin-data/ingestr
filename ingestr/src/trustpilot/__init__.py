@@ -1,8 +1,9 @@
 """Trustpilot source for ingesting reviews."""
 
-from typing import Any, Dict, Generator, Iterable, Optional
+from typing import Any, Dict, Generator, Iterable
 
 import dlt
+import pendulum
 from dlt.sources import DltResource
 
 from .client import TrustpilotClient
@@ -11,22 +12,37 @@ from .client import TrustpilotClient
 @dlt.source()
 def trustpilot_source(
     business_unit_id: str,
-    api_key: str = dlt.secrets.value,
-    per_page: int = 100,
+    start_date: str,
+    end_date: str | None,
+    api_key: str,
+    per_page: int = 1000,
 ) -> Iterable[DltResource]:
     """Return resources for Trustpilot."""
+
     client = TrustpilotClient(api_key=api_key)
 
+    @dlt.resource(name="reviews", write_disposition="merge", primary_key="id")
     def reviews(
-        updated_at: Optional[Any] = dlt.sources.incremental(
-            "updated_at", initial_value="1970-01-01T00:00:00Z"
-        )
+        dateTime=(
+            dlt.sources.incremental(
+                "updated_at",
+                initial_value=start_date,
+                end_value=end_date,
+                range_start="closed",
+                range_end="closed",
+            )
+        ),
     ) -> Generator[Dict[str, Any], None, None]:
-        last_value = updated_at.last_value if updated_at is not None else None
+        if end_date is None:
+            end_dt = pendulum.now(tz="UTC").isoformat()
+        else:
+            end_dt = dateTime.end_value
+        start_dt = dateTime.last_value
         yield from client.paginated_reviews(
             business_unit_id=business_unit_id,
             per_page=per_page,
-            updated_since=last_value,
+            updated_since=start_dt,
+            end_date=end_dt,
         )
 
-    yield dlt.resource(reviews, name="reviews", write_disposition="merge", primary_key="id")
+    yield reviews

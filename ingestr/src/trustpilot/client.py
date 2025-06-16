@@ -1,7 +1,8 @@
 """Simple Trustpilot API client."""
 
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable
 
+import pendulum
 from dlt.sources.helpers import requests
 
 
@@ -22,8 +23,9 @@ class TrustpilotClient:
     def paginated_reviews(
         self,
         business_unit_id: str,
-        per_page: int = 100,
-        updated_since: Optional[str] = None,
+        updated_since: str,
+        end_date: str,
+        per_page: int = 1000,
     ) -> Iterable[Dict[str, Any]]:
         page = 1
         while True:
@@ -35,6 +37,11 @@ class TrustpilotClient:
             if not reviews:
                 break
             for review in reviews:
+                end_date_dt = pendulum.parse(end_date)
+                review["updated_at"] = review["updatedAt"]
+                review_dt = pendulum.parse(review["updated_at"])
+                if review_dt > end_date_dt:  # type: ignore
+                    continue
                 yield review
             if len(reviews) < per_page:
                 break
