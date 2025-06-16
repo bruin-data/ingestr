@@ -447,7 +447,7 @@ rauth==0.7.3
     # via python-quickbooks
 redshift-connector==2.1.5
     # via -r requirements.in
-requests==2.32.3
+requests==2.32.4
     # via
     #   asana
     #   clickhouse-sqlalchemy
