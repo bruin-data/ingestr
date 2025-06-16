@@ -126,6 +126,7 @@ export default defineConfig({
               { text: "Google Cloud Storage (GCS)", link: "/supported-sources/gcs.md" },
               { text: "Google Analytics", link: "/supported-sources/google_analytics.md" },
               { text: "Google Ads", link: "/supported-sources/google-ads.md" },
+              { text: "Bing Ads", link: "/supported-sources/bing-ads.md" },
               { text: "GitHub", link: "/supported-sources/github.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },

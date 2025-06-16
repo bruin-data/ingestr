@@ -39,6 +39,8 @@ bcrypt==4.3.0
     # via paramiko
 beautifulsoup4==4.13.3
     # via redshift-connector
+bingads==13.0.24.2
+    # via -r requirements.in
 boto3==1.37.1
     # via
     #   pyathena
@@ -456,6 +458,7 @@ redshift-connector==2.1.5
 requests==2.32.3
     # via
     #   asana
+    #   bingads
     #   clickhouse-sqlalchemy
     #   curlify
     #   databricks-sql-connector
@@ -582,6 +585,8 @@ sqlparse==0.5.3
     # via google-cloud-spanner
 stripe==10.7.0
     # via -r requirements.in
+suds-community==1.2.0
+    # via bingads
 tenacity==9.0.0
     # via
     #   dlt
