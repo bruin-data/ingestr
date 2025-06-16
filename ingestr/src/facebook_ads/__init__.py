@@ -175,7 +175,7 @@ def facebook_insights_source(
     ) -> Iterator[TDataItems]:
         start_date = get_start_date(date_start)
         end_date = pendulum.now()
-        
+
         while start_date <= end_date:
             query = {
                 "level": level,
@@ -200,7 +200,10 @@ def facebook_insights_source(
                     }
                 ],
             }
-            job = execute_job(account.get_insights(params=query, is_async=True), insights_max_async_sleep_seconds=10)
+            job = execute_job(
+                account.get_insights(params=query, is_async=True),
+                insights_max_async_sleep_seconds=10,
+            )
             yield list(map(process_report_item, job.get_result()))
             start_date = start_date.add(days=time_increment_days)
 

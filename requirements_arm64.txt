@@ -27,8 +27,6 @@ asn1crypto==1.5.1
     # via
     #   scramp
     #   snowflake-connector-python
-async-timeout==5.0.1
-    # via aiohttp
 asynch==0.2.4
     # via clickhouse-sqlalchemy
 attrs==25.3.0
@@ -574,12 +572,10 @@ typing-extensions==4.13.0
     #   alembic
     #   beautifulsoup4
     #   dlt
-    #   multidict
     #   pyairtable
     #   pydantic
     #   pydantic-core
     #   pyopenssl
-    #   rich
     #   simple-salesforce
     #   snowflake-connector-python
     #   sqlalchemy2-stubs

@@ -79,7 +79,7 @@ class SqlSource:
         # clickhouse://<username>:<password>@<host>:<port>?secure=<secure>
         if uri.startswith("clickhouse://"):
             parsed_uri = urlparse(uri)
-            
+
             query_params = parse_qs(parsed_uri.query)
 
             if "http_port" in query_params:
@@ -760,30 +760,31 @@ class FacebookAdsSource:
             # facebook_insights:breakdown_type
             # facebook_insights:breakdown_type:metric1,metric2...
             parts = table.split(":")
-            
+
             if len(parts) < 2 or len(parts) > 3:
                 raise ValueError(
                     "Invalid facebook_insights format. Expected: facebook_insights:breakdown_type or facebook_insights:breakdown_type:metric1,metric2..."
                 )
-            
+
             breakdown_type = parts[1].strip()
             if not breakdown_type:
                 raise ValueError(
                     "Breakdown type must be provided in format: facebook_insights:breakdown_type"
                 )
-            
+
             # Validate breakdown type against available options from settings
-            from ingestr.src.facebook_ads.settings import TInsightsBreakdownOptions
             import typing
-            
+
+            from ingestr.src.facebook_ads.settings import TInsightsBreakdownOptions
+
             # Get valid breakdown options from the type definition
             valid_breakdowns = list(typing.get_args(TInsightsBreakdownOptions))
-            
+
             if breakdown_type not in valid_breakdowns:
                 raise ValueError(
                     f"Invalid breakdown type '{breakdown_type}'. Valid options: {', '.join(valid_breakdowns)}"
                 )
-            
+
             source_kwargs = {
                 "access_token": access_token[0],
                 "account_id": account_id[0],
@@ -791,7 +792,7 @@ class FacebookAdsSource:
                 "end_date": kwargs.get("interval_end"),
                 "breakdowns": breakdown_type,
             }
-            
+
             # If custom metrics are provided, parse them
             if len(parts) == 3:
                 fields = [f.strip() for f in parts[2].split(",") if f.strip()]
@@ -800,8 +801,10 @@ class FacebookAdsSource:
                         "Custom metrics must be provided after the second colon in format: facebook_insights:breakdown_type:metric1,metric2..."
                     )
                 source_kwargs["fields"] = fields
-            
-            return facebook_insights_source(**source_kwargs).with_resources("facebook_insights")
+
+            return facebook_insights_source(**source_kwargs).with_resources(
+                "facebook_insights"
+            )
         else:
             raise ValueError(
                 f"Resource '{table}' is not supported for Facebook Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"

@@ -113,7 +113,7 @@ DEFAULT_INSIGHT_FIELDS = (
     "spend",
     "website_ctr",
     "conversions",
-    "video_thruplay_watched_actions"
+    "video_thruplay_watched_actions",
 )
 
 TInsightsLevels = Literal["account", "campaign", "adset", "ad"]
