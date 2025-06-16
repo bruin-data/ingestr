@@ -3788,7 +3788,7 @@ def trustpilot_test_case(dest_uri):
         mock_get.return_value = mock_response
 
         dest_table = "trustpilot.reviews"
-        source_uri = " trustpilot://<business_unit_id>?api_key=<api_key>"
+        source_uri = "trustpilot://<business_unit_id>?api_key=<api_key>"
         source_table = "reviews"
 
         result = invoke_ingest_command(
