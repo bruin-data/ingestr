@@ -507,7 +507,7 @@ scramp==1.4.5
     # via redshift-connector
 semver==3.0.4
     # via dlt
-setuptools==78.1.0
+setuptools==78.1.1
     # via
     #   dlt
     #   python-quickbooks
