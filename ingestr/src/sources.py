@@ -2316,9 +2316,7 @@ class TrustpilotSource:
         end_date = kwargs.get("interval_end")
 
         if end_date is not None:
-            end_date = (
-                ensure_pendulum_datetime(end_date).in_tz("UTC").to_iso8601_string()
-            )
+            end_date = ensure_pendulum_datetime(end_date).in_tz("UTC").isoformat()
 
         if table not in ["reviews"]:
             raise UnsupportedResourceError(table, "Trustpilot")
