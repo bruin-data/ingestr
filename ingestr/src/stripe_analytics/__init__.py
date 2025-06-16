@@ -85,12 +85,14 @@ def incremental_stripe_source(
         created: Optional[Any] = dlt.sources.incremental(
             "created",
             initial_value=start_date_unix,
+            end_value=transform_date(end_date) if end_date is not None else None,
             range_end="closed",
             range_start="closed",
         ),
     ) -> Generator[Dict[Any, Any], Any, None]:
-        start_value = created.last_value
-        yield from pagination(endpoint, start_date=start_value, end_date=end_date)
+        yield from pagination(
+            endpoint, start_date=created.last_value, end_date=created.end_value
+        )
 
     for endpoint in endpoints:
         yield dlt.resource(
