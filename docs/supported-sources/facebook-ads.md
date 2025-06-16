@@ -41,11 +41,162 @@ The result of this command will be a table in the `facebook.duckdb` database.
 
 Facebook Ads source allows ingesting the following sources into separate tables:
 
-- `campaigns`: Retrieves all DEFAULT_CAMPAIGN_FIELDS.
-- `ad_sets`: Retrieves all DEFAULT_ADSET_FIELDS.
-- `leads`: Retrieves all DEFAULT_LEAD_FIELDS.
-- `ads_creatives`: Retrieves all DEFAULT_ADCREATIVE_FIELDS.
-- `ads`: Retrieves all DEFAULT_ADS_FIELDS.
-- `facebook_insights`: Retrieves all DEFAULT_INSIGHTS_FIELDS.
+- `campaigns`: Retrieves campaign data with fields:
+  - `id`
+  - `updated_time`
+  - `created_time`
+  - `name`
+  - `status`
+  - `effective_status`
+  - `objective`
+  - `start_time`
+  - `stop_time`
+  - `daily_budget`
+  - `lifetime_budget`
+
+- `ad_sets`: Retrieves ad set data with fields:
+  - `id`
+  - `updated_time`
+  - `created_time`
+  - `name`
+  - `status`
+  - `effective_status`
+  - `campaign_id`
+  - `start_time`
+  - `end_time`
+  - `daily_budget`
+  - `lifetime_budget`
+  - `optimization_goal`
+  - `promoted_object`
+  - `billing_event`
+  - `bid_amount`
+  - `bid_strategy`
+  - `targeting`
+
+- `leads`: Retrieves lead data with fields:
+  - `id`
+  - `created_time`
+  - `ad_id`
+  - `ad_name`
+  - `adset_id`
+  - `adset_name`
+  - `campaign_id`
+  - `campaign_name`
+  - `form_id`
+  - `field_data`
+
+- `ads_creatives`: Retrieves ad creative data with fields:
+  - `id`
+  - `name`
+  - `status`
+  - `thumbnail_url`
+  - `object_story_spec`
+  - `effective_object_story_id`
+  - `call_to_action_type`
+  - `object_type`
+  - `template_url`
+  - `url_tags`
+  - `instagram_actor_id`
+  - `product_set_id`
+
+- `ads`: Retrieves ad data with fields:
+  - `id`
+  - `updated_time`
+  - `created_time`
+  - `name`
+  - `status`
+  - `effective_status`
+  - `adset_id`
+  - `campaign_id`
+  - `creative`
+  - `targeting`
+  - `tracking_specs`
+  - `conversion_specs`
+
+- `facebook_insights`: Retrieves insights data with fields:
+  - `campaign_id`
+  - `adset_id`
+  - `ad_id`
+  - `date_start`
+  - `date_stop`
+  - `reach`
+  - `impressions`
+  - `frequency`
+  - `clicks`
+  - `unique_clicks`
+  - `ctr`
+  - `unique_ctr`
+  - `cpc`
+  - `cpm`
+  - `cpp`
+  - `spend`
+  - `actions`
+  - `action_values`
+  - `cost_per_action_type`
+  - `website_ctr`
+  - `account_currency`
+  - `ad_click_actions`
+  - `ad_name`
+  - `adset_name`
+  - `campaign_name`
+  - `country`
+  - `dma`
+  - `full_view_impressions`
+  - `full_view_reach`
+  - `inline_link_click_ctr`
+  - `outbound_clicks`
+  - `social_spend`
+  - `conversions`
+  - `video_thruplay_watched_actions`
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+### Facebook Insights Custom Configuration
+
+The `facebook_insights` table supports advanced configuration for breakdowns and custom metrics:
+
+#### Format Options
+
+1. **Default usage**: `facebook_insights`
+   - Uses default breakdown and default fields
+
+2. **Custom breakdown**: `facebook_insights:breakdown_type`
+   - Uses specified breakdown with default fields
+
+3. **Custom breakdown + metrics**: `facebook_insights:breakdown_type:metric1,metric2,metric3`
+   - Uses specified breakdown with custom metrics
+
+#### Available Breakdown Types
+
+- `ads_insights` (default)
+- `ads_insights_age_and_gender`
+- `ads_insights_country`
+- `ads_insights_platform_and_device`
+- `ads_insights_region`
+- `ads_insights_dma`
+- `ads_insights_hourly_advertiser`
+
+#### Examples
+
+```sh
+# Default facebook_insights
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
+  --source-table 'facebook_insights' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.insights'
+
+# Age and gender breakdown with default metrics
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
+  --source-table 'facebook_insights:ads_insights_age_and_gender' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.insights_demographics'
+
+# Country breakdown with custom metrics
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
+  --source-table 'facebook_insights:ads_insights_country:impressions,clicks,spend,reach,cpm,ctr' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.insights_by_country'
+```

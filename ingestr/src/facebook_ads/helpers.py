@@ -64,8 +64,6 @@ def process_report_item(item: AbstractObject) -> DictStrAny:
     for pki in INSIGHTS_PRIMARY_KEY:
         if pki not in d:
             d[pki] = "no_" + pki
-
-    print("RETURNING ", d)
     return d
 
 

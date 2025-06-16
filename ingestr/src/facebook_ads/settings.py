@@ -112,6 +112,8 @@ DEFAULT_INSIGHT_FIELDS = (
     "social_spend",
     "spend",
     "website_ctr",
+    "conversions",
+    "video_thruplay_watched_actions"
 )
 
 TInsightsLevels = Literal["account", "campaign", "adset", "ad"]
