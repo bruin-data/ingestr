@@ -116,6 +116,8 @@ def facebook_insights_source(
     batch_size: int = 50,
     request_timeout: int = 300,
     app_api_version: str = None,
+    start_date: pendulum.DateTime | None = None,
+    end_date: pendulum.DateTime | None = None,
 ) -> DltResource:
     """Incrementally loads insight reports with defined granularity level, fields, breakdowns etc.
 
@@ -148,27 +150,32 @@ def facebook_insights_source(
         account_id, access_token, request_timeout, app_api_version
     )
 
-    # we load with a defined lag
-    initial_load_start_date = pendulum.today().subtract(days=initial_load_past_days)
-    initial_load_start_date_str = initial_load_start_date.isoformat()
+    if start_date is None:
+        start_date = pendulum.today().subtract(days=initial_load_past_days)
+
+    columns = {}
+    for field in fields:
+        if field in INSIGHT_FIELDS_TYPES:
+            columns[field] = INSIGHT_FIELDS_TYPES[field]
 
     @dlt.resource(
         primary_key=INSIGHTS_PRIMARY_KEY,
         write_disposition="merge",
-        columns=INSIGHT_FIELDS_TYPES,
+        columns=columns,
     )
     def facebook_insights(
         date_start: dlt.sources.incremental[str] = dlt.sources.incremental(
             "date_start",
-            initial_value=initial_load_start_date_str,
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
             range_end="closed",
             range_start="closed",
+            lag=attribution_window_days_lag * 24 * 60 * 60,  # Convert days to seconds
         ),
     ) -> Iterator[TDataItems]:
-        start_date = get_start_date(date_start, attribution_window_days_lag)
+        start_date = get_start_date(date_start)
         end_date = pendulum.now()
 
-        # fetch insights in incremental day steps
         while start_date <= end_date:
             query = {
                 "level": level,
@@ -193,7 +200,10 @@ def facebook_insights_source(
                     }
                 ],
             }
-            job = execute_job(account.get_insights(params=query, is_async=True))
+            job = execute_job(
+                account.get_insights(params=query, is_async=True),
+                insights_max_async_sleep_seconds=10,
+            )
             yield list(map(process_report_item, job.get_result()))
             start_date = start_date.add(days=time_increment_days)
 

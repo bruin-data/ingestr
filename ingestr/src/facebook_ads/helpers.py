@@ -31,14 +31,13 @@ from .settings import (
 
 def get_start_date(
     incremental_start_date: dlt.sources.incremental[str],
-    attribution_window_days_lag: int = 7,
 ) -> pendulum.DateTime:
     """
     Get the start date for incremental loading of Facebook Insights data.
     """
     start_date: pendulum.DateTime = ensure_pendulum_datetime(
         incremental_start_date.start_value
-    ).subtract(days=attribution_window_days_lag)
+    )
 
     # facebook forgets insights so trim the lag and warn
     min_start_date = pendulum.today().subtract(
@@ -65,7 +64,6 @@ def process_report_item(item: AbstractObject) -> DictStrAny:
     for pki in INSIGHTS_PRIMARY_KEY:
         if pki not in d:
             d[pki] = "no_" + pki
-
     return d
 
 
@@ -138,7 +136,7 @@ def execute_job(
 ) -> AbstractCrudObject:
     status: str = None
     time_start = time.time()
-    sleep_time = 10
+    sleep_time = 3
     while status != "Job Completed":
         duration = time.time() - time_start
         job = job.api_get()
