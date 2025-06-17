@@ -5,8 +5,10 @@ from urllib.parse import ParseResult, urlparse
 BucketName: TypeAlias = str
 FileGlob: TypeAlias = str
 
+
 class UnsupportedEndpointError(Exception):
     pass
+
 
 def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
     """
@@ -53,10 +55,11 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
 
     return parts[0], parts[1]
 
+
 def parse_endpoint(path: str) -> str:
     """
     Parse the endpoint kind from the URI.
-    
+
     kind is a file format. one of [csv, jsonl, parquet]
     """
     file_extension = path.split(".")[-1]
