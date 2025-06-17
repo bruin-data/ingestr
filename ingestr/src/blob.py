@@ -6,6 +6,10 @@ BucketName: TypeAlias = str
 FileGlob: TypeAlias = str
 
 
+class UnsupportedEndpointError(Exception):
+    pass
+
+
 def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
     """
     parse the URI of a blob storage and
@@ -50,3 +54,23 @@ def parse_uri(uri: ParseResult, table: str) -> Tuple[BucketName, FileGlob]:
         return "", parts[0]
 
     return parts[0], parts[1]
+
+
+def parse_endpoint(path: str) -> str:
+    """
+    Parse the endpoint kind from the URI.
+
+    kind is a file format. one of [csv, jsonl, parquet]
+    """
+    file_extension = path.split(".")[-1]
+    if file_extension == "gz":
+        file_extension = path.split(".")[-2]
+    if file_extension == "csv":
+        endpoint = "read_csv"
+    elif file_extension == "jsonl":
+        endpoint = "read_jsonl"
+    elif file_extension == "parquet":
+        endpoint = "read_parquet"
+    else:
+        raise UnsupportedEndpointError(f"Unsupported file format: {file_extension}")
+    return endpoint

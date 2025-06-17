@@ -2741,6 +2741,9 @@ def fs_test_cases(
     # for CSV tests
     with test_fs.open("/data.csv", "w") as f:
         f.write(testdata)
+    with test_fs.open("/data.csv.gz", "wb") as f:
+        with gzip.GzipFile(fileobj=f, mode="wb") as gz:
+            gz.write(testdata.encode())
 
     # for Glob tests
     with test_fs.open("/data2.csv", "w") as f:
@@ -2750,6 +2753,12 @@ def fs_test_cases(
     with test_fs.open("/data.parquet", "wb") as f:
         table = pa.csv.read_csv(io.BytesIO(testdata.encode()))
         pya_parquet.write_table(table, f)
+    with io.BytesIO() as buf:
+        pya_parquet.write_table(table, buf)
+        buf.seek(0)
+        with test_fs.open("/data.parquet.gz", "wb") as f:
+            with gzip.GzipFile(fileobj=f, mode="wb") as gz:
+                gz.write(buf.getvalue())
 
     # For JSONL tests
     with test_fs.open("/data.jsonl", "w") as f:
@@ -2757,6 +2766,12 @@ def fs_test_cases(
         for row in reader:
             json.dump(row, f)
             f.write("\n")
+    with test_fs.open("/data.jsonl.gz", "wb") as f:
+        with gzip.GzipFile(fileobj=f, mode="wb") as gz:
+            reader = csv.DictReader(io.StringIO(testdata))
+            for row in reader:
+                gz.write(json.dumps(row).encode())
+                gz.write(b"\n")
 
     # for testing unsupported files
     with test_fs.open("/bin/data.bin", "w") as f:
@@ -2842,6 +2857,24 @@ def fs_test_cases(
             assert result.exit_code == 0
             assert_rows(dest_uri, dest_table, 5)
 
+    def test_csv_gz_load(dest_uri):
+        """When the source URI is a gzipped CSV file, the data should be ingested."""
+        with (
+            patch(target_fs) as target_fs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://bucket?{auth}",
+                "/data.csv.gz",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 5)
+
     def test_parquet_load(dest_uri):
         """
         When the source URI is a Parquet file, the data should be ingested.
@@ -2862,6 +2895,24 @@ def fs_test_cases(
             assert result.exit_code == 0
             assert_rows(dest_uri, dest_table, 5)
 
+    def test_parquet_gz_load(dest_uri):
+        """When the source URI is a gzipped Parquet file, the data should be ingested."""
+        with (
+            patch(target_fs) as target_fs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://bucket?{auth}",
+                "/data.parquet.gz",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 5)
+
     def test_jsonl_load(dest_uri):
         """
         When the source URI is a JSONL file, the data should be ingested.
@@ -2876,6 +2927,24 @@ def fs_test_cases(
             result = invoke_ingest_command(
                 f"{protocol}://bucket?{auth}",
                 "/data.jsonl",
+                dest_uri,
+                dest_table,
+            )
+            assert result.exit_code == 0
+            assert_rows(dest_uri, dest_table, 5)
+
+    def test_jsonl_gz_load(dest_uri):
+        """When the source URI is a gzipped JSONL file, the data should be ingested."""
+        with (
+            patch(target_fs) as target_fs_mock,
+            patch("ingestr.src.filesystem.glob_files", wraps=glob_files_override),
+        ):
+            target_fs_mock.return_value = test_fs
+            schema_rand_prefix = f"testschema_fs_{get_random_string(5)}"
+            dest_table = f"{schema_rand_prefix}.fs_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"{protocol}://bucket?{auth}",
+                "/data.jsonl.gz",
                 dest_uri,
                 dest_table,
             )
@@ -2950,8 +3019,11 @@ def fs_test_cases(
         test_missing_credentials,
         test_unsupported_file_format,
         test_csv_load,
+        test_csv_gz_load,
         test_parquet_load,
+        test_parquet_gz_load,
         test_jsonl_load,
+        test_jsonl_gz_load,
         test_glob_load,
         test_compound_table_name,
         test_uri_precedence,

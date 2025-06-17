@@ -1362,17 +1362,25 @@ class S3Source:
             secret=secret_access_key[0],
         )
 
-        file_extension = path_to_file.split(".")[-1]
-        if file_extension == "csv":
-            endpoint = "read_csv"
-        elif file_extension == "jsonl":
-            endpoint = "read_jsonl"
-        elif file_extension == "parquet":
-            endpoint = "read_parquet"
+        endpoint: Optional[str] = None
+        if "#" in table:
+            _, endpoint = table.split("#")
+            if endpoint not in ["csv", "jsonl", "parquet"]:
+                raise ValueError(
+                    "S3 Source only supports specific formats files: csv, jsonl, parquet"
+                )
+            endpoint = f"read_{endpoint}"
         else:
-            raise ValueError(
-                "S3 Source only supports specific formats files: csv, jsonl, parquet"
-            )
+            try:
+                endpoint = blob.parse_endpoint(path_to_file)
+            except blob.UnsupportedEndpointError:
+                raise ValueError(
+                    "S3 Source only supports specific formats files: csv, jsonl, parquet"
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to parse endpoint from path: {path_to_file}"
+                ) from e
 
         from ingestr.src.filesystem import readers
 
@@ -1844,17 +1852,16 @@ class GCSSource:
             token=credentials,
         )
 
-        file_extension = path_to_file.split(".")[-1]
-        if file_extension == "csv":
-            endpoint = "read_csv"
-        elif file_extension == "jsonl":
-            endpoint = "read_jsonl"
-        elif file_extension == "parquet":
-            endpoint = "read_parquet"
-        else:
+        try:
+            endpoint = blob.parse_endpoint(path_to_file)
+        except blob.UnsupportedEndpointError:
             raise ValueError(
-                "GCS Source only supports specific formats files: csv, jsonl, parquet"
+                "S3 Source only supports specific formats files: csv, jsonl, parquet"
             )
+        except Exception as e:
+            raise ValueError(
+                f"Failed to parse endpoint from path: {path_to_file}"
+            ) from e
 
         from ingestr.src.filesystem import readers
 
@@ -2663,18 +2670,15 @@ class SFTPSource:
         else:
             file_glob = f"/{table}"
 
-        file_extension = table.split(".")[-1].lower()
-        endpoint: str
-        if file_extension == "csv":
-            endpoint = "read_csv"
-        elif file_extension == "jsonl":
-            endpoint = "read_jsonl"
-        elif file_extension == "parquet":
-            endpoint = "read_parquet"
-        else:
+        try:
+            endpoint = blob.parse_endpoint(table)
+        except blob.UnsupportedEndpointError:
             raise ValueError(
-                "FTPServer Source only supports specific file formats: csv, jsonl, parquet."
+                "SFTP Source only supports specific formats files: csv, jsonl, parquet"
             )
+        except Exception as e:
+            raise ValueError(f"Failed to parse endpoint from path: {table}") from e
+
         from ingestr.src.filesystem import readers
 
         dlt_source_resource = readers(bucket_url, fs, file_glob)
