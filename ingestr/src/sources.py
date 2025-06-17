@@ -1362,13 +1362,19 @@ class S3Source:
             secret=secret_access_key[0],
         )
 
-        try:
-            endpoint = blob.parse_endpoint(path_to_file)
-        except blob.UnsupportedEndpointError:
-            raise ValueError("S3 Source only supports specific formats files: csv, jsonl, parquet")
-        except Exception as e:
-            raise ValueError(f"Failed to parse endpoint from path: {path_to_file}") from e
-
+        endpoint: str = None
+        if "#" in table:
+            _, endpoint = table.split("#")
+            if endpoint not in ["csv", "jsonl", "parquet"]:
+                raise ValueError("S3 Source only supports specific formats files: csv, jsonl, parquet")
+            endpoint = f"read_{endpoint}"
+        else:
+            try:
+                endpoint = blob.parse_endpoint(path_to_file)
+            except blob.UnsupportedEndpointError:
+                raise ValueError("S3 Source only supports specific formats files: csv, jsonl, parquet")
+            except Exception as e:
+                raise ValueError(f"Failed to parse endpoint from path: {path_to_file}") from e
 
         from ingestr.src.filesystem import readers
 
