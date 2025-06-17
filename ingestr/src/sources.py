@@ -2653,20 +2653,13 @@ class SFTPSource:
         else:
             file_glob = f"/{table}"
 
-        file_extension = table.split(".")[-1].lower()
-        if file_extension == "gz":
-            file_extension = table.split(".")[-2].lower()
-        endpoint: str
-        if file_extension == "csv":
-            endpoint = "read_csv"
-        elif file_extension == "jsonl":
-            endpoint = "read_jsonl"
-        elif file_extension == "parquet":
-            endpoint = "read_parquet"
-        else:
-            raise ValueError(
-                "FTPServer Source only supports specific file formats: csv, jsonl, parquet."
-            )
+        try:
+            endpoint = blob.parse_endpoint(table)
+        except blob.UnsupportedEndpointError:
+            raise ValueError("SFTP Source only supports specific formats files: csv, jsonl, parquet")
+        except Exception as e:
+            raise ValueError(f"Failed to parse endpoint from path: {table}") from e
+
         from ingestr.src.filesystem import readers
 
         dlt_source_resource = readers(bucket_url, fs, file_glob)
