@@ -63,6 +63,7 @@ from ingestr.src.sources import (
     SolidgateSource,
     SqlSource,
     StripeAnalyticsSource,
+    TrustpilotSource,
     TikTokSource,
     ZendeskSource,
 )
@@ -165,6 +166,7 @@ class SourceDestinationFactory:
         "pipedrive": PipedriveSource,
         "frankfurter": FrankfurterSource,
         "freshdesk": FreshdeskSource,
+        "trustpilot": TrustpilotSource,
         "phantombuster": PhantombusterSource,
         "elasticsearch": ElasticsearchSource,
         "attio": AttioSource,

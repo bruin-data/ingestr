@@ -123,6 +123,7 @@ export default defineConfig({
               },
               { text: "Frankfurter", link: "/supported-sources/frankfurter.md" },
               { text: "Freshdesk", link: "/supported-sources/freshdesk.md" },
+              { text: "Trustpilot", link: "/supported-sources/trustpilot.md" },
               { text: "Google Cloud Storage (GCS)", link: "/supported-sources/gcs.md" },
               { text: "Google Analytics", link: "/supported-sources/google_analytics.md" },
               { text: "Google Ads", link: "/supported-sources/google-ads.md" },
