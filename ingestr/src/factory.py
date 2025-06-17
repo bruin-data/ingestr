@@ -63,8 +63,8 @@ from ingestr.src.sources import (
     SolidgateSource,
     SqlSource,
     StripeAnalyticsSource,
-    TrustpilotSource,
     TikTokSource,
+    TrustpilotSource,
     ZendeskSource,
 )
 

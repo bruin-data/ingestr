@@ -1363,6 +1363,8 @@ class S3Source:
         )
 
         file_extension = path_to_file.split(".")[-1]
+        if file_extension == "gz":
+            file_extension = path_to_file.split(".")[-2]
         if file_extension == "csv":
             endpoint = "read_csv"
         elif file_extension == "jsonl":
@@ -1845,6 +1847,8 @@ class GCSSource:
         )
 
         file_extension = path_to_file.split(".")[-1]
+        if file_extension == "gz":
+            file_extension = path_to_file.split(".")[-2]
         if file_extension == "csv":
             endpoint = "read_csv"
         elif file_extension == "jsonl":
@@ -2664,6 +2668,8 @@ class SFTPSource:
             file_glob = f"/{table}"
 
         file_extension = table.split(".")[-1].lower()
+        if file_extension == "gz":
+            file_extension = table.split(".")[-2].lower()
         endpoint: str
         if file_extension == "csv":
             endpoint = "read_csv"
