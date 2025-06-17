@@ -56,3 +56,4 @@ google-cloud-spanner==3.54.0
 smartsheet-python-sdk==3.0.5
 paramiko==3.5.1
 python-quickbooks==0.9.2
+bingads==13.0.24.2

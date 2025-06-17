@@ -2042,6 +2042,79 @@ class LinkedInAdsSource:
         ).with_resources("custom_reports")
 
 
+class BingAdsSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+
+        account_id = parsed_uri.hostname
+        if not account_id:
+            raise MissingValueError("account_id", "Bing Ads")
+
+        params = parse_qs(parsed_uri.query)
+
+        customer_id = params.get("customer_id")
+        developer_token = params.get("developer_token")
+        client_id = params.get("client_id")
+        client_secret = params.get("client_secret")
+        refresh_token = params.get("refresh_token")
+        environment = params.get("environment", ["production"])
+
+        required = [
+            customer_id,
+            developer_token,
+            client_id,
+            client_secret,
+            refresh_token,
+        ]
+        if any(v is None for v in required):
+            raise MissingValueError(
+                "client_id, client_secret, refresh_token, developer_token, customer_id",
+                "Bing Ads",
+            )
+        assert (
+            customer_id
+            and developer_token
+            and client_id
+            and client_secret
+            and refresh_token
+        )
+        customer_id_val = customer_id[0]
+        developer_token_val = developer_token[0]
+        client_id_val = client_id[0]
+        client_secret_val = client_secret[0]
+        refresh_token_val = refresh_token[0]
+        env = environment[0]
+
+        start_date = ensure_pendulum_datetime(
+            kwargs.get("interval_start") or pendulum.now().subtract(days=30)
+        )
+        end_date = kwargs.get("interval_end")
+        if end_date is not None:
+            end_date = ensure_pendulum_datetime(end_date)
+
+        from ingestr.src.bing_ads import bing_ads_source
+
+        src = bing_ads_source(
+            client_id=client_id_val,
+            client_secret=client_secret_val,
+            refresh_token=refresh_token_val,
+            developer_token=developer_token_val,
+            customer_id=customer_id_val,
+            account_id=account_id,
+            start_date=start_date,
+            end_date=end_date,
+            environment=env,
+        )
+
+        if table not in src.resources:
+            raise UnsupportedResourceError(table, "Bing Ads")
+
+        return src.with_resources(table)
+
+
 class AppLovinSource:
     def handles_incrementality(self) -> bool:
         return True
