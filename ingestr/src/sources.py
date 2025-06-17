@@ -1362,19 +1362,13 @@ class S3Source:
             secret=secret_access_key[0],
         )
 
-        file_extension = path_to_file.split(".")[-1]
-        if file_extension == "gz":
-            file_extension = path_to_file.split(".")[-2]
-        if file_extension == "csv":
-            endpoint = "read_csv"
-        elif file_extension == "jsonl":
-            endpoint = "read_jsonl"
-        elif file_extension == "parquet":
-            endpoint = "read_parquet"
-        else:
-            raise ValueError(
-                "S3 Source only supports specific formats files: csv, jsonl, parquet"
-            )
+        try:
+            endpoint = blob.parse_endpoint(path_to_file)
+        except blob.UnsupportedEndpointError:
+            raise ValueError("S3 Source only supports specific formats files: csv, jsonl, parquet")
+        except Exception as e:
+            raise ValueError(f"Failed to parse endpoint from path: {path_to_file}") from e
+
 
         from ingestr.src.filesystem import readers
 
@@ -1846,24 +1840,16 @@ class GCSSource:
             token=credentials,
         )
 
-        file_extension = path_to_file.split(".")[-1]
-        if file_extension == "gz":
-            file_extension = path_to_file.split(".")[-2]
-        if file_extension == "csv":
-            endpoint = "read_csv"
-        elif file_extension == "jsonl":
-            endpoint = "read_jsonl"
-        elif file_extension == "parquet":
-            endpoint = "read_parquet"
-        else:
-            raise ValueError(
-                "GCS Source only supports specific formats files: csv, jsonl, parquet"
-            )
+        try:
+            endpoint = blob.parse_endpoint(path_to_file)
+        except blob.UnsupportedEndpointError:
+            raise ValueError("S3 Source only supports specific formats files: csv, jsonl, parquet")
+        except Exception as e:
+            raise ValueError(f"Failed to parse endpoint from path: {path_to_file}") from e
 
         from ingestr.src.filesystem import readers
 
         return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
-
 
 class GoogleAdsSource:
     def handles_incrementality(self) -> bool:
