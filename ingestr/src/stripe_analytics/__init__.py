@@ -7,7 +7,12 @@ import stripe
 from dlt.sources import DltResource
 from pendulum import DateTime
 
-from .helpers import pagination, transform_date
+from .helpers import (
+    async_parallel_pagination,
+    pagination,
+    parallel_pagination,
+    transform_date,
+)
 
 
 @dlt.source(max_table_nesting=0)
@@ -45,6 +50,86 @@ def stripe_source(
     for endpoint in endpoints:
         yield dlt.resource(
             stripe_resource,
+            name=endpoint,
+            write_disposition="replace",
+        )(endpoint)
+
+
+@dlt.source(max_table_nesting=0)
+def parallel_stripe_source(
+    endpoints: Tuple[str, ...],
+    stripe_secret_key: str = dlt.secrets.value,
+    start_date: Optional[DateTime] = None,
+    end_date: Optional[DateTime] = None,
+    max_workers: int = 12,
+) -> Iterable[DltResource]:
+    """
+    Retrieves data from the Stripe API for the specified endpoints using parallel pagination.
+
+    This source divides the date range across multiple workers to fetch data in parallel,
+    which can significantly speed up data retrieval for large date ranges.
+
+    Args:
+        endpoints (Tuple[str, ...]): A tuple of endpoint names to retrieve data from.
+        stripe_secret_key (str): The API access token for authentication. Defaults to the value in the `dlt.secrets` object.
+        start_date (Optional[DateTime]): An optional start date to limit the data retrieved. Format: datetime(YYYY, MM, DD). Required for parallel processing.
+        end_date (Optional[DateTime]): An optional end date to limit the data retrieved. Format: datetime(YYYY, MM, DD). Required for parallel processing.
+        max_workers (int): Maximum number of worker threads for parallel fetching. Defaults to 4.
+
+    Returns:
+        Iterable[DltResource]: Resources with data that was created during the period greater than or equal to 'start_date' and less than 'end_date'.
+    """
+    stripe.api_key = stripe_secret_key
+    stripe.api_version = "2022-11-15"
+
+    def parallel_stripe_resource(
+        endpoint: str,
+    ) -> Generator[Dict[Any, Any], Any, None]:
+        yield from parallel_pagination(endpoint, start_date, end_date, max_workers)
+
+    for endpoint in endpoints:
+        yield dlt.resource(
+            parallel_stripe_resource,
+            name=endpoint,
+            write_disposition="replace",
+        )(endpoint)
+
+
+@dlt.source(max_table_nesting=0)
+def async_stripe_source(
+    endpoints: Tuple[str, ...],
+    stripe_secret_key: str = dlt.secrets.value,
+    start_date: Optional[DateTime] = None,
+    end_date: Optional[DateTime] = None,
+    max_workers: int = 40,
+    rate_limit_delay: float = 0.03,
+) -> Iterable[DltResource]:
+    """
+    ULTRA-FAST async Stripe source optimized for maximum speed and throughput.
+
+    WARNING: Returns data in RANDOM ORDER for maximum performance.
+    Uses aggressive concurrency and minimal delays to maximize API throughput.
+
+    Args:
+        endpoints (Tuple[str, ...]): A tuple of endpoint names to retrieve data from.
+        stripe_secret_key (str): The API access token for authentication. Defaults to the value in the `dlt.secrets` object.
+        start_date (Optional[DateTime]): An optional start date to limit the data retrieved. Format: datetime(YYYY, MM, DD). Defaults to 2010-01-01.
+        end_date (Optional[DateTime]): An optional end date to limit the data retrieved. Format: datetime(YYYY, MM, DD). Defaults to today.
+        max_workers (int): Maximum number of concurrent async tasks. Defaults to 40 for maximum speed.
+        rate_limit_delay (float): Minimal delay between requests. Defaults to 0.03 seconds.
+
+    Returns:
+        Iterable[DltResource]: Resources with data in RANDOM ORDER (optimized for speed).
+    """
+    stripe.api_key = stripe_secret_key
+    stripe.api_version = "2022-11-15"
+
+    async def async_stripe_resource(endpoint: str):
+        yield async_parallel_pagination(endpoint, max_workers, rate_limit_delay)
+
+    for endpoint in endpoints:
+        yield dlt.resource(
+            async_stripe_resource,
             name=endpoint,
             write_disposition="replace",
         )(endpoint)

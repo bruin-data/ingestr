@@ -11,6 +11,7 @@ ENDPOINTS = {
     "checkoutsession": "CheckoutSession",
     "checkout_session": "CheckoutSession",
     "coupon": "Coupon",
+    "charge": "Charge",
     "customer": "Customer",
     "dispute": "Dispute",
     "paymentintent": "PaymentIntent",
@@ -52,6 +53,11 @@ ENDPOINTS = {
     "top_up": "Topup",
     "webhookendpoint": "WebhookEndpoint",
     "webhook_endpoint": "WebhookEndpoint",
+    "invoice": "Invoice",
+    "invoiceitem": "InvoiceItem",
+    "invoice_item": "InvoiceItem",
+    "invoicelineitem": "InvoiceLineItem",
+    "invoice_line_item": "InvoiceLineItem",
 }
 # possible incremental endpoints
 INCREMENTAL_ENDPOINTS = {
@@ -59,15 +65,9 @@ INCREMENTAL_ENDPOINTS = {
     "application_fee": "ApplicationFee",
     "balancetransaction": "BalanceTransaction",
     "balance_transaction": "BalanceTransaction",
-    "charge": "Charge",
     "creditnote": "CreditNote",
     "credit_note": "CreditNote",
     "event": "Event",
-    "invoice": "Invoice",
-    "invoiceitem": "InvoiceItem",
-    "invoice_item": "InvoiceItem",
-    "invoicelineitem": "InvoiceLineItem",
-    "invoice_line_item": "InvoiceLineItem",
     "setupattempt": "SetupAttempt",
     "setup_attempt": "SetupAttempt",
 }

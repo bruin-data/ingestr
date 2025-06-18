@@ -684,9 +684,9 @@ class StripeAnalyticsSource:
 
         if table in ENDPOINTS:
             endpoint = ENDPOINTS[table]
-            from ingestr.src.stripe_analytics import stripe_source
+            from ingestr.src.stripe_analytics import async_stripe_source
 
-            return stripe_source(
+            return async_stripe_source(
                 endpoints=[
                     endpoint,
                 ],
