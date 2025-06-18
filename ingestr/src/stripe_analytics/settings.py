@@ -58,16 +58,9 @@ ENDPOINTS = {
     "invoice_item": "InvoiceItem",
     "invoicelineitem": "InvoiceLineItem",
     "invoice_line_item": "InvoiceLineItem",
-}
-# possible incremental endpoints
-INCREMENTAL_ENDPOINTS = {
-    "applicationfee": "ApplicationFee",
-    "application_fee": "ApplicationFee",
     "balancetransaction": "BalanceTransaction",
     "balance_transaction": "BalanceTransaction",
     "creditnote": "CreditNote",
     "credit_note": "CreditNote",
     "event": "Event",
-    "setupattempt": "SetupAttempt",
-    "setup_attempt": "SetupAttempt",
 }

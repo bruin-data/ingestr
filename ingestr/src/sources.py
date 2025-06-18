@@ -677,24 +677,33 @@ class StripeAnalyticsSource:
 
         table = table.lower()
 
-        from ingestr.src.stripe_analytics.settings import (
-            ENDPOINTS,
-            INCREMENTAL_ENDPOINTS,
-        )
+        from ingestr.src.stripe_analytics.settings import ENDPOINTS
 
-        if table in ENDPOINTS:
-            endpoint = ENDPOINTS[table]
-            from ingestr.src.stripe_analytics import async_stripe_source
+        endpoint = None
+        incremental = False
+        sync = False
 
-            return async_stripe_source(
-                endpoints=[
-                    endpoint,
-                ],
-                stripe_secret_key=api_key[0],
-            ).with_resources(endpoint)
+        table_fields = table.split(":")
+        if len(table_fields) == 1:
+            endpoint = table_fields[0]
+        elif len(table_fields) == 2:
+            endpoint = table_fields[0]
+            sync = table_fields[1] == "sync"
+        elif len(table_fields) == 3:
+            endpoint = table_fields[0]
+            sync = table_fields[1] == "sync"
+            incremental = table_fields[2] == "incremental"
+        else:
+            raise ValueError(
+                "Invalid Stripe table format. Expected: stripe:<endpoint> or stripe:<endpoint>:<sync> or stripe:<endpoint>:<sync>:<incremental>"
+            )
 
-        elif table in INCREMENTAL_ENDPOINTS:
-            endpoint = INCREMENTAL_ENDPOINTS[table]
+        if incremental and not sync:
+            raise ValueError(
+                "incremental loads must be used with sync loading"
+            )
+
+        if incremental:
             from ingestr.src.stripe_analytics import incremental_stripe_source
 
             def nullable_date(date_str: Optional[str]):
@@ -702,6 +711,7 @@ class StripeAnalyticsSource:
                     return ensure_pendulum_datetime(date_str)
                 return None
 
+            endpoint = ENDPOINTS[endpoint]
             return incremental_stripe_source(
                 endpoints=[
                     endpoint,
@@ -710,6 +720,26 @@ class StripeAnalyticsSource:
                 initial_start_date=nullable_date(kwargs.get("interval_start", None)),
                 end_date=nullable_date(kwargs.get("interval_end", None)),
             ).with_resources(endpoint)
+        else:
+            endpoint = ENDPOINTS[endpoint]
+            if sync:
+                from ingestr.src.stripe_analytics import stripe_source
+
+                return stripe_source(
+                    endpoints=[
+                        endpoint,
+                    ],
+                    stripe_secret_key=api_key[0],
+                ).with_resources(endpoint)
+            else:
+                from ingestr.src.stripe_analytics import async_stripe_source
+
+                return async_stripe_source(
+                    endpoints=[
+                        endpoint,
+                    ],
+                    stripe_secret_key=api_key[0],
+                ).with_resources(endpoint)
 
         raise ValueError(
             f"Resource '{table}' is not supported for stripe source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
