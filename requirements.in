@@ -20,7 +20,6 @@ pyathena==3.12.2
 pymongo==4.11.1
 pymysql==1.1.1
 pyrate-limiter==3.7.0
-redshift-connector==2.1.5
 rich==13.9.4
 rudder-sdk-python==2.1.4
 snowflake-sqlalchemy==1.6.1

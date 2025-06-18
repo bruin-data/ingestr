@@ -24,9 +24,7 @@ annotated-types==0.7.0
 asana==3.2.3
     # via -r requirements.in
 asn1crypto==1.5.1
-    # via
-    #   scramp
-    #   snowflake-connector-python
+    # via snowflake-connector-python
 asynch==0.2.4
     # via clickhouse-sqlalchemy
 attrs==25.3.0
@@ -37,18 +35,13 @@ backoff==2.2.1
     # via rudder-sdk-python
 bcrypt==4.3.0
     # via paramiko
-beautifulsoup4==4.13.3
-    # via redshift-connector
 boto3==1.37.1
-    # via
-    #   pyathena
-    #   redshift-connector
+    # via pyathena
 botocore==1.37.1
     # via
     #   aiobotocore
     #   boto3
     #   pyathena
-    #   redshift-connector
     #   s3transfer
 cachetools==5.5.2
     # via google-auth
@@ -265,9 +258,7 @@ jsonpath-ng==1.7.0
 leb128==1.0.8
     # via asynch
 lxml==5.3.1
-    # via
-    #   redshift-connector
-    #   zeep
+    # via zeep
 lz4==4.4.3
     # via
     #   asynch
@@ -319,7 +310,6 @@ packaging==24.2
     #   duckdb-engine
     #   google-cloud-bigquery
     #   marshmallow
-    #   redshift-connector
     #   requirements-parser
     #   snowflake-connector-python
     #   sqlalchemy-bigquery
@@ -436,7 +426,6 @@ pytz==2025.2
     #   clickhouse-driver
     #   dlt
     #   pandas
-    #   redshift-connector
     #   snowflake-connector-python
     #   zeep
 pyyaml==6.0.2
@@ -445,8 +434,6 @@ pyyaml==6.0.2
     #   google-ads
 rauth==0.7.3
     # via python-quickbooks
-redshift-connector==2.1.5
-    # via -r requirements.in
 requests==2.32.4
     # via
     #   asana
@@ -463,7 +450,6 @@ requests==2.32.4
     #   pyairtable
     #   python-quickbooks
     #   rauth
-    #   redshift-connector
     #   requests-file
     #   requests-oauthlib
     #   requests-toolbelt
@@ -503,15 +489,12 @@ s3fs==2025.3.2
     # via -r requirements.in
 s3transfer==0.11.3
     # via boto3
-scramp==1.4.5
-    # via redshift-connector
 semver==3.0.4
     # via dlt
 setuptools==78.1.1
     # via
     #   dlt
     #   python-quickbooks
-    #   redshift-connector
     #   types-setuptools
 shellingham==1.5.4
     # via typer
@@ -541,8 +524,6 @@ snowflake-sqlalchemy==1.6.1
     # via -r requirements.in
 sortedcontainers==2.4.0
     # via snowflake-connector-python
-soupsieve==2.6
-    # via beautifulsoup4
 sqlalchemy==1.4.52
     # via
     #   -r requirements.in
@@ -598,7 +579,6 @@ types-setuptools==78.1.0.20250329
 typing-extensions==4.13.0
     # via
     #   alembic
-    #   beautifulsoup4
     #   dlt
     #   pyairtable
     #   pydantic
