@@ -30,11 +30,68 @@ ingestr ingest --source-uri 'stripe://?api_key=sk_test_12345' --source-table 'ch
 
 The result of this command will be a table in the `stripe.duckdb` database with JSON columns.
 
+## Table Name Structure
+
+Stripe source supports different loading modes that can be specified using the table name structure:
+
+- `<endpoint>` - Standard async loading (default)
+- `<endpoint>:sync` - Full loading with synchronous processing
+- `<endpoint>:sync:incremental` - Incremental loading mode with synchronous processing
+
+### Loading Modes and Trade-offs
+
+#### Standard Async Loading (Default)
+**Format**: `<endpoint>` (e.g., `charges`, `subscriptions`)
+
+- **Use case**: Full data loading from all time periods
+- **Performance**: Loads data in parallel using async processing
+- **Data completeness**: Captures all historical data and updates
+- **Speed**: Slower due to comprehensive data retrieval
+- **Best for**: You want to have all updated data in your database
+
+**Example**:
+```sh
+ingestr ingest --source-uri 'stripe://?api_key=sk_test_12345' --source-table 'subscriptions' --dest-uri duckdb:///stripe.duckdb --dest-table 'dest.subscriptions'
+```
+
+#### Sync Loading
+**Format**: `<endpoint>:sync` (e.g., `charges:sync`, `subscriptions:sync`)
+
+- **Use case**: Full data loading from all time periods
+- **Performance**: Loads data in parallel using sync processing
+- **Data completeness**: Captures all historical data and updates
+- **Speed**: Slower due to comprehensive data retrieval, faster if you have less data
+
+#### Incremental Loading
+**Format**: `<endpoint>:sync:incremental` (e.g., `charges:sync:incremental`, `events:sync:incremental`)
+
+- **Use case**: Loading data within specific time windows
+- **Performance**: Fast, processes only data within the specified interval
+- **Data completeness**: Limited to the specified time window, does not track updates from past dates
+- **Speed**: Faster due to filtered data retrieval
+- **Processing**: Runs in synchronous mode only
+- **Best for**: Quick loads, you don't care about the updates to past data
+
+**Example**:
+```sh
+ingestr ingest --source-uri 'stripe://?api_key=sk_test_12345' --source-table 'charges:sync:incremental' --dest-uri duckdb:///stripe.duckdb --dest-table 'dest.charges' --interval-start '2024-01-01' --interval-end '2024-01-31'
+```
+
+### Choosing the Right Approach
+
+| Approach | Speed | Data Completeness | Use Case |
+|----------|--------|------------------|----------|
+| **Standard Async** | Faster for larger data, slower for smaller data | Complete historical data | Initial loads, full historical analysis |
+| **Sync** | Slow for larger data, faster for smaller data | Complete historical data | Initial loads, full historical analysis |
+| **Incremental** | Fastest | Time-window specific | Regular updates, recent data analysis |
+
 ## Tables
 
 Stripe source allows ingesting the following sources into separate tables:
 
-### Regular Endpoints
+### All Endpoints
+
+All endpoints support the standard async loading mode. The following endpoints are available:
 
 - `account`: Contains information about a Stripe account, including balances, payouts, and account settings.
 - `apple_pay_domain`: Represents Apple Pay domains registered with Stripe for processing Apple Pay payments.
@@ -67,12 +124,7 @@ Stripe source allows ingesting the following sources into separate tables:
 - `top_up`: Records top-ups made to Stripe accounts.
 - `transfer`: Records transfers between Stripe accounts.
 - `webhook_endpoint`: Contains webhook endpoint configurations for receiving event notifications.
-
-### Incremental Endpoints
-
-The following endpoints support incremental loading, meaning only new or updated records will be fetched:
-
-- `application_fee`: Records fees collected by platforms (incremental).
+- `application_fee`: Records fees collected by platforms.
 - `balance_transaction`: Records transactions that affect the Stripe account balance, such as charges, refunds, and payouts.
 - `charge`: Returns a list of charges.
 - `credit_note`: Contains credit note information for refunds and adjustments.
@@ -80,12 +132,14 @@ The following endpoints support incremental loading, meaning only new or updated
 - `invoice`: Represents invoices sent to customers, detailing line items, amounts, and payment status.
 - `invoice_item`: Contains individual line items that can be added to invoices.
 - `invoice_line_item`: Represents line items within invoices.
-- `setup_attempt`: Records attempts to set up payment methods (also available as incremental).
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
+> [!TIP]
+> For time-sensitive data analysis or regular updates, use incremental loading (`:incremental`) with `--interval-start` and `--interval-end` parameters for faster processing. For comprehensive historical analysis, use standard async loading without any suffix.
+
 > [!WARNING]
-> Stripe does not support incremental loading for many endpoints in its APIs, which means ingestr will load endpoints incrementally if they support it, and do a full-refresh if not.
+> Incremental loading filters data based on the specified time window and does not track updates to records created outside that window. Use standard async loading if you need to capture all historical updates.
 
 > [!NOTE]
 > For backward compatibility, non-underscored versions of table names (e.g., `checkoutsession`, `paymentintent`, `subscriptionitem`) are still supported but will be deprecated in future versions. Please use the underscored versions (e.g., `checkout_session`, `payment_intent`, `subscription_item`) for new integrations.
