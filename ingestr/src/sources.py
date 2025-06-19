@@ -16,7 +16,7 @@ from typing import (
     TypeAlias,
     Union,
 )
-from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
+from urllib.parse import ParseResult, parse_qs, urlencode, urlparse
 
 import fsspec  # type: ignore
 import pendulum
@@ -1370,7 +1370,7 @@ class S3Source:
             )
 
         parsed_uri = urlparse(uri)
-        source_fields = parse_qs(quote(parsed_uri.query, safe="=&"))
+        source_fields = parse_qs(parsed_uri.query)
         access_key_id = source_fields.get("access_key_id")
         if not access_key_id:
             raise ValueError("access_key_id is required to connect to S3")
@@ -1599,7 +1599,7 @@ class DynamoDBSource:
         if not region:
             raise ValueError("region is required to connect to Dynamodb")
 
-        qs = parse_qs(quote(parsed_uri.query, safe="=&"))
+        qs = parse_qs(parsed_uri.query)
         access_key = qs.get("access_key_id")
 
         if not access_key:
