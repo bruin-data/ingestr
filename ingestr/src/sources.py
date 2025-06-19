@@ -2783,7 +2783,7 @@ class QuickBooksSource:
         ).with_resources(table_name)
 
 
-class PulseSource:
+class IsocPulseSource:
     def handles_incrementality(self) -> bool:
         return True
 
@@ -2802,11 +2802,11 @@ class PulseSource:
 
         metrics = [table]
         if table == "all":
-            from ingestr.src.pulse import GLOBAL_METRICS
+            from ingestr.src.isoc_pulse import GLOBAL_METRICS
 
             metrics = list(GLOBAL_METRICS.keys())
 
-        from ingestr.src.pulse import GLOBAL_METRICS, pulse_source
+        from ingestr.src.isoc_pulse import GLOBAL_METRICS, pulse_source
 
         for metric in metrics:
             if metric not in GLOBAL_METRICS:
