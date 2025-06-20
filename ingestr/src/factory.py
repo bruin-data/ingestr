@@ -52,6 +52,7 @@ from ingestr.src.sources import (
     NotionSource,
     PersonioSource,
     PhantombusterSource,
+    PinterestSource,
     PipedriveSource,
     QuickBooksSource,
     S3Source,
@@ -174,6 +175,7 @@ class SourceDestinationFactory:
         "quickbooks": QuickBooksSource,
         "smartsheet": SmartsheetSource,
         "sftp": SFTPSource,
+        "pinterest": PinterestSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
