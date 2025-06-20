@@ -699,9 +699,7 @@ class StripeAnalyticsSource:
             )
 
         if incremental and not sync:
-            raise ValueError(
-                "incremental loads must be used with sync loading"
-            )
+            raise ValueError("incremental loads must be used with sync loading")
 
         if incremental:
             from ingestr.src.stripe_analytics import incremental_stripe_source
@@ -2783,3 +2781,41 @@ class QuickBooksSource:
             minor_version=minor_version[0],
             object=table_name,
         ).with_resources(table_name)
+
+
+class PulseSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        token = params.get("token")
+        if not token or not token[0].strip():
+            raise MissingValueError("token", "Internet Society Pulse")
+
+        start_date = kwargs.get("interval_start")
+        if start_date is None:
+            raise MissingValueError("interval_start", "Internet Society Pulse")
+
+        end_date = kwargs.get("interval_end")
+
+        metrics = [table]
+        if table == "all":
+            from ingestr.src.pulse import GLOBAL_METRICS
+
+            metrics = list(GLOBAL_METRICS.keys())
+
+        from ingestr.src.pulse import GLOBAL_METRICS, pulse_source
+
+        for metric in metrics:
+            if metric not in GLOBAL_METRICS:
+                raise UnsupportedResourceError(metric, "Internet Society Pulse")
+
+        src = pulse_source(
+            token=token[0],
+            start_date=str(start_date),
+            end_date=str(end_date) if end_date else None,
+            metrics=metrics,
+        )
+        return src.with_resources(*metrics)
