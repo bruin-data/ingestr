@@ -175,3 +175,6 @@ exclude = [
 
 [tool.hatch.metadata.hooks.requirements_txt]
 files = ["requirements.txt"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
