@@ -3,6 +3,8 @@ from typing import Any, Dict, Iterable, List, Optional
 import dlt
 from dataclasses import dataclass
 from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
+from datetime import datetime
+
 
 METRICS: Dict[str, str] = {
     "dnssec_adoption": "dnssec/adoption",
@@ -44,7 +46,7 @@ def pulse_source(
 
     resources: List[EndpointResource] = []
 
-    cfg = get_metric_cfg(metric, opts)
+    cfg = get_metric_cfg(metric, opts, start_date)
     endpoint: Dict[str, Any] = {
         "path": cfg.path,
         "params": {
@@ -93,7 +95,7 @@ class MetricCfg:
     path: str
     params: Dict[str, Any]
 
-def get_metric_cfg(metric: str, opts: List[str]) -> MetricCfg:
+def get_metric_cfg(metric: str, opts: List[str], start_date: str) -> MetricCfg:
     path = METRICS.get(metric)
     if len(opts) == 0:
         return MetricCfg(path=path, params={})
@@ -143,5 +145,19 @@ def get_metric_cfg(metric: str, opts: List[str]) -> MetricCfg:
     #             "shutdown_type": opts[-2],
     #         },
     #     )
+    elif metric == "resilience":
+        date = datetime.strptime(start_date, "%Y-%m-%d")
+        return MetricCfg(
+            path=path,
+            params={
+                "country": opts[-1],
+                "year": date.year,
+            }
+        )
+    else:
+        raise ValueError(
+            f"Unsupported metric '{metric}' with options {opts}. "
+            "Please check the metric and options."
+        )
 
     
