@@ -699,9 +699,7 @@ class StripeAnalyticsSource:
             )
 
         if incremental and not sync:
-            raise ValueError(
-                "incremental loads must be used with sync loading"
-            )
+            raise ValueError("incremental loads must be used with sync loading")
 
         if incremental:
             from ingestr.src.stripe_analytics import incremental_stripe_source
@@ -2817,3 +2815,55 @@ class PinterestSource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(table)
+
+
+
+
+class DaisyconSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed = urlparse(uri)
+        
+        params = parse_qs(parsed.query)
+        advertiser_ids = params.get("advertiser_ids")
+        advertiser_ids = advertiser_ids[0].replace(" ", "").split(",")
+        client_id = params.get("client_id")
+        client_secret = params.get("client_secret")
+        refresh_token = params.get("refresh_token")
+
+        if client_id is None:
+            raise MissingValueError("client_id", "Daisycon")
+
+        if client_secret is None:
+            raise MissingValueError("client_secret", "Daisycon")
+
+        if refresh_token is None:
+            raise MissingValueError("refresh_token", "Daisycon")
+        
+
+        start_date = kwargs.get("interval_start")
+        if start_date is None:
+            start_date = pendulum.datetime(2024, 1, 1).in_tz("UTC")
+        else:
+            start_date = ensure_pendulum_datetime(start_date).in_tz("UTC")
+
+        end_date = kwargs.get("interval_end")
+        if end_date is not None:
+            end_date = ensure_pendulum_datetime(end_date).in_tz("UTC")
+
+        from ingestr.src.daisycon import daisycon_source
+
+        try:
+            return daisycon_source(
+                client_id=client_id[0],
+                client_secret=client_secret[0],
+                refresh_token=refresh_token[0],
+                advertiser_ids=advertiser_ids,
+                start_date=start_date,
+                end_date=end_date,
+            ).with_resources(table)
+        except ResourcesNotFoundError:
+            raise UnsupportedResourceError(table, "Daisycon")
+

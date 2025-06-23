@@ -30,6 +30,7 @@ from ingestr.src.sources import (
     AsanaSource,
     AttioSource,
     ChessSource,
+    DaisyconSource,
     DynamoDBSource,
     ElasticsearchSource,
     FacebookAdsSource,
@@ -176,6 +177,7 @@ class SourceDestinationFactory:
         "smartsheet": SmartsheetSource,
         "sftp": SFTPSource,
         "pinterest": PinterestSource,
+        "daisycon": DaisyconSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
