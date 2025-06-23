@@ -76,7 +76,13 @@ def pulse_source(
         if ip_version is not None and name in {"roa", "rov", "tls", "tls13"}:
             endpoint["params"]["ip_version"] = ip_version
 
-        resources.append({"name": name, "endpoint": endpoint})
+        resources.append({
+            "name": name,
+            "write_disposition": "merge",
+            "primary_key": "date",
+            "columns": {"date": {"data_type": "date"}},
+            "endpoint": endpoint,
+        })
 
     config: RESTAPIConfig = {
         "client": {
