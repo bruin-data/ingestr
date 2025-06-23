@@ -2796,7 +2796,10 @@ class IsocPulseSource:
 
         start_date = kwargs.get("interval_start")
         if start_date is None:
-            raise MissingValueError("interval_start", "Internet Society Pulse")
+            start_date = (pendulum.utcnow()
+                .subtract(days=30)
+                .strftime("%Y-%m-%d")  
+            )
 
         end_date = kwargs.get("interval_end")
 
