@@ -135,5 +135,13 @@ def get_metric_cfg(metric: str, opts: List[str]) -> MetricCfg:
             path=path,
             params={"ip_version": opts[-1]}
         )
+    # elif metric == "net_loss":
+    #     return MetricCfg(
+    #         path=path,
+    #         params={
+    #             "country": opts[-1],
+    #             "shutdown_type": opts[-2],
+    #         },
+    #     )
 
     
