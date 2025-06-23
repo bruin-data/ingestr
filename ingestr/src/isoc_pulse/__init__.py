@@ -121,10 +121,19 @@ def get_metric_cfg(metric: str, opts: List[str]) -> MetricCfg:
                 path=path,
                 params={"topsites": True}
             )
-        else:
+        return MetricCfg(
+            path=f"{path}/country/{opts[-1]}",
+            params={}
+        )
+    elif metric == "roa":
+        if len(opts) > 1:
             return MetricCfg(
                 path=f"{path}/country/{opts[-1]}",
-                params={}
+                params={"ip_version": opts[-2]}
             )
+        return MetricCfg(
+            path=path,
+            params={"ip_version": opts[-1]}
+        )
 
     
