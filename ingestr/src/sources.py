@@ -2803,22 +2803,19 @@ class IsocPulseSource:
 
         end_date = kwargs.get("interval_end")
 
-        metrics = [table]
-        if table == "all":
-            from ingestr.src.isoc_pulse import GLOBAL_METRICS
+        metric = table
+        opts = []
+        if ":" in metric:
+            metric, *opts = metric.strip().split(":")
+            opts = [opt.strip() for opt in opts]
 
-            metrics = list(GLOBAL_METRICS.keys())
-
-        from ingestr.src.isoc_pulse import GLOBAL_METRICS, pulse_source
-
-        for metric in metrics:
-            if metric not in GLOBAL_METRICS:
-                raise UnsupportedResourceError(metric, "Internet Society Pulse")
+        from ingestr.src.isoc_pulse import  pulse_source
 
         src = pulse_source(
             token=token[0],
             start_date=str(start_date),
             end_date=str(end_date) if end_date else None,
-            metrics=metrics,
+            metric=metric,
+            opts=opts,
         )
-        return src.with_resources(*metrics)
+        return src.with_resources(metric)
