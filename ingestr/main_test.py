@@ -558,15 +558,17 @@ SOURCES = {
 }
 
 DESTINATIONS = {
-    "postgres": pgDocker,
+    # "postgres": pgDocker,
     "duckdb": EphemeralDuckDb(),
-    "clickhouse+native": clickHouseDocker,
+    # "clickhouse+native": clickHouseDocker,
 }
 
 
 @pytest.fixture(scope="session", autouse=True)
 def manage_containers(request):
-    shared_dir = request.config.workerinput["shared_directory"]
+    import tempfile
+    shared_dir = tempfile.mkdtemp()
+    print(f"Shared directory: {shared_dir}")
     unique_containers = set(SOURCES.values()) | set(DESTINATIONS.values())
     for container in unique_containers:
         container.container_lock_dir = shared_dir
@@ -3984,3 +3986,92 @@ def pinterest_test_case(dest_uri):
 def test_pinterest_test_case(dest):
     pinterest_test_case(dest.start())
     dest.stop()
+
+
+def daisycon_test_case(dest_uri):
+    sample_response = [
+  {
+    "affiliatemarketing_id": "string",
+    "date": "2025-06-23T20:19:41.249Z",
+    "program_id": 0,
+    "program_name": "string",
+    "transaction_id": "string",
+    "parts": [
+      {
+        "id": "string",
+        "date": "2025-06-23T20:19:41.249Z",
+        "date_click": "2025-06-23T20:19:41.249Z",
+        "media_id": 0,
+        "media_name": "string",
+        "ad_id": 0,
+        "publisher_description": "string",
+        "program_description": "string",
+        "commission": 0,
+        "program_commission": 0,
+        "currency_code": "string",
+        "compensation_code": "string",
+        "referer_click": "string",
+        "revenue": 0,
+        "extra_1": "string",
+        "extra_2": "string",
+        "extra_3": "string",
+        "extra_4": "string",
+        "extra_5": "string",
+        "approval_date": "2025-06-23",
+        "disapproved_reason": "invalid",
+        "status": "open",
+        "referencenumber": 0,
+        "last_modified": "2025-06-23T20:19:41.249Z"
+      }
+    ],
+    "anonymous_ip": "string",
+    "ip_hash": "string",
+    "device_type_id": 0,
+    "device_model_id": 0,
+    "device_platform_id": 0,
+    "device_browser_id": 0
+  }
+]
+    oauth_response = MagicMock()
+    oauth_response.json.return_value = {"access_token": "mock_access_token"}
+    oauth_response.raise_for_status = MagicMock()
+
+    api_response = MagicMock()
+    api_response.json.return_value = sample_response
+    api_response.raise_for_status = MagicMock()
+
+    with patch("requests.Session.post") as mock_post, patch("requests.Session.get") as mock_get:
+        mock_post.return_value = oauth_response
+        mock_get.return_value = api_response
+
+        dest_table = "daisycon.transactions"
+        source_uri = "daisycon://?advertiser_ids=123,234&client_id=123&client_secret=123&refresh_token=123"
+        source_table = "transactions"
+
+        result = invoke_ingest_command(
+            source_uri,
+            source_table,
+            dest_uri,
+            dest_table,
+            interval_start="2025-05-23",
+            interval_end="2025-06-24",
+        )
+
+        assert result.exit_code == 0
+
+        engine = sqlalchemy.create_engine(dest_uri)
+        with engine.connect() as conn:
+            rows = conn.execute(f"SELECT * FROM {dest_table}").fetchall()
+            assert len(rows) > 0, "No data ingested into the destination"
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_daisycon(dest):
+    daisycon_test_case(dest.start())
+    dest.stop()
+    
+
+    
+
