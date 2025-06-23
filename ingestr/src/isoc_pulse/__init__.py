@@ -1,6 +1,7 @@
 from typing import Any, Dict, Iterable, List, Optional
 
 import dlt
+from dataclasses import dataclass
 from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
 
 METRICS: Dict[str, str] = {
@@ -43,11 +44,12 @@ def pulse_source(
 
     resources: List[EndpointResource] = []
 
-    path = get_metric_path(metric, opts)
+    cfg = get_metric_cfg(metric, opts)
     endpoint: Dict[str, Any] = {
-        "path": path,
+        "path": cfg.path,
         "params": {
             "start_date": "{incremental.start_value}",
+            **cfg.params,
         },
         "incremental": {
             "cursor_path": "date",
@@ -86,15 +88,43 @@ def pulse_source(
 
     yield from rest_api_resources(config)
 
-def get_metric_path(metric: str, opts: List[str]) -> str:
+@dataclass
+class MetricCfg:
+    path: str
+    params: Dict[str, Any]
+
+def get_metric_cfg(metric: str, opts: List[str]) -> MetricCfg:
     path = METRICS.get(metric)
     if len(opts) == 0:
-        return path
+        return MetricCfg(path=path, params={})
     
-    # TODO(validation) that acountry is specified.
-    if metric in ["https", "dnssec_validation", "dnssec_tld_adoption"]:
-        return f"{path}/country/{opts[-1]}"
+    if metric == "https":
+        return MetricCfg(
+            path=f"{path}/country/{opts[-1]}",
+            params={
+                "topsites": True if "topsites" in opts else False,
+            }
+        )
+    elif metric in ["dnssec_validation", "dnssec_tld_adoption"]:
+        return MetricCfg(
+            path=f"{path}/country/{opts[-1]}",
+            params={}
+        )
     elif metric == "dnssec_adoption":
-        return f"{path}/domains/{opts[-1]}"
+        return MetricCfg(
+            path=f"{path}/domains/{opts[-1]}",
+            params={}
+        )
+    elif metric == "ipv6":
+        if "topsites" in opts:
+            return MetricCfg(
+                path=path,
+                params={"topsites": True}
+            )
+        else:
+            return MetricCfg(
+                path=f"{path}/country/{opts[-1]}",
+                params={}
+            )
 
     
