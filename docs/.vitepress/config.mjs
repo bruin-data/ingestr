@@ -131,6 +131,7 @@ export default defineConfig({
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "HubSpot", link: "/supported-sources/hubspot.md" },
+              { text: "Internet Society Pulse", link: "/supported-sources/isoc-pulse.md" },
               { text: "Klaviyo", link: "/supported-sources/klaviyo.md" },
               { text: "LinkedIn Ads", link: "/supported-sources/linkedin_ads.md" },
               { text: "Mixpanel", link: "/supported-sources/mixpanel.md" },
