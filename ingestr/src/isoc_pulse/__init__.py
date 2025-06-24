@@ -146,7 +146,7 @@ def get_metric_cfg(metric: str, opts: List[str], start_date: str) -> MetricCfg:
             },
         )
     elif metric == "resilience":
-        date = datetime.strptime(start_date, "%Y-%m-%d %H:%M:%S")
+        date = datetime.strptime(start_date, "%Y-%m-%d")
         return MetricCfg(
             path=path,
             params={
