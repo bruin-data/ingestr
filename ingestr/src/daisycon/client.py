@@ -15,14 +15,12 @@ class DaisyconClient:
         client_id: str,
         client_secret: str,
         refresh_token: str,
-        advertiser_ids: list[str] | str,
+        advertiser_ids: list[str],
     ) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
         self.refresh_token = refresh_token
-        if isinstance(advertiser_ids, str):
-            advertiser_ids = [advertiser_ids]
-        self.advertiser_ids = [a.strip() for a in advertiser_ids if a.strip()]
+        self.advertiser_ids = advertiser_ids
         self.base_url = "https://services.daisycon.com/advertisers"
         self.session = create_client()
         self.access_token: str | None = None
@@ -47,7 +45,7 @@ class DaisyconClient:
 
     def _get(
         self, advertiser_id: str, endpoint: str, params: Dict[str, Any] | None = None
-    ) -> Dict[str, Any]:
+    ) -> list[Dict[str, Any]]:
         if self.access_token is None:
             self.refresh_access_token()
         headers = {"Authorization": f"Bearer {self.access_token}"}
@@ -77,27 +75,27 @@ class DaisyconClient:
                 "per_page": per_page,
                 "currency_code": currency_code,
             }
-            data = self._get(advertiser_id, "/transactions", params=params)
-            records = (
-                data
-                if isinstance(data, list)
-                else data.get("data") or data.get("transactions") or []
-            )
+            records = self._get(advertiser_id, "/transactions", params=params)
+
             for record in records:
-                if "parts" in record and isinstance(record["parts"], list):
+                if "parts" in record:
                     for part in record["parts"]:
                         flattened_record = {**record}
                         if "parts" in flattened_record:
                             del flattened_record["parts"]
                         flattened_record.update(part)
-                        
+
                         if "last_modified" in flattened_record:
                             try:
-                                dt = pendulum.parse(str(flattened_record["last_modified"]))
-                                flattened_record["last_modified"] = dt.in_tz("UTC")
+                                dt = pendulum.parse(
+                                    str(flattened_record["last_modified"])
+                                )
+                                flattened_record["last_modified"] = dt.in_tz("UTC")  # type: ignore
                             except Exception:
-                                flattened_record["last_modified"] = str(flattened_record["last_modified"])
-                        
+                                raise ValueError(
+                                    "Failed to parse last_modified timestamp..."
+                                )
+
                         yield flattened_record
             if len(records) < per_page:
                 break
@@ -106,12 +104,7 @@ class DaisyconClient:
     def paginated_transactions(
         self, start_date: str, end_date: str, currency_code: str, per_page: int = 1000
     ) -> Iterable[Dict[str, Any]]:
-        """Yield transactions between ``start_date`` and ``end_date`` for all advertisers.
-
-        ``start_date`` and ``end_date`` must use the ``YYYY-MM-DD HH:mm:ss`` format.
-        ``currency_code`` must be an ISO 4217 currency like ``EUR``.
-        Timestamps in API responses are converted to UTC to allow incremental comparison.
-        """
+     
         for advertiser_id in self.advertiser_ids:
             yield from self._paginated_transactions(
                 advertiser_id, start_date, end_date, per_page, currency_code

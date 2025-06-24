@@ -24,17 +24,12 @@ def daisycon_source(
     start_date: pendulum.DateTime = pendulum.datetime(2024, 1, 1),
     end_date: pendulum.DateTime | None = None,
 ) -> Iterable[DltResource]:
-    """Return resources for Daisycon transactions.
-
-    ``advertiser_ids`` may be a single id or a list of ids to load transactions for.
-    ``currency_code`` must be an ISO 4217 code such as ``EUR``.
-    """
 
     client = DaisyconClient(client_id, client_secret, refresh_token, advertiser_ids)
 
     @dlt.resource(
         name="transactions",
-        write_disposition="append",
+        write_disposition="merge",
         primary_key="id",
     )
     def transactions(
