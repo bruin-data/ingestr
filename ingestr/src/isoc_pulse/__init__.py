@@ -66,6 +66,10 @@ def pulse_source(
         "paginator": "single_page",
     }
 
+    if metric == "net_loss":
+        del endpoint["incremental"]
+        endpoint["params"]["start_date"] = start_date
+
     if end_date is not None:
         endpoint["params"]["end_date"] = end_date
     
@@ -88,8 +92,10 @@ def pulse_source(
         },
         "resources": resources,
     }
-
-    yield from rest_api_resources(config)
+    res = rest_api_resources(config)
+    if metric == "net_loss":
+        res[0].add_map(add_date(start_date))
+    yield from res
 
 @dataclass
 class MetricCfg:
@@ -124,10 +130,7 @@ def get_metric_cfg(metric: str, opts: List[str], start_date: str) -> MetricCfg:
                 path=path,
                 params={"topsites": True}
             )
-        return MetricCfg(
-            path=f"{path}/country/{opts[-1]}",
-            params={}
-        )
+        return MetricCfg( path=f"{path}/country/{opts[-1]}", params={})
     elif metric == "roa":
         if len(opts) > 1:
             return MetricCfg(
@@ -138,14 +141,14 @@ def get_metric_cfg(metric: str, opts: List[str], start_date: str) -> MetricCfg:
             path=path,
             params={"ip_version": opts[-1]}
         )
-    # elif metric == "net_loss":
-    #     return MetricCfg(
-    #         path=path,
-    #         params={
-    #             "country": opts[-1],
-    #             "shutdown_type": opts[-2],
-    #         },
-    #     )
+    elif metric == "net_loss":
+        return MetricCfg(
+            path=path,
+            params={
+                "country": opts[-1],
+                "shutdown_type": opts[-2],
+            },
+        )
     elif metric == "resilience":
         date = datetime.strptime(start_date, "%Y-%m-%d %H:%M:%S")
         return MetricCfg(
@@ -163,3 +166,8 @@ def get_metric_cfg(metric: str, opts: List[str], start_date: str) -> MetricCfg:
         )
 
     
+def add_date(start_date: str):
+    def transform(item: dict):
+        item["date"] = start_date
+        return item
+    return transform
