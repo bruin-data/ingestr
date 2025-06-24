@@ -33,7 +33,7 @@ ingestr ingest \
 
 This will retrieve HTTPS adoption metrics for the specified date range and store them in your database.
 
-## Available Metrics
+## Tables
 
 Internet Society Pulse source allows ingesting the following metrics as separate tables:
 
@@ -48,7 +48,7 @@ Internet Society Pulse source allows ingesting the following metrics as separate
 | `ipv6` | IPv6 adoption metrics | Yes | `topsites`, Country code |
 | `net_loss` | Internet disconnection metrics | Yes | Shutdown type, Country code |
 | `resilience` | Internet resilience metrics | Yes | Country code |
-| `roa` | Route Origin Authorization metrics | Yes | IP version (`ipv4`/`ipv6`), Country code |
+| `roa` | Route Origin Authorization metrics | Yes | IP version (`4`/`6`), Country code |
 | `rov` | Route Origin Validation metrics | No | None |
 | `tls` | TLS protocol metrics | No | None |
 | `tls13` | TLS 1.3 protocol metrics | No | None |
@@ -142,3 +142,6 @@ ingestr ingest \
   --dest-table 'dest.us_roa_ipv4' \
   --interval-start '2023-01-01'
 ```
+
+## Further Reading:
+* [Pulse Documentation](https://pulse.internetsociety.org/api/docs)
