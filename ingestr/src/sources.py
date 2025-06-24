@@ -2817,18 +2817,19 @@ class PinterestSource:
         ).with_resources(table)
 
 
-
-
 class DaisyconSource:
     def handles_incrementality(self) -> bool:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed = urlparse(uri)
-        
+
         params = parse_qs(parsed.query)
         advertiser_ids = params.get("advertiser_ids")
-        advertiser_ids = advertiser_ids[0].replace(" ", "").split(",")
+        if advertiser_ids is None:
+            raise MissingValueError("advertiser_ids", "Daisycon")
+        advertiser_ids = advertiser_ids[0].split(",")
+        advertiser_ids = [a.strip() for a in advertiser_ids if a.strip()]
         client_id = params.get("client_id")
         client_secret = params.get("client_secret")
         refresh_token = params.get("refresh_token")
@@ -2841,7 +2842,6 @@ class DaisyconSource:
 
         if refresh_token is None:
             raise MissingValueError("refresh_token", "Daisycon")
-        
 
         start_date = kwargs.get("interval_start")
         if start_date is None:
@@ -2866,4 +2866,3 @@ class DaisyconSource:
             ).with_resources(table)
         except ResourcesNotFoundError:
             raise UnsupportedResourceError(table, "Daisycon")
-
