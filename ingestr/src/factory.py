@@ -18,6 +18,7 @@ from ingestr.src.destinations import (
     SnowflakeDestination,
     SqliteDestination,
     SynapseDestination,
+    GCSDestination,
 )
 from ingestr.src.sources import (
     AdjustSource,
@@ -197,6 +198,7 @@ class SourceDestinationFactory:
         "clickhouse+native": ClickhouseDestination,
         "clickhouse": ClickhouseDestination,
         "s3": S3Destination,
+        "gs": GCSDestination,
         "sqlite": SqliteDestination,
         "mysql": MySqlDestination,
         "mysql+pymysql": MySqlDestination,

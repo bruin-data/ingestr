@@ -495,3 +495,68 @@ class MySqlDestination(GenericSqlDestination):
             "dataset_name": database,
             "table_name": table,
         }
+
+class GCSDestination:
+    def dlt_dest(self, uri: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+
+        credentials_path = params.get("credentials_path")
+        credentials_base64 = params.get("credentials_base64")
+        credentials_available = any(
+            map(
+                lambda x: x is not None,
+                [credentials_path, credentials_base64],
+            )
+        )
+        if credentials_available is False:
+            raise MissingValueError("credentials_path or credentials_base64", "GCS")
+
+        credentials = None
+        if credentials_path:
+            credentials = credentials_path[0]
+        else:
+            credentials = json.loads(base64.b64decode(credentials_base64[0]).decode())  # type: ignore
+
+        import gcsfs  # type: ignore
+
+        fs = gcsfs.GCSFileSystem(
+            token=credentials,
+        )
+
+        dest_table = kwargs["dest_table"]
+
+        # only validate if dest_table is not a full URI
+        if not parsed_uri.netloc:
+            dest_table = self.validate_table(dest_table)
+
+        table_parts = dest_table.split("/")
+
+        if parsed_uri.path.strip("/"):
+            path_parts = parsed_uri.path.strip("/ ").split("/")
+            table_parts = path_parts + table_parts
+
+        if parsed_uri.netloc:
+            table_parts.insert(0, parsed_uri.netloc.strip())
+
+        base_path = "/".join(table_parts[:-1])
+
+        opts = {
+            "bucket_url": f"s3://{base_path}",
+            "credentials": fs,
+            # supresses dlt warnings about dataset name normalization.
+            # we don't use dataset names in S3 so it's fine to disable this.
+            "enable_dataset_name_normalization": False,
+        }
+        layout = params.get("layout", [None])[0]
+        if layout is not None:
+            opts["layout"] = layout
+
+        return S3FS(**opts)  # type: ignore
+
+    def validate_table(self, table: str):
+        table = table.strip("/ ")
+        if len(table.split("/")) < 2:
+            raise ValueError("Table name must be in the format {bucket-name}/{path}")
+        return table
