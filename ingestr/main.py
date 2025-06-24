@@ -543,6 +543,7 @@ def ingest(
             sql_reflection_level=sql_reflection_level.value,
             sql_limit=sql_limit,
             sql_exclude_columns=sql_exclude_columns,
+            extract_parallelism=extract_parallelism,
         )
 
         resource.for_each(dlt_source, lambda x: x.add_map(cast_set_to_list))

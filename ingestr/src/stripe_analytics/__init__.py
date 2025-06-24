@@ -10,7 +10,6 @@ from pendulum import DateTime
 from .helpers import (
     async_parallel_pagination,
     pagination,
-    parallel_pagination,
     transform_date,
 )
 
@@ -56,52 +55,12 @@ def stripe_source(
 
 
 @dlt.source(max_table_nesting=0)
-def parallel_stripe_source(
-    endpoints: Tuple[str, ...],
-    stripe_secret_key: str = dlt.secrets.value,
-    start_date: Optional[DateTime] = None,
-    end_date: Optional[DateTime] = None,
-    max_workers: int = 12,
-) -> Iterable[DltResource]:
-    """
-    Retrieves data from the Stripe API for the specified endpoints using parallel pagination.
-
-    This source divides the date range across multiple workers to fetch data in parallel,
-    which can significantly speed up data retrieval for large date ranges.
-
-    Args:
-        endpoints (Tuple[str, ...]): A tuple of endpoint names to retrieve data from.
-        stripe_secret_key (str): The API access token for authentication. Defaults to the value in the `dlt.secrets` object.
-        start_date (Optional[DateTime]): An optional start date to limit the data retrieved. Format: datetime(YYYY, MM, DD). Required for parallel processing.
-        end_date (Optional[DateTime]): An optional end date to limit the data retrieved. Format: datetime(YYYY, MM, DD). Required for parallel processing.
-        max_workers (int): Maximum number of worker threads for parallel fetching. Defaults to 4.
-
-    Returns:
-        Iterable[DltResource]: Resources with data that was created during the period greater than or equal to 'start_date' and less than 'end_date'.
-    """
-    stripe.api_key = stripe_secret_key
-    stripe.api_version = "2022-11-15"
-
-    def parallel_stripe_resource(
-        endpoint: str,
-    ) -> Generator[Dict[Any, Any], Any, None]:
-        yield from parallel_pagination(endpoint, start_date, end_date, max_workers)
-
-    for endpoint in endpoints:
-        yield dlt.resource(
-            parallel_stripe_resource,
-            name=endpoint,
-            write_disposition="replace",
-        )(endpoint)
-
-
-@dlt.source(max_table_nesting=0)
 def async_stripe_source(
     endpoints: Tuple[str, ...],
     stripe_secret_key: str = dlt.secrets.value,
     start_date: Optional[DateTime] = None,
     end_date: Optional[DateTime] = None,
-    max_workers: int = 40,
+    max_workers: int = 4,
     rate_limit_delay: float = 0.03,
 ) -> Iterable[DltResource]:
     """
