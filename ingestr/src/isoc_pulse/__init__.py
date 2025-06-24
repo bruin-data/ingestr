@@ -66,10 +66,6 @@ def pulse_source(
         "paginator": "single_page",
     }
 
-    if metric == "net_loss":
-        del endpoint["incremental"]
-        endpoint["params"]["start_date"] = start_date
-
     if end_date is not None:
         endpoint["params"]["end_date"] = end_date
     
