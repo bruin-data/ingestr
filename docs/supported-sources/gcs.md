@@ -104,10 +104,13 @@ List of available Layout variables is available [here](https://dlthub.com/docs/d
 
 ## Supported File Formats
 `gs` source only supports loading files in the following formats:
-* `csv`: Comma Separated Values (supports Tab Separated Values as well)
+* `csv`: Comma Separated Values 
 * `parquet`: [Apache Parquet](https://parquet.apache.org/) storage format.
 * `jsonl`: Line delimited JSON. see [https://jsonlines.org/](https://jsonlines.org/)
 
+::: info NOTE
+When writing to GCS, only `parquet` is supported.
+:::
 ## File Pattern
 `ingestr` supports [glob](https://en.wikipedia.org/wiki/Glob_(programming)) like pattern matching for `gs` source.
 This allows for a powerful pattern matching mechanism that allows you to specify multiple files in a single `--source-table`.
