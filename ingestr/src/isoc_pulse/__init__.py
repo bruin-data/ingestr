@@ -4,6 +4,7 @@ import dlt
 from dataclasses import dataclass
 from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
 from datetime import datetime
+import math
 
 
 METRICS: Dict[str, str] = {
@@ -146,12 +147,13 @@ def get_metric_cfg(metric: str, opts: List[str], start_date: str) -> MetricCfg:
     #         },
     #     )
     elif metric == "resilience":
-        date = datetime.strptime(start_date, "%Y-%m-%d")
+        date = datetime.strptime(start_date, "%Y-%m-%d %H:%M:%S")
         return MetricCfg(
             path=path,
             params={
                 "country": opts[-1],
                 "year": date.year,
+                "quarter": math.floor(date.month / 4) + 1,
             }
         )
     else:

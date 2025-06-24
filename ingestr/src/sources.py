@@ -2798,7 +2798,6 @@ class IsocPulseSource:
         if start_date is None:
             start_date = (pendulum.utcnow()
                 .subtract(days=30)
-                .strftime("%Y-%m-%d")  
             )
 
         end_date = kwargs.get("interval_end")
@@ -2813,7 +2812,7 @@ class IsocPulseSource:
 
         src = pulse_source(
             token=token[0],
-            start_date=str(start_date),
+            start_date=start_date.strftime("%Y-%m-%d"),
             end_date=str(end_date) if end_date else None,
             metric=metric,
             opts=opts,
