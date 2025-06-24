@@ -606,7 +606,7 @@ tzlocal==5.3.1
     #   clickhouse-driver
 uritemplate==4.1.1
     # via google-api-python-client
-urllib3==2.3.0
+urllib3==2.5.0
     # via
     #   botocore
     #   clickhouse-connect

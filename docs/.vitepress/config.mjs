@@ -138,6 +138,7 @@ export default defineConfig({
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Personio", link: "/supported-sources/personio.md" },
               { text: "PhantomBuster", link: "/supported-sources/phantombuster.md" },
+              { text: "Pinterest", link: "/supported-sources/pinterest.md" },
               { text: "Pipedrive", link: "/supported-sources/pipedrive.md" },
               { text: "QuickBooks", link: "/supported-sources/quickbooks.md" },
               { text: "S3", link: "/supported-sources/s3.md" },

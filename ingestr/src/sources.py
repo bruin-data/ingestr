@@ -16,7 +16,7 @@ from typing import (
     TypeAlias,
     Union,
 )
-from urllib.parse import ParseResult, parse_qs, quote, urlencode, urlparse
+from urllib.parse import ParseResult, parse_qs, urlencode, urlparse
 
 import fsspec  # type: ignore
 import pendulum
@@ -1368,7 +1368,7 @@ class S3Source:
             )
 
         parsed_uri = urlparse(uri)
-        source_fields = parse_qs(quote(parsed_uri.query, safe="=&"))
+        source_fields = parse_qs(parsed_uri.query)
         access_key_id = source_fields.get("access_key_id")
         if not access_key_id:
             raise ValueError("access_key_id is required to connect to S3")
@@ -1597,7 +1597,7 @@ class DynamoDBSource:
         if not region:
             raise ValueError("region is required to connect to Dynamodb")
 
-        qs = parse_qs(quote(parsed_uri.query, safe="=&"))
+        qs = parse_qs(parsed_uri.query)
         access_key = qs.get("access_key_id")
 
         if not access_key:
@@ -2818,3 +2818,36 @@ class IsocPulseSource:
             opts=opts,
         )
         return src.with_resources(metric)
+
+class PinterestSource:
+    def handles_incrementality(self) -> bool:
+        return True
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed = urlparse(uri)
+        params = parse_qs(parsed.query)
+        access_token = params.get("access_token")
+
+        if not access_token:
+            raise MissingValueError("access_token", "Pinterest")
+
+        start_date = kwargs.get("interval_start")
+        if start_date is not None:
+            start_date = ensure_pendulum_datetime(start_date)
+        else:
+            start_date = pendulum.datetime(2020, 1, 1).in_tz("UTC")
+
+        end_date = kwargs.get("interval_end")
+        if end_date is not None:
+            end_date = end_date = ensure_pendulum_datetime(end_date).in_tz("UTC")
+
+        from ingestr.src.pinterest import pinterest_source
+
+        if table not in {"pins", "boards"}:
+            raise UnsupportedResourceError(table, "Pinterest")
+
+        return pinterest_source(
+            access_token=access_token[0],
+            start_date=start_date,
+            end_date=end_date,
+        ).with_resources(table)
+
