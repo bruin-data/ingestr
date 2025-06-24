@@ -1,11 +1,10 @@
+import math
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 import dlt
-from dataclasses import dataclass
-from dlt.sources.rest_api import EndpointResource, RESTAPIConfig, rest_api_resources
-from datetime import datetime
-import math
-
+from dlt.sources.rest_api import RESTAPIConfig, rest_api_resources
 
 METRICS: Dict[str, str] = {
     "dnssec_adoption": "dnssec/adoption",
@@ -54,7 +53,7 @@ def pulse_source(
 
     if end_date is not None:
         endpoint["params"]["end_date"] = end_date
-    
+
     resources = [
         {
             "name": metric,
@@ -74,57 +73,48 @@ def pulse_source(
             "write_disposition": "merge",
             "primary_key": "date",
         },
-        "resources": resources,
+        "resources": resources, # type:ignore
     }
     res = rest_api_resources(config)
     if metric == "net_loss":
         res[0].add_map(add_date(start_date))
     yield from res
 
+
 @dataclass
 class MetricCfg:
     path: str
     params: Dict[str, Any]
 
+
 def get_metric_cfg(metric: str, opts: List[str], start_date: str) -> MetricCfg:
     path = METRICS.get(metric)
+    if path is None:
+        raise ValueError(f"Unknown metric '{metric}'.")
     if len(opts) == 0:
         return MetricCfg(path=path, params={})
-    
+
     if metric == "https":
         return MetricCfg(
             path=f"{path}/country/{opts[-1]}",
             params={
                 "topsites": True if "topsites" in opts else False,
-            }
+            },
         )
     elif metric in ["dnssec_validation", "dnssec_tld_adoption"]:
-        return MetricCfg(
-            path=f"{path}/country/{opts[-1]}",
-            params={}
-        )
+        return MetricCfg(path=f"{path}/country/{opts[-1]}", params={})
     elif metric == "dnssec_adoption":
-        return MetricCfg(
-            path=f"{path}/domains/{opts[-1]}",
-            params={}
-        )
+        return MetricCfg(path=f"{path}/domains/{opts[-1]}", params={})
     elif metric == "ipv6":
         if "topsites" in opts:
-            return MetricCfg(
-                path=path,
-                params={"topsites": True}
-            )
-        return MetricCfg( path=f"{path}/country/{opts[-1]}", params={})
+            return MetricCfg(path=path, params={"topsites": True})
+        return MetricCfg(path=f"{path}/country/{opts[-1]}", params={})
     elif metric == "roa":
         if len(opts) > 1:
             return MetricCfg(
-                path=f"{path}/country/{opts[-1]}",
-                params={"ip_version": opts[-2]}
+                path=f"{path}/country/{opts[-1]}", params={"ip_version": opts[-2]}
             )
-        return MetricCfg(
-            path=path,
-            params={"ip_version": opts[-1]}
-        )
+        return MetricCfg(path=path, params={"ip_version": opts[-1]})
     elif metric == "net_loss":
         return MetricCfg(
             path=path,
@@ -141,7 +131,7 @@ def get_metric_cfg(metric: str, opts: List[str], start_date: str) -> MetricCfg:
                 "country": opts[-1],
                 "year": date.year,
                 "quarter": math.floor(date.month / 4) + 1,
-            }
+            },
         )
     else:
         raise ValueError(
@@ -149,12 +139,14 @@ def get_metric_cfg(metric: str, opts: List[str], start_date: str) -> MetricCfg:
             "Please check the metric and options."
         )
 
-    
+
 def add_date(start_date: str):
     def transform(item: dict):
         item["date"] = start_date
         return item
+
     return transform
+
 
 def validate(metric: str, opts: List[str]) -> None:
     nopts = len(opts)
@@ -164,6 +156,4 @@ def validate(metric: str, opts: List[str]) -> None:
             "'shutdown_type' and 'country'."
         )
     if nopts > 0 and metric in ["http", "http3", "tls", "tls13", "rov"]:
-        raise ValueError(
-            f"metric '{metric}' does not support options. "
-        )
+        raise ValueError(f"metric '{metric}' does not support options. ")

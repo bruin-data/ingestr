@@ -2796,9 +2796,7 @@ class IsocPulseSource:
 
         start_date = kwargs.get("interval_start")
         if start_date is None:
-            start_date = (pendulum.utcnow()
-                .subtract(days=30)
-            )
+            start_date = pendulum.now().in_tz("UTC").subtract(days=30)
 
         end_date = kwargs.get("interval_end")
 
@@ -2808,7 +2806,7 @@ class IsocPulseSource:
             metric, *opts = metric.strip().split(":")
             opts = [opt.strip() for opt in opts]
 
-        from ingestr.src.isoc_pulse import  pulse_source
+        from ingestr.src.isoc_pulse import pulse_source
 
         src = pulse_source(
             token=token[0],
@@ -2819,9 +2817,11 @@ class IsocPulseSource:
         )
         return src.with_resources(metric)
 
+
 class PinterestSource:
     def handles_incrementality(self) -> bool:
         return True
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed = urlparse(uri)
         params = parse_qs(parsed.query)
@@ -2850,4 +2850,3 @@ class PinterestSource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(table)
-
