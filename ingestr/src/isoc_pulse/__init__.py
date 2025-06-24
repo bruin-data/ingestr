@@ -32,7 +32,7 @@ def pulse_source(
     opts: List[str],
     end_date: Optional[str] = None,
 ) -> Iterable[dlt.sources.DltResource]:
-
+    validate(metric, opts)
     cfg = get_metric_cfg(metric, opts, start_date)
     endpoint: Dict[str, Any] = {
         "path": cfg.path,
@@ -155,3 +155,15 @@ def add_date(start_date: str):
         item["date"] = start_date
         return item
     return transform
+
+def validate(metric: str, opts: List[str]) -> None:
+    nopts = len(opts)
+    if metric == "net_loss" and nopts != 2:
+        raise ValueError(
+            "For 'net_loss' metric, two options are required: "
+            "'shutdown_type' and 'country'."
+        )
+    if nopts > 0 and metric in ["http", "http3", "tls", "tls13", "rov"]:
+        raise ValueError(
+            f"metric '{metric}' does not support options. "
+        )
