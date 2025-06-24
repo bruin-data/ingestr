@@ -43,67 +43,6 @@ def pagination(
             break
 
 
-def parallel_pagination(
-    endpoint: str,
-    start_date: Optional[Any] = None,
-    end_date: Optional[Any] = None,
-    max_workers: int = 4,
-) -> Iterable[TDataItem]:
-    """
-    Retrieves data from an endpoint with parallel pagination by dividing date ranges across workers.
-
-    Args:
-        endpoint (str): The endpoint to retrieve data from.
-        start_date (Optional[Any]): An optional start date to limit the data retrieved. Defaults to 2010-01-01 if None.
-        end_date (Optional[Any]): An optional end date to limit the data retrieved. Defaults to today if None.
-        max_workers (int): Maximum number of worker threads to use for parallel fetching. Defaults to 4.
-
-    Returns:
-        Iterable[TDataItem]: Data items retrieved from the endpoint.
-    """
-    # Set default date range if not provided: 2010 to today
-    if not start_date:
-        start_date = pendulum.datetime(2010, 1, 1)
-    if not end_date:
-        end_date = pendulum.now()
-
-    # Convert dates to timestamps for processing
-    start_ts = transform_date(start_date)
-    end_ts = transform_date(end_date)
-
-    # If date range is very small, use sequential pagination
-    date_range_days = (end_ts - start_ts) / (24 * 60 * 60)
-    if date_range_days < 30:  # Less than 30 days
-        yield from pagination(endpoint, start_date, end_date)
-        return
-
-    # Create time chunks with larger chunks for 2010s (less data expected)
-    time_chunks = _create_adaptive_time_chunks(start_ts, end_ts, max_workers)
-
-    # Use ThreadPoolExecutor to fetch data in parallel and yield as soon as ready
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_chunk = {
-            executor.submit(
-                _fetch_chunk_data_streaming, endpoint, chunk_start, chunk_end
-            ): (chunk_start, chunk_end)
-            for chunk_start, chunk_end in time_chunks
-        }
-
-        # MAXIMUM SPEED - Yield results immediately as they complete
-        for future in as_completed(future_to_chunk):
-            chunk_start, chunk_end = future_to_chunk[future]
-            try:
-                chunk_data = future.result()
-                # Yield all batches from this chunk immediately - NO ORDERING
-                for batch in chunk_data:
-                    yield batch
-
-            except Exception as exc:
-                print(f"Chunk {chunk_start}-{chunk_end} generated an exception: {exc}")
-                raise exc
-
-
 def _create_time_chunks(start_ts: int, end_ts: int, num_chunks: int) -> List[tuple]:
     """
     Divide a time range into equal chunks for parallel processing.
@@ -295,7 +234,6 @@ async def async_parallel_pagination(
 
     async def fetch_chunk_with_semaphore(chunk_start: int, chunk_end: int):
         async with semaphore:
-            await asyncio.sleep(rate_limit_delay)
             return await _fetch_chunk_data_async_fast(endpoint, chunk_start, chunk_end)
 
     # Create all tasks
@@ -390,6 +328,10 @@ async def stripe_get_data_async(
     max_wait_time_ms = 10000
 
     while retry_count < max_retries:
+        # print(
+        #     f"Fetching {resource} from {datetime.fromtimestamp(start_date).strftime('%Y-%m-%d %H:%M:%S') if start_date else 'None'} to {datetime.fromtimestamp(end_date).strftime('%Y-%m-%d %H:%M:%S') if end_date else 'None'}, retry {retry_count} of {max_retries}",
+        #     flush=True,
+        # )
         try:
             resource_dict = await getattr(stripe, resource).list_async(
                 created={"gte": start_date, "lt": end_date}, limit=100, **kwargs
@@ -399,6 +341,10 @@ async def stripe_get_data_async(
             retry_count += 1
             if retry_count < max_retries:
                 wait_time = min(2**retry_count * 0.001, max_wait_time_ms)
+                print(
+                    f"Got rate limited, sleeping {wait_time} seconds before retrying...",
+                    flush=True,
+                )
                 await asyncio.sleep(wait_time)
             else:
                 # Re-raise the last exception if we've exhausted retries
