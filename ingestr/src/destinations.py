@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
 import dlt.destinations.impl.filesystem.filesystem
+from dlt.common.storages.configuration import FileSystemCredentials
 from dlt.common.configuration.specs import AwsCredentials
 from dlt.destinations.impl.clickhouse.configuration import (
     ClickHouseCredentials,
@@ -15,6 +16,8 @@ from dlt.destinations.impl.clickhouse.configuration import (
 
 from ingestr.src.errors import MissingValueError
 from ingestr.src.loader import load_dlt_file
+
+from collections.abc import Callable
 
 
 class GenericSqlDestination:
@@ -386,43 +389,30 @@ class ClickhouseDestination:
         pass
 
 
-class S3FSClient(dlt.destinations.impl.filesystem.filesystem.FilesystemClient):
+class BlobFSClient(dlt.destinations.impl.filesystem.filesystem.FilesystemClient):
     @property
     def dataset_path(self):
         # override to remove dataset path
         return self.bucket_path
 
 
-class S3FS(dlt.destinations.filesystem):
+class BlobFS(dlt.destinations.filesystem):
     @property
     def client_class(self):
-        return S3FSClient
+        return BlobFSClient
 
+class BlobStorageDestination:
+    def __init__(self, protocol: str, credential_builder: Callable[[dict], FileSystemCredentials]):
+        self.protocol = protocol
+        self.credential_builder = credential_builder
+    
+    def __call__(self, *args, **kwargs):
+        return self
 
-class S3Destination:
     def dlt_dest(self, uri: str, **kwargs):
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
-
-        access_key_id = params.get("access_key_id", [None])[0]
-        if access_key_id is None:
-            raise MissingValueError("access_key_id", "S3")
-
-        secret_access_key = params.get("secret_access_key", [None])[0]
-        if secret_access_key is None:
-            raise MissingValueError("secret_access_key", "S3")
-
-        endpoint_url = params.get("endpoint_url", [None])[0]
-        if endpoint_url is not None:
-            parsed_endpoint = urlparse(endpoint_url)
-            if not parsed_endpoint.scheme or not parsed_endpoint.netloc:
-                raise ValueError("Invalid endpoint_url. Must be a valid URL.")
-
-        creds = AwsCredentials(
-            aws_access_key_id=access_key_id,
-            aws_secret_access_key=secret_access_key,
-            endpoint_url=endpoint_url,
-        )
+        creds = self.credential_builder(params)
 
         dest_table = kwargs["dest_table"]
 
@@ -442,7 +432,7 @@ class S3Destination:
         base_path = "/".join(table_parts[:-1])
 
         opts = {
-            "bucket_url": f"s3://{base_path}",
+            "bucket_url": f"{self.protocol}://{base_path}",
             "credentials": creds,
             # supresses dlt warnings about dataset name normalization.
             # we don't use dataset names in S3 so it's fine to disable this.
@@ -452,7 +442,7 @@ class S3Destination:
         if layout is not None:
             opts["layout"] = layout
 
-        return S3FS(**opts)  # type: ignore
+        return BlobFS(**opts)  # type: ignore
 
     def validate_table(self, table: str):
         table = table.strip("/ ")
@@ -468,7 +458,6 @@ class S3Destination:
 
     def post_load(self) -> None:
         pass
-
 
 class SqliteDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
@@ -496,12 +485,7 @@ class MySqlDestination(GenericSqlDestination):
             "table_name": table,
         }
 
-class GCSDestination:
-    def dlt_dest(self, uri: str, **kwargs):
-        parsed_uri = urlparse(uri)
-        params = parse_qs(parsed_uri.query)
-
-
+def gcs_credentials_builder(params: dict):
         credentials_path = params.get("credentials_path")
         credentials_base64 = params.get("credentials_base64")
         credentials_available = any(
@@ -519,48 +503,31 @@ class GCSDestination:
                 credentials = json.load(f)
         else:
             credentials = json.loads(base64.b64decode(credentials_base64[0]).decode())  # type: ignore
+        
+        return credentials
 
-        dest_table = kwargs["dest_table"]
 
-        # only validate if dest_table is not a full URI
-        if not parsed_uri.netloc:
-            dest_table = self.validate_table(dest_table)
+def s3_credentials_builder(params: dict):
+        access_key_id = params.get("access_key_id", [None])[0]
+        if access_key_id is None:
+            raise MissingValueError("access_key_id", "S3")
 
-        table_parts = dest_table.split("/")
+        secret_access_key = params.get("secret_access_key", [None])[0]
+        if secret_access_key is None:
+            raise MissingValueError("secret_access_key", "S3")
 
-        if parsed_uri.path.strip("/"):
-            path_parts = parsed_uri.path.strip("/ ").split("/")
-            table_parts = path_parts + table_parts
+        endpoint_url = params.get("endpoint_url", [None])[0]
+        if endpoint_url is not None:
+            parsed_endpoint = urlparse(endpoint_url)
+            if not parsed_endpoint.scheme or not parsed_endpoint.netloc:
+                raise ValueError("Invalid endpoint_url. Must be a valid URL.")
 
-        if parsed_uri.netloc:
-            table_parts.insert(0, parsed_uri.netloc.strip())
+        return AwsCredentials(
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
+            endpoint_url=endpoint_url,
+        )
 
-        base_path = "/".join(table_parts[:-1])
+S3Destination = BlobStorageDestination("s3", s3_credentials_builder)
 
-        opts = {
-            "bucket_url": f"gs://{base_path}",
-            "credentials": credentials,
-            # supresses dlt warnings about dataset name normalization.
-            # we don't use dataset names in S3 so it's fine to disable this.
-            "enable_dataset_name_normalization": False,
-        }
-        layout = params.get("layout", [None])[0]
-        if layout is not None:
-            opts["layout"] = layout
-
-        return S3FS(**opts)  # type: ignore
-
-    def validate_table(self, table: str):
-        table = table.strip("/ ")
-        if len(table.split("/")) < 2:
-            raise ValueError("Table name must be in the format {bucket-name}/{path}")
-        return table
-
-    def dlt_run_params(self, uri: str, table: str, **kwargs):
-        table_parts = table.split("/")
-        return {
-            "table_name": table_parts[-1].strip(),
-        }
-    
-    def post_load(self) -> None:
-        pass
+GCSDestination = BlobStorageDestination("gs", gcs_credentials_builder)
