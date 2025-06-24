@@ -1884,7 +1884,7 @@ class GCSSource:
             endpoint = blob.parse_endpoint(path_to_file)
         except blob.UnsupportedEndpointError:
             raise ValueError(
-                "S3 Source only supports specific formats files: csv, jsonl, parquet"
+                "GCS Source only supports specific formats files: csv, jsonl, parquet"
             )
         except Exception as e:
             raise ValueError(
