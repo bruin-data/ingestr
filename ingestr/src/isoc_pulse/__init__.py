@@ -32,20 +32,6 @@ def pulse_source(
     opts: List[str],
     end_date: Optional[str] = None,
 ) -> Iterable[dlt.sources.DltResource]:
-    """Create resources for Internet Society Pulse metrics.
-
-    Args:
-        token: Bearer token for the API.
-        start_date: First date of the data range (YYYY-MM-DD).
-        end_date: Last date of the data range.
-        metrics: Subset of metrics to fetch. Defaults to all available metrics.
-        topsites: Optional flag used by some endpoints.
-        ip_version: IP version parameter used by some endpoints.
-    """
-
-    headers = {"Authorization": f"Bearer {token}"}
-
-    resources: List[EndpointResource] = []
 
     cfg = get_metric_cfg(metric, opts, start_date)
     endpoint: Dict[str, Any] = {
@@ -69,18 +55,20 @@ def pulse_source(
     if end_date is not None:
         endpoint["params"]["end_date"] = end_date
     
-    resources.append({
-        "name": metric,
-        "write_disposition": "merge",
-        "primary_key": "date",
-        "columns": {"date": {"data_type": "date"}},
-        "endpoint": endpoint,
-    })
+    resources = [
+        {
+            "name": metric,
+            "write_disposition": "merge",
+            "primary_key": "date",
+            "columns": {"date": {"data_type": "date"}},
+            "endpoint": endpoint,
+        }
+    ]
 
     config: RESTAPIConfig = {
         "client": {
             "base_url": "https://pulse.internetsociety.org/api/",
-            "headers": headers,
+            "headers": {"Authorization": f"Bearer {token}"},
         },
         "resource_defaults": {
             "write_disposition": "merge",
