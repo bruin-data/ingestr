@@ -515,15 +515,10 @@ class GCSDestination:
 
         credentials = None
         if credentials_path:
-            credentials = credentials_path[0]
+            with open(credentials_path[0], "r") as f:
+                credentials = json.load(f)
         else:
             credentials = json.loads(base64.b64decode(credentials_base64[0]).decode())  # type: ignore
-
-        import gcsfs  # type: ignore
-
-        fs = gcsfs.GCSFileSystem(
-            token=credentials,
-        )
 
         dest_table = kwargs["dest_table"]
 
@@ -543,8 +538,8 @@ class GCSDestination:
         base_path = "/".join(table_parts[:-1])
 
         opts = {
-            "bucket_url": f"s3://{base_path}",
-            "credentials": fs,
+            "bucket_url": f"gs://{base_path}",
+            "credentials": credentials,
             # supresses dlt warnings about dataset name normalization.
             # we don't use dataset names in S3 so it's fine to disable this.
             "enable_dataset_name_normalization": False,
@@ -560,3 +555,12 @@ class GCSDestination:
         if len(table.split("/")) < 2:
             raise ValueError("Table name must be in the format {bucket-name}/{path}")
         return table
+
+    def dlt_run_params(self, uri: str, table: str, **kwargs):
+        table_parts = table.split("/")
+        return {
+            "table_name": table_parts[-1].strip(),
+        }
+    
+    def post_load(self) -> None:
+        pass
