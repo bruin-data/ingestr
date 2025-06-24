@@ -737,6 +737,7 @@ class StripeAnalyticsSource:
                         endpoint,
                     ],
                     stripe_secret_key=api_key[0],
+                    max_workers=kwargs.get("extract_parallelism", 4),
                 ).with_resources(endpoint)
 
         raise ValueError(
