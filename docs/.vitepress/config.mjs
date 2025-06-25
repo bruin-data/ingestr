@@ -133,6 +133,7 @@ export default defineConfig({
               { text: "HubSpot", link: "/supported-sources/hubspot.md" },
               { text: "Internet Society Pulse", link: "/supported-sources/isoc-pulse.md" },
               { text: "Klaviyo", link: "/supported-sources/klaviyo.md" },
+              { text: "Linear", link: "/supported-sources/linear.md" },
               { text: "LinkedIn Ads", link: "/supported-sources/linkedin_ads.md" },
               { text: "Mixpanel", link: "/supported-sources/mixpanel.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
