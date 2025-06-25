@@ -1,3 +1,4 @@
+import abc
 import base64
 import csv
 import json
@@ -8,16 +9,14 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
 import dlt.destinations.impl.filesystem.filesystem
-from dlt.common.storages.configuration import FileSystemCredentials
 from dlt.common.configuration.specs import AwsCredentials
+from dlt.common.storages.configuration import FileSystemCredentials
 from dlt.destinations.impl.clickhouse.configuration import (
     ClickHouseCredentials,
 )
 
 from ingestr.src.errors import MissingValueError
 from ingestr.src.loader import load_dlt_file
-
-from collections.abc import Callable
 
 
 class GenericSqlDestination:
@@ -401,18 +400,50 @@ class BlobFS(dlt.destinations.filesystem):
     def client_class(self):
         return BlobFSClient
 
-class BlobStorageDestination:
-    def __init__(self, protocol: str, credential_builder: Callable[[dict], FileSystemCredentials]):
-        self.protocol = protocol
-        self.credential_builder = credential_builder
-    
-    def __call__(self, *args, **kwargs):
-        return self
+
+class SqliteDestination(GenericSqlDestination):
+    def dlt_dest(self, uri: str, **kwargs):
+        return dlt.destinations.sqlalchemy(credentials=uri)
+
+    def dlt_run_params(self, uri: str, table: str, **kwargs):
+        return {
+            # https://dlthub.com/docs/dlt-ecosystem/destinations/sqlalchemy#dataset-files
+            "dataset_name": "main",
+            "table_name": table,
+        }
+
+
+class MySqlDestination(GenericSqlDestination):
+    def dlt_dest(self, uri: str, **kwargs):
+        return dlt.destinations.sqlalchemy(credentials=uri)
+
+    def dlt_run_params(self, uri: str, table: str, **kwargs):
+        parsed = urlparse(uri)
+        database = parsed.path.lstrip("/")
+        if not database:
+            raise ValueError("You need to specify a database")
+        return {
+            "dataset_name": database,
+            "table_name": table,
+        }
+
+
+class BlobStorageDestination(abc.ABC):
+    @abc.abstractmethod
+    def credentials(self, params: dict) -> FileSystemCredentials:
+        """Build credentials for the blob storage destination."""
+        pass
+
+    @property
+    @abc.abstractmethod
+    def protocol(self) -> str:
+        """The protocol used for the blob storage destination."""
+        pass
 
     def dlt_dest(self, uri: str, **kwargs):
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
-        creds = self.credential_builder(params)
+        creds = self.credentials(params)
 
         dest_table = kwargs["dest_table"]
 
@@ -459,55 +490,13 @@ class BlobStorageDestination:
     def post_load(self) -> None:
         pass
 
-class SqliteDestination(GenericSqlDestination):
-    def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.sqlalchemy(credentials=uri)
 
-    def dlt_run_params(self, uri: str, table: str, **kwargs):
-        return {
-            # https://dlthub.com/docs/dlt-ecosystem/destinations/sqlalchemy#dataset-files
-            "dataset_name": "main",
-            "table_name": table,
-        }
+class S3Destination(BlobStorageDestination):
+    @property
+    def protocol(self) -> str:
+        return "s3"
 
-
-class MySqlDestination(GenericSqlDestination):
-    def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.sqlalchemy(credentials=uri)
-
-    def dlt_run_params(self, uri: str, table: str, **kwargs):
-        parsed = urlparse(uri)
-        database = parsed.path.lstrip("/")
-        if not database:
-            raise ValueError("You need to specify a database")
-        return {
-            "dataset_name": database,
-            "table_name": table,
-        }
-
-def gcs_credentials_builder(params: dict):
-        credentials_path = params.get("credentials_path")
-        credentials_base64 = params.get("credentials_base64")
-        credentials_available = any(
-            map(
-                lambda x: x is not None,
-                [credentials_path, credentials_base64],
-            )
-        )
-        if credentials_available is False:
-            raise MissingValueError("credentials_path or credentials_base64", "GCS")
-
-        credentials = None
-        if credentials_path:
-            with open(credentials_path[0], "r") as f:
-                credentials = json.load(f)
-        else:
-            credentials = json.loads(base64.b64decode(credentials_base64[0]).decode())  # type: ignore
-        
-        return credentials
-
-
-def s3_credentials_builder(params: dict):
+    def credentials(self, params: dict) -> FileSystemCredentials:
         access_key_id = params.get("access_key_id", [None])[0]
         if access_key_id is None:
             raise MissingValueError("access_key_id", "S3")
@@ -528,6 +517,30 @@ def s3_credentials_builder(params: dict):
             endpoint_url=endpoint_url,
         )
 
-S3Destination = BlobStorageDestination("s3", s3_credentials_builder)
 
-GCSDestination = BlobStorageDestination("gs", gcs_credentials_builder)
+class GCSDestination(BlobStorageDestination):
+    @property
+    def protocol(self) -> str:
+        return "gs"
+
+    def credentials(self, params: dict) -> FileSystemCredentials:
+        """Builds GCS credentials from the provided parameters."""
+        credentials_path = params.get("credentials_path")
+        credentials_base64 = params.get("credentials_base64")
+        credentials_available = any(
+            map(
+                lambda x: x is not None,
+                [credentials_path, credentials_base64],
+            )
+        )
+        if credentials_available is False:
+            raise MissingValueError("credentials_path or credentials_base64", "GCS")
+
+        credentials = None
+        if credentials_path:
+            with open(credentials_path[0], "r") as f:
+                credentials = json.load(f)
+        else:
+            credentials = json.loads(base64.b64decode(credentials_base64[0]).decode())  # type: ignore
+
+        return credentials

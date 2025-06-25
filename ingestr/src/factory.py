@@ -10,6 +10,7 @@ from ingestr.src.destinations import (
     CsvDestination,
     DatabricksDestination,
     DuckDBDestination,
+    GCSDestination,
     MsSQLDestination,
     MySqlDestination,
     PostgresDestination,
@@ -18,7 +19,6 @@ from ingestr.src.destinations import (
     SnowflakeDestination,
     SqliteDestination,
     SynapseDestination,
-    GCSDestination,
 )
 from ingestr.src.sources import (
     AdjustSource,
