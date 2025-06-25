@@ -1,5 +1,4 @@
-from importlib.resources import Resource
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, Optional
 
 import dlt
 import pendulum
@@ -95,11 +94,12 @@ query Users($cursor: String) {
 }
 """
 
+
 @dlt.source(name="linear", max_table_nesting=0)
 def linear_source(
     api_key: str,
     start_date: pendulum.DateTime,
-    end_date: pendulum.DateTime | None = None
+    end_date: pendulum.DateTime | None = None,
 ) -> Iterable[dlt.sources.DltResource]:
     @dlt.resource(name="issues", primary_key="id", write_disposition="merge")
     def issues(
@@ -115,37 +115,69 @@ def linear_source(
             current_start_date = pendulum.parse(updated_at.last_value)
         else:
             current_start_date = pendulum.parse(start_date)
-        
+
         if updated_at.end_value:
             current_end_date = pendulum.parse(updated_at.end_value)
         else:
             current_end_date = pendulum.now(tz="UTC")
-        
-        print("start_date", current_start_date)
-        print("end_date", current_end_date)
-        
+
         for item in _paginate(api_key, ISSUES_QUERY, "issues"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    print("item_updated", pendulum.parse(item["updatedAt"]))
                     yield item
 
-    return [issues]
+    @dlt.resource(name="projects", primary_key="id", write_disposition="merge")
+    def projects(
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updatedAt",
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
+            range_start="closed",
+            range_end="closed",
+        ),
+    ) -> Iterator[Dict[str, Any]]:
+        if updated_at.last_value:
+            current_start_date = pendulum.parse(updated_at.last_value)
+        else:
+            current_start_date = pendulum.parse(start_date)
 
-#         @dlt.resource(name="projects", primary_key="id", write_disposition="merge")
-# def projects(api_key: str = dlt.secrets.value) -> Iterator[Dict[str, Any]]:
-#     yield from _paginate(api_key, PROJECTS_QUERY, "projects")
+        if updated_at.end_value:
+            current_end_date = pendulum.parse(updated_at.end_value)
+        else:
+            current_end_date = pendulum.now(tz="UTC")
 
+        for item in _paginate(api_key, PROJECTS_QUERY, "projects"):
+            if pendulum.parse(item["updatedAt"]) >= current_start_date:
+                if pendulum.parse(item["updatedAt"]) <= current_end_date:
+                    yield item
 
-# @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
-# def teams(api_key: str = dlt.secrets.value) -> Iterator[Dict[str, Any]]:
-#     yield from _paginate(api_key, TEAMS_QUERY, "teams")
+    @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
+    def teams() -> Iterator[Dict[str, Any]]:
+        yield from _paginate(api_key, TEAMS_QUERY, "teams")
 
+    @dlt.resource(name="users", primary_key="id", write_disposition="merge")
+    def users(
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updatedAt",
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
+            range_start="closed",
+            range_end="closed",
+        ),
+    ) -> Iterator[Dict[str, Any]]:
+        if updated_at.last_value:
+            current_start_date = pendulum.parse(updated_at.last_value)
+        else:
+            current_start_date = pendulum.parse(start_date)
 
-# @dlt.resource(name="users", primary_key="id", write_disposition="merge")
-# def users(api_key: str = dlt.secrets.value) -> Iterator[Dict[str, Any]]:
-#     yield from _paginate(api_key, USERS_QUERY, "users")
-        # projects(api_key=api_key, start_date=start_date, end_date=end_date),
-        # teams(api_key=api_key,start_date=start_date, end_date=end_date),
-        # users(api_key=api_key,start_date=start_date, end_date=end_date),
-    
+        if updated_at.end_value:
+            current_end_date = pendulum.parse(updated_at.end_value)
+        else:
+            current_end_date = pendulum.now(tz="UTC")
+
+        for item in _paginate(api_key, USERS_QUERY, "users"):
+            if pendulum.parse(item["updatedAt"]) >= current_start_date:
+                if pendulum.parse(item["updatedAt"]) <= current_end_date:
+                    yield item
+
+    return issues, projects, teams, users
