@@ -73,7 +73,7 @@ def pulse_source(
             "write_disposition": "merge",
             "primary_key": "date",
         },
-        "resources": resources, # type:ignore
+        "resources": resources,  # type:ignore
     }
     res = rest_api_resources(config)
     if metric == "net_loss":
