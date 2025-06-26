@@ -2812,7 +2812,7 @@ class IsocPulseSource:
         src = pulse_source(
             token=token[0],
             start_date=start_date.strftime("%Y-%m-%d"),
-            end_date=str(end_date) if end_date else None,
+            end_date=end_date.strftime("%Y-%m-%d") if end_date else None,
             metric=metric,
             opts=opts,
         )
