@@ -43,7 +43,7 @@ def zoom_source(
         else:
             end_dt = pendulum.parse(datetime.end_value)
         base_params: Dict[str, Any] = {
-            "type": "scheduled ",
+            "type": "scheduled",
             "page_size": 300,
             "from": start_dt.to_date_string(),
             "to": end_dt.to_date_string(),

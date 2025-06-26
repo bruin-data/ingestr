@@ -69,8 +69,6 @@ class ZoomClient:
             data = response.json()
             for item in data.get("meetings", []):
                 item["zoom_user_id"] = user_id
-                print("item", item)
-                print("item_type", type(item))
                 yield item
             token = data.get("next_page_token")
             if not token:
