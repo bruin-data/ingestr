@@ -51,5 +51,9 @@ def zoom_source(
         for user in client.get_users():
             user_id = user["id"]
             yield from client.get_meetings(user_id, base_params)
+    
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def users() -> Iterable[TDataItem]:
+        yield from client.get_users()
 
-    return meetings
+    return meetings, users

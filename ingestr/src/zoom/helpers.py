@@ -47,12 +47,14 @@ class ZoomClient:
 
     def get_users(self) -> Iterator[Dict[str, Any]]:
         url = f"{self.base_url}/users"
+       
         params = {"page_size": 1000}
         while True:
             response = self.session.get(url, headers=self._headers(), params=params)
             response.raise_for_status()
             data = response.json()
             for user in data.get("users", []):
+                print("users", user)
                 yield user
             token = data.get("next_page_token")
             if not token:
