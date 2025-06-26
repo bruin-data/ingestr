@@ -56,4 +56,16 @@ def zoom_source(
     def users() -> Iterable[TDataItem]:
         yield from client.get_users()
 
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def participants() -> Iterable[TDataItem]:
+        base_params: Dict[str, Any] = {
+            "type": "past",
+            "page_size": 300,
+        }
+        for user in client.get_users():
+            user_id = user["id"]
+            for meeting in client.get_meetings(user_id, base_params):
+                meeting_id = meeting["id"]
+                yield from client.get_participants(user_id, base_params)
+                
     return meetings, users

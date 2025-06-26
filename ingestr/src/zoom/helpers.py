@@ -76,3 +76,18 @@ class ZoomClient:
             if not token:
                 break
             params["next_page_token"] = token
+
+    def get_participants(
+        self, meeting_id: str, params: Dict[str, Any]
+    ) -> Iterator[Dict[str, Any]]:
+        url = f"{self.base_url}/report/meetings/{meeting_id}/participants"
+        while True:
+            response = self.session.get(url, headers=self._headers(), params=params)
+            response.raise_for_status()
+            data = response.json()
+            for item in data.get("participants", []):
+                yield item
+            token = data.get("next_page_token")
+            if not token:
+                break
+            params["next_page_token"] = token
