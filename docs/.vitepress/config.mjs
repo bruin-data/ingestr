@@ -152,6 +152,7 @@ export default defineConfig({
               { text: "Stripe", link: "/supported-sources/stripe.md" },
               { text: "TikTok Ads", link: "/supported-sources/tiktok-ads.md" },
               { text: "Zendesk", link: "/supported-sources/zendesk.md" },
+              { text: "Zoom", link: "/supported-sources/zoom.md" },
             ],
           },
         ],
