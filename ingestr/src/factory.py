@@ -71,6 +71,7 @@ from ingestr.src.sources import (
     TikTokSource,
     TrustpilotSource,
     ZendeskSource,
+    ZoomSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -182,6 +183,7 @@ class SourceDestinationFactory:
         "smartsheet": SmartsheetSource,
         "sftp": SFTPSource,
         "pinterest": PinterestSource,
+        "zoom": ZoomSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
