@@ -1,5 +1,4 @@
 import time
-import urllib.parse
 from typing import Any, Dict, Iterator, Optional
 
 import pendulum
@@ -50,7 +49,7 @@ class ZoomClient:
 
     def get_users(self) -> Iterator[Dict[str, Any]]:
         url = f"{self.base_url}/users"
-       
+
         params = {"page_size": 1000}
         while True:
             response = self.session.get(url, headers=self._headers(), params=params)
@@ -63,6 +62,7 @@ class ZoomClient:
                 break
             params["next_page_token"] = token
 
+#https://developers.zoom.us/docs/api/rest/reference/zoom-api/methods/#operation/meetings
     def get_meetings(
         self, user_id: str, params: Dict[str, Any]
     ) -> Iterator[Dict[str, Any]]:
@@ -79,10 +79,13 @@ class ZoomClient:
                 break
             params["next_page_token"] = token
 
- 
-    #https://developers.zoom.us/docs/api/rest/reference/zoom-api/methods/#operation/reportMeetingParticipants
+    # https://developers.zoom.us/docs/api/rest/reference/zoom-api/methods/#operation/reportMeetingParticipants
     def get_participants(
-        self, meeting_id: str, params: Dict[str, Any],start_date: pendulum.DateTime,end_date: pendulum.DateTime
+        self,
+        meeting_id: str,
+        params: Dict[str, Any],
+        start_date: pendulum.DateTime,
+        end_date: pendulum.DateTime,
     ) -> Iterator[Dict[str, Any]]:
         url = f"{self.base_url}/report/meetings/{meeting_id}/participants"
         while True:
@@ -91,7 +94,7 @@ class ZoomClient:
             data = response.json()
             for item in data.get("participants", []):
                 join_time = pendulum.parse(item["join_time"])
-                if join_time >=  start_date and join_time <= end_date:
+                if join_time >= start_date and join_time <= end_date:
                     yield item
             token = data.get("next_page_token")
             if not token:

@@ -2,7 +2,6 @@ from typing import Any, Dict, Iterable, Sequence
 
 import dlt
 import pendulum
-
 from dlt.common.typing import TAnyDateTime, TDataItem
 from dlt.sources import DltResource
 
@@ -43,16 +42,18 @@ def zoom_source(
             end_dt = pendulum.now("UTC")
         else:
             end_dt = pendulum.parse(datetime.end_value)
+        
         base_params: Dict[str, Any] = {
             "type": "scheduled",
             "page_size": 300,
             "from": start_dt.to_date_string(),
             "to": end_dt.to_date_string(),
         }
+        
         for user in client.get_users():
             user_id = user["id"]
             yield from client.get_meetings(user_id, base_params)
-    
+
     @dlt.resource(write_disposition="merge", primary_key="id")
     def users() -> Iterable[TDataItem]:
         yield from client.get_users()
@@ -88,6 +89,11 @@ def zoom_source(
             user_id = user["id"]
             for meeting in client.get_meetings(user_id=user_id, params=meeting_params):
                 meeting_id = meeting["id"]
-                yield from client.get_participants(meeting_id=meeting_id, params=participant_params, start_date=start_dt,end_date=end_dt)
-                
+                yield from client.get_participants(
+                    meeting_id=meeting_id,
+                    params=participant_params,
+                    start_date=start_dt,
+                    end_date=end_dt,
+                )
+
     return meetings, users, participants
