@@ -79,22 +79,7 @@ class ZoomClient:
                 break
             params["next_page_token"] = token
 
-    def get_past_meetings(
-        self, user_id: str, params: Dict[str, Any]
-    ) -> Iterator[Dict[str, Any]]:
-        url = f"{self.base_url}/report/users/{user_id}/meetings"
-        while True:
-            response = self.session.get(url, headers=self._headers(), params=params)
-            response.raise_for_status()
-            data = response.json()
-            for item in data.get("meetings", []):
-                item["zoom_user_id"] = user_id
-                yield item
-            token = data.get("next_page_token")
-            if not token:
-                break
-            params["next_page_token"] = token
-    
+ 
     #https://developers.zoom.us/docs/api/rest/reference/zoom-api/methods/#operation/reportMeetingParticipants
     def get_participants(
         self, meeting_id: str, params: Dict[str, Any],start_date: pendulum.DateTime,end_date: pendulum.DateTime

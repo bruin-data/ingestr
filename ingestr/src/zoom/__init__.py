@@ -77,14 +77,17 @@ def zoom_source(
         else:
             end_dt = pendulum.parse(datetime.end_value)
 
-        base_params: Dict[str, Any] = {
+        participant_params: Dict[str, Any] = {
+            "page_size": 300,
+        }
+        meeting_params = {
+            "type": "previous_meetings",
             "page_size": 300,
         }
         for user in client.get_users():
             user_id = user["id"]
-            for meeting in client.get_past_meetings(user_id, base_params):
+            for meeting in client.get_meetings(user_id=user_id, params=meeting_params):
                 meeting_id = meeting["id"]
-                
-                yield from client.get_participants(meeting_id=meeting_id, params=base_params,start_date=start_dt,end_date=end_dt)
+                yield from client.get_participants(meeting_id=meeting_id, params=participant_params, start_date=start_dt,end_date=end_dt)
                 
     return meetings, users, participants
