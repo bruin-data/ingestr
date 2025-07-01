@@ -2,6 +2,8 @@ import time
 import urllib.parse
 from typing import Any, Dict, Iterator, Optional
 
+import pendulum
+
 from ingestr.src.http_client import create_client
 
 
@@ -92,18 +94,20 @@ class ZoomClient:
             if not token:
                 break
             params["next_page_token"] = token
+    
     #https://developers.zoom.us/docs/api/rest/reference/zoom-api/methods/#operation/reportMeetingParticipants
     def get_participants(
-        self, meeting_id: str, params: Dict[str, Any]
+        self, meeting_id: str, params: Dict[str, Any],start_date: pendulum.DateTime,end_date: pendulum.DateTime
     ) -> Iterator[Dict[str, Any]]:
-        
-        url = f"{self.base_url}/report/meetings/{88010404230}/participants"
+        url = f"{self.base_url}/report/meetings/{meeting_id}/participants"
         while True:
             response = self.session.get(url, headers=self._headers(), params=params)
             response.raise_for_status()
             data = response.json()
             for item in data.get("participants", []):
-                yield item
+                join_time = pendulum.parse(item["join_time"])
+                if join_time >=  start_date and join_time <= end_date:
+                    yield item
             token = data.get("next_page_token")
             if not token:
                 break

@@ -58,9 +58,26 @@ def zoom_source(
         yield from client.get_users()
 
     @dlt.resource(write_disposition="merge", primary_key="id")
-    def participants() -> Iterable[TDataItem]:
+    def participants(
+        datetime: dlt.sources.incremental[TAnyDateTime] = dlt.sources.incremental(
+            "join_time",
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date is not None else None,
+            range_start="closed",
+            range_end="closed",
+        ),
+    ) -> Iterable[TDataItem]:
+        if datetime.last_value:
+            start_dt = pendulum.parse(datetime.last_value)
+        else:
+            start_dt = pendulum.parse(start_date)
+
+        if end_date is None:
+            end_dt = pendulum.now("UTC")
+        else:
+            end_dt = pendulum.parse(datetime.end_value)
+
         base_params: Dict[str, Any] = {
-            "type": "past",
             "page_size": 300,
         }
         for user in client.get_users():
@@ -68,7 +85,6 @@ def zoom_source(
             for meeting in client.get_past_meetings(user_id, base_params):
                 meeting_id = meeting["id"]
                 
-                print("meeting", meeting)
-                yield from client.get_participants(meeting_id=meeting_id, params=base_params)
+                yield from client.get_participants(meeting_id=meeting_id, params=base_params,start_date=start_dt,end_date=end_dt)
                 
     return meetings, users, participants
