@@ -2,6 +2,7 @@ from typing import Any, Dict, Iterable, Sequence
 
 import dlt
 import pendulum
+
 from dlt.common.typing import TAnyDateTime, TDataItem
 from dlt.sources import DltResource
 
@@ -64,8 +65,10 @@ def zoom_source(
         }
         for user in client.get_users():
             user_id = user["id"]
-            for meeting in client.get_meetings(user_id, base_params):
+            for meeting in client.get_past_meetings(user_id, base_params):
                 meeting_id = meeting["id"]
-                yield from client.get_participants(user_id, base_params)
                 
-    return meetings, users
+                print("meeting", meeting)
+                yield from client.get_participants(meeting_id=meeting_id, params=base_params)
+                
+    return meetings, users, participants
