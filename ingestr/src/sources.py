@@ -2915,7 +2915,7 @@ class ZoomSource:
 
         from ingestr.src.zoom import zoom_source
 
-        if table not in {"meetings"}:
+        if table not in {"meetings", "users", "participants"}:
             raise UnsupportedResourceError(table, "Zoom")
 
         return zoom_source(
