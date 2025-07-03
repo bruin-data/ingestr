@@ -43,6 +43,16 @@ query Issues($cursor: String) {
       description
       createdAt
       updatedAt
+      creator { id name }
+      assignee { id name }
+      state { id name }
+      labels { nodes { id name } }
+      cycle { id name }
+      project { id name }
+      comments(first: 50) { nodes { id body } }
+      priority
+      attachments { nodes { id url title } }
+      subscribers { nodes { id } }
     }
     pageInfo { hasNextPage endCursor }
   }
