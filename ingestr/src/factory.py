@@ -79,6 +79,7 @@ SQL_SOURCE_SCHEMES = [
     "crate",
     "duckdb",
     "mssql",
+    "mssql+pyodbc",
     "mysql",
     "mysql+pymysql",
     "mysql+mysqlconnector",
