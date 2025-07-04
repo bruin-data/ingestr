@@ -154,18 +154,35 @@ class DuckDBDestination(GenericSqlDestination):
         return dlt.destinations.duckdb(uri, **kwargs)
 
 class OdbcMsSqlClient(PyOdbcMsSqlClient):
+    SQL_COPT_SS_ACCESS_TOKEN = 1256
+    SKIP_CREDENTIALS = {"PWD", "AUTHENTICATION", "UID"}
+
     def open_connection(self):
         cfg = self.credentials._get_odbc_dsn_dict()
         if cfg.get("AUTHENTICATION", "").strip().lower() != "activedirectoryaccesstoken":
             return super().open_connection()
 
-        token = cfg["PWD"]
-        dsn = ";".join([f"{k}={v}" for k, v in cfg.items()])
         import pyodbc
+
+        dsn = ";".join([
+            f"{k}={v}" for k, v in cfg.items()
+            if k not in self.SKIP_CREDENTIALS
+        ])
+
         return pyodbc.connect(
             dsn,
             timeout=self.credentials.connect_timeout,
+            attrs_before={
+                self.SQL_COPT_SS_ACCESS_TOKEN: self.serialize_token(cfg["PWD"]),
+            },
         )
+
+    def serialize_token(self, token):
+        import struct
+
+        # https://github.com/mkleehammer/pyodbc/issues/228#issuecomment-494773723
+        encoded = token.encode("utf_16_le")
+        return struct.pack("<i", len(encoded)) + encoded
 
 class MsSqlClient(MsSqlJobClient):
     def __init__(
