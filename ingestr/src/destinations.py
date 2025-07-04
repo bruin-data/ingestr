@@ -15,6 +15,17 @@ from dlt.destinations.impl.clickhouse.configuration import (
     ClickHouseCredentials,
 )
 
+from dlt.common.schema import Schema
+from dlt.common.destination.capabilities import DestinationCapabilitiesContext
+from dlt.destinations.impl.mssql.configuration import MsSqlClientConfiguration
+from dlt.destinations.impl.mssql.mssql import (
+    MsSqlJobClient,
+    HINT_TO_MSSQL_ATTR,
+)
+from dlt.destinations.impl.mssql.sql_client import (
+    PyOdbcMsSqlClient,
+)
+
 from ingestr.src.errors import MissingValueError
 from ingestr.src.loader import load_dlt_file
 
@@ -142,11 +153,36 @@ class DuckDBDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
         return dlt.destinations.duckdb(uri, **kwargs)
 
+class OdbcMsSqlClient(PyOdbcMsSqlClient):
+    pass
+
+class MsSqlClient(MsSqlJobClient):
+    def __init__(
+        self,
+        schema: Schema,
+        config: MsSqlClientConfiguration,
+        capabilities: DestinationCapabilitiesContext,
+    ) -> None:
+        sql_client = OdbcMsSqlClient(
+            config.normalize_dataset_name(schema),
+            config.normalize_staging_dataset_name(schema),
+            config.credentials,
+            capabilities,
+        )
+        super().__init__(schema, config, sql_client)
+        self.config: MsSqlClientConfiguration = config
+        self.sql_client = sql_client
+        self.active_hints = HINT_TO_MSSQL_ATTR if self.config.create_indexes else {}
+        self.type_mapper = capabilities.get_type_mapper()
+
+class MsSqlDestImpl(dlt.destinations.mssql):
+    @property
+    def client_class(self):
+        return MsSqlClient
 
 class MsSQLDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.mssql(credentials=uri, **kwargs)
-
+        return MsSqlDestImpl(credentials=uri, **kwargs)
 
 class DatabricksDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
