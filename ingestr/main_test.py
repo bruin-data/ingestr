@@ -561,6 +561,11 @@ DESTINATIONS = {
     "postgres": pgDocker,
     "duckdb": EphemeralDuckDb(),
     "clickhouse+native": clickHouseDocker,
+    "sqlserver": DockerImage(
+        "sqlserver",
+        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+    ),
 }
 
 
