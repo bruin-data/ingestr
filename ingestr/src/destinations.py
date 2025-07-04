@@ -154,7 +154,18 @@ class DuckDBDestination(GenericSqlDestination):
         return dlt.destinations.duckdb(uri, **kwargs)
 
 class OdbcMsSqlClient(PyOdbcMsSqlClient):
-    pass
+    def open_connection(self):
+        cfg = self.credentials._get_odbc_dsn_dict()
+        if cfg.get("AUTHENTICATION", "").strip().lower() != "activedirectoryaccesstoken":
+            return super().open_connection()
+
+        token = cfg["PWD"]
+        dsn = ";".join([f"{k}={v}" for k, v in cfg.items()])
+        import pyodbc
+        return pyodbc.connect(
+            dsn,
+            timeout=self.credentials.connect_timeout,
+        )
 
 class MsSqlClient(MsSqlJobClient):
     def __init__(
@@ -169,7 +180,7 @@ class MsSqlClient(MsSqlJobClient):
             config.credentials,
             capabilities,
         )
-        super().__init__(schema, config, sql_client)
+        super(MsSqlJobClient, self).__init__(schema, config, sql_client)
         self.config: MsSqlClientConfiguration = config
         self.sql_client = sql_client
         self.active_hints = HINT_TO_MSSQL_ATTR if self.config.create_indexes else {}
