@@ -5,6 +5,8 @@ import json
 import os
 import shutil
 import tempfile
+import struct
+import datetime
 from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
@@ -153,6 +155,20 @@ class DuckDBDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
         return dlt.destinations.duckdb(uri, **kwargs)
 
+def handle_datetimeoffset(dto_value: bytes) -> datetime.datetime:
+    # ref: https://github.com/mkleehammer/pyodbc/issues/134#issuecomment-281739794
+    tup = struct.unpack("<6hI2h", dto_value)  # e.g., (2017, 3, 16, 10, 35, 18, 500000000, -6, 0)
+    return datetime.datetime(
+        tup[0],
+        tup[1],
+        tup[2],
+        tup[3],
+        tup[4],
+        tup[5],
+        tup[6] // 1000,
+        datetime.timezone(datetime.timedelta(hours=tup[7], minutes=tup[8])),
+    )
+
 class OdbcMsSqlClient(PyOdbcMsSqlClient):
     SQL_COPT_SS_ACCESS_TOKEN = 1256
     SKIP_CREDENTIALS = {"PWD", "AUTHENTICATION", "UID"}
@@ -169,7 +185,7 @@ class OdbcMsSqlClient(PyOdbcMsSqlClient):
             if k not in self.SKIP_CREDENTIALS
         ])
 
-        return pyodbc.connect(
+        self._conn = pyodbc.connect(
             dsn,
             timeout=self.credentials.connect_timeout,
             attrs_before={
@@ -177,8 +193,12 @@ class OdbcMsSqlClient(PyOdbcMsSqlClient):
             },
         )
 
+        # https://github.com/mkleehammer/pyodbc/wiki/Using-an-Output-Converter-function
+        self._conn.add_output_converter(-155, handle_datetimeoffset)
+        self._conn.autocommit = True
+        return self._conn
+
     def serialize_token(self, token):
-        import struct
 
         # https://github.com/mkleehammer/pyodbc/issues/228#issuecomment-494773723
         encoded = token.encode("utf_16_le")
