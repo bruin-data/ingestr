@@ -4,7 +4,6 @@ import json
 import os
 import re
 import tempfile
-import struct
 from datetime import date, datetime, timedelta, timezone
 from typing import (
     Any,
@@ -263,14 +262,20 @@ class SqlSource:
         if uri.startswith("mssql://"):
             parsed_uri = urlparse(uri)
             params = parse_qs(parsed_uri.query)
-            params = {k.lower():v for k, v in params.items()}
+            params = {k.lower(): v for k, v in params.items()}
             if params.get("authentication") == ["ActiveDirectoryAccessToken"]:
-
-                from ingestr.src.destinations import OdbcMsSqlClient, handle_datetimeoffset
+                import pyodbc  # type: ignore
                 from sqlalchemy import create_engine
-                import pyodbc
+
+                from ingestr.src.destinations import (
+                    OdbcMsSqlClient,
+                    handle_datetimeoffset,
+                )
+
                 cfg = {
-                    "DRIVER": params.get("driver", ["ODBC Driver 18 for SQL Server"])[0],
+                    "DRIVER": params.get("driver", ["ODBC Driver 18 for SQL Server"])[
+                        0
+                    ],
                     "SERVER": f"{parsed_uri.hostname},{parsed_uri.port or 1433}",
                     "DATABASE": parsed_uri.path.lstrip("/"),
                 }
@@ -278,7 +283,7 @@ class SqlSource:
                     if k.lower() not in ["driver", "authentication", "connect_timeout"]:
                         cfg[k.upper()] = v[0]
 
-                token = OdbcMsSqlClient.serialize_token(None, parsed_uri.password)
+                token = OdbcMsSqlClient.serialize_token(None, parsed_uri.password)  # type: ignore[arg-type]
                 dsn = ";".join([f"{k}={v}" for k, v in cfg.items()])
 
                 def creator():
@@ -297,8 +302,6 @@ class SqlSource:
                     "mssql+pyodbc://",
                     creator=creator,
                 )
-
-
 
         builder_res = self.table_builder(
             credentials=credentials,
