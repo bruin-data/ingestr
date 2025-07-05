@@ -30,6 +30,9 @@ import pytest
 import requests
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
+from cratedb_toolkit.testing.testcontainers.cratedb import (  # type: ignore
+    CrateDBContainer,
+)
 from dlt.sources.filesystem import glob_files
 from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
 from sqlalchemy.pool import NullPool
@@ -42,6 +45,7 @@ from testcontainers.mssql import SqlServerContainer  # type: ignore
 from testcontainers.mysql import MySqlContainer  # type: ignore
 from testcontainers.postgres import PostgresContainer  # type: ignore
 from typer.testing import CliRunner
+from yarl import URL
 
 from ingestr.main import app
 from ingestr.src.appstore.errors import (
@@ -509,10 +513,44 @@ class ClickhouseDockerImage(DockerImage):
         return conn_url
 
 
+class CrateDbDockerImage(DockerImage):
+    """
+    The CrateDB destination uses the PostgreSQL protocol (default port 5432).
+    """
+
+    def start_fully(self) -> str:
+        self.container = self.container_creator()
+        if self.container is None:
+            raise ValueError("Container is not initialized.")
+
+        port5432 = int(self.container.get_exposed_port(5432))
+        url = (
+            URL(self.container.get_connection_url())
+            .with_scheme("cratedb")
+            .with_port(port5432)
+        )
+
+        conn_url = str(url)
+        with open(f"{self.container_lock_dir}/{self.id}", "w") as f:
+            f.write(conn_url)
+
+        return conn_url
+
+
 class EphemeralDuckDb:
+    def __init__(self) -> None:
+        self.abs_path = get_abs_path(f"./testdata/duckdb_{get_random_string(5)}.db")
+        self.connection_url = f"duckdb:///{self.abs_path}"
+        this = self
+
+        class ContainerSurrogate:
+            def get_connection_url(self) -> str:
+                return this.connection_url
+
+        self.container = ContainerSurrogate()
+
     def start(self) -> str:
-        abs_path = get_abs_path(f"./testdata/duckdb_{get_random_string(5)}.db")
-        return f"duckdb:///{abs_path}"
+        return self.connection_url
 
     def start_fully(self) -> str:  # type: ignore
         pass
@@ -535,12 +573,17 @@ POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
 MYSQL8_IMAGE = "mysql:8.4.1"
 MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-CU13-ubuntu-22.04"
 CLICKHOUSE_IMAGE = "clickhouse/clickhouse-server:24.12"
+CRATEDB_IMAGE = "crate:5.10"
 
 pgDocker = DockerImage(
     "postgres", lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()
 )
 clickHouseDocker = ClickhouseDockerImage(
     "clickhouse", lambda: ClickHouseContainer(CLICKHOUSE_IMAGE).start()
+)
+crateDbDocker = CrateDbDockerImage(
+    "cratedb",
+    lambda: CrateDBContainer(CRATEDB_IMAGE, ports={4200: None, 5432: None}).start(),
 )
 mysqlDocker = DockerImage(
     "mysql", lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
@@ -565,11 +608,10 @@ DESTINATIONS = {
 
 
 @pytest.fixture(scope="session", autouse=True)
-def manage_containers(request):
-    shared_dir = request.config.workerinput["shared_directory"]
+def manage_containers(request, shared_directory):
     unique_containers = set(SOURCES.values()) | set(DESTINATIONS.values())
     for container in unique_containers:
-        container.container_lock_dir = shared_dir
+        container.container_lock_dir = shared_directory
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -592,6 +634,32 @@ def autocreate_db_for_clickhouse():
     patcher.stop()
 
 
+def get_uri_read(image: DockerImage) -> Optional[str]:
+    """
+    Some databases need different URLs (destination vs. reading back).
+
+    CrateDB uses `cratedb://` for destination addressing,
+    but `crate://` for reading back, as the latter is the
+    designated scheme of the SQLAlchemy dialect.
+
+    In abundance to that, `cratedb://` uses the PostgreSQL protocol
+    (default port 5432), while `crate://` uses the HTTP protocol
+    (default port 4200).
+
+    C'est la vie. ¯\\_(ツ)_/¯
+    """
+    if not hasattr(image, "container") or not image.container:
+        raise RuntimeError(
+            "Testcontainer not available but needed to retrieve URL from"
+        )
+    url = image.container.get_connection_url()
+    if url.startswith("crate"):
+        port4200 = int(image.container.get_exposed_port(4200))
+        uri = URL(url).with_scheme("crate").with_port(port4200)
+        return str(uri)
+    return url
+
+
 @pytest.mark.parametrize(
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
@@ -602,7 +670,8 @@ def test_create_replace(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-    db_to_db_create_replace(source_uri, dest_uri)
+    dest_uri_read = get_uri_read(dest)
+    db_to_db_create_replace(source_uri, dest_uri, dest_uri_read)
     source.stop()
     dest.stop()
 
@@ -617,7 +686,8 @@ def test_append(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-    db_to_db_append(source_uri, dest_uri)
+    dest_uri_read = get_uri_read(dest)
+    db_to_db_append(source_uri, dest_uri, dest_uri_read)
     source.stop()
     dest.stop()
 
@@ -632,7 +702,13 @@ def test_merge_with_primary_key(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-    db_to_db_merge_with_primary_key(source_uri, dest_uri)
+    if dest_uri.startswith("cratedb://"):
+        pytest.skip(
+            "CrateDB currently fails when selecting the 'merge' strategy, "
+            "see https://github.com/crate/dlt-cratedb/issues/14"
+        )
+    dest_uri_read = get_uri_read(dest)
+    db_to_db_merge_with_primary_key(source_uri, dest_uri, dest_uri_read)
     source.stop()
     dest.stop()
 
@@ -647,7 +723,13 @@ def test_delete_insert_without_primary_key(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-    db_to_db_delete_insert_without_primary_key(source_uri, dest_uri)
+    if dest_uri.startswith("cratedb://"):
+        raise pytest.skip(
+            "CrateDB currently fails when selecting the 'delete+insert' strategy, "
+            "see https://github.com/crate/dlt-cratedb/issues/14"
+        )
+    dest_uri_read = get_uri_read(dest)
+    db_to_db_delete_insert_without_primary_key(source_uri, dest_uri, dest_uri_read)
     source.stop()
     dest.stop()
 
@@ -662,24 +744,39 @@ def test_delete_insert_with_time_range(source, dest):
         dest_future = executor.submit(dest.start)
         source_uri = source_future.result()
         dest_uri = dest_future.result()
-    db_to_db_delete_insert_with_timerange(source_uri, dest_uri)
+    if dest_uri.startswith("cratedb://"):
+        raise pytest.skip(
+            "CrateDB currently fails when selecting the 'delete+insert' strategy, "
+            "see https://github.com/crate/dlt-cratedb/issues/14"
+        )
+    dest_uri_read = get_uri_read(dest)
+    db_to_db_delete_insert_with_timerange(source_uri, dest_uri, dest_uri_read)
     source.stop()
     dest.stop()
 
 
-def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str):
+def db_to_db_create_replace(
+    source_connection_url: str,
+    dest_connection_url: str,
+    dest_connection_url_read: str,
+):
     schema_rand_prefix = f"testschema_create_replace_{get_random_string(5)}"
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
         pass
 
+    # CrateDB: Compensate for "Type `date` does not support storage".
+    updated_at_type = "DATE"
+    if dest_connection_url.startswith("cratedb://"):
+        updated_at_type = "TIMESTAMP"
+
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
         conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
         conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
         conn.execute(
-            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at {updated_at_type})"
         )
         conn.execute(
             f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01')"
@@ -701,29 +798,47 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
 
     assert result.exit_code == 0
 
-    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+    dest_engine = sqlalchemy.create_engine(dest_connection_url_read)
+    # CrateDB needs an explicit flush to make data available for reads immediately.
+    if dest_engine.dialect.name == "crate":
+        dest_engine.execute(f"REFRESH TABLE {schema_rand_prefix}.output")
     res = dest_engine.execute(
         f"select id, val, updated_at from {schema_rand_prefix}.output"
     ).fetchall()
 
     assert len(res) == 2
-    assert res[0] == (1, "val1", as_datetime("2022-01-01"))
-    assert res[1] == (2, "val2", as_datetime("2022-02-01"))
+
+    # Compensate for CrateDB types and insert order.
+    if dest_connection_url.startswith("cratedb://"):
+        assert (1, "val1", 1640995200000) in res
+        assert (2, "val2", 1643673600000) in res
+    else:
+        assert res[0] == (1, "val1", as_datetime("2022-01-01"))
+        assert res[1] == (2, "val2", as_datetime("2022-02-01"))
 
 
-def db_to_db_append(source_connection_url: str, dest_connection_url: str):
+def db_to_db_append(
+    source_connection_url: str,
+    dest_connection_url: str,
+    dest_connection_url_read: str,
+):
     schema_rand_prefix = f"testschema_append_{get_random_string(5)}"
     try:
         shutil.rmtree(get_abs_path("../pipeline_data"))
     except Exception:
         pass
 
+    # CrateDB: Compensate for "Type `date` does not support storage".
+    updated_at_type = "DATE"
+    if dest_connection_url.startswith("cratedb://"):
+        updated_at_type = "TIMESTAMP"
+
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
         conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
         conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
         conn.execute(
-            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at {updated_at_type})"
         )
         conn.execute(
             f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01'), (2, 'val2', '2022-01-02')"
@@ -745,9 +860,12 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
         )
         assert res.exit_code == 0
 
-    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+    dest_engine = sqlalchemy.create_engine(dest_connection_url_read)
 
     def get_output_table():
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {schema_rand_prefix}.output")
         return dest_engine.execute(
             f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
@@ -756,8 +874,15 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
 
     res = get_output_table()
     assert len(res) == 2
-    assert res[0] == (1, "val1", as_datetime("2022-01-01"))
-    assert res[1] == (2, "val2", as_datetime("2022-01-02"))
+
+    # Compensate for CrateDB types and insert order.
+    if dest_connection_url.startswith("cratedb://"):
+        assert (1, "val1", 1640995200000) in res
+        assert (2, "val2", 1641081600000) in res
+    else:
+        assert res[0] == (1, "val1", as_datetime("2022-01-01"))
+        assert res[1] == (2, "val2", as_datetime("2022-02-01"))
+
     dest_engine.dispose()
 
     # # run again, nothing should be inserted into the output table
@@ -765,12 +890,20 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
 
     res = get_output_table()
     assert len(res) == 2
-    assert res[0] == (1, "val1", as_datetime("2022-01-01"))
-    assert res[1] == (2, "val2", as_datetime("2022-01-02"))
+
+    # Compensate for CrateDB types and insert order.
+    if dest_connection_url.startswith("cratedb://"):
+        assert (1, "val1", 1640995200000) in res
+        assert (2, "val2", 1641081600000) in res
+    else:
+        assert res[0] == (1, "val1", as_datetime("2022-01-01"))
+        assert res[1] == (2, "val2", as_datetime("2022-02-01"))
 
 
 def db_to_db_merge_with_primary_key(
-    source_connection_url: str, dest_connection_url: str
+    source_connection_url: str,
+    dest_connection_url: str,
+    dest_connection_url_read: str,
 ):
     schema_rand_prefix = f"testschema_merge_{get_random_string(5)}"
     try:
@@ -778,12 +911,17 @@ def db_to_db_merge_with_primary_key(
     except Exception:
         pass
 
+    # CrateDB: Compensate for "Type `date` does not support storage".
+    updated_at_type = "DATE"
+    if dest_connection_url.startswith("cratedb://"):
+        updated_at_type = "TIMESTAMP"
+
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
         conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
         conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
         conn.execute(
-            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER NOT NULL, val VARCHAR(20), updated_at DATE NOT NULL)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER NOT NULL, val VARCHAR(20), updated_at {updated_at_type} NOT NULL)"
         )
         conn.execute(
             f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01')"
@@ -813,9 +951,12 @@ def db_to_db_merge_with_primary_key(
         assert res.exit_code == 0
         return res
 
-    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+    dest_engine = sqlalchemy.create_engine(dest_connection_url_read)
 
     def get_output_rows():
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {schema_rand_prefix}.output")
         return dest_engine.execute(
             f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
@@ -828,9 +969,17 @@ def db_to_db_merge_with_primary_key(
 
     dest_engine.dispose()
     res = run()
-    assert_output_equals(
-        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
-    )
+
+    # Compensate for CrateDB types and insert order.
+    if dest_connection_url.startswith("cratedb://"):
+        assert_output_equals([(1, "val1", 1640995200000), (2, "val2", 1643673600000)])
+    else:
+        assert_output_equals(
+            [
+                (1, "val1", as_datetime("2022-01-01")),
+                (2, "val2", as_datetime("2022-02-01")),
+            ]
+        )
 
     first_run_id = dest_engine.execute(
         f"select _dlt_load_id from {schema_rand_prefix}.output limit 1"
@@ -841,9 +990,15 @@ def db_to_db_merge_with_primary_key(
     ##############################
     # we'll run again, we don't expect any changes since the data hasn't changed
     res = run()
-    assert_output_equals(
-        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
-    )
+    if dest_connection_url.startswith("cratedb://"):
+        assert_output_equals([(1, "val1", 1640995200000), (2, "val2", 1643673600000)])
+    else:
+        assert_output_equals(
+            [
+                (1, "val1", as_datetime("2022-01-01")),
+                (2, "val2", as_datetime("2022-02-01")),
+            ]
+        )
 
     # we also ensure that the other rows were not touched
     count_by_run_id = dest_engine.execute(
@@ -862,9 +1017,15 @@ def db_to_db_merge_with_primary_key(
     )
 
     run()
-    assert_output_equals(
-        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
-    )
+    if dest_connection_url.startswith("cratedb://"):
+        assert_output_equals([(1, "val1", 1640995200000), (2, "val2", 1643673600000)])
+    else:
+        assert_output_equals(
+            [
+                (1, "val1", as_datetime("2022-01-01")),
+                (2, "val2", as_datetime("2022-02-01")),
+            ]
+        )
 
     # we also ensure that the other rows were not touched
     count_by_run_id = dest_engine.execute(
@@ -883,9 +1044,15 @@ def db_to_db_merge_with_primary_key(
     )
 
     run()
-    assert_output_equals(
-        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
-    )
+    if dest_connection_url.startswith("cratedb://"):
+        assert_output_equals([(1, "val1", 1640995200000), (2, "val2", 1643673600000)])
+    else:
+        assert_output_equals(
+            [
+                (1, "val1", as_datetime("2022-01-01")),
+                (2, "val2", as_datetime("2022-02-01")),
+            ]
+        )
 
     # we also ensure that the other rows were not touched
     count_by_run_id = dest_engine.execute(
@@ -904,13 +1071,22 @@ def db_to_db_merge_with_primary_key(
     )
 
     run()
-    assert_output_equals(
-        [
-            (1, "val1", as_datetime("2022-01-01")),
-            (2, "val2", as_datetime("2022-02-01")),
-            (3, "val3", as_datetime("2022-02-02")),
-        ]
-    )
+    if dest_connection_url.startswith("cratedb://"):
+        assert_output_equals(
+            [
+                (1, "val1", 1640995200000),
+                (2, "val2", 1643673600000),
+                (3, "val3", 1643673600000),
+            ]
+        )
+    else:
+        assert_output_equals(
+            [
+                (1, "val1", as_datetime("2022-01-01")),
+                (2, "val2", as_datetime("2022-02-01")),
+                (3, "val3", as_datetime("2022-02-02")),
+            ]
+        )
 
     # we have a new run that inserted rows to this table, so the run count should be 2
     count_by_run_id = dest_engine.execute(
@@ -931,13 +1107,22 @@ def db_to_db_merge_with_primary_key(
     )
 
     run()
-    assert_output_equals(
-        [
-            (1, "val1", as_datetime("2022-01-01")),
-            (2, "val2_modified", as_datetime("2022-02-03")),
-            (3, "val3", as_datetime("2022-02-02")),
-        ]
-    )
+    if dest_connection_url.startswith("cratedb://"):
+        assert_output_equals(
+            [
+                (1, "val1", 1640995200000),
+                (2, "val2_modified", 1643673600000),
+                (3, "val3", 1643673600000),
+            ]
+        )
+    else:
+        assert_output_equals(
+            [
+                (1, "val1", as_datetime("2022-01-01")),
+                (2, "val2_modified", as_datetime("2022-02-03")),
+                (3, "val3", as_datetime("2022-02-02")),
+            ]
+        )
 
     # we have a new run that inserted rows to this table, so the run count should be 2
     count_by_run_id = dest_engine.execute(
@@ -953,7 +1138,9 @@ def db_to_db_merge_with_primary_key(
 
 
 def db_to_db_delete_insert_without_primary_key(
-    source_connection_url: str, dest_connection_url: str
+    source_connection_url: str,
+    dest_connection_url: str,
+    dest_connection_url_read: str,
 ):
     schema_rand_prefix = f"testschema_delete_insert_{get_random_string(5)}"
     try:
@@ -961,12 +1148,17 @@ def db_to_db_delete_insert_without_primary_key(
     except Exception:
         pass
 
+    # CrateDB: Compensate for "Type `date` does not support storage".
+    updated_at_type = "DATE"
+    if dest_connection_url.startswith("cratedb://"):
+        updated_at_type = "TIMESTAMP"
+
     source_engine = sqlalchemy.create_engine(source_connection_url)
     with source_engine.begin() as conn:
         conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
         conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
         conn.execute(
-            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE)"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at {updated_at_type})"
         )
         conn.execute(
             f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01')"
@@ -995,9 +1187,12 @@ def db_to_db_delete_insert_without_primary_key(
         assert res.exit_code == 0
         return res
 
-    dest_engine = sqlalchemy.create_engine(dest_connection_url)
+    dest_engine = sqlalchemy.create_engine(dest_connection_url_read)
 
     def get_output_rows():
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {schema_rand_prefix}.output")
         return dest_engine.execute(
             f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
@@ -1009,9 +1204,15 @@ def db_to_db_delete_insert_without_primary_key(
             assert res[i] == row
 
     run()
-    assert_output_equals(
-        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
-    )
+    if dest_connection_url.startswith("cratedb://"):
+        assert_output_equals([(1, "val1", 1640995200000), (2, "val2", 1643673600000)])
+    else:
+        assert_output_equals(
+            [
+                (1, "val1", as_datetime("2022-01-01")),
+                (2, "val2", as_datetime("2022-02-01")),
+            ]
+        )
 
     first_run_id = dest_engine.execute(
         f"select _dlt_load_id from {schema_rand_prefix}.output limit 1"
@@ -1021,9 +1222,15 @@ def db_to_db_delete_insert_without_primary_key(
     ##############################
     # we'll run again, since this is a delete+insert, we expect the run ID to change for the last one
     res = run()
-    assert_output_equals(
-        [(1, "val1", as_datetime("2022-01-01")), (2, "val2", as_datetime("2022-02-01"))]
-    )
+    if dest_connection_url.startswith("cratedb://"):
+        assert_output_equals([(1, "val1", 1640995200000), (2, "val2", 1643673600000)])
+    else:
+        assert_output_equals(
+            [
+                (1, "val1", as_datetime("2022-01-01")),
+                (2, "val2", as_datetime("2022-02-01")),
+            ]
+        )
 
     # we ensure that one of the rows is updated with a new run
     count_by_run_id = dest_engine.execute(
@@ -1044,14 +1251,24 @@ def db_to_db_delete_insert_without_primary_key(
     )
 
     run()
-    assert_output_equals(
-        [
-            (1, "val1", as_datetime("2022-01-01")),
-            (2, "val2", as_datetime("2022-02-01")),
-            (3, "val3", as_datetime("2022-02-01")),
-            (4, "val4", as_datetime("2022-02-01")),
-        ]
-    )
+    if dest_connection_url.startswith("cratedb://"):
+        assert_output_equals(
+            [
+                (1, "val1", 1640995200000),
+                (2, "val2", 1643673600000),
+                (3, "val3", 1643673600000),
+                (4, "val4", 1643673600000),
+            ]
+        )
+    else:
+        assert_output_equals(
+            [
+                (1, "val1", as_datetime("2022-01-01")),
+                (2, "val2", as_datetime("2022-02-01")),
+                (3, "val3", as_datetime("2022-02-01")),
+                (4, "val4", as_datetime("2022-02-01")),
+            ]
+        )
 
     # the new rows should have a new run ID, there should be 2 distinct runs now
     count_by_run_id = dest_engine.execute(
@@ -1067,7 +1284,9 @@ def db_to_db_delete_insert_without_primary_key(
 
 
 def db_to_db_delete_insert_with_timerange(
-    source_connection_url: str, dest_connection_url: str
+    source_connection_url: str,
+    dest_connection_url: str,
+    dest_connection_url_read: str,
 ):
     schema_rand_prefix = f"testschema_delete_insert_timerange_{get_random_string(5)}"
     source_engine = sqlalchemy.create_engine(source_connection_url)
@@ -1115,9 +1334,12 @@ def db_to_db_delete_insert_with_timerange(
         assert res.exit_code == 0
         return res
 
-    dest_engine = sqlalchemy.create_engine(dest_connection_url, poolclass=NullPool)
+    dest_engine = sqlalchemy.create_engine(dest_connection_url_read, poolclass=NullPool)
 
     def get_output_rows():
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {schema_rand_prefix}.output")
         if "clickhouse" not in dest_connection_url:
             dest_engine.execute("CHECKPOINT")
         rows = dest_engine.execute(
@@ -1132,14 +1354,24 @@ def db_to_db_delete_insert_with_timerange(
             assert res[i] == row
 
     run("2022-01-01", "2022-01-02")  # dlt runs them with the end date exclusive
-    assert_output_equals(
-        [
-            (1, "val1", as_datetime("2022-01-01")),
-            (2, "val2", as_datetime("2022-01-01")),
-            (3, "val3", as_datetime("2022-01-02")),
-            (4, "val4", as_datetime("2022-01-02")),
-        ]
-    )
+    if dest_connection_url.startswith("cratedb://"):
+        assert_output_equals(
+            [
+                (1, "val1", 1640995200000),
+                (2, "val2", 1640995200000),
+                (3, "val3", 1643673600000),
+                (4, "val4", 1643673600000),
+            ]
+        )
+    else:
+        assert_output_equals(
+            [
+                (1, "val1", as_datetime("2022-01-01")),
+                (2, "val2", as_datetime("2022-01-01")),
+                (3, "val3", as_datetime("2022-01-02")),
+                (4, "val4", as_datetime("2022-01-02")),
+            ]
+        )
 
     first_run_id = dest_engine.execute(
         f"select _dlt_load_id from {schema_rand_prefix}.output limit 1"
@@ -1267,6 +1499,8 @@ def test_kafka_to_db(dest):
         dest_uri = dest_future.result()
         kafka = source_future.result()
 
+    dest_uri_read = get_uri_read(dest)
+
     # kafka = KafkaContainer("confluentinc/cp-kafka:7.6.0").start(timeout=60)
 
     # Create Kafka producer
@@ -1290,10 +1524,13 @@ def test_kafka_to_db(dest):
         assert res.exit_code == 0
 
     def get_output_table():
-        dest_engine = sqlalchemy.create_engine(dest_uri)
+        dest_engine = sqlalchemy.create_engine(dest_uri_read)
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute("REFRESH TABLE testschema.output")
         with dest_engine.connect() as conn:
             res = conn.execute(
-                "select _kafka__data from testschema.output order by _kafka_msg_id asc"
+                "select _kafka__data from testschema.output order by _kafka__msg_id asc"
             ).fetchall()
         dest_engine.dispose()
         return res
@@ -1302,18 +1539,30 @@ def test_kafka_to_db(dest):
 
     res = get_output_table()
     assert len(res) == 3
-    assert res[0] == ("message1",)
-    assert res[1] == ("message2",)
-    assert res[2] == ("message3",)
+    if dest_uri.startswith("cratedb://"):
+        messages_db = [res[0][0], res[1][0], res[2][0]]
+        assert "message1" in messages_db
+        assert "message2" in messages_db
+        assert "message3" in messages_db
+    else:
+        assert res[0] == ("message1",)
+        assert res[1] == ("message2",)
+        assert res[2] == ("message3",)
 
     # run again, nothing should be inserted into the output table
     run()
 
     res = get_output_table()
     assert len(res) == 3
-    assert res[0] == ("message1",)
-    assert res[1] == ("message2",)
-    assert res[2] == ("message3",)
+    if dest_uri.startswith("cratedb://"):
+        messages_db = [res[0][0], res[1][0], res[2][0]]
+        assert "message1" in messages_db
+        assert "message2" in messages_db
+        assert "message3" in messages_db
+    else:
+        assert res[0] == ("message1",)
+        assert res[1] == ("message2",)
+        assert res[2] == ("message3",)
 
     # add a new message
     producer.produce(topic, "message4".encode("utf-8"))
@@ -1323,10 +1572,17 @@ def test_kafka_to_db(dest):
     run()
     res = get_output_table()
     assert len(res) == 4
-    assert res[0] == ("message1",)
-    assert res[1] == ("message2",)
-    assert res[2] == ("message3",)
-    assert res[3] == ("message4",)
+    if dest_uri.startswith("cratedb://"):
+        messages_db = [res[0][0], res[1][0], res[2][0], res[3][0]]
+        assert "message1" in messages_db
+        assert "message2" in messages_db
+        assert "message3" in messages_db
+        assert "message4" in messages_db
+    else:
+        assert res[0] == ("message1",)
+        assert res[1] == ("message2",)
+        assert res[2] == ("message3",)
+        assert res[3] == ("message4",)
 
     kafka.stop()
 
@@ -1363,6 +1619,12 @@ def test_arrow_mmap_to_db_create_replace(dest):
             return res
 
     dest_uri = dest.start()
+    if dest_uri.startswith("cratedb://"):
+        pytest.skip(
+            "CrateDB is not supported for this test, "
+            "see https://github.com/crate-workbench/ingestr/issues/4"
+        )
+    dest_uri_read = get_uri_read(dest)
 
     # let's start with a basic dataframe
     row_count = 1000
@@ -1379,7 +1641,7 @@ def test_arrow_mmap_to_db_create_replace(dest):
     table = pa.Table.from_pandas(df)
     run_command(table)
 
-    dest_engine = sqlalchemy.create_engine(dest_uri)
+    dest_engine = sqlalchemy.create_engine(dest_uri_read)
     with dest_engine.begin() as conn:
         res = conn.execute(f"select count(*) from {schema}.output").fetchall()
         assert res[0][0] == row_count
@@ -1443,6 +1705,11 @@ def test_arrow_mmap_to_db_delete_insert(dest):
     dest_uri = dest.start()
     if "clickhouse" in dest_uri:
         pytest.skip("clickhouse is not supported for this test")
+    if dest_uri.startswith("cratedb://"):
+        pytest.skip(
+            "CrateDB is not supported for this test, "
+            "see https://github.com/crate-workbench/ingestr/issues/4"
+        )
 
     dest_engine = sqlalchemy.create_engine(dest_uri)
 
@@ -1568,7 +1835,14 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
             return res
 
     dest_uri = dest.start()
-    dest_engine = sqlalchemy.create_engine(dest_uri)
+    if dest_uri.startswith("cratedb://"):
+        pytest.skip(
+            "CrateDB is not supported for this test, "
+            "see https://github.com/crate-workbench/ingestr/issues/4"
+        )
+
+    dest_uri_read = get_uri_read(dest)
+    dest_engine = sqlalchemy.create_engine(dest_uri_read)
 
     # let's start with a basic dataframe
     row_count = 1000
@@ -1658,12 +1932,17 @@ def test_db_to_db_exclude_columns(source, dest):
 
     schema_rand_prefix = f"testschema_db_to_db_exclude_columns_{get_random_string(5)}"
 
+    # CrateDB: Compensate for "Type `date` does not support storage".
+    updated_at_type = "DATE"
+    if dest_uri.startswith("cratedb://"):
+        updated_at_type = "TIMESTAMP"
+
     source_engine = sqlalchemy.create_engine(source_uri)
     with source_engine.begin() as conn:
         conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
         conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
         conn.execute(
-            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at DATE, col_to_exclude1 VARCHAR(20), col_to_exclude2 VARCHAR(20))"
+            f"CREATE TABLE {schema_rand_prefix}.input (id INTEGER, val VARCHAR(20), updated_at {updated_at_type}, col_to_exclude1 VARCHAR(20), col_to_exclude2 VARCHAR(20))"
         )
         conn.execute(
             f"INSERT INTO {schema_rand_prefix}.input VALUES (1, 'val1', '2022-01-01', 'col1', 'col2')"
@@ -1685,14 +1964,22 @@ def test_db_to_db_exclude_columns(source, dest):
 
     assert result.exit_code == 0
 
-    dest_engine = sqlalchemy.create_engine(dest_uri)
+    dest_uri_read = get_uri_read(dest)
+    dest_engine = sqlalchemy.create_engine(dest_uri_read)
+    # CrateDB needs an explicit flush to make data available for reads immediately.
+    if dest_engine.dialect.name == "crate":
+        dest_engine.execute(f"REFRESH TABLE {schema_rand_prefix}.output")
     res = dest_engine.execute(
         f"select id, val, updated_at from {schema_rand_prefix}.output"
     ).fetchall()
 
     assert len(res) == 2
-    assert res[0] == (1, "val1", as_datetime("2022-01-01"))
-    assert res[1] == (2, "val2", as_datetime("2022-02-01"))
+    if dest_uri.startswith("cratedb://"):
+        assert (1, "val1", 1640995200000) in res
+        assert (2, "val2", 1643673600000) in res
+    else:
+        assert res[0] == (1, "val1", as_datetime("2022-01-01"))
+        assert res[1] == (2, "val2", as_datetime("2022-02-01"))
 
     # Verify excluded columns don't exist in destination schema
     columns = dest_engine.execute(
@@ -1946,7 +2233,7 @@ def dynamodb_tests() -> Iterable[Callable]:
             traceback.print_exception(*result.exc_info)
             raise AssertionError(result.exception)
 
-    def smoke_test(dest_uri, dynamodb):
+    def smoke_test(dest_uri, dest_uri_read, dynamodb):
         dest_table = f"public.dynamodb_{get_random_string(5)}"
 
         result = invoke_ingest_command(
@@ -1954,15 +2241,30 @@ def dynamodb_tests() -> Iterable[Callable]:
         )
         assert_success(result)
 
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        dest_engine = sqlalchemy.create_engine(dest_uri_read, poolclass=NullPool)
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {dest_table}")
+
         result = get_query_result(
-            dest_uri, f"select id, updated_at from {dest_table} ORDER BY id"
+            dest_uri_read, f"select id, updated_at from {dest_table} ORDER BY id"
         )
         assert len(result) == 3
         for i in range(len(result)):
             assert result[i][0] == dynamodb.data[i]["id"]
-            assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+            refval = pendulum.parse(dynamodb.data[i]["updated_at"])
+            if dest_uri.startswith("cratedb://"):
+                assert result[i][1] == refval.int_timestamp * 1000
+            else:
+                assert result[i][1] == refval
 
-    def append_test(dest_uri, dynamodb):
+    def append_test(dest_uri, dest_uri_read, dynamodb):
+        if dest_uri.startswith("cratedb://"):
+            pytest.skip(
+                "CrateDB currently fails when selecting the 'append' strategy, "
+                "see https://github.com/crate-workbench/ingestr/issues/6"
+            )
+
         dest_table = f"public.dynamodb_{get_random_string(5)}"
 
         # we run it twice to assert that the data in destination doesn't change
@@ -1977,16 +2279,31 @@ def dynamodb_tests() -> Iterable[Callable]:
             )
 
             assert_success(result)
+
+            # CrateDB needs an explicit flush to make data available for reads immediately.
+            dest_engine = sqlalchemy.create_engine(dest_uri_read, poolclass=NullPool)
+            if dest_engine.dialect.name == "crate":
+                dest_engine.execute(f"REFRESH TABLE {dest_table}")
+
             result = get_query_result(
-                dest_uri, f"select id, updated_at from {dest_table} ORDER BY id"
+                dest_uri_read, f"select id, updated_at from {dest_table} ORDER BY id"
             )
             assert len(result) == 3
             for i in range(len(result)):
                 assert result[i][0] == dynamodb.data[i]["id"]
-                assert result[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+                refval = pendulum.parse(dynamodb.data[i]["updated_at"])
+                if dest_uri.startswith("cratedb://"):
+                    assert result[i][1] == refval.int_timestamp * 1000
+                else:
+                    assert result[i][1] == refval
 
     def incremental_test_factory(strategy):
-        def incremental_test(dest_uri, dynamodb):
+        def incremental_test(dest_uri, dest_uri_read, dynamodb):
+            if dest_uri.startswith("cratedb://") and strategy != "replace":
+                pytest.skip(
+                    "CrateDB currently fails when selecting the 'merge' strategy, "
+                    "see https://github.com/crate/dlt-cratedb/issues/14"
+                )
             dest_table = f"public.dynamodb_{get_random_string(5)}"
 
             result = invoke_ingest_command(
@@ -2000,13 +2317,23 @@ def dynamodb_tests() -> Iterable[Callable]:
                 interval_end="2024-02-01T00:01:00",  # upto the second entry
             )
             assert_success(result)
+
+            # CrateDB needs an explicit flush to make data available for reads immediately.
+            dest_engine = sqlalchemy.create_engine(dest_uri_read, poolclass=NullPool)
+            if dest_engine.dialect.name == "crate":
+                dest_engine.execute(f"REFRESH TABLE {dest_table}")
+
             rows = get_query_result(
-                dest_uri, f"select id, updated_at from {dest_table} ORDER BY id"
+                dest_uri_read, f"select id, updated_at from {dest_table} ORDER BY id"
             )
             assert len(rows) == 2
             for i in range(len(rows)):
                 assert rows[i][0] == dynamodb.data[i]["id"]
-                assert rows[i][1] == pendulum.parse(dynamodb.data[i]["updated_at"])
+                refval = pendulum.parse(dynamodb.data[i]["updated_at"])
+                if dest_uri.startswith("cratedb://"):
+                    assert rows[i][1] == refval.int_timestamp * 1000
+                else:
+                    assert rows[i][1] == refval
 
             # ingest the rest
             # run it twice to test idempotency
@@ -2022,8 +2349,16 @@ def dynamodb_tests() -> Iterable[Callable]:
                 )
                 assert_success(result)
 
+                # CrateDB needs an explicit flush to make data available for reads immediately.
+                dest_engine = sqlalchemy.create_engine(
+                    dest_uri_read, poolclass=NullPool
+                )
+                if dest_engine.dialect.name == "crate":
+                    dest_engine.execute(f"REFRESH TABLE {dest_table}")
+
                 rows = get_query_result(
-                    dest_uri, f"select id, updated_at from {dest_table} ORDER BY id"
+                    dest_uri_read,
+                    f"select id, updated_at from {dest_table} ORDER BY id",
                 )
                 rows_expected = 3
                 if strategy == "replace":
@@ -2034,7 +2369,12 @@ def dynamodb_tests() -> Iterable[Callable]:
                 for row in rows:
                     id = int(row[0]) - 1
                     assert row[0] == dynamodb.data[id]["id"]
-                    assert row[1] == pendulum.parse(dynamodb.data[id]["updated_at"])
+
+                    refval = pendulum.parse(dynamodb.data[id]["updated_at"])
+                    if dest_uri.startswith("cratedb://"):
+                        assert row[1] == refval.int_timestamp * 1000
+                    else:
+                        assert row[1] == refval
 
         # for easier debugging
         incremental_test.__name__ += f"_{strategy}"
@@ -2059,7 +2399,8 @@ def dynamodb_tests() -> Iterable[Callable]:
 )
 @pytest.mark.parametrize("testcase", dynamodb_tests())
 def test_dynamodb(dest, dynamodb, testcase):
-    testcase(dest.start(), dynamodb)
+    dest_uri_read = get_uri_read(dest)
+    testcase(dest.start(), dest_uri_read, dynamodb)
     dest.stop()
 
 
@@ -2072,7 +2413,16 @@ def get_query_result(uri: str, query: str):
 
 
 def custom_query_tests():
-    def replace(source_connection_url, dest_connection_url):
+    def replace(
+        source_connection_url,
+        dest_connection_url,
+        dest_connection_url_read: str,
+    ):
+        # CrateDB: Compensate for "Type `date` does not support storage".
+        updated_at_type = "DATE"
+        if dest_connection_url.startswith("cratedb://"):
+            updated_at_type = "TIMESTAMP"
+
         schema = f"testschema_cr_cust_{get_random_string(5)}"
         with sqlalchemy.create_engine(
             source_connection_url, poolclass=NullPool
@@ -2080,7 +2430,7 @@ def custom_query_tests():
             conn.execute(f"DROP SCHEMA IF EXISTS {schema}")
             conn.execute(f"CREATE SCHEMA {schema}")
             conn.execute(
-                f"CREATE TABLE {schema}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at DATE)"
+                f"CREATE TABLE {schema}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at {updated_at_type})"
             )
             conn.execute(
                 f"CREATE TABLE {schema}.order_items (id INTEGER, order_id INTEGER NOT NULL, subname VARCHAR(255) NOT NULL)"
@@ -2111,18 +2461,50 @@ def custom_query_tests():
 
         assert result.exit_code == 0
 
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        dest_engine = sqlalchemy.create_engine(
+            dest_connection_url_read, poolclass=NullPool
+        )
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {schema}.output")
+
         res = get_query_result(
-            dest_connection_url,
+            dest_connection_url_read or dest_connection_url,
             f"select id, order_id, subname, updated_at from {schema}.output order by id asc",
         )
 
         assert len(res) == 4
-        assert res[0] == (1, 1, "Item 1 for First Order", as_datetime("2024-01-01"))
-        assert res[1] == (2, 1, "Item 2 for First Order", as_datetime("2024-01-01"))
-        assert res[2] == (3, 2, "Item 1 for Second Order", as_datetime("2024-01-01"))
-        assert res[3] == (4, 3, "Item 1 for Third Order", as_datetime("2024-01-01"))
+        if dest_connection_url.startswith("cratedb://"):
+            assert (1, 1, "Item 1 for First Order", 1704067200000) in res
+            assert (2, 1, "Item 2 for First Order", 1704067200000) in res
+            assert (3, 2, "Item 1 for Second Order", 1704067200000) in res
+            assert (4, 3, "Item 1 for Third Order", 1704067200000) in res
+        else:
+            assert res[0] == (1, 1, "Item 1 for First Order", as_datetime("2024-01-01"))
+            assert res[1] == (2, 1, "Item 2 for First Order", as_datetime("2024-01-01"))
+            assert res[2] == (
+                3,
+                2,
+                "Item 1 for Second Order",
+                as_datetime("2024-01-01"),
+            )
+            assert res[3] == (4, 3, "Item 1 for Third Order", as_datetime("2024-01-01"))
 
-    def merge(source_connection_url, dest_connection_url):
+    def merge(
+        source_connection_url,
+        dest_connection_url,
+        dest_connection_url_read: str,
+    ):
+        if dest_connection_url.startswith("cratedb://"):
+            pytest.skip(
+                "CrateDB currently fails when selecting the 'merge' strategy, "
+                "see https://github.com/crate/dlt-cratedb/issues/14"
+            )
+
+        # CrateDB: Compensate for "Type `date` does not support storage".
+        updated_at_type = "DATE"
+        if dest_connection_url.startswith("cratedb://"):
+            updated_at_type = "TIMESTAMP"
         schema = f"testschema_merge_cust_{get_random_string(5)}"
         source_engine = sqlalchemy.create_engine(
             source_connection_url, poolclass=NullPool
@@ -2131,7 +2513,7 @@ def custom_query_tests():
             conn.execute(f"DROP SCHEMA IF EXISTS {schema}")
             conn.execute(f"CREATE SCHEMA {schema}")
             conn.execute(
-                f"CREATE TABLE {schema}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at DATE)"
+                f"CREATE TABLE {schema}.orders (id INTEGER, name VARCHAR(255) NOT NULL, updated_at {updated_at_type})"
             )
             conn.execute(
                 f"CREATE TABLE {schema}.order_items (id INTEGER, order_id INTEGER NOT NULL, subname VARCHAR(255) NOT NULL)"
@@ -2163,6 +2545,13 @@ def custom_query_tests():
 
         # Initial run to get all data
         run()
+
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        dest_engine = sqlalchemy.create_engine(
+            dest_connection_url_read, poolclass=NullPool
+        )
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {schema}.output")
 
         res = get_query_result(
             dest_connection_url,
@@ -2203,6 +2592,8 @@ def custom_query_tests():
 
         # Run again - should get same load_id since no changes
         run()
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {schema}.output")
         res = get_query_result(
             dest_connection_url,
             f"select id, order_id, subname, updated_at, _dlt_load_id from {schema}.output order by id asc",
@@ -2221,6 +2612,8 @@ def custom_query_tests():
 
         # Run again - should see updated data with new load_id
         run()
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {schema}.output")
         res = get_query_result(
             dest_connection_url,
             f"select id, order_id, subname, updated_at, _dlt_load_id from {schema}.output order by id asc",
@@ -2268,7 +2661,8 @@ def custom_query_tests():
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 @pytest.mark.parametrize("testcase", custom_query_tests())
 def test_custom_query(testcase, source, dest):
-    testcase(source.start(), dest.start())
+    dest_uri_read = get_uri_read(dest)
+    testcase(source.start(), dest.start(), dest_uri_read)
 
 
 # Integration testing when the access token is not provided, and it is only for the resource "repo_events
@@ -2277,6 +2671,7 @@ def test_custom_query(testcase, source, dest):
 )
 def test_github_to_duckdb(dest):
     dest_uri = dest.start()
+    dest_uri_read = get_uri_read(dest)
     source_uri = "github://?owner=bruin-data&repo=ingestr"
     source_table = "repo_events"
 
@@ -2284,7 +2679,11 @@ def test_github_to_duckdb(dest):
     res = invoke_ingest_command(source_uri, source_table, dest_uri, dest_table)
 
     assert res.exit_code == 0
-    dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+
+    dest_engine = sqlalchemy.create_engine(dest_uri_read, poolclass=NullPool)
+    # CrateDB needs an explicit flush to make data available for reads immediately.
+    if dest_engine.dialect.name == "crate":
+        dest_engine.execute(f"REFRESH TABLE {dest_table}")
     res = dest_engine.execute(f"select count(*) from {dest_table}").fetchall()
     assert len(res) > 0
 
@@ -2317,7 +2716,7 @@ def appstore_test_cases() -> Iterable[Callable]:
         res.raw = buffer
         return res
 
-    def test_no_report_instances_found(dest_uri):
+    def test_no_report_instances_found(dest_uri, dest_uri_read):
         """
         When there are no report instances for the given date range,
         NoReportsError should be raised.
@@ -2384,7 +2783,7 @@ def appstore_test_cases() -> Iterable[Callable]:
             )
             assert has_exception(result.exception, NoReportsFoundError)
 
-    def test_no_ongoing_reports_found(dest_uri):
+    def test_no_ongoing_reports_found(dest_uri, dest_uri_read):
         """
         when there are no ongoing reports, or ongoing reports that have
         been stopped due to inactivity, NoOngoingReportRequestsFoundError should be raised.
@@ -2427,7 +2826,7 @@ def appstore_test_cases() -> Iterable[Callable]:
             )
             assert has_exception(result.exception, NoOngoingReportRequestsFoundError)
 
-    def test_no_such_report(dest_uri):
+    def test_no_such_report(dest_uri, dest_uri_read):
         """
         when there is no report with the given name, NoSuchReportError should be raised.
         """
@@ -2470,10 +2869,16 @@ def appstore_test_cases() -> Iterable[Callable]:
             )
             assert has_exception(result.exception, NoSuchReportError)
 
-    def test_successful_ingestion(dest_uri):
+    def test_successful_ingestion(dest_uri, dest_uri_read):
         """
         When there are report instances for the given date range, the data should be ingested
         """
+
+        pytest.skip(
+            "CrateDB is not supported for this test, "
+            "see https://github.com/crate-workbench/ingestr/issues/4"
+        )
+
         client = MagicMock()
         client.list_analytics_report_requests = MagicMock(
             return_value=AnalyticsReportRequestsResponse(
@@ -2559,15 +2964,23 @@ def appstore_test_cases() -> Iterable[Callable]:
 
         assert result.exit_code == 0
 
-        dest_engine = sqlalchemy.create_engine(dest_uri)
+        dest_engine = sqlalchemy.create_engine(dest_uri_read)
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {dest_table}")
         count = dest_engine.execute(f"select count(*) from {dest_table}").fetchone()[0]
         assert count == 3
 
-    def test_incremental_ingestion(dest_uri):
+    def test_incremental_ingestion(dest_uri, dest_uri_read):
         """
         when the pipeline is run till a specific end date, the next ingestion
         should load data from the last processing date, given that last_date is not provided
         """
+
+        pytest.skip(
+            "CrateDB is not supported for this test, "
+            "see https://github.com/crate-workbench/ingestr/issues/4"
+        )
 
         client = MagicMock()
         client.list_analytics_report_requests = MagicMock(
@@ -2660,7 +3073,10 @@ def appstore_test_cases() -> Iterable[Callable]:
 
         assert result.exit_code == 0
 
-        dest_engine = sqlalchemy.create_engine(dest_uri)
+        dest_engine = sqlalchemy.create_engine(dest_uri_read)
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {dest_table}")
         count = dest_engine.execute(f"select count(*) from {dest_table}").fetchone()[0]
         dest_engine.dispose()
         assert count == 3
@@ -2686,7 +3102,10 @@ def appstore_test_cases() -> Iterable[Callable]:
 
         assert result.exit_code == 0
 
-        dest_engine = sqlalchemy.create_engine(dest_uri)
+        dest_engine = sqlalchemy.create_engine(dest_uri_read)
+        # CrateDB needs an explicit flush to make data available for reads immediately.
+        if dest_engine.dialect.name == "crate":
+            dest_engine.execute(f"REFRESH TABLE {dest_table}")
         count = dest_engine.execute(f"select count(*) from {dest_table}").fetchone()[0]
         assert count == 6
         assert (
@@ -2712,7 +3131,8 @@ def appstore_test_cases() -> Iterable[Callable]:
 )
 @pytest.mark.parametrize("test_case", appstore_test_cases())
 def test_appstore(dest, test_case):
-    test_case(dest.start())
+    dest_uri_read = get_uri_read(dest)
+    test_case(dest.start(), dest_uri_read)
     dest.stop()
 
 
@@ -2783,11 +3203,14 @@ def fs_test_cases(
     def assert_rows(dest_uri, dest_table, n):
         engine = sqlalchemy.create_engine(dest_uri)
         with engine.connect() as conn:
+            # CrateDB needs an explicit flush to make data available for reads immediately.
+            if engine.dialect.name == "crate":
+                conn.execute(f"REFRESH TABLE {dest_table}")
             rows = conn.execute(f"select count(*) from {dest_table}").fetchall()
             assert len(rows) == 1
             assert rows[0] == (n,)
 
-    def test_empty_source_uri(dest_uri):
+    def test_empty_source_uri(dest_uri, dest_uri_read):
         """
         When the source URI is empty, an error should be raised.
         """
@@ -2801,7 +3224,7 @@ def fs_test_cases(
         )
         assert has_exception(result.exception, InvalidBlobTableError)
 
-    def test_unsupported_file_format(dest_uri):
+    def test_unsupported_file_format(dest_uri, dest_uri_read):
         """
         When the source file is not one of [csv, parquet, jsonl] it should
         raise an exception
@@ -2822,7 +3245,7 @@ def fs_test_cases(
             assert result.exit_code != 0
             assert has_exception(result.exception, ValueError)
 
-    def test_missing_credentials(dest_uri):
+    def test_missing_credentials(dest_uri, dest_uri_read):
         """
         When the credentials are missing, an error should be raised.
         """
@@ -2837,7 +3260,7 @@ def fs_test_cases(
         )
         assert result.exit_code != 0
 
-    def test_csv_load(dest_uri):
+    def test_csv_load(dest_uri, dest_uri_read):
         """
         When the source URI is a CSV file, the data should be ingested.
         """
@@ -2855,9 +3278,9 @@ def fs_test_cases(
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_rows(dest_uri, dest_table, 5)
+            assert_rows(dest_uri_read, dest_table, 5)
 
-    def test_csv_gz_load(dest_uri):
+    def test_csv_gz_load(dest_uri, dest_uri_read):
         """When the source URI is a gzipped CSV file, the data should be ingested."""
         with (
             patch(target_fs) as target_fs_mock,
@@ -2873,9 +3296,9 @@ def fs_test_cases(
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_rows(dest_uri, dest_table, 5)
+            assert_rows(dest_uri_read, dest_table, 5)
 
-    def test_parquet_load(dest_uri):
+    def test_parquet_load(dest_uri, dest_uri_read):
         """
         When the source URI is a Parquet file, the data should be ingested.
         """
@@ -2893,9 +3316,9 @@ def fs_test_cases(
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_rows(dest_uri, dest_table, 5)
+            assert_rows(dest_uri_read, dest_table, 5)
 
-    def test_parquet_gz_load(dest_uri):
+    def test_parquet_gz_load(dest_uri, dest_uri_read):
         """When the source URI is a gzipped Parquet file, the data should be ingested."""
         with (
             patch(target_fs) as target_fs_mock,
@@ -2911,9 +3334,9 @@ def fs_test_cases(
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_rows(dest_uri, dest_table, 5)
+            assert_rows(dest_uri_read, dest_table, 5)
 
-    def test_jsonl_load(dest_uri):
+    def test_jsonl_load(dest_uri, dest_uri_read):
         """
         When the source URI is a JSONL file, the data should be ingested.
         """
@@ -2931,9 +3354,9 @@ def fs_test_cases(
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_rows(dest_uri, dest_table, 5)
+            assert_rows(dest_uri_read, dest_table, 5)
 
-    def test_jsonl_gz_load(dest_uri):
+    def test_jsonl_gz_load(dest_uri, dest_uri_read):
         """When the source URI is a gzipped JSONL file, the data should be ingested."""
         with (
             patch(target_fs) as target_fs_mock,
@@ -2949,9 +3372,9 @@ def fs_test_cases(
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_rows(dest_uri, dest_table, 5)
+            assert_rows(dest_uri_read, dest_table, 5)
 
-    def test_glob_load(dest_uri):
+    def test_glob_load(dest_uri, dest_uri_read):
         """
         When the source URI is a glob pattern, all files matching the pattern should be ingested
         """
@@ -2969,9 +3392,9 @@ def fs_test_cases(
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_rows(dest_uri, dest_table, 6)
+            assert_rows(dest_uri_read, dest_table, 6)
 
-    def test_compound_table_name(dest_uri):
+    def test_compound_table_name(dest_uri, dest_uri_read):
         """
         When table contains both the bucket name and the file glob,
         loads should be successful.
@@ -2990,9 +3413,9 @@ def fs_test_cases(
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_rows(dest_uri, dest_table, 6)
+            assert_rows(dest_uri_read, dest_table, 6)
 
-    def test_uri_precedence(dest_uri):
+    def test_uri_precedence(dest_uri, dest_uri_read):
         """
         When file glob is present in both URI and Source Table,
         the URI glob should be used
@@ -3012,7 +3435,7 @@ def fs_test_cases(
                 dest_table,
             )
             assert result.exit_code == 0
-            assert_rows(dest_uri, dest_table, 6)
+            assert_rows(dest_uri_read, dest_table, 6)
 
     return [
         test_empty_source_uri,
@@ -3042,7 +3465,8 @@ def fs_test_cases(
     ),
 )
 def test_gcs(dest, test_case):
-    test_case(dest.start())
+    dest_uri_read = get_uri_read(dest)
+    test_case(dest.start(), dest_uri_read)
     dest.stop()
 
 
@@ -3058,7 +3482,8 @@ def test_gcs(dest, test_case):
     ),
 )
 def test_s3(dest, test_case):
-    test_case(dest.start())
+    dest_uri_read = get_uri_read(dest)
+    test_case(dest.start(), dest_uri_read)
     dest.stop()
 
 
@@ -3097,7 +3522,7 @@ def test_applovin_source(testcase):
 
 
 def frankfurter_test_cases() -> Iterable[Callable]:
-    def invalid_source_table(dest_uri):
+    def invalid_source_table(dest_uri, dest_uri_read):
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
         result = invoke_ingest_command(
@@ -3109,7 +3534,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         assert result.exit_code != 0
         assert has_exception(result.exception, UnsupportedResourceError)
 
-    def interval_start_does_not_exceed_interval_end(dest_uri):
+    def interval_start_does_not_exceed_interval_end(dest_uri, dest_uri_read):
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
         result = invoke_ingest_command(
@@ -3124,7 +3549,12 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         assert has_exception(result.exception, ValueError)
         assert "Interval-end cannot be before interval-start." in str(result.exception)
 
-    def interval_start_can_equal_interval_end(dest_uri):
+    def interval_start_can_equal_interval_end(dest_uri, dest_uri_read):
+        if dest_uri.startswith("cratedb://"):
+            pytest.skip(
+                "CrateDB currently fails when selecting the 'merge' strategy, "
+                "see https://github.com/crate/dlt-cratedb/issues/14"
+            )
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
         result = invoke_ingest_command(
@@ -3137,7 +3567,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         )
         assert result.exit_code == 0
 
-    def interval_start_does_not_exceed_current_date(dest_uri):
+    def interval_start_does_not_exceed_current_date(dest_uri, dest_uri_read):
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
         start_date = pendulum.now().add(days=1).format("YYYY-MM-DD")
@@ -3152,7 +3582,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         assert has_exception(result.exception, ValueError)
         assert "Interval-start cannot be in the future." in str(result.exception)
 
-    def interval_end_does_not_exceed_current_date(dest_uri):
+    def interval_end_does_not_exceed_current_date(dest_uri, dest_uri_read):
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
         start_date = pendulum.now().subtract(days=1).format("YYYY-MM-DD")
@@ -3169,7 +3599,12 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         assert has_exception(result.exception, ValueError)
         assert "Interval-end cannot be in the future." in str(result.exception)
 
-    def exchange_rate_on_specific_date(dest_uri):
+    def exchange_rate_on_specific_date(dest_uri, dest_uri_read):
+        if dest_uri.startswith("cratedb://"):
+            pytest.skip(
+                "CrateDB currently fails when selecting the 'merge' strategy, "
+                "see https://github.com/crate/dlt-cratedb/issues/14"
+            )
         schema = f"testschema_frankfurter_{get_random_string(5)}"
         dest_table = f"{schema}.frankfurter_{get_random_string(5)}"
         start_date = "2025-01-03"
@@ -3184,10 +3619,12 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         )
         assert result.exit_code == 0, f"Ingestion failed: {result.output}"
 
-        dest_engine = sqlalchemy.create_engine(dest_uri)
+        dest_engine = sqlalchemy.create_engine(dest_uri_read)
 
         query = f"SELECT rate FROM {dest_table} WHERE currency_code = 'GBP'"
         with dest_engine.connect() as conn:
+            if dest_engine.dialect.name == "crate":
+                conn.execute(f"REFRESH TABLE {dest_table}")
             rows = conn.execute(query).fetchall()
 
         # Assert that the rate for GBP is 0.82993
@@ -3211,7 +3648,8 @@ def frankfurter_test_cases() -> Iterable[Callable]:
 )
 @pytest.mark.parametrize("test_case", frankfurter_test_cases())
 def test_frankfurter(dest, test_case):
-    test_case(dest.start())
+    dest_uri_read = get_uri_read(dest)
+    test_case(dest.start(), dest_uri_read)
     dest.stop()
 
 
@@ -3280,7 +3718,11 @@ def test_mysql_zero_dates(source, dest):
 
     assert result.exit_code == 0
 
-    dest_engine = sqlalchemy.create_engine(dest_uri)
+    dest_uri_read = get_uri_read(dest)
+    dest_engine = sqlalchemy.create_engine(dest_uri_read)
+    # CrateDB needs an explicit flush to make data available for reads immediately.
+    if dest_engine.dialect.name == "crate":
+        dest_engine.execute(f"REFRESH TABLE {schema_rand_prefix}.output")
     res = dest_engine.execute(f"select * from {schema_rand_prefix}.output").fetchall()
 
     # assert there are no new rows, since DBs like DuckDB accept NULL and dlt adds a separate string column for the value `0000-00-00 00:00:00`
@@ -3302,11 +3744,18 @@ def test_mysql_zero_dates(source, dest):
     ]
 
     assert len(res) == 5
-    assert res[0] == ("Row 1", "1970-01-01 00:00:00")
-    assert res[1] == ("Row 2", "2024-01-01 12:00:00")
-    assert res[2] == ("Row 3", "1970-01-01 00:00:00")
-    assert res[3] == ("Row 4", "2025-04-05 08:30:00")
-    assert res[4] == ("Row 5", "1970-01-01 00:00:00")
+    if dest_uri.startswith("cratedb://"):
+        assert ("Row 1", 0) in res
+        assert ("Row 2", 1704110400000) in res
+        assert ("Row 3", 0) in res
+        assert ("Row 4", 1743841800000) in res
+        assert ("Row 5", 0) in res
+    else:
+        assert res[0] == ("Row 1", "1970-01-01 00:00:00")
+        assert res[1] == ("Row 2", "2024-01-01 12:00:00")
+        assert res[2] == ("Row 3", "1970-01-01 00:00:00")
+        assert res[3] == ("Row 4", "2025-04-05 08:30:00")
+        assert res[4] == ("Row 5", "1970-01-01 00:00:00")
 
 
 def appsflyer_test_cases():
@@ -3314,7 +3763,7 @@ def appsflyer_test_cases():
         "INGESTR_TEST_APPSFLYER_TOKEN", ""
     )
 
-    def creatives(dest_uri: str):
+    def creatives(dest_uri: str, dest_uri_read: str):
         schema_rand_prefix = f"testschema_appsflyer_{get_random_string(5)}"
         result = invoke_ingest_command(
             source_uri,
@@ -3327,7 +3776,10 @@ def appsflyer_test_cases():
         )
         assert result.exit_code == 0
 
-        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+        with sqlalchemy.create_engine(dest_uri_read).connect() as conn:
+            # CrateDB needs an explicit flush to make data available for reads immediately.
+            if conn.dialect.name == "crate":
+                conn.execute(f"REFRESH TABLE {schema_rand_prefix}.creatives")
             res = conn.execute(
                 f"select * from {schema_rand_prefix}.creatives"
             ).fetchall()
@@ -3360,7 +3812,7 @@ def appsflyer_test_cases():
             ]
             assert sorted(columns) == sorted(expected_columns)
 
-    def campaigns(dest_uri: str):
+    def campaigns(dest_uri: str, dest_uri_read: str):
         schema_rand_prefix = f"testschema_appsflyer_{get_random_string(5)}"
         result = invoke_ingest_command(
             source_uri,
@@ -3373,7 +3825,10 @@ def appsflyer_test_cases():
         )
         assert result.exit_code == 0
 
-        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+        with sqlalchemy.create_engine(dest_uri_read).connect() as conn:
+            # CrateDB needs an explicit flush to make data available for reads immediately.
+            if conn.dialect.name == "crate":
+                conn.execute(f"REFRESH TABLE {schema_rand_prefix}.campaigns")
             res = conn.execute(
                 f"select * from {schema_rand_prefix}.campaigns"
             ).fetchall()
@@ -3414,7 +3869,7 @@ def appsflyer_test_cases():
             ]
             assert sorted(columns) == sorted(expected_columns)
 
-    def custom(dest_uri: str):
+    def custom(dest_uri: str, dest_uri_read: str):
         schema_rand_prefix = f"testschema_appsflyer_{get_random_string(5)}"
         result = invoke_ingest_command(
             source_uri,
@@ -3427,7 +3882,10 @@ def appsflyer_test_cases():
         )
         assert result.exit_code == 0
 
-        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+        with sqlalchemy.create_engine(dest_uri_read).connect() as conn:
+            # CrateDB needs an explicit flush to make data available for reads immediately.
+            if conn.dialect.name == "crate":
+                conn.execute(f"REFRESH TABLE {schema_rand_prefix}.custom")
             res = conn.execute(f"select * from {schema_rand_prefix}.custom").fetchall()
             assert len(res) > 0
             columns = [
@@ -3465,12 +3923,13 @@ def appsflyer_test_cases():
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_appsflyer_source(testcase, dest):
-    testcase(dest.start())
+    dest_uri_read = get_uri_read(dest)
+    testcase(dest.start(), dest_uri_read)
     dest.stop()
 
 
 def airtable_test_cases():
-    def table_with_base_id(dest_uri: str):
+    def table_with_base_id(dest_uri: str, dest_uri_read: str):
         source_uri = "airtable://?access_token=" + os.environ.get(
             "INGESTR_TEST_AIRTABLE_TOKEN", ""
         )
@@ -3489,7 +3948,10 @@ def airtable_test_cases():
 
         assert result.exit_code == 0
 
-        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+        with sqlalchemy.create_engine(dest_uri_read).connect() as conn:
+            # CrateDB needs an explicit flush to make data available for reads immediately.
+            if conn.dialect.name == "crate":
+                conn.execute(f"REFRESH TABLE {dest_table}")
             res = conn.execute(f"select count(*) from {dest_table}").fetchall()
             assert len(res) > 0
             assert res[0][0] > 0
@@ -3507,7 +3969,8 @@ def airtable_test_cases():
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_airtable_source(testcase, dest):
-    testcase(dest.start())
+    dest_uri_read = get_uri_read(dest)
+    testcase(dest.start(), dest_uri_read)
     dest.stop()
 
 
@@ -3521,6 +3984,12 @@ def pp(x):
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_mongodb_source(dest):
+    if dest.container.get_connection_url().startswith("crate://"):
+        pytest.skip(
+            "CrateDB is not supported for this test, "
+            "see https://github.com/crate-workbench/ingestr/issues/5"
+        )
+
     mongo = MongoDbContainer("mongo:7.0.7")
     mongo.start()
 
@@ -3587,6 +4056,7 @@ def test_mongodb_source(dest):
     )
 
     dest_uri = dest.start()
+    dest_uri_read = get_uri_read(dest)
 
     try:
         invoke_ingest_command(
@@ -3596,7 +4066,10 @@ def test_mongodb_source(dest):
             "raw.test_collection",
         )
 
-        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+        with sqlalchemy.create_engine(dest_uri_read).connect() as conn:
+            # CrateDB needs an explicit flush to make data available for reads immediately.
+            if conn.dialect.name == "crate":
+                conn.execute("REFRESH TABLE raw.test_collection")
             res = conn.execute(
                 "select id, name, nested_parent__key1, nested_parent__key2, nested_parent__key3, key4, value from raw.test_collection"
             ).fetchall()
@@ -3764,7 +4237,13 @@ def test_stripe_source_incremental(stripe_table):
         pass
 
 
-def trustpilot_test_case(dest_uri):
+def trustpilot_test_case(dest_uri, dest_uri_read):
+    if dest_uri.startswith("cratedb://"):
+        pytest.skip(
+            "CrateDB currently fails when selecting the 'merge' strategy, "
+            "see https://github.com/crate/dlt-cratedb/issues/14"
+        )
+
     sample_response = {
         "links": [
             {
@@ -3872,8 +4351,11 @@ def trustpilot_test_case(dest_uri):
 
         assert result.exit_code == 0
 
-        engine = sqlalchemy.create_engine(dest_uri)
+        engine = sqlalchemy.create_engine(dest_uri_read)
         with engine.connect() as conn:
+            # CrateDB needs an explicit flush to make data available for reads immediately.
+            if conn.dialect.name == "crate":
+                conn.execute(f"REFRESH TABLE {dest_table}")
             rows = conn.execute(f"SELECT * FROM {dest_table}").fetchall()
             assert len(rows) > 0, "No data ingested into the destination"
 
@@ -3882,11 +4364,17 @@ def trustpilot_test_case(dest_uri):
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_trustpilot(dest):
-    trustpilot_test_case(dest.start())
+    dest_uri_read = get_uri_read(dest)
+    trustpilot_test_case(dest.start(), dest_uri_read)
     dest.stop()
 
 
-def pinterest_test_case(dest_uri):
+def pinterest_test_case(dest_uri, dest_uri_read):
+    if dest_uri.startswith("cratedb://"):
+        pytest.skip(
+            "CrateDB currently fails when selecting the 'merge' strategy, "
+            "see https://github.com/crate/dlt-cratedb/issues/14"
+        )
     sample_response = {
         "items": [
             {
@@ -3972,8 +4460,11 @@ def pinterest_test_case(dest_uri):
 
         assert result.exit_code == 0
 
-        engine = sqlalchemy.create_engine(dest_uri)
+        engine = sqlalchemy.create_engine(dest_uri_read)
         with engine.connect() as conn:
+            # CrateDB needs an explicit flush to make data available for reads immediately.
+            if conn.dialect.name == "crate":
+                conn.execute(f"REFRESH TABLE {dest_table}")
             rows = conn.execute(f"SELECT * FROM {dest_table}").fetchall()
             assert len(rows) > 0, "No data ingested into the destination"
 
@@ -3982,5 +4473,6 @@ def pinterest_test_case(dest_uri):
     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
 )
 def test_pinterest_test_case(dest):
-    pinterest_test_case(dest.start())
+    dest_uri_read = get_uri_read(dest)
+    pinterest_test_case(dest.start(), dest_uri_read)
     dest.stop()
