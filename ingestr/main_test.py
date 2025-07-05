@@ -565,11 +565,10 @@ DESTINATIONS = {
 
 
 @pytest.fixture(scope="session", autouse=True)
-def manage_containers(request):
-    shared_dir = request.config.workerinput["shared_directory"]
+def manage_containers(request, shared_directory):
     unique_containers = set(SOURCES.values()) | set(DESTINATIONS.values())
     for container in unique_containers:
-        container.container_lock_dir = shared_dir
+        container.container_lock_dir = shared_directory
 
 
 @pytest.fixture(scope="session", autouse=True)
