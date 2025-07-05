@@ -256,7 +256,7 @@ def ingest(
         Optional[list[str]],
         typer.Option(
             help="The column types to be used for the destination table in the format of 'column_name:column_type'",
-            envvar=["COLUMNS", "INGESTR_COLUMNS"],
+            envvar=["INGESTR_COLUMNS"],
         ),
     ] = None,  # type: ignore
     yield_limit: Annotated[
