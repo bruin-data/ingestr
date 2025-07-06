@@ -45,16 +45,16 @@ def _normalize_issue(item: Dict[str, Any]) -> Dict[str, Any]:
         else:
             item[value] = None
             del item[key]
-    json_fields = ["comments", "subscribers", "attachments", "labels", "subtasks"]
+    json_fields = ["comments", "subscribers", "attachments", "labels", "subtasks","projects", "memberships", "members"]
     for field in json_fields:
         if item.get(field):
-            nodes = item[field].get("nodes", [])
-            if nodes:
-                item[f"{field}"] = json.dumps(nodes)    
-            else:
-                item[f"{field}"] = None
-        else:
-            print(f"No {field} found for issue {item['id']}")
-            item[f"{field}"] = None
+            item[f"{field}"] = item[field].get("nodes", [])
+                
+    return item
 
+def _normalize_team(item: Dict[str, Any]) -> Dict[str, Any]:
+    json_fields = ["memberships", "members", "projects"]
+    for field in json_fields:
+        if item.get(field):
+            item[f"{field}"] = item[field].get("nodes", [])
     return item
