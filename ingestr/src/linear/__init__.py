@@ -1,4 +1,4 @@
-from typing import Any, Dict, Iterable, Iterator, Optional
+from typing import Any, Dict, Iterable, Iterator
 
 import dlt
 import pendulum
