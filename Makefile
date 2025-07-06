@@ -22,7 +22,10 @@ deps-ci:
 	uv pip install --system -r requirements-dev.txt
 
 test-ci:
-	set -a; source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto -x -rP -vv --tb=short --durations=10 --cov=ingestr --no-cov-on-fail
+	set -a; source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto -x -rP -vv --tb=short --durations=10 --cov=ingestr --no-cov-on-fail -k "not cratedb"
+
+test-ci-cratedb:
+	set -a; source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -rP -vv --tb=short --durations=10 --cov=ingestr --no-cov-on-fail -k "cratedb"
 
 test : venv lock-deps
 	. venv/bin/activate; $(MAKE) test-ci
