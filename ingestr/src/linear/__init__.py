@@ -3,7 +3,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional
 import dlt
 import pendulum
 
-from .helpers import _paginate, _normalize_issue
+from .helpers import  _paginate, _normalize_issue
 
 ISSUES_QUERY = """
 query Issues($cursor: String) {
@@ -40,6 +40,10 @@ query Projects($cursor: String) {
       description
       createdAt
       updatedAt
+      health
+      priority
+      targetDate
+      lead { id }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -131,7 +135,6 @@ def linear_source(
         for item in _paginate(api_key, PROJECTS_QUERY, "projects"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                  
                     yield item
 
     @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
