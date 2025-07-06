@@ -1112,7 +1112,7 @@ def db_to_db_append(
         assert res.exit_code == 0
 
     def get_output_table():
-        dest_engine = sqlalchemy.create_engine(dest_connection_url)
+        dest_engine = sqlalchemy.create_engine(dest_connection_url_read)
         # CrateDB needs an explicit flush to make data available for reads immediately.
         if dest_engine.dialect.name == "crate":
             dest_engine.execute(f"REFRESH TABLE {schema_rand_prefix}.output")
