@@ -1293,7 +1293,7 @@ def test_kafka_to_db(dest):
         dest_engine = sqlalchemy.create_engine(dest_uri)
         with dest_engine.connect() as conn:
             res = conn.execute(
-                "select _kafka__data from testschema.output order by _kafka_msg_id asc"
+                "select _kafka__data from testschema.output order by _kafka__msg_id asc"
             ).fetchall()
         dest_engine.dispose()
         return res
