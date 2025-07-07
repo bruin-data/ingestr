@@ -35,7 +35,6 @@ class AttioClient:
                 )
 
             data = response_data["data"]
-            first_id = data[0].get("id") if data else None
             for item in data:
                 flat_item = flatten_item(item)
                 yield flat_item
