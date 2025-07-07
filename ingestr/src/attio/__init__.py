@@ -20,13 +20,15 @@ def attio_source(
             "created_at": {"data_type": "timestamp", "partition": True},
         },
     )
+    # https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects - does not support pagination
     def fetch_objects() -> Iterator[dict]:
         if len(params) != 0:
             raise ValueError("Objects table must be in the format `objects`")
 
         path = "objects"
-        yield attio_client.fetch_data(path, "get")
+        yield attio_client.fetch_all(path, "get")
 
+    # https://docs.attio.com/rest-api/endpoint-reference/records/list-records
     @dlt.resource(
         name="records",
         write_disposition="replace",
@@ -39,12 +41,12 @@ def attio_source(
             raise ValueError(
                 "Records table must be in the format `records:{object_api_slug}`"
             )
-
         object_id = params[0]
         path = f"objects/{object_id}/records/query"
 
-        yield attio_client.fetch_data(path, "post")
+        yield attio_client.fetch_paginated(path, "post")
 
+    # https://docs.attio.com/rest-api/endpoint-reference/lists/list-all-lists -- does not support pagination
     @dlt.resource(
         name="lists",
         write_disposition="replace",
@@ -54,8 +56,9 @@ def attio_source(
     )
     def fetch_lists() -> Iterator[dict]:
         path = "lists"
-        yield attio_client.fetch_data(path, "get")
+        yield attio_client.fetch_all(path, "get")
 
+    # https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries
     @dlt.resource(
         name="list_entries",
         write_disposition="replace",
@@ -70,7 +73,7 @@ def attio_source(
             )
         path = f"lists/{params[0]}/entries/query"
 
-        yield attio_client.fetch_data(path, "post")
+        yield attio_client.fetch_paginated(path, "post")
 
     @dlt.resource(
         name="all_list_entries",
@@ -85,10 +88,10 @@ def attio_source(
                 "All list entries table must be in the format `all_list_entries:{object_api_slug}`"
             )
         path = "lists"
-        for lst in attio_client.fetch_data(path, "get"):
+        for lst in attio_client.fetch_all(path, "get"):
             if params[0] in lst["parent_object"]:
                 path = f"lists/{lst['id']['list_id']}/entries/query"
-                yield from attio_client.fetch_data(path, "post")
+                yield from attio_client.fetch_paginated(path, "post")
 
     return (
         fetch_objects,

@@ -10,41 +10,52 @@ class AttioClient:
         }
         self.client = create_client()
 
-    def fetch_data(self, path: str, method: str, limit: int = 1000, params=None):
+    def fetch_paginated(self, path: str, method: str, limit: int = 1000, params=None):
         url = f"{self.base_url}/{path}"
         if params is None:
             params = {}
         offset = 0
         while True:
-            query_params = {**params, "limit": limit, "offset": offset}
+            query_params = {"limit": limit, "offset": offset, **params}
             if method == "get":
                 response = self.client.get(
                     url, headers=self.headers, params=query_params
                 )
             else:
-                response = self.client.post(
-                    url, headers=self.headers, params=query_params
-                )
+                json_body = {**params, "limit": limit, "offset": offset}
+                response = self.client.post(url, headers=self.headers, json=json_body)
 
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code} error: {response.text}")
 
             response_data = response.json()
             if "data" not in response_data:
-                print(f"API Response: {response_data}")
                 raise Exception(
                     "Attio API returned a response without the expected data"
                 )
 
             data = response_data["data"]
-
             for item in data:
                 flat_item = flatten_item(item)
                 yield flat_item
-
             if len(data) < limit:
                 break
+
             offset += limit
+
+    def fetch_all(self, path: str, method: str = "get", params=None):
+        url = f"{self.base_url}/{path}"
+        params = params or {}
+
+        if method == "get":
+            response = self.client.get(url, headers=self.headers, params=params)
+        else:
+            response = self.client.post(url, headers=self.headers, json=params)
+
+        response.raise_for_status()
+        data = response.json().get("data", [])
+        for item in data:
+            yield flatten_item(item)
 
 
 def flatten_item(item: dict) -> dict:
