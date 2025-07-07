@@ -148,11 +148,14 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+full = [
+    "ingestr[oracle,odbc]",
+]
 oracle = [
     "cx_Oracle==8.3.0",
 ]
 odbc = [
-    "pyodbc==5.1.0",
+    "pyodbc==5.2.0",
 ]
 
 [project.urls]

@@ -1,6 +1,7 @@
 import base64
 import csv
 import gzip
+import importlib
 import io
 import json
 import logging
@@ -545,16 +546,16 @@ clickHouseDocker = ClickhouseDockerImage(
 mysqlDocker = DockerImage(
     "mysql", lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
 )
+msSqlServerDocker = DockerImage(
+    "sqlserver",
+    lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
+    "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
+)
 
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": EphemeralDuckDb(),
     "mysql8": mysqlDocker,
-    "sqlserver": DockerImage(
-        "sqlserver",
-        lambda: SqlServerContainer(MSSQL22_IMAGE, dialect="mssql").start(),
-        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Yes",
-    ),
 }
 
 DESTINATIONS = {
@@ -562,6 +563,9 @@ DESTINATIONS = {
     "duckdb": EphemeralDuckDb(),
     "clickhouse+native": clickHouseDocker,
 }
+
+if importlib.util.find_spec("pyodbc"):
+    SOURCES["sqlserver"] = msSqlServerDocker
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -267,7 +267,7 @@ class SqlSource:
                 import pyodbc  # type: ignore
                 from sqlalchemy import create_engine
 
-                from ingestr.src.destinations import (
+                from ingestr.src.mssql.client import (
                     OdbcMsSqlClient,
                     handle_datetimeoffset,
                 )

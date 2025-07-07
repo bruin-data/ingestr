@@ -13,13 +13,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  tests:
+  tests-full:
+    name: Full tests on Python ${{ matrix.python-version }}, ${{ matrix.os }}
     strategy:
       matrix:
         # I tried running stuff on macOS but it was too slow and unreliable.
         # I also tried windows runners but couldn't get Docker to work there, so I gave up.
         os: [ubuntu-latest]
         python-version: ['3.10', '3.11', '3.12']
+    env:
+      UV_SYSTEM_PYTHON: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +55,7 @@ jobs:
       - name: install uv
         uses: astral-sh/setup-uv@v3
       - name: Install pip dependencies
-        run: make deps-ci
+        run: make deps-full
       - name: run tests (macOS)
         if: matrix.os == 'macos-13'
         run: make test-ci
@@ -64,3 +67,26 @@ jobs:
         run: make test-ci
       - name: check the formatting
         run: make lint-ci
+
+  tests-minimal:
+    name: Minimal tests on Python ${{ matrix.python-version }}, ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ['3.10', '3.11', '3.12']
+    runs-on: ${{ matrix.os }}
+    env:
+      UV_SYSTEM_PYTHON: true
+    steps:
+      - name: Acquire sources
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Install project
+        run: make deps-minimal
+      - name: Invoke tests
+        run: make test-ci
