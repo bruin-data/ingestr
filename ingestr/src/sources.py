@@ -258,8 +258,53 @@ class SqlSource:
             # override the query adapters, the only one we want is the one here in the case of custom queries
             query_adapters = [custom_query_variable_subsitution(query_value, kwargs)]
 
+        credentials = ConnectionStringCredentials(uri)
+        if uri.startswith("mssql://"):
+            parsed_uri = urlparse(uri)
+            params = parse_qs(parsed_uri.query)
+            params = {k.lower(): v for k, v in params.items()}
+            if params.get("authentication") == ["ActiveDirectoryAccessToken"]:
+                import pyodbc  # type: ignore
+                from sqlalchemy import create_engine
+
+                from ingestr.src.destinations import (
+                    OdbcMsSqlClient,
+                    handle_datetimeoffset,
+                )
+
+                cfg = {
+                    "DRIVER": params.get("driver", ["ODBC Driver 18 for SQL Server"])[
+                        0
+                    ],
+                    "SERVER": f"{parsed_uri.hostname},{parsed_uri.port or 1433}",
+                    "DATABASE": parsed_uri.path.lstrip("/"),
+                }
+                for k, v in params.items():
+                    if k.lower() not in ["driver", "authentication", "connect_timeout"]:
+                        cfg[k.upper()] = v[0]
+
+                token = OdbcMsSqlClient.serialize_token(None, parsed_uri.password)  # type: ignore[arg-type]
+                dsn = ";".join([f"{k}={v}" for k, v in cfg.items()])
+
+                def creator():
+                    connection = pyodbc.connect(
+                        dsn,
+                        autocommit=True,
+                        timeout=kwargs.get("connect_timeout", 30),
+                        attrs_before={
+                            OdbcMsSqlClient.SQL_COPT_SS_ACCESS_TOKEN: token,
+                        },
+                    )
+                    connection.add_output_converter(-155, handle_datetimeoffset)
+                    return connection
+
+                credentials = create_engine(
+                    "mssql+pyodbc://",
+                    creator=creator,
+                )
+
         builder_res = self.table_builder(
-            credentials=ConnectionStringCredentials(uri),
+            credentials=credentials,
             schema=table_fields.dataset,
             table=table_fields.table,
             incremental=incremental,

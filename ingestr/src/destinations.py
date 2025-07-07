@@ -1,18 +1,30 @@
 import abc
 import base64
 import csv
+import datetime
 import json
 import os
 import shutil
+import struct
 import tempfile
 from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
 import dlt.destinations.impl.filesystem.filesystem
 from dlt.common.configuration.specs import AwsCredentials
+from dlt.common.destination.capabilities import DestinationCapabilitiesContext
+from dlt.common.schema import Schema
 from dlt.common.storages.configuration import FileSystemCredentials
 from dlt.destinations.impl.clickhouse.configuration import (
     ClickHouseCredentials,
+)
+from dlt.destinations.impl.mssql.configuration import MsSqlClientConfiguration
+from dlt.destinations.impl.mssql.mssql import (
+    HINT_TO_MSSQL_ATTR,
+    MsSqlJobClient,
+)
+from dlt.destinations.impl.mssql.sql_client import (
+    PyOdbcMsSqlClient,
 )
 
 from ingestr.src.errors import MissingValueError
@@ -143,9 +155,89 @@ class DuckDBDestination(GenericSqlDestination):
         return dlt.destinations.duckdb(uri, **kwargs)
 
 
+def handle_datetimeoffset(dto_value: bytes) -> datetime.datetime:
+    # ref: https://github.com/mkleehammer/pyodbc/issues/134#issuecomment-281739794
+    tup = struct.unpack(
+        "<6hI2h", dto_value
+    )  # e.g., (2017, 3, 16, 10, 35, 18, 500000000, -6, 0)
+    return datetime.datetime(
+        tup[0],
+        tup[1],
+        tup[2],
+        tup[3],
+        tup[4],
+        tup[5],
+        tup[6] // 1000,
+        datetime.timezone(datetime.timedelta(hours=tup[7], minutes=tup[8])),
+    )
+
+
+class OdbcMsSqlClient(PyOdbcMsSqlClient):
+    SQL_COPT_SS_ACCESS_TOKEN = 1256
+    SKIP_CREDENTIALS = {"PWD", "AUTHENTICATION", "UID"}
+
+    def open_connection(self):
+        cfg = self.credentials._get_odbc_dsn_dict()
+        if (
+            cfg.get("AUTHENTICATION", "").strip().lower()
+            != "activedirectoryaccesstoken"
+        ):
+            return super().open_connection()
+
+        import pyodbc  # type: ignore
+
+        dsn = ";".join(
+            [f"{k}={v}" for k, v in cfg.items() if k not in self.SKIP_CREDENTIALS]
+        )
+
+        self._conn = pyodbc.connect(
+            dsn,
+            timeout=self.credentials.connect_timeout,
+            attrs_before={
+                self.SQL_COPT_SS_ACCESS_TOKEN: self.serialize_token(cfg["PWD"]),
+            },
+        )
+
+        # https://github.com/mkleehammer/pyodbc/wiki/Using-an-Output-Converter-function
+        self._conn.add_output_converter(-155, handle_datetimeoffset)
+        self._conn.autocommit = True
+        return self._conn
+
+    def serialize_token(self, token):
+        # https://github.com/mkleehammer/pyodbc/issues/228#issuecomment-494773723
+        encoded = token.encode("utf_16_le")
+        return struct.pack("<i", len(encoded)) + encoded
+
+
+class MsSqlClient(MsSqlJobClient):
+    def __init__(
+        self,
+        schema: Schema,
+        config: MsSqlClientConfiguration,
+        capabilities: DestinationCapabilitiesContext,
+    ) -> None:
+        sql_client = OdbcMsSqlClient(
+            config.normalize_dataset_name(schema),
+            config.normalize_staging_dataset_name(schema),
+            config.credentials,
+            capabilities,
+        )
+        super(MsSqlJobClient, self).__init__(schema, config, sql_client)
+        self.config: MsSqlClientConfiguration = config
+        self.sql_client = sql_client
+        self.active_hints = HINT_TO_MSSQL_ATTR if self.config.create_indexes else {}
+        self.type_mapper = capabilities.get_type_mapper()
+
+
+class MsSqlDestImpl(dlt.destinations.mssql):
+    @property
+    def client_class(self):
+        return MsSqlClient
+
+
 class MsSQLDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.mssql(credentials=uri, **kwargs)
+        return MsSqlDestImpl(credentials=uri, **kwargs)
 
 
 class DatabricksDestination(GenericSqlDestination):
