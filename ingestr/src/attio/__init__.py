@@ -88,10 +88,10 @@ def attio_source(
                 "All list entries table must be in the format `all_list_entries:{object_api_slug}`"
             )
         path = "lists"
-        for lst in attio_client.fetch_data(path, "get"):
+        for lst in attio_client.fetch_all(path, "get"):
             if params[0] in lst["parent_object"]:
                 path = f"lists/{lst['id']['list_id']}/entries/query"
-                yield from attio_client.fetch_data(path, "post")
+                yield from attio_client.fetch_paginated(path, "post")
 
     return (
         fetch_objects,
