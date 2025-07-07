@@ -28,6 +28,7 @@ def attio_source(
         path = "objects"
         yield attio_client.fetch_all(path, "get")
 
+    #https://docs.attio.com/rest-api/endpoint-reference/records/list-records
     @dlt.resource(
         name="records",
         write_disposition="replace",
@@ -40,11 +41,10 @@ def attio_source(
             raise ValueError(
                 "Records table must be in the format `records:{object_api_slug}`"
             )
-
         object_id = params[0]
         path = f"objects/{object_id}/records/query"
 
-        yield attio_client.fetch_data(path, "post")
+        yield attio_client.fetch_paginated(path, "post")
 
     @dlt.resource(
         name="lists",
