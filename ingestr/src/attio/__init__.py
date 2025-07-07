@@ -20,12 +20,13 @@ def attio_source(
             "created_at": {"data_type": "timestamp", "partition": True},
         },
     )
+    #https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects - does not support pagination
     def fetch_objects() -> Iterator[dict]:
         if len(params) != 0:
             raise ValueError("Objects table must be in the format `objects`")
 
         path = "objects"
-        yield attio_client.fetch_data(path, "get")
+        yield attio_client.fetch_all(path, "get")
 
     @dlt.resource(
         name="records",
