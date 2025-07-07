@@ -20,7 +20,7 @@ def attio_source(
             "created_at": {"data_type": "timestamp", "partition": True},
         },
     )
-    #https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects - does not support pagination
+    # https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects - does not support pagination
     def fetch_objects() -> Iterator[dict]:
         if len(params) != 0:
             raise ValueError("Objects table must be in the format `objects`")
@@ -28,7 +28,7 @@ def attio_source(
         path = "objects"
         yield attio_client.fetch_all(path, "get")
 
-    #https://docs.attio.com/rest-api/endpoint-reference/records/list-records
+    # https://docs.attio.com/rest-api/endpoint-reference/records/list-records
     @dlt.resource(
         name="records",
         write_disposition="replace",
@@ -46,7 +46,7 @@ def attio_source(
 
         yield attio_client.fetch_paginated(path, "post")
 
-    #https://docs.attio.com/rest-api/endpoint-reference/lists/list-all-lists -- does not support pagination
+    # https://docs.attio.com/rest-api/endpoint-reference/lists/list-all-lists -- does not support pagination
     @dlt.resource(
         name="lists",
         write_disposition="replace",
@@ -58,7 +58,7 @@ def attio_source(
         path = "lists"
         yield attio_client.fetch_all(path, "get")
 
-    #https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries
+    # https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries
     @dlt.resource(
         name="list_entries",
         write_disposition="replace",

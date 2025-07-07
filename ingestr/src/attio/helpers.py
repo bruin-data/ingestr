@@ -10,13 +10,13 @@ class AttioClient:
         }
         self.client = create_client()
 
-    def fetch_paginated(self, path: str, method: str, limit: int = 10, params=None):
+    def fetch_paginated(self, path: str, method: str, limit: int = 1000, params=None):
         url = f"{self.base_url}/{path}"
         if params is None:
             params = {}
         offset = 0
         while True:
-            query_params = {"limit": limit, "offset": offset, **params} 
+            query_params = {"limit": limit, "offset": offset, **params}
             if method == "get":
                 response = self.client.get(
                     url, headers=self.headers, params=query_params
@@ -30,24 +30,19 @@ class AttioClient:
 
             response_data = response.json()
             if "data" not in response_data:
-                print(f"API Response: {response_data}")
                 raise Exception(
                     "Attio API returned a response without the expected data"
                 )
 
             data = response_data["data"]
             first_id = data[0].get("id") if data else None
-            print(f"Offset: {offset}, Fetched: {len(data)}, First ID: {first_id}")
             for item in data:
                 flat_item = flatten_item(item)
                 yield flat_item
-            print("data",len(data))
             if len(data) < limit:
                 break
-            
-            offset += limit 
-            print(f"Offset: {offset}, Fetched: {len(data)}")
 
+            offset += limit
 
     def fetch_all(self, path: str, method: str = "get", params=None):
         url = f"{self.base_url}/{path}"
