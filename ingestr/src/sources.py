@@ -268,8 +268,9 @@ class SqlSource:
                 from sqlalchemy import create_engine
 
                 from ingestr.src.destinations import (
-                    OdbcMsSqlClient,
+                    MSSQL_COPT_SS_ACCESS_TOKEN,
                     handle_datetimeoffset,
+                    serialize_azure_token,
                 )
 
                 cfg = {
@@ -283,7 +284,7 @@ class SqlSource:
                     if k.lower() not in ["driver", "authentication", "connect_timeout"]:
                         cfg[k.upper()] = v[0]
 
-                token = OdbcMsSqlClient.serialize_token(None, parsed_uri.password)  # type: ignore[arg-type]
+                token = serialize_azure_token(parsed_uri.password)
                 dsn = ";".join([f"{k}={v}" for k, v in cfg.items()])
 
                 def creator():
@@ -292,7 +293,7 @@ class SqlSource:
                         autocommit=True,
                         timeout=kwargs.get("connect_timeout", 30),
                         attrs_before={
-                            OdbcMsSqlClient.SQL_COPT_SS_ACCESS_TOKEN: token,
+                            MSSQL_COPT_SS_ACCESS_TOKEN: token,
                         },
                     )
                     connection.add_output_converter(-155, handle_datetimeoffset)
