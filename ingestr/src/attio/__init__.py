@@ -46,6 +46,7 @@ def attio_source(
 
         yield attio_client.fetch_paginated(path, "post")
 
+    #https://docs.attio.com/rest-api/endpoint-reference/lists/list-all-lists -- does not support pagination
     @dlt.resource(
         name="lists",
         write_disposition="replace",
@@ -55,8 +56,9 @@ def attio_source(
     )
     def fetch_lists() -> Iterator[dict]:
         path = "lists"
-        yield attio_client.fetch_data(path, "get")
+        yield attio_client.fetch_all(path, "get")
 
+    #https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries
     @dlt.resource(
         name="list_entries",
         write_disposition="replace",
@@ -71,7 +73,7 @@ def attio_source(
             )
         path = f"lists/{params[0]}/entries/query"
 
-        yield attio_client.fetch_data(path, "post")
+        yield attio_client.fetch_paginated(path, "post")
 
     @dlt.resource(
         name="all_list_entries",
