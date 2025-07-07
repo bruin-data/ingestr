@@ -1,3 +1,4 @@
+import importlib
 import json
 import os
 import unittest
@@ -103,9 +104,11 @@ class DuckDBDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
     expected_class = dlt.destinations.duckdb
 
 
-class MsSQLDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
-    destination = MsSQLDestination()
-    expected_class = dlt.destinations.mssql
+if importlib.util.find_spec("pyodbc"):
+
+    class MsSQLDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
+        destination = MsSQLDestination()
+        expected_class = dlt.destinations.mssql
 
 
 class DatabricksDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
