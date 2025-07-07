@@ -10,21 +10,20 @@ class AttioClient:
         }
         self.client = create_client()
 
-    def fetch_data(self, path: str, method: str, limit: int = 1000, params=None):
+    def fetch_paginated(self, path: str, method: str, limit: int = 10, params=None):
         url = f"{self.base_url}/{path}"
         if params is None:
             params = {}
         offset = 0
         while True:
-            query_params = {**params, "limit": limit, "offset": offset}
+            query_params = {"limit": limit, "offset": offset, **params} 
             if method == "get":
                 response = self.client.get(
                     url, headers=self.headers, params=query_params
                 )
             else:
-                response = self.client.post(
-                    url, headers=self.headers, params=query_params
-                )
+                json_body = {**params, "limit": limit, "offset": offset}
+                response = self.client.post(url, headers=self.headers, json=json_body)
 
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code} error: {response.text}")
@@ -37,14 +36,32 @@ class AttioClient:
                 )
 
             data = response_data["data"]
-
+            first_id = data[0].get("id") if data else None
+            print(f"Offset: {offset}, Fetched: {len(data)}, First ID: {first_id}")
             for item in data:
                 flat_item = flatten_item(item)
                 yield flat_item
-
+            print("data",len(data))
             if len(data) < limit:
                 break
-            offset += limit
+            
+            offset += limit 
+            print(f"Offset: {offset}, Fetched: {len(data)}")
+
+
+    def fetch_all(self, path: str, method: str = "get", params=None):
+        url = f"{self.base_url}/{path}"
+        params = params or {}
+
+        if method == "get":
+            response = self.client.get(url, headers=self.headers, params=params)
+        else:
+            response = self.client.post(url, headers=self.headers, json=params)
+
+        response.raise_for_status()
+        data = response.json().get("data", [])
+        for item in data:
+            yield flatten_item(item)
 
 
 def flatten_item(item: dict) -> dict:
