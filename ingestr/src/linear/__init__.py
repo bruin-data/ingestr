@@ -1,38 +1,9 @@
-from typing import Any, Dict, Iterable, Iterator, Optional
+from typing import Any, Dict, Iterable, Iterator
 
 import dlt
 import pendulum
-import requests
 
-LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql"
-
-
-def _graphql(
-    api_key: str, query: str, variables: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
-    headers = {"Authorization": api_key, "Content-Type": "application/json"}
-    response = requests.post(
-        LINEAR_GRAPHQL_ENDPOINT,
-        json={"query": query, "variables": variables or {}},
-        headers=headers,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if "errors" in payload:
-        raise ValueError(str(payload["errors"]))
-    return payload["data"]
-
-
-def _paginate(api_key: str, query: str, root: str) -> Iterator[Dict[str, Any]]:
-    cursor: Optional[str] = None
-    while True:
-        data = _graphql(api_key, query, {"cursor": cursor})[root]
-        for item in data["nodes"]:
-            yield item
-        if not data["pageInfo"]["hasNextPage"]:
-            break
-        cursor = data["pageInfo"]["endCursor"]
-
+from .helpers import  _paginate, _normalize_issue, _normalize_team
 
 ISSUES_QUERY = """
 query Issues($cursor: String) {
@@ -43,6 +14,17 @@ query Issues($cursor: String) {
       description
       createdAt
       updatedAt
+      creator { id }
+      assignee { id}
+      state { id}
+      labels { nodes { id } }
+      cycle { id}
+      project { id }
+      subtasks: children { nodes { id title } }
+      comments(first: 250) { nodes { id body } }
+      priority
+      attachments { nodes { id } }
+      subscribers { nodes { id } }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -58,6 +40,10 @@ query Projects($cursor: String) {
       description
       createdAt
       updatedAt
+      health
+      priority
+      targetDate
+      lead { id }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -72,6 +58,11 @@ query Teams($cursor: String) {
       name
       key
       description
+      updatedAt
+      createdAt
+      memberships { nodes { id } }
+      members { nodes { id } }
+      projects { nodes { id } }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -124,7 +115,7 @@ def linear_source(
         for item in _paginate(api_key, ISSUES_QUERY, "issues"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield item
+                    yield _normalize_issue(item)
 
     @dlt.resource(name="projects", primary_key="id", write_disposition="merge")
     def projects(
@@ -152,8 +143,29 @@ def linear_source(
                     yield item
 
     @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
-    def teams() -> Iterator[Dict[str, Any]]:
-        yield from _paginate(api_key, TEAMS_QUERY, "teams")
+    def teams( updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updatedAt",
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
+            range_start="closed",
+            range_end="closed",
+        ),) -> Iterator[Dict[str, Any]]:
+        print(start_date)
+        if updated_at.last_value:
+            current_start_date = pendulum.parse(updated_at.last_value)
+        else:
+            current_start_date = pendulum.parse(start_date)
+        print(current_start_date)
+
+        if updated_at.end_value:
+            current_end_date = pendulum.parse(updated_at.end_value)
+        else:
+            current_end_date = pendulum.now(tz="UTC")
+
+        for item in _paginate(api_key, TEAMS_QUERY, "teams"):
+            if pendulum.parse(item["updatedAt"]) >= current_start_date:
+                if pendulum.parse(item["updatedAt"]) <= current_end_date:
+                    yield _normalize_team(item)
 
     @dlt.resource(name="users", primary_key="id", write_disposition="merge")
     def users(
