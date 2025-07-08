@@ -44,6 +44,7 @@ from ingestr.src.sources import (
     GoogleSheetsSource,
     GorgiasSource,
     HubspotSource,
+    InfluxDBSource,
     IsocPulseSource,
     KafkaSource,
     KinesisSource,
@@ -72,7 +73,6 @@ from ingestr.src.sources import (
     TrustpilotSource,
     ZendeskSource,
     ZoomSource,
-    InfluxDBSource,
 )
 
 SQL_SOURCE_SCHEMES = [

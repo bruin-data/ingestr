@@ -2971,7 +2971,7 @@ class ZoomSource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(table)
-    
+
 
 class InfluxDBSource:
     def handles_incrementality(self) -> bool:
@@ -2981,11 +2981,11 @@ class InfluxDBSource:
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
         host = parsed_uri.netloc
-  
+
         secure = params.get("secure", ["true"])[0].lower() != "false"
         scheme = "https" if secure else "http"
         host_url = f"{scheme}://{host}"
-        
+
         token = params.get("token")
         org = params.get("org")
         bucket = params.get("bucket")
@@ -3012,6 +3012,7 @@ class InfluxDBSource:
         from ingestr.src.influxdb import influxdb_source
 
         return influxdb_source(
+            measurement=table,
             host=host_url,
             org=org[0],
             bucket=bucket[0],
@@ -3019,4 +3020,4 @@ class InfluxDBSource:
             secure=secure,
             start_date=start_date,
             end_date=end_date,
-        ).with_resources("temperature")
+        ).with_resources(table)

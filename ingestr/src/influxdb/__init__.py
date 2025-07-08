@@ -10,6 +10,7 @@ from .client import InfluxClient
 
 @dlt.source(max_table_nesting=0)
 def influxdb_source(
+    measurement: str,
     host: str,
     org: str,
     bucket: str,
@@ -18,11 +19,12 @@ def influxdb_source(
     start_date: pendulum.DateTime = pendulum.datetime(2024, 1, 1),
     end_date: pendulum.DateTime | None = None,
 ) -> Iterable[DltResource]:
-    client = InfluxClient(url=host, token=token, org=org, bucket=bucket, verify_ssl=secure)
+    client = InfluxClient(
+        url=host, token=token, org=org, bucket=bucket, verify_ssl=secure
+    )
 
-    @dlt.resource(write_disposition="append", name="temperature")
+    @dlt.resource(write_disposition="append", name=measurement)
     def fetch_table(
-        measurement: str = "temperature",
         timestamp=dlt.sources.incremental(
             "time",
             initial_value=start_date,
