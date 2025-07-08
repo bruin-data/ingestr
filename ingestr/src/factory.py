@@ -72,6 +72,7 @@ from ingestr.src.sources import (
     TrustpilotSource,
     ZendeskSource,
     ZoomSource,
+    InfluxDBSource,
 )
 
 SQL_SOURCE_SCHEMES = [
@@ -185,6 +186,7 @@ class SourceDestinationFactory:
         "sftp": SFTPSource,
         "pinterest": PinterestSource,
         "zoom": ZoomSource,
+        "influxdb": InfluxDBSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
