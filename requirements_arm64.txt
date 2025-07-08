@@ -544,7 +544,7 @@ sqlalchemy==1.4.52
     #   sqlalchemy-spanner
 sqlalchemy-bigquery==1.12.1
     # via -r requirements.in
-sqlalchemy-cratedb==0.42.0.dev2
+sqlalchemy-cratedb==0.41.0
     # via -r requirements.in
 sqlalchemy-hana==2.0.0
     # via -r requirements.in
@@ -620,7 +620,7 @@ urllib3==2.5.0
     #   pyairtable
     #   requests
     #   types-requests
-verlib2==0.3.1
+verlib2==0.2.0
     # via
     #   crate
     #   sqlalchemy-cratedb

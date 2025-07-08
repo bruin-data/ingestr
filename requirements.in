@@ -25,7 +25,7 @@ rich==13.9.4
 rudder-sdk-python==2.1.4
 snowflake-sqlalchemy==1.6.1
 sqlalchemy-bigquery==1.12.1
-sqlalchemy-cratedb==0.42.0.dev2
+sqlalchemy-cratedb==0.41.0
 sqlalchemy-hana==2.0.0
 sqlalchemy-redshift==0.8.14
 SQLAlchemy==1.4.52
