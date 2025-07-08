@@ -113,4 +113,5 @@ def get_data(
     df = pd.read_csv(response_url)
     df["Date"] = pd.to_datetime(df["Date"])
     df["partition_date"] = df["Date"].dt.date
+    df["platform"] = platform
     return df
