@@ -82,11 +82,11 @@ class SqlSource:
             query_params = parse_qs(parsed_uri.query)
             
             if "private_key" in query_params:
-                from dlt.destinations.impl.snowflake.configuration import _decode_private_key
+                from dlt.common.libs.cryptography import decode_private_key
                 
                 private_key = query_params["private_key"][0]
                 passphrase = query_params.get("private_key_passphrase", [None])[0]
-                decoded_key = _decode_private_key(private_key, passphrase)
+                decoded_key = decode_private_key(private_key, passphrase)
                 
                 query_params["private_key"] = [base64.b64encode(decoded_key).decode()]
                 if "private_key_passphrase" in query_params:
