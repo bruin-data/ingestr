@@ -506,6 +506,7 @@ def ingest(
 
         if factory.source_scheme == "sqlite":
             source_table = "main." + source_table.split(".")[-1]
+    
 
         if (
             incremental_key
@@ -595,6 +596,12 @@ def ingest(
         write_disposition = None
         if incremental_strategy != IncrementalStrategy.none:
             write_disposition = incremental_strategy.value
+
+        if factory.source_scheme == "influxdb":
+            if primary_key:
+                write_disposition = "merge"
+            else:
+                write_disposition = "replace"
 
         start_time = datetime.now()
 
