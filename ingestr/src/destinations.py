@@ -90,7 +90,7 @@ class BigQueryDestination:
 
         return dlt.destinations.bigquery(
             credentials=credentials,  # type: ignore
-            location=location,
+            location=location,  # type: ignore
             project_id=project_id,
             **kwargs,
         )
@@ -398,7 +398,7 @@ class AthenaDestination:
 
         return dlt.destinations.athena(
             query_result_bucket=query_result_path,
-            athena_work_group=source_params.get("workgroup", [None])[0],
+            athena_work_group=source_params.get("workgroup", [None])[0],  # type: ignore
             credentials=AwsCredentials(
                 aws_access_key_id=access_key_id,  # type: ignore
                 aws_secret_access_key=secret_access_key,  # type: ignore

@@ -97,7 +97,7 @@ decorator==5.2.1
     # via gcsfs
 deprecation==2.1.0
     # via rudder-sdk-python
-dlt==1.10.0
+dlt==1.11.0
     # via
     #   -r requirements.in
     #   dlt-cratedb
@@ -361,7 +361,9 @@ protobuf==4.25.8
 psutil==6.1.1
     # via -r requirements.in
 psycopg2-binary==2.9.10
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   dlt
 py-machineid==0.6.0
     # via -r requirements.in
 pyairtable==2.3.3

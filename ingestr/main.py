@@ -455,7 +455,7 @@ def ingest(
 
                 column_hints[key]["primary_key"] = True
 
-        pipeline = dlt.pipeline(
+        pipeline = dlt.pipeline(  # type: ignore
             pipeline_name=m.hexdigest(),
             destination=dlt_dest,
             progress=progressInstance,
