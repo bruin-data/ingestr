@@ -601,10 +601,10 @@ def ingest(
             if primary_key:
                 write_disposition = "merge"
             else:
-                write_disposition = "replace"
+                write_disposition = "append"
 
         start_time = datetime.now()
-
+     
         run_info: LoadInfo = pipeline.run(
             dlt_source,
             **destination.dlt_run_params(
