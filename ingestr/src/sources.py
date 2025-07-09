@@ -160,11 +160,6 @@ class SqlSource:
                 return engine.execution_options(read_only=True)
 
             engine_adapter_callback = eng_callback
-
-        # if uri.startswith("snowflake://"):
-        #     from dlt.sources.sql_database.helpers import BigQueryAdapter
-        #     
-
         from dlt.common.libs.sql_alchemy import (
             Engine,
             MetaData,
