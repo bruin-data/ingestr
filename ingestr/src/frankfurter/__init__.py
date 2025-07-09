@@ -33,7 +33,9 @@ def frankfurter_source(
         currencies(),
         latest(base_currency=base_currency),
         exchange_rates(
-            start_date=date_time, end_date=end_date, base_currency=base_currency
+            start_date=date_time,  # type: ignore
+            end_date=end_date,
+            base_currency=base_currency,  # type: ignore
         ),
     )
 
