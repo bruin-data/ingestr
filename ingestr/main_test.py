@@ -245,6 +245,8 @@ def test_create_replace_csv_to_duckdb():
     for i, row in enumerate(actual_rows):
         assert res[i] == tuple(row)
 
+    # Clean up
+    conn.close()
     try:
         os.remove(abs_db_path)
     except Exception:
@@ -268,7 +270,10 @@ def test_merge_with_primary_key_csv_to_duckdb():
     rel_db_path_to_command = f"ingestr/testdata/{dbname}"
     uri = f"duckdb:///{rel_db_path_to_command}"
 
-    conn = duckdb.connect(abs_db_path)
+    # DuckDB is sensitive about multiple connections to the same database file.
+    # Connection Error: Can't open a connection to same database file with a
+    # different configuration than existing connections
+    # conn = duckdb.connect(abs_db_path)
 
     def run(source: str):
         res = invoke_ingest_command(
@@ -284,10 +289,13 @@ def test_merge_with_primary_key_csv_to_duckdb():
         return res
 
     def get_output_rows():
+        conn = duckdb.connect(abs_db_path)
         conn.execute("CHECKPOINT")
-        return conn.sql(
+        results = conn.sql(
             "select symbol, date, is_enabled, name from testschema_merge.output order by symbol asc"
         ).fetchall()
+        conn.close()
+        return results
 
     def assert_output_equals_to_csv(path: str):
         res = get_output_rows()
@@ -305,9 +313,11 @@ def test_merge_with_primary_key_csv_to_duckdb():
     run("csv://ingestr/testdata/merge_part1.csv")
     assert_output_equals_to_csv("./testdata/merge_part1.csv")
 
+    conn = duckdb.connect(abs_db_path)
     first_run_id = conn.sql(
         "select _dlt_load_id from testschema_merge.output limit 1"
     ).fetchall()[0][0]
+    conn.close()
 
     ##############################
     # we'll run again, we don't expect any changes since the data hasn't changed
@@ -315,9 +325,11 @@ def test_merge_with_primary_key_csv_to_duckdb():
     assert_output_equals_to_csv("./testdata/merge_part1.csv")
 
     # we also ensure that the other rows were not touched
+    conn = duckdb.connect(abs_db_path)
     count_by_run_id = conn.sql(
         "select _dlt_load_id, count(*) from testschema_merge.output group by 1"
     ).fetchall()
+    conn.close()
     assert len(count_by_run_id) == 1
     assert count_by_run_id[0][1] == 3
     assert count_by_run_id[0][0] == first_run_id
@@ -330,9 +342,11 @@ def test_merge_with_primary_key_csv_to_duckdb():
     assert_output_equals_to_csv("./testdata/merge_expected.csv")
 
     # let's check the runs
+    conn = duckdb.connect(abs_db_path)
     count_by_run_id = conn.sql(
         "select _dlt_load_id, count(*) from testschema_merge.output group by 1 order by 1 asc"
     ).fetchall()
+    conn.close()
 
     # we expect that there's a new load ID now
     assert len(count_by_run_id) == 2
@@ -442,6 +456,8 @@ def test_delete_insert_without_primary_key_csv_to_duckdb():
     assert count_by_run_id[1][1] == 4
     ##############################
 
+    # Clean up
+    conn.close()
     try:
         os.remove(abs_db_path)
     except Exception:
@@ -690,6 +706,7 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
             f"select count(*) from {schema_rand_prefix}.input"
         ).fetchall()
         assert res[0][0] == 2
+    source_engine.dispose()
 
     result = invoke_ingest_command(
         source_connection_url,
@@ -704,6 +721,7 @@ def db_to_db_create_replace(source_connection_url: str, dest_connection_url: str
     res = dest_engine.execute(
         f"select id, val, updated_at from {schema_rand_prefix}.output"
     ).fetchall()
+    dest_engine.dispose()
 
     assert len(res) == 2
     assert res[0] == (1, "val1", as_datetime("2022-01-01"))
@@ -731,6 +749,7 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
             f"select count(*) from {schema_rand_prefix}.input"
         ).fetchall()
         assert res[0][0] == 2
+    source_engine.dispose()
 
     def run():
         res = invoke_ingest_command(
@@ -744,12 +763,13 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
         )
         assert res.exit_code == 0
 
-    dest_engine = sqlalchemy.create_engine(dest_connection_url)
-
     def get_output_table():
-        return dest_engine.execute(
+        dest_engine = sqlalchemy.create_engine(dest_connection_url)
+        results = dest_engine.execute(
             f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
+        dest_engine.dispose()
+        return results
 
     run()
 
@@ -757,7 +777,6 @@ def db_to_db_append(source_connection_url: str, dest_connection_url: str):
     assert len(res) == 2
     assert res[0] == (1, "val1", as_datetime("2022-01-01"))
     assert res[1] == (2, "val2", as_datetime("2022-01-02"))
-    dest_engine.dispose()
 
     # # run again, nothing should be inserted into the output table
     run()
@@ -859,6 +878,7 @@ def db_to_db_merge_with_primary_key(
     source_engine.execute(
         f"UPDATE {schema_rand_prefix}.input SET val = 'val1_modified' WHERE id = 2"
     )
+    source_engine.dispose()
 
     run()
     assert_output_equals(
@@ -880,6 +900,7 @@ def db_to_db_merge_with_primary_key(
     source_engine.execute(
         f"INSERT INTO {schema_rand_prefix}.input VALUES (3, 'val3', '2022-01-01')"
     )
+    source_engine.dispose()
 
     run()
     assert_output_equals(
@@ -901,6 +922,7 @@ def db_to_db_merge_with_primary_key(
     source_engine.execute(
         f"INSERT INTO {schema_rand_prefix}.input VALUES (3, 'val3', '2022-02-02')"
     )
+    source_engine.dispose()
 
     run()
     assert_output_equals(
@@ -928,6 +950,7 @@ def db_to_db_merge_with_primary_key(
     source_engine.execute(
         f"UPDATE {schema_rand_prefix}.input SET val='val2_modified', updated_at = '2022-02-03' WHERE id = 2"
     )
+    source_engine.dispose()
 
     run()
     assert_output_equals(
@@ -948,6 +971,7 @@ def db_to_db_merge_with_primary_key(
     # we don't care about the rest of the run IDs
     assert count_by_run_id[1][1] == 1
     assert count_by_run_id[2][1] == 1
+    dest_engine.dispose()
     ##############################
 
 
@@ -978,6 +1002,7 @@ def db_to_db_delete_insert_without_primary_key(
             f"select count(*) from {schema_rand_prefix}.input"
         ).fetchall()
         assert res[0][0] == 2
+    source_engine.dispose()
 
     def run():
         res = invoke_ingest_command(
@@ -997,9 +1022,11 @@ def db_to_db_delete_insert_without_primary_key(
     dest_engine = sqlalchemy.create_engine(dest_connection_url)
 
     def get_output_rows():
-        return dest_engine.execute(
+        results = dest_engine.execute(
             f"select id, val, updated_at from {schema_rand_prefix}.output order by id asc"
         ).fetchall()
+        dest_engine.dispose()
+        return results
 
     def assert_output_equals(expected):
         res = get_output_rows()
@@ -1041,6 +1068,7 @@ def db_to_db_delete_insert_without_primary_key(
     source_engine.execute(
         f"INSERT INTO {schema_rand_prefix}.input VALUES (3, 'val3', '2022-02-01'), (4, 'val4', '2022-02-01')"
     )
+    source_engine.dispose()
 
     run()
     assert_output_equals(
@@ -1098,6 +1126,7 @@ def db_to_db_delete_insert_with_timerange(
         f"select count(*) from {schema_rand_prefix}.input"
     ).fetchall()
     assert res[0][0] == 6
+    source_engine.dispose()
 
     def run(start_date: str, end_date: str):
         res = invoke_ingest_command(
@@ -1222,6 +1251,7 @@ def db_to_db_delete_insert_with_timerange(
     source_engine.execute(
         f"UPDATE {schema_rand_prefix}.input SET val = 'val1_modified' WHERE id = 1"
     )
+    source_engine.dispose()
 
     run("2022-01-01", "2022-01-02")
     assert_output_equals(
@@ -1411,6 +1441,7 @@ def test_arrow_mmap_to_db_create_replace(dest):
         ).fetchall()
         assert res[0][0] == "some value"
         assert res[0][1] == row_count
+    dest_engine.dispose()
 
 
 @pytest.mark.parametrize(
@@ -1539,6 +1570,7 @@ def test_arrow_mmap_to_db_delete_insert(dest):
         assert res[0][1] == row_count
         assert res[1][0] == build_datetime("2024-11-06")
         assert res[1][1] == 1000
+    dest_engine.dispose()
 
 
 @pytest.mark.parametrize(
@@ -1642,6 +1674,7 @@ def test_arrow_mmap_to_db_merge_without_incremental(dest):
         ).fetchall()
         assert res[0][0] == "a"
         assert res[0][1] == row_count + 1000
+    dest_engine.dispose()
 
 
 @pytest.mark.parametrize(
@@ -1674,6 +1707,7 @@ def test_db_to_db_exclude_columns(source, dest):
             f"select count(*) from {schema_rand_prefix}.input"
         ).fetchall()
         assert res[0][0] == 2
+    source_engine.dispose()
     result = invoke_ingest_command(
         source_uri,
         f"{schema_rand_prefix}.input",
@@ -1698,6 +1732,9 @@ def test_db_to_db_exclude_columns(source, dest):
         f"SELECT column_name FROM information_schema.columns WHERE table_schema = '{schema_rand_prefix}' AND table_name = 'output'"
     ).fetchall()
     assert columns == [("id",), ("val",), ("updated_at",)]
+
+    # Clean up
+    dest_engine.dispose()
     source.stop()
     dest.stop()
 
@@ -2066,7 +2103,7 @@ def get_query_result(uri: str, query: str):
     engine = sqlalchemy.create_engine(uri, poolclass=NullPool)
     with engine.connect() as conn:
         res = conn.execute(query).fetchall()
-
+    engine.dispose()
     return res
 
 
@@ -2267,7 +2304,14 @@ def custom_query_tests():
 @pytest.mark.parametrize("source", list(SOURCES.values()), ids=list(SOURCES.keys()))
 @pytest.mark.parametrize("testcase", custom_query_tests())
 def test_custom_query(testcase, source, dest):
-    testcase(source.start(), dest.start())
+    with ThreadPoolExecutor() as executor:
+        source_future = executor.submit(source.start)
+        dest_future = executor.submit(dest.start)
+        source_uri = source_future.result()
+        dest_uri = dest_future.result()
+    testcase(source_uri, dest_uri)
+    source.stop()
+    dest.stop()
 
 
 # Integration testing when the access token is not provided, and it is only for the resource "repo_events
@@ -2285,6 +2329,7 @@ def test_github_to_duckdb(dest):
     assert res.exit_code == 0
     dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
     res = dest_engine.execute(f"select count(*) from {dest_table}").fetchall()
+    dest_engine.dispose()
     assert len(res) > 0
 
 
@@ -2560,6 +2605,7 @@ def appstore_test_cases() -> Iterable[Callable]:
 
         dest_engine = sqlalchemy.create_engine(dest_uri)
         count = dest_engine.execute(f"select count(*) from {dest_table}").fetchone()[0]
+        dest_engine.dispose()
         assert count == 3
 
     def test_incremental_ingestion(dest_uri):
@@ -2696,6 +2742,7 @@ def appstore_test_cases() -> Iterable[Callable]:
             )
             == 2
         )
+        dest_engine.dispose()
 
     return [
         test_no_report_instances_found,
@@ -2785,6 +2832,7 @@ def fs_test_cases(
             rows = conn.execute(f"select count(*) from {dest_table}").fetchall()
             assert len(rows) == 1
             assert rows[0] == (n,)
+        engine.dispose()
 
     def test_empty_source_uri(dest_uri):
         """
@@ -3188,6 +3236,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
         query = f"SELECT rate FROM {dest_table} WHERE currency_code = 'GBP'"
         with dest_engine.connect() as conn:
             rows = conn.execute(query).fetchall()
+        dest_engine.dispose()
 
         # Assert that the rate for GBP is 0.82993
         assert len(rows) > 0, "No data found for GBP"
@@ -3268,6 +3317,7 @@ def test_mysql_zero_dates(source, dest):
             f"select count(*) from {schema_rand_prefix}.input"
         ).fetchall()
         assert res[0][0] == 5
+    source_engine.dispose()
 
     result = invoke_ingest_command(
         source_uri,
@@ -3281,6 +3331,7 @@ def test_mysql_zero_dates(source, dest):
 
     dest_engine = sqlalchemy.create_engine(dest_uri)
     res = dest_engine.execute(f"select * from {schema_rand_prefix}.output").fetchall()
+    dest_engine.dispose()
 
     # assert there are no new rows, since DBs like DuckDB accept NULL and dlt adds a separate string column for the value `0000-00-00 00:00:00`
     # we want 4 columns: name, created_at, _dlt_load_id, _dlt_id
@@ -3306,6 +3357,10 @@ def test_mysql_zero_dates(source, dest):
     assert res[2] == ("Row 3", "1970-01-01 00:00:00")
     assert res[3] == ("Row 4", "2025-04-05 08:30:00")
     assert res[4] == ("Row 5", "1970-01-01 00:00:00")
+
+    # Clean up
+    source.stop()
+    dest.stop()
 
 
 def appsflyer_test_cases():
@@ -3700,8 +3755,6 @@ def test_stripe_source_full_refresh(stripe_table):
     rel_db_path_to_command = f"ingestr/testdata/{dbname}"
     uri = f"duckdb:///{rel_db_path_to_command}"
 
-    conn = duckdb.connect(abs_db_path)
-
     # Run ingest command
     result = invoke_ingest_command(
         f"stripe://{stripe_table}s?api_key={stripe_token}",
@@ -3713,10 +3766,12 @@ def test_stripe_source_full_refresh(stripe_table):
     assert result.exit_code == 0
 
     # Verify data was loaded
+    conn = duckdb.connect(abs_db_path)
     res = conn.sql(f"select count(*) from raw.{stripe_table}s").fetchone()
     assert res[0] > 0, f"No {stripe_table} records found"
 
     # Clean up
+    conn.close()
     try:
         os.remove(abs_db_path)
     except Exception:
@@ -3738,8 +3793,6 @@ def test_stripe_source_incremental(stripe_table):
     rel_db_path_to_command = f"ingestr/testdata/{dbname}"
     uri = f"duckdb:///{rel_db_path_to_command}"
 
-    conn = duckdb.connect(abs_db_path)
-
     # Run ingest command
     result = invoke_ingest_command(
         f"stripe://{stripe_table}s?api_key={stripe_token}",
@@ -3753,10 +3806,12 @@ def test_stripe_source_incremental(stripe_table):
     assert result.exit_code == 0
 
     # Verify data was loaded
+    conn = duckdb.connect(abs_db_path)
     res = conn.sql(f"select count(*) from raw.{stripe_table}s").fetchone()
     assert res[0] > 0, f"No {stripe_table} records found"
 
     # Clean up
+    conn.close()
     try:
         os.remove(abs_db_path)
     except Exception:
@@ -3875,6 +3930,7 @@ def trustpilot_test_case(dest_uri):
         with engine.connect() as conn:
             rows = conn.execute(f"SELECT * FROM {dest_table}").fetchall()
             assert len(rows) > 0, "No data ingested into the destination"
+        engine.dispose()
 
 
 @pytest.mark.parametrize(
@@ -3975,6 +4031,7 @@ def pinterest_test_case(dest_uri):
         with engine.connect() as conn:
             rows = conn.execute(f"SELECT * FROM {dest_table}").fetchall()
             assert len(rows) > 0, "No data ingested into the destination"
+        engine.dispose()
 
 
 @pytest.mark.parametrize(
