@@ -2,6 +2,7 @@ import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 from main_test import DESTINATIONS, SOURCES  # type: ignore
 
 
@@ -13,6 +14,14 @@ def pytest_configure(config):
 def pytest_configure_node(node):
     """xdist hook"""
     node.workerinput["shared_directory"] = node.config.shared_directory
+
+
+@pytest.fixture(scope="session")
+def shared_directory(request):
+    if is_master(request.config):
+        return request.config.shared_directory
+    else:
+        return request.config.workerinput["shared_directory"]
 
 
 def is_master(config):
