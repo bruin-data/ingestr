@@ -44,6 +44,7 @@ from ingestr.src.sources import (
     GoogleSheetsSource,
     GorgiasSource,
     HubspotSource,
+    InfluxDBSource,
     IsocPulseSource,
     KafkaSource,
     KinesisSource,
@@ -185,6 +186,7 @@ class SourceDestinationFactory:
         "sftp": SFTPSource,
         "pinterest": PinterestSource,
         "zoom": ZoomSource,
+        "influxdb": InfluxDBSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

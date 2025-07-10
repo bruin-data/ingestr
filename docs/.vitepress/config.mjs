@@ -82,6 +82,7 @@ export default defineConfig({
               },
               { text: "GCP Spanner", link: "/supported-sources/spanner.md" },
               { text: "IBM Db2", link: "/supported-sources/db2.md" },
+              { text: "InfluxDB", link: "/supported-sources/influxdb.md" },
               { text: "Kafka", link: "/supported-sources/kafka.md" },
               { text: "Local CSV Files", link: "/supported-sources/csv.md" },
               {
