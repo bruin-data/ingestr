@@ -4,9 +4,11 @@ import unittest
 
 import dlt
 import pytest
+from sqlglot.helper import classproperty
 
 from ingestr.src.destinations import (
     BigQueryDestination,
+    CrateDBDestination,
     DatabricksDestination,
     DuckDBDestination,
     MsSQLDestination,
@@ -111,3 +113,11 @@ class MsSQLDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
 class DatabricksDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
     destination = DatabricksDestination()
     expected_class = dlt.destinations.databricks
+
+
+class CrateDBDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
+    destination = CrateDBDestination()
+
+    @classproperty
+    def expected_class(cls):
+        return dlt.destinations.cratedb  # type: ignore[attr-defined]
