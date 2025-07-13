@@ -593,6 +593,8 @@ tomlkit==0.13.2
     # via
     #   dlt
     #   snowflake-connector-python
+toolz==1.0.0
+    # via -r requirements.in
 tqdm==4.67.1
     # via -r requirements.in
 trino==0.336.0
