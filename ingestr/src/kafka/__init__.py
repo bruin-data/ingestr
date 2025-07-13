@@ -14,7 +14,7 @@
 
 """A source to extract Kafka messages.
 
-When extraction starts, partitions length is checked -
+When extraction starts, partition length is checked -
 data is read only up to it, overriding the default Kafka's
 behavior of waiting for new messages in endless loop.
 """
@@ -30,8 +30,8 @@ from dlt.common.typing import TAnyDateTime, TDataItem
 
 from .helpers import (
     KafkaCredentials,
+    KafkaEventProcessor,
     OffsetTracker,
-    default_msg_processor,
 )
 
 
@@ -43,9 +43,7 @@ from .helpers import (
 def kafka_consumer(
     topics: Union[str, List[str]],
     credentials: Union[KafkaCredentials, Consumer] = dlt.secrets.value,
-    msg_processor: Optional[
-        Callable[[Message], Dict[str, Any]]
-    ] = default_msg_processor,
+    msg_processor: Optional[Callable[[Message], Dict[str, Any]]] = None,
     batch_size: Optional[int] = 3000,
     batch_timeout: Optional[int] = 3,
     start_from: Optional[TAnyDateTime] = None,
@@ -63,17 +61,19 @@ def kafka_consumer(
             Auth credentials or an initiated Kafka consumer. By default,
             is taken from secrets.
         msg_processor(Optional[Callable]): A function-converter,
-            which'll process every Kafka message after it's read and
-            before it's transfered to the destination.
+            which will process every Kafka message after it is read and
+            before it is transferred to the destination.
         batch_size (Optional[int]): Messages batch size to read at once.
         batch_timeout (Optional[int]): Maximum time to wait for a batch
-            consume, in seconds.
+            to be consumed in seconds.
         start_from (Optional[TAnyDateTime]): A timestamp, at which to start
             reading. Older messages are ignored.
 
     Yields:
         Iterable[TDataItem]: Kafka messages.
     """
+    msg_processor = msg_processor or KafkaEventProcessor().process
+
     if not isinstance(topics, list):
         topics = [topics]
 
