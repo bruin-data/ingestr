@@ -80,18 +80,18 @@ class SqlSource:
         if uri.startswith("snowflake://"):
             parsed_uri = urlparse(uri)
             query_params = parse_qs(parsed_uri.query)
-            
+
             if "private_key" in query_params:
                 from dlt.common.libs.cryptography import decode_private_key
-                
+
                 private_key = query_params["private_key"][0]
                 passphrase = query_params.get("private_key_passphrase", [None])[0]
                 decoded_key = decode_private_key(private_key, passphrase)
-                
+
                 query_params["private_key"] = [base64.b64encode(decoded_key).decode()]
                 if "private_key_passphrase" in query_params:
                     del query_params["private_key_passphrase"]
-                
+
                 # Rebuild URI
                 uri = parsed_uri._replace(
                     query=urlencode(query_params, doseq=True)

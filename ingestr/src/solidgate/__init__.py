@@ -107,7 +107,7 @@ COLUMN_HINTS = {
         "transaction_id": {"data_type": "text"},
         "chargeback_id": {"data_type": "text"},
         "legal_entity": {"data_type": "text"},
-    }
+    },
 }
 
 
@@ -124,7 +124,7 @@ def solidgate_source(
         name="subscriptions",
         write_disposition="merge",
         primary_key="id",
-        columns=COLUMN_HINTS["subscriptions"],
+        columns=COLUMN_HINTS["subscriptions"],  # type: ignore
     )
     def fetch_all_subscriptions(
         dateTime=dlt.sources.incremental(
@@ -148,7 +148,7 @@ def solidgate_source(
         name="apm_orders",
         write_disposition="merge",
         primary_key="order_id",
-        columns=COLUMN_HINTS["apm_orders"],
+        columns=COLUMN_HINTS["apm_orders"],  # type: ignore
     )
     def fetch_apm_orders(
         dateTime=dlt.sources.incremental(
@@ -172,7 +172,7 @@ def solidgate_source(
         name="card_orders",
         write_disposition="merge",
         primary_key="order_id",
-        columns=COLUMN_HINTS["card_orders"],
+        columns=COLUMN_HINTS["card_orders"],  # type: ignore
     )
     def fetch_card_orders(
         dateTime=dlt.sources.incremental(
@@ -196,7 +196,7 @@ def solidgate_source(
         name="financial_entries",
         write_disposition="merge",
         primary_key="id",
-        columns=COLUMN_HINTS["financial_entries"],
+        columns=COLUMN_HINTS["financial_entries"],  # type: ignore
     )
     def fetch_financial_entries(
         dateTime=dlt.sources.incremental(

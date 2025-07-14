@@ -109,7 +109,7 @@ class SolidgateClient:
         # Retry getting the report for up to 10 minutes (600 seconds) with 5-second intervals
         max_retries = 120  # 10 minutes / 5 seconds = 120 attempts
         retry_count = 0
-        
+
         while retry_count < max_retries:
             get_response = self.client.get(report_url, headers=headers_get)
 
@@ -117,7 +117,9 @@ class SolidgateClient:
                 try:
                     response_json = json.loads(get_response.content)
                     if "error" in response_json:
-                        raise Exception(f"API Error: {response_json['error']['messages']}")
+                        raise Exception(
+                            f"API Error: {response_json['error']['messages']}"
+                        )
                 except json.JSONDecodeError:
                     try:
                         csv_data = get_response.content.decode("utf-8")
