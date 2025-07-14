@@ -92,9 +92,6 @@ class SolidgateClient:
         if not report_url:
             return f"Report URL not found in the response: {post_response.json()}", 400
 
-        # Wait for 5 seconds before attempting to download the report as report may not be immediately available
-        time.sleep(5)
-
         data = self.public_key + self.public_key
         hmac_hash = hmac.new(
             self.secret_key.encode("utf-8"), data.encode("utf-8"), hashlib.sha512
@@ -109,27 +106,36 @@ class SolidgateClient:
             "Content-Type": "application/json",
         }
 
-        get_response = self.client.get(report_url, headers=headers_get)
+        # Retry getting the report for up to 10 minutes (600 seconds) with 5-second intervals
+        max_retries = 120  # 10 minutes / 5 seconds = 120 attempts
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            get_response = self.client.get(report_url, headers=headers_get)
 
-        if get_response.status_code == 200:
-            try:
-                response_json = json.loads(get_response.content)
-                if "error" in response_json:
-                    raise Exception(f"API Error: {response_json['error']['messages']}")
-            except json.JSONDecodeError:
+            if get_response.status_code == 200:
                 try:
-                    csv_data = get_response.content.decode("utf-8")
-                    df = pd.read_csv(StringIO(csv_data))
-                    df["created_at"] = df["created_at"].apply(
-                        lambda x: pendulum.parse(x)
+                    response_json = json.loads(get_response.content)
+                    if "error" in response_json:
+                        raise Exception(f"API Error: {response_json['error']['messages']}")
+                except json.JSONDecodeError:
+                    try:
+                        csv_data = get_response.content.decode("utf-8")
+                        df = pd.read_csv(StringIO(csv_data))
+                        df["created_at"] = df["created_at"].apply(
+                            lambda x: pendulum.parse(x)
+                        )
+                        return df
+                    except Exception as e:
+                        raise Exception(f"Error reading CSV: {e}")
+            else:
+                # Report might not be ready yet, wait and retry
+                retry_count += 1
+                if retry_count >= max_retries:
+                    raise Exception(
+                        f"Failed to get report after {max_retries} attempts. Status code: {get_response.status_code}"
                     )
-                    return df
-                except Exception as e:
-                    raise Exception(f"Error reading CSV: {e}")
-        else:
-            raise Exception(
-                f"Failed to get report. Status code: {get_response.status_code}"
-            )
+                time.sleep(5)  # Wait 5 seconds before retrying
 
     def generateSignature(self, json_string):
         data = self.public_key + json_string + self.public_key
