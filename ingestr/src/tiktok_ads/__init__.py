@@ -112,7 +112,8 @@ def tiktok_source(
         datetime=(
             dlt.sources.incremental(
                 incremental_loading_param,
-                start_date,
+                initial_value=start_date,
+                end_value=end_date,
                 range_end="closed",
                 range_start="closed",
             )
@@ -120,15 +121,16 @@ def tiktok_source(
             else None
         ),
     ) -> Iterable[TDataItem]:
-        current_date = start_date.in_tz(timezone)
+        start_date_tz_adjusted = start_date.in_tz(timezone)
+        end_date_tz_adjusted = end_date.in_tz(timezone)
 
         if datetime is not None:
-            datetime_str = datetime.last_value
-            current_date = ensure_pendulum_datetime(datetime_str).in_tz(timezone)
+            start_date_tz_adjusted = ensure_pendulum_datetime(datetime.last_value).in_tz(timezone)
+            end_date_tz_adjusted = ensure_pendulum_datetime(datetime.end_value).in_tz(timezone)
 
         list_of_interval = find_intervals(
-            current_date=current_date,
-            end_date=end_date,
+            current_date=start_date_tz_adjusted,
+            end_date=end_date_tz_adjusted,
             interval_days=interval_days,
         )
 
