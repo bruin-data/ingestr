@@ -2142,6 +2142,25 @@ class LinkedInAdsSource:
             metrics=metrics,
             time_granularity=time_granularity,
         ).with_resources("custom_reports")
+    
+class ClickupSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        api_token = params.get("api_token")
+
+        if api_token is None:
+            raise MissingValueError("api_token", "ClickUp")
+
+        from ingestr.src.clickup import clickup_source
+
+        if table not in {"users", "teams", "lists", "tasks", "spaces"}:
+            raise UnsupportedResourceError(table, "ClickUp")
+
+        return clickup_source(api_token=api_token[0]).with_resources(table)
 
 
 class AppLovinSource:
