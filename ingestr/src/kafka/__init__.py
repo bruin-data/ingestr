@@ -83,7 +83,7 @@ def kafka_consumer(
     # read messages up to the maximum offsets,
     # not waiting for new messages
     with closing(consumer):
-        while tracker.has_unread:
+        while True:
             messages = consumer.consume(batch_size, timeout=batch_timeout)
             if not messages:
                 break
@@ -101,3 +101,6 @@ def kafka_consumer(
                     tracker.renew(msg)
 
             yield batch
+
+            if tracker.has_unread is False:
+                return
