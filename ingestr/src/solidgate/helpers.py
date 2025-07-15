@@ -1,4 +1,5 @@
 import base64
+import csv
 import hashlib
 import hmac
 import json
@@ -123,11 +124,18 @@ class SolidgateClient:
                 except json.JSONDecodeError:
                     try:
                         csv_data = get_response.content.decode("utf-8")
-                        df = pd.read_csv(StringIO(csv_data))
-                        df["created_at"] = df["created_at"].apply(
-                            lambda x: pendulum.parse(x)
-                        )
-                        return df
+                        reader = csv.DictReader(StringIO(csv_data))
+                        rows = []
+                        for row in reader:
+                            if row["created_at"]:
+                                row["created_at"] = pendulum.parse(row["created_at"])
+                            else:
+                                row["created_at"] = None
+
+                            row2 = {k: v for k, v in row.items() if v != ''}
+                            rows.append(row2)
+                        
+                        return rows
                     except Exception as e:
                         raise Exception(f"Error reading CSV: {e}")
             else:
