@@ -1690,16 +1690,6 @@ query discountNodes($after: String, $query: String, $first: Int)  {
                 "nullable": True,
                 "description": "The category of the product from Shopify's Standard Product Taxonomy.",
             },
-            "combinedListing": {
-                "data_type": "json",
-                "nullable": True,
-                "description": "A special product type that combines separate products into a single product listing.",
-            },
-            "combinedListingRole": {
-                "data_type": "json",
-                "nullable": True,
-                "description": "The role of the product in a combined listing.",
-            },
             "compareAtPriceRange": {
                 "data_type": "json",
                 "nullable": True,
@@ -1841,12 +1831,6 @@ query products($after: String, $query: String, $first: Int)  {
       category {
         id
       }
-      combinedListing {
-        parentProduct {
-          id
-        }
-      }
-      combinedListingRole
       compareAtPriceRange {
         maxVariantCompareAtPrice {
           amount
