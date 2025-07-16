@@ -2155,7 +2155,7 @@ class ClickupSource:
 
         if api_token is None:
             raise MissingValueError("api_token", "ClickUp")
-        
+
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
         start_date = (
@@ -2164,7 +2164,9 @@ class ClickupSource:
             else pendulum.datetime(2020, 1, 1, tz="UTC")
         )
         end_date = (
-            ensure_pendulum_datetime(interval_end).in_timezone("UTC") if interval_end else None
+            ensure_pendulum_datetime(interval_end).in_timezone("UTC")
+            if interval_end
+            else None
         )
 
         from ingestr.src.clickup import clickup_source
@@ -2172,7 +2174,9 @@ class ClickupSource:
         if table not in {"user", "teams", "lists", "tasks", "spaces"}:
             raise UnsupportedResourceError(table, "ClickUp")
 
-        return clickup_source(api_token=api_token[0], start_date=start_date, end_date=end_date).with_resources(table)
+        return clickup_source(
+            api_token=api_token[0], start_date=start_date, end_date=end_date
+        ).with_resources(table)
 
 
 class AppLovinSource:

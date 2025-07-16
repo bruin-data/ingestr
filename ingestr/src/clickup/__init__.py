@@ -4,15 +4,19 @@ from datetime import datetime
 from typing import Iterable
 
 import dlt
+import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.sources import DltResource
-import pendulum
 
 from .helpers import ClickupClient
 
 
 @dlt.source(max_table_nesting=0)
-def clickup_source(api_token: str = dlt.secrets.value, start_date: datetime = None, end_date: datetime = None) -> Iterable[DltResource]:
+def clickup_source(
+    api_token: str = dlt.secrets.value,
+    start_date: datetime = None,
+    end_date: datetime = None,
+) -> Iterable[DltResource]:
     client = ClickupClient(api_token)
 
     @dlt.resource(
@@ -59,15 +63,23 @@ def clickup_source(api_token: str = dlt.secrets.value, start_date: datetime = No
             start = ensure_pendulum_datetime(start_date).in_timezone("UTC")
 
         if date_updated.end_value is None:
-            end = (pendulum.now("UTC"))
+            end = pendulum.now("UTC")
         else:
             end = date_updated.end_value.in_timezone("UTC")
-        
+
         for list_obj in client.get_lists():
-            for task in client.paginated(f"/list/{list_obj['id']}/task", "tasks", {"page_size": 100}):
+            for task in client.paginated(
+                f"/list/{list_obj['id']}/task", "tasks", {"page_size": 100}
+            ):
                 task_dt = ensure_pendulum_datetime(int(task["date_updated"]) / 1000)
                 if task_dt >= start and task_dt <= end:
                     task["date_updated"] = task_dt
                     yield task
 
-    return user, teams, spaces, lists, tasks, 
+    return (
+        user,
+        teams,
+        spaces,
+        lists,
+        tasks,
+    )

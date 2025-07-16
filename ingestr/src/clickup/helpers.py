@@ -32,7 +32,6 @@ class ClickupClient:
                 break
             page += 1
 
-
     def get_teams(self):
         data = self.get("/team")
         return data.get("teams", [])
