@@ -91,6 +91,7 @@ exclude = [
     'src/pipedrive/.*',
     'src/linear/.*',
     'src/zoom/.*',
+    'src/clickup/.*',
   ]
 
 [[tool.mypy.overrides]]
@@ -120,6 +121,7 @@ module = [
   "ingestr.src.pipedrive.*",
   "ingestr.src.linear.*",
   "ingestr.src.zoom.*",
+  "ingestr.src.clickup.*",
 ]
 follow_imports = "skip"
 

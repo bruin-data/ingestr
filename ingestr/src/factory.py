@@ -32,6 +32,7 @@ from ingestr.src.sources import (
     AsanaSource,
     AttioSource,
     ChessSource,
+    ClickupSource,
     DynamoDBSource,
     ElasticsearchSource,
     FacebookAdsSource,
@@ -185,6 +186,7 @@ class SourceDestinationFactory:
         "sftp": SFTPSource,
         "pinterest": PinterestSource,
         "zoom": ZoomSource,
+        "clickup": ClickupSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

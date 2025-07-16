@@ -2144,6 +2144,41 @@ class LinkedInAdsSource:
         ).with_resources("custom_reports")
 
 
+class ClickupSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        api_token = params.get("api_token")
+
+        if api_token is None:
+            raise MissingValueError("api_token", "ClickUp")
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+        start_date = (
+            ensure_pendulum_datetime(interval_start).in_timezone("UTC")
+            if interval_start
+            else pendulum.datetime(2020, 1, 1, tz="UTC")
+        )
+        end_date = (
+            ensure_pendulum_datetime(interval_end).in_timezone("UTC")
+            if interval_end
+            else None
+        )
+
+        from ingestr.src.clickup import clickup_source
+
+        if table not in {"user", "teams", "lists", "tasks", "spaces"}:
+            raise UnsupportedResourceError(table, "ClickUp")
+
+        return clickup_source(
+            api_token=api_token[0], start_date=start_date, end_date=end_date
+        ).with_resources(table)
+
+
 class AppLovinSource:
     def handles_incrementality(self) -> bool:
         return True
