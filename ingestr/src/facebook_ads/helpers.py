@@ -3,6 +3,7 @@
 import functools
 import itertools
 import time
+from datetime import datetime
 from typing import Any, Iterator, Sequence
 
 import dlt
@@ -23,43 +24,17 @@ from facebook_business.api import FacebookResponse
 
 from .exceptions import InsightsJobTimeout
 from .settings import (
-    FACEBOOK_INSIGHTS_RETENTION_PERIOD,
     INSIGHTS_PRIMARY_KEY,
     TFbMethod,
 )
 
 
-def get_start_date(
-    incremental_start_date: dlt.sources.incremental[str],
-) -> pendulum.DateTime:
-    """
-    Get the start date for incremental loading of Facebook Insights data.
-    """
-    start_date: pendulum.DateTime = ensure_pendulum_datetime(
-        incremental_start_date.start_value
-    )
-
-    # facebook forgets insights so trim the lag and warn
-    min_start_date = pendulum.today().subtract(
-        months=FACEBOOK_INSIGHTS_RETENTION_PERIOD
-    )
-    if start_date < min_start_date:
-        logger.warning(
-            "%s: Start date is earlier than %s months ago, using %s instead. "
-            "For more information, see https://www.facebook.com/business/help/1695754927158071?id=354406972049255",
-            "facebook_insights",
-            FACEBOOK_INSIGHTS_RETENTION_PERIOD,
-            min_start_date,
-        )
-        start_date = min_start_date
-        incremental_start_date.start_value = min_start_date
-
-    # lag the incremental start date by attribution window lag
-    incremental_start_date.start_value = start_date.isoformat()
-    return start_date
-
-
 def process_report_item(item: AbstractObject) -> DictStrAny:
+    if "date_start" in item:
+        item["date_start"] = datetime.strptime(item["date_start"], "%Y-%m-%d").date()
+    if "date_stop" in item:
+        item["date_stop"] = datetime.strptime(item["date_stop"], "%Y-%m-%d").date()
+    
     d: DictStrAny = item.export_all_data()
     for pki in INSIGHTS_PRIMARY_KEY:
         if pki not in d:
@@ -138,15 +113,20 @@ def execute_job(
     time_start = time.time()
     sleep_time = 3
     while status != "Job Completed":
+        print("-----")
+        print("waiting for job to finish")
         duration = time.time() - time_start
         job = job.api_get()
         status = job["async_status"]
         percent_complete = job["async_percent_completion"]
+        print("async_status", status)
+        print("percent_complete", percent_complete)
 
         job_id = job["id"]
         logger.info("%s, %d%% done", status, percent_complete)
 
         if status == "Job Completed":
+            print("job completed")
             return job
 
         if duration > insights_max_wait_to_start_seconds and percent_complete == 0:

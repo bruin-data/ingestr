@@ -121,7 +121,7 @@ enum-compat==0.0.3
     # via intuit-oauth
 et-xmlfile==2.0.0
     # via openpyxl
-facebook-business==20.0.0
+facebook-business==23.0.0
     # via -r requirements.in
 filelock==3.17.0
     # via snowflake-connector-python
