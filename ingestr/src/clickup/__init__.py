@@ -26,22 +26,18 @@ def clickup_source(api_token: str = dlt.secrets.value, start_date: datetime = No
 
     @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
     def teams() -> Iterable[dict]:
-        data = client.get("/team")
-        yield from data.get("teams", [])
+        for team in client.get_teams():
+            yield team
 
     @dlt.resource(name="spaces", primary_key="id", write_disposition="merge")
     def spaces() -> Iterable[dict]:
-        for team in client.get("/team").get("teams", []):
-            team_id = team["id"]
-            yield from client.paginated(f"/team/{team_id}/space", "spaces")
+        for space in client.get_spaces():
+            yield space
 
     @dlt.resource(name="lists", write_disposition="merge", primary_key="id")
     def lists() -> Iterable[dict]:
-        for team in client.get("/team").get("teams", []):
-            team_id = team["id"]
-            for space in client.paginated(f"/team/{team_id}/space", "spaces"):
-                space_id = space["id"]
-                yield from client.paginated(f"/space/{space_id}/list", "lists")
+        for list in client.get_lists():
+            yield list
 
     @dlt.resource(
         name="tasks",
@@ -67,13 +63,11 @@ def clickup_source(api_token: str = dlt.secrets.value, start_date: datetime = No
         else:
             end = date_updated.end_value.in_timezone("UTC")
         
-        for list_obj in lists():
-            list_id = list_obj["id"]
-            params = {"page_size": 100}
-            for task in client.paginated(f"/list/{list_id}/task", "tasks", params):
+        for list_obj in client.get_lists():
+            for task in client.paginated(f"/list/{list_obj['id']}/task", "tasks", {"page_size": 100}):
                 task_dt = ensure_pendulum_datetime(int(task["date_updated"]) / 1000)
                 if task_dt >= start and task_dt <= end:
                     task["date_updated"] = task_dt
                     yield task
 
-    return user, teams, lists, tasks, spaces
+    return user, teams, spaces, lists, tasks, 

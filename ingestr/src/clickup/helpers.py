@@ -31,3 +31,18 @@ class ClickupClient:
             if data.get("last_page") or len(items) < params.get("page_size", 100):
                 break
             page += 1
+
+
+    def get_teams(self):
+        data = self.get("/team")
+        return data.get("teams", [])
+
+    def get_spaces(self):
+        for team in self.get_teams():
+            for space in self.paginated(f"/team/{team['id']}/space", "spaces"):
+                yield space
+
+    def get_lists(self):
+        for space in self.get_spaces():
+            for lst in self.paginated(f"/space/{space['id']}/list", "lists"):
+                yield lst
