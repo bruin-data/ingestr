@@ -32,6 +32,7 @@ from ingestr.src.sources import (
     AsanaSource,
     AttioSource,
     ChessSource,
+    ClickupSource,
     DynamoDBSource,
     ElasticsearchSource,
     FacebookAdsSource,
@@ -72,7 +73,6 @@ from ingestr.src.sources import (
     TrustpilotSource,
     ZendeskSource,
     ZoomSource,
-    ClickupSource,
 )
 
 SQL_SOURCE_SCHEMES = [

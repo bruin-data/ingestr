@@ -2142,7 +2142,8 @@ class LinkedInAdsSource:
             metrics=metrics,
             time_granularity=time_granularity,
         ).with_resources("custom_reports")
-    
+
+
 class ClickupSource:
     def handles_incrementality(self) -> bool:
         return True

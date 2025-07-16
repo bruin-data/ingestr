@@ -22,7 +22,7 @@ def clickup_source(api_token: str = dlt.secrets.value) -> Iterable[DltResource]:
         data = client.get("/user")
         yield data
 
-    @dlt.resource(name="teams", primary_key= "id", write_disposition="merge")
+    @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
     def teams() -> Iterable[dict]:
         data = client.get("/team")
         yield from data.get("teams", [])
