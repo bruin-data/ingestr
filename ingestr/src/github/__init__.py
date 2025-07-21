@@ -10,7 +10,7 @@ from dlt.sources import DltResource
 from .helpers import get_reactions_data, get_rest_pages, get_stargazers
 
 
-@dlt.source
+@dlt.source(max_table_nesting=0)
 def github_reactions(
     owner: str,
     name: str,
@@ -114,7 +114,7 @@ def github_repo_events(
     return repo_events
 
 
-@dlt.source
+@dlt.source(max_table_nesting=0)
 def github_stargazers(
     owner: str,
     name: str,
