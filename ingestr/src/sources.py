@@ -1814,7 +1814,21 @@ class GitHubSource:
                 owner=owner, name=repo, access_token=access_token
             ).with_resources(table)
         elif table == "repo_events":
-            return github_repo_events(owner=owner, name=repo, access_token=access_token)
+            start_date = kwargs.get("interval_start") or pendulum.now().subtract(days=30)
+            end_date = kwargs.get("interval_end") or pendulum.now()
+            
+            if isinstance(start_date, str):
+                start_date = pendulum.parse(start_date)
+            if isinstance(end_date, str):
+                end_date = pendulum.parse(end_date)
+                
+            return github_repo_events(
+                owner=owner, 
+                name=repo, 
+                access_token=access_token,
+                start_date=start_date,
+                end_date=end_date
+            )
         elif table == "stargazers":
             return github_stargazers(owner=owner, name=repo, access_token=access_token)
         else:
