@@ -76,6 +76,27 @@ class SqlSource:
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
+        # Process Snowflake private key authentication
+        if uri.startswith("snowflake://"):
+            parsed_uri = urlparse(uri)
+            query_params = parse_qs(parsed_uri.query)
+
+            if "private_key" in query_params:
+                from dlt.common.libs.cryptography import decode_private_key
+
+                private_key = query_params["private_key"][0]
+                passphrase = query_params.get("private_key_passphrase", [None])[0]
+                decoded_key = decode_private_key(private_key, passphrase)
+
+                query_params["private_key"] = [base64.b64encode(decoded_key).decode()]
+                if "private_key_passphrase" in query_params:
+                    del query_params["private_key_passphrase"]
+
+                # Rebuild URI
+                uri = parsed_uri._replace(
+                    query=urlencode(query_params, doseq=True)
+                ).geturl()
+
         # clickhouse://<username>:<password>@<host>:<port>?secure=<secure>
         if uri.startswith("clickhouse://"):
             parsed_uri = urlparse(uri)
@@ -139,7 +160,6 @@ class SqlSource:
                 return engine.execution_options(read_only=True)
 
             engine_adapter_callback = eng_callback
-
         from dlt.common.libs.sql_alchemy import (
             Engine,
             MetaData,
@@ -2122,6 +2142,41 @@ class LinkedInAdsSource:
             metrics=metrics,
             time_granularity=time_granularity,
         ).with_resources("custom_reports")
+
+
+class ClickupSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        api_token = params.get("api_token")
+
+        if api_token is None:
+            raise MissingValueError("api_token", "ClickUp")
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+        start_date = (
+            ensure_pendulum_datetime(interval_start).in_timezone("UTC")
+            if interval_start
+            else pendulum.datetime(2020, 1, 1, tz="UTC")
+        )
+        end_date = (
+            ensure_pendulum_datetime(interval_end).in_timezone("UTC")
+            if interval_end
+            else None
+        )
+
+        from ingestr.src.clickup import clickup_source
+
+        if table not in {"user", "teams", "lists", "tasks", "spaces"}:
+            raise UnsupportedResourceError(table, "ClickUp")
+
+        return clickup_source(
+            api_token=api_token[0], start_date=start_date, end_date=end_date
+        ).with_resources(table)
 
 
 class AppLovinSource:

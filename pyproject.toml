@@ -91,6 +91,7 @@ exclude = [
     'src/pipedrive/.*',
     'src/linear/.*',
     'src/zoom/.*',
+    'src/clickup/.*',
     'src/influxdb/.*'
   ]
 
@@ -121,6 +122,7 @@ module = [
   "ingestr.src.pipedrive.*",
   "ingestr.src.linear.*",
   "ingestr.src.zoom.*",
+  "ingestr.src.clickup.*",
   "ingestr.src.influxdb",
 ]
 follow_imports = "skip"

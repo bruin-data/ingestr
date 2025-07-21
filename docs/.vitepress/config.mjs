@@ -119,6 +119,7 @@ export default defineConfig({
               { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Attio", link: "/supported-sources/attio.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
+              { text: "ClickUp", link: "/supported-sources/clickup.md" },
               {
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",

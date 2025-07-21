@@ -97,7 +97,7 @@ decorator==5.2.1
     # via gcsfs
 deprecation==2.1.0
     # via rudder-sdk-python
-dlt==1.10.0
+dlt==1.11.0
     # via
     #   -r requirements.in
     #   dlt-cratedb
@@ -121,7 +121,7 @@ enum-compat==0.0.3
     # via intuit-oauth
 et-xmlfile==2.0.0
     # via openpyxl
-facebook-business==20.0.0
+facebook-business==23.0.0
     # via -r requirements.in
 filelock==3.17.0
     # via snowflake-connector-python
@@ -365,7 +365,9 @@ protobuf==4.25.6
 psutil==6.1.1
     # via -r requirements.in
 psycopg2-binary==2.9.10
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   dlt
 py-machineid==0.6.0
     # via -r requirements.in
 pyairtable==2.3.3

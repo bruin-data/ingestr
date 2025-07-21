@@ -3,7 +3,7 @@ from typing import Any, Dict, Iterable, Iterator
 import dlt
 import pendulum
 
-from .helpers import  _paginate, _normalize_issue, _normalize_team
+from .helpers import _normalize_issue, _normalize_team, _paginate
 
 ISSUES_QUERY = """
 query Issues($cursor: String) {
@@ -143,13 +143,15 @@ def linear_source(
                     yield item
 
     @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
-    def teams( updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+    def teams(
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "updatedAt",
             initial_value=start_date.isoformat(),
             end_value=end_date.isoformat() if end_date else None,
             range_start="closed",
             range_end="closed",
-        ),) -> Iterator[Dict[str, Any]]:
+        ),
+    ) -> Iterator[Dict[str, Any]]:
         print(start_date)
         if updated_at.last_value:
             current_start_date = pendulum.parse(updated_at.last_value)

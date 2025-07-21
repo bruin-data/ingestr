@@ -62,7 +62,7 @@ class ZoomClient:
                 break
             params["next_page_token"] = token
 
-#https://developers.zoom.us/docs/api/rest/reference/zoom-api/methods/#operation/meetings
+    # https://developers.zoom.us/docs/api/rest/reference/zoom-api/methods/#operation/meetings
     def get_meetings(
         self, user_id: str, params: Dict[str, Any]
     ) -> Iterator[Dict[str, Any]]:

@@ -1,9 +1,9 @@
-import json
 from typing import Any, Dict, Iterator, Optional
 
 import requests
 
 LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql"
+
 
 def _graphql(
     api_key: str, query: str, variables: Optional[Dict[str, Any]] = None
@@ -20,6 +20,7 @@ def _graphql(
         raise ValueError(str(payload["errors"]))
     return payload["data"]
 
+
 def _paginate(api_key: str, query: str, root: str) -> Iterator[Dict[str, Any]]:
     cursor: Optional[str] = None
     while True:
@@ -29,6 +30,7 @@ def _paginate(api_key: str, query: str, root: str) -> Iterator[Dict[str, Any]]:
         if not data["pageInfo"]["hasNextPage"]:
             break
         cursor = data["pageInfo"]["endCursor"]
+
 
 def _normalize_issue(item: Dict[str, Any]) -> Dict[str, Any]:
     field_mapping = {
@@ -45,12 +47,22 @@ def _normalize_issue(item: Dict[str, Any]) -> Dict[str, Any]:
         else:
             item[value] = None
             del item[key]
-    json_fields = ["comments", "subscribers", "attachments", "labels", "subtasks","projects", "memberships", "members"]
+    json_fields = [
+        "comments",
+        "subscribers",
+        "attachments",
+        "labels",
+        "subtasks",
+        "projects",
+        "memberships",
+        "members",
+    ]
     for field in json_fields:
         if item.get(field):
             item[f"{field}"] = item[field].get("nodes", [])
-                
+
     return item
+
 
 def _normalize_team(item: Dict[str, Any]) -> Dict[str, Any]:
     json_fields = ["memberships", "members", "projects"]

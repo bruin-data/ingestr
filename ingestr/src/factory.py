@@ -32,6 +32,7 @@ from ingestr.src.sources import (
     AsanaSource,
     AttioSource,
     ChessSource,
+    ClickupSource,
     DynamoDBSource,
     ElasticsearchSource,
     FacebookAdsSource,
@@ -186,6 +187,7 @@ class SourceDestinationFactory:
         "sftp": SFTPSource,
         "pinterest": PinterestSource,
         "zoom": ZoomSource,
+        "clickup": ClickupSource,
         "influxdb": InfluxDBSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {

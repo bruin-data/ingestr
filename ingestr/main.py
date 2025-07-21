@@ -256,7 +256,7 @@ def ingest(
         Optional[list[str]],
         typer.Option(
             help="The column types to be used for the destination table in the format of 'column_name:column_type'",
-            envvar=["COLUMNS", "INGESTR_COLUMNS"],
+            envvar=["INGESTR_COLUMNS"],
         ),
     ] = None,  # type: ignore
     yield_limit: Annotated[
@@ -455,7 +455,7 @@ def ingest(
 
                 column_hints[key]["primary_key"] = True
 
-        pipeline = dlt.pipeline(
+        pipeline = dlt.pipeline(  # type: ignore
             pipeline_name=m.hexdigest(),
             destination=dlt_dest,
             progress=progressInstance,
