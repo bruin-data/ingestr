@@ -4,6 +4,7 @@ import urllib.parse
 from typing import Iterator, Optional, Sequence
 
 import dlt
+import pendulum
 from dlt.common.typing import TDataItems
 from dlt.sources import DltResource
 
@@ -67,7 +68,11 @@ def github_reactions(
 
 @dlt.source(max_table_nesting=0)
 def github_repo_events(
-    owner: str, name: str, access_token: Optional[str] = None
+    owner: str,
+    name: str,
+    access_token: str,
+    start_date: pendulum.DateTime,
+    end_date: pendulum.DateTime,
 ) -> DltResource:
     """Gets events for repository `name` with owner `owner` incrementally.
 
@@ -90,7 +95,8 @@ def github_repo_events(
     def repo_events(
         last_created_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "created_at",
-            initial_value="1970-01-01T00:00:00Z",
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat(),
             last_value_func=max,
             range_end="closed",
             range_start="closed",
@@ -100,8 +106,35 @@ def github_repo_events(
             f"/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(name)}/events"
         )
 
+        # Get the date range from the incremental state
+        start_filter = pendulum.parse(
+            last_created_at.last_value or last_created_at.initial_value
+        )
+        end_filter = (
+            pendulum.parse(last_created_at.end_value)
+            if last_created_at.end_value
+            else None
+        )
+
         for page in get_rest_pages(access_token, repos_path + "?per_page=100"):
-            yield page
+            # Filter events by date range
+            filtered_events = []
+            for event in page:
+                event_date = pendulum.parse(event["created_at"])
+
+                # Check if event is within the date range
+                if event_date >= start_filter:
+                    if end_filter is None or event_date <= end_filter:
+                        filtered_events.append(event)
+                    elif event_date > end_filter:
+                        # Skip events that are newer than our end date
+                        continue
+                else:
+                    # Events are ordered by date desc, so if we hit an older event, we can stop
+                    break
+
+            if filtered_events:
+                yield filtered_events
 
             # stop requesting pages if the last element was already older than initial value
             # note: incremental will skip those items anyway, we just do not want to use the api limits
