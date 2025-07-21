@@ -600,8 +600,7 @@ def ingest(
         if factory.source_scheme == "influxdb":
             if primary_key:
                 write_disposition = "merge"
-            else:
-                write_disposition = "append"
+            
 
         start_time = datetime.now()
      
