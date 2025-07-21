@@ -6,7 +6,6 @@ import json
 import time
 from io import StringIO
 
-import pandas as pd  # type: ignore
 import pendulum
 
 from ingestr.src.http_client import create_client
@@ -132,9 +131,9 @@ class SolidgateClient:
                             else:
                                 row["created_at"] = None
 
-                            row2 = {k: v for k, v in row.items() if v != ''}
+                            row2 = {k: v for k, v in row.items() if v != ""}
                             rows.append(row2)
-                        
+
                         return rows
                     except Exception as e:
                         raise Exception(f"Error reading CSV: {e}")

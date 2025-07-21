@@ -6,12 +6,10 @@ import time
 from datetime import datetime
 from typing import Any, Iterator, Sequence
 
-import dlt
 import humanize
 import pendulum
 from dlt.common import logger
 from dlt.common.configuration.inject import with_config
-from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import DictStrAny, TDataItem, TDataItems
 from dlt.sources.helpers import requests
 from dlt.sources.helpers.requests import Client
@@ -34,7 +32,7 @@ def process_report_item(item: AbstractObject) -> DictStrAny:
         item["date_start"] = datetime.strptime(item["date_start"], "%Y-%m-%d").date()
     if "date_stop" in item:
         item["date_stop"] = datetime.strptime(item["date_stop"], "%Y-%m-%d").date()
-    
+
     d: DictStrAny = item.export_all_data()
     for pki in INSIGHTS_PRIMARY_KEY:
         if pki not in d:

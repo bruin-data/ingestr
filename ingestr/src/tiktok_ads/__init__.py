@@ -125,8 +125,12 @@ def tiktok_source(
         end_date_tz_adjusted = end_date.in_tz(timezone)
 
         if datetime is not None:
-            start_date_tz_adjusted = ensure_pendulum_datetime(datetime.last_value).in_tz(timezone)
-            end_date_tz_adjusted = ensure_pendulum_datetime(datetime.end_value).in_tz(timezone)
+            start_date_tz_adjusted = ensure_pendulum_datetime(
+                datetime.last_value
+            ).in_tz(timezone)
+            end_date_tz_adjusted = ensure_pendulum_datetime(datetime.end_value).in_tz(
+                timezone
+            )
 
         list_of_interval = find_intervals(
             current_date=start_date_tz_adjusted,

@@ -1,14 +1,13 @@
 """Loads campaigns, ads sets, ads, leads and insight data from Facebook Marketing API"""
 
-from datetime import datetime
 from typing import Iterator, Sequence
 
 import dlt
 from dlt.common import pendulum
+from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TDataItems
 from dlt.sources import DltResource
 from facebook_business.adobjects.ad import Ad
-from dlt.common.time import ensure_pendulum_datetime
 
 from .helpers import (
     execute_job,
@@ -167,14 +166,20 @@ def facebook_insights_source(
     def facebook_insights(
         date_start: dlt.sources.incremental[str] = dlt.sources.incremental(
             "date_start",
-            initial_value=ensure_pendulum_datetime(start_date).start_of('day').date(),
-            end_value=ensure_pendulum_datetime(end_date).end_of('day').date() if end_date else None,
+            initial_value=ensure_pendulum_datetime(start_date).start_of("day").date(),
+            end_value=ensure_pendulum_datetime(end_date).end_of("day").date()
+            if end_date
+            else None,
             range_end="closed",
             range_start="closed",
         ),
     ) -> Iterator[TDataItems]:
         start_date = date_start.last_value
-        end_date = pendulum.instance(date_start.end_value) if date_start.end_value else pendulum.now()
+        end_date = (
+            pendulum.instance(date_start.end_value)
+            if date_start.end_value
+            else pendulum.now()
+        )
 
         while start_date <= end_date:
             query = {

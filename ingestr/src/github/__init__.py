@@ -4,9 +4,9 @@ import urllib.parse
 from typing import Iterator, Optional, Sequence
 
 import dlt
+import pendulum
 from dlt.common.typing import TDataItems
 from dlt.sources import DltResource
-import pendulum
 
 from .helpers import get_reactions_data, get_rest_pages, get_stargazers
 
@@ -68,7 +68,11 @@ def github_reactions(
 
 @dlt.source(max_table_nesting=0)
 def github_repo_events(
-    owner: str, name: str, access_token: str, start_date: pendulum.DateTime, end_date: pendulum.DateTime
+    owner: str,
+    name: str,
+    access_token: str,
+    start_date: pendulum.DateTime,
+    end_date: pendulum.DateTime,
 ) -> DltResource:
     """Gets events for repository `name` with owner `owner` incrementally.
 
@@ -103,15 +107,21 @@ def github_repo_events(
         )
 
         # Get the date range from the incremental state
-        start_filter = pendulum.parse(last_created_at.last_value or last_created_at.initial_value)
-        end_filter = pendulum.parse(last_created_at.end_value) if last_created_at.end_value else None
+        start_filter = pendulum.parse(
+            last_created_at.last_value or last_created_at.initial_value
+        )
+        end_filter = (
+            pendulum.parse(last_created_at.end_value)
+            if last_created_at.end_value
+            else None
+        )
 
         for page in get_rest_pages(access_token, repos_path + "?per_page=100"):
             # Filter events by date range
             filtered_events = []
             for event in page:
                 event_date = pendulum.parse(event["created_at"])
-                
+
                 # Check if event is within the date range
                 if event_date >= start_filter:
                     if end_filter is None or event_date <= end_filter:
@@ -122,7 +132,7 @@ def github_repo_events(
                 else:
                     # Events are ordered by date desc, so if we hit an older event, we can stop
                     break
-            
+
             if filtered_events:
                 yield filtered_events
 
