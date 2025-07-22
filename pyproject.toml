@@ -92,6 +92,7 @@ exclude = [
     'src/linear/.*',
     'src/zoom/.*',
     'src/clickup/.*',
+    'src/influxdb/.*'
   ]
 
 [[tool.mypy.overrides]]
@@ -122,6 +123,7 @@ module = [
   "ingestr.src.linear.*",
   "ingestr.src.zoom.*",
   "ingestr.src.clickup.*",
+  "ingestr.src.influxdb",
 ]
 follow_imports = "skip"
 

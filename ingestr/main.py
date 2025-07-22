@@ -506,6 +506,7 @@ def ingest(
 
         if factory.source_scheme == "sqlite":
             source_table = "main." + source_table.split(".")[-1]
+    
 
         if (
             incremental_key
@@ -596,8 +597,13 @@ def ingest(
         if incremental_strategy != IncrementalStrategy.none:
             write_disposition = incremental_strategy.value
 
-        start_time = datetime.now()
+        if factory.source_scheme == "influxdb":
+            if primary_key:
+                write_disposition = "merge"
+            
 
+        start_time = datetime.now()
+     
         run_info: LoadInfo = pipeline.run(
             dlt_source,
             **destination.dlt_run_params(
