@@ -3051,11 +3051,16 @@ class InfluxDBSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
-        host = parsed_uri.netloc
+        host = parsed_uri.hostname
+        port = parsed_uri.port
 
         secure = params.get("secure", ["true"])[0].lower() != "false"
         scheme = "https" if secure else "http"
-        host_url = f"{scheme}://{host}"
+        
+        if port:
+            host_url = f"{scheme}://{host}:{port}"
+        else:
+            host_url = f"{scheme}://{host}"
 
         token = params.get("token")
         org = params.get("org")

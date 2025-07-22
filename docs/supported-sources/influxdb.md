@@ -10,7 +10,8 @@ influxdb://<host>:<port>?token=<token>&org=<org>&bucket=<bucket>&secure=<secure>
 ```
 
 URI parameters:
-- `host`: Hostname and optional port of your InfluxDB instance.
+- `host`: The host address of the database server.
+- `port`: The port number the database server is listening on. If you do not specify a port, the default is 8086 for self-hosted InfluxDB and 443 for InfluxDB Cloud.
 - `token`: Authentication token.
 - `org`: Name of the organization.
 - `bucket`: Bucket that stores the measurements.
