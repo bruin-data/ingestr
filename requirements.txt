@@ -49,6 +49,7 @@ certifi==2025.1.31
     # via
     #   clickhouse-connect
     #   elastic-transport
+    #   influxdb-client
     #   requests
     #   smartsheet-python-sdk
     #   snowflake-connector-python
@@ -252,6 +253,8 @@ idna==3.10
     #   yarl
 inflection==0.5.1
     # via pyairtable
+influxdb-client==1.41.0
+    # via -r requirements.in
 intuit-oauth==1.2.4
     # via python-quickbooks
 isodate==0.7.2
@@ -416,6 +419,7 @@ python-dateutil==2.9.0.post0
     #   aiobotocore
     #   botocore
     #   google-cloud-bigquery
+    #   influxdb-client
     #   pandas
     #   pendulum
     #   pyathena
@@ -444,6 +448,8 @@ pyyaml==6.0.2
     #   google-ads
 rauth==0.7.3
     # via python-quickbooks
+reactivex==4.0.4
+    # via influxdb-client
 requests==2.32.3
     # via
     #   asana
@@ -504,6 +510,7 @@ semver==3.0.4
 setuptools==75.8.2
     # via
     #   dlt
+    #   influxdb-client
     #   python-quickbooks
     #   types-setuptools
 shellingham==1.5.4
@@ -595,6 +602,7 @@ typing-extensions==4.12.2
     #   pydantic
     #   pydantic-core
     #   pyopenssl
+    #   reactivex
     #   simple-salesforce
     #   snowflake-connector-python
     #   sqlalchemy2-stubs
@@ -621,6 +629,7 @@ urllib3==2.3.0
     #   crate
     #   databricks-sql-connector
     #   elastic-transport
+    #   influxdb-client
     #   pyairtable
     #   requests
     #   types-requests
