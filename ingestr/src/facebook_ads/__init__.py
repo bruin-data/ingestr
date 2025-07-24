@@ -159,8 +159,8 @@ def facebook_insights_source(
             columns[field] = INSIGHT_FIELDS_TYPES[field]
 
     @dlt.resource(
-        primary_key=INSIGHTS_PRIMARY_KEY,
         write_disposition="merge",
+        merge_key="date_start",
         columns=columns,
     )
     def facebook_insights(
