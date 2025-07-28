@@ -50,7 +50,6 @@ def github_reactions(
             ),
             name="issues",
             write_disposition="replace",
-            primary_key="number",
         ),
         dlt.resource(
             get_reactions_data(
@@ -63,7 +62,6 @@ def github_reactions(
             ),
             name="pull_requests",
             write_disposition="replace",
-            primary_key="number",
         ),
     )
 
@@ -184,6 +182,5 @@ def github_stargazers(
             ),
             name="stargazers",
             write_disposition="replace",
-            primary_key = ["login", "starred_at"]
         ),
     )
