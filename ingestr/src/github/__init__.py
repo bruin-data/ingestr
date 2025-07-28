@@ -50,6 +50,7 @@ def github_reactions(
             ),
             name="issues",
             write_disposition="replace",
+            primary_key="number",
         ),
         dlt.resource(
             get_reactions_data(
@@ -62,6 +63,7 @@ def github_reactions(
             ),
             name="pull_requests",
             write_disposition="replace",
+            primary_key="number",
         ),
     )
 
@@ -91,7 +93,7 @@ def github_repo_events(
     """
 
     # use naming function in table name to generate separate tables for each event
-    @dlt.resource(primary_key="id", table_name=lambda i: i["type"])
+    @dlt.resource(primary_key="id", table_name=lambda i: i["type"], write_disposition="append")
     def repo_events(
         last_created_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "created_at",
@@ -182,5 +184,6 @@ def github_stargazers(
             ),
             name="stargazers",
             write_disposition="replace",
+            primary_key = ["login", "starred_at"]
         ),
     )
