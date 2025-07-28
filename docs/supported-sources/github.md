@@ -36,14 +36,13 @@ This is a sample command that will copy the data from the GitHub source to DuckD
 ## Tables
 
 GitHub source allows ingesting the following sources into separate tables:
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `issues`        | - | –                | replace               | Retrieves GitHub issues along with their comments and reactions. Full reload on each run.                                        |
+| `pull_requests` | - | –                | replace               | Retrieves pull requests with comments and reactions. Full reload on each run.                                                    |
+| `repo_events`   | `id` | `created_at`     | merge  | Retrieves recent repository events. Appends only new events using `created_at` filter. Only events from the past 30 days allowed. |
+| `stargazers`    | - | –                | replace               | Retrieves stargazers. Full reload on each run.                                  |
 
-- `issues`: Retrieves data about issues, their associated comments, and subsequent reactions
-- `pull_requests`: Retrieves all pull requests
-- `repo_events`: Retrieves all the repo events associated with the repository
-- `stargazers`: Retrieves all stargazers
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
-
-> [!WARNING]
-> GitHub does not support incremental loading for many endpoints in its APIs, which means ingestr will load endpoints incrementally if they support it, and do a full-refresh if not.
  

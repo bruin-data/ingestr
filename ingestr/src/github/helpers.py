@@ -61,7 +61,6 @@ def get_stargazers(
             page_items,
         )
 
-
 def get_reactions_data(
     node_type: str,
     owner: str,
