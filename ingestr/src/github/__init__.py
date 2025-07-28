@@ -93,7 +93,7 @@ def github_repo_events(
     """
 
     # use naming function in table name to generate separate tables for each event
-    @dlt.resource(primary_key="id", table_name=lambda i: i["type"], write_disposition="append")
+    @dlt.resource(primary_key="id", table_name= repo_events, write_disposition="append")
     def repo_events(
         last_created_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "created_at",
