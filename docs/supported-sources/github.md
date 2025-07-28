@@ -36,7 +36,7 @@ This is a sample command that will copy the data from the GitHub source to DuckD
 ## Tables
 
 GitHub source allows ingesting the following sources into separate tables:
-| Table           | Primary Key | Incremental Key | Incremental Strategy | Details                                                                                                                                        |
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `issues`        | `number` | –                | replace               | Retrieves GitHub issues along with their comments and reactions. Full reload on each run.                                        |
 | `pull_requests` | `number` | –                | replace               | Retrieves pull requests with comments and reactions. Full reload on each run.                                                    |
