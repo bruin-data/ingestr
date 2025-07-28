@@ -57,7 +57,7 @@ def get_stargazers(
         access_token, STARGAZERS_QUERY, variables, "stargazers", max_items
     ):
         yield map(
-            lambda item: {"starredAt": item["starredAt"], "user": item["node"]},
+            lambda item: {"starredAt": item["starredAt"], "user": item["node"], "login": item["node"]["login"], },
             page_items,
         )
 
