@@ -36,11 +36,11 @@ This is a sample command that will copy the data from the GitHub source to DuckD
 ## Tables
 
 GitHub source allows ingesting the following sources into separate tables:
-| Table           | PK   | Inc Key | Inc Strategy| Details                                                                                                                                        |
-| --------------- | ---- | ---------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Table           | Primary Key | Incremental Key | Incremental Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `issues`        | `number` | –                | replace               | Retrieves GitHub issues along with their comments and reactions. Full reload on each run.                                        |
 | `pull_requests` | `number` | –                | replace               | Retrieves pull requests with comments and reactions. Full reload on each run.                                                    |
-| `repo_events`   | `id` | `created_at`     | append  | Retrieves recent repository events. Appends only new events using `created_at` filter. Only events from the past 30 days allowed. |
+| `repo_events`   | `id` | `created_at`     | merge  | Retrieves recent repository events. Appends only new events using `created_at` filter. Only events from the past 30 days allowed. |
 | `stargazers`    | [`login", "starred_at`] | –                | replace               | Retrieves stargazers. Full reload on each run.                                  |
 
 
