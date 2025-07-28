@@ -146,6 +146,14 @@ class DuckDBDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
         return dlt.destinations.duckdb(uri, **kwargs)
 
+class MotherduckDestination(GenericSqlDestination):
+    def dlt_dest(self, uri: str, **kwargs):
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(uri)
+        query = parse_qs(parsed.query)
+        token = query.get("token", [None])[0]
+        return dlt.destinations.motherduck(f"md:///{parsed.path.lstrip('/')}?password={token}", **kwargs)
+
 
 def handle_datetimeoffset(dto_value: bytes) -> datetime.datetime:
     # ref: https://github.com/mkleehammer/pyodbc/issues/134#issuecomment-281739794
