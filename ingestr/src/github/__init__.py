@@ -72,7 +72,7 @@ def github_repo_events(
     name: str,
     access_token: str,
     start_date: pendulum.DateTime,
-    end_date: pendulum.DateTime,
+    end_date: Optional[pendulum.DateTime] = None,
 ) -> DltResource:
     """Gets events for repository `name` with owner `owner` incrementally.
 
@@ -96,7 +96,7 @@ def github_repo_events(
         last_created_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "created_at",
             initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
             last_value_func=max,
             range_end="closed",
             range_start="closed",
@@ -105,7 +105,7 @@ def github_repo_events(
         repos_path = (
             f"/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(name)}/events"
         )
-
+        
         # Get the date range from the incremental state
         start_filter = pendulum.parse(
             last_created_at.last_value or last_created_at.initial_value
@@ -113,9 +113,9 @@ def github_repo_events(
         end_filter = (
             pendulum.parse(last_created_at.end_value)
             if last_created_at.end_value
-            else None
+            else pendulum.now()
         )
-
+        
         for page in get_rest_pages(access_token, repos_path + "?per_page=100"):
             # Filter events by date range
             filtered_events = []

@@ -1817,7 +1817,7 @@ class GitHubSource:
             start_date = kwargs.get("interval_start") or pendulum.now().subtract(
                 days=30
             )
-            end_date = kwargs.get("interval_end") or pendulum.now()
+            end_date = kwargs.get("interval_end") or None
 
             if isinstance(start_date, str):
                 start_date = pendulum.parse(start_date)
