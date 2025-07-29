@@ -2485,13 +2485,16 @@ class FrankfurterSource:
 
         if kwargs.get("interval_start"):
             start_date = ensure_pendulum_datetime(str(kwargs.get("interval_start")))
-            if kwargs.get("interval_end"):
-                end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
-            else:
-                end_date = pendulum.now()
         else:
-            start_date = pendulum.now()
-            end_date = pendulum.now()
+            start_date = pendulum.yesterday()
+
+        if kwargs.get("interval_end"):
+            end_date = ensure_pendulum_datetime(str(kwargs.get("interval_end")))
+        else:
+            end_date = None
+        
+        print("start_date", start_date)
+        print("end_date", end_date)
 
         validate_dates(start_date=start_date, end_date=end_date)
 
