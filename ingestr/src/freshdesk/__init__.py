@@ -4,9 +4,9 @@ etc. to the database"""
 from typing import Any, Dict, Generator, Iterable, List, Optional
 
 import dlt
+import pendulum
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.sources import DltResource
-import pendulum
 
 from .freshdesk_client import FreshdeskClient
 from .settings import DEFAULT_ENDPOINTS
@@ -19,7 +19,7 @@ def freshdesk_source(
     start_date: pendulum.DateTime,
     end_date: Optional[pendulum.DateTime] = None,
     per_page: int = 100,
-    endpoints: Optional[List[str]] = None,    
+    endpoints: Optional[List[str]] = None,
 ) -> Iterable[DltResource]:
     """
     Retrieves data from specified Freshdesk API endpoints.
@@ -43,8 +43,11 @@ def freshdesk_source(
     def incremental_resource(
         endpoint: str,
         updated_at: Optional[Any] = dlt.sources.incremental(
-            "updated_at", initial_value=start_date.isoformat(),
+            "updated_at",
+            initial_value=start_date.isoformat(),
             end_value=end_date.isoformat() if end_date else None,
+            range_start="closed",
+            range_end="closed",
         ),
     ) -> Generator[Dict[Any, Any], Any, None]:
         """
@@ -52,16 +55,19 @@ def freshdesk_source(
         Each page of data is fetched based on the `updated_at` timestamp
         to ensure incremental loading.
         """
-        
+
         if updated_at.last_value is not None:
             start_date = ensure_pendulum_datetime(updated_at.last_value)
         else:
             start_date = start_date
-        
+
         if updated_at.end_value is not None:
             end_date = ensure_pendulum_datetime(updated_at.end_value)
         else:
             end_date = pendulum.now(tz="UTC")
+
+        print("updated_at.last_value", updated_at.last_value)
+        print("updated_at.end_value", updated_at.end_value)
 
         # Use the FreshdeskClient instance to fetch paginated responses
         yield from freshdesk.paginated_response(

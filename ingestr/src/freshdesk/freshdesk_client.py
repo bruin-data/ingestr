@@ -2,11 +2,11 @@
 
 import logging
 import time
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable
 
+import pendulum
 from dlt.common.typing import TDataItem
 from dlt.sources.helpers import requests
-import pendulum
 
 
 class FreshdeskClient:
@@ -102,8 +102,10 @@ class FreshdeskClient:
                 break  # Stop if no data or max page limit reached
 
             filtered_data = [
-                item for item in data
-                if "updated_at" in item and pendulum.parse(item["updated_at"]) <= end_date
+                item
+                for item in data
+                if "updated_at" in item
+                and pendulum.parse(item["updated_at"]) <= end_date
             ]
             if not filtered_data:
                 break
