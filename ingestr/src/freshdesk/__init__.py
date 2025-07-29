@@ -52,8 +52,6 @@ def freshdesk_source(
         Each page of data is fetched based on the `updated_at` timestamp
         to ensure incremental loading.
         """
-        print("updated_at.last_value", updated_at.last_value)
-        print("updated_at.end_value", updated_at.end_value)
         
         if updated_at.last_value is not None:
             start_date = ensure_pendulum_datetime(updated_at.last_value)
