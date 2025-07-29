@@ -428,7 +428,7 @@ class MongoDbSource:
             connection_url=uri,
             database=table_fields.dataset,
             collection=table_fields.table,
-            parallel=True,
+            parallel=False,
             incremental=incremental,
         )
         table_instance.max_table_nesting = 1
