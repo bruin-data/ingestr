@@ -1,5 +1,6 @@
 """Mongo database source helpers"""
 
+import json
 from itertools import islice
 from typing import (
     TYPE_CHECKING,
@@ -204,7 +205,14 @@ class CollectionLoader:
         cursor = self._limit(cursor, limit)
 
         while docs_slice := list(islice(cursor, self.chunk_size)):
-            yield map_nested_in_place(convert_mongo_objs, docs_slice)
+            res = map_nested_in_place(convert_mongo_objs, docs_slice)
+            if len(res) > 0 and "_id" in res[0] and isinstance(res[0]["_id"], dict):
+                yield dlt.mark.with_hints(
+                    res,
+                    dlt.mark.make_hints(columns={"_id": {"data_type": "json"} }),
+                )
+            else:
+                yield res
 
 
 class CollectionLoaderParallel(CollectionLoader):
@@ -531,7 +539,7 @@ def collection_documents(
             LoaderClass = CollectionArrowLoader  # type: ignore
         else:
             LoaderClass = CollectionLoader  # type: ignore
-
+    
     loader = LoaderClass(
         client, collection, incremental=incremental, chunk_size=chunk_size
     )
