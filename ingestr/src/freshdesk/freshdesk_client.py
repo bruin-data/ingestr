@@ -6,7 +6,6 @@ from typing import Any, Dict, Iterable, Optional
 
 from dlt.common.typing import TDataItem
 from dlt.sources.helpers import requests
-import pendulum
 
 
 class FreshdeskClient:
@@ -68,8 +67,7 @@ class FreshdeskClient:
         self,
         endpoint: str,
         per_page: int,
-        start_date: pendulum.DateTime,
-        end_date: pendulum.DateTime,
+        updated_at: Optional[str] = None,
     ) -> Iterable[TDataItem]:
         """
         Fetches a paginated response from a specified endpoint.
@@ -90,8 +88,8 @@ class FreshdeskClient:
                 param_key = (
                     "updated_since" if endpoint == "tickets" else "_updated_since"
                 )
-
-                params[param_key] = start_date.to_iso8601_string()
+                if updated_at:
+                    params[param_key] = updated_at
 
             # Handle requests with rate-limiting
             # A maximum of 300 pages (30000 tickets) will be returned.
@@ -100,12 +98,5 @@ class FreshdeskClient:
 
             if not data:
                 break  # Stop if no data or max page limit reached
-
-            filtered_data = [
-                item for item in data
-                if "updated_at" in item and pendulum.parse(item["updated_at"]) <= end_date
-            ]
-            if not filtered_data:
-                break
-            yield filtered_data
+            yield data
             page += 1

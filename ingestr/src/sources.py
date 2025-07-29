@@ -2530,16 +2530,6 @@ class FreshdeskSource:
         api_key = params.get("api_key")
         if api_key is None:
             raise MissingValueError("api_key", "Freshdesk")
-        
-        if kwargs.get("interval_start"):
-            start_date = ensure_pendulum_datetime(kwargs.get("interval_start")).in_tz("UTC")
-        else:
-            start_date = ensure_pendulum_datetime("2022-01-01T00:00:00Z")
-
-        if kwargs.get("interval_end"):
-            end_date = ensure_pendulum_datetime(kwargs.get("interval_end")).in_tz("UTC")
-        else: 
-            end_date = None
 
         if table not in [
             "agents",
@@ -2554,7 +2544,7 @@ class FreshdeskSource:
         from ingestr.src.freshdesk import freshdesk_source
 
         return freshdesk_source(
-            api_secret_key=api_key[0], domain=domain, start_date=start_date, end_date=end_date
+            api_secret_key=api_key[0], domain=domain
         ).with_resources(table)
 
 
