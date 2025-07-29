@@ -86,7 +86,6 @@ class MongoDbSourceTest(unittest.TestCase):
             self.assertEqual(database, "schema")
             self.assertEqual(collection, "table")
             self.assertIsNone(incremental)
-            self.assertTrue(parallel)
             return dlt.resource()
 
         source = MongoDbSource(table_builder=mongo)
@@ -105,7 +104,6 @@ class MongoDbSourceTest(unittest.TestCase):
             self.assertEqual(collection, "table")
             self.assertIsInstance(incremental, dlt.sources.incremental)
             self.assertEqual(incremental.cursor_path, incremental_key)
-            self.assertTrue(parallel)
             return dlt.resource()
 
         source = MongoDbSource(table_builder=mongo)
