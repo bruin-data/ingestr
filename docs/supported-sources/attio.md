@@ -40,3 +40,6 @@ Attio source supports ingesting the following sources into separate tables:
 - `all_list_entries:{object_api_slug}`: Fetches all the lists for an object, and then fetches all the entries from that list. For eg:  Fetches all lists for an object, and then fetches all entries from those lists. For example: `all_list_entries:companies`
 
 Use this as `--source-table` parameter in the `ingestr ingest` command.
+
+> [!WARNING]
+> Attio does not support incremental loading, which means ingestr will do a full-refresh.
