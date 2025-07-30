@@ -1,3 +1,4 @@
+import warnings
 from datetime import datetime
 from enum import Enum
 from typing import Optional
@@ -7,6 +8,14 @@ from rich.console import Console
 from typing_extensions import Annotated
 
 from ingestr.src.telemetry.event import track
+
+try:
+    from duckdb_engine import DuckDBEngineWarning
+
+    warnings.filterwarnings("ignore", category=DuckDBEngineWarning)
+except ImportError:
+    # duckdb-engine not installed
+    pass
 
 app = typer.Typer(
     name="ingestr",
