@@ -90,6 +90,7 @@ export default defineConfig({
                 link: "/supported-sources/mssql.md",
               },
               { text: "MongoDB", link: "/supported-sources/mongodb.md" },
+              { text: "MotherDuck", link: "/supported-sources/motherduck.md" },
               { text: "MySQL", link: "/supported-sources/mysql.md" },
               { text: "Oracle", link: "/supported-sources/oracle.md" },
               { text: "Postgres", link: "/supported-sources/postgres.md" },
