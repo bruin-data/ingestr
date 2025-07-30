@@ -66,8 +66,6 @@ def freshdesk_source(
         else:
             end_date = pendulum.now(tz="UTC")
 
-        print("updated_at.last_value", updated_at.last_value)
-        print("updated_at.end_value", updated_at.end_value)
 
         # Use the FreshdeskClient instance to fetch paginated responses
         yield from freshdesk.paginated_response(
