@@ -106,6 +106,7 @@ def mongodb_collection(
     filter_: Optional[Dict[str, Any]] = None,
     projection: Optional[Union[Mapping[str, Any], Iterable[str]]] = dlt.config.value,
     pymongoarrow_schema: Optional[Any] = None,
+    custom_query: Optional[List[Dict[str, Any]]] = None,
 ) -> Any:
     """
     A DLT source which loads a collection from a mongo database using PyMongo.
@@ -132,6 +133,7 @@ def mongodb_collection(
                 exclude (dict) - {"released": False, "runtime": False}
             Note: Can't mix include and exclude statements '{"title": True, "released": False}`
         pymongoarrow_schema (pymongoarrow.schema.Schema): Mapping of expected field types to convert BSON to Arrow
+        custom_query (Optional[List[Dict[str, Any]]]): Custom MongoDB aggregation pipeline to execute instead of find()
 
     Returns:
         Iterable[DltResource]: A list of DLT resources for each collection to be loaded.
@@ -161,4 +163,5 @@ def mongodb_collection(
         filter_=filter_ or {},
         projection=projection,
         pymongoarrow_schema=pymongoarrow_schema,
+        custom_query=custom_query,
     )
