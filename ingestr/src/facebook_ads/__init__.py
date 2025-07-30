@@ -26,7 +26,6 @@ from .settings import (
     DEFAULT_LEAD_FIELDS,
     INSIGHT_FIELDS_TYPES,
     INSIGHTS_BREAKDOWNS_OPTIONS,
-    INSIGHTS_PRIMARY_KEY,
     INVALID_INSIGHTS_FIELDS,
     TInsightsBreakdownOptions,
     TInsightsLevels,
