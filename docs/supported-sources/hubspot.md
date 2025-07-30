@@ -43,22 +43,7 @@ HubSpot source allows ingesting the following sources into separate tables:
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
-## Custom Objects
-
-HubSpot custom objects are supported by using the `custom` table.
-
-The format for the custom object is as follows:
-
-```plaintext
-custom:<custom_object_name>:<optional associations>
-```
-
-For example, to ingest the `course` custom object with the `contacts` and `companies` associations, the format would be:
-
-```plaintext
-custom:course:contacts,companies
-```
-
-This would pull all the data for the `course` custom object and include the `contacts` and `companies` associations in the resulting table.
+> [!WARNING]
+> Hubspot does not support incremental loading, which means ingestr will do a full-refresh.
 
 

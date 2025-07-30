@@ -1111,7 +1111,7 @@ class SlackSource:
 
 class HubspotSource:
     def handles_incrementality(self) -> bool:
-        return True
+        return False
 
     # hubspot://?api_key=<api_key>
     def dlt_source(self, uri: str, table: str, **kwargs):
@@ -2834,7 +2834,7 @@ class ElasticsearchSource:
 
 class AttioSource:
     def handles_incrementality(self) -> bool:
-        return True
+        return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
