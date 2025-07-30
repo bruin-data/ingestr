@@ -73,6 +73,20 @@ class SqlSource:
 
         engine_adapter_callback = None
 
+        if uri.startswith("md://") or uri.startswith("motherduck://"):
+            parsed_uri = urlparse(uri)
+            query_params = parse_qs(parsed_uri.query)
+            # Convert md:// URI to duckdb:///md: format
+            if parsed_uri.path:
+                db_path = parsed_uri.path
+            else:
+                db_path = ""
+
+            token = query_params.get("token", [""])[0]
+            if not token:
+                raise ValueError("Token is required for MotherDuck connection")
+            uri = f"duckdb:///md:{db_path}?motherduck_token={token}"
+
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 

@@ -86,6 +86,8 @@ SQL_SOURCE_SCHEMES = [
     "mysql",
     "mysql+pymysql",
     "mysql+mysqlconnector",
+    "md",
+    "motherduck",
     "postgres",
     "postgresql",
     "postgresql+psycopg2",
