@@ -197,6 +197,7 @@ class SourceDestinationFactory:
         "databricks": DatabricksDestination,
         "duckdb": DuckDBDestination,
         "motherduck": MotherduckDestination,
+        "md": MotherduckDestination,
         "mssql": MsSQLDestination,
         "postgres": PostgresDestination,
         "postgresql": PostgresDestination,

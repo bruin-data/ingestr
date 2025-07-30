@@ -66,7 +66,6 @@ def freshdesk_source(
         else:
             end_date = pendulum.now(tz="UTC")
 
-
         # Use the FreshdeskClient instance to fetch paginated responses
         yield from freshdesk.paginated_response(
             endpoint=endpoint,
