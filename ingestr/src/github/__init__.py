@@ -91,7 +91,9 @@ def github_repo_events(
     """
 
     # use naming function in table name to generate separate tables for each event
-    @dlt.resource(primary_key= "id", table_name=lambda i: i["type"], write_disposition="merge")
+    @dlt.resource(
+        primary_key="id", table_name=lambda i: i["type"], write_disposition="merge"
+    )
     def repo_events(
         last_created_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "created_at",
@@ -105,7 +107,7 @@ def github_repo_events(
         repos_path = (
             f"/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(name)}/events"
         )
-        
+
         # Get the date range from the incremental state
         start_filter = pendulum.parse(
             last_created_at.last_value or last_created_at.initial_value
@@ -115,7 +117,7 @@ def github_repo_events(
             if last_created_at.end_value
             else pendulum.now()
         )
-        
+
         for page in get_rest_pages(access_token, repos_path + "?per_page=100"):
             # Filter events by date range
             filtered_events = []

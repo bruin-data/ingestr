@@ -3730,27 +3730,59 @@ def mongodb_custom_query_test_cases():
         try:
             db = mongo.get_connection_client()
             test_collection = db.test_db.events
-            
+
             # Insert test data
-            test_collection.insert_many([
-                {"event_id": 1, "event_type": "login", "user_id": "user1", "status": "success", "value": 100},
-                {"event_id": 2, "event_type": "purchase", "user_id": "user1", "status": "success", "value": 250},
-                {"event_id": 3, "event_type": "login", "user_id": "user2", "status": "success", "value": 150},
-                {"event_id": 4, "event_type": "purchase", "user_id": "user2", "status": "failed", "value": 300},
-                {"event_id": 5, "event_type": "logout", "user_id": "user1", "status": "success", "value": 50},
-            ])
+            test_collection.insert_many(
+                [
+                    {
+                        "event_id": 1,
+                        "event_type": "login",
+                        "user_id": "user1",
+                        "status": "success",
+                        "value": 100,
+                    },
+                    {
+                        "event_id": 2,
+                        "event_type": "purchase",
+                        "user_id": "user1",
+                        "status": "success",
+                        "value": 250,
+                    },
+                    {
+                        "event_id": 3,
+                        "event_type": "login",
+                        "user_id": "user2",
+                        "status": "success",
+                        "value": 150,
+                    },
+                    {
+                        "event_id": 4,
+                        "event_type": "purchase",
+                        "user_id": "user2",
+                        "status": "failed",
+                        "value": 300,
+                    },
+                    {
+                        "event_id": 5,
+                        "event_type": "logout",
+                        "user_id": "user1",
+                        "status": "success",
+                        "value": 50,
+                    },
+                ]
+            )
 
             # Test simple filtering query
             custom_query = '[{"$match": {"status": "success"}}, {"$project": {"_id": 1, "event_id": 1, "event_type": 1, "user_id": 1, "value": 1}}]'
             schema_rand_prefix = f"testschema_mongo_filter_{get_random_string(5)}"
-            
+
             result = invoke_ingest_command(
                 mongo.get_connection_url(),
                 f"test_db.events:{custom_query}",
                 dest_uri,
                 f"{schema_rand_prefix}.events_success",
             )
-            
+
             assert result.exit_code == 0
 
             with sqlalchemy.create_engine(dest_uri).connect() as conn:
@@ -3775,27 +3807,59 @@ def mongodb_custom_query_test_cases():
         try:
             db = mongo.get_connection_client()
             test_collection = db.test_db.events
-            
+
             # Insert test data
-            test_collection.insert_many([
-                {"event_id": 1, "event_type": "login", "user_id": "user1", "status": "success", "value": 100},
-                {"event_id": 2, "event_type": "purchase", "user_id": "user1", "status": "success", "value": 250},
-                {"event_id": 3, "event_type": "login", "user_id": "user2", "status": "success", "value": 150},
-                {"event_id": 4, "event_type": "purchase", "user_id": "user2", "status": "failed", "value": 300},
-                {"event_id": 5, "event_type": "logout", "user_id": "user1", "status": "success", "value": 50},
-            ])
+            test_collection.insert_many(
+                [
+                    {
+                        "event_id": 1,
+                        "event_type": "login",
+                        "user_id": "user1",
+                        "status": "success",
+                        "value": 100,
+                    },
+                    {
+                        "event_id": 2,
+                        "event_type": "purchase",
+                        "user_id": "user1",
+                        "status": "success",
+                        "value": 250,
+                    },
+                    {
+                        "event_id": 3,
+                        "event_type": "login",
+                        "user_id": "user2",
+                        "status": "success",
+                        "value": 150,
+                    },
+                    {
+                        "event_id": 4,
+                        "event_type": "purchase",
+                        "user_id": "user2",
+                        "status": "failed",
+                        "value": 300,
+                    },
+                    {
+                        "event_id": 5,
+                        "event_type": "logout",
+                        "user_id": "user1",
+                        "status": "success",
+                        "value": 50,
+                    },
+                ]
+            )
 
             # Test aggregation with grouping
             group_query = '[{"$match": {"status": "success"}}, {"$group": {"_id": "$user_id", "total_value": {"$sum": "$value"}, "event_count": {"$sum": 1}}}]'
             schema_rand_prefix = f"testschema_mongo_group_{get_random_string(5)}"
-            
+
             result = invoke_ingest_command(
                 mongo.get_connection_url(),
                 f"test_db.events:{group_query}",
                 dest_uri,
                 f"{schema_rand_prefix}.user_stats",
             )
-            
+
             assert result.exit_code == 0
 
             with sqlalchemy.create_engine(dest_uri).connect() as conn:
@@ -3804,8 +3868,16 @@ def mongodb_custom_query_test_cases():
                 ).fetchall()
 
                 assert len(res) == 2
-                assert res[0] == ("user1", 400, 3)  # user1: 100 + 250 + 50 = 400, 3 events
-                assert res[1] == ("user2", 150, 1)  # user2: only 150 from login, 1 event
+                assert res[0] == (
+                    "user1",
+                    400,
+                    3,
+                )  # user1: 100 + 250 + 50 = 400, 3 events
+                assert res[1] == (
+                    "user2",
+                    150,
+                    1,
+                )  # user2: only 150 from login, 1 event
 
         finally:
             mongo.stop()
@@ -3818,19 +3890,55 @@ def mongodb_custom_query_test_cases():
         try:
             db = mongo.get_connection_client()
             test_collection = db.test_db.events
-            
+
             # Insert test data with timestamps
-            test_collection.insert_many([
-                {"event_id": 1, "event_type": "login", "user_id": "user1", "timestamp": datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc), "status": "success", "value": 100},
-                {"event_id": 2, "event_type": "purchase", "user_id": "user1", "timestamp": datetime(2024, 1, 1, 11, 0, 0, tzinfo=timezone.utc), "status": "success", "value": 250},
-                {"event_id": 3, "event_type": "login", "user_id": "user2", "timestamp": datetime(2024, 1, 2, 9, 0, 0, tzinfo=timezone.utc), "status": "success", "value": 150},
-                {"event_id": 4, "event_type": "purchase", "user_id": "user2", "timestamp": datetime(2024, 1, 2, 10, 0, 0, tzinfo=timezone.utc), "status": "failed", "value": 300},
-            ])
+            test_collection.insert_many(
+                [
+                    {
+                        "event_id": 1,
+                        "event_type": "login",
+                        "user_id": "user1",
+                        "timestamp": datetime(
+                            2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc
+                        ),
+                        "status": "success",
+                        "value": 100,
+                    },
+                    {
+                        "event_id": 2,
+                        "event_type": "purchase",
+                        "user_id": "user1",
+                        "timestamp": datetime(
+                            2024, 1, 1, 11, 0, 0, tzinfo=timezone.utc
+                        ),
+                        "status": "success",
+                        "value": 250,
+                    },
+                    {
+                        "event_id": 3,
+                        "event_type": "login",
+                        "user_id": "user2",
+                        "timestamp": datetime(2024, 1, 2, 9, 0, 0, tzinfo=timezone.utc),
+                        "status": "success",
+                        "value": 150,
+                    },
+                    {
+                        "event_id": 4,
+                        "event_type": "purchase",
+                        "user_id": "user2",
+                        "timestamp": datetime(
+                            2024, 1, 2, 10, 0, 0, tzinfo=timezone.utc
+                        ),
+                        "status": "failed",
+                        "value": 300,
+                    },
+                ]
+            )
 
             # Test incremental load with interval placeholders
             incremental_query = '[{"$match": {"timestamp": {"$gte": ":interval_start", "$lt": ":interval_end"}, "status": "success"}}, {"$project": {"_id": 1, "event_id": 1, "event_type": 1, "user_id": 1, "timestamp": 1, "value": 1}}]'
             schema_rand_prefix = f"testschema_mongo_incr_{get_random_string(5)}"
-            
+
             result = invoke_ingest_command(
                 mongo.get_connection_url(),
                 f"test_db.events:{incremental_query}",
@@ -3841,7 +3949,7 @@ def mongodb_custom_query_test_cases():
                 interval_start="2024-01-01T00:00:00+00:00",
                 interval_end="2024-01-02T00:00:00+00:00",
             )
-            
+
             assert result.exit_code == 0
 
             with sqlalchemy.create_engine(dest_uri).connect() as conn:
@@ -3865,18 +3973,54 @@ def mongodb_custom_query_test_cases():
         try:
             db = mongo.get_connection_client()
             test_collection = db.test_db.events
-            
+
             # Insert test data with timestamps
-            test_collection.insert_many([
-                {"event_id": 1, "event_type": "login", "user_id": "user1", "timestamp": datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc), "status": "success", "value": 100},
-                {"event_id": 2, "event_type": "purchase", "user_id": "user1", "timestamp": datetime(2024, 1, 1, 11, 0, 0, tzinfo=timezone.utc), "status": "success", "value": 250},
-                {"event_id": 3, "event_type": "login", "user_id": "user2", "timestamp": datetime(2024, 1, 2, 9, 0, 0, tzinfo=timezone.utc), "status": "success", "value": 150},
-                {"event_id": 4, "event_type": "purchase", "user_id": "user2", "timestamp": datetime(2024, 1, 2, 10, 0, 0, tzinfo=timezone.utc), "status": "failed", "value": 300},
-            ])
+            test_collection.insert_many(
+                [
+                    {
+                        "event_id": 1,
+                        "event_type": "login",
+                        "user_id": "user1",
+                        "timestamp": datetime(
+                            2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc
+                        ),
+                        "status": "success",
+                        "value": 100,
+                    },
+                    {
+                        "event_id": 2,
+                        "event_type": "purchase",
+                        "user_id": "user1",
+                        "timestamp": datetime(
+                            2024, 1, 1, 11, 0, 0, tzinfo=timezone.utc
+                        ),
+                        "status": "success",
+                        "value": 250,
+                    },
+                    {
+                        "event_id": 3,
+                        "event_type": "login",
+                        "user_id": "user2",
+                        "timestamp": datetime(2024, 1, 2, 9, 0, 0, tzinfo=timezone.utc),
+                        "status": "success",
+                        "value": 150,
+                    },
+                    {
+                        "event_id": 4,
+                        "event_type": "purchase",
+                        "user_id": "user2",
+                        "timestamp": datetime(
+                            2024, 1, 2, 10, 0, 0, tzinfo=timezone.utc
+                        ),
+                        "status": "failed",
+                        "value": 300,
+                    },
+                ]
+            )
 
             incremental_query = '[{"$match": {"timestamp": {"$gte": ":interval_start", "$lt": ":interval_end"}, "status": "success"}}, {"$project": {"_id": 1, "event_id": 1, "event_type": 1, "user_id": 1, "timestamp": 1, "value": 1}}]'
             schema_rand_prefix = f"testschema_mongo_multi_{get_random_string(5)}"
-            
+
             # First day
             result = invoke_ingest_command(
                 mongo.get_connection_url(),
@@ -3888,7 +4032,7 @@ def mongodb_custom_query_test_cases():
                 interval_start="2024-01-01T00:00:00+00:00",
                 interval_end="2024-01-02T00:00:00+00:00",
             )
-            
+
             assert result.exit_code == 0
 
             # Second day
@@ -3898,11 +4042,11 @@ def mongodb_custom_query_test_cases():
                 dest_uri,
                 f"{schema_rand_prefix}.events_multi",
                 inc_strategy="append",
-                inc_key="timestamp", 
+                inc_key="timestamp",
                 interval_start="2024-01-02T00:00:00+00:00",
                 interval_end="2024-01-03T00:00:00+00:00",
             )
-            
+
             assert result.exit_code == 0
 
             with sqlalchemy.create_engine(dest_uri).connect() as conn:
@@ -3921,9 +4065,9 @@ def mongodb_custom_query_test_cases():
 
     return [
         simple_filtering_query,
-        aggregation_with_grouping, 
+        aggregation_with_grouping,
         incremental_with_interval_placeholders,
-        incremental_multiple_days
+        incremental_multiple_days,
     ]
 
 

@@ -1,6 +1,5 @@
 """Mongo database source helpers"""
 
-import json
 from itertools import islice
 from typing import (
     TYPE_CHECKING,
@@ -209,7 +208,7 @@ class CollectionLoader:
             if len(res) > 0 and "_id" in res[0] and isinstance(res[0]["_id"], dict):
                 yield dlt.mark.with_hints(
                     res,
-                    dlt.mark.make_hints(columns={"_id": {"data_type": "json"} }),
+                    dlt.mark.make_hints(columns={"_id": {"data_type": "json"}}),
                 )
             else:
                 yield res
@@ -476,7 +475,7 @@ class CollectionAggregationLoader(CollectionLoader):
     """
     MongoDB collection loader that uses aggregation pipelines instead of find queries.
     """
-    
+
     def __init__(
         self,
         client: TMongoClient,
@@ -486,11 +485,11 @@ class CollectionAggregationLoader(CollectionLoader):
     ) -> None:
         super().__init__(client, collection, chunk_size, incremental)
         self.custom_query: Optional[List[Dict[str, Any]]] = None
-    
+
     def set_custom_query(self, query: List[Dict[str, Any]]):
         """Set the custom aggregation pipeline query"""
         self.custom_query = query
-    
+
     def load_documents(
         self,
         filter_: Dict[str, Any],
@@ -502,27 +501,27 @@ class CollectionAggregationLoader(CollectionLoader):
             # Fallback to parent method if no custom query
             yield from super().load_documents(filter_, limit, projection)
             return
-        
+
         # Build aggregation pipeline
         pipeline = list(self.custom_query)  # Copy the query
-        
+
         # For custom queries, we assume incremental filtering is already handled
         # via interval placeholders (:interval_start, :interval_end) in the query itself.
         # We don't add additional incremental filtering to avoid conflicts.
-        
+
         # Add additional filter if provided
         if filter_:
             filter_match = {"$match": filter_}
             pipeline.insert(0, filter_match)
-        
+
         # Add limit if specified
         if limit and limit > 0:
             pipeline.append({"$limit": limit})
-        
+
         print("pipeline", pipeline)
         # Execute aggregation
         cursor = self.collection.aggregate(pipeline, allowDiskUse=True)
-        
+
         # Process results in chunks
         while docs_slice := list(islice(cursor, self.chunk_size)):
             res = map_nested_in_place(convert_mongo_objs, docs_slice)
@@ -542,7 +541,7 @@ class CollectionAggregationLoaderParallel(CollectionAggregationLoader):
     Note: Parallel loading is not supported for aggregation pipelines due to cursor limitations.
     Falls back to sequential loading.
     """
-    
+
     def load_documents(
         self,
         filter_: Dict[str, Any],
@@ -560,7 +559,7 @@ class CollectionAggregationArrowLoader(CollectionAggregationLoader):
     """
     MongoDB collection aggregation loader that uses Apache Arrow for data processing.
     """
-    
+
     def load_documents(
         self,
         filter_: Dict[str, Any],
@@ -572,17 +571,20 @@ class CollectionAggregationArrowLoader(CollectionAggregationLoader):
         logger.warning(
             "Arrow format is not directly supported for MongoDB aggregation pipelines. Converting to Arrow after loading."
         )
-        
+
         # Load documents normally and convert to arrow format
         for batch in super().load_documents(filter_, limit, projection):
             if batch:  # Only process non-empty batches
                 try:
                     from dlt.common.libs.pyarrow import pyarrow
+
                     # Convert dict batch to arrow table
                     table = pyarrow.Table.from_pylist(batch)
                     yield convert_arrow_columns(table)
                 except ImportError:
-                    logger.warning("PyArrow not available, falling back to object format")
+                    logger.warning(
+                        "PyArrow not available, falling back to object format"
+                    )
                     yield batch
 
 
@@ -591,7 +593,7 @@ class CollectionAggregationArrowLoaderParallel(CollectionAggregationArrowLoader)
     MongoDB collection parallel aggregation loader with Arrow support.
     Falls back to sequential loading.
     """
-    
+
     def load_documents(
         self,
         filter_: Dict[str, Any],
@@ -603,7 +605,9 @@ class CollectionAggregationArrowLoaderParallel(CollectionAggregationArrowLoader)
         logger.warning(
             "Parallel loading is not supported for MongoDB aggregation pipelines. Using sequential loading."
         )
-        yield from super().load_documents(filter_, limit, projection, pymongoarrow_schema)
+        yield from super().load_documents(
+            filter_, limit, projection, pymongoarrow_schema
+        )
 
 
 def collection_documents(
@@ -688,17 +692,25 @@ def collection_documents(
                 LoaderClass = CollectionArrowLoader  # type: ignore
             else:
                 LoaderClass = CollectionLoader  # type: ignore
-    
+
     loader = LoaderClass(
         client, collection, incremental=incremental, chunk_size=chunk_size
     )
-    
+
     # Set custom query if provided
-    if custom_query and hasattr(loader, 'set_custom_query'):
+    if custom_query and hasattr(loader, "set_custom_query"):
         loader.set_custom_query(custom_query)
-    
+
     # Load documents based on loader type
-    if isinstance(loader, (CollectionArrowLoader, CollectionArrowLoaderParallel, CollectionAggregationArrowLoader, CollectionAggregationArrowLoaderParallel)):
+    if isinstance(
+        loader,
+        (
+            CollectionArrowLoader,
+            CollectionArrowLoaderParallel,
+            CollectionAggregationArrowLoader,
+            CollectionAggregationArrowLoaderParallel,
+        ),
+    ):
         yield from loader.load_documents(
             limit=limit,
             filter_=filter_,
