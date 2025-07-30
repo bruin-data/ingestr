@@ -25,10 +25,6 @@ def frankfurter_source(
 
     @dlt.resource(
         write_disposition="replace",
-        columns={
-            "currency_code": {"data_type": "text"},
-            "currency_name": {"data_type": "text"},
-        },
     )
     def currencies() -> Iterator[dict]:
         """
