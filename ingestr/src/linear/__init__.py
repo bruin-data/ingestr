@@ -103,17 +103,15 @@ WORKFLOW_STATES_QUERY = """
 query WorkflowStates($cursor: String) {
   workflowStates(first: 50, after: $cursor) {
     nodes { 
-    id
-    name
-    description
-    createdAt
-    updatedAt
-    color
-    position
-    type
-    team {nodes {id name}}
-
-     }
+      id
+      name
+      updatedAt
+      color
+      position
+      type
+      team { id  }
+    }
+    pageInfo { hasNextPage endCursor }
   }
 }
 """
@@ -194,4 +192,22 @@ def linear_source(
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
                     yield item
 
-    return issues, projects, teams, users
+    @dlt.resource(name="workflow_states", primary_key="id", write_disposition="merge")
+    def workflow_states(
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updatedAt",
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
+            range_start="closed",
+            range_end="closed",
+        ),
+    ) -> Iterator[Dict[str, Any]]:
+        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
+
+        for item in _paginate(api_key, WORKFLOW_STATES_QUERY, "workflowStates"):
+            if pendulum.parse(item["updatedAt"]) >= current_start_date:
+                if pendulum.parse(item["updatedAt"]) <= current_end_date:
+                    yield item
+
+    return [issues, projects, teams, users, workflow_states]
+
