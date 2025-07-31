@@ -99,7 +99,24 @@ query Users($cursor: String) {
   }
 }
 """
+WORKFLOW_STATES_QUERY = """
+query WorkflowStates($cursor: String) {
+  workflowStates(first: 50, after: $cursor) {
+    nodes { 
+    id
+    name
+    description
+    createdAt
+    updatedAt
+    color
+    position
+    type
+    team {nodes {id name}}
 
+     }
+  }
+}
+"""
 
 @dlt.source(name="linear", max_table_nesting=0)
 def linear_source(
