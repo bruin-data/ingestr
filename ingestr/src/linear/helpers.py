@@ -70,3 +70,12 @@ def _normalize_team(item: Dict[str, Any]) -> Dict[str, Any]:
         if item.get(field):
             item[f"{field}"] = item[field].get("nodes", [])
     return item
+
+
+def _normalize_workflow_states(item: Dict[str, Any]) -> Dict[str, Any]:
+    if item.get("team"):
+        item["team_id"] = item["team"]["id"]
+        del item["team"]
+    else:
+        item["team_id"] = None
+    return item

@@ -3,7 +3,7 @@ from typing import Any, Dict, Iterable, Iterator
 import dlt
 import pendulum
 
-from .helpers import _normalize_issue, _normalize_team, _paginate
+from .helpers import _normalize_issue, _normalize_team, _normalize_workflow_states, _paginate
 
 
 def _get_date_range(updated_at, start_date):
@@ -207,7 +207,7 @@ def linear_source(
         for item in _paginate(api_key, WORKFLOW_STATES_QUERY, "workflowStates"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield item
+                    yield _normalize_workflow_states(item)
 
     return [issues, projects, teams, users, workflow_states]
 

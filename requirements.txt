@@ -214,6 +214,8 @@ googleapis-common-protos==1.69.0
     #   google-api-core
     #   grpc-google-iam-v1
     #   grpcio-status
+greenlet==3.2.3
+    # via sqlalchemy
 grpc-google-iam-v1==0.14.2
     # via google-cloud-spanner
 grpc-interceptor==0.15.4
