@@ -117,15 +117,7 @@ def linear_source(
             range_end="closed",
         ),
     ) -> Iterator[Dict[str, Any]]:
-        if updated_at.last_value:
-            current_start_date = pendulum.parse(updated_at.last_value)
-        else:
-            current_start_date = pendulum.parse(start_date)
-
-        if updated_at.end_value:
-            current_end_date = pendulum.parse(updated_at.end_value)
-        else:
-            current_end_date = pendulum.now(tz="UTC")
+        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
 
         for item in _paginate(api_key, ISSUES_QUERY, "issues"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
@@ -142,15 +134,7 @@ def linear_source(
             range_end="closed",
         ),
     ) -> Iterator[Dict[str, Any]]:
-        if updated_at.last_value:
-            current_start_date = pendulum.parse(updated_at.last_value)
-        else:
-            current_start_date = pendulum.parse(start_date)
-
-        if updated_at.end_value:
-            current_end_date = pendulum.parse(updated_at.end_value)
-        else:
-            current_end_date = pendulum.now(tz="UTC")
+        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
 
         for item in _paginate(api_key, PROJECTS_QUERY, "projects"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
@@ -168,16 +152,8 @@ def linear_source(
         ),
     ) -> Iterator[Dict[str, Any]]:
         print(start_date)
-        if updated_at.last_value:
-            current_start_date = pendulum.parse(updated_at.last_value)
-        else:
-            current_start_date = pendulum.parse(start_date)
+        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
         print(current_start_date)
-
-        if updated_at.end_value:
-            current_end_date = pendulum.parse(updated_at.end_value)
-        else:
-            current_end_date = pendulum.now(tz="UTC")
 
         for item in _paginate(api_key, TEAMS_QUERY, "teams"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
@@ -194,15 +170,7 @@ def linear_source(
             range_end="closed",
         ),
     ) -> Iterator[Dict[str, Any]]:
-        if updated_at.last_value:
-            current_start_date = pendulum.parse(updated_at.last_value)
-        else:
-            current_start_date = pendulum.parse(start_date)
-
-        if updated_at.end_value:
-            current_end_date = pendulum.parse(updated_at.end_value)
-        else:
-            current_end_date = pendulum.now(tz="UTC")
+        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
 
         for item in _paginate(api_key, USERS_QUERY, "users"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
