@@ -103,13 +103,16 @@ WORKFLOW_STATES_QUERY = """
 query WorkflowStates($cursor: String) {
   workflowStates(first: 50, after: $cursor) {
     nodes { 
-      id
-      name
-      updatedAt
+      archivedAt
       color
+      createdAt
+      id
+      inheritedFrom { id }
+      name
       position
-      type
       team { id  }
+      type
+      updatedAt
     }
     pageInfo { hasNextPage endCursor }
   }
