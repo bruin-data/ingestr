@@ -32,50 +32,24 @@ def _paginate(api_key: str, query: str, root: str) -> Iterator[Dict[str, Any]]:
         cursor = data["pageInfo"]["endCursor"]
 
 
-def _normalize_issue(item: Dict[str, Any]) -> Dict[str, Any]:
-    field_mapping = {
-        "assignee": "assignee_id",
-        "creator": "creator_id",
-        "state": "state_id",
-        "cycle": "cycle_id",
-        "project": "project_id",
-    }
-    for key, value in field_mapping.items():
-        if item.get(key):
-            item[value] = item[key]["id"]
-            del item[key]
-        else:
-            item[value] = None
-            del item[key]
-    json_fields = [
-        "comments",
-        "subscribers",
-        "attachments",
-        "labels",
-        "subtasks",
-        "projects",
-        "memberships",
-        "members",
-    ]
-    for field in json_fields:
-        if item.get(field):
-            item[f"{field}"] = item[field].get("nodes", [])
-
-    return item
 
 
-def _normalize_team(item: Dict[str, Any]) -> Dict[str, Any]:
-    json_fields = ["memberships", "members", "projects"]
-    for field in json_fields:
-        if item.get(field):
-            item[f"{field}"] = item[field].get("nodes", [])
-    return item
-
-
-def _normalize_workflow_states(item: Dict[str, Any]) -> Dict[str, Any]:
-    if item.get("team"):
-        item["team_id"] = item["team"]["id"]
-        del item["team"]
-    else:
-        item["team_id"] = None
-    return item
+def normalize_dictionaries(item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Automatically normalize dictionary fields by detecting their structure:
+    - Convert nested objects with 'id' field to {field_name}_id
+    - Convert objects with 'nodes' field to arrays
+    """
+    normalized_item = item.copy()
+    
+    for key, value in list(normalized_item.items()):
+        if isinstance(value, dict):
+            # If the dict has an 'id' field, replace with {key}_id
+            if 'id' in value:
+                normalized_item[f"{key}_id"] = value['id']
+                del normalized_item[key]
+            # If the dict has 'nodes' field, extract the nodes array
+            elif 'nodes' in value:
+                normalized_item[key] = value['nodes']
+    
+    return normalized_item

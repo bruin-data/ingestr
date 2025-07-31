@@ -3,7 +3,7 @@ from typing import Any, Dict, Iterable, Iterator
 import dlt
 import pendulum
 
-from .helpers import _normalize_issue, _normalize_team, _normalize_workflow_states, _paginate
+from .helpers import _paginate, normalize_dictionaries
 
 
 def _get_date_range(updated_at, start_date):
@@ -140,7 +140,7 @@ def linear_source(
         for item in _paginate(api_key, ISSUES_QUERY, "issues"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield _normalize_issue(item)
+                    yield normalize_dictionaries(item)
 
     @dlt.resource(name="projects", primary_key="id", write_disposition="merge")
     def projects(
@@ -157,7 +157,7 @@ def linear_source(
         for item in _paginate(api_key, PROJECTS_QUERY, "projects"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield item
+                    yield normalize_dictionaries(item)
 
     @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
     def teams(
@@ -176,7 +176,7 @@ def linear_source(
         for item in _paginate(api_key, TEAMS_QUERY, "teams"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield _normalize_team(item)
+                    yield normalize_dictionaries(item)
 
     @dlt.resource(name="users", primary_key="id", write_disposition="merge")
     def users(
@@ -193,7 +193,7 @@ def linear_source(
         for item in _paginate(api_key, USERS_QUERY, "users"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield item
+                    yield normalize_dictionaries(item)
 
     @dlt.resource(name="workflow_states", primary_key="id", write_disposition="merge")
     def workflow_states(
@@ -210,7 +210,6 @@ def linear_source(
         for item in _paginate(api_key, WORKFLOW_STATES_QUERY, "workflowStates"):
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield _normalize_workflow_states(item)
-
+                    yield normalize_dictionaries(item)
     return [issues, projects, teams, users, workflow_states]
 
