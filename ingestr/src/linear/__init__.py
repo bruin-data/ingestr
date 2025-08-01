@@ -515,66 +515,78 @@ query Teams($cursor: String) {
   teams(first: 50, after: $cursor) {
     nodes {
       id
-      archivedAt
-      autoArchivePeriod
-      autoClosePeriod
-      autoCloseStateId
-      color
-      createdAt
-      cycleCalenderUrl
-      cycleCurrentIssueNumber
-      cycleDuration
-      cycleEnabledStartWeek
-      cycleIssueAutoAssignCompleted
-      cycleIssueAutoAssignStarted
-      cycleLockToActive
-      cycleStartDay
-      cyclesEnabled
-      defaultIssueEstimate
-      defaultTemplateForMembersId
-      defaultTemplateForNonMembersId
-      description
-      draftWorkflowStateId
-      estimationAllowZero
-      estimationExtended
-      estimationType
-      groupIssueHistory
-      icon
-      issueEstimationAllowZero
-      issueEstimationExtended
-      issueEstimationType
-      issueOrderingNeedsUsernameInDisplayName
-      issueSortOrderDefaultToBottom
-      key
-      markedAsDuplicateWorkflowStateId
-      mergeWorkflowStateId
       name
-      private
-      requirePriorityToLeaveTriage
-      scimGroupName
-      slackIssueComments
-      slackIssueStatuses
-      slackNewIssue
-      timezone
-      triageEnabled
-      upcomingCycleCount
+      key
+      description
       updatedAt
-      
-      activeCycle { id }
-      defaultIssueState { id }
-      defaultProjectTemplate { id }
-      defaultTemplate { id }
-      draftWorkflowState { id }
-      integrationsSettings { id }
-      markedAsDuplicateWorkflowState { id }
-      mergeWorkflowState { id }
-      organization { id }
-      parent { id }
-      reviewWorkflowState { id }
-      startWorkflowState { id }
-      triageIssueState { id }
+      createdAt
+      memberships { nodes { id } }
+      members { nodes { id } }
+      projects { nodes { id } }
     }
     pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+TEAM_QUERY = """
+query Team($id: String!) {
+  team(id: $id) {
+    id
+    name
+    displayName
+    key
+    description
+    color
+    icon
+    private
+    createdAt
+    updatedAt
+    archivedAt
+    timezone
+    cyclesEnabled
+    cycleDuration
+    cycleCooldownTime
+    cycleStartDay
+    cycleIssueAutoAssignCompleted
+    cycleIssueAutoAssignStarted
+    cycleLockToActive
+    cycleCalenderUrl
+    upcomingCycleCount
+    triageEnabled
+    defaultIssueEstimate
+    issueEstimationType
+    issueEstimationAllowZero
+    issueEstimationExtended
+    inheritIssueEstimation
+    inheritWorkflowStatuses
+    autoArchivePeriod
+    autoCloseChildIssues
+    autoCloseParentIssues
+    autoClosePeriod
+    autoCloseStateId
+    groupIssueHistory
+    requirePriorityToLeaveTriage
+    setIssueSortOrderOnStateChange
+    joinByDefault
+    inviteHash
+    scimManaged
+    scimGroupName
+    aiThreadSummariesEnabled
+    slackIssueComments
+    slackIssueStatuses  
+    slackNewIssue
+    
+    organization { id name }
+    parent { id name key }
+    activeCycle { id name number }
+    defaultIssueState { id name type }
+    defaultProjectTemplate { id name }
+    defaultTemplateForMembers { id name }
+    defaultTemplateForNonMembers { id name }
+    triageIssueState { id name type }
+    markedAsDuplicateWorkflowState { id name type }
+    integrationsSettings { id }
   }
 }
 """
@@ -706,6 +718,29 @@ def linear_source(
         current_start_date, current_end_date = _get_date_range(updated_at, start_date)
 
         for item in _paginate(api_key, TEAMS_QUERY, "teams"):
+            if pendulum.parse(item["updatedAt"]) >= current_start_date:
+                if pendulum.parse(item["updatedAt"]) <= current_end_date:
+                    yield normalize_dictionaries(item)
+
+    @dlt.resource(name="team", primary_key="id", write_disposition="merge")
+    def team(
+        team_id: str | None = None,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updatedAt",
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
+            range_start="closed",
+            range_end="closed",
+        ),
+    ) -> Iterator[Dict[str, Any]]:
+        if team_id is None:
+            return
+            
+        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
+
+        data = _graphql(api_key, TEAM_QUERY, {"id": team_id})
+        if "team" in data and data["team"]:
+            item = data["team"]
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
                     yield normalize_dictionaries(item)
@@ -1024,7 +1059,8 @@ def linear_source(
     return [
         issues, 
         projects, 
-        teams, 
+        teams,
+        team, 
         users, 
         workflow_states, 
         cycles,
