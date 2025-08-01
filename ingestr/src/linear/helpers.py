@@ -37,6 +37,7 @@ def normalize_dictionaries(item: Dict[str, Any]) -> Dict[str, Any]:
     Automatically normalize dictionary fields by detecting their structure:
     - Convert nested objects with 'id' field to {field_name}_id
     - Convert objects with 'nodes' field to arrays
+ 
     """
     normalized_item = item.copy()
 
