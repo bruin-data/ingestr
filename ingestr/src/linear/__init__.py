@@ -120,6 +120,42 @@ query WorkflowStates($cursor: String) {
 }
 """
 
+CYCLES_QUERY = """
+query Cycles($cursor: String) {
+  cycles(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      autoArchivedAt
+      completedAt
+      completedIssueCountHistory
+      completedScopeHistory
+      createdAt
+      currentProgress
+      description
+      endsAt
+      inProgressScopeHistory
+      inheritedFromId
+      isActive
+      isFuture
+      isNext
+      isPast
+      isPrevious
+      issueCountHistory
+      name
+      number
+      progress
+      progressHistory
+      scopeHistory
+      startsAt
+      team { id }
+      updatedAt
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
 
 @dlt.source(name="linear", max_table_nesting=0)
 def linear_source(
