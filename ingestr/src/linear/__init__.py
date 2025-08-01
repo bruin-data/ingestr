@@ -250,4 +250,21 @@ def linear_source(
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
                     yield normalize_dictionaries(item)
 
-    return [issues, projects, teams, users, workflow_states]
+    @dlt.resource(name="cycles", primary_key="id", write_disposition="merge")
+    def cycles(
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updatedAt",
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
+            range_start="closed",
+            range_end="closed",
+        ),
+    ) -> Iterator[Dict[str, Any]]:
+        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
+
+        for item in _paginate(api_key, CYCLES_QUERY, "cycles"):
+            if pendulum.parse(item["updatedAt"]) >= current_start_date:
+                if pendulum.parse(item["updatedAt"]) <= current_end_date:
+                    yield normalize_dictionaries(item)
+    return [issues, projects, teams, users, workflow_states, cycles]
+
