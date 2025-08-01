@@ -3160,7 +3160,7 @@ class LinearSource:
         if api_key is None:
             raise MissingValueError("api_key", "Linear")
 
-        if table not in ["issues", "projects", "teams", "users"]:
+        if table not in ["issues", "projects", "teams", "users", "workflow_states"]:
             raise UnsupportedResourceError(table, "Linear")
 
         start_date = kwargs.get("interval_start")
