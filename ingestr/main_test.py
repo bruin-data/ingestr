@@ -4409,7 +4409,7 @@ def linear_test_cases():
         "attachments", "comments", "documents", "external_users", "initiative",
         "integrations", "labels", "organization", "project_updates", "roadmaps",
         "roadmap_to_projects", "team_memberships", "initiative_to_project",
-        "project_milestone", "project_status"
+        "project_milestone", "project_status", "project"
     ]
     
     def create_table_test(table_name):
