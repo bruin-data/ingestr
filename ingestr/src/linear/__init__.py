@@ -413,39 +413,80 @@ query Projects($cursor: String) {
   projects(first: 50, after: $cursor) {
     nodes {
       id
-      archivedAt
-      autoArchivedAt
-      canceledAt
-      color
-      completedAt
-      completedIssueCountHistory
-      completedScopeHistory
-      content
-      createdAt
-      description
-      health
-      icon
-      inProgressScopeHistory
-      issueCountHistory
       name
-      priority
-      progress
-      scopeHistory
-      slugId
-      sortOrder
-      startDate
-      startedAt
-      state
-      targetDate
+      description
+      createdAt
       updatedAt
-      
-      creator { id }
-      favorite { id }
+      health
+      priority
+      targetDate
       lead { id }
-      organization { id }
-      team { id }
     }
     pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+PROJECT_QUERY = """
+query Project($id: String!) {
+  project(id: $id) {
+    id
+    name
+    description
+    archivedAt
+    autoArchivedAt
+    canceledAt
+    color
+    completedAt
+    completedIssueCountHistory
+    completedScopeHistory
+    content
+    contentState
+    createdAt
+    currentProgress
+    frequencyResolution
+    health
+    healthUpdatedAt
+    icon
+    inProgressScopeHistory
+    issueCountHistory
+    labelIds
+    priority
+    priorityLabel
+    prioritySortOrder
+    progress
+    progressHistory
+    projectUpdateRemindersPausedUntilAt
+    scope
+    scopeHistory
+    slackIssueComments
+    slackIssueStatuses
+    slackNewIssue
+    slugId
+    sortOrder
+    startDate
+    startDateResolution
+    startedAt
+    state
+    targetDate
+    targetDateResolution
+    trashed
+    updateReminderFrequency
+    updateReminderFrequencyInWeeks
+    updateRemindersDay
+    updateRemindersHour
+    updatedAt
+    url
+    
+    creator { id  }
+    convertedFromIssue { id }
+    documentContent { id }
+    favorite { id }
+    integrationsSettings { id }
+    lastAppliedTemplate { id }
+    lastUpdate { id }
+    lead { id }
+    status { id }
   }
 }
 """
@@ -701,6 +742,29 @@ def linear_source(
         current_start_date, current_end_date = _get_date_range(updated_at, start_date)
 
         for item in _paginate(api_key, PROJECTS_QUERY, "projects"):
+            if pendulum.parse(item["updatedAt"]) >= current_start_date:
+                if pendulum.parse(item["updatedAt"]) <= current_end_date:
+                    yield normalize_dictionaries(item)
+
+    @dlt.resource(name="project", primary_key="id", write_disposition="merge")
+    def project(
+        project_id: str | None = None,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updatedAt",
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
+            range_start="closed",
+            range_end="closed",
+        ),
+    ) -> Iterator[Dict[str, Any]]:
+        if project_id is None:
+            return
+            
+        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
+
+        data = _graphql(api_key, PROJECT_QUERY, {"id": project_id})
+        if "project" in data and data["project"]:
+            item = data["project"]
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
                     yield normalize_dictionaries(item)
@@ -1058,7 +1122,8 @@ def linear_source(
 
     return [
         issues, 
-        projects, 
+        projects,
+        project, 
         teams,
         team, 
         users, 
