@@ -46,7 +46,7 @@ def default_msg_processor(msg: Message) -> Dict[str, Any]:
             },
             "data": msg.value().decode("utf-8"),
         },
-        "_kafka_msg_id": digest128(topic + str(partition) + str(key)),
+        "_kafka__msg_id": digest128(topic + str(partition) + str(key)),
     }
 
 
