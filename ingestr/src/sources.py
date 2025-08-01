@@ -3182,6 +3182,7 @@ class LinearSource:
             "initiative_to_project",
             "project_milestone",
             "project_status",
+            "team",
         ]:
             raise UnsupportedResourceError(table, "Linear")
 
