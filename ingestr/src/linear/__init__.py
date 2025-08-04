@@ -427,69 +427,6 @@ query Projects($cursor: String) {
 }
 """
 
-PROJECT_QUERY = """
-query Project($id: String!) {
-  project(id: $id) {
-    id
-    name
-    description
-    archivedAt
-    autoArchivedAt
-    canceledAt
-    color
-    completedAt
-    completedIssueCountHistory
-    completedScopeHistory
-    content
-    contentState
-    createdAt
-    currentProgress
-    frequencyResolution
-    health
-    healthUpdatedAt
-    icon
-    inProgressScopeHistory
-    issueCountHistory
-    labelIds
-    priority
-    priorityLabel
-    prioritySortOrder
-    progress
-    progressHistory
-    projectUpdateRemindersPausedUntilAt
-    scope
-    scopeHistory
-    slackIssueComments
-    slackIssueStatuses
-    slackNewIssue
-    slugId
-    sortOrder
-    startDate
-    startDateResolution
-    startedAt
-    state
-    targetDate
-    targetDateResolution
-    trashed
-    updateReminderFrequency
-    updateReminderFrequencyInWeeks
-    updateRemindersDay
-    updateRemindersHour
-    updatedAt
-    url
-    
-    creator { id  }
-    convertedFromIssue { id }
-    documentContent { id }
-    favorite { id }
-    integrationsSettings { id }
-    lastAppliedTemplate { id }
-    lastUpdate { id }
-    lead { id }
-    status { id }
-  }
-}
-"""
 
 PROJECT_UPDATES_QUERY = """
 query ProjectUpdates($cursor: String) {
@@ -534,67 +471,6 @@ query Teams($cursor: String) {
 }
 """
 
-TEAM_QUERY = """
-query Team($id: String!) {
-  team(id: $id) {
-    id
-    name
-    displayName
-    key
-    description
-    color
-    icon
-    private
-    createdAt
-    updatedAt
-    archivedAt
-    timezone
-    cyclesEnabled
-    cycleDuration
-    cycleCooldownTime
-    cycleStartDay
-    cycleIssueAutoAssignCompleted
-    cycleIssueAutoAssignStarted
-    cycleLockToActive
-    cycleCalenderUrl
-    upcomingCycleCount
-    triageEnabled
-    defaultIssueEstimate
-    issueEstimationType
-    issueEstimationAllowZero
-    issueEstimationExtended
-    inheritIssueEstimation
-    inheritWorkflowStatuses
-    autoArchivePeriod
-    autoCloseChildIssues
-    autoCloseParentIssues
-    autoClosePeriod
-    autoCloseStateId
-    groupIssueHistory
-    requirePriorityToLeaveTriage
-    setIssueSortOrderOnStateChange
-    joinByDefault
-    inviteHash
-    scimManaged
-    scimGroupName
-    aiThreadSummariesEnabled
-    slackIssueComments
-    slackIssueStatuses  
-    slackNewIssue
-    
-    organization { id  }
-    parent { id  }
-    activeCycle { id  }
-    defaultIssueState { id  }
-    defaultProjectTemplate { id  }
-    defaultTemplateForMembers { id  }
-    defaultTemplateForNonMembers { id }
-    triageIssueState { id  }
-    markedAsDuplicateWorkflowState { id }
-    integrationsSettings { id }
-  }
-}
-"""
 
 TEAM_MEMBERSHIPS_QUERY = """
 query TeamMemberships($cursor: String) {
@@ -710,34 +586,7 @@ def linear_source(
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
                     yield normalize_dictionaries(item)
 
-    @dlt.resource(name="project", primary_key="id", write_disposition="merge")
-    def project(
-        project_id: str | None = None,
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        if project_id is None:
-            # If no project_id provided, use projects query to get all projects
-            current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-            for item in _paginate(api_key, PROJECTS_QUERY, "projects"):
-                if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                    if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                        yield normalize_dictionaries(item)
-            return
-            
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
 
-        data = _graphql(api_key, PROJECT_QUERY, {"id": project_id})
-        if "project" in data and data["project"]:
-            item = data["project"]
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
 
     @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
     def teams(
@@ -756,34 +605,7 @@ def linear_source(
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
                     yield normalize_dictionaries(item)
 
-    @dlt.resource(name="team", primary_key="id", write_disposition="merge")
-    def team(
-        team_id: str | None = None,
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        if team_id is None:
-            # If no team_id provided, use teams query to get all teams
-            current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-            for item in _paginate(api_key, TEAMS_QUERY, "teams"):
-                if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                    if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                        yield normalize_dictionaries(item)
-            return
-            
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        data = _graphql(api_key, TEAM_QUERY, {"id": team_id})
-        if "team" in data and data["team"]:
-            item = data["team"]
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
+    
 
     @dlt.resource(name="users", primary_key="id", write_disposition="merge")
     def users(
@@ -1067,9 +889,7 @@ def linear_source(
     return [
         issues, 
         projects,
-        project, 
-        teams,
-        team, 
+        teams, 
         users, 
         workflow_states, 
         cycles,
