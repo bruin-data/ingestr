@@ -113,13 +113,13 @@ query Comments($cursor: String) {
       createdAt
       editedAt
       quotedText
-      reactionData
+      reactionData 
       resolvedAt
       threadSummary
       updatedAt
       url
       
-      botActor { id name type }
+      botActor { id  }
       documentContent { id }
       externalThread { id }
       externalUser { id }

@@ -73,7 +73,8 @@ def _create_paginated_resource(resource_name: str, query: str, query_field: str,
             range_end="closed",
         ),
     ) -> Iterator[Dict[str, Any]]:
-        yield from _paginated_resource(api_key, query, query_field, updated_at, start_date)
+        for item in _paginated_resource(api_key, query, query_field, updated_at, start_date):
+            yield normalize_dictionaries(item)
     
     return paginated_resource
 
