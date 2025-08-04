@@ -1056,33 +1056,16 @@ class FacebookAdsSource:
             # Validate breakdown type against available options from settings
             import typing
 
-            from ingestr.src.facebook_ads.settings import TInsightsBreakdownOptions
-
-            # Get valid breakdown options from the type definition
-            valid_breakdowns = list(typing.get_args(TInsightsBreakdownOptions))
-
-            if breakdown_type not in valid_breakdowns:
-                raise ValueError(
-                    f"Invalid breakdown type '{breakdown_type}'. Valid options: {', '.join(valid_breakdowns)}"
-                )
+            from ingestr.src.facebook_ads.helpers import parse_insights_table_to_source_kwargs
 
             source_kwargs = {
                 "access_token": access_token[0],
                 "account_id": account_id[0],
                 "start_date": kwargs.get("interval_start"),
                 "end_date": kwargs.get("interval_end"),
-                "breakdowns": breakdown_type,
             }
 
-            # If custom metrics are provided, parse them
-            if len(parts) == 3:
-                fields = [f.strip() for f in parts[2].split(",") if f.strip()]
-                if not fields:
-                    raise ValueError(
-                        "Custom metrics must be provided after the second colon in format: facebook_insights:breakdown_type:metric1,metric2..."
-                    )
-                source_kwargs["fields"] = fields
-
+            source_kwargs.update(parse_insights_table_to_source_kwargs(table))
             return facebook_insights_source(**source_kwargs).with_resources(
                 "facebook_insights"
             )
