@@ -117,6 +117,9 @@ def facebook_insights_source(
     app_api_version: str = None,
     start_date: pendulum.DateTime | None = None,
     end_date: pendulum.DateTime | None = None,
+    insights_max_wait_to_finish_seconds: int = 60 * 60 * 4,
+    insights_max_wait_to_start_seconds: int = 60 * 30,
+    insights_max_async_sleep_seconds: int = 20,
 ) -> DltResource:
     """Incrementally loads insight reports with defined granularity level, fields, breakdowns etc.
 
@@ -206,7 +209,9 @@ def facebook_insights_source(
             }
             job = execute_job(
                 account.get_insights(params=query, is_async=True),
-                insights_max_async_sleep_seconds=20,
+                insights_max_async_sleep_seconds=insights_max_async_sleep_seconds,
+                insights_max_wait_to_finish_seconds=insights_max_wait_to_finish_seconds,
+                insights_max_wait_to_start_seconds=insights_max_wait_to_start_seconds,
             )
             output = list(map(process_report_item, job.get_result()))
             yield output

@@ -1008,6 +1008,16 @@ class FacebookAdsSource:
             facebook_insights_source,
         )
 
+        insights_max_wait_to_finish_seconds = source_params.get(
+            "insights_max_wait_to_finish_seconds", [60 * 60 * 4]
+        )
+        insights_max_wait_to_start_seconds = source_params.get(
+            "insights_max_wait_to_start_seconds", [60 * 30]
+        )
+        insights_max_async_sleep_seconds = source_params.get(
+            "insights_max_async_sleep_seconds", [20]
+        )
+
         endpoint = None
         if table in ["campaigns", "ad_sets", "ad_creatives", "ads", "leads"]:
             endpoint = table
@@ -1017,6 +1027,13 @@ class FacebookAdsSource:
                 account_id=account_id[0],
                 start_date=kwargs.get("interval_start"),
                 end_date=kwargs.get("interval_end"),
+                insights_max_wait_to_finish_seconds=insights_max_wait_to_finish_seconds[
+                    0
+                ],
+                insights_max_wait_to_start_seconds=insights_max_wait_to_start_seconds[
+                    0
+                ],
+                insights_max_async_sleep_seconds=insights_max_async_sleep_seconds[0],
             ).with_resources("facebook_insights")
         elif table.startswith("facebook_insights:"):
             # Parse custom breakdowns and metrics from table name

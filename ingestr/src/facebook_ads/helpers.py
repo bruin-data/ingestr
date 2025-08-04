@@ -144,7 +144,7 @@ def execute_job(
             raise InsightsJobTimeout(
                 "facebook_insights",
                 pretty_error_message.format(
-                    job_id, insights_max_wait_to_finish_seconds // 60
+                    job_id, insights_max_wait_to_finish_seconds
                 ),
             )
 
