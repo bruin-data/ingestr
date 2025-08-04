@@ -4405,11 +4405,11 @@ def test_pinterest_test_case(dest):
 def linear_test_cases():
     # All Linear source tables
     tables = [
-        "issues", "projects", "team", "users", "workflow_states", "cycles",
+        "issues", "projects",  "users", "workflow_states", "cycles",
         "attachments", "comments", "documents", "external_users", "initiative",
         "integrations", "labels", "organization", "project_updates",
         "team_memberships", "initiative_to_project",
-        "project_milestone", "project_status", "project"
+        "project_milestone", "project_status", 
     ]
     
     def create_table_test(table_name):

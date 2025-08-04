@@ -4,22 +4,7 @@ import dlt
 import pendulum
 import requests
 
-from .helpers import _paginate, _graphql, normalize_dictionaries
-
-
-def _get_date_range(updated_at, start_date):
-    """Extract current start and end dates from incremental state."""
-    if updated_at.last_value:
-        current_start_date = pendulum.parse(updated_at.last_value)
-    else:
-        current_start_date = pendulum.parse(start_date)
-
-    if updated_at.end_value:
-        current_end_date = pendulum.parse(updated_at.end_value)
-    else:
-        current_end_date = pendulum.now(tz="UTC")
-
-    return current_start_date, current_end_date
+from .helpers import _graphql, normalize_dictionaries, _get_date_range, _create_paginated_resource
 
 
 ISSUES_QUERY = """
@@ -33,8 +18,6 @@ query Issues($cursor: String) {
       updatedAt
       archivedAt
       addedToCycleAt
-      addedToProjectAt
-      addedToTeamAt
       autoArchivedAt
       autoClosedAt
       boardOrder
@@ -76,13 +59,11 @@ query Issues($cursor: String) {
       favorite { id }
       lastAppliedTemplate { id }
       parent { id }
-      project { id }
       projectMilestone { id }
       recurringIssueTemplate { id }
       snoozedBy { id }
       sourceComment { id }
       state { id }
-      team { id }
       
       labels(first: 250) { 
         nodes { 
@@ -177,8 +158,6 @@ query Cycles($cursor: String) {
       scopeHistory
       startsAt
       updatedAt
-      
-      team { id }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -199,7 +178,6 @@ query Documents($cursor: String) {
       updatedAt
       
       creator { id }
-      project { id }
       updatedBy { id }
     }
     pageInfo { hasNextPage endCursor }
@@ -283,7 +261,6 @@ query InitiativeToProjects($cursor: String) {
       updatedAt
       
       initiative { id }
-      project { id }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -309,7 +286,6 @@ query ProjectMilestones($cursor: String) {
       updatedAt
       
       documentContent { id }
-      project { id }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -348,7 +324,6 @@ query Integrations($cursor: String) {
       
       creator { id }
       organization { id }
-      team { id }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -371,12 +346,12 @@ query IssueLabels($cursor: String) {
       creator { id }
       organization { id }
       parent { id }
-      team { id }
     }
     pageInfo { hasNextPage endCursor }
   }
 }
 """
+
 
 ORGANIZATION_QUERY = """
 query Organization {
@@ -408,25 +383,6 @@ query Organization {
 }
 """
 
-PROJECTS_QUERY = """
-query Projects($cursor: String) {
-  projects(first: 50, after: $cursor) {
-    nodes {
-      id
-      name
-      description
-      createdAt
-      updatedAt
-      health
-      priority
-      targetDate
-      lead { id }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-"""
-
 
 PROJECT_UPDATES_QUERY = """
 query ProjectUpdates($cursor: String) {
@@ -442,7 +398,6 @@ query ProjectUpdates($cursor: String) {
       updatedAt
       url
       
-      project { id }
       user { id }
     }
     pageInfo { hasNextPage endCursor }
@@ -450,26 +405,6 @@ query ProjectUpdates($cursor: String) {
 }
 """
 
-
-
-TEAMS_QUERY = """
-query Teams($cursor: String) {
-  teams(first: 50, after: $cursor) {
-    nodes {
-      id
-      name
-      key
-      description
-      updatedAt
-      createdAt
-      memberships { nodes { id } }
-      members { nodes { id } }
-      projects { nodes { id } }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-"""
 
 
 TEAM_MEMBERSHIPS_QUERY = """
@@ -483,7 +418,6 @@ query TeamMemberships($cursor: String) {
       sortOrder
       updatedAt
       
-      team { id }
       user { id }
     }
     pageInfo { hasNextPage endCursor }
@@ -537,13 +471,52 @@ query WorkflowStates($cursor: String) {
       position
       type
       updatedAt
-      
-      team { id }
     }
     pageInfo { hasNextPage endCursor }
   }
 }
 """
+PROJECTS_QUERY = """
+query Projects($cursor: String) {
+  projects(first: 50, after: $cursor) {
+    nodes {
+      id
+      name
+      description
+      createdAt
+      updatedAt
+      health
+      priority
+      targetDate
+      lead { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+# Paginated resources configuration
+PAGINATED_RESOURCES = [
+    ("issues", ISSUES_QUERY, "issues"),
+    ("users", USERS_QUERY, "users"),
+    ("workflow_states", WORKFLOW_STATES_QUERY, "workflowStates"),
+    ("cycles", CYCLES_QUERY, "cycles"),
+    ("attachments", ATTACHMENTS_QUERY, "attachments"),
+    ("comments", COMMENTS_QUERY, "comments"),
+    ("documents", DOCUMENTS_QUERY, "documents"),
+    ("external_users", EXTERNAL_USERS_QUERY, "externalUsers"),
+    ("initiative", INITIATIVES_QUERY, "initiatives"),
+    ("integrations", INTEGRATIONS_QUERY, "integrations"),
+    ("labels", LABELS_QUERY, "issueLabels"),
+    ("project_updates", PROJECT_UPDATES_QUERY, "projectUpdates"),
+    ("team_memberships", TEAM_MEMBERSHIPS_QUERY, "teamMemberships"),
+    ("initiative_to_project", INITIATIVE_TO_PROJECTS_QUERY, "initiativeToProjects"),
+    ("project_milestone", PROJECT_MILESTONES_QUERY, "projectMilestones"),
+    ("project_status", PROJECT_STATUSES_QUERY, "projectStatuses"),
+    ("projects", PROJECTS_QUERY, "projects"),
+]
+
 
 
 @dlt.source(name="linear", max_table_nesting=0)
@@ -552,231 +525,6 @@ def linear_source(
     start_date: pendulum.DateTime,
     end_date: pendulum.DateTime | None = None,
 ) -> Iterable[dlt.sources.DltResource]:
-    @dlt.resource(name="issues", primary_key="id", write_disposition="merge")
-    def issues(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, ISSUES_QUERY, "issues"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="projects", primary_key="id", write_disposition="merge")
-    def projects(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, PROJECTS_QUERY, "projects"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-
-
-    @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
-    def teams(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, TEAMS_QUERY, "teams"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    
-
-    @dlt.resource(name="users", primary_key="id", write_disposition="merge")
-    def users(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, USERS_QUERY, "users"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="workflow_states", primary_key="id", write_disposition="merge")
-    def workflow_states(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, WORKFLOW_STATES_QUERY, "workflowStates"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="cycles", primary_key="id", write_disposition="merge")
-    def cycles(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, CYCLES_QUERY, "cycles"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="attachments", primary_key="id", write_disposition="merge")
-    def attachments(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, ATTACHMENTS_QUERY, "attachments"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="comments", primary_key="id", write_disposition="merge")
-    def comments(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, COMMENTS_QUERY, "comments"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="documents", primary_key="id", write_disposition="merge")
-    def documents(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, DOCUMENTS_QUERY, "documents"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="external_users", primary_key="id", write_disposition="merge")
-    def external_users(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, EXTERNAL_USERS_QUERY, "externalUsers"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="initiative", primary_key="id", write_disposition="merge")
-    def initiative(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, INITIATIVES_QUERY, "initiatives"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="integrations", primary_key="id", write_disposition="merge")
-    def integrations(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, INTEGRATIONS_QUERY, "integrations"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-
-    @dlt.resource(name="labels", primary_key="id", write_disposition="merge")
-    def labels(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, LABELS_QUERY, "issueLabels"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
 
     @dlt.resource(name="organization", primary_key="id", write_disposition="merge")
     def organization(
@@ -797,114 +545,13 @@ def linear_source(
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
                     yield normalize_dictionaries(item)
 
-    @dlt.resource(name="project_updates", primary_key="id", write_disposition="merge")
-    def project_updates(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, PROJECT_UPDATES_QUERY, "projectUpdates"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-
-
-    @dlt.resource(name="team_memberships", primary_key="id", write_disposition="merge")
-    def team_memberships(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, TEAM_MEMBERSHIPS_QUERY, "teamMemberships"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-
-
-    @dlt.resource(name="initiative_to_project", primary_key="id", write_disposition="merge")
-    def initiative_to_project(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, INITIATIVE_TO_PROJECTS_QUERY, "initiativeToProjects"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="project_milestone", primary_key="id", write_disposition="merge")
-    def project_milestone(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, PROJECT_MILESTONES_QUERY, "projectMilestones"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="project_status", primary_key="id", write_disposition="merge")
-    def project_status(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, PROJECT_STATUSES_QUERY, "projectStatuses"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    return [
-        issues, 
-        projects,
-        teams, 
-        users, 
-        workflow_states, 
-        cycles,
-        attachments,
-        comments,
-        documents,
-        external_users,
-        initiative,
-        integrations,
-        labels,
-        organization,
-        project_updates,
-        team_memberships,
-        initiative_to_project,
-        project_milestone,
-        project_status,
+    # Create paginated resources dynamically
+    paginated_resources = [
+        _create_paginated_resource(resource_name, query, query_field, api_key, start_date, end_date)
+        for resource_name, query, query_field in PAGINATED_RESOURCES
     ]
-
+    
+    return [
+        *paginated_resources,
+        organization,
+    ]

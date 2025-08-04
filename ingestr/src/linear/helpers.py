@@ -1,6 +1,8 @@
 from typing import Any, Dict, Iterator, Optional
 
 import requests
+import pendulum
+import dlt
 
 LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql"
 
@@ -30,6 +32,50 @@ def _paginate(api_key: str, query: str, root: str) -> Iterator[Dict[str, Any]]:
         if not data["pageInfo"]["hasNextPage"]:
             break
         cursor = data["pageInfo"]["endCursor"]
+
+
+
+
+def _get_date_range(updated_at, start_date):
+    """Extract current start and end dates from incremental state."""
+    if updated_at.last_value:
+        current_start_date = pendulum.parse(updated_at.last_value)
+    else:
+        current_start_date = pendulum.parse(start_date)
+
+    if updated_at.end_value:
+        current_end_date = pendulum.parse(updated_at.end_value)
+    else:
+        current_end_date = pendulum.now(tz="UTC")
+    
+    return current_start_date, current_end_date
+
+
+def _paginated_resource(api_key: str, query: str, query_field: str, updated_at, start_date) -> Iterator[Dict[str, Any]]:
+    """Helper function for paginated resources with date filtering."""
+    current_start_date, current_end_date = _get_date_range(updated_at, start_date)
+
+    for item in _paginate(api_key, query, query_field):
+        if pendulum.parse(item["updatedAt"]) >= current_start_date:
+            if pendulum.parse(item["updatedAt"]) <= current_end_date:
+                yield normalize_dictionaries(item)
+
+
+def _create_paginated_resource(resource_name: str, query: str, query_field: str, api_key: str, start_date, end_date = None):
+    """Factory function to create paginated resources dynamically."""
+    @dlt.resource(name=resource_name, primary_key="id", write_disposition="merge")
+    def paginated_resource(
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updatedAt",
+            initial_value=start_date.isoformat(),
+            end_value=end_date.isoformat() if end_date else None,
+            range_start="closed",
+            range_end="closed",
+        ),
+    ) -> Iterator[Dict[str, Any]]:
+        yield from _paginated_resource(api_key, query, query_field, updated_at, start_date)
+    
+    return paginated_resource
 
 
 def normalize_dictionaries(item: Dict[str, Any]) -> Dict[str, Any]:
