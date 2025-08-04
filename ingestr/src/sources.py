@@ -3256,8 +3256,6 @@ class LinearSource:
             "labels",
             "organization",
             "project_updates",
-            "roadmaps",
-            "roadmap_to_projects",
             "team_memberships",
             "initiative_to_project",
             "project_milestone",

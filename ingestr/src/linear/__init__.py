@@ -513,43 +513,7 @@ query ProjectUpdates($cursor: String) {
 }
 """
 
-ROADMAPS_QUERY = """
-query Roadmaps($cursor: String) {
-  roadmaps(first: 50, after: $cursor) {
-    nodes {
-      id
-      archivedAt
-      createdAt
-      description
-      name
-      slugId
-      updatedAt
-      
-      creator { id }
-      organization { id }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-"""
 
-ROADMAP_TO_PROJECTS_QUERY = """
-query RoadmapToProjects($cursor: String) {
-  roadmapToProjects(first: 50, after: $cursor) {
-    nodes {
-      id
-      archivedAt
-      createdAt
-      sortOrder
-      updatedAt
-      
-      project { id }
-      roadmap { id }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-"""
 
 TEAMS_QUERY = """
 query Teams($cursor: String) {
@@ -618,15 +582,15 @@ query Team($id: String!) {
     slackIssueStatuses  
     slackNewIssue
     
-    organization { id name }
-    parent { id name key }
-    activeCycle { id name number }
-    defaultIssueState { id name type }
-    defaultProjectTemplate { id name }
-    defaultTemplateForMembers { id name }
-    defaultTemplateForNonMembers { id name }
-    triageIssueState { id name type }
-    markedAsDuplicateWorkflowState { id name type }
+    organization { id  }
+    parent { id  }
+    activeCycle { id  }
+    defaultIssueState { id  }
+    defaultProjectTemplate { id  }
+    defaultTemplateForMembers { id  }
+    defaultTemplateForNonMembers { id }
+    triageIssueState { id  }
+    markedAsDuplicateWorkflowState { id }
     integrationsSettings { id }
   }
 }
@@ -758,6 +722,12 @@ def linear_source(
         ),
     ) -> Iterator[Dict[str, Any]]:
         if project_id is None:
+            # If no project_id provided, use projects query to get all projects
+            current_start_date, current_end_date = _get_date_range(updated_at, start_date)
+            for item in _paginate(api_key, PROJECTS_QUERY, "projects"):
+                if pendulum.parse(item["updatedAt"]) >= current_start_date:
+                    if pendulum.parse(item["updatedAt"]) <= current_end_date:
+                        yield normalize_dictionaries(item)
             return
             
         current_start_date, current_end_date = _get_date_range(updated_at, start_date)
@@ -798,6 +768,12 @@ def linear_source(
         ),
     ) -> Iterator[Dict[str, Any]]:
         if team_id is None:
+            # If no team_id provided, use teams query to get all teams
+            current_start_date, current_end_date = _get_date_range(updated_at, start_date)
+            for item in _paginate(api_key, TEAMS_QUERY, "teams"):
+                if pendulum.parse(item["updatedAt"]) >= current_start_date:
+                    if pendulum.parse(item["updatedAt"]) <= current_end_date:
+                        yield normalize_dictionaries(item)
             return
             
         current_start_date, current_end_date = _get_date_range(updated_at, start_date)
@@ -1016,39 +992,7 @@ def linear_source(
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
                     yield normalize_dictionaries(item)
 
-    @dlt.resource(name="roadmaps", primary_key="id", write_disposition="merge")
-    def roadmaps(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
 
-        for item in _paginate(api_key, ROADMAPS_QUERY, "roadmaps"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="roadmap_to_projects", primary_key="id", write_disposition="merge")
-    def roadmap_to_projects(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, ROADMAP_TO_PROJECTS_QUERY, "roadmapToProjects"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
 
     @dlt.resource(name="team_memberships", primary_key="id", write_disposition="merge")
     def team_memberships(
@@ -1138,8 +1082,6 @@ def linear_source(
         labels,
         organization,
         project_updates,
-        roadmaps,
-        roadmap_to_projects,
         team_memberships,
         initiative_to_project,
         project_milestone,

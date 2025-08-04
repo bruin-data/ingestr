@@ -4407,8 +4407,8 @@ def linear_test_cases():
     tables = [
         "issues", "projects", "team", "users", "workflow_states", "cycles",
         "attachments", "comments", "documents", "external_users", "initiative",
-        "integrations", "labels", "organization", "project_updates", "roadmaps",
-        "roadmap_to_projects", "team_memberships", "initiative_to_project",
+        "integrations", "labels", "organization", "project_updates",
+        "team_memberships", "initiative_to_project",
         "project_milestone", "project_status", "project"
     ]
     
@@ -4428,35 +4428,27 @@ def linear_test_cases():
                 source_table,
                 dest_uri,
                 dest_table,
-                interval_start="2024-01-01",
-                interval_end="2024-12-31",
-                print_output=False,
+                interval_start="2020-01-01",
+                interval_end="2025-12-31",
+                print_output=True,
             )
             
             if result.exit_code != 0:
                 # Some Linear resources might not be accessible based on workspace permissions
                 print(f"Linear {table_name} test failed (likely permissions/access issue)")
                 traceback.print_exception(*result.exc_info)
-                # Skip this test instead of failing
-                pytest.skip(f"Linear {table_name} resource not accessible")
             
             assert result.exit_code == 0
             
             with sqlalchemy.create_engine(dest_uri).connect() as conn:
-                try:
-                    res = conn.execute(f"select count(*) from {dest_table}").fetchall()
-                    assert len(res) > 0
-                    count = res[0][0]
-                    print(f"Linear {table_name} count: {count}")
-                    
-                    # Special validation for users table - should have at least one user
-                    if table_name == "users":
-                        assert count > 0, "Linear should have at least one user"
-                        
-                except Exception as e:
-                    # Some tables might not exist if workspace doesn't have that data
-                    print(f"Linear {table_name} test completed (no data or table not accessible): {str(e)[:100]}...")
-                    pass
+                res = conn.execute(f"select count(*) from {dest_table}").fetchall()
+                assert len(res) > 0
+                count = res[0][0]
+                print(f"Linear {table_name} count: {count}")
+                
+                # Special validation for users table - should have at least one user
+                if table_name == "users":
+                    assert count > 0, "Linear should have at least one user"
         
         # Set function name for pytest identification
         table_test.__name__ = f"{table_name}_table"
