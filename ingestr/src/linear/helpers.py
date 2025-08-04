@@ -32,8 +32,6 @@ def _paginate(api_key: str, query: str, root: str) -> Iterator[Dict[str, Any]]:
         cursor = data["pageInfo"]["endCursor"]
 
 
-
-
 def normalize_dictionaries(item: Dict[str, Any]) -> Dict[str, Any]:
     """
     Automatically normalize dictionary fields by detecting their structure:
@@ -41,15 +39,15 @@ def normalize_dictionaries(item: Dict[str, Any]) -> Dict[str, Any]:
     - Convert objects with 'nodes' field to arrays
     """
     normalized_item = item.copy()
-    
+
     for key, value in list(normalized_item.items()):
         if isinstance(value, dict):
             # If the dict has an 'id' field, replace with {key}_id
-            if 'id' in value:
-                normalized_item[f"{key}_id"] = value['id']
+            if "id" in value:
+                normalized_item[f"{key}_id"] = value["id"]
                 del normalized_item[key]
             # If the dict has 'nodes' field, extract the nodes array
-            elif 'nodes' in value:
-                normalized_item[key] = value['nodes']
-    
+            elif "nodes" in value:
+                normalized_item[key] = value["nodes"]
+
     return normalized_item

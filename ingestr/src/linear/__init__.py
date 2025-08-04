@@ -17,8 +17,9 @@ def _get_date_range(updated_at, start_date):
         current_end_date = pendulum.parse(updated_at.end_value)
     else:
         current_end_date = pendulum.now(tz="UTC")
-    
+
     return current_start_date, current_end_date
+
 
 ISSUES_QUERY = """
 query Issues($cursor: String) {
@@ -119,6 +120,7 @@ query WorkflowStates($cursor: String) {
 }
 """
 
+
 @dlt.source(name="linear", max_table_nesting=0)
 def linear_source(
     api_key: str,
@@ -211,5 +213,5 @@ def linear_source(
             if pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
                     yield normalize_dictionaries(item)
-    return [issues, projects, teams, users, workflow_states]
 
+    return [issues, projects, teams, users, workflow_states]
