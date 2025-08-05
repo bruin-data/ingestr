@@ -3367,6 +3367,7 @@ class InfluxDBSource:
             end_date=end_date,
         ).with_resources(table)
 
+
 class WiseSource:
     def handles_incrementality(self) -> bool:
         return True
