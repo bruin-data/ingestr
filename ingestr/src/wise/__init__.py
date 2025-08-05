@@ -16,8 +16,8 @@ def wise_source(
 ) -> Iterable[DltResource]:
     client = WiseClient(api_key)
 
-    # List of all profiles belonging to user. 
-    @dlt.resource(write_disposition="replace", name="profiles", primary_key="id")
+    # List of all profiles belonging to user.
+    @dlt.resource(write_disposition="merge", name="profiles", primary_key="id")
     def profiles() -> Iterable[TDataItem]:
         yield from client.fetch_profiles()
 
@@ -42,6 +42,30 @@ def wise_source(
             for profile in profiles:
                 yield from client.fetch_transfers(profile["id"], start_dt, end_dt)
     
-   
+    #Retrieve the user's multi-currency account balance accounts. It returns all balance accounts the profile has.
+    @dlt.resource(write_disposition="merge", name="balances", primary_key="id")
+    def balances(profiles=profiles,
+                 datetime = dlt.sources.incremental(
+                    "modificationTime",
+                    initial_value=start_date,
+                    end_value=end_date,
+                    range_end="closed",
+                    range_start="closed",
+            )) -> Iterable[TDataItem]:
+            if datetime.end_value is None:
+                end_dt = pendulum.now(tz="UTC")
+            else:
+                end_dt = datetime.end_value
 
-    return profiles,transfers
+            start_dt = datetime.last_value
+
+            for profile in profiles:
+                yield from client.fetch_balances(profile["id"], start_dt, end_dt)
+
+    #Returns a list of cards that linked to the profile
+    @dlt.resource(name="cards", primary_key="token", write_disposition="merge")
+    def cards(profiles=profiles):
+        for profile in profiles:
+            yield from client.fetch_cards(profile["id"])
+
+    return profiles,transfers,balances,cards
