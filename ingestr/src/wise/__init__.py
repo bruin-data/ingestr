@@ -65,10 +65,4 @@ def wise_source(
         for profile in profiles:
             yield from client.fetch_balances(profile["id"], start_dt, end_dt)
 
-    # Returns a list of cards that linked to the profile
-    @dlt.resource(name="cards", primary_key="token", write_disposition="merge")
-    def cards(profiles=profiles):
-        for profile in profiles:
-            yield from client.fetch_cards(profile["id"])
-
-    return profiles, transfers, balances, cards
+    return profiles, transfers, balances

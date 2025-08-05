@@ -61,19 +61,3 @@ class WiseClient:
                 and balance["modificationTime"] < end_time
             ):
                 yield balance
-
-    # https://docs.wise.com/api-docs/api-reference/card#list
-    def fetch_cards(self, profile_id: str):
-        page = 1
-        while True:
-            data = self.session.get(
-                f"{self.BASE_URL}/v3/spend/profiles/{profile_id}/cards",
-                params={"pageNumber": page, "pageSize": 100},
-            )
-            data.raise_for_status()
-            response_data = data.json()
-            if not response_data or len(response_data) == 0:
-                break
-            for card in response_data:
-                yield card
-            page += 1

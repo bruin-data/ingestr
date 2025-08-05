@@ -3380,7 +3380,7 @@ class WiseSource:
         if not api_key:
             raise MissingValueError("api_key", "Wise")
 
-        if table not in ["profiles", "transfers", "balances", "cards"]:
+        if table not in ["profiles", "transfers", "balances"]:
             raise ValueError(
                 f"Resource '{table}' is not supported for Wise source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
