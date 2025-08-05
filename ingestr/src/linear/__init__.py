@@ -2,23 +2,9 @@ from typing import Any, Dict, Iterable, Iterator
 
 import dlt
 import pendulum
+import requests
 
-from .helpers import _paginate, normalize_dictionaries
-
-
-def _get_date_range(updated_at, start_date):
-    """Extract current start and end dates from incremental state."""
-    if updated_at.last_value:
-        current_start_date = pendulum.parse(updated_at.last_value)
-    else:
-        current_start_date = pendulum.parse(start_date)
-
-    if updated_at.end_value:
-        current_end_date = pendulum.parse(updated_at.end_value)
-    else:
-        current_end_date = pendulum.now(tz="UTC")
-
-    return current_start_date, current_end_date
+from .helpers import _graphql, normalize_dictionaries, _get_date_range, _create_paginated_resource
 
 
 ISSUES_QUERY = """
@@ -30,23 +16,466 @@ query Issues($cursor: String) {
       description
       createdAt
       updatedAt
-      creator { id }
-      assignee { id}
-      state { id}
-      labels { nodes { id } }
-      cycle { id}
-      project { id }
-      subtasks: children { nodes { id title } }
-      comments(first: 250) { nodes { id body } }
+      archivedAt
+      addedToCycleAt
+      autoArchivedAt
+      autoClosedAt
+      boardOrder
+      branchName
+      canceledAt
+      completedAt
+      customerTicketCount
+      descriptionState
+      dueDate
+      estimate
+      identifier
+      integrationSourceType
+      labelIds
+      number
+      previousIdentifiers
       priority
-      attachments { nodes { id } }
-      subscribers { nodes { id } }
+      priorityLabel
+      prioritySortOrder
+      reactionData
+      slaBreachesAt
+      slaHighRiskAt
+      slaMediumRiskAt
+      slaStartedAt
+      slaType
+      snoozedUntilAt
+      sortOrder
+      startedAt
+      startedTriageAt
+      subIssueSortOrder
+      triagedAt
+      url
+      
+      creator { id }
+      assignee { id }
+      botActor { id name type }
+      cycle { id }
+      delegate { id }
+      externalUserCreator { id }
+      favorite { id }
+      lastAppliedTemplate { id }
+      parent { id }
+      projectMilestone { id }
+      recurringIssueTemplate { id }
+      snoozedBy { id }
+      sourceComment { id }
+      state { id }
+      
+      labels(first: 250) { 
+        nodes { 
+          id 
+        } 
+      }
     }
     pageInfo { hasNextPage endCursor }
   }
 }
 """
 
+ATTACHMENTS_QUERY = """
+query Attachments($cursor: String) {
+  attachments(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      bodyData
+      createdAt
+      groupBySource
+      metadata
+      sourceType
+      subtitle
+      title
+      updatedAt
+      url
+      
+      creator { id }
+      externalUserCreator { id }
+      issue { id }
+      originalIssue { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+COMMENTS_QUERY = """
+query Comments($cursor: String) {
+  comments(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      body
+      bodyData
+      createdAt
+      editedAt
+      quotedText
+      reactionData 
+      resolvedAt
+      threadSummary
+      updatedAt
+      url
+      
+      botActor { id  }
+      documentContent { id }
+      externalThread { id }
+      externalUser { id }
+      initiativeUpdate { id }
+      issue { id }
+      parent { id }
+      post { id }
+      projectUpdate { id }
+      resolvingComment { id }
+      resolvingUser { id }
+      user { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+CYCLES_QUERY = """
+query Cycles($cursor: String) {
+  cycles(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      autoArchivedAt
+      completedAt
+      completedIssueCountHistory
+      completedScopeHistory
+      createdAt
+      description
+      endsAt
+      inProgressScopeHistory
+      issueCountHistory
+      name
+      number
+      progress
+      scopeHistory
+      startsAt
+      updatedAt
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+DOCUMENTS_QUERY = """
+query Documents($cursor: String) {
+  documents(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      color
+      createdAt
+      icon
+      slugId
+      title
+      updatedAt
+      
+      creator { id }
+      updatedBy { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+EXTERNAL_USERS_QUERY = """
+query ExternalUsers($cursor: String) {
+  externalUsers(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      avatarUrl
+      createdAt
+      displayName
+      email
+      lastSeen
+      name
+      updatedAt
+      
+      organization { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+INITIATIVES_QUERY = """
+query Initiatives($cursor: String) {
+  initiatives(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      color
+      completedAt
+      content
+      createdAt
+      description
+      frequencyResolution
+      health
+      healthUpdatedAt
+      icon
+      name
+      slugId
+      sortOrder
+      startedAt
+      status
+      targetDate
+      targetDateResolution
+      trashed
+      updateReminderFrequency
+      updateReminderFrequencyInWeeks
+      updateRemindersDay
+      updateRemindersHour
+      updatedAt
+      
+      creator { id }
+      documentContent { id }
+      integrationsSettings { id }
+      lastUpdate { id }
+      organization { id }
+      owner { id }
+      parentInitiative { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+
+INITIATIVE_TO_PROJECTS_QUERY = """
+query InitiativeToProjects($cursor: String) {
+  initiativeToProjects(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      createdAt
+      sortOrder
+      updatedAt
+      
+      initiative { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+PROJECT_MILESTONES_QUERY = """
+query ProjectMilestones($cursor: String) {
+  projectMilestones(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      createdAt
+      currentProgress
+      description
+      descriptionState
+      name
+      progress
+      progressHistory
+      sortOrder
+      status
+      targetDate
+      updatedAt
+      
+      documentContent { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+PROJECT_STATUSES_QUERY = """
+query ProjectStatuses($cursor: String) {
+  projectStatuses(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      color
+      createdAt
+      description
+      indefinite
+      name
+      position
+      type
+      updatedAt
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+INTEGRATIONS_QUERY = """
+query Integrations($cursor: String) {
+  integrations(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      createdAt
+      service
+      updatedAt
+      
+      creator { id }
+      organization { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+LABELS_QUERY = """
+query IssueLabels($cursor: String) {
+  issueLabels(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      color
+      createdAt
+      description
+      name
+      updatedAt
+      
+      creator { id }
+      organization { id }
+      parent { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+ORGANIZATION_QUERY = """
+query Organization {
+  viewer {
+    organization {
+      id
+      name
+      createdAt
+      updatedAt
+      archivedAt
+      logoUrl
+      allowMembersToInvite
+      allowedAuthServices
+      createdIssueCount
+      customerCount
+      customersEnabled
+      deletionRequestedAt
+      gitBranchFormat
+      gitLinkbackMessagesEnabled
+      gitPublicLinkbackMessagesEnabled
+      logoUrl
+      periodUploadVolume
+      previousUrlKeys
+      roadmapEnabled
+      samlEnabled
+      scimEnabled
+    }
+  }
+}
+"""
+
+
+PROJECT_UPDATES_QUERY = """
+query ProjectUpdates($cursor: String) {
+  projectUpdates(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      body
+      bodyData
+      createdAt
+      diffMarkdown
+      health
+      updatedAt
+      url
+      
+      user { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+
+TEAM_MEMBERSHIPS_QUERY = """
+query TeamMemberships($cursor: String) {
+  teamMemberships(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      createdAt
+      owner
+      sortOrder
+      updatedAt
+      
+      user { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+USERS_QUERY = """
+query Users($cursor: String) {
+  users(first: 50, after: $cursor) {
+    nodes {
+      id
+      active
+      admin
+      archivedAt
+      avatarUrl
+      calendarHash
+      createdAt
+      createdIssueCount
+      description
+      disableReason
+      displayName
+      email
+      guest
+      inviteHash
+      lastSeen
+      name
+      statusEmoji
+      statusLabel
+      statusUntilAt
+      timezone
+      updatedAt
+      url
+      
+      organization { id }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+WORKFLOW_STATES_QUERY = """
+query WorkflowStates($cursor: String) {
+  workflowStates(first: 50, after: $cursor) {
+    nodes {
+      id
+      archivedAt
+      color
+      createdAt
+      description
+      name
+      position
+      type
+      updatedAt
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
 PROJECTS_QUERY = """
 query Projects($cursor: String) {
   projects(first: 50, after: $cursor) {
@@ -66,59 +495,28 @@ query Projects($cursor: String) {
 }
 """
 
-TEAMS_QUERY = """
-query Teams($cursor: String) {
-  teams(first: 50, after: $cursor) {
-    nodes {
-      id
-      name
-      key
-      description
-      updatedAt
-      createdAt
-      memberships { nodes { id } }
-      members { nodes { id } }
-      projects { nodes { id } }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-"""
 
-USERS_QUERY = """
-query Users($cursor: String) {
-  users(first: 50, after: $cursor) {
-    nodes {
-      id
-      name
-      displayName
-      email
-      createdAt
-      updatedAt
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-"""
-WORKFLOW_STATES_QUERY = """
-query WorkflowStates($cursor: String) {
-  workflowStates(first: 50, after: $cursor) {
-    nodes { 
-      archivedAt
-      color
-      createdAt
-      id
-      inheritedFrom { id }
-      name
-      position
-      team { id  }
-      type
-      updatedAt
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-"""
+# Paginated resources configuration
+PAGINATED_RESOURCES = [
+    ("issues", ISSUES_QUERY, "issues"),
+    ("users", USERS_QUERY, "users"),
+    ("workflow_states", WORKFLOW_STATES_QUERY, "workflowStates"),
+    ("cycles", CYCLES_QUERY, "cycles"),
+    ("attachments", ATTACHMENTS_QUERY, "attachments"),
+    ("comments", COMMENTS_QUERY, "comments"),
+    ("documents", DOCUMENTS_QUERY, "documents"),
+    ("external_users", EXTERNAL_USERS_QUERY, "externalUsers"),
+    ("initiative", INITIATIVES_QUERY, "initiatives"),
+    ("integrations", INTEGRATIONS_QUERY, "integrations"),
+    ("labels", LABELS_QUERY, "issueLabels"),
+    ("project_updates", PROJECT_UPDATES_QUERY, "projectUpdates"),
+    ("team_memberships", TEAM_MEMBERSHIPS_QUERY, "teamMemberships"),
+    ("initiative_to_project", INITIATIVE_TO_PROJECTS_QUERY, "initiativeToProjects"),
+    ("project_milestone", PROJECT_MILESTONES_QUERY, "projectMilestones"),
+    ("project_status", PROJECT_STATUSES_QUERY, "projectStatuses"),
+    ("projects", PROJECTS_QUERY, "projects"),
+]
+
 
 
 @dlt.source(name="linear", max_table_nesting=0)
@@ -127,8 +525,9 @@ def linear_source(
     start_date: pendulum.DateTime,
     end_date: pendulum.DateTime | None = None,
 ) -> Iterable[dlt.sources.DltResource]:
-    @dlt.resource(name="issues", primary_key="id", write_disposition="merge")
-    def issues(
+
+    @dlt.resource(name="organization", primary_key="id", write_disposition="merge")
+    def organization(
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "updatedAt",
             initial_value=start_date.isoformat(),
@@ -139,79 +538,20 @@ def linear_source(
     ) -> Iterator[Dict[str, Any]]:
         current_start_date, current_end_date = _get_date_range(updated_at, start_date)
 
-        for item in _paginate(api_key, ISSUES_QUERY, "issues"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
+        data = _graphql(api_key, ORGANIZATION_QUERY)
+        if "viewer" in data and "organization" in data["viewer"]:
+            item = data["viewer"]["organization"]
+            if item and pendulum.parse(item["updatedAt"]) >= current_start_date:
                 if pendulum.parse(item["updatedAt"]) <= current_end_date:
                     yield normalize_dictionaries(item)
 
-    @dlt.resource(name="projects", primary_key="id", write_disposition="merge")
-    def projects(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, PROJECTS_QUERY, "projects"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="teams", primary_key="id", write_disposition="merge")
-    def teams(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        print(start_date)
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-        print(current_start_date)
-
-        for item in _paginate(api_key, TEAMS_QUERY, "teams"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="users", primary_key="id", write_disposition="merge")
-    def users(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, USERS_QUERY, "users"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    @dlt.resource(name="workflow_states", primary_key="id", write_disposition="merge")
-    def workflow_states(
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updatedAt",
-            initial_value=start_date.isoformat(),
-            end_value=end_date.isoformat() if end_date else None,
-            range_start="closed",
-            range_end="closed",
-        ),
-    ) -> Iterator[Dict[str, Any]]:
-        current_start_date, current_end_date = _get_date_range(updated_at, start_date)
-
-        for item in _paginate(api_key, WORKFLOW_STATES_QUERY, "workflowStates"):
-            if pendulum.parse(item["updatedAt"]) >= current_start_date:
-                if pendulum.parse(item["updatedAt"]) <= current_end_date:
-                    yield normalize_dictionaries(item)
-
-    return [issues, projects, teams, users, workflow_states]
+    # Create paginated resources dynamically
+    paginated_resources = [
+        _create_paginated_resource(resource_name, query, query_field, api_key, start_date, end_date)
+        for resource_name, query, query_field in PAGINATED_RESOURCES
+    ]
+    
+    return [
+        *paginated_resources,
+        organization,
+    ]
