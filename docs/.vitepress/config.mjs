@@ -155,6 +155,7 @@ export default defineConfig({
               { text: "Solidgate", link: "/supported-sources/solidgate.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
               { text: "TikTok Ads", link: "/supported-sources/tiktok-ads.md" },
+              { text: "Wise", link: "/supported-sources/wise.md" },
               { text: "Zendesk", link: "/supported-sources/zendesk.md" },
               { text: "Zoom", link: "/supported-sources/zoom.md" },
             ],
