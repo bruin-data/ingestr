@@ -73,6 +73,7 @@ from ingestr.src.sources import (
     StripeAnalyticsSource,
     TikTokSource,
     TrustpilotSource,
+    WiseSource,
     ZendeskSource,
     ZoomSource,
 )
@@ -192,6 +193,7 @@ class SourceDestinationFactory:
         "zoom": ZoomSource,
         "clickup": ClickupSource,
         "influxdb": InfluxDBSource,
+        "wise": WiseSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
