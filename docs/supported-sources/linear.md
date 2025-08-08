@@ -47,14 +47,9 @@ Linear source allows ingesting the following tables:
 - `labels`: Fetches labels used for categorizing issues.
 - `organization`: Fetches organization-level information.
 - `project_updates`: Fetches updates posted to projects.
-- `roadmaps`: Fetches roadmap data for strategic planning.
-- `roadmap_to_projects`: Fetches relationships between roadmaps and projects.
 - `team_memberships`: Fetches team membership information.
 - `initiative_to_project`: Fetches relationships between initiatives and projects.
 - `project_milestone`: Fetches project milestone data.
 - `project_status`: Fetches project status information.
-- `team`: Fetches team-level data.
-- `project`: Fetches individual project information.
-
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
