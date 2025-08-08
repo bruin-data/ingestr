@@ -485,9 +485,32 @@ query Projects($cursor: String) {
       description
       createdAt
       updatedAt
+      archivedAt
+      completedAt
+      canceledAt
+      startedAt
+      
+      color
+      icon
+      slugId
+      url
+      
       health
       priority
+      priorityLabel
+      state
+      
       targetDate
+      startDate
+      
+      progress
+      currentProgress
+      scope
+      
+      sortOrder
+      trashed
+      
+      creator { id }
       lead { id }
     }
     pageInfo { hasNextPage endCursor }
