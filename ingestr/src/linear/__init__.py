@@ -495,6 +495,58 @@ query Projects($cursor: String) {
 }
 """
 
+TEAMS_QUERY = """
+query Teams($cursor: String) {
+  teams(first: 50, after: $cursor) {
+    nodes {
+      id
+      name
+      key
+      description
+      color
+      icon
+      private
+      archivedAt
+      createdAt
+      updatedAt
+      
+      organization { id }
+      parent { id }
+      
+      cyclesEnabled
+      cycleDuration
+      cycleStartDay
+      cycleCooldownTime
+      
+      issueCount
+      issueEstimationType
+      issueEstimationAllowZero
+      issueEstimationExtended
+      issueOrderingNoPriorityFirst
+      
+      autoArchivePeriod
+      autoClosePeriod
+      autoCloseChildIssues
+      autoCloseParentIssues
+      
+      groupIssueHistory
+      timezone
+      inviteHash
+      joinByDefault
+      
+      slackNewIssue
+      slackIssueComments
+      slackIssueStatuses
+      
+      triageEnabled
+      requirePriorityToLeaveTriage
+      upcomingCycleCount
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
 
 # Paginated resources configuration
 PAGINATED_RESOURCES = [
@@ -515,6 +567,7 @@ PAGINATED_RESOURCES = [
     ("project_milestone", PROJECT_MILESTONES_QUERY, "projectMilestones"),
     ("project_status", PROJECT_STATUSES_QUERY, "projectStatuses"),
     ("projects", PROJECTS_QUERY, "projects"),
+    ("teams", TEAMS_QUERY, "teams"),
 ]
 
 
