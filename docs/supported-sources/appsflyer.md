@@ -34,9 +34,13 @@ The result of this command will be a table in the `appsflyer.duckdb` database.
 
 ingestr integrates with the [Master Report API](https://dev.appsflyer.com/hc/reference/master_api_get) of AppsFlyer, which allows you to retrieve data for the following tables:
 
-- `campaigns`: Retrieves data for campaigns, detailing the app's costs, loyal users, total installs, and revenue over multiple days.
-- `creatives`: Retrieves data for a creative asset, including revenue and cost.
-- `custom:<dimensions>:<metrics>`: Retrieves data for custom tables, which can be specified by the user.
+## Tables
+
+| Name | PK/Merge Key | Inc Key | Inc Strategy |  Details |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `campaigns` | install_time | install_time | merge| Retrieves data for campaigns, detailing the app's costs, loyal users, total installs, and revenue over multiple days. |
+| `creatives` | install_time | install_time | merge| Retrieves data for a creative asset, including revenue and cost. |
+| `custom:<dimensions>:<metrics>` | Dynamic (dimensions + install_time) | install_time | merge| Retrieves data for custom tables, which can be specified by the user.|
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
