@@ -32,7 +32,7 @@ Adjust data may change going back, which means you'll need to change your start 
 ## Tables
 Adjust source allows ingesting data from various sources:
 
-### Custom reports: `custom:<dimensions>:<metrics>[:<filters>]`
+#### Custom reports: `custom:<dimensions>:<metrics>[:<filters>]`
 
 The custom table allows you to retrieve data based on specific dimensions and metrics, and apply filters to the data.
 
@@ -52,10 +52,10 @@ Parameters:
 
 | Table           | PK/Merge Key | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Events`        | `id` | –  |        replace     | Retrieves data for [events](https://dev.adjust.com/en/api/rs-api/events/) and event slugs.              |                                        |
-| `campaigns` | `day`| –                | merge            | Retrieves data for a campaign, showing the app's revenue and network costs over multiple days.
-| `creatives`   | `day` | -     | merge  | Retrieves data for a creative assets, detailing the app's revenue and network costs across multiple days.
-| `custom`   | `{From user}` | -     | merge  | Retrieves custom data based on the dimensions and metrics specified.
+| `Events`        | id | –  |        replace     | Retrieves data for [events](https://dev.adjust.com/en/api/rs-api/events/) and event slugs.              |                                        |
+| `campaigns` | day | –                | merge            | Retrieves data for a campaign, showing the app's revenue and network costs over multiple days.
+| `creatives`   | day | -     | merge  | Retrieves data for a creative assets, detailing the app's revenue and network costs across multiple days.
+| `custom`   | `configurable` | -     | merge  | Retrieves custom data based on the dimensions and metrics specified.
 
  ## Examples
 
