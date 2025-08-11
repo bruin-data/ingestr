@@ -48,7 +48,7 @@ Asana source allows ingesting the following sources into separate tables:
 | `sections` | - | - | replace | Project sections and organization. Full reload on each run. |
 | `tags` | - | - | replace | Labels that can be attached to tasks, projects, or conversations. Full reload on each run. |
 | `tasks` | gid | modified_at | merge | Tasks within a project. Only tasks that belong to a project can be ingested. Uses modified_since API parameter for incremental loading. |
-| `stories` | gid | - | append | Updates or comments that team members can add to a task or project. Depends on tasks, append mode. |
+| `stories` | - | - | replace | Updates or comments that team members can add to a task or project. |
 | `teams` | - | - | replace | Groups of individuals who work together to complete projects and tasks. Full reload on each run. |
 | `users` | - | - | replace | Individuals who have access to the Asana platform. Full reload on each run. |
 
