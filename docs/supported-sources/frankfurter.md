@@ -34,9 +34,13 @@ The result of this command will be a list of currency exchange rates from 20.03.
 
 ## Tables
 
-- `latest`: Fetches the latest exchange rates.
-- `exchange_rates`: Fetches historical exchange rates for a specified date range.
-- `currencies`: Fetches a list of the available currencies and their ISO 4217 currency code (e.g. `USD`, `EUR`, `GBP`).
+Frankfurter source allows ingesting the following sources into separate tables:
+
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [currencies]((https://www.frankfurter.dev/docs/#currencies))   | - | –                | replace               | Retrieves list of available currencies with ISO 4217 codes and names. |
+| [latest](https://www.frankfurter.dev/docs/#latest)    | ["date", "currency_code", "base_currency"] | –                | merge               | Fetches latest exchange rates for all currencies. |
+| [exchange_rates]((https://www.frankfurter.dev/docs/#historical)) | ["date", "currency_code", "base_currency"] | date    | merge               | Retrieves historical exchange rates for specified date range.|
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
