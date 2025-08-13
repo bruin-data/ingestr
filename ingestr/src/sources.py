@@ -3327,8 +3327,6 @@ class RevenueCatSource:
         return revenuecat_source(
             api_key=api_key[0],
             project_id=project_id[0],
-            start_date=start_date,
-            end_date=end_date,
         ).with_resources(table)
 
 

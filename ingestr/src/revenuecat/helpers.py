@@ -1,7 +1,5 @@
 from typing import Any, Dict, Iterator, Optional
 import requests
-import pendulum
-import dlt
 
 REVENUECAT_API_BASE = "https://api.revenuecat.com/v2"
 
@@ -54,18 +52,5 @@ def _paginate(
             break
 
 
-def _get_date_range(updated_at, start_date):
-    """Extract current start and end dates from incremental state."""
-    if updated_at.last_value:
-        current_start_date = pendulum.parse(updated_at.last_value)
-    else:
-        current_start_date = start_date
-    
-    if updated_at.end_value:
-        current_end_date = pendulum.parse(updated_at.end_value)
-    else:
-        current_end_date = pendulum.now(tz="UTC")
-    
-    return current_start_date, current_end_date
 
 
