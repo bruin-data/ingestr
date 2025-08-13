@@ -3282,6 +3282,56 @@ class LinearSource:
         ).with_resources(table)
 
 
+class RevenueCatSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "RevenueCat takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+        
+        api_key = params.get("api_key")
+        if api_key is None:
+            raise MissingValueError("api_key", "RevenueCat")
+            
+        project_id = params.get("project_id")
+        if project_id is None:
+            raise MissingValueError("project_id", "RevenueCat")
+
+        if table not in [
+            "customers", 
+            "products", 
+            "subscriptions", 
+            "purchases", 
+            "projects",
+        ]:
+            raise UnsupportedResourceError(table, "RevenueCat")
+
+        start_date = kwargs.get("interval_start")
+        if start_date is not None:
+            start_date = ensure_pendulum_datetime(start_date)
+        else:
+            start_date = pendulum.datetime(2020, 1, 1).in_tz("UTC")
+
+        end_date = kwargs.get("interval_end")
+        if end_date is not None:
+            end_date = ensure_pendulum_datetime(end_date).in_tz("UTC")
+
+        from ingestr.src.revenuecat import revenuecat_source
+
+        return revenuecat_source(
+            api_key=api_key[0],
+            project_id=project_id[0],
+            start_date=start_date,
+            end_date=end_date,
+        ).with_resources(table)
+
+
 class ZoomSource:
     def handles_incrementality(self) -> bool:
         return True
