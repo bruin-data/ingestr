@@ -31,6 +31,7 @@ def _paginate(
 ) -> Iterator[Dict[str, Any]]:
     """Paginate through RevenueCat API results."""
     current_params = params.copy() if params is not None else {}
+    current_params["limit"] = 1000
     
     while True:
         data = _make_request(api_key, endpoint, current_params)
@@ -39,7 +40,18 @@ def _paginate(
         if "items" in data:
             for item in data["items"]:
                 yield item
-            return
+        
+        # Check if there's a next page
+        if "next_page" not in data:
+            break
+            
+        # Extract starting_after parameter from next_page URL
+        next_page_url = data["next_page"]
+        if "starting_after=" in next_page_url:
+            starting_after = next_page_url.split("starting_after=")[1].split("&")[0]
+            current_params["starting_after"] = starting_after
+        else:
+            break
 
 
 def _get_date_range(updated_at, start_date):
