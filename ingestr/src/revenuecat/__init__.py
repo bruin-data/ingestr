@@ -38,6 +38,16 @@ def revenuecat_source(
         endpoint = f"/projects/{project_id}/customers"
         
         for customer in _paginate(api_key, endpoint):
+            # Convert timestamp fields from milliseconds to ISO format
+            timestamp_fields = ["first_seen_at", "last_seen_at"]
+            
+            for field in timestamp_fields:
+                if field in customer and customer[field] is not None:
+                    # Convert from milliseconds timestamp to ISO datetime string
+                    timestamp_ms = customer[field]
+                    dt = pendulum.from_timestamp(timestamp_ms / 1000)
+                    customer[field] = dt.to_iso8601_string()
+            
             yield customer
     
     @dlt.resource(name="products", primary_key="id", write_disposition="merge")
