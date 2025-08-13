@@ -3300,7 +3300,7 @@ class RevenueCatSource:
             raise MissingValueError("api_key", "RevenueCat")
             
         project_id = params.get("project_id")
-        if project_id is None:
+        if project_id is None and table != "projects":
             raise MissingValueError("project_id", "RevenueCat")
 
         if table not in [
@@ -3326,7 +3326,7 @@ class RevenueCatSource:
 
         return revenuecat_source(
             api_key=api_key[0],
-            project_id=project_id[0],
+            project_id=project_id[0] if project_id is not None else None,
         ).with_resources(table)
 
 

@@ -1,5 +1,6 @@
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 import requests
+import pendulum
 
 REVENUECAT_API_BASE = "https://api.revenuecat.com/v2"
 
@@ -50,6 +51,18 @@ def _paginate(
             current_params["starting_after"] = starting_after
         else:
             break
+
+
+def convert_timestamps_to_iso(record: Dict[str, Any], timestamp_fields: List[str]) -> Dict[str, Any]:
+    """Convert timestamp fields from milliseconds to ISO format."""
+    for field in timestamp_fields:
+        if field in record and record[field] is not None:
+            # Convert from milliseconds timestamp to ISO datetime string
+            timestamp_ms = record[field]
+            dt = pendulum.from_timestamp(timestamp_ms / 1000)
+            record[field] = dt.to_iso8601_string()
+    
+    return record
 
 
 
