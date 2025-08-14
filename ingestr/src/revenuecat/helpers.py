@@ -68,5 +68,35 @@ def convert_timestamps_to_iso(record: Dict[str, Any], timestamp_fields: List[str
     return record
 
 
+def fetch_and_process_nested_resource(
+    api_key: str,
+    project_id: str,
+    customer_id: str,
+    customer: Dict[str, Any],
+    resource_name: str,
+    timestamp_fields: Optional[List[str]] = None
+) -> None:
+    """
+    Fetch and process any nested resource for a customer.
+    
+    Args:
+        api_key: RevenueCat API key
+        project_id: Project ID
+        customer_id: Customer ID
+        customer: Customer data dictionary to modify
+        resource_name: Name of the nested resource (e.g., 'purchases', 'subscriptions', 'events')
+        timestamp_fields: List of timestamp fields to convert to ISO format
+    """
+    # If resource not included in customer data, fetch separately
+    if resource_name not in customer or customer[resource_name] is None:
+        endpoint = f"/projects/{project_id}/customers/{customer_id}/{resource_name}"
+        customer[resource_name] = []
+        for item in _paginate(api_key, endpoint):
+            customer[resource_name].append(item)
+    
+    # Convert timestamps if fields specified
+    if timestamp_fields and resource_name in customer and customer[resource_name] is not None:
+        for item in customer[resource_name]:
+            convert_timestamps_to_iso(item, timestamp_fields)
 
 

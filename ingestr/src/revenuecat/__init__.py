@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterable, Iterator
 
 import dlt
 
-from .helpers import _make_request, _paginate, convert_timestamps_to_iso
+from .helpers import _make_request, _paginate, convert_timestamps_to_iso, fetch_and_process_nested_resource
 
 
 @dlt.source(name="revenuecat", max_table_nesting=0)
@@ -45,29 +45,17 @@ def revenuecat_source(
             # Convert customer timestamps
             customer = convert_timestamps_to_iso(customer, ["first_seen_at", "last_seen_at"])
             
-            # If subscriptions not included in customer data, fetch separately
-            if "subscriptions" not in customer or customer["subscriptions"] is None:
-                subscriptions_endpoint = f"/projects/{project_id}/customers/{customer_id}/subscriptions"
-                customer["subscriptions"] = []
-                for subscription in _paginate(api_key, subscriptions_endpoint):
-                    customer["subscriptions"].append(subscription)
+            # Fetch and process nested resources
+            nested_resources = [
+                ("subscriptions", ["purchased_at", "expires_at", "grace_period_expires_at"]),
+                ("purchases", ["purchased_at", "expires_at"])
+            ]
             
-            # Convert subscriptions timestamps
-            if "subscriptions" in customer and customer["subscriptions"] is not None:
-                for subscription in customer["subscriptions"]:
-                    subscription = convert_timestamps_to_iso(subscription, ["purchased_at", "expires_at", "grace_period_expires_at"])
-            
-            # If purchases not included in customer data, fetch separately
-            if "purchases" not in customer or customer["purchases"] is None:
-                purchases_endpoint = f"/projects/{project_id}/customers/{customer_id}/purchases"
-                customer["purchases"] = []
-                for purchase in _paginate(api_key, purchases_endpoint):
-                    customer["purchases"].append(purchase)
-            
-            # Convert purchases timestamps
-            if "purchases" in customer and customer["purchases"] is not None:
-                for purchase in customer["purchases"]:
-                    purchase = convert_timestamps_to_iso(purchase, ["purchased_at", "expires_at"])
+            for resource_name, timestamp_fields in nested_resources:
+                fetch_and_process_nested_resource(
+                    api_key, project_id, customer_id, customer,
+                    resource_name, timestamp_fields
+                )
             
             yield customer
     
