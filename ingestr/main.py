@@ -562,6 +562,7 @@ def ingest(
             sql_exclude_columns=sql_exclude_columns,
             extract_parallelism=extract_parallelism,
         )
+        dlt_source.max_table_nesting = 0
 
         resource.for_each(dlt_source, lambda x: x.add_map(cast_set_to_list))
         if factory.source_scheme.startswith("mysql"):
