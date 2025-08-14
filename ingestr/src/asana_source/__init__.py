@@ -182,7 +182,7 @@ def tasks(
 
 @dlt.transformer(
     data_from=tasks,
-    write_disposition="append",
+    write_disposition="replace",
 )
 @dlt.defer
 def stories(

@@ -101,12 +101,12 @@ $ duckdb report.db 'select day from public.publisher_report group by 1'
 
 ## Tables
 
-| Name | Description |
-| --- | --- |
-| `publisher-report` | Provides daily metrics from the `report` end point using the report_type `publisher` |
-| `advertiser-report` | Provides daily metrics from the `report` end point using the report_type `advertiser`|
-| `advertiser-probabilistic-report` | Provides daily metrics from the `probabilisticReport` end point using the report_type `advertiser` |
-| `advertiser-ska-report` | Provides daily metrics from the `skaReport` end point using the report_type `advertiser` |
+| Name | Merge Key | Inc Key | Inc Strategy |  Details |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `publisher-report` | day | day | merge| Provides daily metrics from the `report` end point using the report_type `publisher` |
+| `advertiser-report` | day | day | merge| Provides daily metrics from the `report` end point using the report_type `advertiser`|
+| `advertiser-probabilistic-report` | day | day | merge| Provides daily metrics from the `probabilisticReport` end point using the report_type `advertiser` |
+| `advertiser-ska-report` | day | day | merge| Provides daily metrics from the `skaReport` end point using the report_type `advertiser` |
 
 ## Custom Reports
 

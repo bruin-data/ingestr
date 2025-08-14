@@ -32,12 +32,7 @@ Adjust data may change going back, which means you'll need to change your start 
 ## Tables
 Adjust source allows ingesting data from various sources:
 
-- `campaigns`: Retrieves data for a campaign, showing the app's revenue and network costs over multiple days.
-- `creatives`: Retrieves data for a creative assets, detailing the app's revenue and network costs across multiple days.
-- `events`: Retrieves data for [events](https://dev.adjust.com/en/api/rs-api/events/) and event slugs.
-- `custom`: Retrieves custom data based on the dimensions and metrics specified.
-
-### Custom reports: `custom:<dimensions>:<metrics>[:<filters>]`
+#### Custom reports: `custom:<dimensions>:<metrics>[:<filters>]`
 
 The custom table allows you to retrieve data based on specific dimensions and metrics, and apply filters to the data.
 
@@ -55,7 +50,14 @@ Parameters:
 > [!WARNING]
 > Custom tables require a time-based dimension for efficient operation, such as `hour`, `day`, `week`, `month`, or `year`.
 
-## Examples
+| Table           | PK/Merge Key | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Events](https://dev.adjust.com/en/api/rs-api/events)        | id | –  |        replace     | Retrieves data for [events](https://dev.adjust.com/en/api/rs-api/events/) and event slugs.              |                                        |
+| [campaigns](https://dev.adjust.com/en/api/rs-api/reports) | day | –                | merge            | Retrieves data for a campaign, showing the app's revenue and network costs over multiple days. `Columns:` campaign, day, app, store_type, channel, country, network_cost, all_revenue_total_d0, ad_revenue_total_d0, revenue_total_d0, all_revenue_total_d1, ad_revenue_total_d1, revenue_total_d1, all_revenue_total_d3, ad_revenue_total_d3, revenue_total_d3, all_revenue_total_d7, ad_revenue_total_d7, revenue_total_d7, all_revenue_total_d14, ad_revenue_total_d14, revenue_total_d14, all_revenue_total_d21 |
+| [creatives](https://dev.adjust.com/en/api/rs-api/reports)   | day | -     | merge  | Retrieves data for a creative assets, detailing the app's revenue and network costs across multiple days. `Columns:` campaign, day, app, store_type, channel, country, adgroup, creative, network_cost, all_revenue_total_d0, ad_revenue_total_d0, revenue_total_d0, all_revenue_total_d1, ad_revenue_total_d1, revenue_total_d1, all_revenue_total_d3, ad_revenue_total_d3, revenue_total_d3, all_revenue_total_d7, ad_revenue_total_d7, revenue_total_d7, all_revenue_total_d14, ad_revenue_total_d14, revenue_total_d14, all_revenue_total_d21 |
+| `custom`   | `configurable` | -     | merge  | Retrieves custom data based on the dimensions and metrics specified.
+
+ ## Examples
 
 Copy campaigns data from Adjust into a DuckDB database:
 ```sh

@@ -41,16 +41,17 @@ ingestr ingest \
 
 Asana source allows ingesting the following sources into separate tables:
 
-| **Table**    | **Description**                                                                 |
-|---------------|---------------------------------------------------------------------------------|
-| `workspaces`  | Information about people, materials, or assets required to complete a task or project successfully. |
-| `projects`    | Collections of tasks and related information.                                   |
-| `tasks`    | Tasks within a project. Only tasks that belong to a project can be ingested. Users private tasks are not ingested, for example.      |
-| `projects`    | Collections of tasks and related information.                                   |
-| `tags`        | Labels that can be attached to tasks, projects, or conversations to help categorize and organize them. |
-| `stories`     | Updates or comments that team members can add to a task or project.             |
-| `teams`       | Groups of individuals who work together to complete projects and tasks.         |
-| `users`       | Individuals who have access to the Asana platform.                              |
+| Table | Primary/Merge Key | Inc Key | Inc Strategy | Details |
+|-------|----|----------|--------------|---------|
+| `workspaces` | - | - | replace | Information about people, materials, or assets required to complete a task or project successfully. Full reload on each run. |
+| `projects` | - | - | replace | Collections of tasks and related information. Full reload on each run. |
+| `sections` | - | - | replace | Project sections and organization. Full reload on each run. |
+| `tags` | - | - | replace | Labels that can be attached to tasks, projects, or conversations. Full reload on each run. |
+| `tasks` | gid | modified_at | merge | Tasks within a project. Only tasks that belong to a project can be ingested. Uses modified_since API parameter for incremental loading. |
+| `stories` | - | - | replace | Updates or comments that team members can add to a task or project. |
+| `teams` | - | - | replace | Groups of individuals who work together to complete projects and tasks. Full reload on each run. |
+| `users` | - | - | replace | Individuals who have access to the Asana platform. Full reload on each run. |
+
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
