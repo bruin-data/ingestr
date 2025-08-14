@@ -11,8 +11,11 @@ def _make_request(
     params: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Make a REST API request to RevenueCat API v2."""
+    # Check if api_key already starts with "Bearer "
+    auth_header = api_key if api_key.startswith("Bearer ") else f"Bearer {api_key}"
+    
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": auth_header,
         "Content-Type": "application/json"
     }
     
@@ -36,7 +39,7 @@ def _paginate(
         data = _make_request(api_key, endpoint, current_params)
         
         # Yield items from the current page
-        if "items" in data:
+        if "items" in data and data["items"] is not None:
             for item in data["items"]:
                 yield item
         
@@ -46,7 +49,7 @@ def _paginate(
             
         # Extract starting_after parameter from next_page URL
         next_page_url = data["next_page"]
-        if "starting_after=" in next_page_url:
+        if next_page_url and "starting_after=" in next_page_url:
             starting_after = next_page_url.split("starting_after=")[1].split("&")[0]
             current_params["starting_after"] = starting_after
         else:

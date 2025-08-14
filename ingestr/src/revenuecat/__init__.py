@@ -34,13 +34,41 @@ def revenuecat_source(
     
     @dlt.resource(name="customers", primary_key="id", write_disposition="merge")
     def customers() -> Iterator[Dict[str, Any]]:
-        """Get list of customers."""
+        """Get list of customers with nested purchases and subscriptions."""
         if project_id is None:
             raise ValueError("project_id is required for customers resource")
         endpoint = f"/projects/{project_id}/customers"
         
         for customer in _paginate(api_key, endpoint):
+            customer_id = customer["id"]
+            
+            # Convert customer timestamps
             customer = convert_timestamps_to_iso(customer, ["first_seen_at", "last_seen_at"])
+            
+            # If subscriptions not included in customer data, fetch separately
+            if "subscriptions" not in customer or customer["subscriptions"] is None:
+                subscriptions_endpoint = f"/projects/{project_id}/customers/{customer_id}/subscriptions"
+                customer["subscriptions"] = []
+                for subscription in _paginate(api_key, subscriptions_endpoint):
+                    customer["subscriptions"].append(subscription)
+            
+            # Convert subscriptions timestamps
+            if "subscriptions" in customer and customer["subscriptions"] is not None:
+                for subscription in customer["subscriptions"]:
+                    subscription = convert_timestamps_to_iso(subscription, ["purchased_at", "expires_at", "grace_period_expires_at"])
+            
+            # If purchases not included in customer data, fetch separately
+            if "purchases" not in customer or customer["purchases"] is None:
+                purchases_endpoint = f"/projects/{project_id}/customers/{customer_id}/purchases"
+                customer["purchases"] = []
+                for purchase in _paginate(api_key, purchases_endpoint):
+                    customer["purchases"].append(purchase)
+            
+            # Convert purchases timestamps
+            if "purchases" in customer and customer["purchases"] is not None:
+                for purchase in customer["purchases"]:
+                    purchase = convert_timestamps_to_iso(purchase, ["purchased_at", "expires_at"])
+            
             yield customer
     
     @dlt.resource(name="products", primary_key="id", write_disposition="merge")
@@ -54,44 +82,11 @@ def revenuecat_source(
             product = convert_timestamps_to_iso(product, ["created_at", "updated_at"])
             yield product
     
-    @dlt.resource(name="subscriptions", primary_key="id", write_disposition="merge")
-    def subscriptions() -> Iterator[Dict[str, Any]]:
-        """Get list of subscriptions by iterating through customers."""
-        if project_id is None:
-            raise ValueError("project_id is required for subscriptions resource")
-        customers_endpoint = f"/projects/{project_id}/customers"
-        
-        # First get all customers, then get their subscriptions
-        for customer in _paginate(api_key, customers_endpoint):
-            customer_id = customer["id"]
-            subscriptions_endpoint = f"/projects/{project_id}/customers/{customer_id}/subscriptions"
-            
-            for subscription in _paginate(api_key, subscriptions_endpoint):
-                subscription["customer_id"] = customer_id
-                subscription = convert_timestamps_to_iso(subscription, ["purchased_at", "expires_at", "grace_period_expires_at"])
-                yield subscription
-    
-    @dlt.resource(name="purchases", primary_key="id", write_disposition="merge")
-    def purchases() -> Iterator[Dict[str, Any]]:
-        """Get list of purchases by iterating through customers."""
-        if project_id is None:
-            raise ValueError("project_id is required for purchases resource")
-        customers_endpoint = f"/projects/{project_id}/customers"
-        
-        # First get all customers, then get their purchases
-        for customer in _paginate(api_key, customers_endpoint):
-            customer_id = customer["id"]
-            purchases_endpoint = f"/projects/{project_id}/customers/{customer_id}/purchases"
-            
-            for purchase in _paginate(api_key, purchases_endpoint):
-                purchase["customer_id"] = customer_id
-                purchase = convert_timestamps_to_iso(purchase, ["purchased_at", "expires_at"])
-                yield purchase
+   
     
     return [
         projects,
         customers,
         products,
-        subscriptions,
-        purchases,
+       
     ]
