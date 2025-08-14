@@ -39,11 +39,19 @@ This command will retrieve customers data and save it to the `dest.details` tabl
 ## Tables
 QuickBooks source allows ingesting the following tables:
 
-- `customers`: Retrives list of customers.
-- `invoices`: Retrives sales invoices.
-- `accounts`: Retrives details of accounts.
-- `vendors`: Retrives vendor records.
-- `payments`: Retrives payments recorded.
+- `customers`: 
+- `invoices`: 
+- `accounts`: 
+- `vendors`: 
+- `payments`: 
+
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `customers`     | `id` | `lastupdatedtime`     | merge               | Retrives list of customers. |
+| `invoices`      | `id` | `lastupdatedtime`     | merge               | Retrives sales invoices.|
+| `accounts`      | `id` | `lastupdatedtime`     | merge               | Retrives details of accounts. |
+| `vendors`       | `id` | `lastupdatedtime`     | merge               | Retrives vendor records. |
+| `payments`      | `id` | `lastupdatedtime`     | merge  | Retrives payments recorded. |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
