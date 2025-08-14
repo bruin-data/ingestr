@@ -39,19 +39,19 @@ Internet Society Pulse source allows ingesting the following metrics as separate
 
 | Metric | Description | Country Support | Additional Options | PK | Inc Key | Inc Strategy |
 |--------|-------------|-----------------|-------------------|-----|----------|--------------|
-| `dnssec_adoption` | DNSSEC adoption metrics for specific domains | No | Domain name | `date` | `date` | merge |
-| `dnssec_tld_adoption` | DNSSEC adoption metrics for top-level domains | Yes | Country code | `date` | `date` | merge |
-| `dnssec_validation` | DNSSEC validation metrics | Yes | Country code | `date` | `date` | merge |
-| `http` | HTTP protocol metrics | No | None | `date` | `date` | merge |
-| `http3` | HTTP/3 protocol metrics | No | None | `date` | `date` | merge |
-| `https` | HTTPS adoption metrics | Yes | `topsites`, Country code | `date` | `date` | merge |
-| `ipv6` | IPv6 adoption metrics | Yes | `topsites`, Country code | `date` | `date` | merge |
-| `net_loss` | Internet disconnection metrics | Yes | Shutdown type, Country code | `date` | `date` | merge |
-| `resilience` | Internet resilience metrics | Yes | Country code | `date` | `date` | merge |
-| `roa` | Route Origin Authorization metrics | Yes | IP version (`4`/`6`), Country code | `date` | `date` | merge |
-| `rov` | Route Origin Validation metrics | No | None | `date` | `date` | merge |
-| `tls` | TLS protocol metrics | No | None | `date` | `date` | merge |
-| `tls13` | TLS 1.3 protocol metrics | No | None | `date` | `date` | merge |
+| `dnssec_adoption` | DNSSEC adoption metrics for specific domains | No | Domain name | date | date | merge |
+| `dnssec_tld_adoption` | DNSSEC adoption metrics for top-level domains | Yes | Country code | date | date | merge |
+| `dnssec_validation` | DNSSEC validation metrics | Yes | Country code | date | date | merge |
+| `http` | HTTP protocol metrics | No | None | date | date | merge |
+| `http3` | HTTP/3 protocol metrics | No | None | date | date | merge |
+| `https` | HTTPS adoption metrics | Yes | topsites, Country code | date | date | merge |
+| `ipv6` | IPv6 adoption metrics | Yes | topsites, Country code | date | date | merge |
+| `net_loss` | Internet disconnection metrics | Yes | Shutdown type, Country code | date | date | merge |
+| `resilience` | Internet resilience metrics | Yes | Country code | date | date | merge |
+| `roa` | Route Origin Authorization metrics | Yes | IP version (4/6), Country code | date | date | merge |
+| `rov` | Route Origin Validation metrics | No | None | date | date | merge |
+| `tls` | TLS protocol metrics | No | None | date | date | merge |
+| `tls13` | TLS 1.3 protocol metrics | No | None | date | date | merge |
 
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
