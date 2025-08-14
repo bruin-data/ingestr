@@ -2,10 +2,13 @@ from typing import Any, Dict, Iterable, Iterator
 
 import dlt
 import pendulum
-import requests
 
-from .helpers import _graphql, normalize_dictionaries, _get_date_range, _create_paginated_resource
-
+from .helpers import (
+    _create_paginated_resource,
+    _get_date_range,
+    _graphql,
+    normalize_dictionaries,
+)
 
 ISSUES_QUERY = """
 query Issues($cursor: String) {
@@ -249,7 +252,6 @@ query Initiatives($cursor: String) {
 """
 
 
-
 INITIATIVE_TO_PROJECTS_QUERY = """
 query InitiativeToProjects($cursor: String) {
   initiativeToProjects(first: 50, after: $cursor) {
@@ -404,7 +406,6 @@ query ProjectUpdates($cursor: String) {
   }
 }
 """
-
 
 
 TEAM_MEMBERSHIPS_QUERY = """
@@ -594,14 +595,12 @@ PAGINATED_RESOURCES = [
 ]
 
 
-
 @dlt.source(name="linear", max_table_nesting=0)
 def linear_source(
     api_key: str,
     start_date: pendulum.DateTime,
     end_date: pendulum.DateTime | None = None,
 ) -> Iterable[dlt.sources.DltResource]:
-
     @dlt.resource(name="organization", primary_key="id", write_disposition="merge")
     def organization(
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
@@ -623,10 +622,12 @@ def linear_source(
 
     # Create paginated resources dynamically
     paginated_resources = [
-        _create_paginated_resource(resource_name, query, query_field, api_key, start_date, end_date)
+        _create_paginated_resource(
+            resource_name, query, query_field, api_key, start_date, end_date
+        )
         for resource_name, query, query_field in PAGINATED_RESOURCES
     ]
-    
+
     return [
         *paginated_resources,
         organization,
