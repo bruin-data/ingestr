@@ -42,7 +42,7 @@ The Freshdesk source allows you to ingest the following tables:
 | [companies](https://developers.freshdesk.com/api/#companies)     | id | updated_at     | merge               | Retrieves customer organizations or groups that agents support. |
 | [contacts](https://developers.freshdesk.com/api/#contacts)     | id | updated_at     | merge               | Retrieves individuals or customers who reach out for support. |
 | [groups](https://developers.freshdesk.com/api/#groups)       | id | updated_at     | merge               | Retrieves agents organized based on specific criteria.  |
-| [roles]((https://developers.freshdesk.com/api/#roles))         | id | updated_at     | merge               | Retrieves predefined sets of permissions that determine what actions an agent can perform.|
-| [tickets]((https://developers.freshdesk.com/api/#tickets))      | id | updated_at     | merge               | Retrieves customer inquiries or issues submitted via various channels like email, chat, phone, etc.
+| [roles](https://developers.freshdesk.com/api/#roles)       | id | updated_at     | merge               | Retrieves predefined sets of permissions that determine what actions an agent can perform.|
+| [tickets](https://developers.freshdesk.com/api/#tickets)      | id | updated_at     | merge               | Retrieves customer inquiries or issues submitted via various channels like email, chat, phone, etc.
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
