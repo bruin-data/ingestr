@@ -11,8 +11,7 @@ def _make_request(
     params: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Make a REST API request to RevenueCat API v2."""
-    # Check if api_key already starts with "Bearer "
-    auth_header = api_key if api_key.startswith("Bearer ") else f"Bearer {api_key}"
+    auth_header = f"Bearer {api_key}"
     
     headers = {
         "Authorization": auth_header,
