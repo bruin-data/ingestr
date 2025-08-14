@@ -33,11 +33,11 @@ ClickUp source allows ingesting the following resources into separate tables:
 
 | Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `user`        | id | -             | merge               | The authorised user profile                       |
-| `teams` | id | –                | merge               | Workspaces available to the authenticated user. In ClickUp, a "team" in the API is equivalent to a workspace, which is the highest-level container for all spaces, folders, lists, and tasks |
+| [user](https://developer.clickup.com/reference/getauthorizeduser)        | id | -             | merge               | The authorised user profile                       |
+| [teams](https://developer.clickup.com/reference/getauthorizedteams) | id | –                | merge               | Workspaces available to the authenticated user. In ClickUp, a "team" in the API is equivalent to a workspace, which is the highest-level container for all spaces, folders, lists, and tasks |
 | [spaces](https://developer.clickup.com/reference/getspaces)   | id | -     | merge  | Spaces available within a workspace. Spaces are major sections used to organize work, such as departments, projects, or business units. Each space can contain folders, lists, and tasks |
 | [lists](https://developer.clickup.com/reference/getlists)   | id | –  | merge               | Lists contained in each space. Lists are collections of tasks, often representing projects, sprints, or workflow stages |
-| [tasks](https://developer.clickup.com/reference/gettasks)    | id | `date_updated`              | merge            | Tasks belonging to each list |
+| [tasks](https://developer.clickup.com/reference/gettasks)    | id | date_updated             | merge            | Tasks belonging to each list |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
