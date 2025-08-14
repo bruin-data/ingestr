@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-trixie
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ RUN \
   export ACCEPT_EULA='Y' && \
   # Install build dependencies
   apt-get update && \
-  apt-get install -y curl gcc libpq-dev build-essential unixodbc-dev g++ apt-transport-https
+  apt-get install -y curl gcc gpg libpq-dev build-essential unixodbc-dev g++ apt-transport-https
 
 RUN \ 
   # Install pyodbc db drivers for MSSQL and PostgreSQL
