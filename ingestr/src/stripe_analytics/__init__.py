@@ -94,7 +94,7 @@ def async_stripe_source(
         )(endpoint)
 
 
-@dlt.source
+@dlt.source(max_table_nesting=0)
 def incremental_stripe_source(
     endpoints: Tuple[str, ...],
     stripe_secret_key: str = dlt.secrets.value,
