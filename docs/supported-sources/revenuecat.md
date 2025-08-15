@@ -10,6 +10,8 @@ The URI format for RevenueCat is:
 
 ```plaintext
 revenuecat://?api_key=<api_key>&project_id=<project_id>
+# or without project_id for projects table only
+revenuecat://?api_key=<api_key>
 ```
 
 URI parameters:
