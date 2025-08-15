@@ -60,7 +60,7 @@ FLUXX_RESOURCES = {
             "clone_ancestries": {"data_type": "json", "field_type": "relation"},
             "code_block_conversions": {"data_type": "json", "field_type": "relation"},
             "connection_ids": {"data_type": "json", "field_type": "relation"},
-            "created_by": {"data_type": "bigint", "field_type": "relation"},
+            "created_by": {"data_type": "json", "field_type": "relation"},
             "created_by_id": {"data_type": "bigint", "field_type": "relation"},
             "etl_claim_expense_data": {"data_type": "json", "field_type": "relation"},
             "etl_relationships": {"data_type": "json", "field_type": "relation"},
@@ -345,7 +345,7 @@ FLUXX_RESOURCES = {
             "code_block_conversions": {"data_type": "json", "field_type": "relation"},
             "coi_ids": {"data_type": "json", "field_type": "relation"},
             "connection_ids": {"data_type": "json", "field_type": "relation"},
-            "created_by": {"data_type": "bigint", "field_type": "relation"},
+            "created_by": {"data_type": "json", "field_type": "relation"},
             "etl_relationships": {"data_type": "json", "field_type": "relation"},
             "etl_request_budget_ids": {"data_type": "json", "field_type": "relation"},
             "etl_request_transaction_budget_ids": {"data_type": "json", "field_type": "relation"},
@@ -453,7 +453,7 @@ FLUXX_RESOURCES = {
             "use_custom_fx_rate": {"data_type": "bool", "field_type": "column"},
             
             # Decimal/Money fields
-            "amount_recommended": {"data_type": "decimal", "field_type": "column"},
+            "amount_recommended": {"data_type": "decimal", "precision": 10, "scale": 2, "field_type": "column"},
             "amount_recommended_cpi_adjusted": {"data_type": "decimal", "field_type": "column"},
             "amount_recommended_fx_2": {"data_type": "decimal", "field_type": "column"},
             "amount_recommended_local": {"data_type": "decimal", "field_type": "column"},
@@ -647,7 +647,7 @@ FLUXX_RESOURCES = {
             "coi_ids": {"data_type": "json", "field_type": "relation"},
             "concept_initiative_relationships": {"data_type": "json", "field_type": "relation"},
             "connection_ids": {"data_type": "json", "field_type": "relation"},
-            "created_by": {"data_type": "bigint", "field_type": "relation"},
+            "created_by": {"data_type": "json", "field_type": "relation"},
             "current_reviewer_user_ids": {"data_type": "json", "field_type": "relation"},
             "etl_claim_expense_data": {"data_type": "json", "field_type": "relation"},
             "etl_grantee_budget_tracker_actuals": {"data_type": "json", "field_type": "relation"},
@@ -946,7 +946,7 @@ FLUXX_RESOURCES = {
             "coi_ids": {"data_type": "json", "field_type": "relation"},
             "conflict_coi_ids": {"data_type": "json", "field_type": "relation"},
             "connection_ids": {"data_type": "json", "field_type": "relation"},
-            "created_by": {"data_type": "bigint", "field_type": "relation"},
+            "created_by": {"data_type": "json", "field_type": "relation"},
             "etl_relationships": {"data_type": "json", "field_type": "relation"},
             "etl_request_budget_ids": {"data_type": "json", "field_type": "relation"},
             "etl_request_transaction_budget_ids": {"data_type": "json", "field_type": "relation"},
@@ -1098,7 +1098,7 @@ FLUXX_RESOURCES = {
             "concept_initiative_ids": {"data_type": "json", "field_type": "relation"},
             "concept_program_ids": {"data_type": "json", "field_type": "relation"},
             "connection_ids": {"data_type": "json", "field_type": "relation"},
-            "created_by": {"data_type": "bigint", "field_type": "relation"},
+            "created_by": {"data_type": "json", "field_type": "relation"},
             "etl_relationships": {"data_type": "json", "field_type": "relation"},
             "favorite_user_ids": {"data_type": "json", "field_type": "relation"},
             "favorites": {"data_type": "json", "field_type": "relation"},
@@ -1250,7 +1250,7 @@ FLUXX_RESOURCES = {
             "clone_ancestries": {"data_type": "json", "field_type": "relation"},
             "code_block_conversions": {"data_type": "json", "field_type": "relation"},
             "connection_ids": {"data_type": "json", "field_type": "relation"},
-            "created_by": {"data_type": "bigint", "field_type": "relation"},
+            "created_by": {"data_type": "json", "field_type": "relation"},
             "etl_grantee_budget_tracker_actuals": {"data_type": "json", "field_type": "relation"},
             "etl_relationships": {"data_type": "json", "field_type": "relation"},
             "favorite_user_ids": {"data_type": "json", "field_type": "relation"},
@@ -1465,7 +1465,7 @@ FLUXX_RESOURCES = {
             "clone_ancestries": {"data_type": "json", "field_type": "relation"},
             "code_block_conversions": {"data_type": "json", "field_type": "relation"},
             "connection_ids": {"data_type": "json", "field_type": "relation"},
-            "created_by": {"data_type": "bigint", "field_type": "relation"},
+            "created_by": {"data_type": "json", "field_type": "relation"},
             "etl_relationships": {"data_type": "json", "field_type": "relation"},
             "etl_request_budget_ids": {"data_type": "json", "field_type": "relation"},
             "etl_request_transaction_budget_ids": {"data_type": "json", "field_type": "relation"},
@@ -1577,7 +1577,7 @@ FLUXX_RESOURCES = {
             "code_block_conversions": {"data_type": "json", "field_type": "relation"},
             "concept_initiative_ids": {"data_type": "json", "field_type": "relation"},
             "connection_ids": {"data_type": "json", "field_type": "relation"},
-            "created_by": {"data_type": "bigint", "field_type": "relation"},
+            "created_by": {"data_type": "json", "field_type": "relation"},
             "etl_relationships": {"data_type": "json", "field_type": "relation"},
             "favorite_user_ids": {"data_type": "json", "field_type": "relation"},
             "favorites": {"data_type": "json", "field_type": "relation"},
@@ -1655,7 +1655,7 @@ FLUXX_RESOURCES = {
             "code_block_conversions": {"data_type": "json", "field_type": "relation"},
             "concept_initiative_ids": {"data_type": "json", "field_type": "relation"},
             "connection_ids": {"data_type": "json", "field_type": "relation"},
-            "created_by": {"data_type": "bigint", "field_type": "relation"},
+            "created_by": {"data_type": "json", "field_type": "relation"},
             "etl_relationships": {"data_type": "json", "field_type": "relation"},
             "favorite_user_ids": {"data_type": "json", "field_type": "relation"},
             "favorites": {"data_type": "json", "field_type": "relation"},
@@ -1694,6 +1694,7 @@ def fluxx_source(
     start_date: Optional[pendulum.DateTime] = None,
     end_date: Optional[pendulum.DateTime] = None,
     resources: Optional[list] = None,
+    custom_fields: Optional[dict] = None,
 ) -> Iterable[DltResource]:
     """
     Returns a list of resources to load data from Fluxx Grant Management API.
@@ -1705,6 +1706,7 @@ def fluxx_source(
         start_date: Start date for incremental loading
         end_date: End date for incremental loading
         resources: List of resource names to load (defaults to all available)
+        custom_fields: Dictionary mapping resource names to custom field lists
 
     Returns:
         Iterable[DltResource]: Selected Fluxx resources
@@ -1717,6 +1719,9 @@ def fluxx_source(
     if resources is None:
         resources = list(FLUXX_RESOURCES.keys())
 
+    if custom_fields is None:
+        custom_fields = {}
+
     # Create dynamic resources based on configuration
     resource_list = []
     for resource_name in resources:
@@ -1724,6 +1729,26 @@ def fluxx_source(
             continue
 
         config = FLUXX_RESOURCES[resource_name]
+        
+        # Filter fields if custom field selection is specified
+        fields_to_extract = config["fields"]
+        if resource_name in custom_fields:
+            custom_field_names = custom_fields[resource_name]
+            # Always include 'id' field for primary key
+            if 'id' not in custom_field_names:
+                custom_field_names = ['id'] + custom_field_names
+            
+            # Filter the fields_to_extract to only include selected fields
+            filtered_fields = {}
+            for field_name in custom_field_names:
+                if field_name in fields_to_extract:
+                    filtered_fields[field_name] = fields_to_extract[field_name]
+                else:
+                    # If field is not in the resource configuration, log a warning but continue
+                    print(f"Warning: Field '{field_name}' not found in {resource_name} configuration")
+            
+            fields_to_extract = filtered_fields
+
         resource = create_dynamic_resource(
             resource_name=resource_name,
             endpoint=config["endpoint"],
@@ -1731,7 +1756,7 @@ def fluxx_source(
             access_token=access_token,
             start_date=start_date,
             end_date=end_date,
-            fields_to_extract=config["fields"],
+            fields_to_extract=fields_to_extract,
         )
         resource_list.append(resource)
 

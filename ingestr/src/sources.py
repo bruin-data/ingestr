@@ -3265,11 +3265,24 @@ class FluxxSource:
         # Import Fluxx source
         from ingestr.src.fluxx import fluxx_source
 
-        # Determine which resources to load
+        # Parse table specification for custom column selection
+        # Format: "resource_name:field1,field2,field3" or "resource_name"
         resources = None
+        custom_fields = {}
+        
         if table:
-            # Support comma-separated list of resources
-            resources = [r.strip() for r in table.split(",")]
+            # Handle single resource with custom fields or multiple resources
+            if ":" in table and table.count(":") == 1:
+                # Single resource with custom fields: "grant_request:id,name,amount"
+                resource_name, field_list = table.split(":", 1)
+                resource_name = resource_name.strip()
+                fields = [f.strip() for f in field_list.split(",")]
+                resources = [resource_name]
+                custom_fields[resource_name] = fields
+            else:
+                # Multiple resources or single resource without custom fields
+                # Support comma-separated list: "grant_request,user"
+                resources = [r.strip() for r in table.split(",")]
 
         return fluxx_source(
             instance=instance,
@@ -3278,6 +3291,7 @@ class FluxxSource:
             start_date=start_date,
             end_date=end_date,
             resources=resources,
+            custom_fields=custom_fields,
         )
 
 

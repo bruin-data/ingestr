@@ -179,12 +179,26 @@ def normalize_fluxx_item(
         if field_name in item:
             value = item[field_name]
             field_type = field_config.get("data_type")
-            if field_type == "json" and not isinstance(value, list) and not isinstance(value, dict):
-                normalized[field_name] = [value]
-            if field_type == "date" or field_type == "timestamp" or field_type == "datetime" or field_type == "text":
+            
+            if field_type == "json":
+                # Handle json fields (arrays/relations)
+                if value is None:
+                    normalized[field_name] = None
+                elif value == "":
+                    normalized[field_name] = None
+                elif isinstance(value, (list, dict)):
+                    normalized[field_name] = value
+                else:
+                    # Single value - wrap in array for json fields
+                    normalized[field_name] = [value]
+            elif field_type in ("date", "timestamp", "datetime", "text"):
+                # Handle text/date fields - convert empty strings to None
                 if value == "":
                     normalized[field_name] = None
+                else:
+                    normalized[field_name] = value
             else:
+                # All other field types - pass through as-is
                 normalized[field_name] = value
 
     # Always include id if present
