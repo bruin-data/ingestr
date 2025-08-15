@@ -29,9 +29,10 @@ The result of this command will be a table in the `chess.duckdb` database.
 ## Tables
 
 Chess source allows ingesting the following sources into separate tables:
-
-- `profiles`: Retrieves player profiles based on a list of player usernames.
-- `games`: Retrieves players' games for specified players.
-- `archives`: Retrieves the URLs to game archives for specified players.
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `profiles`        | - | –                | replace               | Retrieves player profiles based on a list of player usernames.                                |
+| `games` | - | –                | replace               | Retrieves players games for specified players.   
+| `archives`        | - | –                | replace               | Retrieves the URLs to game archives for specified players.                                      |                                                 
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.

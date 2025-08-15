@@ -26,28 +26,17 @@ ingestr ingest --source-table 'tickets' --source-uri $GORGIAS_URI --dest-uri $BI
 ingestr ingest --source-table 'customers' --source-uri $GORGIAS_URI --dest-uri duckdb:///gorgias.duckdb --interval-start 2024-01-01  --dest-table 'dest.customers'
 ```
 
-## Supported entities
-The Gorgias source supports a growing list of entities, feel free to create an issue if you need more entities to be supported.
 
-### Customers
-Customers are the users who have interacted with the support team. Each customer has a unique ID and contains information such as the name and email.
 
-You can retrieve customers by using `customers` as the source table.
+Gorgias source allows ingesting the following sources into separate tables:
 
-### Tickets
-Tickets are the main entity in Gorgias, representing customer inquiries. Each ticket has a unique ID and contains information such as the customer, status, and messages.
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [customers](https://developers.gorgias.com/reference/list-customers)     | id | updated_datetime     | merge               | Customers are the users who have interacted with the support team. Each customer has a unique ID and contains information such as the name and email.  Retrieves customers lists|
+| [tickets](https://developers.gorgias.com/reference/list-tickets)  | id | updated_datetime    | merge               | Tickets are the main entity in Gorgias, representing customer inquiries. Each ticket has a unique ID and contains information such as the customer, status, and messages. Retrieves tickets lists |
+| [ticket_messages](https://developers.gorgias.com/reference/list-messages) | id | updated_datetime    | merge               | Ticket messages are the messages exchanged between the customer and the support agent in a ticket. Each message has a unique ID and contains information such as the sender, content, and timestamp. Retrieves messages lists | 
+| [satisfaction_surveys](https://developers.gorgias.com/reference/list-satisfaction-surveys) | id | updated_datetime     | merge               | Satisfaction surveys are sent to customers after a ticket is resolved to gather feedback on their experience. Each survey has a unique ID and contains information such as the rating and comments. Retrieves surveys lists.|
 
-You can retrieve tickets by using `tickets` as the source table.
-
-### Ticket messages
-Ticket messages are the messages exchanged between the customer and the support agent in a ticket. Each message has a unique ID and contains information such as the sender, content, and timestamp.
-
-You can retrieve ticket messages by using `ticket_messages` as the source table.
-
-### Satisfaction surveys
-Satisfaction surveys are sent to customers after a ticket is resolved to gather feedback on their experience. Each survey has a unique ID and contains information such as the rating and comments.
-
-You can retrieve satisfaction surveys by using `satisfaction_surveys` as the source table.
-
+Use these as `--source-table` parameter in the `ingestr ingest` command.
 
 

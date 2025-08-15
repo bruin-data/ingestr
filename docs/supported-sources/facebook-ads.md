@@ -2,7 +2,7 @@
 
 Facebook Ads is the advertising platform that helps users to create targeted ads on Facebook, Instagram and Messenger.
 
-ingestr supports Facebook Ads as a source.
+ingestr supports Facebook Ads as a source using [Facebook Marketing API](https://developers.facebook.com/docs/marketing-api/).
 
 ## URI format
 
@@ -41,113 +41,14 @@ The result of this command will be a table in the `facebook.duckdb` database.
 
 Facebook Ads source allows ingesting the following sources into separate tables:
 
-- `campaigns`: Retrieves campaign data with fields:
-  - `id`
-  - `updated_time`
-  - `created_time`
-  - `name`
-  - `status`
-  - `effective_status`
-  - `objective`
-  - `start_time`
-  - `stop_time`
-  - `daily_budget`
-  - `lifetime_budget`
-
-- `ad_sets`: Retrieves ad set data with fields:
-  - `id`
-  - `updated_time`
-  - `created_time`
-  - `name`
-  - `status`
-  - `effective_status`
-  - `campaign_id`
-  - `start_time`
-  - `end_time`
-  - `daily_budget`
-  - `lifetime_budget`
-  - `optimization_goal`
-  - `promoted_object`
-  - `billing_event`
-  - `bid_amount`
-  - `bid_strategy`
-  - `targeting`
-
-- `leads`: Retrieves lead data with fields:
-  - `id`
-  - `created_time`
-  - `ad_id`
-  - `ad_name`
-  - `adset_id`
-  - `adset_name`
-  - `campaign_id`
-  - `campaign_name`
-  - `form_id`
-  - `field_data`
-
-- `ads_creatives`: Retrieves ad creative data with fields:
-  - `id`
-  - `name`
-  - `status`
-  - `thumbnail_url`
-  - `object_story_spec`
-  - `effective_object_story_id`
-  - `call_to_action_type`
-  - `object_type`
-  - `template_url`
-  - `url_tags`
-  - `instagram_actor_id`
-  - `product_set_id`
-
-- `ads`: Retrieves ad data with fields:
-  - `id`
-  - `updated_time`
-  - `created_time`
-  - `name`
-  - `status`
-  - `effective_status`
-  - `adset_id`
-  - `campaign_id`
-  - `creative`
-  - `targeting`
-  - `tracking_specs`
-  - `conversion_specs`
-
-- `facebook_insights`: Retrieves insights data with fields:
-  - `campaign_id`
-  - `adset_id`
-  - `ad_id`
-  - `date_start`
-  - `date_stop`
-  - `reach`
-  - `impressions`
-  - `frequency`
-  - `clicks`
-  - `unique_clicks`
-  - `ctr`
-  - `unique_ctr`
-  - `cpc`
-  - `cpm`
-  - `cpp`
-  - `spend`
-  - `actions`
-  - `action_values`
-  - `cost_per_action_type`
-  - `website_ctr`
-  - `account_currency`
-  - `ad_click_actions`
-  - `ad_name`
-  - `adset_name`
-  - `campaign_name`
-  - `country`
-  - `dma`
-  - `full_view_impressions`
-  - `full_view_reach`
-  - `inline_link_click_ctr`
-  - `outbound_clicks`
-  - `social_spend`
-  - `conversions`
-  - `video_thruplay_watched_actions`
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `campaigns`       | id | –  |        replace     | Retrieves campaign data with `fields`: id, updated_time, created_time, name, status, effective_status, objective, start_time, stop_time, daily_budget, lifetime_budget              |
+| `ad_sets` | id | –                | replace            | Retrieves ad set data with `fields`: id, updated_time, created_time, name, status, effective_status, campaign_id, start_time, end_time, daily_budget, lifetime_budget, optimization_goal, promoted_object, billing_event, bid_amount, bid_strategy, targeting                       |
+| `ads`   | id | -     | replace  | Retrieves ad data with `fields`: id, updated_time, created_time, name, status, effective_status, adset_id, campaign_id, creative, targeting, tracking_specs, conversion_specs                          |
+| `ad_creatives`   | id | -     | replace  | Retrieves ad creative data with `fields`: id, name, status, thumbnail_url, object_story_spec, effective_object_story_id, call_to_action_type, object_type, template_url, url_tags, instagram_actor_id, product_set_id |
+| `leads`   | id | -     | replace  | Retrieves lead data with fields: id, created_time, ad_id, ad_name, adset_id, adset_name, campaign_id, campaign_name, form_id, field_data |
+| `facebook_insights`   | date_start | date_start     | merge  | Retrieves insights data with `fields`: campaign_id, adset_id, ad_id, date_start, date_stop, reach, impressions, frequency, clicks, unique_clicks, ctr, unique_ctr, cpc, cpm, cpp, spend, actions, action_values, cost_per_action_type, website_ctr, account_currency, ad_click_actions, ad_name, adset_name, campaign_name, country, dma, full_view_impressions, full_view_reach, inline_link_click_ctr, outbound_clicks, social_spend, conversions, video_thruplay_watched_actions. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 

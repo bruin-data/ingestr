@@ -23,6 +23,13 @@ URI parameters:
 Google Analytics requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/google_analytics#grab-google-service-account-credentials). Once you complete the guide, you should have an `.json` file  and `project_id`. 
 
 ## Available Tables:
+
+
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [realtime](https://developers.google.com/analytics/devguides/reporting/data/v1/realtime-basics)     | ingested_at |  -    | merge               | Retrieves real-time analytics data based on specified dimensions and metrics. Format: `realtime:<dimensions>:<metrics>:<minutes_ranges>`. Supports incremental loading by ingestion timestamp. |
+| `custom` | datetime_dimension | datetime_dimension    |     merge           | Retrieves custom reports based on specified dimensions and metrics. Format: `custom:<dimensions>:<metrics>` |
+
 ### Custom reports 
 - `Custom reports`: allow you to retrieve data based on specific `dimensions` and  `metrics`.
 
