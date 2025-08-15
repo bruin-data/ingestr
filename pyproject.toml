@@ -83,7 +83,7 @@ exclude = [
     'src/zendesk/.*',
     'src/github/.*',
     'src/google_analytics/.*',
-
+    'src/revenuecat/.*',
     'src/dynamodb/.*',
     'src/clickhouse/.*',
     'src/asana_source/.*',
@@ -127,7 +127,8 @@ module = [
   "ingestr.src.clickup.*",
   "ingestr.src.influxdb",
   "ingestr.src.freshdesk",
-  "ingestr.src.wise"
+  "ingestr.src.wise",
+  "ingestr.src.revenuecat"
 ]
 follow_imports = "skip"
 

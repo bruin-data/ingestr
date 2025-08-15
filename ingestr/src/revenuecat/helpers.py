@@ -1,0 +1,257 @@
+from typing import Any, Dict, Iterator, List, Optional
+import asyncio
+import time
+import requests
+import aiohttp
+import pendulum
+
+REVENUECAT_API_BASE = "https://api.revenuecat.com/v2"
+
+
+def _make_request(
+    api_key: str, 
+    endpoint: str, 
+    params: Optional[Dict[str, Any]] = None,
+    max_retries: int = 3
+) -> Dict[str, Any]:
+    """Make a REST API request to RevenueCat API v2 with rate limiting."""
+    auth_header = f"Bearer {api_key}"
+    
+    headers = {
+        "Authorization": auth_header,
+        "Content-Type": "application/json"
+    }
+    
+    url = f"{REVENUECAT_API_BASE}{endpoint}"
+    
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.get(url, headers=headers, params=params or {})
+            
+            # Handle rate limiting (429 Too Many Requests)
+            if response.status_code == 429:
+                if attempt < max_retries:
+                    # Wait based on Retry-After header or exponential backoff
+                    retry_after = response.headers.get('Retry-After')
+                    if retry_after:
+                        wait_time = int(retry_after)
+                    else:
+                        wait_time = (2 ** attempt) * 5  # 5, 10, 20 seconds
+                    
+                    time.sleep(wait_time)
+                    continue
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries:
+                wait_time = (2 ** attempt) * 2  # 2, 4, 8 seconds
+                time.sleep(wait_time)
+                continue
+            raise
+    
+    # If we get here, all retries failed
+    response.raise_for_status()
+    return response.json()
+
+
+def _paginate(
+    api_key: str, 
+    endpoint: str, 
+    params: Optional[Dict[str, Any]] = None
+) -> Iterator[Dict[str, Any]]:
+    """Paginate through RevenueCat API results."""
+    current_params = params.copy() if params is not None else {}
+    current_params["limit"] = 1000
+    
+    while True:
+        data = _make_request(api_key, endpoint, current_params)
+        
+        # Yield items from the current page
+        if "items" in data and data["items"] is not None:
+            for item in data["items"]:
+                yield item
+        
+        # Check if there's a next page
+        if "next_page" not in data:
+            break
+            
+        # Extract starting_after parameter from next_page URL
+        next_page_url = data["next_page"]
+        if next_page_url and "starting_after=" in next_page_url:
+            starting_after = next_page_url.split("starting_after=")[1].split("&")[0]
+            current_params["starting_after"] = starting_after
+        else:
+            break
+
+
+def convert_timestamps_to_iso(record: Dict[str, Any], timestamp_fields: List[str]) -> Dict[str, Any]:
+    """Convert timestamp fields from milliseconds to ISO format."""
+    for field in timestamp_fields:
+        if field in record and record[field] is not None:
+            # Convert from milliseconds timestamp to ISO datetime string
+            timestamp_ms = record[field]
+            dt = pendulum.from_timestamp(timestamp_ms / 1000)
+            record[field] = dt.to_iso8601_string()
+    
+    return record
+
+
+async def _make_request_async(
+    session: aiohttp.ClientSession,
+    api_key: str, 
+    endpoint: str, 
+    params: Optional[Dict[str, Any]] = None,
+    max_retries: int = 3
+) -> Dict[str, Any]:
+    """Make an async REST API request to RevenueCat API v2 with rate limiting."""
+    auth_header = f"Bearer {api_key}"
+    
+    headers = {
+        "Authorization": auth_header,
+        "Content-Type": "application/json"
+    }
+    
+    url = f"{REVENUECAT_API_BASE}{endpoint}"
+    
+    for attempt in range(max_retries + 1):
+        try:
+            async with session.get(url, headers=headers, params=params or {}) as response:
+                # Handle rate limiting (429 Too Many Requests)
+                if response.status == 429:
+                    if attempt < max_retries:
+                        # Wait based on Retry-After header or exponential backoff
+                        retry_after = response.headers.get('Retry-After')
+                        if retry_after:
+                            wait_time = int(retry_after)
+                        else:
+                            wait_time = (2 ** attempt) * 5  # 5, 10, 20 seconds
+                        
+                        await asyncio.sleep(wait_time)
+                        continue
+                
+                response.raise_for_status()
+                return await response.json()
+                
+        except aiohttp.ClientError as e:
+            if attempt < max_retries:
+                wait_time = (2 ** attempt) * 2  # 2, 4, 8 seconds
+                await asyncio.sleep(wait_time)
+                continue
+            raise
+    
+    # If we get here, all retries failed
+    async with session.get(url, headers=headers, params=params or {}) as response:
+        response.raise_for_status()
+        return await response.json()
+
+
+async def _paginate_async(
+    session: aiohttp.ClientSession,
+    api_key: str, 
+    endpoint: str, 
+    params: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """Paginate through RevenueCat API results asynchronously."""
+    items = []
+    current_params = params.copy() if params is not None else {}
+    current_params["limit"] = 1000
+    
+    while True:
+        data = await _make_request_async(session, api_key, endpoint, current_params)
+        
+        # Collect items from the current page
+        if "items" in data and data["items"] is not None:
+            items.extend(data["items"])
+        
+        # Check if there's a next page
+        if "next_page" not in data:
+            break
+            
+        # Extract starting_after parameter from next_page URL
+        next_page_url = data["next_page"]
+        if next_page_url and "starting_after=" in next_page_url:
+            starting_after = next_page_url.split("starting_after=")[1].split("&")[0]
+            current_params["starting_after"] = starting_after
+        else:
+            break
+    
+    return items
+
+
+async def fetch_and_process_nested_resource_async(
+    session: aiohttp.ClientSession,
+    api_key: str,
+    project_id: str,
+    customer_id: str,
+    customer: Dict[str, Any],
+    resource_name: str,
+    timestamp_fields: Optional[List[str]] = None
+) -> None:
+    """
+    Fetch and process any nested resource for a customer asynchronously.
+    
+    Args:
+        session: aiohttp ClientSession
+        api_key: RevenueCat API key
+        project_id: Project ID
+        customer_id: Customer ID
+        customer: Customer data dictionary to modify
+        resource_name: Name of the nested resource (e.g., 'purchases', 'subscriptions', 'events')
+        timestamp_fields: List of timestamp fields to convert to ISO format
+    """
+    # If resource not included in customer data, fetch separately
+    if resource_name not in customer or customer[resource_name] is None:
+        endpoint = f"/projects/{project_id}/customers/{customer_id}/{resource_name}"
+        customer[resource_name] = await _paginate_async(session, api_key, endpoint)
+    
+    # Convert timestamps if fields specified
+    if timestamp_fields and resource_name in customer and customer[resource_name] is not None:
+        for item in customer[resource_name]:
+            convert_timestamps_to_iso(item, timestamp_fields)
+
+
+
+async def process_customer_with_nested_resources_async(
+    session: aiohttp.ClientSession,
+    api_key: str,
+    project_id: str,
+    customer: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Process a customer and fetch nested resources concurrently.
+    
+    Args:
+        session: aiohttp ClientSession
+        api_key: RevenueCat API key
+        project_id: Project ID
+        customer: Customer data to process
+        
+    Returns:
+        Customer data with nested resources populated
+    """
+    customer_id = customer["id"]
+    
+    # Convert customer timestamps
+    customer = convert_timestamps_to_iso(customer, ["first_seen_at", "last_seen_at"])
+    
+    # Define nested resources to fetch concurrently
+    nested_resources = [
+        ("subscriptions", ["purchased_at", "expires_at", "grace_period_expires_at"]),
+        ("purchases", ["purchased_at", "expires_at"])
+    ]
+    
+    # Create concurrent tasks for fetching nested resources
+    tasks = []
+    for resource_name, timestamp_fields in nested_resources:
+        task = fetch_and_process_nested_resource_async(
+            session, api_key, project_id, customer_id, customer,
+            resource_name, timestamp_fields
+        )
+        tasks.append(task)
+    
+    # Wait for all nested resources to be fetched
+    await asyncio.gather(*tasks)
+    
+    return customer

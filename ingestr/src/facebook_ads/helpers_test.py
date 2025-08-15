@@ -181,7 +181,7 @@ class TestParseInsightsTableToSourceKwargs:
         }
         assert result == expected
 
-    def test_complex_level_and_dimensions_scenario(self):
+    def test_campaign_level_with_campaign_id_field(self):
         result = parse_insights_table_to_source_kwargs(
             "facebook_insights:campaign:campaign_id,clicks"
         )
