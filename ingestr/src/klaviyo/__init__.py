@@ -30,7 +30,7 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
     start_date_obj = ensure_pendulum_datetime(start_date)
     client = KlaviyoClient(api_key)
 
-    @dlt.resource(write_disposition="append", primary_key="id", parallelized=True)
+    @dlt.resource(write_disposition="merge", primary_key="id", parallelized=True)
     def events(
         datetime=dlt.sources.incremental(
             "datetime",
@@ -135,7 +135,7 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
     ) -> Iterable[TDataItem]:
         yield from client.fetch_catalog_item(create_client(), updated.start_value)
 
-    @dlt.resource(write_disposition="append", primary_key="id", parallelized=True)
+    @dlt.resource(write_disposition="merge", primary_key="id", parallelized=True)
     def forms(
         updated_at=dlt.sources.incremental(
             "updated_at",
@@ -162,7 +162,7 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
     ) -> Iterable[TDataItem]:
         yield from client.fetch_lists(create_client(), updated.start_value)
 
-    @dlt.resource(write_disposition="append", primary_key="id", parallelized=True)
+    @dlt.resource(write_disposition="merge", primary_key="id", parallelized=True)
     def images(
         updated_at=dlt.sources.incremental(
             "updated_at",
@@ -188,7 +188,7 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
     ) -> Iterable[TDataItem]:
         yield from client.fetch_segments(create_client(), updated.start_value)
 
-    @dlt.resource(write_disposition="append", primary_key="id", parallelized=True)
+    @dlt.resource(write_disposition="merge", primary_key="id", parallelized=True)
     def flows(
         updated=dlt.sources.incremental(
             "updated",
@@ -203,7 +203,7 @@ def klaviyo_source(api_key: str, start_date: TAnyDateTime) -> Iterable[DltResour
         for start, end in intervals:
             yield lambda s=start, e=end: client.fetch_flows(create_client(), s, e)
 
-    @dlt.resource(write_disposition="append", primary_key="id", parallelized=True)
+    @dlt.resource(write_disposition="merge", primary_key="id", parallelized=True)
     def templates(
         updated=dlt.sources.incremental(
             "updated",

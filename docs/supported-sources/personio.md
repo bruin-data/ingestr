@@ -35,14 +35,21 @@ ingestr ingest --source-uri 'personio://?client_id=id_123&client_secret=secret_1
 
 
 Personio source allows ingesting the following resources into separate tables:
-- [employees](https://developer.personio.de/reference/get_company-employees) : Retrieves company employees details
-- [absences](https://developer.personio.de/reference/get_company-time-offs) : Retrieves absence periods for absences tracked in days
-- [absence_types](https://developer.personio.de/reference/get_company-time-off-types) : Retrieves list of various types of employee absences
-- [attendances](https://developer.personio.de/reference/get_company-attendances) : Retrieves attendance records for each employee
-- [projects](https://developer.personio.de/reference/get_company-attendances-projects) : Retrieves a list of all company projects
-- [document_categories](https://developer.personio.de/reference/get_company-document-categories) : Retrieves all document categories of the company
-- [employees_absences_balance](https://developer.personio.de/reference/get_company-employees-employee-id-absences-balance) : Retrieves the absence balance for a specific employee
-- [custom_reports_list](https://developer.personio.de/reference/listreports) : Retrieves metadata about existing custom reports in your Personio account, such as report name, report type, report date / timeframe.
+
+## Tables
+
+Personio source allows ingesting the following sources into separate tables:
+
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ---| ----| - | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [employees](https://developer.personio.de/v1.0/reference/get_company-employees) | id | last_modified_at | merge | Retrieves company employees details.   |
+| [absence_types](https://developer.personio.de/v1.0/reference/get_company-time-off-types) | id | – | replace | Retrieves list of various types of employee absences Retrieves absence periods for absences tracked in days.         |
+| [absences](https://developer.personio.de/v1.0/reference/get_company-time-offs) | id | updated_at | merge |  Fetches absence periods for absences with time unit set to days. |
+| [attendances](https://developer.personio.de/v1.0/reference/get_company-attendances) | id | updated_at | merge              | Retrieves attendance records for each employee|
+| [projects](https://developer.personio.de/v1.0/reference/get_company-attendances-projects) | id | – | replace               | Retrieves a list of all company projects|
+| [document_categories](https://developer.personio.de/v1.0/reference/get_company-document-categories) | id | –  | replace | Retrieves all document categories of the company      |
+| [custom_reports_list](https://developer.personio.de/v1.0/reference/listreports) | id | – | replace | Retrieves metadata about existing custom reports in your Personio account, such as report name, report type, report date / timeframe.      |
+| [employees_absences_balance](https://developer.personio.de/v1.0/reference/get_company-employees-employee-id-absences-balance) | [employee_id,id] | –  | merge | Retrieves the absence balance for a specific employee    |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.\
 

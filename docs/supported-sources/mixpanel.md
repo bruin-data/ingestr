@@ -40,7 +40,9 @@ ingestr ingest \
 
 Mixpanel source allows ingesting the following tables:
 
-- `events`: Raw event data returned from the export API.
-- `profiles`: User profiles from the Engage API.
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [events](https://developer.mixpanel.com/reference/raw-event-export)        | distinct_id | time     | merge               | Retrieves events data|
+| [profiles](https://developer.mixpanel.com/reference/engage-query)     | distinct_id | last_seen     | merge               | Retrieves Mixpanel user profiles and attributes. |
 
 Use these as `--source-table` values in the `ingestr ingest` command.

@@ -33,13 +33,16 @@ The result of this command will be a table in the `hubspot.duckdb` database.
 ## Tables
 
 HubSpot source allows ingesting the following sources into separate tables:
-
-- `companies`: Retrieves information about organizations.
-- `deals`: Retrieves deal records and tracks deal progress.
-- `products`: Retrieves pricing information of products.
-- `tickets`: Handles requests for help from customers or users.
-- `quotes`: Retrieves price proposals that salespeople can create and send to their contacts.
-- `contacts`: Retrieves information about visitors, potential customers, and leads.
+ 
+Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [companies](https://developers.hubspot.com/docs/reference/api/crm/objects/companies#get-%2Fcrm%2Fv3%2Fobjects%2Fcompanies)     | - | –                | replace               | Retrieves information about organizations. |
+| [contacts](https://developers.hubspot.com/docs/reference/api/crm/objects/contacts#get-%2Fcrm%2Fv3%2Fobjects%2Fcontacts)     | - | –                | replace               | Retrieves information about visitors, potential customers, and leads. |
+| [deals](https://developers.hubspot.com/docs/reference/api/crm/objects/deals#get-%2Fcrm%2Fv3%2Fobjects%2Fdeals)       | - | –                | replace               | Retrieves deal records and tracks deal progress.|
+| [tickets](https://developers.hubspot.com/docs/reference/api/crm/objects/tickets#basic)     | - | –                | replace               | Handles requests for help from customers or users. |
+| [products](https://developers.hubspot.com/docs/reference/api/crm/objects/products#get-%2Fcrm%2Fv3%2Fobjects%2Fproducts)     | - | –                | replace               | Retrieves pricing information of products. |
+| [quotes](https://developers.hubspot.com/docs/reference/api/crm/objects/quotes#get-%2Fcrm%2Fv3%2Fobjects%2Fquotes)        | - | –                | replace               | Retrieves price proposals that salespeople can create and send to their contacts. |
+| [schemas](https://developers.hubspot.com/docs/reference/api/crm/objects/schemas#get-%2Fcrm-object-schemas%2Fv3%2Fschemas)      | id | –                | merge               | Returns all object schemas that have been defined for your account.  |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
