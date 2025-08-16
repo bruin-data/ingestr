@@ -125,6 +125,7 @@ export default defineConfig({
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
               },
+              { text: "Fluxx", link: "/supported-sources/fluxx.md" },
               { text: "Frankfurter", link: "/supported-sources/frankfurter.md" },
               { text: "Freshdesk", link: "/supported-sources/freshdesk.md" },
               { text: "Trustpilot", link: "/supported-sources/trustpilot.md" },
