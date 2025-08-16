@@ -1700,7 +1700,7 @@ def fluxx_source(
     Returns a list of resources to load data from Fluxx Grant Management API.
 
     Args:
-        instance: The Fluxx instance subdomain (e.g., "isocfoundation.preprod")
+        instance: The Fluxx instance subdomain (e.g., "mycompany.preprod")
         client_id: OAuth client ID
         client_secret: OAuth client secret
         start_date: Start date for incremental loading

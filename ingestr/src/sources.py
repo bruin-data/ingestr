@@ -3242,7 +3242,7 @@ class FluxxSource:
         instance = parsed_uri.hostname
         if not instance:
             raise ValueError(
-                "Instance is required in the URI (e.g., fluxx://isocfoundation.preprod)"
+                "Instance is required in the URI (e.g., fluxx://mycompany.preprod)"
             )
 
         client_id = source_params.get("client_id")
