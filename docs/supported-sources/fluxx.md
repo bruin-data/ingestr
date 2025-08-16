@@ -67,36 +67,6 @@ Each resource contains numerous fields. You can:
 
 The field selection feature is particularly useful for large resources like `grant_request` which has over 300 fields.
 
-## Key Features
-
-### Incremental Loading
-The Fluxx source handles incrementality automatically using the `updated_at` field. You can specify date ranges using:
-
-```bash
-ingestr ingest \
---source-uri 'fluxx://myorg.preprod?client_id=your_client_id&client_secret=your_client_secret' \
---source-table 'grant_request' \
---interval-start '2024-01-01' \
---interval-end '2024-12-31' \
---dest-uri duckdb:///fluxx.duckdb \
---dest-table 'raw.grant_request'
-```
-
-### Field Type Mapping
-The source automatically maps Fluxx field types to appropriate data types:
-- Monetary amounts → `decimal`
-- IDs and foreign keys → `bigint`
-- Dates and timestamps → `date`/`timestamp`
-- Boolean fields → `bool`
-- Relations/arrays → `json`
-- Text fields → `text`
-
-### Data Normalization
-The source handles Fluxx API inconsistencies:
-- Single values for array fields are automatically wrapped in arrays
-- Empty strings are converted to `NULL` for appropriate field types
-- Related entity IDs are properly typed
-
 ## Authentication
 
 Fluxx uses OAuth 2.0 with client credentials flow. To obtain credentials:
@@ -104,25 +74,3 @@ Fluxx uses OAuth 2.0 with client credentials flow. To obtain credentials:
 1. Contact your Fluxx administrator to create an API client
 2. You'll receive a `client_id` and `client_secret`
 3. Note your Fluxx instance subdomain (the part before `.fluxxlabs.com`)
-
-## Limitations
-
-- The Fluxx API may have rate limits depending on your subscription
-- Some fields may require specific permissions to access
-- Large resources like `grant_request` may take time to ingest due to their size
-
-## Tips
-
-1. **Start with specific fields**: For large resources, start by selecting only the fields you need
-2. **Use incremental loading**: For regular syncs, use date ranges to fetch only updated records
-3. **Monitor API usage**: Be aware of your API rate limits when ingesting large datasets
-4. **Test with small batches**: Use `--yield-limit` to test with a small number of records first
-
-```bash
-ingestr ingest \
---source-uri 'fluxx://myorg.preprod?client_id=your_client_id&client_secret=your_client_secret' \
---source-table 'grant_request:id,name,amount_requested' \
---dest-uri duckdb:///test.duckdb \
---dest-table 'test.grant_request' \
---yield-limit 10
-```
