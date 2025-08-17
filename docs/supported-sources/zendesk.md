@@ -59,26 +59,29 @@ The result of this command will be a table in the `zendesk.duckdb` database.
 
 Zendesk source allows ingesting the following sources into separate tables:
 
-- [`activities`](https://developer.zendesk.com/api-reference/ticketing/tickets/activity_stream/): Retrieves ticket activities affecting the agent
-- [`addresses`](https://developer.zendesk.com/api-reference/voice/talk-api/addresses/): Retrieves addresses information
-- [`agents_activity`](https://developer.zendesk.com/api-reference/voice/talk-api/stats/#list-agents-activity): Retrieves activity information for agents
-- [`automations`](https://developer.zendesk.com/api-reference/ticketing/business-rules/automations/): Retrieves the automations for the current account
-- [`brands`](https://developer.zendesk.com/api-reference/ticketing/account-configuration/brands/): Retrieves all brands for your account
-- [`calls`](https://developer.zendesk.com/api-reference/voice/talk-api/incremental_exports/#incremental-calls-export): Retrieves all calls specific to channels
-- [`chats`](https://developer.zendesk.com/api-reference/live-chat/chat-api/incremental_export/): Retrieves available chats
-- [`greetings`](https://developer.zendesk.com/api-reference/voice/talk-api/greetings/): Retrieves all default or customs greetings
-- [`groups`](https://developer.zendesk.com/api-reference/ticketing/groups/groups/): Retrieves groups of support agents
-- [`legs_incremental`](https://developer.zendesk.com/api-reference/voice/talk-api/incremental_exports/#incremental-call-legs-export): Retrieves detailed information about each agent involved in a call
-- [`lines`](https://developer.zendesk.com/api-reference/voice/talk-api/lines/): Retrieves all available lines, such as phone numbers and digital lines, in your Zendesk voice account
-- [`organizations`](https://developer.zendesk.com/api-reference/ticketing/organizations/organizations/) : Retrieves organizations
-- [`phone_numbers`](https://developer.zendesk.com/api-reference/voice/talk-api/phone_numbers/): Retrieves all available phone numbers
-- [`settings`](https://developer.zendesk.com/api-reference/voice/talk-api/voice_settings/): Retrieves account settings related to Zendesk voice accounts
-- [`sla_policies`](https://developer.zendesk.com/api-reference/ticketing/business-rules/sla_policies/): Retrieves different SLA policies.
-- [`targets`](https://developer.zendesk.com/api-reference/ticketing/targets/targets/): Retrieves targets where as targets are data from Zendesk to external applications like Slack when a ticket is updated or created.
-- [`tickets`](https://developer.zendesk.com/api-reference/ticketing/tickets/tickets/): Retrieves all tickets, which are the means through which customers communicate with agents
-- [`ticket_forms`](https://developer.zendesk.com/api-reference/ticketing/tickets/ticket_forms/): Retrieves all ticket forms
-- [`ticket_metrics`](https://developer.zendesk.com/api-reference/ticketing/tickets/ticket_metrics/): Retrieves various metrics about one or more tickets.
-- [`ticket_metric_events`](https://developer.zendesk.com/api-reference/ticketing/tickets/ticket_metric_events/): Retrieves ticket metric events that occurred on or after the start time
-- [`users`](https://developer.zendesk.com/api-reference/ticketing/users/users/): Retrieves all users
+
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [tickets](https://developer.zendesk.com/api-reference/ticketing/tickets/tickets/)      | id | updated_at | merge            |  Retrieves all tickets, which are the means through which customers communicate with agents |
+| [ticket_metrics](https://developer.zendesk.com/api-reference/ticketing/tickets/ticket_metrics/) | - | – | replace               | Retrieves various metrics about one or more tickets. |
+| [ticket_metric_events](https://developer.zendesk.com/api-reference/ticketing/tickets/ticket_metric_events/) | id | time | append               | Retrieves ticket metric events that occurred on or after the start time |
+| [ticket_forms](https://developer.zendesk.com/api-reference/ticketing/tickets/ticket_forms/) | | - | replace | Retrieves all ticket forms |
+| [users](https://developer.zendesk.com/api-reference/ticketing/users/users/)         | - | – | replace               | Retrieves all users |
+| [groups](https://developer.zendesk.com/api-reference/ticketing/groups/groups/)       | - | – | replace               | Retrieves groups of support agents |
+| [organizations](https://developer.zendesk.com/api-reference/ticketing/organizations/organizations/) | - | – | replace               | Retrieves organizations |
+| [brands](https://developer.zendesk.com/api-reference/ticketing/account-configuration/brands/)       | - | – | replace               | Retrieves all brands for your account |
+| [sla_policies](https://developer.zendesk.com/api-reference/ticketing/business-rules/sla_policies/)  | - | – | replace               | Retrieves different SLA policies. |
+| [activities](https://developer.zendesk.com/api-reference/ticketing/tickets/activity_stream/)  | - | – | replace               | Retrieves ticket activities affecting the agent. |
+| [automations](https://developer.zendesk.com/api-reference/ticketing/business-rules/automations/)   | - | – | replace               | Retrieves the automations for the current account |
+| [targets](https://developer.zendesk.com/api-reference/ticketing/targets/targets/)       | - | – | replace               | Retrieves targets where as targets are data from Zendesk to external applications like Slack when a ticket is updated or created. |
+| [calls](https://developer.zendesk.com/api-reference/voice/talk-api/incremental_exports/#incremental-calls-export)        | id | updated_at | merge               | Retrieves all calls specific to channels |
+| [addresses](https://developer.zendesk.com/api-reference/voice/talk-api/addresses/)     | - | – | replace               | Retrieves addresses information|
+| [greetings](https://developer.zendesk.com/api-reference/voice/talk-api/greetings/)     | - | – | replace               | Retrieves all default or customs greetings |
+| [phone_numbers](https://developer.zendesk.com/api-reference/voice/talk-api/phone_numbers/) | - | – | replace               | Retrieves all available phone numbers. |
+| [settings](https://developer.zendesk.com/api-reference/voice/talk-api/voice_settings/)      | - | – | replace               | Retrieves account settings related to Zendesk voice accounts |
+| [lines](https://developer.zendesk.com/api-reference/voice/talk-api/lines/)        | - | – | replace               | Retrieves all available lines, such as phone numbers and digital lines, in your Zendesk voice account. |
+| [agents_activity](https://developer.zendesk.com/api-reference/voice/talk-api/stats/#list-agents-activity) | - | – | replace               | Retrieves activity information for agents |
+| [legs_incremental](https://developer.zendesk.com/api-reference/voice/talk-api/incremental_exports/#incremental-call-legs-export) | id | updated_at | merge               | Retrieves detailed information about each agent involved in a call. |
+| [chats](https://developer.zendesk.com/api-reference/live-chat/chat-api/incremental_export/)  | id | update_timestamp/ updated_timestamp | merge  | Retrieves available chats. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
