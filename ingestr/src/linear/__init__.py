@@ -2,7 +2,6 @@ from typing import Any, Dict, Iterable, Iterator
 
 import dlt
 import pendulum
-import requests
 
 from .helpers import (
     _create_paginated_resource,

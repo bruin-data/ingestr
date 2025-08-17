@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import dlt
 import pendulum
@@ -70,7 +70,7 @@ def paginate_fluxx_resource(
     endpoint: str,
     params: Optional[Dict[str, Any]] = None,
     page_size: int = 100,
-) -> Iterator[Dict[str, Any]]:
+) -> Iterator[List[Dict[str, Any]]]:
     """Paginate through a Fluxx API resource."""
     if params is None:
         params = {}
@@ -100,7 +100,7 @@ def paginate_fluxx_resource(
             items = records[first_key]
         else:
             items = []
-        
+
         yield items
 
         if response["per_page"] is None or len(items) < response["per_page"]:
@@ -147,7 +147,7 @@ def create_dynamic_resource(
             if data_type:
                 columns[field_name] = {"data_type": data_type}
 
-    @dlt.resource(name=resource_name, write_disposition="replace", columns=columns)
+    @dlt.resource(name=resource_name, write_disposition="replace", columns=columns)  # type: ignore
     def fluxx_resource() -> Iterator[Dict[str, Any]]:
         params = {}
         if fields_to_extract:
@@ -161,7 +161,7 @@ def create_dynamic_resource(
             params=params,
             page_size=100,
         ):
-            yield [normalize_fluxx_item(item, fields_to_extract) for item in page]
+            yield [normalize_fluxx_item(item, fields_to_extract) for item in page]  # type: ignore
 
     return fluxx_resource
 
@@ -174,7 +174,7 @@ def normalize_fluxx_item(
     Handles nested structures and field extraction based on field types.
     Rounds all decimal/float values to 4 decimal places regardless of field type.
     """
-    normalized = {}
+    normalized: Dict[str, Any] = {}
 
     # If no field mapping provided, just return the item as-is
     if not fields_to_extract:
@@ -185,49 +185,9 @@ def normalize_fluxx_item(
             value = item[field_name]
             field_type = field_config.get("data_type")
 
-            # Debug specific problematic value
-            if value is not None:
-                value_str = str(value)
-                if (
-                    "2497.80999999999994543031789362430572509765625" in value_str
-                    or "2497.8" in value_str
-                ):
-                    print(f"DEBUG: Found problematic value in field '{field_name}'")
-                    print(f"  Raw value: {value}")
-                    print(f"  Value type: {type(value)}")
-                    print(f"  Value repr: {repr(value)}")
-                    print(f"  Field type: {field_type}")
-                    print(f"  Is float: {isinstance(value, float)}")
-                    print(f"  Is string: {isinstance(value, str)}")
-                    if isinstance(value, str):
-                        try:
-                            float_val = float(value)
-                            print(f"  Converted to float: {float_val}")
-                            print(f"  Rounded value: {round(float_val, 4)}")
-                        except:
-                            print("  Could not convert to float")
-
-            # Universal numeric value detection and rounding
-            # Check if value can be converted to float and needs rounding
-            should_round = False
-            converted_value = None
-
-            if value is not None and value != "":
-                try:
-                    # Try to convert any value to float
-                    converted_value = float(value)
-                    # Check if it's a decimal number (has fractional part)
-                    if converted_value != int(converted_value) or isinstance(
-                        value, float
-                    ):
-                        should_round = True
-                except (ValueError, TypeError):
-                    # Not a numeric value
-                    pass
-
-            if should_round:
+            if isinstance(value, float):
                 # Round any numeric value with decimal places
-                normalized[field_name] = round(converted_value, 4)
+                normalized[field_name] = round(value, 4)
             elif field_type == "json":
                 # Handle json fields (arrays/relations)
                 if value is None:

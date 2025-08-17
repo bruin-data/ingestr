@@ -1,4 +1,4 @@
-from typing import Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 import dlt
 import pendulum
@@ -5691,7 +5691,7 @@ def fluxx_source(
         config = FLUXX_RESOURCES[resource_name]
 
         # Filter fields if custom field selection is specified
-        fields_to_extract = config["fields"]
+        fields_to_extract: Dict[str, Any] = config["fields"]  # type: ignore
         if resource_name in custom_fields:
             custom_field_names = custom_fields[resource_name]
             # Always include 'id' field for primary key
@@ -5699,7 +5699,7 @@ def fluxx_source(
                 custom_field_names = ["id"] + custom_field_names
 
             # Filter the fields_to_extract to only include selected fields
-            filtered_fields = {}
+            filtered_fields: Dict[str, Any] = {}
             for field_name in custom_field_names:
                 if field_name in fields_to_extract:
                     filtered_fields[field_name] = fields_to_extract[field_name]
@@ -5713,7 +5713,7 @@ def fluxx_source(
 
         resource = create_dynamic_resource(
             resource_name=resource_name,
-            endpoint=config["endpoint"],
+            endpoint=config["endpoint"],  # type: ignore
             instance=instance,
             access_token=access_token,
             start_date=start_date,
