@@ -30,14 +30,16 @@ The result of this command will be a table in the `shopify.duckdb` database with
 
 ## Tables
 Shopify source allows ingesting the following sources into separate tables:
-- `orders`
-- `customers`
-- `discounts`: Uses the GraphQL API, `discountNodes` query, take a look at the [Shopify docs](https://shopify.dev/docs/api/admin-graphql/2024-07/queries/discountNodes) for more details.
-- `products`
-- `inventory_items`
-- `transactions`
-- `balance`
-- `events`
-- `price_rules`: this is a deprecated table, please use `discounts` instead.
+| Table | PK | Inc Key | Inc Strategy | Details |
+|-------|----|---------|--------------|---------|
+| [orders](https://shopify.dev/api/admin-rest/2023-10/resources/order) | id | updated_at | merge | Retrieves Shopify order data including customer info, line items, and shipping details |
+| [customers](https://shopify.dev/api/admin-rest/2023-10/resources/customer) | id | updated_at | merge | Retrieves Shopify customer data including contact info and order history |
+| [discounts](https://shopify.dev/docs/api/admin-graphql/2024-07/queries/discountNodes) | id | updated_at | merge | Retrieves Shopify discount data using GraphQL API (use instead of deprecated price_rules) |
+| [products](https://shopify.dev/api/admin-rest/2023-10/resources/product) | id | updated_at | merge | Retrieves Shopify product information including variants, images, and inventory |
+| [inventory_items](https://shopify.dev/api/admin-rest/2023-10/resources/inventoryitem) | id | updated_at | merge | Retrieves Shopify inventory item details and stock levels |
+| [transactions](https://shopify.dev/api/admin-rest/2023-10/resources/transaction) | id | id | merge | Retrieves Shopify transaction data for payments and refunds |
+| [balance](https://shopify.dev/api/admin-rest/2023-10/resources/balance) | currency | - | merge | Retrieves Shopify balance information for financial tracking |
+| [events](https://shopify.dev/api/admin-rest/2023-10/resources/event) | id | created_at |merge| Retrieves Shopify event data for audit trails and activity tracking |
+| [price_rules](https://shopify.dev/api/admin-rest/2023-10/resources/pricerule) | id | updated_at | merge | **DEPRECATED** - Use `discounts` table instead |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
