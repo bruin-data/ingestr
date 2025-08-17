@@ -3269,7 +3269,7 @@ class FluxxSource:
         # Format: "resource_name:field1,field2,field3" or "resource_name"
         resources = None
         custom_fields = {}
-        
+
         if table:
             # Handle single resource with custom fields or multiple resources
             if ":" in table and table.count(":") == 1:
@@ -3365,20 +3365,20 @@ class RevenueCatSource:
 
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
-        
+
         api_key = params.get("api_key")
         if api_key is None:
             raise MissingValueError("api_key", "RevenueCat")
-            
+
         project_id = params.get("project_id")
         if project_id is None and table != "projects":
             raise MissingValueError("project_id", "RevenueCat")
 
         if table not in [
-            "customers", 
-            "products", 
-            "subscriptions", 
-            "purchases", 
+            "customers",
+            "products",
+            "subscriptions",
+            "purchases",
             "projects",
         ]:
             raise UnsupportedResourceError(table, "RevenueCat")

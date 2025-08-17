@@ -92,11 +92,18 @@ def paginate_fluxx_resource(
         if not response:
             break
 
-        items = response['records'][endpoint]
+        # Get the first available key from records instead of assuming endpoint name
+        records = response["records"]
+        if records:
+            # Pick the first key available in records
+            first_key = next(iter(records))
+            items = records[first_key]
+        else:
+            items = []
+        
         yield items
 
-        
-        if len(items) < response['per_page'] or response['current_page'] == response['total_pages']:
+        if response["per_page"] is None or len(items) < response["per_page"]:
             break
 
         page += 1
@@ -140,10 +147,7 @@ def create_dynamic_resource(
             if data_type:
                 columns[field_name] = {"data_type": data_type}
 
-
-    @dlt.resource(
-        name=resource_name, primary_key="id", write_disposition="merge", columns=columns
-    )
+    @dlt.resource(name=resource_name, write_disposition="replace", columns=columns)
     def fluxx_resource() -> Iterator[Dict[str, Any]]:
         params = {}
         if fields_to_extract:
@@ -155,7 +159,7 @@ def create_dynamic_resource(
             access_token=access_token,
             endpoint=endpoint,
             params=params,
-            page_size=500,
+            page_size=100,
         ):
             yield [normalize_fluxx_item(item, fields_to_extract) for item in page]
 
@@ -168,6 +172,7 @@ def normalize_fluxx_item(
     """
     Normalize a Fluxx API response item.
     Handles nested structures and field extraction based on field types.
+    Rounds all decimal/float values to 4 decimal places regardless of field type.
     """
     normalized = {}
 
@@ -179,8 +184,51 @@ def normalize_fluxx_item(
         if field_name in item:
             value = item[field_name]
             field_type = field_config.get("data_type")
-            
-            if field_type == "json":
+
+            # Debug specific problematic value
+            if value is not None:
+                value_str = str(value)
+                if (
+                    "2497.80999999999994543031789362430572509765625" in value_str
+                    or "2497.8" in value_str
+                ):
+                    print(f"DEBUG: Found problematic value in field '{field_name}'")
+                    print(f"  Raw value: {value}")
+                    print(f"  Value type: {type(value)}")
+                    print(f"  Value repr: {repr(value)}")
+                    print(f"  Field type: {field_type}")
+                    print(f"  Is float: {isinstance(value, float)}")
+                    print(f"  Is string: {isinstance(value, str)}")
+                    if isinstance(value, str):
+                        try:
+                            float_val = float(value)
+                            print(f"  Converted to float: {float_val}")
+                            print(f"  Rounded value: {round(float_val, 4)}")
+                        except:
+                            print("  Could not convert to float")
+
+            # Universal numeric value detection and rounding
+            # Check if value can be converted to float and needs rounding
+            should_round = False
+            converted_value = None
+
+            if value is not None and value != "":
+                try:
+                    # Try to convert any value to float
+                    converted_value = float(value)
+                    # Check if it's a decimal number (has fractional part)
+                    if converted_value != int(converted_value) or isinstance(
+                        value, float
+                    ):
+                        should_round = True
+                except (ValueError, TypeError):
+                    # Not a numeric value
+                    pass
+
+            if should_round:
+                # Round any numeric value with decimal places
+                normalized[field_name] = round(converted_value, 4)
+            elif field_type == "json":
                 # Handle json fields (arrays/relations)
                 if value is None:
                     normalized[field_name] = None
