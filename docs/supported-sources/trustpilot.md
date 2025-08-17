@@ -29,7 +29,8 @@ ingestr ingest --source-uri 'trustpilot://123?api_key=key_abc' --source-table 'r
 
 Currently the Trustpilot source exposes the following table:
 
-| Name    | Description                                 |
-| ------- | ------------------------------------------- |
-| reviews | Customer reviews for the specified business |
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reviews`       | id | updated_at | merge               | Customer reviews for the specified businessa |
 
+Use this as the `--source-table` parameter in the `ingestr ingest` command.
