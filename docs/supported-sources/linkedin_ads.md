@@ -48,8 +48,11 @@ LinkedIn Ads requires an `access_token` and `account_ids` to retrieve reports fr
 
 To find the Ad Account IDs, the ad account owner can refer to the detailed instructions provided in this [guide](https://www.linkedin.com/help/linkedin/answer/a424270/find-linkedin-ads-account-details?lang=en).
 
-## Table: Custom Reports    
-Custom reports allow you to retrieve data based on specific dimensions and metrics.
+## Table:
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |  
+|  [custom](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder)      | [dimension, date] or [dimension, start_date, end_date]| date (daily) or start_date (monthly)    | merge               | Custom reports allow you to retrieve data based on specific dimensions and metrics. |
+
 
 Custom Table Format:
 ```
@@ -68,7 +71,7 @@ custom:<dimensions>:<metrics>
 
 Retrieve data for campaign with `account_ids` id_123 and id_456:
 ```sh
-ingestr ingest \                         
+ingestr ingest \                      
     --source-uri "linkedinads://?access_token=token_123&account_ids=id_123,id_456" \
     --source-table 'custom:campaign,date:impressions,clicks' \
     --dest-uri 'duckdb:///linkedin.duckdb' \
