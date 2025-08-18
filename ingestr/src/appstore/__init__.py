@@ -38,6 +38,7 @@ def app_store(
             name=resource.name,
             primary_key=resource.primary_key,
             columns=resource.columns,
+            write_disposition="merge",
         )(client, app_ids, resource.report_name, start_date, end_date)
 
 
