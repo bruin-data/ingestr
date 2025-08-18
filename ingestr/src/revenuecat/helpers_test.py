@@ -125,14 +125,12 @@ class TestPaginate:
 class TestAsyncFunctions:
     """Tests for async helper functions."""
 
-    @pytest.mark.asyncio
     async def test_async_function_signature(self):
         """Test that async functions exist and have correct signatures."""
         # Test that functions are callable and async
         assert asyncio.iscoroutinefunction(_make_request_async)
         assert asyncio.iscoroutinefunction(_paginate_async)
 
-    @pytest.mark.asyncio
     async def test_async_sleep_patch(self):
         """Test async sleep can be patched (integration test)."""
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
@@ -143,7 +141,6 @@ class TestAsyncFunctions:
 class TestPaginateAsync:
     """Tests for _paginate_async function."""
 
-    @pytest.mark.asyncio
     async def test_async_single_page(self):
         """Test async pagination with single page."""
         mock_session = AsyncMock()
@@ -157,7 +154,3 @@ class TestPaginateAsync:
         assert results[0] == {"id": 1}
         assert results[1] == {"id": 2}
         mock_make_request.assert_called_once()
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
