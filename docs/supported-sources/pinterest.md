@@ -17,11 +17,14 @@ URI parameters:
 - `access_token`: The token used for authentication with the Pinterest API. You can obtain an access token from the [official Pinterest documentation](https://developers.pinterest.com/docs/getting-started/connect-app/)
 
 
-
 ## Tables
 
 Pinterest source allows ingesting the following sources into separate tables:
-- `pins`: Retrieves a list of pins.
-- `boards`: Retrieves a list of boards.
 
-Use these table names with the `--source-table` parameter in the `ingestr ingest` command.
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [pins](https://developers.pinterest.com/docs/api/v5/pins-list)          | id | created_at     | merge             | Retrieves a list of pins.|
+| [boards](https://developers.pinterest.com/docs/api/v5/boards-list)      | id | created_at     | merge               | Retrieves a list of boards.
+ |
+
+Use these as `--source-table` parameter in the `ingestr ingest` command.
