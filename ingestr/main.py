@@ -1,3 +1,4 @@
+import warnings
 from datetime import datetime
 from enum import Enum
 from typing import Optional
@@ -7,6 +8,14 @@ from rich.console import Console
 from typing_extensions import Annotated
 
 from ingestr.src.telemetry.event import track
+
+try:
+    from duckdb_engine import DuckDBEngineWarning
+
+    warnings.filterwarnings("ignore", category=DuckDBEngineWarning)
+except ImportError:
+    # duckdb-engine not installed
+    pass
 
 app = typer.Typer(
     name="ingestr",
@@ -506,7 +515,6 @@ def ingest(
 
         if factory.source_scheme == "sqlite":
             source_table = "main." + source_table.split(".")[-1]
-    
 
         if (
             incremental_key
@@ -600,10 +608,9 @@ def ingest(
         if factory.source_scheme == "influxdb":
             if primary_key:
                 write_disposition = "merge"
-            
 
         start_time = datetime.now()
-     
+
         run_info: LoadInfo = pipeline.run(
             dlt_source,
             **destination.dlt_run_params(

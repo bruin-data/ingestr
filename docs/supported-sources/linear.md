@@ -30,12 +30,26 @@ ingestr ingest
 <img alt="linear" src="../media/linear.png"/>
 
 ## Tables
-Linear source allows ingesting the following tables::
+Linear source allows ingesting the following tables:
 
 - `issues`: Fetches all issues from your Linear workspace.
-- `projects`: Fetches project-level data, .
+- `projects`: Fetches project-level data.
 - `teams`: Fetches information about the teams configured in Linear.
 - `users`: Fetches users from your workspace.
-
+- `workflow_states`: Fetches workflow states used in your Linear workspace.
+- `cycles`: Fetches cycle information and planning data.
+- `attachments`: Fetches file attachments associated with issues.
+- `comments`: Fetches comments on issues and other entities.
+- `documents`: Fetches documents created in Linear.
+- `external_users`: Fetches information about external users.
+- `initiative`: Fetches initiative data for high-level planning.
+- `integrations`: Fetches integration configurations.
+- `labels`: Fetches labels used for categorizing issues.
+- `organization`: Fetches organization-level information.
+- `project_updates`: Fetches updates posted to projects.
+- `team_memberships`: Fetches team membership information.
+- `initiative_to_project`: Fetches relationships between initiatives and projects.
+- `project_milestone`: Fetches project milestone data.
+- `project_status`: Fetches project status information.
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.

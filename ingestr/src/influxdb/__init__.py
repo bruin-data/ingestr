@@ -7,6 +7,7 @@ from dlt.sources import DltResource
 
 from .client import InfluxClient
 
+
 @dlt.source(max_table_nesting=0)
 def influxdb_source(
     measurement: str,

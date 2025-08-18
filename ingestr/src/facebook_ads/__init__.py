@@ -22,12 +22,8 @@ from .settings import (
     DEFAULT_ADCREATIVE_FIELDS,
     DEFAULT_ADSET_FIELDS,
     DEFAULT_CAMPAIGN_FIELDS,
-    DEFAULT_INSIGHT_FIELDS,
     DEFAULT_LEAD_FIELDS,
     INSIGHT_FIELDS_TYPES,
-    INSIGHTS_BREAKDOWNS_OPTIONS,
-    INVALID_INSIGHTS_FIELDS,
-    TInsightsBreakdownOptions,
     TInsightsLevels,
 )
 
@@ -105,10 +101,9 @@ def facebook_insights_source(
     account_id: str = dlt.config.value,
     access_token: str = dlt.secrets.value,
     initial_load_past_days: int = 1,
-    fields: Sequence[str] = DEFAULT_INSIGHT_FIELDS,
-    attribution_window_days_lag: int = 7,
+    dimensions: Sequence[str] = None,
+    fields: Sequence[str] = None,
     time_increment_days: int = 1,
-    breakdowns: TInsightsBreakdownOptions = "ads_insights",
     action_breakdowns: Sequence[str] = ALL_ACTION_BREAKDOWNS,
     level: TInsightsLevels = "ad",
     action_attribution_windows: Sequence[str] = ALL_ACTION_ATTRIBUTION_WINDOWS,
@@ -117,6 +112,9 @@ def facebook_insights_source(
     app_api_version: str = None,
     start_date: pendulum.DateTime | None = None,
     end_date: pendulum.DateTime | None = None,
+    insights_max_wait_to_finish_seconds: int = 60 * 60 * 4,
+    insights_max_wait_to_start_seconds: int = 60 * 30,
+    insights_max_async_sleep_seconds: int = 20,
 ) -> DltResource:
     """Incrementally loads insight reports with defined granularity level, fields, breakdowns etc.
 
@@ -152,6 +150,11 @@ def facebook_insights_source(
     if start_date is None:
         start_date = pendulum.today().subtract(days=initial_load_past_days)
 
+    if dimensions is None:
+        dimensions = []
+    if fields is None:
+        fields = []
+
     columns = {}
     for field in fields:
         if field in INSIGHT_FIELDS_TYPES:
@@ -184,15 +187,9 @@ def facebook_insights_source(
             query = {
                 "level": level,
                 "action_breakdowns": list(action_breakdowns),
-                "breakdowns": list(
-                    INSIGHTS_BREAKDOWNS_OPTIONS[breakdowns]["breakdowns"]
-                ),
+                "breakdowns": dimensions,
                 "limit": batch_size,
-                "fields": list(
-                    set(fields)
-                    .union(INSIGHTS_BREAKDOWNS_OPTIONS[breakdowns]["fields"])
-                    .difference(INVALID_INSIGHTS_FIELDS)
-                ),
+                "fields": fields,
                 "time_increment": time_increment_days,
                 "action_attribution_windows": list(action_attribution_windows),
                 "time_ranges": [
@@ -206,7 +203,9 @@ def facebook_insights_source(
             }
             job = execute_job(
                 account.get_insights(params=query, is_async=True),
-                insights_max_async_sleep_seconds=20,
+                insights_max_async_sleep_seconds=insights_max_async_sleep_seconds,
+                insights_max_wait_to_finish_seconds=insights_max_wait_to_finish_seconds,
+                insights_max_wait_to_start_seconds=insights_max_wait_to_start_seconds,
             )
             output = list(map(process_report_item, job.get_result()))
             yield output

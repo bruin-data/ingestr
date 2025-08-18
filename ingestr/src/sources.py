@@ -73,6 +73,20 @@ class SqlSource:
 
         engine_adapter_callback = None
 
+        if uri.startswith("md://") or uri.startswith("motherduck://"):
+            parsed_uri = urlparse(uri)
+            query_params = parse_qs(parsed_uri.query)
+            # Convert md:// URI to duckdb:///md: format
+            if parsed_uri.path:
+                db_path = parsed_uri.path
+            else:
+                db_path = ""
+
+            token = query_params.get("token", [""])[0]
+            if not token:
+                raise ValueError("Token is required for MotherDuck connection")
+            uri = f"duckdb:///md:{db_path}?motherduck_token={token}"
+
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
@@ -409,31 +423,181 @@ class MongoDbSource:
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        table_fields = table_string_to_dataclass(table)
+        # Check if this is a custom query format (collection:query)
+        if ":" in table:
+            collection_name, query_json = table.split(":", 1)
 
-        incremental = None
-        if kwargs.get("incremental_key"):
-            start_value = kwargs.get("interval_start")
-            end_value = kwargs.get("interval_end")
+            # Parse and validate the query
+            try:
+                import json
 
-            incremental = dlt_incremental(
-                kwargs.get("incremental_key", ""),
-                initial_value=start_value,
-                end_value=end_value,
-                range_end="closed",
-                range_start="closed",
+                query = json.loads(query_json)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON query format: {e}")
+
+            # Validate that it's a list for aggregation pipeline
+            if not isinstance(query, list):
+                raise ValueError(
+                    "Query must be a JSON array representing a MongoDB aggregation pipeline"
+                )
+
+            # Check for incremental load requirements
+            incremental = None
+            if kwargs.get("incremental_key"):
+                start_value = kwargs.get("interval_start")
+                end_value = kwargs.get("interval_end")
+
+                # Validate that incremental key is present in the pipeline
+                incremental_key = kwargs.get("incremental_key")
+                self._validate_incremental_query(query, str(incremental_key))
+
+                incremental = dlt_incremental(
+                    str(incremental_key),
+                    initial_value=start_value,
+                    end_value=end_value,
+                )
+
+                # Substitute interval parameters in the query
+                query = self._substitute_interval_params(query, kwargs)
+
+            # Parse collection name to get database and collection
+            if "." in collection_name:
+                # Handle database.collection format
+                table_fields = table_string_to_dataclass(collection_name)
+                database = table_fields.dataset
+                collection = table_fields.table
+            else:
+                # Single collection name, use default database
+                database = None
+                collection = collection_name
+
+            table_instance = self.table_builder(
+                connection_url=uri,
+                database=database,
+                collection=collection,
+                parallel=False,
+                incremental=incremental,
+                custom_query=query,
+            )
+            table_instance.max_table_nesting = 1
+            return table_instance
+        else:
+            # Default behavior for simple collection names
+            table_fields = table_string_to_dataclass(table)
+
+            incremental = None
+            if kwargs.get("incremental_key"):
+                start_value = kwargs.get("interval_start")
+                end_value = kwargs.get("interval_end")
+
+                incremental = dlt_incremental(
+                    kwargs.get("incremental_key", ""),
+                    initial_value=start_value,
+                    end_value=end_value,
+                )
+
+            table_instance = self.table_builder(
+                connection_url=uri,
+                database=table_fields.dataset,
+                collection=table_fields.table,
+                parallel=False,
+                incremental=incremental,
+            )
+            table_instance.max_table_nesting = 1
+
+            return table_instance
+
+    def _validate_incremental_query(self, query: list, incremental_key: str):
+        """Validate that incremental key is projected in the aggregation pipeline"""
+        # Check if there's a $project stage and if incremental_key is included
+        has_project = False
+        incremental_key_projected = False
+
+        for stage in query:
+            if "$project" in stage:
+                has_project = True
+                project_stage = stage["$project"]
+                if isinstance(project_stage, dict):
+                    # Check if incremental_key is explicitly included
+                    if incremental_key in project_stage:
+                        if project_stage[incremental_key] not in [0, False]:
+                            incremental_key_projected = True
+                    # If there are only inclusions (1 or True values) and incremental_key is not included
+                    elif any(v in [1, True] for v in project_stage.values()):
+                        # This is an inclusion projection, incremental_key must be explicitly included
+                        incremental_key_projected = False
+                    # If there are only exclusions (0 or False values) and incremental_key is not excluded
+                    elif all(
+                        v in [0, False]
+                        for v in project_stage.values()
+                        if v in [0, False, 1, True]
+                    ):
+                        # This is an exclusion projection, incremental_key is included by default
+                        if incremental_key not in project_stage:
+                            incremental_key_projected = True
+                        else:
+                            incremental_key_projected = project_stage[
+                                incremental_key
+                            ] not in [0, False]
+                    else:
+                        # Mixed or unclear projection, assume incremental_key needs to be explicit
+                        incremental_key_projected = False
+
+        # If there's a $project stage but incremental_key is not projected, raise error
+        if has_project and not incremental_key_projected:
+            raise ValueError(
+                f"Incremental key '{incremental_key}' must be included in the projected fields of the aggregation pipeline"
             )
 
-        table_instance = self.table_builder(
-            connection_url=uri,
-            database=table_fields.dataset,
-            collection=table_fields.table,
-            parallel=True,
-            incremental=incremental,
-        )
-        table_instance.max_table_nesting = 1
+    def _substitute_interval_params(self, query: list, kwargs: dict):
+        """Substitute :interval_start and :interval_end placeholders with actual datetime values"""
+        from dlt.common.time import ensure_pendulum_datetime
 
-        return table_instance
+        # Get interval values and convert them to datetime objects
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        # Convert string dates to datetime objects if needed
+        if interval_start is not None:
+            if isinstance(interval_start, str):
+                pendulum_dt = ensure_pendulum_datetime(interval_start)
+                interval_start = (
+                    pendulum_dt.to_datetime()
+                    if hasattr(pendulum_dt, "to_datetime")
+                    else pendulum_dt
+                )
+            elif hasattr(interval_start, "to_datetime"):
+                interval_start = interval_start.to_datetime()
+
+        if interval_end is not None:
+            if isinstance(interval_end, str):
+                pendulum_dt = ensure_pendulum_datetime(interval_end)
+                interval_end = (
+                    pendulum_dt.to_datetime()
+                    if hasattr(pendulum_dt, "to_datetime")
+                    else pendulum_dt
+                )
+            elif hasattr(interval_end, "to_datetime"):
+                interval_end = interval_end.to_datetime()
+
+        # Deep copy the query and replace placeholders with actual datetime objects
+        def replace_placeholders(obj):
+            if isinstance(obj, dict):
+                result = {}
+                for key, value in obj.items():
+                    if value == ":interval_start" and interval_start is not None:
+                        result[key] = interval_start
+                    elif value == ":interval_end" and interval_end is not None:
+                        result[key] = interval_end
+                    else:
+                        result[key] = replace_placeholders(value)
+                return result
+            elif isinstance(obj, list):
+                return [replace_placeholders(item) for item in obj]
+            else:
+                return obj
+
+        return replace_placeholders(query)
 
 
 class LocalCsvSource:
@@ -538,6 +702,11 @@ class ShopifySource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Shopify takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         source_fields = urlparse(uri)
         source_params = parse_qs(source_fields.query)
         api_key = source_params.get("api_key")
@@ -839,6 +1008,16 @@ class FacebookAdsSource:
             facebook_insights_source,
         )
 
+        insights_max_wait_to_finish_seconds = source_params.get(
+            "insights_max_wait_to_finish_seconds", [60 * 60 * 4]
+        )
+        insights_max_wait_to_start_seconds = source_params.get(
+            "insights_max_wait_to_start_seconds", [60 * 30]
+        )
+        insights_max_async_sleep_seconds = source_params.get(
+            "insights_max_async_sleep_seconds", [20]
+        )
+
         endpoint = None
         if table in ["campaigns", "ad_sets", "ad_creatives", "ads", "leads"]:
             endpoint = table
@@ -848,6 +1027,13 @@ class FacebookAdsSource:
                 account_id=account_id[0],
                 start_date=kwargs.get("interval_start"),
                 end_date=kwargs.get("interval_end"),
+                insights_max_wait_to_finish_seconds=insights_max_wait_to_finish_seconds[
+                    0
+                ],
+                insights_max_wait_to_start_seconds=insights_max_wait_to_start_seconds[
+                    0
+                ],
+                insights_max_async_sleep_seconds=insights_max_async_sleep_seconds[0],
             ).with_resources("facebook_insights")
         elif table.startswith("facebook_insights:"):
             # Parse custom breakdowns and metrics from table name
@@ -870,33 +1056,16 @@ class FacebookAdsSource:
             # Validate breakdown type against available options from settings
             import typing
 
-            from ingestr.src.facebook_ads.settings import TInsightsBreakdownOptions
-
-            # Get valid breakdown options from the type definition
-            valid_breakdowns = list(typing.get_args(TInsightsBreakdownOptions))
-
-            if breakdown_type not in valid_breakdowns:
-                raise ValueError(
-                    f"Invalid breakdown type '{breakdown_type}'. Valid options: {', '.join(valid_breakdowns)}"
-                )
+            from ingestr.src.facebook_ads.helpers import parse_insights_table_to_source_kwargs
 
             source_kwargs = {
                 "access_token": access_token[0],
                 "account_id": account_id[0],
                 "start_date": kwargs.get("interval_start"),
                 "end_date": kwargs.get("interval_end"),
-                "breakdowns": breakdown_type,
             }
 
-            # If custom metrics are provided, parse them
-            if len(parts) == 3:
-                fields = [f.strip() for f in parts[2].split(",") if f.strip()]
-                if not fields:
-                    raise ValueError(
-                        "Custom metrics must be provided after the second colon in format: facebook_insights:breakdown_type:metric1,metric2..."
-                    )
-                source_kwargs["fields"] = fields
-
+            source_kwargs.update(parse_insights_table_to_source_kwargs(table))
             return facebook_insights_source(**source_kwargs).with_resources(
                 "facebook_insights"
             )
@@ -961,7 +1130,7 @@ class SlackSource:
 
 class HubspotSource:
     def handles_incrementality(self) -> bool:
-        return True
+        return False
 
     # hubspot://?api_key=<api_key>
     def dlt_source(self, uri: str, table: str, **kwargs):
@@ -1488,6 +1657,11 @@ class TikTokSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "TikTok takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         endpoint = "custom_reports"
 
         parsed_uri = urlparse(uri)
@@ -1709,6 +1883,11 @@ class GoogleAnalyticsSource:
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         import ingestr.src.google_analytics.helpers as helpers
+
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Google Analytics takes care of incrementality on its own, you should not provide incremental_key"
+            )
 
         result = helpers.parse_google_analytics_uri(uri)
         credentials = result["credentials"]
@@ -2082,6 +2261,11 @@ class LinkedInAdsSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "LinkedIn Ads takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         source_fields = parse_qs(parsed_uri.query)
 
@@ -2165,6 +2349,11 @@ class ClickupSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "ClickUp takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
         api_token = params.get("api_token")
@@ -2249,6 +2438,11 @@ class ApplovinMaxSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "AppLovin Max takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
 
@@ -2341,6 +2535,11 @@ class PersonioSource:
 
     # applovin://?client_id=123&client_secret=123
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Personio takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
 
@@ -2431,6 +2630,11 @@ class PipedriveSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Pipedrive takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
         api_key = params.get("api_token")
@@ -2513,6 +2717,11 @@ class FreshdeskSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Freshdesk takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         domain = parsed_uri.netloc
         query = parsed_uri.query
@@ -2528,6 +2737,18 @@ class FreshdeskSource:
         if api_key is None:
             raise MissingValueError("api_key", "Freshdesk")
 
+        start_date = kwargs.get("interval_start")
+        if start_date is not None:
+            start_date = ensure_pendulum_datetime(start_date).in_tz("UTC")
+        else:
+            start_date = ensure_pendulum_datetime("2022-01-01T00:00:00Z")
+
+        end_date = kwargs.get("interval_end")
+        if end_date is not None:
+            end_date = ensure_pendulum_datetime(end_date).in_tz("UTC")
+        else:
+            end_date = None
+
         if table not in [
             "agents",
             "companies",
@@ -2541,7 +2762,10 @@ class FreshdeskSource:
         from ingestr.src.freshdesk import freshdesk_source
 
         return freshdesk_source(
-            api_secret_key=api_key[0], domain=domain
+            api_secret_key=api_key[0],
+            domain=domain,
+            start_date=start_date,
+            end_date=end_date,
         ).with_resources(table)
 
 
@@ -2551,6 +2775,11 @@ class TrustpilotSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Trustpilot takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         business_unit_id = parsed_uri.netloc
         params = parse_qs(parsed_uri.query)
@@ -2591,6 +2820,11 @@ class PhantombusterSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Phantombuster takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         # phantombuster://?api_key=<api_key>
         # source table = phantom_results:agent_id
         parsed_uri = urlparse(uri)
@@ -2684,7 +2918,7 @@ class ElasticsearchSource:
 
 class AttioSource:
     def handles_incrementality(self) -> bool:
-        return True
+        return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
@@ -2744,6 +2978,11 @@ class SolidgateSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Solidgate takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         query_params = parse_qs(parsed_uri.query)
         public_key = query_params.get("public_key")
@@ -2837,6 +3076,11 @@ class QuickBooksSource:
 
     # quickbooks://?company_id=<company_id>&client_id=<client_id>&client_secret=<client_secret>&refresh_token=<refresh>&access_token=<access_token>&environment=<env>&minor_version=<version>
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "QuickBooks takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
 
         params = parse_qs(parsed_uri.query)
@@ -2906,6 +3150,11 @@ class IsocPulseSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Internet Society Pulse takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
         token = params.get("token")
@@ -2941,6 +3190,11 @@ class PinterestSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Pinterest takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed = urlparse(uri)
         params = parse_qs(parsed.query)
         access_token = params.get("access_token")
@@ -2975,13 +3229,38 @@ class LinearSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Linear takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
         api_key = params.get("api_key")
         if api_key is None:
             raise MissingValueError("api_key", "Linear")
 
-        if table not in ["issues", "projects", "teams", "users"]:
+        if table not in [
+            "issues", 
+            "projects", 
+            "teams", 
+            "users", 
+            "workflow_states", 
+            "cycles",
+            "attachments",
+            "comments",
+            "documents",
+            "external_users",
+            "initiative",
+            "integrations",
+            "labels",
+            "organization",
+            "project_updates",
+            "team_memberships",
+            "initiative_to_project",
+            "project_milestone",
+            "project_status",
+        ]:
             raise UnsupportedResourceError(table, "Linear")
 
         start_date = kwargs.get("interval_start")
@@ -3008,6 +3287,11 @@ class ZoomSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Zoom takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed = urlparse(uri)
         params = parse_qs(parsed.query)
         client_id = params.get("client_id")
@@ -3049,6 +3333,11 @@ class InfluxDBSource:
         return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "InfluxDB takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
         host = parsed_uri.hostname
@@ -3056,7 +3345,7 @@ class InfluxDBSource:
 
         secure = params.get("secure", ["true"])[0].lower() != "false"
         scheme = "https" if secure else "http"
-        
+
         if port:
             host_url = f"{scheme}://{host}:{port}"
         else:
@@ -3094,6 +3383,44 @@ class InfluxDBSource:
             bucket=bucket[0],
             token=token[0],
             secure=secure,
+            start_date=start_date,
+            end_date=end_date,
+        ).with_resources(table)
+
+
+class WiseSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed = urlparse(uri)
+        params = parse_qs(parsed.query)
+        api_key = params.get("api_key")
+
+        if not api_key:
+            raise MissingValueError("api_key", "Wise")
+
+        if table not in ["profiles", "transfers", "balances"]:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Wise source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        start_date = kwargs.get("interval_start")
+        if start_date:
+            start_date = ensure_pendulum_datetime(start_date).in_timezone("UTC")
+        else:
+            start_date = pendulum.datetime(2020, 1, 1).in_timezone("UTC")
+
+        end_date = kwargs.get("interval_end")
+        if end_date:
+            end_date = ensure_pendulum_datetime(end_date).in_timezone("UTC")
+        else:
+            end_date = None
+
+        from ingestr.src.wise import wise_source
+
+        return wise_source(
+            api_key=api_key[0],
             start_date=start_date,
             end_date=end_date,
         ).with_resources(table)

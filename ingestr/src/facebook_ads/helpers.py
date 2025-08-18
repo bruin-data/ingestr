@@ -144,7 +144,7 @@ def execute_job(
             raise InsightsJobTimeout(
                 "facebook_insights",
                 pretty_error_message.format(
-                    job_id, insights_max_wait_to_finish_seconds // 60
+                    job_id, insights_max_wait_to_finish_seconds
                 ),
             )
 
@@ -229,3 +229,49 @@ def notify_on_token_expiration(access_token_expires_at: int = None) -> None:
             logger.error(
                 f"Access Token expires in {humanize.precisedelta(pendulum.now() - expires_at)}. Replace the token now!"
             )
+
+
+def parse_insights_table_to_source_kwargs(table: str) -> DictStrAny:
+    import typing
+
+    from ingestr.src.facebook_ads.settings import (
+        INSIGHTS_BREAKDOWNS_OPTIONS,
+        TInsightsBreakdownOptions,
+        TInsightsLevels,
+    )
+
+    parts = table.split(":")
+
+    source_kwargs = {}
+
+    breakdown_type = parts[1]
+
+    valid_breakdowns = list(typing.get_args(TInsightsBreakdownOptions))
+    if breakdown_type in valid_breakdowns:
+        dimensions = INSIGHTS_BREAKDOWNS_OPTIONS[breakdown_type]["breakdowns"]
+        fields = INSIGHTS_BREAKDOWNS_OPTIONS[breakdown_type]["fields"]
+        source_kwargs["dimensions"] = dimensions
+        source_kwargs["fields"] = fields
+    else:
+        dimensions = breakdown_type.split(",")
+        valid_levels = list(typing.get_args(TInsightsLevels))
+        level = None
+        for valid_level in reversed(valid_levels):
+            if valid_level in dimensions:
+                level = valid_level
+                dimensions.remove(valid_level)
+                break
+
+        source_kwargs["level"] = level
+        source_kwargs["dimensions"] = dimensions
+
+    # If custom metrics are provided, parse them
+    if len(parts) == 3:
+        fields = [f.strip() for f in parts[2].split(",") if f.strip()]
+        if not fields:
+            raise ValueError(
+                "Custom metrics must be provided after the second colon in format: facebook_insights:breakdown_type:metric1,metric2..."
+            )
+        source_kwargs["fields"] = fields
+
+    return source_kwargs

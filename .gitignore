@@ -25,3 +25,4 @@ ingest.sh
 test.env
 *.log
 .claude
+helper_scripts

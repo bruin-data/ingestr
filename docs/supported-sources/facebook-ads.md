@@ -160,13 +160,19 @@ The `facebook_insights` table supports advanced configuration for breakdowns and
 1. **Default usage**: `facebook_insights`
    - Uses default breakdown and default fields
 
-2. **Custom breakdown**: `facebook_insights:breakdown_type`
-   - Uses specified breakdown with default fields
+2. **Predefined breakdown**: `facebook_insights:breakdown_type`
+   - Uses specified predefined breakdown with default fields
 
-3. **Custom breakdown + metrics**: `facebook_insights:breakdown_type:metric1,metric2,metric3`
-   - Uses specified breakdown with custom metrics
+3. **Predefined breakdown + custom metrics**: `facebook_insights:breakdown_type:metric1,metric2,metric3`
+   - Uses specified predefined breakdown with custom metrics
 
-#### Available Breakdown Types
+4. **Custom dimensions + metrics**: `facebook_insights:dimension1,dimension2:metric1,metric2,metric3`
+   - Uses custom dimensions with custom metrics
+
+5. **Level + dimensions + metrics**: `facebook_insights:level,dimension1,dimension2:metric1,metric2,metric3`
+   - Uses specified level with custom dimensions and metrics
+
+#### Available Predefined Breakdown Types
 
 - `ads_insights` (default)
 - `ads_insights_age_and_gender`
@@ -175,6 +181,30 @@ The `facebook_insights` table supports advanced configuration for breakdowns and
 - `ads_insights_region`
 - `ads_insights_dma`
 - `ads_insights_hourly_advertiser`
+
+#### Available Levels
+
+When using custom dimensions, you can specify one of these levels:
+- `account` - Account level insights
+- `campaign` - Campaign level insights  
+- `adset` - Ad set level insights
+- `ad` - Ad level insights
+
+Note: If multiple levels are specified in the dimensions list, the last valid level will be used and removed from the dimensions list.
+
+#### Common Dimensions
+
+You can use any valid Facebook Ads dimension in your custom configurations. Some commonly used dimensions include:
+- `age` - Age ranges
+- `gender` - Gender breakdown
+- `country` - Country breakdown
+- `region` - Region breakdown  
+- `platform_position` - Platform position
+- `publisher_platform` - Publisher platform
+- `impression_device` - Device type
+- `placement` - Ad placement
+
+Note: Not all dimension combinations are valid according to Facebook's API. Refer to [Facebook's Marketing API](https://developers.facebook.com/docs/marketing-api/insights/breakdowns/) documentation for valid dimension combinations.
 
 #### Examples
 
@@ -199,4 +229,32 @@ ingestr ingest \
   --source-table 'facebook_insights:ads_insights_country:impressions,clicks,spend,reach,cpm,ctr' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.insights_by_country'
+
+# Custom dimensions (age and gender) with custom metrics
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
+  --source-table 'facebook_insights:age,gender:impressions,clicks,spend' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.insights_custom_dimensions'
+
+# Campaign level with custom dimensions and metrics
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
+  --source-table 'facebook_insights:campaign,age,gender:impressions,clicks,spend,reach' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.campaign_insights_demographics'
+
+# Ad level with geographic dimensions
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
+  --source-table 'facebook_insights:ad,country,region:clicks,impressions,spend' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.ad_insights_geographic'
+
+# Account level insights only (no additional dimensions)
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
+  --source-table 'facebook_insights:account:impressions,clicks,spend,reach' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.account_level_insights'
 ```
