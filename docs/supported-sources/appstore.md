@@ -45,8 +45,8 @@ For more information, see [App Store Connect docs](https://developer.apple.com/d
 
 You can find the App ID of your app by:
 1. Opening the app entry in App Store Connect
-2. Looking for "General Information" in the App information tab
-3. Finding your App ID under the "Apple ID" entry
+2. Looking for General Information in the App information tab
+3. Finding your App ID under the Apple ID entry
 
 With this, you are ready to ingest data from App Store.
 
@@ -69,10 +69,10 @@ We will run `ingestr` to save this data to a [duckdb](https://duckdb.org/) datab
 
 ```sh
 ingestr ingest \
-    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
-    --source-table "app-downloads-detailed" \
-    --dest-uri "duckdb:///analytics.db"  \
-    --dest-table "public.app_downloads" \
+    --source-uri appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
+    --source-table app-downloads-detailed \
+    --dest-uri duckdb:///analytics.db  \
+    --dest-table public.app_downloads \
 ```
 
 ### Example: Loading Data for multiple Apps
@@ -80,10 +80,10 @@ ingestr ingest \
 We will extend the prior example with another app with ID `67890`. To achieve this, simply add another `app_id` query parameter to the URI.
 ```sh
 ingestr ingest \
-    --source-uri "appstore://app_id=12345&app_id=67890&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
-    --source-table "app-downloads-detailed" \
-    --dest-uri "duckdb:///analytics.db"  \
-    --dest-table "public.app_downloads" \
+    --source-uri appstore://app_id=12345&app_id=67890&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
+    --source-table app-downloads-detailed \
+    --dest-uri duckdb:///analytics.db  \
+    --dest-table public.app_downloads \
 ```
 
 
@@ -94,27 +94,35 @@ ingestr ingest \
 To begin, we will first load all data till `2025-01-01` by specifying the `--interval-end` flag. We'll assume the same credentials from our [first example](#example-loading-app-downloads-analytics)
 ```sh
 ingestr ingest \
-    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
-    --source-table "app-downloads-detailed" \
-    --dest-uri "duckdb:///analytics.db"  \
-    --dest-table "public.app_downloads" \
-    --interval-end "2025-01-01"
+    --source-uri appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
+    --source-table app-downloads-detailed \
+    --dest-uri duckdb:///analytics.db  \
+    --dest-table public.app_downloads \
+    --interval-end 2025-01-01
 ```
 
 `ingestr` will load all data available till `2025-01-01`. Now we will run `ingestr` again, but this time, we'll let `ingestr` pickup from where it left off by specifying the `--incremental-strategy` flag.
 
 ```sh
 ingestr ingest \
-    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
-    --source-table "app-downloads-detailed" \
-    --dest-uri "duckdb:///analytics.db"  \
-    --dest-table "public.app_downloads" \
-    --incremental-strategy "merge"
+    --source-uri appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
+    --source-table app-downloads-detailed \
+    --dest-uri duckdb:///analytics.db  \
+    --dest-table public.app_downloads \
+    --incremental-strategy merge
 ```
 
 Notice how we didn't specify a date parameter? `ingestr` will automatically use the metadata from last load and continue loading data from that point on.
 
 ## Tables
+| Table | PK | Inc Key | Inc Strategy | Details |
+|-------|----|---------|--------------|---------|
+| `app-downloads-detailed` | [App Apple Identifier,App Name, App Version,Campaign,Date,Device,Download Type,Page Title,Page Type,Platform Version,Pre-Order,Source Info,Source Type,Territory] | processing_date | merge | App download analytics including first-time downloads, redownloads, updates, and more. |
+| `app-store-discovery-and-engagement-detailed` |  primary_key = [App Apple Identifier,App Name,Campaign,Date,Device,Engagement Type,Event,Page Title,Page Type,Platform Version,Source Info,Source Type,Territory] | processing_date | merge | App Store discovery and engagement metrics including data about user engagement with your app’s icons, product pages, in-app event pages, and other install sheets. |
+|`app-sessions-detailed` |  primary_key=[Date,App Name,App Apple Identifier,App Version,Device,Platform Version,Source Type,Source Info,Campaign,Page Type,Page Title,App Download Date,Territory] | processing_date | merge | App Session provides insights on how often people open your app, and how long they spend in your app. |
+| app-store-installation-and-deletion-detailed | [App Apple Identifier,App Download Date,App Name,App Version,Campaign,Counts,Date,Device,Download Type,Event,Page Title,Page Type,Platform Version,Source Info,Source Type,Territory,Unique Devices] | processing_date | merge | App installation and deletion metrics including device to estimate the number of times people install and delete your App Store apps. |
+| `app-store-purchases-detailed`|  [App Apple Identifier,App Download Date,App Name,Campaign,Content Apple Identifier,Content Name,Date,Device,Page Title,Page Type,Payment Method,Platform Version,Pre-Order,Purchase Type,Source Info,Source Type,Territory] | processing_date | merge | App purchase analytics including revenue, payment methods, and content details. |
+| `app-crashes-expanded`| [App Name,App Version,Build,Date,Device,Platform,Release Type,Territory] |processing_date | merge | App crash analytics including crash counts, device information, and version details. |
 
 ### `app-downloads-detailed`
 The App Downloads Report includes download data generated on the App Store. You can use this report to understand your total number of downloads, including first-time downloads, redownloads, updates, and more.
