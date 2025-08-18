@@ -167,7 +167,7 @@ def invoke_ingest_command(
     if sql_limit:
         args.append("--sql-limit")
         args.append(sql_limit)
-    
+
     if yield_limit:
         args.append("--yield-limit")
         args.append(str(yield_limit))
@@ -3157,6 +3157,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             "invalid table",
             dest_uri,
             dest_table,
+            print_output=False,
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, UnsupportedResourceError)
@@ -3171,6 +3172,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_table,
             interval_start="2025-04-11",
             interval_end="2025-04-10",
+            print_output=False,
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, ValueError)
@@ -3186,6 +3188,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_table,
             interval_start="2025-04-10",
             interval_end="2025-04-10",
+            print_output=False,
         )
         assert result.exit_code == 0
 
@@ -3199,6 +3202,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_uri,
             dest_table,
             interval_start=start_date,
+            print_output=False,
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, ValueError)
@@ -3216,6 +3220,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_table,
             interval_start=start_date,
             interval_end=end_date,
+            print_output=False,
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, ValueError)
@@ -3233,6 +3238,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_table,
             interval_start=start_date,
             interval_end=end_date,
+            print_output=False,
         )
         assert result.exit_code == 0, f"Ingestion failed: {result.output}"
 
@@ -4410,24 +4416,39 @@ def test_pinterest_test_case(dest):
 def linear_test_cases():
     # All Linear source tables
     tables = [
-        "issues", "projects",  "users", "workflow_states", "cycles",
-        "attachments", "comments", "documents", "external_users", "initiative",
-        "integrations", "labels", "organization", "project_updates",
-        "team_memberships", "initiative_to_project",
-        "project_milestone", "project_status", 
+        "issues",
+        "projects",
+        "users",
+        "workflow_states",
+        "cycles",
+        "attachments",
+        "comments",
+        "documents",
+        "external_users",
+        "initiative",
+        "integrations",
+        "labels",
+        "organization",
+        "project_updates",
+        "team_memberships",
+        "initiative_to_project",
+        "project_milestone",
+        "project_status",
     ]
-    
+
     def create_table_test(table_name):
         def table_test(dest_uri: str):
             linear_api_key = os.environ.get("INGESTR_TEST_LINEAR_API_KEY", "")
             if not linear_api_key:
-                pytest.skip("INGESTR_TEST_LINEAR_API_KEY environment variable is not set")
-            
+                pytest.skip(
+                    "INGESTR_TEST_LINEAR_API_KEY environment variable is not set"
+                )
+
             source_uri = f"linear://?api_key={linear_api_key}"
             source_table = table_name
             schema_rand_prefix = f"testschema_linear_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.{table_name}_{get_random_string(5)}"
-            
+
             result = invoke_ingest_command(
                 source_uri,
                 source_table,
@@ -4437,28 +4458,30 @@ def linear_test_cases():
                 interval_end="2025-12-31",
                 print_output=True,
             )
-            
+
             if result.exit_code != 0:
                 # Some Linear resources might not be accessible based on workspace permissions
-                print(f"Linear {table_name} test failed (likely permissions/access issue)")
+                print(
+                    f"Linear {table_name} test failed (likely permissions/access issue)"
+                )
                 traceback.print_exception(*result.exc_info)
-            
+
             assert result.exit_code == 0
-            
+
             with sqlalchemy.create_engine(dest_uri).connect() as conn:
                 res = conn.execute(f"select count(*) from {dest_table}").fetchall()
                 assert len(res) > 0
                 count = res[0][0]
                 print(f"Linear {table_name} count: {count}")
-                
+
                 # Special validation for users table - should have at least one user
                 if table_name == "users":
                     assert count > 0, "Linear should have at least one user"
-        
+
         # Set function name for pytest identification
         table_test.__name__ = f"{table_name}_table"
         return table_test
-    
+
     return [create_table_test(table) for table in tables]
 
 
@@ -4478,32 +4501,38 @@ def test_linear_source(testcase, dest):
 def revenuecat_test_cases():
     # All RevenueCat source tables
     tables = ["projects", "customers", "products"]
-    
+
     def create_table_test(table_name):
         def table_test(dest_uri: str):
             revenuecat_api_key = os.environ.get("INGESTR_TEST_REVENUECAT_API_KEY", "")
-            revenuecat_project_id = os.environ.get("INGESTR_TEST_REVENUECAT_PROJECT_ID", "")
-            
+            revenuecat_project_id = os.environ.get(
+                "INGESTR_TEST_REVENUECAT_PROJECT_ID", ""
+            )
+
             if not revenuecat_api_key:
-                pytest.skip("INGESTR_TEST_REVENUECAT_API_KEY environment variable is not set")
-            
+                pytest.skip(
+                    "INGESTR_TEST_REVENUECAT_API_KEY environment variable is not set"
+                )
+
             # Projects table doesn't need project_id, others do
             if table_name != "projects" and not revenuecat_project_id:
-                pytest.skip("INGESTR_TEST_REVENUECAT_PROJECT_ID environment variable is not set")
-            
+                pytest.skip(
+                    "INGESTR_TEST_REVENUECAT_PROJECT_ID environment variable is not set"
+                )
+
             # Build source URI
             if table_name == "projects":
                 source_uri = f"revenuecat://?api_key={revenuecat_api_key}"
             else:
                 source_uri = f"revenuecat://?api_key={revenuecat_api_key}&project_id={revenuecat_project_id}"
-            
+
             source_table = table_name
             schema_rand_prefix = f"testschema_revenuecat_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.{table_name}_{get_random_string(5)}"
-            
+
             # Limit customers table to 100 records for faster testing
             yield_limit = 100 if table_name == "customers" else None
-            
+
             result = invoke_ingest_command(
                 source_uri,
                 source_table,
@@ -4512,28 +4541,30 @@ def revenuecat_test_cases():
                 yield_limit=yield_limit,
                 print_output=True,
             )
-            
+
             if result.exit_code != 0:
                 # Some RevenueCat resources might not be accessible based on API key permissions
-                print(f"RevenueCat {table_name} test failed (likely permissions/access issue)")
+                print(
+                    f"RevenueCat {table_name} test failed (likely permissions/access issue)"
+                )
                 traceback.print_exception(*result.exc_info)
-            
+
             assert result.exit_code == 0
-            
+
             with sqlalchemy.create_engine(dest_uri).connect() as conn:
                 res = conn.execute(f"select count(*) from {dest_table}").fetchall()
                 assert len(res) > 0
                 count = res[0][0]
                 print(f"RevenueCat {table_name} count: {count}")
-                
+
                 # Special validation for projects table - should have at least one project
                 if table_name == "projects":
                     assert count > 0, "RevenueCat should have at least one project"
-        
+
         # Set function name for pytest identification
         table_test.__name__ = f"{table_name}_table"
         return table_test
-    
+
     return [create_table_test(table) for table in tables]
 
 

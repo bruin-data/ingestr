@@ -669,7 +669,7 @@ def shopify_source(
             params["updated_at_max"] = updated_at.end_value.isoformat()
         yield from client.get_pages("customers", params)
 
-    @dlt.resource(primary_key="id", write_disposition="append")
+    @dlt.resource(primary_key="id", write_disposition="merge")
     def events(
         created_at: dlt.sources.incremental[
             pendulum.DateTime

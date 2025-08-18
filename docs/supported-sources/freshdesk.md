@@ -33,15 +33,16 @@ This command copies data from the Freshdesk source to DuckDB.
 <img alt="freshdesk_img" src="../media/freshdesk_ingestion.png" />
 
 ## Available Tables
+
 The Freshdesk source allows you to ingest the following tables:
 
-| S.No. | Name      | Description                                                                               |
-| ----- | --------- | ----------------------------------------------------------------------------------------- |
-| 1.    | agents    |  Users responsible for managing and resolving customer inquiries and support tickets.     |
-| 2.    | companies |  Customer organizations or groups that agents support.                                    |
-| 3.    | contacts  |  Individuals or customers who reach out for support.                                      |
-| 4.    | groups    |  Agents organized based on specific criteria.                                             |
-| 5.    | roles     |  Predefined sets of permissions that determine what actions an agent can perform.         |
-| 6.    | tickets   |  Customer inquiries or issues submitted via various channels like email, chat, phone, etc. |
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [agents](https://developers.freshdesk.com/api/#agents)    | id | updated_at    | merge               | Retrieves users responsible for managing and resolving customer inquiries and support tickets |
+| [companies](https://developers.freshdesk.com/api/#companies)     | id | updated_at     | merge               | Retrieves customer organizations or groups that agents support. |
+| [contacts](https://developers.freshdesk.com/api/#contacts)     | id | updated_at     | merge               | Retrieves individuals or customers who reach out for support. |
+| [groups](https://developers.freshdesk.com/api/#groups)       | id | updated_at     | merge               | Retrieves agents organized based on specific criteria.  |
+| [roles](https://developers.freshdesk.com/api/#roles)       | id | updated_at     | merge               | Retrieves predefined sets of permissions that determine what actions an agent can perform.|
+| [tickets](https://developers.freshdesk.com/api/#tickets)      | id | updated_at     | merge               | Retrieves customer inquiries or issues submitted via various channels like email, chat, phone, etc.
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.

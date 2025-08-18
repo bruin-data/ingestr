@@ -38,10 +38,13 @@ The result of this command will be a table in the `Solidgate.duckdb` database wi
 ## Tables
 
 Solidgate source allows ingesting the following sources into separate tables:
-- `subscriptions`: Provides a comprehensive view of customer subscriptions, including subscription IDs, statuses, and key timestamps such as creation, update, and expiration dates.
-- `apm_orders`: Provides essential information for anti-fraud purposes, including order IDs, transaction statuses, amounts, currencies, and payment methods, along with crucial customer details such as email addresses.
-- `card_orders`: Provides detailed information on orders processed via card payments, including transaction data, payment status, and customer details.
-- `financial_entries`: Provides a detailed transaction-level breakdown of financial records.
+
+| Table | PK | Inc Key | Inc Strategy | Details |
+|-------|----|---------|--------------|---------|
+| [subscriptions](https://api-docs.solidgate.com/#tag/Reports/operation/retrieve-subscriptions) | id | updated_at | merge | Provides a comprehensive view of customer subscriptions, including subscription IDs, statuses, and key timestamps such as creation, update, and expiration dates |
+| [apm_orders](https://api-docs.solidgate.com/#tag/Reports/operation/retrieve-apm-orders) | order_id | updated_at | merge | Provides essential information for anti-fraud purposes, including order IDs, transaction statuses, amounts, currencies, and payment methods, along with crucial customer details such as email addresses |
+| [card_orders](https://api-docs.solidgate.com/#tag/Reports/operation/retrieve-card-orders) | order_id | updated_at | merge | Provides detailed information on orders processed via card payments, including transaction data, payment status, and customer details |
+| [financial_entries](https://docs.solidgate.com/) | id | created_at | merge | Provides a detailed transaction-level breakdown of financial records |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 

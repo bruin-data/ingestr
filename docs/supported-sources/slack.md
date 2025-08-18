@@ -34,9 +34,13 @@ The result of this command will be a table in the `slack.duckdb` database.
 
 Slack source allows ingesting the following sources into separate tables:
 
-- `channels`: Retrieves information about all the channels.
-- `users`: Retrieves information about all the users.
-- `messages:chan1,chan2`: Retrieves messages from specified channels, where chan1 and chan2 represent user-defined channels, e.g: general, memes. Multiple channels can be listed.
-- `access_logs`: Retrieves all the access logs.
+
+| Table | PK | Inc Key | Inc Strategy | Details |
+|-------|----|---------|--------------|---------|
+| [channels](https://api.slack.com/methods/conversations.list) | id | - | replace | Retrieves information about all the channels |
+| [users](https://api.slack.com/methods/users.list) | id | - | replace | Retrieves all the users|
+| [messages:chan1,chan2](https://api.slack.com/methods/conversations.history) | ts | ts | append/merge | Retrieves messages from specified channels (e.g., general, memes). Multiple channels can be listed separated by commas |
+| [access_logs](https://api.slack.com/methods/team.accessLogs) | user_id | - | append | Retrieves access logs|
+
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.

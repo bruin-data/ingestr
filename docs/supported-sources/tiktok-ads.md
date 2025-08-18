@@ -19,10 +19,15 @@ TikTok requires an `access_token` and `advertiser_ids` to retrieve reports from 
 ## Table: Custom Reports
 Custom reports allow you to retrieve data based on specific `dimensions`, `metrics`, and `filters`.
 
+| Table | PK | Inc Key | Inc Strategy | Details |
+|-------|----|---------|--------------|---------|
+|`custom`| [dimensions,advertiser_id] | stat_time_day/stat_time_hour | merge | Custom reports based on specified dimensions, metrics, and filters.|
+
 Custom Table Format:
 ```
 custom:<dimensions>:<metrics>[:<filter_name,filter_values>]
 ```
+
 ### Parameters:
 - `dimensions`(required): A comma-separated list of [dimensions](https://business-api.tiktok.com/portal/docs?id=1751443956638721) to retrieve.
 - `metrics`(required): A comma-separated list of [metrics](https://business-api.tiktok.com/portal/docs?id=1751443967255553) to retrieve.
