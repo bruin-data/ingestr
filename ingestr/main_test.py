@@ -3157,6 +3157,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             "invalid table",
             dest_uri,
             dest_table,
+            print_output=False,
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, UnsupportedResourceError)
@@ -3171,6 +3172,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_table,
             interval_start="2025-04-11",
             interval_end="2025-04-10",
+            print_output=False,
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, ValueError)
@@ -3186,6 +3188,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_table,
             interval_start="2025-04-10",
             interval_end="2025-04-10",
+            print_output=False,
         )
         assert result.exit_code == 0
 
@@ -3199,6 +3202,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_uri,
             dest_table,
             interval_start=start_date,
+            print_output=False,
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, ValueError)
@@ -3216,6 +3220,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_table,
             interval_start=start_date,
             interval_end=end_date,
+            print_output=False,
         )
         assert result.exit_code != 0
         assert has_exception(result.exception, ValueError)
@@ -3233,6 +3238,7 @@ def frankfurter_test_cases() -> Iterable[Callable]:
             dest_table,
             interval_start=start_date,
             interval_end=end_date,
+            print_output=False,
         )
         assert result.exit_code == 0, f"Ingestion failed: {result.output}"
 

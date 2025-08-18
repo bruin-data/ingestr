@@ -101,23 +101,6 @@ def incremental_stripe_source(
     initial_start_date: Optional[DateTime] = None,
     end_date: Optional[DateTime] = None,
 ) -> Iterable[DltResource]:
-    """
-    As Stripe API does not include the "updated" key in its responses,
-    we are only able to perform incremental downloads from endpoints where all objects are uneditable.
-    This source yields the resources with incremental loading based on "append" mode.
-    You will load only the newest data without duplicating and without downloading a huge amount of data each time.
-
-    Args:
-        endpoints (tuple): A tuple of endpoint names to retrieve data from. Defaults to Stripe API endpoints with uneditable data.
-        stripe_secret_key (str): The API access token for authentication. Defaults to the value in the `dlt.secrets` object.
-        initial_start_date (Optional[DateTime]): An optional parameter that specifies the initial value for dlt.sources.incremental.
-                            If parameter is not None, then load only data that were created after initial_start_date on the first run.
-                            Defaults to None. Format: datetime(YYYY, MM, DD).
-        end_date (Optional[DateTime]): An optional end date to limit the data retrieved.
-                  Defaults to None. Format: datetime(YYYY, MM, DD).
-    Returns:
-        Iterable[DltResource]: Resources with only that data has not yet been loaded.
-    """
     stripe.api_key = stripe_secret_key
     stripe.api_version = "2022-11-15"
     start_date_unix = (
@@ -142,6 +125,6 @@ def incremental_stripe_source(
         yield dlt.resource(
             incremental_resource,
             name=endpoint,
-            write_disposition="append",
+            write_disposition="merge",
             primary_key="id",
         )(endpoint)
