@@ -29,19 +29,11 @@ ingestr ingest \
 ## Tables
 
 Zoom source allows ingesting the following tables:
-- `meetings`: Retrieve all valid previous meetings, live meetings, and upcoming scheduled meetings for all users in the given Zoom account. 
-    - Permissions required: meeting:read:admin,meeting:read
-    - Granular permissions: meeting:read:list_meetings,meeting:read:list_meetings:admin
 
-- `users`: Retrieve a list of users in your account.
-    - Permissions required: user:read, user:write, user:read:admin, user:write:admin.
-    - Granular permissions: user:read:list_users:admin.
-    - Prerequisites: A Pro or higher plan.
-
-- `participants`: Return a report of a past meeting that had participants, including the host.
- It only returns data for meetings within the last 6 months.
-  - Permissions required: report:read:admin.
-  - Granular permissions: report:read:list_meeting_participants:admin.
-  - Prerequisites: A Pro or higher plan.
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [meetings](https://developers.zoom.us/docs/api/rest/reference/zoom-api/methods/#operation/meetings)     | id | start_time | merge               | Retrieve all valid previous meetings, live meetings, and upcoming scheduled meetings for all users in the given Zoom account. Permissions required: meeting:read:admin,meeting:read, Granular permissions, meeting:read:list_meetings,meeting:read:list_meetings:admin |
+| users       | id | – | merge               | Retrieve a list of users in your account. Permissions required: user:read, user:write, user:read:admin, user:write:admin, Granular permissions: user:read:list_users:admin, Prerequisites: A Pro or higher plan. |
+| [participants](https://developers.zoom.us/docs/api/rest/reference/zoom-api/methods/#operation/reportMeetingParticipants)  | id | join_time | merge               | Return a report of a past meeting that had participants, including the host. It only returns data for meetings within the last 6 months.Permissions required: report:read:admin. Granular permissions: report:read:list_meeting_participants:admin. Prerequisites: A Pro or higher plan. |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
