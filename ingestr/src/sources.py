@@ -1054,9 +1054,10 @@ class FacebookAdsSource:
                 )
 
             # Validate breakdown type against available options from settings
-            import typing
 
-            from ingestr.src.facebook_ads.helpers import parse_insights_table_to_source_kwargs
+            from ingestr.src.facebook_ads.helpers import (
+                parse_insights_table_to_source_kwargs,
+            )
 
             source_kwargs = {
                 "access_token": access_token[0],
@@ -3224,6 +3225,76 @@ class PinterestSource:
         ).with_resources(table)
 
 
+class FluxxSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Fluxx takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        # Parse URI: fluxx://instance?client_id=xxx&client_secret=xxx
+        parsed_uri = urlparse(uri)
+        source_params = parse_qs(parsed_uri.query)
+
+        instance = parsed_uri.hostname
+        if not instance:
+            raise ValueError(
+                "Instance is required in the URI (e.g., fluxx://mycompany.preprod)"
+            )
+
+        client_id = source_params.get("client_id")
+        if not client_id:
+            raise ValueError("client_id in the URI is required to connect to Fluxx")
+
+        client_secret = source_params.get("client_secret")
+        if not client_secret:
+            raise ValueError("client_secret in the URI is required to connect to Fluxx")
+
+        # Parse date parameters
+        start_date = kwargs.get("interval_start")
+        if start_date:
+            start_date = ensure_pendulum_datetime(start_date)
+
+        end_date = kwargs.get("interval_end")
+        if end_date:
+            end_date = ensure_pendulum_datetime(end_date)
+
+        # Import Fluxx source
+        from ingestr.src.fluxx import fluxx_source
+
+        # Parse table specification for custom column selection
+        # Format: "resource_name:field1,field2,field3" or "resource_name"
+        resources = None
+        custom_fields = {}
+
+        if table:
+            # Handle single resource with custom fields or multiple resources
+            if ":" in table and table.count(":") == 1:
+                # Single resource with custom fields: "grant_request:id,name,amount"
+                resource_name, field_list = table.split(":", 1)
+                resource_name = resource_name.strip()
+                fields = [f.strip() for f in field_list.split(",")]
+                resources = [resource_name]
+                custom_fields[resource_name] = fields
+            else:
+                # Multiple resources or single resource without custom fields
+                # Support comma-separated list: "grant_request,user"
+                resources = [r.strip() for r in table.split(",")]
+
+        return fluxx_source(
+            instance=instance,
+            client_id=client_id[0],
+            client_secret=client_secret[0],
+            start_date=start_date,
+            end_date=end_date,
+            resources=resources,
+            custom_fields=custom_fields,
+        )
+
+
 class LinearSource:
     def handles_incrementality(self) -> bool:
         return True
@@ -3241,11 +3312,11 @@ class LinearSource:
             raise MissingValueError("api_key", "Linear")
 
         if table not in [
-            "issues", 
-            "projects", 
-            "teams", 
-            "users", 
-            "workflow_states", 
+            "issues",
+            "projects",
+            "teams",
+            "users",
+            "workflow_states",
             "cycles",
             "attachments",
             "comments",
@@ -3294,20 +3365,20 @@ class RevenueCatSource:
 
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
-        
+
         api_key = params.get("api_key")
         if api_key is None:
             raise MissingValueError("api_key", "RevenueCat")
-            
+
         project_id = params.get("project_id")
         if project_id is None and table != "projects":
             raise MissingValueError("project_id", "RevenueCat")
 
         if table not in [
-            "customers", 
-            "products", 
-            "subscriptions", 
-            "purchases", 
+            "customers",
+            "products",
+            "subscriptions",
+            "purchases",
             "projects",
         ]:
             raise UnsupportedResourceError(table, "RevenueCat")
