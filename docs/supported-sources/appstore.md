@@ -31,8 +31,8 @@ To generate an API key, you must have an Admin account in App Store Connect.
 To generate a new API key to use with `ingestr`, log in to [App Store Connect](https://appstoreconnect.apple.com/) and:
 
 1. Select Users and Access, and then select the API Keys tab.
-2. Make sure the Team Keys tab is selected.
-3. Click Generate API Key or the Add (+) button.
+2. Looking for "General Information" in the App information tab
+3. Finding your App ID under the "Apple ID" entry
 4. Enter a name for the key. The name is for your reference only and isn’t part of the key itself.
 5. Under Access, select the role as `FINANCE`.
 6. Click Generate.
@@ -69,10 +69,10 @@ We will run `ingestr` to save this data to a [duckdb](https://duckdb.org/) datab
 
 ```sh
 ingestr ingest \
-    --source-uri appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
-    --source-table app-downloads-detailed \
-    --dest-uri duckdb:///analytics.db  \
-    --dest-table public.app_downloads \
+    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
+    --source-table "app-downloads-detailed" \
+    --dest-uri "duckdb:///analytics.db"  \
+    --dest-table "public.app_downloads" \
 ```
 
 ### Example: Loading Data for multiple Apps
@@ -80,10 +80,10 @@ ingestr ingest \
 We will extend the prior example with another app with ID `67890`. To achieve this, simply add another `app_id` query parameter to the URI.
 ```sh
 ingestr ingest \
-    --source-uri appstore://app_id=12345&app_id=67890&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
-    --source-table app-downloads-detailed \
-    --dest-uri duckdb:///analytics.db  \
-    --dest-table public.app_downloads \
+    --source-uri "appstore://app_id=12345&app_id=67890&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
+    --source-table "app-downloads-detailed" \
+    --dest-uri "duckdb:///analytics.db"  \
+    --dest-table "public.app_downloads" \
 ```
 
 
@@ -94,21 +94,21 @@ ingestr ingest \
 To begin, we will first load all data till `2025-01-01` by specifying the `--interval-end` flag. We'll assume the same credentials from our [first example](#example-loading-app-downloads-analytics)
 ```sh
 ingestr ingest \
-    --source-uri appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
-    --source-table app-downloads-detailed \
-    --dest-uri duckdb:///analytics.db  \
-    --dest-table public.app_downloads \
-    --interval-end 2025-01-01
+    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
+    --source-table "app-downloads-detailed" \
+    --dest-uri "duckdb:///analytics.db"  \
+    --dest-table "public.app_downloads" \
+    --interval-end "2025-01-01"
 ```
 
 `ingestr` will load all data available till `2025-01-01`. Now we will run `ingestr` again, but this time, we'll let `ingestr` pickup from where it left off by specifying the `--incremental-strategy` flag.
 
 ```sh
 ingestr ingest \
-    --source-uri appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0 \
-    --source-table app-downloads-detailed \
-    --dest-uri duckdb:///analytics.db  \
-    --dest-table public.app_downloads \
+    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
+    --source-table "app-downloads-detailed" \
+    --dest-uri "duckdb:///analytics.db"  \
+    --dest-table "public.app_downloads" \
     --incremental-strategy merge
 ```
 
