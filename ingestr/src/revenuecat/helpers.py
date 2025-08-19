@@ -260,3 +260,32 @@ async def process_customer_with_nested_resources_async(
     await asyncio.gather(*tasks)
 
     return customer
+
+
+def create_project_resource(
+    resource_name: str,
+    api_key: str,
+    project_id: str = None,
+    timestamp_fields: List[str] = None,
+) -> Iterator[Dict[str, Any]]:
+    """
+    Helper function to create DLT resources for project-dependent endpoints.
+    
+    Args:
+        resource_name: Name of the resource (e.g., 'products', 'entitlements', 'offerings')
+        api_key: RevenueCat API key
+        project_id: RevenueCat project ID
+        timestamp_fields: List of timestamp fields to convert to ISO format
+    
+    Returns:
+        Iterator of resource data
+    """
+    if project_id is None:
+        raise ValueError(f"project_id is required for {resource_name} resource")
+    
+    endpoint = f"/projects/{project_id}/{resource_name}"
+    default_timestamp_fields = timestamp_fields or ["created_at", "updated_at"]
+    
+    for item in _paginate(api_key, endpoint):
+        item = convert_timestamps_to_iso(item, default_timestamp_fields)
+        yield item

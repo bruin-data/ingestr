@@ -9,7 +9,9 @@ from .helpers import (
     _paginate,
     convert_timestamps_to_iso,
     process_customer_with_nested_resources_async,
+    create_project_resource,
 )
+
 
 
 @dlt.source(name="revenuecat", max_table_nesting=0)
@@ -85,43 +87,22 @@ def revenuecat_source(
         # Yield each processed customer
         yield from process_customers_sync()
 
-    @dlt.resource(name="products", primary_key="id", write_disposition="merge")
-    def products() -> Iterator[Dict[str, Any]]:
-        """Get list of products."""
-        if project_id is None:
-            raise ValueError("project_id is required for products resource")
-        endpoint = f"/projects/{project_id}/products"
-
-        for product in _paginate(api_key, endpoint):
-            product = convert_timestamps_to_iso(product, ["created_at", "updated_at"])
-            yield product
-
-    @dlt.resource(name="entitlements", primary_key="id", write_disposition="merge")
-    def entitlements() -> Iterator[Dict[str, Any]]:
-        """Get list of entitlements."""
-        if project_id is None:
-            raise ValueError("project_id is required for entitlements resource")
-        endpoint = f"/projects/{project_id}/entitlements"
-
-        for entitlement in _paginate(api_key, endpoint):
-            entitlement = convert_timestamps_to_iso(entitlement, ["created_at", "updated_at"])
-            yield entitlement
-
-    @dlt.resource(name="offerings", primary_key="id", write_disposition="merge")
-    def offerings() -> Iterator[Dict[str, Any]]:
-        """Get list of offerings."""
-        if project_id is None:
-            raise ValueError("project_id is required for offerings resource")
-        endpoint = f"/projects/{project_id}/offerings"
-
-        for offering in _paginate(api_key, endpoint):
-            offering = convert_timestamps_to_iso(offering, ["created_at", "updated_at"])
-            yield offering
+    # Create project-dependent resources dynamically
+    project_resources = []
+    resource_names = ["products", "entitlements", "offerings"]
+    
+    for resource_name in resource_names:
+        @dlt.resource(name=resource_name, primary_key="id", write_disposition="merge")
+        def create_resource(resource_name=resource_name) -> Iterator[Dict[str, Any]]:
+            """Get list of project resource."""
+            yield from create_project_resource(resource_name, api_key, project_id)
+        
+        # Set the function name for better identification
+        create_resource.__name__ = resource_name
+        project_resources.append(create_resource)
 
     return [
         projects,
         customers,
-        products,
-        entitlements,
-        offerings,
+        *project_resources,
     ]
