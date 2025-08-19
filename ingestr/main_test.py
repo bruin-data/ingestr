@@ -4500,7 +4500,7 @@ def test_linear_source(testcase, dest):
 
 def revenuecat_test_cases():
     # All RevenueCat source tables
-    tables = ["projects", "customers", "products"]
+    tables = ["projects", "customers", "products", "entitlements", "offerings"]
 
     def create_table_test(table_name):
         def table_test(dest_uri: str):
