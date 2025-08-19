@@ -31,8 +31,8 @@ To generate an API key, you must have an Admin account in App Store Connect.
 To generate a new API key to use with `ingestr`, log in to [App Store Connect](https://appstoreconnect.apple.com/) and:
 
 1. Select Users and Access, and then select the API Keys tab.
-2. Looking for "General Information" in the App information tab
-3. Finding your App ID under the "Apple ID" entry
+2. Make sure the Team Keys tab is selected.
+3. Click Generate API Key or the Add (+) button.
 4. Enter a name for the key. The name is for your reference only and isn’t part of the key itself.
 5. Under Access, select the role as `FINANCE`.
 6. Click Generate.
@@ -45,8 +45,8 @@ For more information, see [App Store Connect docs](https://developer.apple.com/d
 
 You can find the App ID of your app by:
 1. Opening the app entry in App Store Connect
-2. Looking for General Information in the App information tab
-3. Finding your App ID under the Apple ID entry
+2. Looking for "General Information" in the App information tab
+3. Finding your App ID under the "Apple ID" entry
 
 With this, you are ready to ingest data from App Store.
 
@@ -109,7 +109,7 @@ ingestr ingest \
     --source-table "app-downloads-detailed" \
     --dest-uri "duckdb:///analytics.db"  \
     --dest-table "public.app_downloads" \
-    --incremental-strategy merge
+    --incremental-strategy "merge"
 ```
 
 Notice how we didn't specify a date parameter? `ingestr` will automatically use the metadata from last load and continue loading data from that point on.
