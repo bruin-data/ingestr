@@ -147,6 +147,7 @@ export default defineConfig({
               { text: "Pinterest", link: "/supported-sources/pinterest.md" },
               { text: "Pipedrive", link: "/supported-sources/pipedrive.md" },
               { text: "QuickBooks", link: "/supported-sources/quickbooks.md" },
+              { text: "RevenueCat", link: "/supported-sources/revenuecat.md" },
               { text: "S3", link: "/supported-sources/s3.md" },
               { text: "Salesforce", link: "/supported-sources/salesforce.md" },
               { text: "SFTP", link: "/supported-sources/sftp.md"},

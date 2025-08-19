@@ -47,9 +47,12 @@ ingestr ingest \
 
 RevenueCat source allows ingesting the following tables:
 
-- `projects`: Fetches all projects from your RevenueCat account.
-- `customers`: Fetches all customers with nested purchases and subscriptions data.
-- `products`: Fetches all products configured in your RevenueCat project.
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |  
+|  [projects](https://www.revenuecat.com/docs/api-v2#tag/Product/operation/list-products)     | id |     | merge               |  Fetches all projects from your RevenueCat account. |
+|  [customers](https://www.revenuecat.com/docs/api-v2#tag/Customer)     | id |  | merge               |  Fetches all customers with nested purchases and subscriptions data.|
+|  [products](https://www.revenuecat.com/docs/api-v2#tag/Product/operation/list-products)     | id |   | merge               |  Fetches all products configured in your RevenueCat project.|
+
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
