@@ -3378,6 +3378,7 @@ class RevenueCatSource:
             "customers",
             "products",
             "entitlements",
+            "offerings",
             "subscriptions",
             "purchases",
             "projects",

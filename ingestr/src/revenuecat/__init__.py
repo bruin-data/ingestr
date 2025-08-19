@@ -22,10 +22,10 @@ def revenuecat_source(
 
     Args:
         api_key: RevenueCat API v2 secret key with Bearer token format
-        project_id: RevenueCat project ID (required for customers, products, entitlements, subscriptions, purchases)
+        project_id: RevenueCat project ID (required for customers, products, entitlements, offerings, subscriptions, purchases)
 
     Returns:
-        Iterable of DLT resources for customers, products, entitlements, purchases, subscriptions, and projects
+        Iterable of DLT resources for customers, products, entitlements, offerings, purchases, subscriptions, and projects
     """
 
     @dlt.resource(name="projects", primary_key="id", write_disposition="merge")
@@ -107,9 +107,21 @@ def revenuecat_source(
             entitlement = convert_timestamps_to_iso(entitlement, ["created_at", "updated_at"])
             yield entitlement
 
+    @dlt.resource(name="offerings", primary_key="id", write_disposition="merge")
+    def offerings() -> Iterator[Dict[str, Any]]:
+        """Get list of offerings."""
+        if project_id is None:
+            raise ValueError("project_id is required for offerings resource")
+        endpoint = f"/projects/{project_id}/offerings"
+
+        for offering in _paginate(api_key, endpoint):
+            offering = convert_timestamps_to_iso(offering, ["created_at", "updated_at"])
+            yield offering
+
     return [
         projects,
         customers,
         products,
         entitlements,
+        offerings,
     ]
