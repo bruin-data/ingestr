@@ -3377,6 +3377,7 @@ class RevenueCatSource:
         if table not in [
             "customers",
             "products",
+            "entitlements",
             "subscriptions",
             "purchases",
             "projects",
