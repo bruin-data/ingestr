@@ -32,12 +32,14 @@ ingestr ingest \
 
 pipedrive source allows ingesting the following resources into separate tables:
 
-- `activities`: Refers to scheduled events or tasks associated with deals, contacts, or organizations
-- `organizations`: Refers to company or entity with which you have potential or existing business dealings.
-- `products`: Refers to items or services offered for sale that can be associated with deals
-- `deals`: Refers to potential sale or transaction that you can track through various stages
-- `users`: Refers to Individual with a unique login credential who can access and use the platform
-- `persons`: Refers individual contacts or leads that can be linked to sales deals
+| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |  
+| `activities` | id | update_time | merge | Refers to scheduled events or tasks associated with deals, contacts, or organizations |
+| `deals` | id | update_time | merge | Refers to potential sale or transaction that you can track through various stages |
+| `persons` | id | update_time | merge | Refers individual contacts or leads that can be linked to sales deals |
+| `organizations` | id | update_time | merge | Refers to company or entity with which you have potential or existing business dealings. |
+| `products` | id | update_time | merge | Refers to items or services offered for sale that can be associated with deals |
+| `users` | id | update_time | merge | Refers to Individual with a unique login credential who can access and use the platform |
 
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
