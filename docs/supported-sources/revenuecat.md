@@ -49,9 +49,11 @@ RevenueCat source allows ingesting the following tables:
 
 | Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |  
-|  [projects](https://www.revenuecat.com/docs/api-v2#tag/Product/operation/list-products)     | id |     | merge               |  Fetches all projects from your RevenueCat account. |
+|  [projects](https://www.revenuecat.com/docs/api-v2#tag/Project)     | id |     | merge               |  Fetches all projects from your RevenueCat account. |
 |  [customers](https://www.revenuecat.com/docs/api-v2#tag/Customer)     | id |  | merge               |  Fetches all customers with nested purchases and subscriptions data.|
 |  [products](https://www.revenuecat.com/docs/api-v2#tag/Product/operation/list-products)     | id |   | merge               |  Fetches all products configured in your RevenueCat project.|
+|  [entitlements](https://www.revenuecat.com/docs/api-v2#tag/Entitlement/operation/list-entitlements)     | id |   | merge               |  Fetches all entitlements configured in your RevenueCat project.|
+|  [offerings](https://www.revenuecat.com/docs/api-v2#tag/Offering/operation/list-offerings)    | id |   | merge               |  Fetches all offerings configured in your RevenueCat project.|
 
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
