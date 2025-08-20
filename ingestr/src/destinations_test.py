@@ -111,3 +111,15 @@ class MsSQLDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
 class DatabricksDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
     destination = DatabricksDestination()
     expected_class = dlt.destinations.databricks
+    def test_credentials_are_passed_correctly(self):
+        uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace&schema=dest"
+        result = self.destination.dlt_dest(uri)
+
+        self.assertTrue(isinstance(result, self.expected_class))
+        # Override the generic test - expect parsed credentials, not raw URI
+        creds = result.config_params["credentials"]
+        self.assertEqual(creds["access_token"], "password")
+        self.assertEqual(creds["server_hostname"], "hostname")
+        self.assertEqual(creds["http_path"], "/path/123")
+        self.assertEqual(creds["catalog"], "workspace")
+        self.assertEqual(creds["schema"], "dest")
