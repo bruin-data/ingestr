@@ -25,7 +25,20 @@ from ingestr.src.loader import load_dlt_file
 
 class GenericSqlDestination:
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
-        table_fields = table.split(".")
+        
+        if uri.startswith("databricks://"):
+            p = urlparse(uri)
+            q = parse_qs(p.query)
+            schema = q.get("schema", [None])[0]
+            if not schema:
+                raise ValueError("Databricks requires schema in the URI.")
+            res = {
+                "dataset_name": schema,
+                "table_name": table,
+            }
+            return res
+        
+        table_fields = table.split(".") 
         if len(table_fields) != 2:
             raise ValueError("Table name must be in the format <schema>.<table>")
 
@@ -270,8 +283,35 @@ class MsSQLDestination(GenericSqlDestination):
 
 class DatabricksDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
-        return dlt.destinations.databricks(credentials=uri, **kwargs)
+        p = urlparse(uri)
+        q = parse_qs(p.query)
+        access_token = p.password
+        server_hostname = p.hostname
+        http_path = q.get("http_path", [None])[0]
+        catalog = q.get("catalog", [None])[0]
+        schema = q.get("schema", [None])[0]
+        
+        print("access_token", access_token)
+        print("server_hostname", server_hostname)
+        print("http_path", http_path)
+        print("catalog", catalog)
+        print("schema", schema)
 
+        creds = {
+            "access_token": access_token,
+            "server_hostname": server_hostname,
+            "http_path": http_path,
+            "catalog": catalog,
+            "schema": schema,
+        }
+       
+        return dlt.destinations.databricks(
+            credentials=creds,
+            **kwargs,
+        )
+    
+
+    
 
 class SynapseDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
