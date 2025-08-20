@@ -23,8 +23,6 @@ asana==3.2.3
     # via -r requirements.in
 asn1crypto==1.5.1
     # via snowflake-connector-python
-async-timeout==5.0.1
-    # via aiohttp
 asynch==0.2.4
     # via clickhouse-sqlalchemy
 attrs==25.1.0
@@ -594,13 +592,11 @@ typing-extensions==4.12.2
     # via
     #   alembic
     #   dlt
-    #   multidict
     #   pyairtable
     #   pydantic
     #   pydantic-core
     #   pyopenssl
     #   reactivex
-    #   rich
     #   simple-salesforce
     #   snowflake-connector-python
     #   sqlalchemy2-stubs

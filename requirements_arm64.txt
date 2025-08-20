@@ -16,9 +16,7 @@ aioitertools==0.12.0
 aiosignal==1.3.2
     # via aiohttp
 alembic==1.15.2
-    # via
-    #   databricks-sql-connector
-    #   sqlalchemy-spanner
+    # via sqlalchemy-spanner
 annotated-types==0.7.0
     # via pydantic
 asana==3.2.3
@@ -88,7 +86,7 @@ cryptography==44.0.2
     #   snowflake-connector-python
 curlify==2.2.1
     # via facebook-business
-databricks-sql-connector==2.9.3
+databricks-sql-connector==4.0.5
     # via -r requirements.in
 databricks-sqlalchemy==1.0.2
     # via -r requirements.in
@@ -297,9 +295,7 @@ mypy-extensions==1.0.0
 mysql-connector-python==9.2.0
     # via -r requirements.in
 numpy==2.2.4
-    # via
-    #   databricks-sql-connector
-    #   pandas
+    # via pandas
 oauthlib==3.2.2
     # via
     #   databricks-sql-connector
@@ -372,9 +368,7 @@ py-machineid==0.6.0
 pyairtable==2.3.3
     # via -r requirements.in
 pyarrow==18.1.0
-    # via
-    #   -r requirements.in
-    #   databricks-sql-connector
+    # via -r requirements.in
 pyasn1==0.6.1
     # via
     #   pyasn1-modules
@@ -414,6 +408,7 @@ python-dateutil==2.9.0.post0
     # via
     #   aiobotocore
     #   botocore
+    #   databricks-sql-connector
     #   google-cloud-bigquery
     #   influxdb-client
     #   pandas
@@ -542,7 +537,6 @@ sqlalchemy==1.4.52
     #   -r requirements.in
     #   alembic
     #   clickhouse-sqlalchemy
-    #   databricks-sql-connector
     #   databricks-sqlalchemy
     #   duckdb-engine
     #   snowflake-sqlalchemy
