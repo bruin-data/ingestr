@@ -1,6 +1,7 @@
 asana==3.2.3
 confluent-kafka==2.8.0
-databricks-sql-connector==2.9.3
+databricks-sql-connector==4.0.5
+databricks-sqlalchemy==1.0.2
 dataclasses-json==0.6.7
 dlt==1.11.0
 dlt-cratedb>=0.0.1
@@ -42,7 +43,6 @@ flatten_json==0.1.14
 dataclasses-json==0.6.7
 gcsfs==2025.3.2
 simple-salesforce==1.12.6
-databricks-sqlalchemy==1.0.2
 clickhouse-connect==0.8.14
 clickhouse-driver==0.2.9
 clickhouse-sqlalchemy==0.2.7
