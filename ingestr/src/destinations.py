@@ -291,11 +291,6 @@ class DatabricksDestination(GenericSqlDestination):
         catalog = q.get("catalog", [None])[0]
         schema = q.get("schema", [None])[0]
         
-        print("access_token", access_token)
-        print("server_hostname", server_hostname)
-        print("http_path", http_path)
-        print("catalog", catalog)
-        print("schema", schema)
 
         creds = {
             "access_token": access_token,
