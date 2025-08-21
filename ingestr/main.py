@@ -282,6 +282,13 @@ def ingest(
             envvar=["STAGING_BUCKET", "INGESTR_STAGING_BUCKET"],
         ),
     ] = None,  # type: ignore
+    mask: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            help="Column masking configuration in format 'column:algorithm[:param]'. Can be specified multiple times.",
+            envvar=["MASK", "INGESTR_MASK"],
+        ),
+    ] = [],  # type: ignore
 ):
     import hashlib
     import tempfile
@@ -302,6 +309,7 @@ def ingest(
     from ingestr.src.filters import (
         cast_set_to_list,
         cast_spanner_types,
+        create_masking_filter,
         handle_mysql_empty_dates,
     )
     from ingestr.src.sources import MongoDbSource
@@ -561,6 +569,10 @@ def ingest(
 
         if factory.source_scheme.startswith("spanner"):
             resource.for_each(dlt_source, lambda x: x.add_map(cast_spanner_types))
+
+        if mask:
+            masking_filter = create_masking_filter(mask)
+            resource.for_each(dlt_source, lambda x: x.add_map(masking_filter))
 
         if yield_limit:
             resource.for_each(dlt_source, lambda x: x.add_limit(yield_limit))

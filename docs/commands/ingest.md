@@ -28,6 +28,7 @@ ingestr ingest \
 - `--interval-end`: Sets the end of the interval for the incremental key. Defaults to `None`.
 - `--primary-key TEXT`: Specifies the primary key for the merge operation. Defaults to `None`.
 - `--columns <column_name>:<column_type>`: Specifies the columns to be ingested. Defaults to `None`.
+- `--mask <column_name>:<algorithm>[:param]`: Applies data masking to specified columns. Can be used multiple times for different columns. See the [Data Masking](../getting-started/data-masking.md) documentation for available algorithms and usage examples. Defaults to `None`.
 
 The `interval-start` and `interval-end` options support various datetime formats, here are some examples:
 - `%Y-%m-%d`: `2023-01-31`
@@ -105,6 +106,26 @@ ingestr ingest
    --interval-end '2023-01-31' \
    --columns 'dt:date'
 ```
+
+### Ingesting with Data Masking
+
+```bash
+ingestr ingest \
+   --source-uri 'postgresql://user:pass@localhost/customers' \
+   --source-table 'customer_data' \
+   --dest-uri 'duckdb:///masked_customers.db' \
+   --dest-table 'masked_customers' \
+   --mask 'email:hash' \
+   --mask 'phone:partial:3' \
+   --mask 'ssn:redact' \
+   --mask 'salary:round:5000'
+```
+
+This example demonstrates masking sensitive customer data:
+- Email addresses are hashed for consistent anonymization
+- Phone numbers show only first and last 3 digits
+- SSNs are completely redacted
+- Salaries are rounded to nearest $5000
 
 > [!INFO]
 > For more examples, please refer to the specific platforms' documentation on the sidebar.
