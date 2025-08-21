@@ -518,21 +518,42 @@ class CollectionAggregationLoader(CollectionLoader):
         if limit and limit > 0:
             pipeline.append({"$limit": limit})
 
-        print("pipeline", pipeline)
-        # Execute aggregation
-        cursor = self.collection.aggregate(pipeline, allowDiskUse=True)
-
-        # Process results in chunks
-        while docs_slice := list(islice(cursor, self.chunk_size)):
-            res = map_nested_in_place(convert_mongo_objs, docs_slice)
-            print("res", res)
-            if len(res) > 0 and "_id" in res[0] and isinstance(res[0]["_id"], dict):
-                yield dlt.mark.with_hints(
-                    res,
-                    dlt.mark.make_hints(columns={"_id": {"data_type": "json"}}),
-                )
-            else:
-                yield res
+        # Add maxTimeMS to prevent hanging
+        cursor = self.collection.aggregate(
+            pipeline, 
+            allowDiskUse=True, 
+            batchSize=min(self.chunk_size, 101),
+            maxTimeMS=30000  # 30 second timeout
+        )
+        
+        docs_buffer = []
+        try:
+            for doc in cursor:
+                docs_buffer.append(doc)
+                
+                if len(docs_buffer) >= self.chunk_size:
+                    res = map_nested_in_place(convert_mongo_objs, docs_buffer)
+                    if len(res) > 0 and "_id" in res[0] and isinstance(res[0]["_id"], dict):
+                        yield dlt.mark.with_hints(
+                            res,
+                            dlt.mark.make_hints(columns={"_id": {"data_type": "json"}}),
+                        )
+                    else:
+                        yield res
+                    docs_buffer = []
+            
+            # Yield any remaining documents
+            if docs_buffer:
+                res = map_nested_in_place(convert_mongo_objs, docs_buffer)
+                if len(res) > 0 and "_id" in res[0] and isinstance(res[0]["_id"], dict):
+                    yield dlt.mark.with_hints(
+                        res,
+                        dlt.mark.make_hints(columns={"_id": {"data_type": "json"}}),
+                    )
+                else:
+                    yield res
+        finally:
+            cursor.close()
 
 
 class CollectionAggregationLoaderParallel(CollectionAggregationLoader):

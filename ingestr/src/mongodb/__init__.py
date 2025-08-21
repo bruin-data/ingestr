@@ -101,7 +101,7 @@ def mongodb_collection(
     write_disposition: Optional[str] = dlt.config.value,
     parallel: Optional[bool] = False,
     limit: Optional[int] = None,
-    chunk_size: Optional[int] = 10000,
+    chunk_size: Optional[int] = 1000,
     data_item_format: Optional[TDataItemFormat] = "object",
     filter_: Optional[Dict[str, Any]] = None,
     projection: Optional[Union[Mapping[str, Any], Iterable[str]]] = dlt.config.value,
