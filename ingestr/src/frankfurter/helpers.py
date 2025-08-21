@@ -16,9 +16,9 @@ def get_path_with_retry(path: str) -> StrAny:
     return get_url_with_retry(f"{FRANKFURTER_API_URL}{path}")
 
 
-def validate_dates(start_date: datetime, end_date: datetime|None) -> None:
+def validate_dates(start_date: datetime, end_date: datetime | None) -> None:
     current_date = pendulum.now()
-    
+
     # Check if start_date is in the futurep
     if start_date > current_date:
         raise ValueError("Interval-start cannot be in the future.")

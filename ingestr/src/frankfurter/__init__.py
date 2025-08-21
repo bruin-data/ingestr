@@ -14,14 +14,13 @@ from ingestr.src.frankfurter.helpers import get_path_with_retry
 )
 def frankfurter_source(
     start_date: TAnyDateTime,
-    end_date: TAnyDateTime|None,
+    end_date: TAnyDateTime | None,
     base_currency: str,
 ) -> Any:
     """
     A dlt source for the frankfurter.dev API. It groups several resources (in this case frankfurter.dev API endpoints) containing
     various types of data: currencies, latest rates, historical rates.
     """
-    
 
     @dlt.resource(
         write_disposition="replace",
@@ -35,7 +34,6 @@ def frankfurter_source(
 
         for currency_code, currency_name in currencies_data.items():
             yield {"currency_code": currency_code, "currency_name": currency_name}
-
 
     @dlt.resource(
         write_disposition="merge",
@@ -81,7 +79,6 @@ def frankfurter_source(
                 "base_currency": base_currency,
             }
 
-
     @dlt.resource(
         write_disposition="merge",
         columns={
@@ -93,13 +90,13 @@ def frankfurter_source(
         primary_key=("date", "currency_code", "base_currency"),
     )
     def exchange_rates(
-        date_time = dlt.sources.incremental(
-        "date",
-        initial_value=start_date,
-        end_value=end_date,
-        range_start="closed",
-        range_end="closed",
-    )
+        date_time=dlt.sources.incremental(
+            "date",
+            initial_value=start_date,
+            end_value=end_date,
+            range_start="closed",
+            range_end="closed",
+        ),
     ) -> Iterator[dict]:
         """
         Fetches exchange rates for a specified date range.
@@ -115,9 +112,9 @@ def frankfurter_source(
             end_date = date_time.end_value
         else:
             end_date = pendulum.now()
-        
+
         # Ensure start_date.last_value is a pendulum.DateTime object
-        start_date_obj = ensure_pendulum_datetime(start_date) # type: ignore
+        start_date_obj = ensure_pendulum_datetime(start_date)  # type: ignore
         start_date_str = start_date_obj.format("YYYY-MM-DD")
 
         # Ensure end_date is a pendulum.DateTime object
@@ -158,4 +155,3 @@ def frankfurter_source(
                 }
 
     return currencies, latest, exchange_rates
-    

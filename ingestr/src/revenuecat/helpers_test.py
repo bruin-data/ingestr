@@ -5,8 +5,6 @@ Unit tests for RevenueCat helper functions.
 import asyncio
 from unittest.mock import AsyncMock, Mock, patch
 
-import pytest
-
 from .helpers import (
     _make_request,
     _make_request_async,
