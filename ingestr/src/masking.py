@@ -256,7 +256,7 @@ class MaskingEngine:
 
         # Try to parse string dates
         try:
-            from dateutil import parser
+            from dateutil import parser  # type: ignore
 
             dt = parser.parse(str(value))
             shift_days = random.randint(-max_days, max_days)
