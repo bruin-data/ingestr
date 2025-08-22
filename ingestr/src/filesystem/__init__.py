@@ -25,6 +25,8 @@ def readers(
     bucket_url: str,
     credentials: Union[FileSystemCredentials, AbstractFileSystem],
     file_glob: Optional[str] = "*",
+    interval_start: Optional[str] = None,
+    interval_end: Optional[str] = None,
 ) -> Tuple[DltResource, ...]:
     """This source provides a few resources that are chunked file readers. Readers can be further parametrized before use
        read_csv(chunksize, **pandas_kwargs)
@@ -35,11 +37,15 @@ def readers(
         bucket_url (str): The url to the bucket.
         credentials (FileSystemCredentials | AbstractFilesystem): The credentials to the filesystem of fsspec `AbstractFilesystem` instance.
         file_glob (str, optional): The filter to apply to the files in glob format. by default lists all files in bucket_url non-recursively
+        interval_start (str, optional): The start date for incremental loading. Defaults to None.
+        interval_end (str, optional): The end date for incremental loading. Defaults to None.
     """
     filesystem_resource = filesystem(bucket_url, credentials, file_glob=file_glob)
-    filesystem_resource.apply_hints(
-        incremental=dlt.sources.incremental("modification_date"),
-    )
+    # Only apply incremental hints if interval values are provided
+    if interval_start is not None or interval_end is not None:
+        filesystem_resource.apply_hints(
+            incremental=dlt.sources.incremental("modification_date", initial_value=interval_start, end_value=interval_end),
+        )
     return (
         filesystem_resource | dlt.transformer(name="read_csv")(_read_csv),
         filesystem_resource | dlt.transformer(name="read_jsonl")(_read_jsonl),
