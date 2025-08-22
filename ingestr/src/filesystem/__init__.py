@@ -37,9 +37,14 @@ def readers(
         file_glob (str, optional): The filter to apply to the files in glob format. by default lists all files in bucket_url non-recursively
     """
     filesystem_resource = filesystem(bucket_url, credentials, file_glob=file_glob)
-    filesystem_resource.apply_hints(
-        incremental=dlt.sources.incremental("modification_date"),
-    )
+
+    # NOTE: incremental support is disabled until we can figure out
+    #       how to support incremental loads per matching file, rather
+    #       than a blanket threshold.
+    #
+    # filesystem_resource.apply_hints(
+    #     incremental=dlt.sources.incremental("modification_date"),
+    # )
     return (
         filesystem_resource | dlt.transformer(name="read_csv")(_read_csv),
         filesystem_resource | dlt.transformer(name="read_jsonl")(_read_jsonl),
