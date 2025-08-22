@@ -43,6 +43,7 @@ export default defineConfig({
             text: "Incremental Loading",
             link: "/getting-started/incremental-loading.md",
           },
+          { text: "Data Masking", link: "/getting-started/data-masking.md" },
           { text: "Telemetry", link: "/getting-started/telemetry.md" },
         ],
       },

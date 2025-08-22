@@ -520,20 +520,24 @@ class CollectionAggregationLoader(CollectionLoader):
 
         # Add maxTimeMS to prevent hanging
         cursor = self.collection.aggregate(
-            pipeline, 
-            allowDiskUse=True, 
+            pipeline,
+            allowDiskUse=True,
             batchSize=min(self.chunk_size, 101),
-            maxTimeMS=30000  # 30 second timeout
+            maxTimeMS=30000,  # 30 second timeout
         )
-        
+
         docs_buffer = []
         try:
             for doc in cursor:
                 docs_buffer.append(doc)
-                
+
                 if len(docs_buffer) >= self.chunk_size:
                     res = map_nested_in_place(convert_mongo_objs, docs_buffer)
-                    if len(res) > 0 and "_id" in res[0] and isinstance(res[0]["_id"], dict):
+                    if (
+                        len(res) > 0
+                        and "_id" in res[0]
+                        and isinstance(res[0]["_id"], dict)
+                    ):
                         yield dlt.mark.with_hints(
                             res,
                             dlt.mark.make_hints(columns={"_id": {"data_type": "json"}}),
@@ -541,7 +545,7 @@ class CollectionAggregationLoader(CollectionLoader):
                     else:
                         yield res
                     docs_buffer = []
-            
+
             # Yield any remaining documents
             if docs_buffer:
                 res = map_nested_in_place(convert_mongo_objs, docs_buffer)

@@ -51,3 +51,12 @@ def table_adapter_exclude_columns(cols: list[str]):
             table._columns.remove(col)  # type: ignore
 
     return excluder
+
+
+def create_masking_filter(mask_configs: list[str]):
+    from ingestr.src.masking import create_masking_mapper
+
+    if not mask_configs:
+        return lambda x: x
+
+    return create_masking_mapper(mask_configs)

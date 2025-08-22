@@ -109,6 +109,7 @@ def invoke_ingest_command(
     columns=None,
     sql_limit=None,
     yield_limit=None,
+    mask=None,
     print_output=True,
     run_in_subprocess=False,
 ):
@@ -171,6 +172,13 @@ def invoke_ingest_command(
     if yield_limit:
         args.append("--yield-limit")
         args.append(str(yield_limit))
+
+    if mask:
+        if isinstance(mask, str):
+            mask = [mask]
+        for m in mask:
+            args.append("--mask")
+            args.append(m)
 
     if not run_in_subprocess:
         result = CliRunner().invoke(
@@ -1867,6 +1875,333 @@ def test_date_coercion_issue():
         (5, "val5", as_datetime("2024-01-02")),
         (6, "val6", as_datetime("2024-01-02")),
     ]
+
+    source_instance.stop()
+    dest_instance.stop()
+
+
+def test_duckdb_masking_basic():
+    """
+    Test basic masking functionality with DuckDB source and destination.
+    Tests hash, partial, redact, and round masking algorithms.
+    """
+    source_instance = EphemeralDuckDb()
+    dest_instance = EphemeralDuckDb()
+
+    source_uri = source_instance.start()
+    dest_uri = dest_instance.start()
+
+    schema_rand_prefix = f"test_masking_{get_random_string(5)}"
+    source_engine = sqlalchemy.create_engine(source_uri, poolclass=NullPool)
+
+    # Create test data with sensitive information
+    with source_engine.begin() as conn:
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+        conn.execute(
+            f"""CREATE TABLE {schema_rand_prefix}.customers (
+                id INTEGER,
+                name VARCHAR(100),
+                email VARCHAR(100),
+                phone VARCHAR(20),
+                ssn VARCHAR(15),
+                salary INTEGER,
+                created_date DATE
+            )"""
+        )
+        conn.execute(
+            f"""INSERT INTO {schema_rand_prefix}.customers VALUES 
+                (1, 'John Doe', 'john.doe@example.com', '555-123-4567', '123-45-6789', 52300, '2024-01-15'),
+                (2, 'Jane Smith', 'jane.smith@gmail.com', '555-987-6543', '987-65-4321', 67800, '2024-02-20'),
+                (3, 'Bob Johnson', 'bob.j@company.org', '555-555-1234', '456-78-9012', 45000, '2024-03-10')
+            """
+        )
+
+    # Run ingestion with masking
+    result = invoke_ingest_command(
+        source_uri,
+        f"{schema_rand_prefix}.customers",
+        dest_uri,
+        f"{schema_rand_prefix}.masked_customers",
+        mask=["email:hash", "phone:partial:3", "ssn:redact", "salary:round:5000"],
+    )
+
+    assert result.exit_code == 0
+
+    # Verify masked data
+    dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+    res = dest_engine.execute(
+        f"SELECT id, name, email, phone, ssn, salary FROM {schema_rand_prefix}.masked_customers ORDER BY id"
+    ).fetchall()
+
+    # Check that data was masked correctly
+    assert len(res) == 3
+
+    # First row checks
+    assert res[0][0] == 1  # id unchanged
+    assert res[0][1] == "John Doe"  # name unchanged
+    assert len(res[0][2]) == 64  # email should be SHA-256 hash (64 chars)
+    assert res[0][3] == "555******567"  # phone partially masked
+    assert res[0][4] == "REDACTED"  # SSN redacted
+    assert res[0][5] == 50000  # salary rounded to nearest 5000
+
+    # Second row checks
+    assert res[1][0] == 2
+    assert res[1][1] == "Jane Smith"
+    assert len(res[1][2]) == 64  # email hash
+    assert res[1][3] == "555******543"
+    assert res[1][4] == "REDACTED"
+    assert res[1][5] == 70000  # 67800 -> 70000
+
+    # Third row checks
+    assert res[2][0] == 3
+    assert res[2][1] == "Bob Johnson"
+    assert len(res[2][2]) == 64
+    assert res[2][3] == "555******234"
+    assert res[2][4] == "REDACTED"
+    assert res[2][5] == 45000  # 45000 -> 45000 (already rounded)
+
+    source_instance.stop()
+    dest_instance.stop()
+
+
+def test_duckdb_masking_consistency():
+    """
+    Test that hash masking produces consistent results across multiple runs.
+    """
+    source_instance = EphemeralDuckDb()
+    dest_instance1 = EphemeralDuckDb()
+    dest_instance2 = EphemeralDuckDb()
+
+    source_uri = source_instance.start()
+    dest_uri1 = dest_instance1.start()
+    dest_uri2 = dest_instance2.start()
+
+    schema_rand_prefix = f"test_mask_consistency_{get_random_string(5)}"
+    source_engine = sqlalchemy.create_engine(source_uri, poolclass=NullPool)
+
+    # Create test data
+    with source_engine.begin() as conn:
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+        conn.execute(
+            f"""CREATE TABLE {schema_rand_prefix}.users (
+                id INTEGER,
+                username VARCHAR(100),
+                email VARCHAR(100)
+            )"""
+        )
+        conn.execute(
+            f"""INSERT INTO {schema_rand_prefix}.users VALUES 
+                (1, 'user1', 'user1@example.com'),
+                (2, 'user2', 'user2@example.com')
+            """
+        )
+
+    # Run first ingestion with masking
+    result1 = invoke_ingest_command(
+        source_uri,
+        f"{schema_rand_prefix}.users",
+        dest_uri1,
+        f"{schema_rand_prefix}.masked_users",
+        mask=["email:hash", "username:hash"],
+    )
+    assert result1.exit_code == 0
+
+    # Run second ingestion with same masking
+    result2 = invoke_ingest_command(
+        source_uri,
+        f"{schema_rand_prefix}.users",
+        dest_uri2,
+        f"{schema_rand_prefix}.masked_users",
+        mask=["email:hash", "username:hash"],
+    )
+    assert result2.exit_code == 0
+
+    # Get results from both destinations
+    dest_engine1 = sqlalchemy.create_engine(dest_uri1, poolclass=NullPool)
+    res1 = dest_engine1.execute(
+        f"SELECT id, username, email FROM {schema_rand_prefix}.masked_users ORDER BY id"
+    ).fetchall()
+
+    dest_engine2 = sqlalchemy.create_engine(dest_uri2, poolclass=NullPool)
+    res2 = dest_engine2.execute(
+        f"SELECT id, username, email FROM {schema_rand_prefix}.masked_users ORDER BY id"
+    ).fetchall()
+
+    # Check that hashes are consistent between runs
+    assert res1 == res2
+
+    # Verify hashes are different from original values
+    assert res1[0][1] != "user1"
+    assert res1[0][2] != "user1@example.com"
+    assert len(res1[0][1]) == 64  # SHA-256 hash
+    assert len(res1[0][2]) == 64
+
+    source_instance.stop()
+    dest_instance1.stop()
+    dest_instance2.stop()
+
+
+def test_duckdb_masking_format_preserving():
+    """
+    Test format-preserving masking algorithms.
+    """
+    source_instance = EphemeralDuckDb()
+    dest_instance = EphemeralDuckDb()
+
+    source_uri = source_instance.start()
+    dest_uri = dest_instance.start()
+
+    schema_rand_prefix = f"test_format_masking_{get_random_string(5)}"
+    source_engine = sqlalchemy.create_engine(source_uri, poolclass=NullPool)
+
+    # Create test data
+    with source_engine.begin() as conn:
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+        conn.execute(
+            f"""CREATE TABLE {schema_rand_prefix}.contacts (
+                id INTEGER,
+                email VARCHAR(100),
+                phone VARCHAR(20),
+                credit_card VARCHAR(20),
+                ssn VARCHAR(15),
+                name VARCHAR(100)
+            )"""
+        )
+        conn.execute(
+            f"""INSERT INTO {schema_rand_prefix}.contacts VALUES 
+                (1, 'alice@example.com', '555-123-4567', '4111-1111-1111-1111', '123-45-6789', 'Alice Brown'),
+                (2, 'bob@company.org', '555-987-6543', '5500-0000-0000-0004', '987-65-4321', 'Bob Smith')
+            """
+        )
+
+    # Run ingestion with format-preserving masks
+    result = invoke_ingest_command(
+        source_uri,
+        f"{schema_rand_prefix}.contacts",
+        dest_uri,
+        f"{schema_rand_prefix}.masked_contacts",
+        mask=[
+            "email:email",
+            "phone:phone",
+            "credit_card:credit_card",
+            "ssn:ssn",
+            "name:first_letter",
+        ],
+    )
+
+    assert result.exit_code == 0
+
+    # Verify masked data
+    dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+    res = dest_engine.execute(
+        f"SELECT id, email, phone, credit_card, ssn, name FROM {schema_rand_prefix}.masked_contacts ORDER BY id"
+    ).fetchall()
+
+    # Check format-preserving masks
+    assert len(res) == 2
+
+    # Email masking - preserves domain (column 1)
+    assert "@example.com" in res[0][1]
+    assert "@company.org" in res[1][1]
+    assert res[0][1] != "alice@example.com"
+    assert res[1][1] != "bob@company.org"
+
+    # Phone masking - shows area code and last digits (column 2)
+    assert res[0][2].startswith("555")
+    assert "***" in res[0][2]
+
+    # Credit card - shows last 4 digits only (column 3)
+    assert res[0][3] == "************1111"
+    assert res[1][3] == "************0004"
+
+    # SSN - shows last 4 digits (column 4)
+    assert res[0][4] == "***-**-6789"
+    assert res[1][4] == "***-**-4321"
+
+    # Name - first letter only (column 5)
+    assert res[0][5] == "A**********"  # Alice Brown (11 chars -> 10 stars)
+    assert res[1][5] == "B********"  # Bob Smith (9 chars -> 8 stars)
+
+    source_instance.stop()
+    dest_instance.stop()
+
+
+def test_duckdb_masking_numeric_and_date():
+    """
+    Test numeric masking algorithms.
+    """
+    source_instance = EphemeralDuckDb()
+    dest_instance = EphemeralDuckDb()
+
+    source_uri = source_instance.start()
+    dest_uri = dest_instance.start()
+
+    schema_rand_prefix = f"test_numeric_masking_{get_random_string(5)}"
+    source_engine = sqlalchemy.create_engine(source_uri, poolclass=NullPool)
+
+    # Create test data
+    with source_engine.begin() as conn:
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema_rand_prefix}")
+        conn.execute(f"CREATE SCHEMA {schema_rand_prefix}")
+        conn.execute(
+            f"""CREATE TABLE {schema_rand_prefix}.transactions (
+                id INTEGER,
+                amount DOUBLE,
+                age INTEGER,
+                score INTEGER,
+                notes VARCHAR(100)
+            )"""
+        )
+        conn.execute(
+            f"""INSERT INTO {schema_rand_prefix}.transactions VALUES 
+                (1, 12345.67, 34, 456, 'Transaction notes 1'),
+                (2, 98765.43, 57, 789, 'Transaction notes 2'),
+                (3, 5432.10, 28, 234, 'Transaction notes 3')
+            """
+        )
+
+    # Run ingestion with numeric masks
+    result = invoke_ingest_command(
+        source_uri,
+        f"{schema_rand_prefix}.transactions",
+        dest_uri,
+        f"{schema_rand_prefix}.masked_transactions",
+        mask=["amount:round:1000", "age:round:10", "score:round:100", "notes:redact"],
+    )
+
+    assert result.exit_code == 0
+
+    # Verify masked data
+    dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+    res = dest_engine.execute(
+        f"SELECT id, amount, age, score, notes FROM {schema_rand_prefix}.masked_transactions ORDER BY id"
+    ).fetchall()
+
+    # Check numeric masks
+    assert len(res) == 3
+
+    # Round masking on amount
+    assert res[0][1] == 12000  # 12345.67 -> 12000 (round to 1000)
+    assert res[1][1] == 99000  # 98765.43 -> 99000
+    assert res[2][1] == 5000  # 5432.10 -> 5000
+
+    # Round masking on age
+    assert res[0][2] == 30  # 34 -> 30 (round to 10)
+    assert res[1][2] == 60  # 57 -> 60
+    assert res[2][2] == 30  # 28 -> 30
+
+    # Round masking on score column
+    assert res[0][3] == 500  # 456 -> 500 (round to 100)
+    assert res[1][3] == 800  # 789 -> 800
+    assert res[2][3] == 200  # 234 -> 200
+
+    # Notes redacted
+    assert res[0][4] == "REDACTED"
+    assert res[1][4] == "REDACTED"
+    assert res[2][4] == "REDACTED"
 
     source_instance.stop()
     dest_instance.stop()
