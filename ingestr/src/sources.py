@@ -1649,7 +1649,17 @@ class S3Source:
 
         from ingestr.src.filesystem import readers
 
-        return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
+        # Extract interval_start and interval_end from kwargs and pass them to readers
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+        
+        return readers(
+            bucket_url, 
+            fs, 
+            path_to_file, 
+            interval_start=interval_start,
+            interval_end=interval_end
+        ).with_resources(endpoint)
 
 
 class TikTokSource:
@@ -2156,7 +2166,17 @@ class GCSSource:
 
         from ingestr.src.filesystem import readers
 
-        return readers(bucket_url, fs, path_to_file).with_resources(endpoint)
+        # Extract interval_start and interval_end from kwargs and pass them to readers
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+        
+        return readers(
+            bucket_url, 
+            fs, 
+            path_to_file, 
+            interval_start=interval_start,
+            interval_end=interval_end
+        ).with_resources(endpoint)
 
 
 class GoogleAdsSource:
