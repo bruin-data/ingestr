@@ -34,9 +34,13 @@ The result of this command will be a table in the `appsflyer.duckdb` database.
 
 ingestr integrates with the [Master Report API](https://dev.appsflyer.com/hc/reference/master_api_get) of AppsFlyer, which allows you to retrieve data for the following tables:
 
-- `campaigns`: Retrieves data for campaigns, detailing the app's costs, loyal users, total installs, and revenue over multiple days.
-- `creatives`: Retrieves data for a creative asset, including revenue and cost.
-- `custom:<dimensions>:<metrics>`: Retrieves data for custom tables, which can be specified by the user.
+## Tables
+
+| Name | PK/Merge Key | Inc Key | Inc Strategy |  Details |
+| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [campaigns](https://dev.appsflyer.com/hc/reference/master_api_get) | install_time | install_time | merge| Retrieves data for campaigns, detailing the app's costs, loyal users, total installs, and revenue over multiple days.`columns:`  app_id, campaign, geo, install_time, average_ecpi, clicks, cohort_day_1_revenue_per_user, cohort_day_1_total_revenue_per_user, cohort_day_14_revenue_per_user, cohort_day_14_total_revenue_per_user, cohort_day_21_revenue_per_user, cohort_day_21_total_revenue_per_user, cohort_day_3_revenue_per_user, cohort_day_3_total_revenue_per_user, cohort_day_7_revenue_per_user, cohort_day_7_total_revenue_per_user, cost, impressions, installs, loyal_users, retention_day_7, revenue, roi, uninstalls |
+| [creatives](https://dev.appsflyer.com/hc/reference/master_api_get) | install_time | install_time | merge| Retrieves data for a creative asset, including revenue and cost. `columns:` geo, app_id, install_time, campaign, adset_id, adset, ad_id, impressions, clicks, installs, cost, revenue, average_ecpi, loyal_users, uninstalls, roi  |
+| `custom:<dimensions>:<metrics>` | Dynamic (dimensions + install_time) | install_time | merge| Retrieves data for custom tables, which can be specified by the user.|
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
