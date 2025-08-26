@@ -13,6 +13,7 @@ def salesforce_source(
     username: str,
     password: str,
     token: str,
+    domain: str,
 ) -> Iterable[DltResource]:
     """
     Retrieves data from Salesforce using the Salesforce API.
@@ -26,7 +27,7 @@ def salesforce_source(
         DltResource: Data resources from Salesforce.
     """
 
-    client = Salesforce(username, password, token)
+    client = Salesforce(username, password, token, domain=domain)
 
     # define resources
     @dlt.resource(write_disposition="replace")
@@ -37,7 +38,7 @@ def salesforce_source(
     def user_role() -> Iterable[TDataItem]:
         yield get_records(client, "UserRole")
 
-    @dlt.resource(write_disposition="merge")
+    @dlt.resource(write_disposition="merge", primary_key="id")
     def opportunity(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
@@ -47,7 +48,7 @@ def salesforce_source(
             client, "Opportunity", last_timestamp.last_value, "SystemModstamp"
         )
 
-    @dlt.resource(write_disposition="merge")
+    @dlt.resource(write_disposition="merge", primary_key="id")
     def opportunity_line_item(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
@@ -57,7 +58,7 @@ def salesforce_source(
             client, "OpportunityLineItem", last_timestamp.last_value, "SystemModstamp"
         )
 
-    @dlt.resource(write_disposition="merge")
+    @dlt.resource(write_disposition="merge", primary_key="id")
     def opportunity_contact_role(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
@@ -70,7 +71,7 @@ def salesforce_source(
             "SystemModstamp",
         )
 
-    @dlt.resource(write_disposition="merge")
+    @dlt.resource(write_disposition="merge", primary_key="id")
     def account(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "LastModifiedDate", initial_value=None
@@ -92,7 +93,7 @@ def salesforce_source(
     def campaign() -> Iterable[TDataItem]:
         yield get_records(client, "Campaign")
 
-    @dlt.resource(write_disposition="merge")
+    @dlt.resource(write_disposition="merge", primary_key="id")
     def campaign_member(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
@@ -114,7 +115,7 @@ def salesforce_source(
     def pricebook_entry() -> Iterable[TDataItem]:
         yield get_records(client, "PricebookEntry")
 
-    @dlt.resource(write_disposition="merge")
+    @dlt.resource(write_disposition="merge", primary_key="id")
     def task(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
@@ -122,7 +123,7 @@ def salesforce_source(
     ) -> Iterable[TDataItem]:
         yield get_records(client, "Task", last_timestamp.last_value, "SystemModstamp")
 
-    @dlt.resource(write_disposition="merge")
+    @dlt.resource(write_disposition="merge", primary_key="id")
     def event(
         last_timestamp: incremental[str] = dlt.sources.incremental(
             "SystemModstamp", initial_value=None
