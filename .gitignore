@@ -26,3 +26,5 @@ test.env
 *.log
 .claude
 helper_scripts
+
+.bruin.yml
