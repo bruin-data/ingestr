@@ -7,13 +7,14 @@ Ingestr supports Salesforce as a source.
 
 The URI format for Salesforce is as follows:
 ```
-salesforce://?username=<username>&password=<password>&token=<token>
+salesforce://?username=<username>&password=<password>&token=<token>&domain=<domain>
 ```
 
 URI parameters:
 - `username` is your Salesforce account username.
 - `password` is your Salesforce account password.
 - `token` is your Salesforce security token.
+- `domain` is your Salesforce instance domain.
 
 You can obtain your security token by logging into your Salesforce account and navigating to the user settings under "Reset My Security Token."
 
@@ -27,13 +28,14 @@ Let's say:
 * Your Salesforce username is `user`.
 * Your password is `password123`.
 * Your security token is `fake_token`.
+* Your domain is `test.salesforce.com`.
 * You want to ingest `account` data from your salesforce account
 * You want to save this data in a duckdb database `sf.db` under the table `public.account`
 
 You can run the following command to achieve this:
 ```sh
 ingestr ingest \
-  --source-uri "salesforce://?username=user&password=password123&token=fake_token" \
+  --source-uri "salesforce://?username=user&password=password123&token=fake_token&domain=test.salesforce.com" \
   --source-table "account" \
   --dest-uri "duckdb:///sf.db" \
   --dest-table "public.account"
@@ -43,23 +45,23 @@ ingestr ingest \
 
 Salesforce source allows ingesting the following objects into separate tables:
 
-| **Table**                 | **Mode**   | **Description** |
-|---------------------------|-----------|----------------|
-| `user`                  | replace   | Refers to an individual who has access to a Salesforce org or instance. |
-| `user_role`             | replace   | A standard object that represents a role within the organization's hierarchy. |
-| `opportunity`          | merge     | Represents a sales opportunity for a specific account or contact. |
-| `opportunity_line_item` | merge     | Represents individual line items or products associated with an Opportunity. |
-| `opportunity_contact_role` | merge  | Represents the association between an Opportunity and a Contact. |
-| `account`               | merge     | Individual or organization that interacts with your business. |
-| `contact`               | replace   | An individual person associated with an account or organization. |
-| `lead`                  | replace   | Prospective customer/individual/org. that has shown interest in a company's products/services. |
-| `campaign`              | replace   | Marketing initiative or project designed to achieve specific goals, such as generating leads. |
-| `campaign_member`       | merge     | Association between a Contact or Lead and a Campaign. |
-| `product`               | replace   | For managing and organizing your product-related data within the Salesforce ecosystem. |
-| `pricebook`             | replace   | Used to manage product pricing and create price books. |
-| `pricebook_entry`      | replace   | Represents a specific price for a product in a price book. |
-| `task`                 | merge     | Used to track and manage various activities and tasks within the Salesforce platform. |
-| `event`                | merge     | Used to track and manage calendar-based events, such as meetings, appointments, or calls. |
+| Table | PK | Inc Key | Inc Strategy | Details |
+|-------|----|---------|--------------|---------|
+| `user` | - | - | replace | Refers to an individual who has access to a Salesforce org or instance. |
+| `user_role` | - | - | replace | A standard object that represents a role within the organization's hierarchy.|
+| `opportunity` | id | last_timestamp | merge | Represents a sales opportunity for a specific account or contact. |
+| `opportunity_line_item` | id | last_timestamp | merge | Represents individual line items or products associated with an Opportunity. |
+| `opportunity_contact_role` | id | last_timestamp | merge | Represents the association between an Opportunity and a Contact. |
+| `account` | id | last_timestamp | merge | Individual or organization that interacts with your business. |
+| `contact`  | id | - | replace | An individual person associated with an account or organization. |
+| `lead`  | id | - | replace | Prospective customer/individual/org. that has shown interest in a company's products/services. |
+| `campaign`  | id | - | replace | Marketing initiative or project designed to achieve specific goals, such as generating leads. |
+| `campaign_member`  | id | last_timestamp | merge  | Association between a Contact or Lead and a Campaign. |
+|  `product`  | id | - | replace  | For managing and organizing your product-related data within the Salesforce ecosystem. |
+|  `pricebook`   | id | - | replace  | Used to manage product pricing and create price books. |
+|  `pricebook_entry`   | id | - | replace  | Represents a specific price for a product in a price book. |
+|  `task`   | id | last_timestamp | merge | Used to track and manage various activities and tasks within the Salesforce platform.  |
+|  `event`   | id | last_timestamp | merge | Used to track and manage calendar-based events, such as meetings, appointments, or calls. |
 
 Use these as `--source-table` parameters in the `ingestr ingest` command.
 
