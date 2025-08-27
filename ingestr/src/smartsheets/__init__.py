@@ -48,7 +48,7 @@ def _get_sheet_data(smartsheet_client: smartsheet.Smartsheet, sheet_id: int):
     # Transform rows to a list of dictionaries
     column_titles = [col.title for col in sheet.columns]
     for row in sheet.rows:
-        row_data = {}
+        row_data = {"_row_id": row.id}
         for i, cell in enumerate(row.cells):
             row_data[column_titles[i]] = cell.value
         yield row_data
