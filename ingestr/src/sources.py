@@ -2515,6 +2515,7 @@ class SalesforceSource:
             "username": params.get("username", [None])[0],
             "password": params.get("password", [None])[0],
             "token": params.get("token", [None])[0],
+            "domain": params.get("domain", [None])[0],
         }
         for k, v in creds.items():
             if v is None:
