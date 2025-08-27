@@ -60,8 +60,8 @@ class TestSmartsheetSource(unittest.TestCase):
         resource = smartsheet_source(access_token="test_token", sheet_id="123")
         data = list(resource)
         self.assertEqual(len(data), 2)
-        self.assertEqual(data[0], {"row_id": 101, "Col A": "r1c1", "Col B": "r1c2"})
-        self.assertEqual(data[1], {"row_id": 102, "Col A": "r2c1", "Col B": "r2c2"})
+        self.assertEqual(data[0], {"_row_id": 101, "Col A": "r1c1", "Col B": "r1c2"})
+        self.assertEqual(data[1], {"_row_id": 102, "Col A": "r2c1", "Col B": "r2c2"})
 
         mock_smartsheet_client.assert_called_once_with("test_token")
         mock_client_instance.Sheets.get_sheet.assert_any_call(
@@ -127,8 +127,8 @@ class TestSmartsheetSource(unittest.TestCase):
         data = list(data_generator)
 
         self.assertEqual(len(data), 2)
-        self.assertEqual(data[0], {"row_id": 201, "ID": 1, "Value": "Alpha"})
-        self.assertEqual(data[1], {"row_id": 202, "ID": 2, "Value": "Beta"})
+        self.assertEqual(data[0], {"_row_id": 201, "ID": 1, "Value": "Alpha"})
+        self.assertEqual(data[1], {"_row_id": 202, "ID": 2, "Value": "Beta"})
         mock_smartsheet_client_instance.Sheets.get_sheet.assert_called_once_with(456)
 
 
