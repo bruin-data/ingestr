@@ -40,7 +40,7 @@ ingestr integrates with the [Master Report API](https://dev.appsflyer.com/hc/ref
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | [campaigns](https://dev.appsflyer.com/hc/reference/master_api_get) | install_time | install_time | merge| Retrieves data for campaigns, detailing the app's costs, loyal users, total installs, and revenue over multiple days.`columns:`  app_id, campaign, geo, install_time, average_ecpi, clicks, cohort_day_1_revenue_per_user, cohort_day_1_total_revenue_per_user, cohort_day_14_revenue_per_user, cohort_day_14_total_revenue_per_user, cohort_day_21_revenue_per_user, cohort_day_21_total_revenue_per_user, cohort_day_3_revenue_per_user, cohort_day_3_total_revenue_per_user, cohort_day_7_revenue_per_user, cohort_day_7_total_revenue_per_user, cost, impressions, installs, loyal_users, retention_day_7, revenue, roi, uninstalls |
 | [creatives](https://dev.appsflyer.com/hc/reference/master_api_get) | install_time | install_time | merge| Retrieves data for a creative asset, including revenue and cost. `columns:` geo, app_id, install_time, campaign, adset_id, adset, ad_id, impressions, clicks, installs, cost, revenue, average_ecpi, loyal_users, uninstalls, roi  |
-| `custom:<dimensions>:<metrics>` | Dynamic (dimensions + install_time) | install_time | merge| Retrieves data for custom tables, which can be specified by the user.|
+| `custom:<dimensions>:<metrics>` | Dynamic (dimensions + install_time) | install_time | merge| Retrieves data for custom tables, which can be specified by the user. Please refer to the `custom Tables` section below for more information. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
@@ -53,6 +53,8 @@ The table format is as follows:
 ```plaintext
 custom:<dimension1>,<dimension2>,<metric1>,<metric2>
 ```
+- `dimensions`: A comma-separated list of [dimensions](https://support.appsflyer.com/hc/en-us/articles/213223166-Master-API-user-acquisition-metrics-via-API#groupings) to retrieve.
+- `metrics`: A comma-separated list of [metrics](https://support.appsflyer.com/hc/en-us/articles/213223166-Master-API-user-acquisition-metrics-via-API#kpis) to retrieve.
 
 This will automatically generate a table with the dimensions and metrics you provided.
 
@@ -60,3 +62,33 @@ For custom tables, ingestr will use the given dimensions as the primary key to d
 
 > [!NOTE]
 > ingestr will add `install_time` as the primary key to the table by default if it is not provided as one of the dimensions.
+
+
+ ## Examples
+
+Copy campaigns data from Appsflyer into a DuckDB database:
+```sh
+ingestr ingest \
+    --source-uri 'appsflyer://?api_key=ey123' \
+    --source-table 'campaigns' \
+    --dest-uri duckdb:///appsflyer.duckdb \
+    --dest-table 'dest.output'
+```
+
+Copy creatives data from Appsflyer into a DuckDB database:
+```sh
+ingestr ingest \
+    --source-uri 'appsflyer://?api_key=ey123' \
+    --source-table 'creatives' \
+    --dest-uri duckdb:///appsflyer.duckdb \
+    --dest-table 'dest.output'
+```
+
+Copy custom data from Appsflyer into a DuckDB database:
+```sh
+ingestr ingest \
+    --source-uri "appsflyer://?api_key=ey123" \
+    --source-table "custom:app_id,geo,install_time,clicks,install" \
+    --dest-uri duckdb:///appsflyer.db \
+    --dest-table "mat.example"
+```
