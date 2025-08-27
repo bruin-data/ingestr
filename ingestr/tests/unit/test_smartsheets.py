@@ -127,8 +127,8 @@ class TestSmartsheetSource(unittest.TestCase):
         data = list(data_generator)
 
         self.assertEqual(len(data), 2)
-        self.assertEqual(data[0], {"ID": 1, "Value": "Alpha"})
-        self.assertEqual(data[1], {"ID": 2, "Value": "Beta"})
+        self.assertEqual(data[0], {"row_id": 201, "ID": 1, "Value": "Alpha"})
+        self.assertEqual(data[1], {"row_id": 202, "ID": 2, "Value": "Beta"})
         mock_smartsheet_client_instance.Sheets.get_sheet.assert_called_once_with(456)
 
 
