@@ -21,10 +21,10 @@ An API token is required to retrieve reports from the AppsFlyer API, please [fol
 Let's say your API key is `ey123`, here's a sample command that will copy the data from AppsFlyer into a DuckDB database:
 
 ```bash
-ingestr ingest 
-    --source-uri 'appsflyer://?api_key=ey123' 
-    --source-table 'campaigns' 
-    --dest-uri duckdb:///appsflyer.duckdb 
+ingestr ingest \
+    --source-uri 'appsflyer://?api_key=ey123' \
+    --source-table 'campaigns' \
+    --dest-uri duckdb:///appsflyer.duckdb \
     --dest-table 'appsflyer.output'
 ```
 
@@ -48,15 +48,14 @@ Use these as `--source-table` parameter in the `ingestr ingest` command.
 
 You can also ingest custom tables by providing a list of dimensions and metrics.
 
-The table format is as follows:
+The format for the custom table is:
 
 ```plaintext
 custom:<dimension1>,<dimension2>,<metric1>,<metric2>
 ```
+Parameters:
 - `dimensions`: A comma-separated list of [dimensions](https://support.appsflyer.com/hc/en-us/articles/213223166-Master-API-user-acquisition-metrics-via-API#groupings) to retrieve.
 - `metrics`: A comma-separated list of [metrics](https://support.appsflyer.com/hc/en-us/articles/213223166-Master-API-user-acquisition-metrics-via-API#kpis) to retrieve.
-
-This will automatically generate a table with the dimensions and metrics you provided.
 
 For custom tables, ingestr will use the given dimensions as the primary key to deduplicate the data.
 
