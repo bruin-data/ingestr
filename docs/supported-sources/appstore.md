@@ -57,70 +57,14 @@ We recommend using `ONGOING` access-type for reports. Please note that it may ta
 
 > [!NOTE]
 > you have to create a Report Request for each individual App that you want to ingest data for. You can use [list apps](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-apps) API to get the list of all apps in your Apple Account.
-### Example: Loading App Downloads Analytics
-
-For this example, we'll assume that:
-* `key_id` is `key_0`
-* `issuer_id` is `issue_0`
-* `key` is stored in the current directory and is named `api.key`
-* `app_id` is `12345`
-
-We will run `ingestr` to save this data to a [duckdb](https://duckdb.org/) database called `analytics.db` under the name `public.app_downloads`.
-
-```sh
-ingestr ingest \
-    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
-    --source-table "app-downloads-detailed" \
-    --dest-uri "duckdb:///analytics.db"  \
-    --dest-table "public.app_downloads" \
-```
-
-### Example: Loading Data for multiple Apps
-
-We will extend the prior example with another app with ID `67890`. To achieve this, simply add another `app_id` query parameter to the URI.
-```sh
-ingestr ingest \
-    --source-uri "appstore://app_id=12345&app_id=67890&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
-    --source-table "app-downloads-detailed" \
-    --dest-uri "duckdb:///analytics.db"  \
-    --dest-table "public.app_downloads" \
-```
-
-
-### Example: Incremental Loading
-
-`ingestr` supports incremental loading for all App Store tables.
-
-To begin, we will first load all data till `2025-01-01` by specifying the `--interval-end` flag. We'll assume the same credentials from our [first example](#example-loading-app-downloads-analytics)
-```sh
-ingestr ingest \
-    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
-    --source-table "app-downloads-detailed" \
-    --dest-uri "duckdb:///analytics.db"  \
-    --dest-table "public.app_downloads" \
-    --interval-end "2025-01-01"
-```
-
-`ingestr` will load all data available till `2025-01-01`. Now we will run `ingestr` again, but this time, we'll let `ingestr` pickup from where it left off by specifying the `--incremental-strategy` flag.
-
-```sh
-ingestr ingest \
-    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
-    --source-table "app-downloads-detailed" \
-    --dest-uri "duckdb:///analytics.db"  \
-    --dest-table "public.app_downloads" \
-    --incremental-strategy "merge"
-```
-
-Notice how we didn't specify a date parameter? `ingestr` will automatically use the metadata from last load and continue loading data from that point on.
 
 ## Tables
 | Table | PK | Inc Key | Inc Strategy | Details |
 |-------|----|---------|--------------|---------|
 | `app-downloads-detailed` | [App Apple Identifier,App Name, App Version,Campaign,Date,Device,Download Type,Page Title,Page Type,Platform Version,Pre-Order,Source Info,Source Type,Territory] | processing_date | merge | App download analytics including first-time downloads, redownloads, updates, and more. |
-| `app-store-discovery-and-engagement-detailed` |  primary_key = [App Apple Identifier,App Name,Campaign,Date,Device,Engagement Type,Event,Page Title,Page Type,Platform Version,Source Info,Source Type,Territory] | processing_date | merge | App Store discovery and engagement metrics including data about user engagement with your app’s icons, product pages, in-app event pages, and other install sheets. |
-|`app-sessions-detailed` |  primary_key=[Date,App Name,App Apple Identifier,App Version,Device,Platform Version,Source Type,Source Info,Campaign,Page Type,Page Title,App Download Date,Territory] | processing_date | merge | App Session provides insights on how often people open your app, and how long they spend in your app. |
-| app-store-installation-and-deletion-detailed | [App Apple Identifier,App Download Date,App Name,App Version,Campaign,Counts,Date,Device,Download Type,Event,Page Title,Page Type,Platform Version,Source Info,Source Type,Territory,Unique Devices] | processing_date | merge | App installation and deletion metrics including device to estimate the number of times people install and delete your App Store apps. |
+| `app-store-discovery-and-engagement-detailed` | [App Apple Identifier,App Name,Campaign,Date,Device,Engagement Type,Event,Page Title,Page Type,Platform Version,Source Info,Source Type,Territory] | processing_date | merge | App Store discovery and engagement metrics including data about user engagement with your app’s icons, product pages, in-app event pages, and other install sheets. |
+|`app-sessions-detailed` | [Date,App Name,App Apple Identifier,App Version,Device,Platform Version,Source Type,Source Info,Campaign,Page Type,Page Title,App Download Date,Territory] | processing_date | merge | App Session provides insights on how often people open your app, and how long they spend in your app. |
+| `app-store-installation-and-deletion-detailed` | [App Apple Identifier,App Download Date,App Name,App Version,Campaign,Counts,Date,Device,Download Type,Event,Page Title,Page Type,Platform Version,Source Info,Source Type,Territory,Unique Devices] | processing_date | merge | App installation and deletion metrics including device to estimate the number of times people install and delete your App Store apps. |
 | `app-store-purchases-detailed`|  [App Apple Identifier,App Download Date,App Name,Campaign,Content Apple Identifier,Content Name,Date,Device,Page Title,Page Type,Payment Method,Platform Version,Pre-Order,Purchase Type,Source Info,Source Type,Territory] | processing_date | merge | App purchase analytics including revenue, payment methods, and content details. |
 | `app-crashes-expanded`| [App Name,App Version,Build,Date,Device,Platform,Release Type,Territory] |processing_date | merge | App crash analytics including crash counts, device information, and version details. |
 
@@ -256,6 +200,63 @@ Use this report to understand crashes for your App Store apps by app version and
 | `crashes` | The total number of crashes.|
 | `unique_devices` | Number of unique devices where app crashed. |
 
+
+## Examples
+### Loading App Downloads Analytics
+
+For this example, we'll assume that:
+* `key_id` is `key_0`
+* `issuer_id` is `issue_0`
+* `key` is stored in the current directory and is named `api.key`
+* `app_id` is `12345`
+
+We will run `ingestr` to save this data to a [duckdb](https://duckdb.org/) database called `analytics.db` under the name `public.app_downloads`.
+
+```sh
+ingestr ingest \
+    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
+    --source-table "app-downloads-detailed" \
+    --dest-uri "duckdb:///analytics.db"  \
+    --dest-table "public.app_downloads"
+```
+
+### Loading Data for multiple Apps
+
+We will extend the prior example with another app with ID `67890`. To achieve this, simply add another `app_id` query parameter to the URI.
+```sh
+ingestr ingest \
+    --source-uri "appstore://app_id=12345&app_id=67890&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
+    --source-table "app-downloads-detailed" \
+    --dest-uri "duckdb:///analytics.db"  \
+    --dest-table "public.app_downloads"
+```
+
+### Incremental Loading
+
+`ingestr` supports incremental loading for all App Store tables.
+
+To begin, we will first load all data till `2025-01-01` by specifying the `--interval-end` flag. We'll assume the same credentials from our [first example](#example-loading-app-downloads-analytics)
+```sh
+ingestr ingest \
+    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
+    --source-table "app-downloads-detailed" \
+    --dest-uri "duckdb:///analytics.db"  \
+    --dest-table "public.app_downloads"
+    --interval-end "2025-01-01"
+```
+
+`ingestr` will load all data available till `2025-01-01`. Now we will run `ingestr` again, but this time, we'll let `ingestr` pickup from where it left off by specifying the `--incremental-strategy` flag.
+
+```sh
+ingestr ingest \
+    --source-uri "appstore://app_id=12345&key_path=api.key&key_id=key_0&issuer_id=issue_0" \
+    --source-table "app-downloads-detailed" \
+    --dest-uri "duckdb:///analytics.db"  \
+    --dest-table "public.app_downloads" \
+    --incremental-strategy "merge"
+```
+
+Notice how we didn't specify a date parameter? `ingestr` will automatically use the metadata from last load and continue loading data from that point on.
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
