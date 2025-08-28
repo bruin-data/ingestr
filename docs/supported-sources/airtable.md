@@ -24,22 +24,22 @@ Airtable requires a few steps to set up an integration, please follow the guide 
 
 Once you complete the guide, you should have an Access Token. 
 
-### Getting your Base ID
+The source table you'll use for ingestr will be `<base_id>/<table_id>`.
 
-To find your Base ID:
+### Getting your Base ID and Table ID
+
+To find your Base ID and Table ID:
 
 1. Log into Airtable and navigate to your base or table
 2. Look at the URL in your browser's address bar when viewing your base
 3. The Base ID always starts with "app" and appears before the next `/`
+4. The Table IDs start with "tbl" and appears before the next `/`.
 
 For example, in this URL:
 ```plaintext
 https://airtable.com/appve10kl227BIT4GV/tblOUnZVLFWbemTP1/viw3qtF76bRQC3wKx/rec9khXgeTotgCQ62?blocks=hide 
 ```
-
-In this case base_id is: `appve10kl227BIT4GV`
-
-The source table you'll use for ingestr will be `<base_id>/<table_name>`.
+In this case base_id is `appve10kl227BIT4GV` and table_id is `tblOUnZVLFWbemTP1`
 
 Let's say your access token is `patr123.abc` and the base ID is `appXYZ`, here's a sample command that will copy the data from Airtable into a DuckDB database:
 
