@@ -14,6 +14,7 @@ def salesforce_source(
     password: str,
     token: str,
     domain: str,
+    custom_object: str = None,
 ) -> Iterable[DltResource]:
     """
     Retrieves data from Salesforce using the Salesforce API.
@@ -131,6 +132,10 @@ def salesforce_source(
     ) -> Iterable[TDataItem]:
         yield get_records(client, "Event", last_timestamp.last_value, "SystemModstamp")
 
+    @dlt.resource(write_disposition="replace")
+    def custom() -> Iterable[TDataItem]:
+        yield get_records(client, custom_object)
+
     return (
         user,
         user_role,
@@ -147,4 +152,5 @@ def salesforce_source(
         pricebook_entry,
         task,
         event,
+        custom,
     )
