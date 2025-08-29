@@ -94,7 +94,9 @@ exclude = [
     'src/clickup/.*',
     'src/influxdb/.*',
     'src/freshdesk/.*',
-    'src/wise/.*'
+    'src/wise/.*',
+    'src/salesforce/.*'
+
   ]
 
 [[tool.mypy.overrides]]
@@ -128,7 +130,8 @@ module = [
   "ingestr.src.influxdb",
   "ingestr.src.freshdesk",
   "ingestr.src.wise",
-  "ingestr.src.revenuecat"
+  "ingestr.src.revenuecat",
+  "ingestr.src.salesforce",
 ]
 follow_imports = "skip"
 

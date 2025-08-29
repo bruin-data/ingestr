@@ -2525,9 +2525,14 @@ class SalesforceSource:
 
         src = salesforce_source(**creds)  # type: ignore
 
+        if table.startswith("custom:"):
+            custom_object = table.split(":")[1]
+            src = salesforce_source(**creds, custom_object=custom_object)
+            return src.with_resources("custom")
+
         if table not in src.resources:
             raise UnsupportedResourceError(table, "Salesforce")
-
+        
         return src.with_resources(table)
 
 

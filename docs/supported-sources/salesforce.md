@@ -62,8 +62,28 @@ Salesforce source allows ingesting the following objects into separate tables:
 |  `pricebook_entry`   | id | - | replace  | Represents a specific price for a product in a price book. |
 |  `task`   | id | last_timestamp | merge | Used to track and manage various activities and tasks within the Salesforce platform.  |
 |  `event`   | id | last_timestamp | merge | Used to track and manage calendar-based events, such as meetings, appointments, or calls. |
+|  `custom:<custom_object_name>`   | - | - | replace | Track and store data that’s unique to your organization. For more information about custom objects in Salesforce, read [here](https://developer.salesforce.com/docs/atlas.en-us.object_reference.meta/object_reference/sforce_api_objects_custom_objects.htm)|
 
 Use these as `--source-table` parameters in the `ingestr ingest` command.
+
+ ## Examples
+ Copy user_role data from Salesforce into a DuckDB database:
+```sh
+ingestr ingest \
+  --source-uri "salesforce://?username=<username>&password=<password>&token=<token>&domain=<domain>" \
+  --source-table "user_role" \
+  --dest-uri "duckdb:///sf.db" \
+  --dest-table "public.user_role"
+```
+
+Copy custom object data from Salesforce into a DuckDB database:
+```sh
+ingestr ingest \
+  --source-uri "salesforce://?username=<username>&password=<password>&token=<token>&domain=<domain>" \
+  --source-table "custom:My__Community_Group__c" \
+  --dest-uri "duckdb:///sf.db" \
+  --dest-table "public.my_community"
+```
 
 > [!WARNING]
 > Salesforce API limits may affect the frequency and volume of data ingestion. Incremental loading is supported for objects with the `SystemModstamp` field, but some objects may require full-refresh loads. This is indicated by `mode` in the tables above. Tables with mode `replace` don't support incremental loads, while the ones with `merge` do.
