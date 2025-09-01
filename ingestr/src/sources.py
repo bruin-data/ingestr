@@ -427,14 +427,19 @@ class MongoDbSource:
         if ":" in table:
             collection_name, query_json = table.split(":", 1)
 
-            # Parse and validate the query
+            # Parse the query using MongoDB's extended JSON parser
+            # First, convert MongoDB shell syntax to Extended JSON format
+            from bson import json_util
+            from ingestr.src.mongodb.helpers import convert_mongo_shell_to_extended_json
+            
+            # Convert MongoDB shell constructs to Extended JSON v2 format
+            converted_query = convert_mongo_shell_to_extended_json(query_json)
+            
             try:
-                import json
-
-                query = json.loads(query_json)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON query format: {e}")
-
+                query = json_util.loads(converted_query)
+            except Exception as e:
+                raise ValueError(f"Invalid MongoDB query format: {e}")
+            
             # Validate that it's a list for aggregation pipeline
             if not isinstance(query, list):
                 raise ValueError(
