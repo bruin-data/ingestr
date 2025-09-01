@@ -1,5 +1,6 @@
 """Mongo database source helpers"""
 
+import re
 from itertools import islice
 from typing import (
     TYPE_CHECKING,
@@ -864,6 +865,129 @@ class MongoDbCollectionResourceConfiguration(BaseConfiguration):
     write_disposition: Optional[str] = dlt.config.value
     parallel: Optional[bool] = False
     projection: Optional[Union[Mapping[str, Any], Iterable[str]]] = dlt.config.value
+
+
+def convert_mongo_shell_to_extended_json(query_string: str) -> str:
+    """
+    Convert MongoDB shell syntax to MongoDB Extended JSON v2 format.
+    
+    This function handles common MongoDB shell constructs like ISODate, ObjectId,
+    NumberLong, NumberDecimal, etc. and converts them to their Extended JSON equivalents
+    that can be parsed by bson.json_util.
+    
+    Args:
+        query_string: A string containing MongoDB shell syntax
+        
+    Returns:
+        A string with MongoDB Extended JSON v2 format
+        
+    Examples:
+        >>> convert_mongo_shell_to_extended_json('ISODate("2010-01-01T00:00:00.000Z")')
+        '{"$date": "2010-01-01T00:00:00.000Z"}'
+        
+        >>> convert_mongo_shell_to_extended_json('ObjectId("507f1f77bcf86cd799439011")')
+        '{"$oid": "507f1f77bcf86cd799439011"}'
+    """
+    converted = query_string
+    
+    # Convert ISODate("...") to {"$date": "..."}
+    # Pattern matches ISODate("2010-01-01T00:00:00.000+0000") or similar
+    converted = re.sub(
+        r'ISODate\("([^"]+)"\)',
+        r'{"$date": "\1"}',
+        converted
+    )
+    
+    # Convert ObjectId("...") to {"$oid": "..."}
+    converted = re.sub(
+        r'ObjectId\("([^"]+)"\)',
+        r'{"$oid": "\1"}',
+        converted
+    )
+    
+    # Convert NumberLong(...) to {"$numberLong": "..."}
+    # Note: NumberLong can have quotes or not: NumberLong(123) or NumberLong("123")
+    converted = re.sub(
+        r'NumberLong\("([^"]+)"\)',
+        r'{"$numberLong": "\1"}',
+        converted
+    )
+    converted = re.sub(
+        r'NumberLong\(([^)]+)\)',
+        r'{"$numberLong": "\1"}',
+        converted
+    )
+    
+    # Convert NumberInt(...) to {"$numberInt": "..."}
+    converted = re.sub(
+        r'NumberInt\("([^"]+)"\)',
+        r'{"$numberInt": "\1"}',
+        converted
+    )
+    converted = re.sub(
+        r'NumberInt\(([^)]+)\)',
+        r'{"$numberInt": "\1"}',
+        converted
+    )
+    
+    # Convert NumberDecimal("...") to {"$numberDecimal": "..."}
+    converted = re.sub(
+        r'NumberDecimal\("([^"]+)"\)',
+        r'{"$numberDecimal": "\1"}',
+        converted
+    )
+    
+    # Convert Timestamp(..., ...) to {"$timestamp": {"t": ..., "i": ...}}
+    # Timestamp(1234567890, 1) -> {"$timestamp": {"t": 1234567890, "i": 1}}
+    converted = re.sub(
+        r'Timestamp\((\d+),\s*(\d+)\)',
+        r'{"$timestamp": {"t": \1, "i": \2}}',
+        converted
+    )
+    
+    # Convert BinData(..., "...") to {"$binary": {"base64": "...", "subType": "..."}}
+    converted = re.sub(
+        r'BinData\((\d+),\s*"([^"]+)"\)',
+        r'{"$binary": {"base64": "\2", "subType": "\1"}}',
+        converted
+    )
+    
+    # Convert MinKey() to {"$minKey": 1}
+    converted = re.sub(
+        r'MinKey\(\)',
+        r'{"$minKey": 1}',
+        converted
+    )
+    
+    # Convert MaxKey() to {"$maxKey": 1}
+    converted = re.sub(
+        r'MaxKey\(\)',
+        r'{"$maxKey": 1}',
+        converted
+    )
+    
+    # Convert UUID("...") to {"$uuid": "..."}
+    converted = re.sub(
+        r'UUID\("([^"]+)"\)',
+        r'{"$uuid": "\1"}',
+        converted
+    )
+    
+    # Convert DBRef("collection", "id") to {"$ref": "collection", "$id": "id"}
+    converted = re.sub(
+        r'DBRef\("([^"]+)",\s*"([^"]+)"\)',
+        r'{"$ref": "\1", "$id": "\2"}',
+        converted
+    )
+    
+    # Convert Code("...") to {"$code": "..."}
+    converted = re.sub(
+        r'Code\("([^"]+)"\)',
+        r'{"$code": "\1"}',
+        converted
+    )
+    
+    return converted
 
 
 __source_name__ = "mongodb"
