@@ -14,7 +14,7 @@ URI parameters:
 - `username` is your Salesforce account username.
 - `password` is your Salesforce account password.
 - `token` is your Salesforce security token.
-- `domain` is your Salesforce instance domain.
+- `domain` is your Salesforce instance domain (for example, `login`, `test`, or `your-domain.my`). Do **not** include `.salesforce.com`.
 
 You can obtain your security token by logging into your Salesforce account and navigating to the user settings under "Reset My Security Token."
 
@@ -28,14 +28,14 @@ Let's say:
 * Your Salesforce username is `user`.
 * Your password is `password123`.
 * Your security token is `fake_token`.
-* Your domain is `test.salesforce.com`.
+* Your domain is `your-domain.my`.
 * You want to ingest `account` data from your salesforce account
 * You want to save this data in a duckdb database `sf.db` under the table `public.account`
 
 You can run the following command to achieve this:
 ```sh
 ingestr ingest \
-  --source-uri "salesforce://?username=user&password=password123&token=fake_token&domain=test.salesforce.com" \
+  --source-uri "salesforce://?username=user&password=password123&token=fake_token&domain=your-domain.my" \
   --source-table "account" \
   --dest-uri "duckdb:///sf.db" \
   --dest-table "public.account"
