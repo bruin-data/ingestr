@@ -84,7 +84,6 @@ class TestSmartsheetSource(unittest.TestCase):
             list(source)
 
     def test_get_sheet_data(self):
-        mock_smartsheet_client_instance = MagicMock()
         mock_sheet = Sheet(
             {
                 "id": 456,
@@ -121,15 +120,13 @@ class TestSmartsheetSource(unittest.TestCase):
                 ],
             }
         )
-        mock_smartsheet_client_instance.Sheets.get_sheet.return_value = mock_sheet
 
-        data_generator = _get_sheet_data(mock_smartsheet_client_instance, 456)
+        data_generator = _get_sheet_data(mock_sheet)
         data = list(data_generator)
 
         self.assertEqual(len(data), 2)
         self.assertEqual(data[0], {"_row_id": 201, "ID": 1, "Value": "Alpha"})
         self.assertEqual(data[1], {"_row_id": 202, "ID": 2, "Value": "Beta"})
-        mock_smartsheet_client_instance.Sheets.get_sheet.assert_called_once_with(456)
 
 
 if __name__ == "__main__":
