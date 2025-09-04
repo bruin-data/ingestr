@@ -50,5 +50,9 @@ def _get_sheet_data(smartsheet_client: smartsheet.Smartsheet, sheet_id: int):
     for row in sheet.rows:
         row_data = {"_row_id": row.id}
         for i, cell in enumerate(row.cells):
-            row_data[column_titles[i]] = cell.value
+            # NOTE(turtledev): we use an empty string as the default
+            # value so that all columns are produced in the destination
+            # dataset. However, dlt's type inference mechanics can cause
+            # the resulting column's type to change between loads.
+            row_data[column_titles[i]] = cell.value or ''
         yield row_data
