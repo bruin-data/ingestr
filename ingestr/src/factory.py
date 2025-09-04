@@ -34,6 +34,7 @@ from ingestr.src.sources import (
     AttioSource,
     ChessSource,
     ClickupSource,
+    DoceboSource,
     DynamoDBSource,
     ElasticsearchSource,
     FacebookAdsSource,
@@ -144,6 +145,7 @@ class SourceDestinationFactory:
     destination_scheme: str
     sources: Dict[str, Type[SourceProtocol]] = {
         "csv": LocalCsvSource,
+        "docebo": DoceboSource,
         "mongodb": MongoDbSource,
         "mongodb+srv": MongoDbSource,
         "notion": NotionSource,
