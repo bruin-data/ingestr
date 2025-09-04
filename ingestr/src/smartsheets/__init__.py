@@ -75,5 +75,7 @@ def _generate_type_hints(sheet: Sheet):
         col.title: {
             "data_type": TYPE_MAPPING.get(col.type.value),
             "nullable": True,
-        } for col in sheet.columns
+        }
+        for col in sheet.columns
+        if col.type.value in TYPE_MAPPING
     }
