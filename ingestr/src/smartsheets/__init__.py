@@ -2,24 +2,24 @@ from typing import Iterable
 
 import dlt
 import smartsheet  # type: ignore
-from smartsheet.models.enums import ColumnType
-from smartsheet.models.sheet import Sheet
-
 from dlt.extract import DltResource
+from smartsheet.models.enums import ColumnType  # type: ignore
+from smartsheet.models.sheet import Sheet  # type: ignore
 
 TYPE_MAPPING = {
-    ColumnType.TEXT_NUMBER: 'text',
-    ColumnType.DATE: 'date',
-    ColumnType.DATETIME: 'timestamp',
-    ColumnType.CONTACT_LIST: 'text',
-    ColumnType.CHECKBOX: 'bool',
-    ColumnType.PICKLIST: 'text',
-    ColumnType.DURATION: 'text',
-    ColumnType.PREDECESSOR: 'text',
-    ColumnType.ABSTRACT_DATETIME: 'timestamp',
-    ColumnType.MULTI_CONTACT_LIST: 'text',
-    ColumnType.MULTI_PICKLIST: 'text',
+    ColumnType.TEXT_NUMBER: "text",
+    ColumnType.DATE: "date",
+    ColumnType.DATETIME: "timestamp",
+    ColumnType.CONTACT_LIST: "text",
+    ColumnType.CHECKBOX: "bool",
+    ColumnType.PICKLIST: "text",
+    ColumnType.DURATION: "text",
+    ColumnType.PREDECESSOR: "text",
+    ColumnType.ABSTRACT_DATETIME: "timestamp",
+    ColumnType.MULTI_CONTACT_LIST: "text",
+    ColumnType.MULTI_PICKLIST: "text",
 }
+
 
 @dlt.source
 def smartsheet_source(
@@ -69,6 +69,7 @@ def _get_sheet_data(sheet: Sheet):
         for i, cell in enumerate(row.cells):
             row_data[column_titles[i]] = cell.value
         yield row_data
+
 
 def _generate_type_hints(sheet: Sheet):
     return {
