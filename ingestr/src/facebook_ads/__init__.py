@@ -177,11 +177,11 @@ def facebook_insights_source(
         ),
     ) -> Iterator[TDataItems]:
         start_date = date_start.last_value
-        end_date = (
-            pendulum.instance(date_start.end_value)
-            if date_start.end_value
-            else pendulum.now()
-        )
+        if date_start.end_value:
+            end_date_val = pendulum.instance(date_start.end_value)
+            end_date = end_date_val if isinstance(end_date_val, pendulum.Date) else end_date_val.date()
+        else:
+            end_date = pendulum.now().date()
 
         while start_date <= end_date:
             query = {
