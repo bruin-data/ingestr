@@ -25,7 +25,6 @@ from ingestr.src.loader import load_dlt_file
 
 class GenericSqlDestination:
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
-        
         if uri.startswith("databricks://"):
             p = urlparse(uri)
             q = parse_qs(p.query)
@@ -37,8 +36,8 @@ class GenericSqlDestination:
                 "table_name": table,
             }
             return res
-        
-        table_fields = table.split(".") 
+
+        table_fields = table.split(".")
         if len(table_fields) != 2:
             raise ValueError("Table name must be in the format <schema>.<table>")
 
@@ -290,7 +289,6 @@ class DatabricksDestination(GenericSqlDestination):
         http_path = q.get("http_path", [None])[0]
         catalog = q.get("catalog", [None])[0]
         schema = q.get("schema", [None])[0]
-        
 
         creds = {
             "access_token": access_token,
@@ -299,14 +297,12 @@ class DatabricksDestination(GenericSqlDestination):
             "catalog": catalog,
             "schema": schema,
         }
-       
+
         return dlt.destinations.databricks(
             credentials=creds,
             **kwargs,
         )
-    
 
-    
 
 class SynapseDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
