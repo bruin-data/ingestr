@@ -31,9 +31,7 @@ test-specific: venv lock-deps
 	. venv/bin/activate; set -a; source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto  -rP -vv --tb=short --capture=no -k $(test)
 
 lint-ci:
-	@ruff format --diff ingestr || (echo "Error: formatting errors detected" && exit 1)
-	@ruff check ingestr || exit 1
-	@mypy --config-file pyproject.toml --explicit-package-bases ingestr
+	@ruff format --diff ingestr && ruff check ingestr && mypy --config-file pyproject.toml --explicit-package-bases ingestr
 
 lint-dev:
 	@ruff format ingestr && ruff check ingestr --fix
