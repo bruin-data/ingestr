@@ -58,6 +58,7 @@ jobs:
         uses: astral-sh/setup-uv@v3
       - name: Install pip dependencies
         run: make deps-ci
+
       - name: run tests (macOS)
         if: matrix.os == 'macos-13'
         run: make test-ci

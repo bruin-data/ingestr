@@ -1,6 +1,6 @@
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import smartsheet  # type: ignore
 from smartsheet.models import Cell, Column, Row, Sheet  # type: ignore

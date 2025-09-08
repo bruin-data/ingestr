@@ -179,7 +179,12 @@ def facebook_insights_source(
         start_date = date_start.last_value
         if date_start.end_value:
             end_date_val = pendulum.instance(date_start.end_value)
-            end_date = end_date_val if isinstance(end_date_val, pendulum.Date) else end_date_val.date()
+
+            end_date = (
+                end_date_val
+                if isinstance(end_date_val, pendulum.Date)
+                else end_date_val.date()
+            )
         else:
             end_date = pendulum.now().date()
 

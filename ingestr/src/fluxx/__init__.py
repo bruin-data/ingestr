@@ -30,7 +30,10 @@ FLUXX_RESOURCES = {
             "timestamp_entered_state": {"data_type": "date", "field_type": "column"},
             # Integer fields
             "live_report_order": {"data_type": "bigint", "field_type": "column"},
-            "model_document_template_id": {"data_type": "bigint", "field_type": "column"},
+            "model_document_template_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
             "sphinx_id": {"data_type": "bigint", "field_type": "column"},
             # String fields
             "columns": {"data_type": "text", "field_type": "column"},
@@ -5789,11247 +5792,4034 @@ FLUXX_RESOURCES = {
             "notes": {"data_type": "json", "field_type": "relation"},
         },
     },
-    
-  "affiliate_type": {
-    "endpoint": "affiliate_type",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "aha_requirements_tickets": {
-    "endpoint": "aha_requirements_tickets",
-    "fields": {
-      "aha_requirement_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "alert": {
-    "endpoint": "alert",
-    "fields": {
-      "alert_enabled": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "alert_output": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "alert_trigger_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "bcc_emails": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "body": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "cc_emails": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "custom_action": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "dashboard_card_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "dashboard_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "dynamic_model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "extra_fields": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "group_models": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "last_realtime_update_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "model_controller_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "original_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "queue_uuid": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "send_by_queuing": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "send_in_one_thread": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "send_without_queuing": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "subject": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "trigger_fields": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_relationship_fields": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "alert_email_user": {
-    "endpoint": "alert_email_user",
-    "fields": {
-      "alert_email_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "alert_model_log": {
-    "endpoint": "alert_model_log",
-    "fields": {
-      "alert_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "alert_recipient": {
-    "endpoint": "alert_recipient",
-    "fields": {
-      "alert_bcc_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "alert_cc_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "alert_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "rtu_model_user_method": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "alert_transition_state": {
-    "endpoint": "alert_transition_state",
-    "fields": {
-      "alert_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "machine_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "bank_account": {
-    "endpoint": "bank_account",
-    "fields": {
-      "account_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "account_number": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "active": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "bank_code": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "bank_code_type*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "bank_contact_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "bank_contact_phone": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "bank_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "bank_type*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "banking_beneficiary_name*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "city": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "comments*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "contact_name*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "contact_title*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "contig_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "country_code*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "country_str": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "domestic_special_wire_instructions": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "domestic_wire_aba_routing": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "email*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "fax": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "finance_id_to_text*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "finance_internal_id*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "foreign_special_wire_instructions": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "foreign_wire_beneficiary_bank_swift": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "foreign_wire_intermediary_bank_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "foreign_wire_intermediary_bank_swift": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "geo_country_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "geo_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "intermediary_account_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_account_number": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_bank_code": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_bank_contact_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_bank_contact_phone": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_bank_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_city": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_fax": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_geo_country_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "intermediary_geo_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "intermediary_phone": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_postal_code": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_special_instructions": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_street_address": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "intermediary_street_address2": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "is_temp_precreate": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "ofac_result_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "ofac_run_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "ofac_run_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "ofac_state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "payment_account_type*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "phone": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "postal_code": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "special_instructions": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_str": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "street_address": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "street_address2": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "update_requestspayments*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "validated_at*": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "vendor_setup_form_uploaded*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "wire_transfer_number": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "budget_request": {
-    "endpoint": "budget_request",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "amount_recommended": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amount_requested": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "card_configuration": {
-    "endpoint": "card_configuration",
-    "fields": {
-      "allow_create": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "allowed_roles": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "allowed_states": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "controller_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "filter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "label": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "menu_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "replace_existing_menu_item": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "census_code_result": {
-    "endpoint": "census_code_result",
-    "fields": {
-      "census_config_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "census_percentile": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "census_config": {
-    "endpoint": "census_config",
-    "fields": {
-      "census_code": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "claim_expense_row_document": {
-    "endpoint": "claim_expense_row_document",
-    "fields": {
-      "claim_expense_row_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_document_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "clean_calculation": {
-    "endpoint": "clean_calculation",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "client_configuration": {
-    "endpoint": "client_configuration",
-    "fields": {
-      "configuration": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "client_store": {
-    "endpoint": "client_store",
-    "fields": {
-      "client_store_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "dashboard_template_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "data": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "favorite_settings": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "include_smart_filter": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "locked_to_dashboard_template_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "shared_from_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "client_store_dashboard_group": {
-    "endpoint": "client_store_dashboard_group",
-    "fields": {
-      "client_store_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "dashboard_group_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "clone_ancestry": {
-    "endpoint": "clone_ancestry",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_clone_configuration_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "parent_ids": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "code_block_conversion": {
-    "endpoint": "code_block_conversion",
-    "fields": {
-      "conversion_confidence": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "conversion_status": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "crc_complexity": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "custom_ruby_code": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "llm_error": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "llm_iterations": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "related_model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "stencil_uuid": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "test_results": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "test_score": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "version": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "coi": {
-    "endpoint": "coi",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "ancestry": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "conflict_organization_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "conflict_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "conflict_user_fullname": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "details": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "ends_at*": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "raised_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "request_id_string": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "resolved": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "resolved_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "starts_at*": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "type_of_conflict*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "type_of_conflict_other*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_fullname": {
-        "data_type": "text",
-        "field_type": "string"
-      }
-    }
-  },
-  "compliance_checklist_item": {
-    "endpoint": "compliance_checklist_item",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "note": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "uid": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "config_model_document": {
-    "endpoint": "config_model_document",
-    "fields": {
-      "allowed_filetypes": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "checked_out": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "combined": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "current": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "doc_label": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "doc_type_custom": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "doc_type_date": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "doc_type_year": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "document_content_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document_description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document_file_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document_file_size": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "document_text": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document_updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "documentable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "documentable_state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "documentable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "external_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "icon_url": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_document_sub_type_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_document_template_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_documentable_type_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "original_file_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "s3_permission": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "seq_number": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "storage_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "upload_state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "url": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "configuration_value": {
-    "endpoint": "configuration_value",
-    "fields": {
-      "client_ref": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "config_key": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "config_value": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "cpi": {
-    "endpoint": "cpi",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "value": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "year": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "dashboard_group": {
-    "endpoint": "dashboard_group",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "table_view": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "title": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "dashboard_template": {
-    "endpoint": "dashboard_template",
-    "fields": {
-      "client_store_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "data": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "enable_multi_language_support": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "original_client_store_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "shared": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "sphinx_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "demographic_category": {
-    "endpoint": "demographic_category",
-    "fields": {
-      "candid_category_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "demographic_item": {
-    "endpoint": "demographic_item",
-    "fields": {
-      "board_members": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "candid_subcategory_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "demographic_category_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "label": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "member_count": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "reported_by_ceo": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "reported_by_coceo": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "senior_staff": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "staff": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "tax_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "document": {
-    "endpoint": "document",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "document_content_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document_file_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document_file_size": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "document_updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "docusign_token": {
-    "endpoint": "docusign_token",
-    "fields": {
-      "access_token": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "expires_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "refresh_token": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "email_user": {
-    "endpoint": "email_user",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_email_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "relation_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "expirable_token": {
-    "endpoint": "expirable_token",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "expires_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "purpose": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "token_string": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "extract_format": {
-    "endpoint": "extract_format",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "filter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "format": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "label": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "favorite": {
-    "endpoint": "favorite",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "favorable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "favorable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "field_list": {
-    "endpoint": "field_list",
-    "fields": {
-      "columns": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "use_in_report_builder": {
-        "data_type": "bool",
-        "field_type": "column"
-      }
-    }
-  },
-  "filter": {
-    "endpoint": "filter",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "data": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "filter_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "view_type": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "form": {
-    "endpoint": "form",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "enabled": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "file_path": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "form_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "form_type_suffix": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "liquid_text": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "form_element": {
-    "endpoint": "form_element",
-    "fields": {
-      "config": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "dropdown_filter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "element_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "element_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "element_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "element_uid": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "form_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "label": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "max_value": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "min_value": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "required": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "use_local_currency": {
-        "data_type": "bool",
-        "field_type": "column"
-      }
-    }
-  },
-  "fund": {
-    "endpoint": "fund",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "balance": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "can_be_over_allocated": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "closed_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "illiquid_balance": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "is_invested": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "opened_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "fund_docket": {
-    "endpoint": "fund_docket",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "funding_source_allocation_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_temp_precreate": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "to_request_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "fund_line_item": {
-    "endpoint": "fund_line_item",
-    "fields": {
-      "amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "fund_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_debit": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "transacted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "funding_source": {
-    "endpoint": "funding_source",
-    "fields": {
-      "account_group": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amount_budgeted": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amount_requested": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "calculated_amount_spent": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "company_code": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "end_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "ext_sync_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "ext_sync_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "fund_closing_date": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fund_opening_date": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "funding_source_notes*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "fx_rate1": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_rate2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "geographic_restrictions": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "gst_exempt": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "liability_account": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "net_available_to_spend_amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "overhead_amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "payment_method": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "probability": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "reconciliation_account": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "report_date_at": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "restricted_funds": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "retired": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "sap_account_number": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "start_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "funding_source_allocation": {
-    "endpoint": "funding_source_allocation",
-    "fields": {
-      "actual_budget_amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "budget_amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "etl_amount_granted": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "etl_amount_paid": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "etl_amount_pipeline": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "etl_amount_unpaid": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "etl_num_granted": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "etl_num_pipeline": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "fx_rate1": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_rate2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "retired": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "spending_year": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "title": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "funding_source_allocation_authority": {
-    "endpoint": "funding_source_allocation_authority",
-    "fields": {
-      "amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "authority_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "funding_source_allocation_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "fx_rate1": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_rate2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "note": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "funding_source_forecast": {
-    "endpoint": "funding_source_forecast",
-    "fields": {
-      "amount_available_to_spend": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amount_overhead": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amount_received": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "funding_source_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "office": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "percent_overhead": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "spending_year": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "fx_conversion": {
-    "endpoint": "fx_conversion",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "fx_date": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_rate": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_source": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "fx_type_from_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "fx_type_to_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "fx_type": {
-    "endpoint": "fx_type",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "generic_template": {
-    "endpoint": "generic_template",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "test_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "geo_country": {
-    "endpoint": "geo_country",
-    "fields": {
-      "capital": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "comment": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "currency": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "currency_code": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "es_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "fips104": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "geo_names_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "ht_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "internet": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "iso2": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "iso3": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "ison": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "latitude": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "longitude": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "map_reference": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "nationality_plural": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "nationality_singular": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "population": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "retired": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "title": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "geo_place_relationship": {
-    "endpoint": "geo_place_relationship",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "geo_place_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "geoplaceable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "geoplaceable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "percent": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "grant_outcome": {
-    "endpoint": "grant_outcome",
-    "fields": {
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "grant_outcome_progress_report": {
-    "endpoint": "grant_outcome_progress_report",
-    "fields": {
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_report_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "grant_outcome_progress_report_row": {
-    "endpoint": "grant_outcome_progress_report_row",
-    "fields": {
-      "actual": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "grant_outcome_progress_report_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grant_outcome_row_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grantee_comments": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "staff_feedback": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "staff_feedback_internal": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "grant_outcome_row": {
-    "endpoint": "grant_outcome_row",
-    "fields": {
-      "grant_outcome_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grantee_comments": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "outcome_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "parent_grant_outcome_row_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "pledge": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "staff_feedback": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "staff_feedback_internal": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "unit": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "grant_output": {
-    "endpoint": "grant_output",
-    "fields": {
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "grant_output_period": {
-    "endpoint": "grant_output_period",
-    "fields": {
-      "grant_output_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "grant_output_period_datum": {
-    "endpoint": "grant_output_period_datum",
-    "fields": {
-      "grant_output_period_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grant_output_row_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "value": {
-        "data_type": "double",
-        "field_type": "column"
-      }
-    }
-  },
-  "grant_output_progress_report": {
-    "endpoint": "grant_output_progress_report",
-    "fields": {
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_report_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "grant_output_progress_report_datum": {
-    "endpoint": "grant_output_progress_report_datum",
-    "fields": {
-      "cumulative_total": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "grant_output_progress_report_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grant_output_row_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grantee_comments": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "staff_feedback": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "staff_feedback_internal": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "value": {
-        "data_type": "double",
-        "field_type": "column"
-      }
-    }
-  },
-  "grant_output_row": {
-    "endpoint": "grant_output_row",
-    "fields": {
-      "grant_output_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grantee_comments": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "parent_grant_output_row_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "staff_feedback": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "staff_feedback_internal": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "total": {
-        "data_type": "double",
-        "field_type": "column"
-      }
-    }
-  },
-  "grantee_budget": {
-    "endpoint": "grantee_budget",
-    "fields": {
-      "actual_total": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "budgeted_total": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "budgeted_update_total": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "carryover": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "comments*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "custom_fields": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "custom_fields_actual_total": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "custom_fields_budgeted_total": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "custom_fields_budgeted_update_total": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "custom_fields_original_budgeted_total": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "end_date": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "equipiment_actual*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "equipiment_additional_col_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "equipiment_additional_col_2*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "equipiment_additional_col_3*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "equipiment_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "equipiment_budgeted_update*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "equipiment_original_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "general_project_expenses_actual*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "general_project_expenses_additional_col_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "general_project_expenses_additional_col_2*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "general_project_expenses_additional_col_3*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "general_project_expenses_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "general_project_expenses_budgeted_update*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "general_project_expenses_original_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_temp_precreate": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "materials_supplies_actual*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "materials_supplies_additional_col_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "materials_supplies_additional_col_2*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "materials_supplies_additional_col_3*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "materials_supplies_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "materials_supplies_budgeted_update*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "materials_supplies_original_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "modify_budget_enabled": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "original_budgeted_total": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_grant_id": {
-        "data_type": "bigint",
-        "field_type": "string"
-      },
-      "request_grantee_user_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_org_acronym": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_org_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "section_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "settings": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "speakerinstructor_fees_actual*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "speakerinstructor_fees_additional_col_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "speakerinstructor_fees_additional_col_2*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "speakerinstructor_fees_additional_col_3*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "speakerinstructor_fees_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "speakerinstructor_fees_budgeted_update*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "speakerinstructor_fees_original_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "start_date": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "subline_items": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_services_actual*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_services_additional_col_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_services_additional_col_2*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_services_additional_col_3*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_services_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_services_budgeted_update*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_services_original_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "travel_expenses_actual*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "travel_expenses_additional_col_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "travel_expenses_additional_col_2*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "travel_expenses_additional_col_3*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "travel_expenses_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "travel_expenses_budgeted_update*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "travel_expenses_original_budgeted*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "grantee_budget_category_group": {
-    "endpoint": "grantee_budget_category_group",
-    "fields": {
-      "code_column_hidden": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "description_column_hidden": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "grantee_budget_category_group_relationship": {
-    "endpoint": "grantee_budget_category_group_relationship",
-    "fields": {
-      "archived_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grantee_budget_category_group_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grantee_budget_category_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "position": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "unit_rate_enabled": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "grantee_budget_tracker_period_amendment": {
-    "endpoint": "grantee_budget_tracker_period_amendment",
-    "fields": {
-      "amended_amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amendment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grantee_budget_tracker_period_datum_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "grantee_whitelist": {
-    "endpoint": "grantee_whitelist",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "group": {
-    "endpoint": "group",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deprecated": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "hierarchical": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "group_member": {
-    "endpoint": "group_member",
-    "fields": {
-      "ancestry": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "group_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "groupable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "groupable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "gs_stream": {
-    "endpoint": "gs_stream",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "author_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "entry_date": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_temp_precreate": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "media": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "metrics": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "organization_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "sentiment": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "title": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "uid": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "gs_stream_document": {
-    "endpoint": "gs_stream_document",
-    "fields": {
-      "attachment": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "attachment_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "display_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "file_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "gs_stream_document_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "gs_stream_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "gs_stream_gs_tag": {
-    "endpoint": "gs_stream_gs_tag",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "gs_stream_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "gs_tag_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "gs_stream_request": {
-    "endpoint": "gs_stream_request",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "gs_stream_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "gs_tag": {
-    "endpoint": "gs_tag",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "indicator": {
-    "endpoint": "indicator",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "baseline": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "decimal_places": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "exclude_from_mel": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "outcome_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "projected": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "retired": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "start_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "unit_label": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "unit_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "integration_filter": {
-    "endpoint": "integration_filter",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "custom_model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filters": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filters_v2": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "integration": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "v2": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "job": {
-    "endpoint": "job",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "delayed_job_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "enter_params": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "exit_params": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "job_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "list_template": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "show_template": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "status_explanation": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "language": {
-    "endpoint": "language",
-    "fields": {
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "iso_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "locale": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "native_name": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "login_attempt": {
-    "endpoint": "login_attempt",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "impersonator_user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "ip_address": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "is_sso_login": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "loi": {
-    "endpoint": "loi",
-    "fields": {
-      "address": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "address_differs*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "amount_requested": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amount_requested_fx_2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amount_requested_local": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "applicant": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "budget_check*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "budget_link*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "chapter_officer*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "city": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "confirm_recipient*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "duration_in_months": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "email": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "fdtn_country*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "first_name_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "fx_applied_date_1": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_applied_date_2": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_date_1": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_date_2": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_rate1": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_rate2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_spotrate_1": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "fx_spotrate_2": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "fx_type_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "geo_country_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "geo_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grant_begins_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "independent_applicant_have_bank_account*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "independent_applicant_or_organization*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "is_org_chapter*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "is_org_chapter_non_profit*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "is_temp_precreate": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "iso_country*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "iso_country_user*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "last_name_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "linkedin_profile*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "login": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_applicant": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "loi_email": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "loi_foundation_region*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_organization_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "loi_phone": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "loi_project_title": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "loi_question_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_question_2*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_question_3*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_question_4*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_question_5*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_question_6*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_question_7*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_question_8*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_question_9*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "loi_type*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "mobile": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "opt_in_marketing*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "org_bureau_region*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "org_email": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "org_fax": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "org_geo_country_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "org_geo_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "org_have_bank_account*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "org_phone": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "org_tax_exempt*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "org_url": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "organization_legal_name*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "organization_mission*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "organization_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "organization_name_foreign_language": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "organization_type*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "personal_bureau_region*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "phone": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "phone_extension*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "postal_code": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "program_interest*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "program_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "project_summary": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "project_summary_native": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "project_summary_native_updated": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "project_title": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "rejection_reason*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "researcher_publications*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "state_1*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "store_information*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "street_address2": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "tax_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "token": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "token_created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_geo_country_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_geo_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_title": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "year_founded*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "machine_event": {
-    "endpoint": "machine_event",
-    "fields": {
-      "button_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "draft_guard": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "draft_guard_submit": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "filter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "guard": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "guard_migration_confirmed": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "guard_migration_status": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "guard_strategy": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "has_custom_ruby_code": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_validation_suppressed": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "machine_workflow_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "on_transition": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "on_transition_migration_confirmed": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "on_transition_migration_status": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "unsafe_guard": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "unsafe_on_transition": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "machine_event_from_state": {
-    "endpoint": "machine_event_from_state",
-    "fields": {
-      "button_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "from_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "machine_event_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "machine_event_role": {
-    "endpoint": "machine_event_role",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "machine_event_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "role_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "machine_model_type": {
-    "endpoint": "machine_model_type",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "next_auto_increment_num": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_model_attribute_ids": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "show_in_plus_menu": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "machine_state": {
-    "endpoint": "machine_state",
-    "fields": {
-      "after_enter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "after_enter_migration_confirmed": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "after_enter_migration_status": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "allowed_roles": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "before_validation_enter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "before_validation_enter_migration_confirmed": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "before_validation_enter_migration_status": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "draft_after_enter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "draft_after_enter_submit": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "draft_before_validation_enter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "draft_before_validation_enter_submit": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "external_description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "has_custom_ruby_code": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "state_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "theme_switching_enabled": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "transition_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "unsafe_after_enter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "unsafe_before_validation_enter": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "machine_state_category": {
-    "endpoint": "machine_state_category",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "machine_category_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "machine_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "machine_state_group": {
-    "endpoint": "machine_state_group",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "machine_state_ids": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "machine_workflow": {
-    "endpoint": "machine_workflow",
-    "fields": {
-      "characteristics": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "related_model_relationship": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "related_model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "workflow_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "machine_workflow_fork": {
-    "endpoint": "machine_workflow_fork",
-    "fields": {
-      "after_state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "related_model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "related_model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "role_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "matching_gift_profile": {
-    "endpoint": "matching_gift_profile",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "annual_limit": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "match_multiplier": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "minimum_match_amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "mention": {
-    "endpoint": "mention",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "mentionable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "mentionable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "post_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "migrate_row": {
-    "endpoint": "migrate_row",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migration_config_model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migration_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "new_row": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "row_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "migration": {
-    "endpoint": "migration",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_timestamp_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "migration_config_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migration_file_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migration_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "migration_config": {
-    "endpoint": "migration_config",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "file_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "ignore_first_row": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "ignore_last_row": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "migration_config_column": {
-    "endpoint": "migration_config_column",
-    "fields": {
-      "component_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "config": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "config_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "csv_fixed_column": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "file_column_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "fixed_col_end": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "fixed_col_start": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "hard_coded_value": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "matching_field": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "matching_model_attribute_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "matching_value": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migration_config_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migration_config_model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migration_file_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migration_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_attribute_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "must_match_existing": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "number_implicit_decimals": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "required": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "sample_content": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "migration_config_model": {
-    "endpoint": "migration_config_model",
-    "fields": {
-      "allow_modification": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_optional": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "migration_config_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "must_match_existing": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "report_stats": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "migration_config_model_link": {
-    "endpoint": "migration_config_model_link",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "from_migration_model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "from_model_attribute_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "link_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "matching_link": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "migration_config_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_migration_model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "migration_file": {
-    "endpoint": "migration_file",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_attribute": {
-    "endpoint": "model_attribute",
-    "fields": {
-      "api_style": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "attribute_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "calculation": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "calculation_enabled": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "calculation_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "calculation_related_model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "calculation_relationship_field": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "decimal_format": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "display_to_s": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "force_dropdown": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "include_in_export": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "include_in_fluxx_insight": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "include_in_fulltext_search": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "legacy_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "legacy_table": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "mapped_attribute": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_type_enum": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "multi_allowed": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "native_language_attribute_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "parent_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "round_calculated_value": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "show_related_tab": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "translatable": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "use_local_currency": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "value_model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "value_model_type_enum": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_attribute_choice": {
-    "endpoint": "model_attribute_choice",
-    "fields": {
-      "amount_value": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "boolean_value": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "choice_number": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "date_value": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "datetime_value": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "integer_value": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_attribute_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_attribute_value_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type_enum": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_value_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "string_equivalent": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "string_value": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "text_value": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "value_model_type_enum": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_clone_configuration": {
-    "endpoint": "model_clone_configuration",
-    "fields": {
-      "after_create": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "allowed_roles": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "allowed_states": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "card_label": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "columns": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "create_relationship": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "label": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_document_dynamic_recipient": {
-    "endpoint": "model_document_dynamic_recipient",
-    "fields": {
-      "affiliate_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "full_name_string": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_to": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "model_document_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_document_master": {
-    "endpoint": "model_document_master",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "current_model_document_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "current_sequence": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "native_model_document_master_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "translator_downloads_data": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_document_sign": {
-    "endpoint": "model_document_sign",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_document_sign_envelope_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "order_in_envelope": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "signer_delivered_date_time": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "signer_email": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "signer_model_relationship": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "signer_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "signer_role_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "signer_signed_date_time": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "signer_status": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "signer_user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_document_sign_envelope": {
-    "endpoint": "model_document_sign_envelope",
-    "fields": {
-      "body": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "cc_list": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "envelope_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "envelope_status": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "envelope_status_change_time": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_document_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "subject": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "template_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_document_template": {
-    "endpoint": "model_document_template",
-    "fields": {
-      "auto_generate_on_different_record_language": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "category": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "disable_liquid_html_strip": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "display_in_adhoc_list": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "disposition": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "do_not_insert_page_break": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "document": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document_content_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "dynamic_recipientable": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "filename": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "footer_height": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "generate_pdf_snapshot": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "generate_state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "header_height": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "language_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "letter_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_document_type_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "parent_document_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "pdf_snapshot_user_profile_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "related_model_document_template_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "show_related_posts": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_email": {
-    "endpoint": "model_email",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "body": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "cc": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "from": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "outlook_conversation_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "outlook_message_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "pop3_mail_unique_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "received_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "subject": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_method": {
-    "endpoint": "model_method",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "draft_dyn_method": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "draft_dyn_method_submit": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "dyn_method": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "dyn_method_migration_confirmed": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "dyn_method_migration_status": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "has_custom_ruby_code": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "method_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "unsafe_dyn_method": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_summary": {
-    "endpoint": "model_summary",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "generated_text": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "word_count": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_validation": {
-    "endpoint": "model_validation",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "machine_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "timing": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "validation_condition": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "model_validation_field": {
-    "endpoint": "model_validation_field",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "custom_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "custom_validation": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "dyn_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "max_length": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "min_length": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_name_to_validate": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_validation_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "unsafe_custom_validation": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "validation_unique": {
-        "data_type": "bool",
-        "field_type": "column"
-      }
-    }
-  },
-  "modification": {
-    "endpoint": "modification",
-    "fields": {
-      "attr": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "new_value": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "old_value": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "trackable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "trackable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "multi_element_choice": {
-    "endpoint": "multi_element_choice",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "multi_element_value_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "target_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "multi_element_group": {
-    "endpoint": "multi_element_group",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_attribute_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "target_class_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "multi_element_value": {
-    "endpoint": "multi_element_value",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "dependent_multi_element_value_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "multi_element_group_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "value": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "note": {
-    "endpoint": "note",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "attribute_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "form_element_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "notable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "notable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "note": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "private": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "ofac_person": {
-    "endpoint": "ofac_person",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "ofac_result_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "ofac_run_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "ofac_run_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "ofac_score": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "ofac_state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "organization_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "title": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "widget_label": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "organization_connection_request": {
-    "endpoint": "organization_connection_request",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "organization_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_organization_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "outcome": {
-    "endpoint": "outcome",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "exclude_from_mel": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "outcomeable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "outcomeable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "retired": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "periodic_sync": {
-    "endpoint": "periodic_sync",
-    "fields": {
-      "configuration": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "last_sync_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "last_sync_result": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "locked_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "perishable_token": {
-    "endpoint": "perishable_token",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "expires_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "token": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "permission_delegator": {
-    "endpoint": "permission_delegator",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_attribute_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_attribute_ids": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_profile_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "persona": {
-    "endpoint": "persona",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_profile_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "post": {
-    "endpoint": "post",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "content": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "parent_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "private": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "sphinx_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "post_relationship": {
-    "endpoint": "post_relationship",
-    "fields": {
-      "attribute_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "form_element_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "post_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "sphinx_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "post_view": {
-    "endpoint": "post_view",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "post_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "primary_contact_tenure": {
-    "endpoint": "primary_contact_tenure",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "end_date": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "start_date": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_organization_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "program_budget": {
-    "endpoint": "program_budget",
-    "fields": {
-      "amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "fx_rate1": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_rate2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "initiative_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "program_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "spending_year": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "sub_initiative_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "sub_program_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "project": {
-    "endpoint": "project",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_temp_precreate": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "project_end_date*": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "project_start_date*": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "project_type*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "title": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "project_list": {
-    "endpoint": "project_list",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "list_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "list_type*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "project_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "title": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "project_list_item": {
-    "endpoint": "project_list_item",
-    "fields": {
-      "assigned_user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "due_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "item_completed": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "item_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "list_item_text": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "project_list_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "project_organization": {
-    "endpoint": "project_organization",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "organization_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "project_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "project_request": {
-    "endpoint": "project_request",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "granted": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "project_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "project_user": {
-    "endpoint": "project_user",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "project_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "real_me_invitation": {
-    "endpoint": "real_me_invitation",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "token": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "realtime_update": {
-    "endpoint": "realtime_update",
-    "fields": {
-      "action": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta_attributes": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_class": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "target_user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "type_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "recommendation_email": {
-    "endpoint": "recommendation_email",
-    "fields": {
-      "body": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "from": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "reply_to": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "return_path": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "status": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "subject": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "reduce_indexing_record": {
-    "endpoint": "reduce_indexing_record",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "relationship": {
-    "endpoint": "relationship",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "archived": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "principal_entity_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "principal_entity_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "relatable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "relatable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "related_model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "related_relatable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "related_relatable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "relationship_schema_mapping": {
-    "endpoint": "relationship_schema_mapping",
-    "fields": {
-      "active": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "column_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_cdt": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "is_shim": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "is_zoom": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "related_model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_type_identifier": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_profile_category": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_amendment": {
-    "endpoint": "request_amendment",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "amend_flag*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "amended_at": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "amendment_attestation*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "amendment_budget_year*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "amendment_id_to_text*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "amendment_type*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "amount_difference*": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amount_recommended": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amount_recommended_fx_2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "amount_recommended_local": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "attestation_date*": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "budget_changes*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "change_in_activities_or_deliverables*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "comments_to_grantee*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "cost_category_change_type*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "describe_change_of_scope*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "describe_the_amendment_needed*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "duration": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "end_date": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "equipment_budget_change_comment*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "feedback_addressed*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "fx_applied_date_1": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_applied_date_2": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_date_1": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_date_2": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_rate1": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_rate2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_spotrate_1": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "fx_spotrate_2": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "fx_type_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "gm_check_1*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "gm_check_2*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "gm_check_3*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "grant_budget_year*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_city": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_email": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_fax": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_name_first_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_name_last_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_phone": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_street_address": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_street_address_2": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_user_first_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_user_last_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_temp_precreate": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "new_equipment_amount*": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "new_extra_column": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "new_indirect_costs_amount_up_to_20_of_direct_costs*": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "new_indirect_costs_budget_change_comment*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "new_other_direct_costs_amount*": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "new_personnel_amount*": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "new_professional_services_amount*": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "new_subawards_amount*": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "new_travel_amount*": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "note": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "old_amount_recommended": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "old_amount_recommended_fx_2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "old_amount_recommended_local": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "old_duration": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "old_end_date": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "old_extra_column": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "old_start_date": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "original": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "other_direct_costs_budget_change_comment*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "parent_request_id*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "payment_changes*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "personnel_budget_change_narrative*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "professional_services_budget_change_comment*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "program_org_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "reason_for_amendment*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "recommendations*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "reporting_changes*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_grant_id": {
-        "data_type": "bigint",
-        "field_type": "string"
-      },
-      "request_hierarchy": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_org_acronym": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_org_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "start_date": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "subawards_budget_change_comment*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "travel_budget_change_comment*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_amendment_model_themes": {
-    "endpoint": "request_amendment_model_themes",
-    "fields": {
-      "active": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "amendment_model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "limit": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "request_model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_evaluation_metric": {
-    "endpoint": "request_evaluation_metric",
-    "fields": {
-      "achieved": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "comment": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "timeframe": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_funding_source": {
-    "endpoint": "request_funding_source",
-    "fields": {
-      "board_authority_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "document_file_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "funding_amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "funding_amount_fx_2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "funding_amount_local": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "funding_source_allocation_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "fx_applied_date_1": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_applied_date_2": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_date_1": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_date_2": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "fx_rate1": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_rate2": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "fx_spotrate_1": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "fx_spotrate_2": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "fx_type_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "initiative_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "program_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_regrant_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "sub_initiative_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "sub_program_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_geo_state": {
-    "endpoint": "request_geo_state",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "geo_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_organization": {
-    "endpoint": "request_organization",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "archived": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "principal_entity_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "principal_entity_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_outcome": {
-    "endpoint": "request_outcome",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "outcome_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "percent": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_program": {
-    "endpoint": "request_program",
-    "fields": {
-      "approved_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "approved_by_user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "program_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_recommendation": {
-    "endpoint": "request_recommendation",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "body": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_recommender_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_recommender": {
-    "endpoint": "request_recommender",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "email": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "first_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "last_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "submission_token": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "token_expiry": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_regrant": {
-    "endpoint": "request_regrant",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "amount": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "base_regrant_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "contig_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "full_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "granted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "grantee_city": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_email": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_fax": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_name_first_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_name_last_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_phone": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_street_address": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_street_address_2": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_user_first_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_user_last_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_temp_precreate": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "program_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "program_org_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "regrant_org_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_grant_id": {
-        "data_type": "bigint",
-        "field_type": "string"
-      },
-      "request_hierarchy": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_org_acronym": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_org_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_spending_year": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "short_summary": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_review": {
-    "endpoint": "request_review",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "application_type*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "benefits": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "budget_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "budget_rating_1*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "capacity_comments*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "capacity_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "clarity_and_feasibility_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "clarity_comments*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "class_analysis_comments*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "class_analysis_completed*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "class_analysis_needed*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "class_analysis_select*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "comment": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "conflict_exists_dynamic*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "conflict_reported": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "contig_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delayed_conflict*": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "eligibility_mission_multiple*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "eligibility_mission_multiple_comments*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "environmental_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "external_review_average_2024*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "external_review_score_total_sum_2024*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "external_review_score_total_sum_2025*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "external_reviewer": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "feedback_answered*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "goals_and_funding_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "grant_or_request_id": {
-        "data_type": "bigint",
-        "field_type": "string"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_city": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_email": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_fax": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_name_first_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_name_last_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_org_owner_first_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_org_owner_last_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_phone": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_street_address": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_street_address_2": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_user_first_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grantee_user_last_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "impact_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "implementation_feedback*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "independent_or_university*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "independent_or_university_select*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "innovation_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_temp_precreate": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "measurements_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "merits": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "merits_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "mission_alignment_exempt*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "mission_alignment_exempt_comments*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "number_different_amount_requested*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "outcomes": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "outcomes_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "pm_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "program_org_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "programme_goal_comments*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "programme_goal_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "publication_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "questions_for_grantee*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "questions_for_grantee_yes*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "questions_for_staff*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "questions_for_staff_yes*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "rating": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "rating_float": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "ratings_formula": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "ratings_hash": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "reasonability_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "recommendation": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_hierarchy": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_org_acronym": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_org_name": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_review_set_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "research_applied*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "research_collaborative*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "research_novel*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "responds_to_needs_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "response_to_legal_questions*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "review_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "reviewer_name*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "roles_and_relationships_comments*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "roles_and_relationships_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "start_review": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "strengths_weaknesses_feedback*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "suitability_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "support_funding*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_funding_btn_small*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_funding_conditions*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_funding_no*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "support_funding_yes*": {
-        "data_type": "double",
-        "field_type": "column"
-      },
-      "sustainability_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "technical_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "timing_rating*": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "type_of_conflict*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "type_of_conflict_other*": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_review_set": {
-    "endpoint": "request_review_set",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "grant_request_workflow_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "pre_create_reviews": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "request_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_review_model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "reviewer_group_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "states_json": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "request_reviewer_assignment": {
-    "endpoint": "request_reviewer_assignment",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_review_set_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "role": {
-    "endpoint": "role",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "roleable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "role_user": {
-    "endpoint": "role_user",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_for_all": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "role_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "roleable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "section": {
-    "endpoint": "section",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "segment": {
-    "endpoint": "segment",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "program_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_tag_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "segment_tag": {
-    "endpoint": "segment_tag",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "retired": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "shared_card": {
-    "endpoint": "shared_card",
-    "fields": {
-      "card": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "sms_log": {
-    "endpoint": "sms_log",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "message_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "spending_forecast": {
-    "endpoint": "spending_forecast",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "forecast_amount": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "spending_year": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "sphinx_check": {
-    "endpoint": "sphinx_check",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "check_ts": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "sphinx_id": {
-        "data_type": "bigint",
-        "field_type": "long"
-      },
-      "string": {
-        "data_type": "date",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "stencil": {
-    "endpoint": "stencil",
-    "fields": {
-      "compiled": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "enabled": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "form_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "has_custom_ruby_code": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "json": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "settings_json": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_profile": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "stencil_book": {
-    "endpoint": "stencil_book",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "stencil_book_page": {
-    "endpoint": "stencil_book_page",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "stencil_book_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "stencil_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "stencil_form": {
-    "endpoint": "stencil_form",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deployed_version": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "form_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "stencil_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "underscore_template": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "sub_model": {
-    "endpoint": "sub_model",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "sub_modelable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "sub_modelable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "table_view": {
-    "endpoint": "table_view",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "data": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "shared": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "table_view_favorite": {
-    "endpoint": "table_view_favorite",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "tag": {
-    "endpoint": "tag",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "owner_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "private_tag": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "tagging": {
-    "endpoint": "tagging",
-    "fields": {
-      "context": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "tag_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "taggable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "taggable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "transaction_report_dependency": {
-    "endpoint": "transaction_report_dependency",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "request_report_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "request_transaction_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "translator_assignment": {
-    "endpoint": "translator_assignment",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "comment": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "priority": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "translator_assignable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "translator_assignable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "translator_language": {
-    "endpoint": "translator_language",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "language_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "user_email": {
-    "endpoint": "user_email",
-    "fields": {
-      "body": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "from": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "reply_to": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "return_path": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "status": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "subject": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "user_permission": {
-    "endpoint": "user_permission",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "user_profile": {
-    "endpoint": "user_profile",
-    "fields": {
-      "can_access_bulk_update_menu": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_access_chatbot": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_access_dedupe_tool": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_access_word_excel_addins": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_add_specific_grantee_budget_config": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_assign": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_assign_profiles_and_roles": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_bulk_bridger_status_check": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_bulk_generate_documents": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_bulk_run_charity_check": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_bulk_schedule_payments": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_bulk_schedule_reports": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_bulk_send_email_alerts": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_bulk_update_attribute": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_bulk_update_status": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_crud_funding_sources": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_crud_payment_contingencies": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_crud_reports": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_crud_rfs_on_active_grants": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_edit_dropdown_fields": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_edit_mavs": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_impersonate": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_impersonate_donor": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_impersonate_reviewer": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_impersonate_translator": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_listview_alert_emails": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_listview_jobs": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_manage_document_type": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_manage_email_template": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_manage_letters": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_switch_themes": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_update_alert_emails": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_update_jobs": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_update_sso_uid": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_update_user_login": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "can_update_user_password": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "categories": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "cloned_user_profile_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "dashboard_config": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "dashboard_template_ids": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "dashboard_theme_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "disable_workflow_notes": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "hide_universal_search": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "lock_dashboard_manager": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "must_segment": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "user_profile_rule": {
-    "endpoint": "user_profile_rule",
-    "fields": {
-      "allowed": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "permission_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_profile_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "user_segment_tag": {
-    "endpoint": "user_segment_tag",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "is_default": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "is_read_only": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "segment_tag_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "webhook_subscription": {
-    "endpoint": "webhook_subscription",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "event": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "platform": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "tracked_fields": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "url": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "wiki_document": {
-    "endpoint": "wiki_document",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "model_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "note": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "title": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "wiki_document_template_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "wiki_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "wiki_document_template": {
-    "endpoint": "wiki_document_template",
-    "fields": {
-      "category": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "description": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "document_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "filename": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "model_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "updated_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  },
-  "work_task": {
-    "endpoint": "work_task",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "completed_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "deleted_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "delta": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "due_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "filter_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_by_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "locked_until": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "machine_state_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "previous_state": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "related_work_task_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "state": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "state_description": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "state_to_english": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "task_completed": {
-        "data_type": "bool",
-        "field_type": "column"
-      },
-      "task_order": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "task_text": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "taskable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "taskable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      }
-    }
-  },
-  "workflow_event": {
-    "endpoint": "workflow_event",
-    "fields": {
-      "all_notes": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "change_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "comment": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "created_by_email": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_by_first_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "created_by_last_name_first": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "ip_address": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_id": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "migrate_source_name": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "new_state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "old_state": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "related_workflowable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "related_workflowable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "segment_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "to_s": {
-        "data_type": "text",
-        "field_type": "string"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "workflowable_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "workflowable_type": {
-        "data_type": "text",
-        "field_type": "column"
-      }
-    }
-  },
-  "zenith_user_configuration": {
-    "endpoint": "zenith_user_configuration",
-    "fields": {
-      "created_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      },
-      "json": {
-        "data_type": "text",
-        "field_type": "column"
-      },
-      "updated_at": {
-        "data_type": "timestamp",
-        "field_type": "column"
-      },
-      "user_id": {
-        "data_type": "bigint",
-        "field_type": "column"
-      }
-    }
-  }
+    "affiliate_type": {
+        "endpoint": "affiliate_type",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "aha_requirements_tickets": {
+        "endpoint": "aha_requirements_tickets",
+        "fields": {
+            "aha_requirement_id": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "alert": {
+        "endpoint": "alert",
+        "fields": {
+            "alert_enabled": {"data_type": "bool", "field_type": "column"},
+            "alert_output": {"data_type": "text", "field_type": "column"},
+            "alert_trigger_type": {"data_type": "text", "field_type": "column"},
+            "bcc_emails": {"data_type": "text", "field_type": "column"},
+            "body": {"data_type": "text", "field_type": "column"},
+            "cc_emails": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "custom_action": {"data_type": "text", "field_type": "column"},
+            "dashboard_card_id": {"data_type": "bigint", "field_type": "column"},
+            "dashboard_id": {"data_type": "bigint", "field_type": "column"},
+            "dynamic_model_type": {"data_type": "text", "field_type": "column"},
+            "extra_fields": {"data_type": "text", "field_type": "column"},
+            "filter": {"data_type": "text", "field_type": "column"},
+            "group_models": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "last_realtime_update_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "model_controller_type": {"data_type": "text", "field_type": "column"},
+            "original_id": {"data_type": "bigint", "field_type": "column"},
+            "queue_uuid": {"data_type": "text", "field_type": "column"},
+            "send_by_queuing": {"data_type": "bool", "field_type": "column"},
+            "send_in_one_thread": {"data_type": "bool", "field_type": "column"},
+            "send_without_queuing": {"data_type": "bool", "field_type": "column"},
+            "subject": {"data_type": "text", "field_type": "column"},
+            "trigger_fields": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_relationship_fields": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "alert_email_user": {
+        "endpoint": "alert_email_user",
+        "fields": {
+            "alert_email_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "alert_model_log": {
+        "endpoint": "alert_model_log",
+        "fields": {
+            "alert_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_at": {"data_type": "timestamp", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "alert_recipient": {
+        "endpoint": "alert_recipient",
+        "fields": {
+            "alert_bcc_id": {"data_type": "bigint", "field_type": "column"},
+            "alert_cc_id": {"data_type": "bigint", "field_type": "column"},
+            "alert_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "rtu_model_user_method": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "alert_transition_state": {
+        "endpoint": "alert_transition_state",
+        "fields": {
+            "alert_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "machine_state_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "bank_account": {
+        "endpoint": "bank_account",
+        "fields": {
+            "account_name": {"data_type": "text", "field_type": "column"},
+            "account_number": {"data_type": "text", "field_type": "column"},
+            "active": {"data_type": "bool", "field_type": "column"},
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "bank_code": {"data_type": "text", "field_type": "column"},
+            "bank_code_type*": {"data_type": "text", "field_type": "column"},
+            "bank_contact_name": {"data_type": "text", "field_type": "column"},
+            "bank_contact_phone": {"data_type": "text", "field_type": "column"},
+            "bank_name": {"data_type": "text", "field_type": "column"},
+            "bank_type*": {"data_type": "text", "field_type": "column"},
+            "banking_beneficiary_name*": {"data_type": "text", "field_type": "column"},
+            "city": {"data_type": "text", "field_type": "column"},
+            "comments*": {"data_type": "text", "field_type": "column"},
+            "contact_name*": {"data_type": "text", "field_type": "column"},
+            "contact_title*": {"data_type": "text", "field_type": "column"},
+            "contig_id": {"data_type": "text", "field_type": "column"},
+            "country_code*": {"data_type": "text", "field_type": "column"},
+            "country_str": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "domestic_special_wire_instructions": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "domestic_wire_aba_routing": {"data_type": "text", "field_type": "column"},
+            "email*": {"data_type": "text", "field_type": "column"},
+            "fax": {"data_type": "text", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "finance_id_to_text*": {"data_type": "text", "field_type": "column"},
+            "finance_internal_id*": {"data_type": "bigint", "field_type": "column"},
+            "foreign_special_wire_instructions": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "foreign_wire_beneficiary_bank_swift": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "foreign_wire_intermediary_bank_name": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "foreign_wire_intermediary_bank_swift": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "geo_country_id": {"data_type": "bigint", "field_type": "column"},
+            "geo_state_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "intermediary_account_name": {"data_type": "text", "field_type": "column"},
+            "intermediary_account_number": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "intermediary_bank_code": {"data_type": "text", "field_type": "column"},
+            "intermediary_bank_contact_name": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "intermediary_bank_contact_phone": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "intermediary_bank_name": {"data_type": "text", "field_type": "column"},
+            "intermediary_city": {"data_type": "text", "field_type": "column"},
+            "intermediary_fax": {"data_type": "text", "field_type": "column"},
+            "intermediary_geo_country_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "intermediary_geo_state_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "intermediary_phone": {"data_type": "text", "field_type": "column"},
+            "intermediary_postal_code": {"data_type": "text", "field_type": "column"},
+            "intermediary_special_instructions": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "intermediary_street_address": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "intermediary_street_address2": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "is_temp_precreate": {"data_type": "bool", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "ofac_result_id": {"data_type": "text", "field_type": "column"},
+            "ofac_run_at": {"data_type": "timestamp", "field_type": "column"},
+            "ofac_run_id": {"data_type": "text", "field_type": "column"},
+            "ofac_state": {"data_type": "text", "field_type": "column"},
+            "payment_account_type*": {"data_type": "text", "field_type": "column"},
+            "phone": {"data_type": "text", "field_type": "column"},
+            "postal_code": {"data_type": "text", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "special_instructions": {"data_type": "text", "field_type": "column"},
+            "state": {"data_type": "bigint", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_str": {"data_type": "text", "field_type": "column"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "street_address": {"data_type": "text", "field_type": "column"},
+            "street_address2": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "update_requestspayments*": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "validated_at*": {"data_type": "date", "field_type": "column"},
+            "vendor_setup_form_uploaded*": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "wire_transfer_number": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "budget_request": {
+        "endpoint": "budget_request",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "amount_recommended": {"data_type": "double", "field_type": "column"},
+            "amount_requested": {"data_type": "double", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "card_configuration": {
+        "endpoint": "card_configuration",
+        "fields": {
+            "allow_create": {"data_type": "bool", "field_type": "column"},
+            "allowed_roles": {"data_type": "text", "field_type": "column"},
+            "allowed_states": {"data_type": "text", "field_type": "column"},
+            "controller_name": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "filter": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "label": {"data_type": "text", "field_type": "column"},
+            "menu_order": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "replace_existing_menu_item": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "census_code_result": {
+        "endpoint": "census_code_result",
+        "fields": {
+            "census_config_id": {"data_type": "bigint", "field_type": "column"},
+            "census_percentile": {"data_type": "double", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "census_config": {
+        "endpoint": "census_config",
+        "fields": {
+            "census_code": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "claim_expense_row_document": {
+        "endpoint": "claim_expense_row_document",
+        "fields": {
+            "claim_expense_row_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "model_document_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "clean_calculation": {
+        "endpoint": "clean_calculation",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "client_configuration": {
+        "endpoint": "client_configuration",
+        "fields": {
+            "configuration": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "client_store": {
+        "endpoint": "client_store",
+        "fields": {
+            "client_store_type": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "dashboard_template_id": {"data_type": "bigint", "field_type": "column"},
+            "data": {"data_type": "text", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "favorite_settings": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "include_smart_filter": {"data_type": "bool", "field_type": "column"},
+            "locked_to_dashboard_template_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "shared_from_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "client_store_dashboard_group": {
+        "endpoint": "client_store_dashboard_group",
+        "fields": {
+            "client_store_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "dashboard_group_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "clone_ancestry": {
+        "endpoint": "clone_ancestry",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_clone_configuration_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "parent_ids": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "code_block_conversion": {
+        "endpoint": "code_block_conversion",
+        "fields": {
+            "conversion_confidence": {"data_type": "double", "field_type": "column"},
+            "conversion_status": {"data_type": "text", "field_type": "column"},
+            "crc_complexity": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "custom_ruby_code": {"data_type": "text", "field_type": "column"},
+            "filter": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "llm_error": {"data_type": "text", "field_type": "column"},
+            "llm_iterations": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "related_model_type": {"data_type": "text", "field_type": "column"},
+            "stencil_uuid": {"data_type": "text", "field_type": "column"},
+            "test_results": {"data_type": "text", "field_type": "column"},
+            "test_score": {"data_type": "double", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "version": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "coi": {
+        "endpoint": "coi",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "ancestry": {"data_type": "text", "field_type": "column"},
+            "conflict_organization_name": {"data_type": "text", "field_type": "string"},
+            "conflict_type": {"data_type": "text", "field_type": "column"},
+            "conflict_user_fullname": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "details": {"data_type": "text", "field_type": "column"},
+            "ends_at*": {"data_type": "date", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "raised_at": {"data_type": "timestamp", "field_type": "column"},
+            "request_id_string": {"data_type": "text", "field_type": "string"},
+            "resolved": {"data_type": "bool", "field_type": "column"},
+            "resolved_at": {"data_type": "timestamp", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "starts_at*": {"data_type": "date", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "type_of_conflict*": {"data_type": "text", "field_type": "column"},
+            "type_of_conflict_other*": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_fullname": {"data_type": "text", "field_type": "string"},
+        },
+    },
+    "compliance_checklist_item": {
+        "endpoint": "compliance_checklist_item",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "note": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "uid": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "config_model_document": {
+        "endpoint": "config_model_document",
+        "fields": {
+            "allowed_filetypes": {"data_type": "text", "field_type": "column"},
+            "checked_out": {"data_type": "bool", "field_type": "column"},
+            "combined": {"data_type": "bool", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "current": {"data_type": "bool", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "doc_label": {"data_type": "text", "field_type": "column"},
+            "doc_type_custom": {"data_type": "text", "field_type": "column"},
+            "doc_type_date": {"data_type": "date", "field_type": "column"},
+            "doc_type_year": {"data_type": "bigint", "field_type": "column"},
+            "document_content_type": {"data_type": "text", "field_type": "column"},
+            "document_description": {"data_type": "text", "field_type": "column"},
+            "document_file_name": {"data_type": "text", "field_type": "column"},
+            "document_file_size": {"data_type": "bigint", "field_type": "column"},
+            "document_text": {"data_type": "text", "field_type": "column"},
+            "document_type": {"data_type": "text", "field_type": "column"},
+            "document_updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "documentable_id": {"data_type": "bigint", "field_type": "column"},
+            "documentable_state": {"data_type": "text", "field_type": "column"},
+            "documentable_type": {"data_type": "text", "field_type": "column"},
+            "external_id": {"data_type": "text", "field_type": "column"},
+            "icon_url": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "model_document_sub_type_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "model_document_template_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "model_documentable_type_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "original_file_name": {"data_type": "text", "field_type": "column"},
+            "s3_permission": {"data_type": "text", "field_type": "column"},
+            "seq_number": {"data_type": "bigint", "field_type": "column"},
+            "storage_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "upload_state": {"data_type": "text", "field_type": "column"},
+            "url": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "configuration_value": {
+        "endpoint": "configuration_value",
+        "fields": {
+            "client_ref": {"data_type": "bigint", "field_type": "column"},
+            "config_key": {"data_type": "text", "field_type": "column"},
+            "config_value": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "cpi": {
+        "endpoint": "cpi",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "value": {"data_type": "double", "field_type": "column"},
+            "year": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "dashboard_group": {
+        "endpoint": "dashboard_group",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "table_view": {"data_type": "bool", "field_type": "column"},
+            "title": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "dashboard_template": {
+        "endpoint": "dashboard_template",
+        "fields": {
+            "client_store_type": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "data": {"data_type": "text", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "enable_multi_language_support": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked": {"data_type": "bool", "field_type": "column"},
+            "original_client_store_id": {"data_type": "bigint", "field_type": "column"},
+            "shared": {"data_type": "bool", "field_type": "column"},
+            "sphinx_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "demographic_category": {
+        "endpoint": "demographic_category",
+        "fields": {
+            "candid_category_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "demographic_item": {
+        "endpoint": "demographic_item",
+        "fields": {
+            "board_members": {"data_type": "bigint", "field_type": "column"},
+            "candid_subcategory_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "demographic_category_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "text", "field_type": "column"},
+            "label": {"data_type": "text", "field_type": "column"},
+            "member_count": {"data_type": "bigint", "field_type": "column"},
+            "reported_by_ceo": {"data_type": "bool", "field_type": "column"},
+            "reported_by_coceo": {"data_type": "bool", "field_type": "column"},
+            "senior_staff": {"data_type": "bigint", "field_type": "column"},
+            "staff": {"data_type": "bigint", "field_type": "column"},
+            "tax_id": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "document": {
+        "endpoint": "document",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "document_content_type": {"data_type": "text", "field_type": "column"},
+            "document_file_name": {"data_type": "text", "field_type": "column"},
+            "document_file_size": {"data_type": "bigint", "field_type": "column"},
+            "document_updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "docusign_token": {
+        "endpoint": "docusign_token",
+        "fields": {
+            "access_token": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "expires_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "refresh_token": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "email_user": {
+        "endpoint": "email_user",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_email_id": {"data_type": "bigint", "field_type": "column"},
+            "relation_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "expirable_token": {
+        "endpoint": "expirable_token",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "expires_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "purpose": {"data_type": "text", "field_type": "column"},
+            "token_string": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "extract_format": {
+        "endpoint": "extract_format",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "filter": {"data_type": "text", "field_type": "column"},
+            "format": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "label": {"data_type": "text", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "favorite": {
+        "endpoint": "favorite",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "favorable_id": {"data_type": "bigint", "field_type": "column"},
+            "favorable_type": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "field_list": {
+        "endpoint": "field_list",
+        "fields": {
+            "columns": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "use_in_report_builder": {"data_type": "bool", "field_type": "column"},
+        },
+    },
+    "filter": {
+        "endpoint": "filter",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "data": {"data_type": "text", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "filter_name": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+            "view_type": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "form": {
+        "endpoint": "form",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "enabled": {"data_type": "bool", "field_type": "column"},
+            "file_path": {"data_type": "text", "field_type": "column"},
+            "form_type": {"data_type": "text", "field_type": "column"},
+            "form_type_suffix": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "liquid_text": {"data_type": "text", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "model_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "form_element": {
+        "endpoint": "form_element",
+        "fields": {
+            "config": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "dropdown_filter": {"data_type": "text", "field_type": "column"},
+            "element_name": {"data_type": "text", "field_type": "column"},
+            "element_order": {"data_type": "bigint", "field_type": "column"},
+            "element_type": {"data_type": "text", "field_type": "column"},
+            "element_uid": {"data_type": "text", "field_type": "column"},
+            "form_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "label": {"data_type": "text", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "max_value": {"data_type": "double", "field_type": "column"},
+            "min_value": {"data_type": "double", "field_type": "column"},
+            "required": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "use_local_currency": {"data_type": "bool", "field_type": "column"},
+        },
+    },
+    "fund": {
+        "endpoint": "fund",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "balance": {"data_type": "double", "field_type": "column"},
+            "can_be_over_allocated": {"data_type": "bool", "field_type": "column"},
+            "closed_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "illiquid_balance": {"data_type": "double", "field_type": "column"},
+            "is_invested": {"data_type": "bool", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "opened_at": {"data_type": "timestamp", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "fund_docket": {
+        "endpoint": "fund_docket",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "funding_source_allocation_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_temp_precreate": {"data_type": "bool", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "to_request_state_id": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "fund_line_item": {
+        "endpoint": "fund_line_item",
+        "fields": {
+            "amount": {"data_type": "double", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "fund_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_debit": {"data_type": "bool", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "transacted_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "funding_source": {
+        "endpoint": "funding_source",
+        "fields": {
+            "account_group": {"data_type": "text", "field_type": "column"},
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "amount": {"data_type": "double", "field_type": "column"},
+            "amount_budgeted": {"data_type": "double", "field_type": "column"},
+            "amount_requested": {"data_type": "double", "field_type": "column"},
+            "calculated_amount_spent": {"data_type": "double", "field_type": "column"},
+            "company_code": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "end_at": {"data_type": "timestamp", "field_type": "column"},
+            "ext_sync_at": {"data_type": "timestamp", "field_type": "column"},
+            "ext_sync_id": {"data_type": "text", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "fund_closing_date": {"data_type": "date", "field_type": "column"},
+            "fund_opening_date": {"data_type": "date", "field_type": "column"},
+            "funding_source_notes*": {"data_type": "text", "field_type": "column"},
+            "fx_rate1": {"data_type": "double", "field_type": "column"},
+            "fx_rate2": {"data_type": "double", "field_type": "column"},
+            "geographic_restrictions": {"data_type": "text", "field_type": "column"},
+            "gst_exempt": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "liability_account": {"data_type": "text", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "net_available_to_spend_amount": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "overhead_amount": {"data_type": "double", "field_type": "column"},
+            "payment_method": {"data_type": "text", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "probability": {"data_type": "text", "field_type": "column"},
+            "reconciliation_account": {"data_type": "text", "field_type": "column"},
+            "report_date_at": {"data_type": "date", "field_type": "column"},
+            "restricted_funds": {"data_type": "bool", "field_type": "column"},
+            "retired": {"data_type": "bool", "field_type": "column"},
+            "sap_account_number": {"data_type": "text", "field_type": "column"},
+            "start_at": {"data_type": "timestamp", "field_type": "column"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "funding_source_allocation": {
+        "endpoint": "funding_source_allocation",
+        "fields": {
+            "actual_budget_amount": {"data_type": "double", "field_type": "column"},
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "amount": {"data_type": "double", "field_type": "column"},
+            "budget_amount": {"data_type": "double", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "etl_amount_granted": {"data_type": "double", "field_type": "column"},
+            "etl_amount_paid": {"data_type": "double", "field_type": "column"},
+            "etl_amount_pipeline": {"data_type": "double", "field_type": "column"},
+            "etl_amount_unpaid": {"data_type": "double", "field_type": "column"},
+            "etl_num_granted": {"data_type": "bigint", "field_type": "column"},
+            "etl_num_pipeline": {"data_type": "bigint", "field_type": "column"},
+            "fx_rate1": {"data_type": "double", "field_type": "column"},
+            "fx_rate2": {"data_type": "double", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "retired": {"data_type": "bool", "field_type": "column"},
+            "spending_year": {"data_type": "text", "field_type": "column"},
+            "title": {"data_type": "text", "field_type": "string"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "funding_source_allocation_authority": {
+        "endpoint": "funding_source_allocation_authority",
+        "fields": {
+            "amount": {"data_type": "double", "field_type": "column"},
+            "authority_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "funding_source_allocation_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "fx_rate1": {"data_type": "double", "field_type": "column"},
+            "fx_rate2": {"data_type": "double", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "note": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "funding_source_forecast": {
+        "endpoint": "funding_source_forecast",
+        "fields": {
+            "amount_available_to_spend": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "amount_overhead": {"data_type": "double", "field_type": "column"},
+            "amount_received": {"data_type": "double", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "funding_source_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "office": {"data_type": "text", "field_type": "column"},
+            "percent_overhead": {"data_type": "double", "field_type": "column"},
+            "spending_year": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "fx_conversion": {
+        "endpoint": "fx_conversion",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "fx_date": {"data_type": "date", "field_type": "column"},
+            "fx_rate": {"data_type": "double", "field_type": "column"},
+            "fx_source": {"data_type": "text", "field_type": "column"},
+            "fx_type_from_id": {"data_type": "bigint", "field_type": "column"},
+            "fx_type_to_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "fx_type": {
+        "endpoint": "fx_type",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "generic_template": {
+        "endpoint": "generic_template",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "test_1*": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "geo_country": {
+        "endpoint": "geo_country",
+        "fields": {
+            "capital": {"data_type": "text", "field_type": "column"},
+            "comment": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "currency": {"data_type": "text", "field_type": "column"},
+            "currency_code": {"data_type": "text", "field_type": "column"},
+            "es_name": {"data_type": "text", "field_type": "column"},
+            "fips104": {"data_type": "text", "field_type": "column"},
+            "geo_names_id": {"data_type": "bigint", "field_type": "column"},
+            "ht_name": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "internet": {"data_type": "text", "field_type": "column"},
+            "iso2": {"data_type": "text", "field_type": "column"},
+            "iso3": {"data_type": "text", "field_type": "column"},
+            "ison": {"data_type": "text", "field_type": "column"},
+            "latitude": {"data_type": "double", "field_type": "column"},
+            "longitude": {"data_type": "double", "field_type": "column"},
+            "map_reference": {"data_type": "text", "field_type": "column"},
+            "nationality_plural": {"data_type": "text", "field_type": "column"},
+            "nationality_singular": {"data_type": "text", "field_type": "column"},
+            "population": {"data_type": "text", "field_type": "column"},
+            "retired": {"data_type": "bool", "field_type": "column"},
+            "title": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "geo_place_relationship": {
+        "endpoint": "geo_place_relationship",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "geo_place_id": {"data_type": "bigint", "field_type": "column"},
+            "geoplaceable_id": {"data_type": "bigint", "field_type": "column"},
+            "geoplaceable_type": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "percent": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "grant_outcome": {
+        "endpoint": "grant_outcome",
+        "fields": {
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "grant_outcome_progress_report": {
+        "endpoint": "grant_outcome_progress_report",
+        "fields": {
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "request_report_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "grant_outcome_progress_report_row": {
+        "endpoint": "grant_outcome_progress_report_row",
+        "fields": {
+            "actual": {"data_type": "double", "field_type": "column"},
+            "grant_outcome_progress_report_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "grant_outcome_row_id": {"data_type": "bigint", "field_type": "column"},
+            "grantee_comments": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "staff_feedback": {"data_type": "text", "field_type": "column"},
+            "staff_feedback_internal": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "grant_outcome_row": {
+        "endpoint": "grant_outcome_row",
+        "fields": {
+            "grant_outcome_id": {"data_type": "bigint", "field_type": "column"},
+            "grantee_comments": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "order": {"data_type": "bigint", "field_type": "column"},
+            "outcome_type": {"data_type": "text", "field_type": "column"},
+            "parent_grant_outcome_row_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "pledge": {"data_type": "double", "field_type": "column"},
+            "staff_feedback": {"data_type": "text", "field_type": "column"},
+            "staff_feedback_internal": {"data_type": "text", "field_type": "column"},
+            "unit": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "grant_output": {
+        "endpoint": "grant_output",
+        "fields": {
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "grant_output_period": {
+        "endpoint": "grant_output_period",
+        "fields": {
+            "grant_output_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "order": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "grant_output_period_datum": {
+        "endpoint": "grant_output_period_datum",
+        "fields": {
+            "grant_output_period_id": {"data_type": "bigint", "field_type": "column"},
+            "grant_output_row_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "value": {"data_type": "double", "field_type": "column"},
+        },
+    },
+    "grant_output_progress_report": {
+        "endpoint": "grant_output_progress_report",
+        "fields": {
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "request_report_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "grant_output_progress_report_datum": {
+        "endpoint": "grant_output_progress_report_datum",
+        "fields": {
+            "cumulative_total": {"data_type": "double", "field_type": "column"},
+            "grant_output_progress_report_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "grant_output_row_id": {"data_type": "bigint", "field_type": "column"},
+            "grantee_comments": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "staff_feedback": {"data_type": "text", "field_type": "column"},
+            "staff_feedback_internal": {"data_type": "text", "field_type": "column"},
+            "value": {"data_type": "double", "field_type": "column"},
+        },
+    },
+    "grant_output_row": {
+        "endpoint": "grant_output_row",
+        "fields": {
+            "grant_output_id": {"data_type": "bigint", "field_type": "column"},
+            "grantee_comments": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "order": {"data_type": "bigint", "field_type": "column"},
+            "parent_grant_output_row_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "staff_feedback": {"data_type": "text", "field_type": "column"},
+            "staff_feedback_internal": {"data_type": "text", "field_type": "column"},
+            "total": {"data_type": "double", "field_type": "column"},
+        },
+    },
+    "grantee_budget": {
+        "endpoint": "grantee_budget",
+        "fields": {
+            "actual_total": {"data_type": "double", "field_type": "column"},
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "budgeted_total": {"data_type": "double", "field_type": "column"},
+            "budgeted_update_total": {"data_type": "double", "field_type": "column"},
+            "carryover": {"data_type": "double", "field_type": "column"},
+            "comments*": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "custom_fields": {"data_type": "text", "field_type": "column"},
+            "custom_fields_actual_total": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "custom_fields_budgeted_total": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "custom_fields_budgeted_update_total": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "custom_fields_original_budgeted_total": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "end_date": {"data_type": "timestamp", "field_type": "column"},
+            "equipiment_actual*": {"data_type": "text", "field_type": "column"},
+            "equipiment_additional_col_1*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "equipiment_additional_col_2*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "equipiment_additional_col_3*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "equipiment_budgeted*": {"data_type": "text", "field_type": "column"},
+            "equipiment_budgeted_update*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "equipiment_original_budgeted*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "general_project_expenses_actual*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "general_project_expenses_additional_col_1*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "general_project_expenses_additional_col_2*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "general_project_expenses_additional_col_3*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "general_project_expenses_budgeted*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "general_project_expenses_budgeted_update*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "general_project_expenses_original_budgeted*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_temp_precreate": {"data_type": "bool", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "materials_supplies_actual*": {"data_type": "text", "field_type": "column"},
+            "materials_supplies_additional_col_1*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "materials_supplies_additional_col_2*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "materials_supplies_additional_col_3*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "materials_supplies_budgeted*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "materials_supplies_budgeted_update*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "materials_supplies_original_budgeted*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "modify_budget_enabled": {"data_type": "bool", "field_type": "column"},
+            "original_budgeted_total": {"data_type": "double", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "request_grant_id": {"data_type": "bigint", "field_type": "string"},
+            "request_grantee_user_name": {"data_type": "text", "field_type": "string"},
+            "request_org_acronym": {"data_type": "text", "field_type": "string"},
+            "request_org_name": {"data_type": "text", "field_type": "string"},
+            "section_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "settings": {"data_type": "text", "field_type": "column"},
+            "speakerinstructor_fees_actual*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "speakerinstructor_fees_additional_col_1*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "speakerinstructor_fees_additional_col_2*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "speakerinstructor_fees_additional_col_3*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "speakerinstructor_fees_budgeted*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "speakerinstructor_fees_budgeted_update*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "speakerinstructor_fees_original_budgeted*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "start_date": {"data_type": "timestamp", "field_type": "column"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "subline_items": {"data_type": "text", "field_type": "column"},
+            "support_services_actual*": {"data_type": "text", "field_type": "column"},
+            "support_services_additional_col_1*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "support_services_additional_col_2*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "support_services_additional_col_3*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "support_services_budgeted*": {"data_type": "text", "field_type": "column"},
+            "support_services_budgeted_update*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "support_services_original_budgeted*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "travel_expenses_actual*": {"data_type": "text", "field_type": "column"},
+            "travel_expenses_additional_col_1*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "travel_expenses_additional_col_2*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "travel_expenses_additional_col_3*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "travel_expenses_budgeted*": {"data_type": "text", "field_type": "column"},
+            "travel_expenses_budgeted_update*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "travel_expenses_original_budgeted*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "grantee_budget_category_group": {
+        "endpoint": "grantee_budget_category_group",
+        "fields": {
+            "code_column_hidden": {"data_type": "bool", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "description_column_hidden": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "grantee_budget_category_group_relationship": {
+        "endpoint": "grantee_budget_category_group_relationship",
+        "fields": {
+            "archived_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "grantee_budget_category_group_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "grantee_budget_category_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "position": {"data_type": "bigint", "field_type": "column"},
+            "unit_rate_enabled": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "grantee_budget_tracker_period_amendment": {
+        "endpoint": "grantee_budget_tracker_period_amendment",
+        "fields": {
+            "amended_amount": {"data_type": "double", "field_type": "column"},
+            "amendment_id": {"data_type": "bigint", "field_type": "column"},
+            "grantee_budget_tracker_period_datum_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "grantee_whitelist": {
+        "endpoint": "grantee_whitelist",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "group": {
+        "endpoint": "group",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deprecated": {"data_type": "bool", "field_type": "column"},
+            "hierarchical": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "group_member": {
+        "endpoint": "group_member",
+        "fields": {
+            "ancestry": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "group_id": {"data_type": "bigint", "field_type": "column"},
+            "groupable_id": {"data_type": "bigint", "field_type": "column"},
+            "groupable_type": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "gs_stream": {
+        "endpoint": "gs_stream",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "author_name": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "entry_date": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_temp_precreate": {"data_type": "bool", "field_type": "column"},
+            "media": {"data_type": "text", "field_type": "column"},
+            "metrics": {"data_type": "text", "field_type": "column"},
+            "organization_id": {"data_type": "bigint", "field_type": "column"},
+            "sentiment": {"data_type": "bigint", "field_type": "column"},
+            "title": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "uid": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "gs_stream_document": {
+        "endpoint": "gs_stream_document",
+        "fields": {
+            "attachment": {"data_type": "text", "field_type": "column"},
+            "attachment_type": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "display_name": {"data_type": "text", "field_type": "column"},
+            "file_name": {"data_type": "text", "field_type": "column"},
+            "gs_stream_document_id": {"data_type": "bigint", "field_type": "column"},
+            "gs_stream_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "gs_stream_gs_tag": {
+        "endpoint": "gs_stream_gs_tag",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "gs_stream_id": {"data_type": "bigint", "field_type": "column"},
+            "gs_tag_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "gs_stream_request": {
+        "endpoint": "gs_stream_request",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "gs_stream_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "gs_tag": {
+        "endpoint": "gs_tag",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "indicator": {
+        "endpoint": "indicator",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "baseline": {"data_type": "double", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "decimal_places": {"data_type": "bigint", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "exclude_from_mel": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "outcome_id": {"data_type": "bigint", "field_type": "column"},
+            "projected": {"data_type": "double", "field_type": "column"},
+            "retired": {"data_type": "bool", "field_type": "column"},
+            "start_at": {"data_type": "timestamp", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "unit_label": {"data_type": "text", "field_type": "column"},
+            "unit_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "integration_filter": {
+        "endpoint": "integration_filter",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "custom_model_type": {"data_type": "text", "field_type": "column"},
+            "filters": {"data_type": "text", "field_type": "column"},
+            "filters_v2": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "integration": {"data_type": "text", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "v2": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "job": {
+        "endpoint": "job",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "delayed_job_id": {"data_type": "bigint", "field_type": "column"},
+            "enter_params": {"data_type": "text", "field_type": "column"},
+            "exit_params": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "job_type": {"data_type": "text", "field_type": "column"},
+            "list_template": {"data_type": "text", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "show_template": {"data_type": "text", "field_type": "column"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "status_explanation": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "language": {
+        "endpoint": "language",
+        "fields": {
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "iso_name": {"data_type": "text", "field_type": "column"},
+            "locale": {"data_type": "text", "field_type": "column"},
+            "native_name": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "login_attempt": {
+        "endpoint": "login_attempt",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "impersonator_user_id": {"data_type": "bigint", "field_type": "column"},
+            "ip_address": {"data_type": "text", "field_type": "column"},
+            "is_sso_login": {"data_type": "bool", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "loi": {
+        "endpoint": "loi",
+        "fields": {
+            "address": {"data_type": "text", "field_type": "column"},
+            "address_differs*": {"data_type": "bool", "field_type": "column"},
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "amount_requested": {"data_type": "double", "field_type": "column"},
+            "amount_requested_fx_2": {"data_type": "double", "field_type": "column"},
+            "amount_requested_local": {"data_type": "double", "field_type": "column"},
+            "applicant": {"data_type": "text", "field_type": "column"},
+            "budget_check*": {"data_type": "bool", "field_type": "column"},
+            "budget_link*": {"data_type": "text", "field_type": "column"},
+            "chapter_officer*": {"data_type": "text", "field_type": "column"},
+            "city": {"data_type": "text", "field_type": "column"},
+            "confirm_recipient*": {"data_type": "bool", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "duration_in_months": {"data_type": "bigint", "field_type": "column"},
+            "email": {"data_type": "text", "field_type": "column"},
+            "fdtn_country*": {"data_type": "text", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "first_name_1*": {"data_type": "text", "field_type": "column"},
+            "fx_applied_date_1": {"data_type": "date", "field_type": "column"},
+            "fx_applied_date_2": {"data_type": "date", "field_type": "column"},
+            "fx_date_1": {"data_type": "date", "field_type": "column"},
+            "fx_date_2": {"data_type": "date", "field_type": "column"},
+            "fx_rate1": {"data_type": "double", "field_type": "column"},
+            "fx_rate2": {"data_type": "double", "field_type": "column"},
+            "fx_spotrate_1": {"data_type": "bool", "field_type": "column"},
+            "fx_spotrate_2": {"data_type": "bool", "field_type": "column"},
+            "fx_type_id": {"data_type": "bigint", "field_type": "column"},
+            "geo_country_id": {"data_type": "bigint", "field_type": "column"},
+            "geo_state_id": {"data_type": "bigint", "field_type": "column"},
+            "grant_begins_at": {"data_type": "timestamp", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "independent_applicant_have_bank_account*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "independent_applicant_or_organization*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "is_org_chapter*": {"data_type": "text", "field_type": "column"},
+            "is_org_chapter_non_profit*": {"data_type": "text", "field_type": "column"},
+            "is_temp_precreate": {"data_type": "bool", "field_type": "column"},
+            "iso_country*": {"data_type": "text", "field_type": "column"},
+            "iso_country_user*": {"data_type": "text", "field_type": "column"},
+            "last_name_1*": {"data_type": "text", "field_type": "column"},
+            "linkedin_profile*": {"data_type": "text", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "login": {"data_type": "text", "field_type": "column"},
+            "loi_applicant": {"data_type": "text", "field_type": "string"},
+            "loi_email": {"data_type": "text", "field_type": "string"},
+            "loi_foundation_region*": {"data_type": "text", "field_type": "column"},
+            "loi_organization_name": {"data_type": "text", "field_type": "string"},
+            "loi_phone": {"data_type": "text", "field_type": "string"},
+            "loi_project_title": {"data_type": "text", "field_type": "string"},
+            "loi_question_1*": {"data_type": "text", "field_type": "column"},
+            "loi_question_2*": {"data_type": "text", "field_type": "column"},
+            "loi_question_3*": {"data_type": "text", "field_type": "column"},
+            "loi_question_4*": {"data_type": "text", "field_type": "column"},
+            "loi_question_5*": {"data_type": "text", "field_type": "column"},
+            "loi_question_6*": {"data_type": "text", "field_type": "column"},
+            "loi_question_7*": {"data_type": "text", "field_type": "column"},
+            "loi_question_8*": {"data_type": "text", "field_type": "column"},
+            "loi_question_9*": {"data_type": "text", "field_type": "column"},
+            "loi_type*": {"data_type": "text", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "mobile": {"data_type": "text", "field_type": "column"},
+            "opt_in_marketing*": {"data_type": "bool", "field_type": "column"},
+            "org_bureau_region*": {"data_type": "text", "field_type": "column"},
+            "org_email": {"data_type": "text", "field_type": "column"},
+            "org_fax": {"data_type": "text", "field_type": "column"},
+            "org_geo_country_id": {"data_type": "bigint", "field_type": "column"},
+            "org_geo_state_id": {"data_type": "bigint", "field_type": "column"},
+            "org_have_bank_account*": {"data_type": "text", "field_type": "column"},
+            "org_phone": {"data_type": "text", "field_type": "column"},
+            "org_tax_exempt*": {"data_type": "text", "field_type": "column"},
+            "org_url": {"data_type": "text", "field_type": "column"},
+            "organization_legal_name*": {"data_type": "text", "field_type": "column"},
+            "organization_mission*": {"data_type": "text", "field_type": "column"},
+            "organization_name": {"data_type": "text", "field_type": "column"},
+            "organization_name_foreign_language": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "organization_type*": {"data_type": "text", "field_type": "column"},
+            "personal_bureau_region*": {"data_type": "text", "field_type": "column"},
+            "phone": {"data_type": "text", "field_type": "column"},
+            "phone_extension*": {"data_type": "text", "field_type": "column"},
+            "postal_code": {"data_type": "text", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "program_interest*": {"data_type": "text", "field_type": "column"},
+            "program_name": {"data_type": "text", "field_type": "string"},
+            "project_summary": {"data_type": "text", "field_type": "column"},
+            "project_summary_native": {"data_type": "text", "field_type": "column"},
+            "project_summary_native_updated": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "project_title": {"data_type": "text", "field_type": "column"},
+            "rejection_reason*": {"data_type": "text", "field_type": "column"},
+            "request_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "researcher_publications*": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "state": {"data_type": "bigint", "field_type": "column"},
+            "state_1*": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "store_information*": {"data_type": "bool", "field_type": "column"},
+            "street_address2": {"data_type": "text", "field_type": "column"},
+            "tax_id": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "token": {"data_type": "text", "field_type": "column"},
+            "token_created_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_geo_country_id": {"data_type": "bigint", "field_type": "column"},
+            "user_geo_state_id": {"data_type": "bigint", "field_type": "column"},
+            "user_title": {"data_type": "text", "field_type": "column"},
+            "year_founded*": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "machine_event": {
+        "endpoint": "machine_event",
+        "fields": {
+            "button_name": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "draft_guard": {"data_type": "text", "field_type": "column"},
+            "draft_guard_submit": {"data_type": "bool", "field_type": "column"},
+            "filter": {"data_type": "text", "field_type": "column"},
+            "guard": {"data_type": "text", "field_type": "column"},
+            "guard_migration_confirmed": {"data_type": "bool", "field_type": "column"},
+            "guard_migration_status": {"data_type": "text", "field_type": "column"},
+            "guard_strategy": {"data_type": "text", "field_type": "column"},
+            "has_custom_ruby_code": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_validation_suppressed": {"data_type": "bool", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "machine_workflow_id": {"data_type": "bigint", "field_type": "column"},
+            "on_transition": {"data_type": "text", "field_type": "column"},
+            "on_transition_migration_confirmed": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "on_transition_migration_status": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "to_state_id": {"data_type": "bigint", "field_type": "column"},
+            "unsafe_guard": {"data_type": "text", "field_type": "column"},
+            "unsafe_on_transition": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "machine_event_from_state": {
+        "endpoint": "machine_event_from_state",
+        "fields": {
+            "button_order": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "from_state_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "machine_event_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "machine_event_role": {
+        "endpoint": "machine_event_role",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "machine_event_id": {"data_type": "bigint", "field_type": "column"},
+            "role_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "machine_model_type": {
+        "endpoint": "machine_model_type",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "next_auto_increment_num": {"data_type": "bigint", "field_type": "column"},
+            "segment_model_attribute_ids": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "show_in_plus_menu": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "machine_state": {
+        "endpoint": "machine_state",
+        "fields": {
+            "after_enter": {"data_type": "text", "field_type": "column"},
+            "after_enter_migration_confirmed": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "after_enter_migration_status": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "allowed_roles": {"data_type": "text", "field_type": "column"},
+            "before_validation_enter": {"data_type": "text", "field_type": "column"},
+            "before_validation_enter_migration_confirmed": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "before_validation_enter_migration_status": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "draft_after_enter": {"data_type": "text", "field_type": "column"},
+            "draft_after_enter_submit": {"data_type": "bool", "field_type": "column"},
+            "draft_before_validation_enter": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "draft_before_validation_enter_submit": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "external_description": {"data_type": "text", "field_type": "column"},
+            "has_custom_ruby_code": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "state_order": {"data_type": "bigint", "field_type": "column"},
+            "state_type": {"data_type": "text", "field_type": "column"},
+            "theme_switching_enabled": {"data_type": "bool", "field_type": "column"},
+            "transition_name": {"data_type": "text", "field_type": "column"},
+            "unsafe_after_enter": {"data_type": "text", "field_type": "column"},
+            "unsafe_before_validation_enter": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "machine_state_category": {
+        "endpoint": "machine_state_category",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "machine_category_id": {"data_type": "bigint", "field_type": "column"},
+            "machine_state_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "machine_state_group": {
+        "endpoint": "machine_state_group",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "machine_state_ids": {"data_type": "text", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "machine_workflow": {
+        "endpoint": "machine_workflow",
+        "fields": {
+            "characteristics": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "model_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "related_model_relationship": {"data_type": "text", "field_type": "column"},
+            "related_model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "workflow_order": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "machine_workflow_fork": {
+        "endpoint": "machine_workflow_fork",
+        "fields": {
+            "after_state": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "related_model_id": {"data_type": "bigint", "field_type": "column"},
+            "related_model_type": {"data_type": "text", "field_type": "column"},
+            "role_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "matching_gift_profile": {
+        "endpoint": "matching_gift_profile",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "annual_limit": {"data_type": "double", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "match_multiplier": {"data_type": "double", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "minimum_match_amount": {"data_type": "double", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "mention": {
+        "endpoint": "mention",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "mentionable_id": {"data_type": "bigint", "field_type": "column"},
+            "mentionable_type": {"data_type": "text", "field_type": "column"},
+            "post_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "migrate_row": {
+        "endpoint": "migrate_row",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migration_config_model_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "migration_id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "new_row": {"data_type": "bool", "field_type": "column"},
+            "row_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "migration": {
+        "endpoint": "migration",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_timestamp_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrated_at": {"data_type": "timestamp", "field_type": "column"},
+            "migration_config_id": {"data_type": "bigint", "field_type": "column"},
+            "migration_file_id": {"data_type": "bigint", "field_type": "column"},
+            "migration_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "migration_config": {
+        "endpoint": "migration_config",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "file_type": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "ignore_first_row": {"data_type": "bool", "field_type": "column"},
+            "ignore_last_row": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "migration_config_column": {
+        "endpoint": "migration_config_column",
+        "fields": {
+            "component_name": {"data_type": "text", "field_type": "column"},
+            "config": {"data_type": "bigint", "field_type": "column"},
+            "config_type": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "csv_fixed_column": {"data_type": "bigint", "field_type": "column"},
+            "file_column_name": {"data_type": "text", "field_type": "column"},
+            "fixed_col_end": {"data_type": "bigint", "field_type": "column"},
+            "fixed_col_start": {"data_type": "bigint", "field_type": "column"},
+            "hard_coded_value": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "matching_field": {"data_type": "bool", "field_type": "column"},
+            "matching_model_attribute_name": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "matching_value": {"data_type": "text", "field_type": "column"},
+            "migration_config_id": {"data_type": "bigint", "field_type": "column"},
+            "migration_config_model_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "migration_file_id": {"data_type": "bigint", "field_type": "column"},
+            "migration_order": {"data_type": "bigint", "field_type": "column"},
+            "model_attribute_name": {"data_type": "text", "field_type": "column"},
+            "must_match_existing": {"data_type": "bool", "field_type": "column"},
+            "number_implicit_decimals": {"data_type": "bigint", "field_type": "column"},
+            "required": {"data_type": "bool", "field_type": "column"},
+            "sample_content": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "migration_config_model": {
+        "endpoint": "migration_config_model",
+        "fields": {
+            "allow_modification": {"data_type": "bool", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_optional": {"data_type": "bool", "field_type": "column"},
+            "migration_config_id": {"data_type": "bigint", "field_type": "column"},
+            "model_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "must_match_existing": {"data_type": "bool", "field_type": "column"},
+            "report_stats": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "migration_config_model_link": {
+        "endpoint": "migration_config_model_link",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "from_migration_model_id": {"data_type": "bigint", "field_type": "column"},
+            "from_model_attribute_name": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "link_order": {"data_type": "bigint", "field_type": "column"},
+            "matching_link": {"data_type": "bool", "field_type": "column"},
+            "migration_config_id": {"data_type": "bigint", "field_type": "column"},
+            "to_migration_model_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "migration_file": {
+        "endpoint": "migration_file",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "model_attribute": {
+        "endpoint": "model_attribute",
+        "fields": {
+            "api_style": {"data_type": "text", "field_type": "column"},
+            "attribute_type": {"data_type": "text", "field_type": "column"},
+            "calculation": {"data_type": "bool", "field_type": "column"},
+            "calculation_enabled": {"data_type": "bool", "field_type": "column"},
+            "calculation_order": {"data_type": "bigint", "field_type": "column"},
+            "calculation_related_model_type": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "calculation_relationship_field": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "decimal_format": {"data_type": "text", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "display_to_s": {"data_type": "bool", "field_type": "column"},
+            "force_dropdown": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "include_in_export": {"data_type": "bool", "field_type": "column"},
+            "include_in_fluxx_insight": {"data_type": "bool", "field_type": "column"},
+            "include_in_fulltext_search": {"data_type": "bool", "field_type": "column"},
+            "legacy_name": {"data_type": "text", "field_type": "column"},
+            "legacy_table": {"data_type": "text", "field_type": "column"},
+            "mapped_attribute": {"data_type": "text", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "model_type_enum": {"data_type": "bigint", "field_type": "column"},
+            "multi_allowed": {"data_type": "bool", "field_type": "column"},
+            "native_language_attribute_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "parent_id": {"data_type": "bigint", "field_type": "column"},
+            "round_calculated_value": {"data_type": "bool", "field_type": "column"},
+            "show_related_tab": {"data_type": "bool", "field_type": "column"},
+            "translatable": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "use_local_currency": {"data_type": "bool", "field_type": "column"},
+            "value_model_type": {"data_type": "text", "field_type": "column"},
+            "value_model_type_enum": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "model_attribute_choice": {
+        "endpoint": "model_attribute_choice",
+        "fields": {
+            "amount_value": {"data_type": "double", "field_type": "column"},
+            "boolean_value": {"data_type": "bool", "field_type": "column"},
+            "choice_number": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "date_value": {"data_type": "date", "field_type": "column"},
+            "datetime_value": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "integer_value": {"data_type": "bigint", "field_type": "column"},
+            "model_attribute_id": {"data_type": "bigint", "field_type": "column"},
+            "model_attribute_value_id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type_enum": {"data_type": "bigint", "field_type": "column"},
+            "model_value_id": {"data_type": "bigint", "field_type": "column"},
+            "string_equivalent": {"data_type": "text", "field_type": "column"},
+            "string_value": {"data_type": "text", "field_type": "column"},
+            "text_value": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "value_model_type_enum": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "model_clone_configuration": {
+        "endpoint": "model_clone_configuration",
+        "fields": {
+            "after_create": {"data_type": "text", "field_type": "column"},
+            "allowed_roles": {"data_type": "text", "field_type": "column"},
+            "allowed_states": {"data_type": "text", "field_type": "column"},
+            "card_label": {"data_type": "text", "field_type": "column"},
+            "columns": {"data_type": "text", "field_type": "column"},
+            "create_relationship": {"data_type": "bool", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "label": {"data_type": "text", "field_type": "column"},
+            "model_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "to_state": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "model_document_dynamic_recipient": {
+        "endpoint": "model_document_dynamic_recipient",
+        "fields": {
+            "affiliate_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "full_name_string": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_to": {"data_type": "bool", "field_type": "column"},
+            "model_document_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "model_document_master": {
+        "endpoint": "model_document_master",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "current_model_document_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "current_sequence": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "native_model_document_master_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "translator_downloads_data": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "model_document_sign": {
+        "endpoint": "model_document_sign",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_document_sign_envelope_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "order_in_envelope": {"data_type": "bigint", "field_type": "column"},
+            "signer_delivered_date_time": {"data_type": "date", "field_type": "column"},
+            "signer_email": {"data_type": "text", "field_type": "column"},
+            "signer_model_relationship": {"data_type": "text", "field_type": "column"},
+            "signer_name": {"data_type": "text", "field_type": "column"},
+            "signer_role_name": {"data_type": "text", "field_type": "column"},
+            "signer_signed_date_time": {"data_type": "date", "field_type": "column"},
+            "signer_status": {"data_type": "text", "field_type": "column"},
+            "signer_user_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "model_document_sign_envelope": {
+        "endpoint": "model_document_sign_envelope",
+        "fields": {
+            "body": {"data_type": "text", "field_type": "column"},
+            "cc_list": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "envelope_id": {"data_type": "text", "field_type": "column"},
+            "envelope_status": {"data_type": "text", "field_type": "column"},
+            "envelope_status_change_time": {
+                "data_type": "date",
+                "field_type": "column",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_document_id": {"data_type": "bigint", "field_type": "column"},
+            "subject": {"data_type": "text", "field_type": "column"},
+            "template_id": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "model_document_template": {
+        "endpoint": "model_document_template",
+        "fields": {
+            "auto_generate_on_different_record_language": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "category": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "disable_liquid_html_strip": {"data_type": "bool", "field_type": "column"},
+            "display_in_adhoc_list": {"data_type": "bool", "field_type": "column"},
+            "disposition": {"data_type": "text", "field_type": "column"},
+            "do_not_insert_page_break": {"data_type": "bool", "field_type": "column"},
+            "document": {"data_type": "text", "field_type": "column"},
+            "document_content_type": {"data_type": "text", "field_type": "column"},
+            "document_type": {"data_type": "text", "field_type": "column"},
+            "dynamic_recipientable": {"data_type": "bool", "field_type": "column"},
+            "filename": {"data_type": "text", "field_type": "column"},
+            "footer_height": {"data_type": "bigint", "field_type": "column"},
+            "generate_pdf_snapshot": {"data_type": "bool", "field_type": "column"},
+            "generate_state": {"data_type": "text", "field_type": "column"},
+            "header_height": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "language_id": {"data_type": "bigint", "field_type": "column"},
+            "letter_type": {"data_type": "text", "field_type": "column"},
+            "model_document_type_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "parent_document_id": {"data_type": "bigint", "field_type": "column"},
+            "pdf_snapshot_user_profile_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "related_model_document_template_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "show_related_posts": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "model_email": {
+        "endpoint": "model_email",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "body": {"data_type": "text", "field_type": "column"},
+            "cc": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "from": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "outlook_conversation_id": {"data_type": "text", "field_type": "column"},
+            "outlook_message_id": {"data_type": "text", "field_type": "column"},
+            "pop3_mail_unique_id": {"data_type": "text", "field_type": "column"},
+            "received_at": {"data_type": "timestamp", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "subject": {"data_type": "text", "field_type": "column"},
+            "to": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "model_method": {
+        "endpoint": "model_method",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "draft_dyn_method": {"data_type": "text", "field_type": "column"},
+            "draft_dyn_method_submit": {"data_type": "bool", "field_type": "column"},
+            "dyn_method": {"data_type": "text", "field_type": "column"},
+            "dyn_method_migration_confirmed": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "dyn_method_migration_status": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "has_custom_ruby_code": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "method_type": {"data_type": "text", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "unsafe_dyn_method": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "model_summary": {
+        "endpoint": "model_summary",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "generated_text": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "word_count": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "model_validation": {
+        "endpoint": "model_validation",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "machine_state_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "timing": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "validation_condition": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "model_validation_field": {
+        "endpoint": "model_validation_field",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "custom_name": {"data_type": "text", "field_type": "column"},
+            "custom_validation": {"data_type": "text", "field_type": "column"},
+            "dyn_name": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "max_length": {"data_type": "bigint", "field_type": "column"},
+            "min_length": {"data_type": "bigint", "field_type": "column"},
+            "model_name_to_validate": {"data_type": "text", "field_type": "column"},
+            "model_validation_id": {"data_type": "bigint", "field_type": "column"},
+            "unsafe_custom_validation": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "validation_unique": {"data_type": "bool", "field_type": "column"},
+        },
+    },
+    "modification": {
+        "endpoint": "modification",
+        "fields": {
+            "attr": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "new_value": {"data_type": "text", "field_type": "column"},
+            "old_value": {"data_type": "text", "field_type": "column"},
+            "trackable_id": {"data_type": "bigint", "field_type": "column"},
+            "trackable_type": {"data_type": "text", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "multi_element_choice": {
+        "endpoint": "multi_element_choice",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "multi_element_value_id": {"data_type": "bigint", "field_type": "column"},
+            "target_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "multi_element_group": {
+        "endpoint": "multi_element_group",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_attribute_name": {"data_type": "text", "field_type": "column"},
+            "target_class_name": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "multi_element_value": {
+        "endpoint": "multi_element_value",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "dependent_multi_element_value_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "description": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "multi_element_group_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "value": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "note": {
+        "endpoint": "note",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "attribute_name": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "form_element_id": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "notable_id": {"data_type": "bigint", "field_type": "column"},
+            "notable_type": {"data_type": "text", "field_type": "column"},
+            "note": {"data_type": "text", "field_type": "column"},
+            "private": {"data_type": "bool", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "ofac_person": {
+        "endpoint": "ofac_person",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "ofac_result_id": {"data_type": "bigint", "field_type": "column"},
+            "ofac_run_at": {"data_type": "timestamp", "field_type": "column"},
+            "ofac_run_id": {"data_type": "bigint", "field_type": "column"},
+            "ofac_score": {"data_type": "bigint", "field_type": "column"},
+            "ofac_state": {"data_type": "text", "field_type": "column"},
+            "organization_id": {"data_type": "bigint", "field_type": "column"},
+            "title": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "widget_label": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "organization_connection_request": {
+        "endpoint": "organization_connection_request",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "organization_id": {"data_type": "bigint", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+            "user_organization_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "outcome": {
+        "endpoint": "outcome",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "exclude_from_mel": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "outcomeable_id": {"data_type": "bigint", "field_type": "column"},
+            "outcomeable_type": {"data_type": "text", "field_type": "column"},
+            "retired": {"data_type": "bool", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "periodic_sync": {
+        "endpoint": "periodic_sync",
+        "fields": {
+            "configuration": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "last_sync_at": {"data_type": "timestamp", "field_type": "column"},
+            "last_sync_result": {"data_type": "text", "field_type": "column"},
+            "locked_at": {"data_type": "timestamp", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "perishable_token": {
+        "endpoint": "perishable_token",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "expires_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "token": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "permission_delegator": {
+        "endpoint": "permission_delegator",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_attribute_id": {"data_type": "bigint", "field_type": "column"},
+            "model_attribute_ids": {"data_type": "text", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_profile_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "persona": {
+        "endpoint": "persona",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+            "user_profile_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "post": {
+        "endpoint": "post",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "content": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "parent_id": {"data_type": "bigint", "field_type": "column"},
+            "private": {"data_type": "bool", "field_type": "column"},
+            "sphinx_id": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "post_relationship": {
+        "endpoint": "post_relationship",
+        "fields": {
+            "attribute_name": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "form_element_id": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "post_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "sphinx_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "post_view": {
+        "endpoint": "post_view",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "post_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "primary_contact_tenure": {
+        "endpoint": "primary_contact_tenure",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "end_date": {"data_type": "date", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "start_date": {"data_type": "date", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_organization_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "program_budget": {
+        "endpoint": "program_budget",
+        "fields": {
+            "amount": {"data_type": "double", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "fx_rate1": {"data_type": "double", "field_type": "column"},
+            "fx_rate2": {"data_type": "double", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "initiative_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "program_id": {"data_type": "bigint", "field_type": "column"},
+            "spending_year": {"data_type": "text", "field_type": "column"},
+            "sub_initiative_id": {"data_type": "bigint", "field_type": "column"},
+            "sub_program_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "project": {
+        "endpoint": "project",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_temp_precreate": {"data_type": "bool", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "project_end_date*": {"data_type": "date", "field_type": "column"},
+            "project_start_date*": {"data_type": "date", "field_type": "column"},
+            "project_type*": {"data_type": "text", "field_type": "column"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "title": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "project_list": {
+        "endpoint": "project_list",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "list_order": {"data_type": "bigint", "field_type": "column"},
+            "list_type*": {"data_type": "text", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "project_id": {"data_type": "bigint", "field_type": "column"},
+            "title": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "project_list_item": {
+        "endpoint": "project_list_item",
+        "fields": {
+            "assigned_user_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "due_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "item_completed": {"data_type": "bool", "field_type": "column"},
+            "item_order": {"data_type": "bigint", "field_type": "column"},
+            "list_item_text": {"data_type": "text", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "project_list_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "project_organization": {
+        "endpoint": "project_organization",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "organization_id": {"data_type": "bigint", "field_type": "column"},
+            "project_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "project_request": {
+        "endpoint": "project_request",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "granted": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "project_id": {"data_type": "bigint", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "project_user": {
+        "endpoint": "project_user",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "project_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "real_me_invitation": {
+        "endpoint": "real_me_invitation",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "token": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "realtime_update": {
+        "endpoint": "realtime_update",
+        "fields": {
+            "action": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta_attributes": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_class": {"data_type": "text", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "target_user_id": {"data_type": "bigint", "field_type": "column"},
+            "type_name": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "recommendation_email": {
+        "endpoint": "recommendation_email",
+        "fields": {
+            "body": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "from": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "reply_to": {"data_type": "text", "field_type": "column"},
+            "return_path": {"data_type": "text", "field_type": "column"},
+            "status": {"data_type": "text", "field_type": "column"},
+            "subject": {"data_type": "text", "field_type": "column"},
+            "to": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "reduce_indexing_record": {
+        "endpoint": "reduce_indexing_record",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "relationship": {
+        "endpoint": "relationship",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "archived": {"data_type": "bool", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "principal_entity_id": {"data_type": "bigint", "field_type": "column"},
+            "principal_entity_type": {"data_type": "text", "field_type": "column"},
+            "relatable_id": {"data_type": "bigint", "field_type": "column"},
+            "relatable_type": {"data_type": "text", "field_type": "column"},
+            "related_model_id": {"data_type": "bigint", "field_type": "column"},
+            "related_relatable_id": {"data_type": "bigint", "field_type": "column"},
+            "related_relatable_type": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "relationship_schema_mapping": {
+        "endpoint": "relationship_schema_mapping",
+        "fields": {
+            "active": {"data_type": "bool", "field_type": "column"},
+            "column_type": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_cdt": {"data_type": "bool", "field_type": "column"},
+            "is_shim": {"data_type": "bool", "field_type": "column"},
+            "is_zoom": {"data_type": "bool", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "related_model_type": {"data_type": "text", "field_type": "column"},
+            "request_type_identifier": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_profile_category": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "request_amendment": {
+        "endpoint": "request_amendment",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "amend_flag*": {"data_type": "text", "field_type": "column"},
+            "amended_at": {"data_type": "date", "field_type": "column"},
+            "amendment_attestation*": {"data_type": "bool", "field_type": "column"},
+            "amendment_budget_year*": {"data_type": "bigint", "field_type": "column"},
+            "amendment_id_to_text*": {"data_type": "text", "field_type": "column"},
+            "amendment_type*": {"data_type": "text", "field_type": "column"},
+            "amount_difference*": {"data_type": "double", "field_type": "column"},
+            "amount_recommended": {"data_type": "double", "field_type": "column"},
+            "amount_recommended_fx_2": {"data_type": "double", "field_type": "column"},
+            "amount_recommended_local": {"data_type": "double", "field_type": "column"},
+            "attestation_date*": {"data_type": "timestamp", "field_type": "column"},
+            "budget_changes*": {"data_type": "text", "field_type": "column"},
+            "change_in_activities_or_deliverables*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "comments_to_grantee*": {"data_type": "text", "field_type": "column"},
+            "cost_category_change_type*": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "describe_change_of_scope*": {"data_type": "text", "field_type": "column"},
+            "describe_the_amendment_needed*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "duration": {"data_type": "bigint", "field_type": "column"},
+            "end_date": {"data_type": "timestamp", "field_type": "column"},
+            "equipment_budget_change_comment*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "feedback_addressed*": {"data_type": "text", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "fx_applied_date_1": {"data_type": "date", "field_type": "column"},
+            "fx_applied_date_2": {"data_type": "date", "field_type": "column"},
+            "fx_date_1": {"data_type": "date", "field_type": "column"},
+            "fx_date_2": {"data_type": "date", "field_type": "column"},
+            "fx_rate1": {"data_type": "double", "field_type": "column"},
+            "fx_rate2": {"data_type": "double", "field_type": "column"},
+            "fx_spotrate_1": {"data_type": "bool", "field_type": "column"},
+            "fx_spotrate_2": {"data_type": "bool", "field_type": "column"},
+            "fx_type_id": {"data_type": "bigint", "field_type": "column"},
+            "gm_check_1*": {"data_type": "bool", "field_type": "column"},
+            "gm_check_2*": {"data_type": "bool", "field_type": "column"},
+            "gm_check_3*": {"data_type": "bool", "field_type": "column"},
+            "grant_budget_year*": {"data_type": "bigint", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_city": {"data_type": "text", "field_type": "string"},
+            "grantee_email": {"data_type": "text", "field_type": "string"},
+            "grantee_fax": {"data_type": "text", "field_type": "string"},
+            "grantee_name_first_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_name_last_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_phone": {"data_type": "text", "field_type": "string"},
+            "grantee_street_address": {"data_type": "text", "field_type": "string"},
+            "grantee_street_address_2": {"data_type": "text", "field_type": "string"},
+            "grantee_user_first_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_user_last_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_temp_precreate": {"data_type": "bool", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "new_equipment_amount*": {"data_type": "double", "field_type": "column"},
+            "new_extra_column": {"data_type": "text", "field_type": "column"},
+            "new_indirect_costs_amount_up_to_20_of_direct_costs*": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "new_indirect_costs_budget_change_comment*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "new_other_direct_costs_amount*": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "new_personnel_amount*": {"data_type": "double", "field_type": "column"},
+            "new_professional_services_amount*": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "new_subawards_amount*": {"data_type": "double", "field_type": "column"},
+            "new_travel_amount*": {"data_type": "double", "field_type": "column"},
+            "note": {"data_type": "text", "field_type": "column"},
+            "old_amount_recommended": {"data_type": "double", "field_type": "column"},
+            "old_amount_recommended_fx_2": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "old_amount_recommended_local": {
+                "data_type": "double",
+                "field_type": "column",
+            },
+            "old_duration": {"data_type": "bigint", "field_type": "column"},
+            "old_end_date": {"data_type": "timestamp", "field_type": "column"},
+            "old_extra_column": {"data_type": "text", "field_type": "column"},
+            "old_start_date": {"data_type": "timestamp", "field_type": "column"},
+            "original": {"data_type": "bool", "field_type": "column"},
+            "other_direct_costs_budget_change_comment*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "parent_request_id*": {"data_type": "text", "field_type": "column"},
+            "payment_changes*": {"data_type": "text", "field_type": "column"},
+            "personnel_budget_change_narrative*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "professional_services_budget_change_comment*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "program_org_name": {"data_type": "text", "field_type": "string"},
+            "reason_for_amendment*": {"data_type": "text", "field_type": "column"},
+            "recommendations*": {"data_type": "text", "field_type": "column"},
+            "reporting_changes*": {"data_type": "text", "field_type": "column"},
+            "request_grant_id": {"data_type": "bigint", "field_type": "string"},
+            "request_hierarchy": {"data_type": "text", "field_type": "string"},
+            "request_org_acronym": {"data_type": "text", "field_type": "string"},
+            "request_org_name": {"data_type": "text", "field_type": "string"},
+            "request_type": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "start_date": {"data_type": "timestamp", "field_type": "column"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "subawards_budget_change_comment*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "travel_budget_change_comment*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "request_amendment_model_themes": {
+        "endpoint": "request_amendment_model_themes",
+        "fields": {
+            "active": {"data_type": "bool", "field_type": "column"},
+            "amendment_model_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "limit": {"data_type": "bool", "field_type": "column"},
+            "request_model_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "request_evaluation_metric": {
+        "endpoint": "request_evaluation_metric",
+        "fields": {
+            "achieved": {"data_type": "bool", "field_type": "column"},
+            "comment": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "timeframe": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "request_funding_source": {
+        "endpoint": "request_funding_source",
+        "fields": {
+            "board_authority_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "document_file_name": {"data_type": "text", "field_type": "column"},
+            "funding_amount": {"data_type": "double", "field_type": "column"},
+            "funding_amount_fx_2": {"data_type": "double", "field_type": "column"},
+            "funding_amount_local": {"data_type": "double", "field_type": "column"},
+            "funding_source_allocation_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "fx_applied_date_1": {"data_type": "date", "field_type": "column"},
+            "fx_applied_date_2": {"data_type": "date", "field_type": "column"},
+            "fx_date_1": {"data_type": "date", "field_type": "column"},
+            "fx_date_2": {"data_type": "date", "field_type": "column"},
+            "fx_rate1": {"data_type": "double", "field_type": "column"},
+            "fx_rate2": {"data_type": "double", "field_type": "column"},
+            "fx_spotrate_1": {"data_type": "bool", "field_type": "column"},
+            "fx_spotrate_2": {"data_type": "bool", "field_type": "column"},
+            "fx_type_id": {"data_type": "bigint", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "initiative_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "program_id": {"data_type": "bigint", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "request_regrant_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "sub_initiative_id": {"data_type": "bigint", "field_type": "column"},
+            "sub_program_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "request_geo_state": {
+        "endpoint": "request_geo_state",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "geo_state_id": {"data_type": "bigint", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "request_organization": {
+        "endpoint": "request_organization",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "archived": {"data_type": "bool", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "principal_entity_id": {"data_type": "bigint", "field_type": "column"},
+            "principal_entity_type": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "request_outcome": {
+        "endpoint": "request_outcome",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "outcome_id": {"data_type": "bigint", "field_type": "column"},
+            "percent": {"data_type": "bigint", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "request_program": {
+        "endpoint": "request_program",
+        "fields": {
+            "approved_at": {"data_type": "timestamp", "field_type": "column"},
+            "approved_by_user_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "program_id": {"data_type": "bigint", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "request_recommendation": {
+        "endpoint": "request_recommendation",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "body": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "request_recommender_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "request_recommender": {
+        "endpoint": "request_recommender",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "email": {"data_type": "text", "field_type": "column"},
+            "first_name": {"data_type": "text", "field_type": "column"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "last_name": {"data_type": "text", "field_type": "column"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "submission_token": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "token_expiry": {"data_type": "timestamp", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "request_regrant": {
+        "endpoint": "request_regrant",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "amount": {"data_type": "double", "field_type": "column"},
+            "base_regrant_id": {"data_type": "text", "field_type": "column"},
+            "contig_id": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "full_name": {"data_type": "text", "field_type": "string"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "granted_at": {"data_type": "timestamp", "field_type": "column"},
+            "grantee_city": {"data_type": "text", "field_type": "string"},
+            "grantee_email": {"data_type": "text", "field_type": "string"},
+            "grantee_fax": {"data_type": "text", "field_type": "string"},
+            "grantee_name_first_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_name_last_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_phone": {"data_type": "text", "field_type": "string"},
+            "grantee_street_address": {"data_type": "text", "field_type": "string"},
+            "grantee_street_address_2": {"data_type": "text", "field_type": "string"},
+            "grantee_user_first_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_user_last_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_temp_precreate": {"data_type": "bool", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "program_id": {"data_type": "bigint", "field_type": "column"},
+            "program_org_name": {"data_type": "text", "field_type": "string"},
+            "regrant_org_name": {"data_type": "text", "field_type": "string"},
+            "request_grant_id": {"data_type": "bigint", "field_type": "string"},
+            "request_hierarchy": {"data_type": "text", "field_type": "string"},
+            "request_org_acronym": {"data_type": "text", "field_type": "string"},
+            "request_org_name": {"data_type": "text", "field_type": "string"},
+            "request_spending_year": {"data_type": "text", "field_type": "string"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "short_summary": {"data_type": "text", "field_type": "column"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "request_review": {
+        "endpoint": "request_review",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "application_type*": {"data_type": "text", "field_type": "column"},
+            "benefits": {"data_type": "text", "field_type": "column"},
+            "budget_rating*": {"data_type": "bigint", "field_type": "column"},
+            "budget_rating_1*": {"data_type": "bigint", "field_type": "column"},
+            "capacity_comments*": {"data_type": "text", "field_type": "column"},
+            "capacity_rating*": {"data_type": "bigint", "field_type": "column"},
+            "clarity_and_feasibility_rating*": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "clarity_comments*": {"data_type": "text", "field_type": "column"},
+            "class_analysis_comments*": {"data_type": "text", "field_type": "column"},
+            "class_analysis_completed*": {"data_type": "text", "field_type": "column"},
+            "class_analysis_needed*": {"data_type": "text", "field_type": "column"},
+            "class_analysis_select*": {"data_type": "text", "field_type": "column"},
+            "comment": {"data_type": "text", "field_type": "column"},
+            "conflict_exists_dynamic*": {"data_type": "bool", "field_type": "column"},
+            "conflict_reported": {"data_type": "bool", "field_type": "column"},
+            "contig_id": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "delayed_conflict*": {"data_type": "bool", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "eligibility_mission_multiple*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "eligibility_mission_multiple_comments*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "environmental_rating*": {"data_type": "bigint", "field_type": "column"},
+            "external_review_average_2024*": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "external_review_score_total_sum_2024*": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "external_review_score_total_sum_2025*": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "external_reviewer": {"data_type": "text", "field_type": "string"},
+            "feedback_answered*": {"data_type": "text", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "goals_and_funding_rating*": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "grant_or_request_id": {"data_type": "bigint", "field_type": "string"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_city": {"data_type": "text", "field_type": "string"},
+            "grantee_email": {"data_type": "text", "field_type": "string"},
+            "grantee_fax": {"data_type": "text", "field_type": "string"},
+            "grantee_name_first_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_name_last_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_org_owner_first_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_org_owner_last_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_phone": {"data_type": "text", "field_type": "string"},
+            "grantee_street_address": {"data_type": "text", "field_type": "string"},
+            "grantee_street_address_2": {"data_type": "text", "field_type": "string"},
+            "grantee_user_first_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "grantee_user_last_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "impact_rating*": {"data_type": "bigint", "field_type": "column"},
+            "implementation_feedback*": {"data_type": "text", "field_type": "column"},
+            "independent_or_university*": {"data_type": "text", "field_type": "column"},
+            "independent_or_university_select*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "innovation_rating*": {"data_type": "bigint", "field_type": "column"},
+            "is_temp_precreate": {"data_type": "bool", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "measurements_rating*": {"data_type": "bigint", "field_type": "column"},
+            "merits": {"data_type": "text", "field_type": "column"},
+            "merits_rating*": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "mission_alignment_exempt*": {"data_type": "text", "field_type": "column"},
+            "mission_alignment_exempt_comments*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "number_different_amount_requested*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "outcomes": {"data_type": "text", "field_type": "column"},
+            "outcomes_rating*": {"data_type": "bigint", "field_type": "column"},
+            "pm_rating*": {"data_type": "bigint", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "program_org_name": {"data_type": "text", "field_type": "string"},
+            "programme_goal_comments*": {"data_type": "text", "field_type": "column"},
+            "programme_goal_rating*": {"data_type": "bigint", "field_type": "column"},
+            "publication_rating*": {"data_type": "bigint", "field_type": "column"},
+            "questions_for_grantee*": {"data_type": "text", "field_type": "column"},
+            "questions_for_grantee_yes*": {"data_type": "text", "field_type": "column"},
+            "questions_for_staff*": {"data_type": "text", "field_type": "column"},
+            "questions_for_staff_yes*": {"data_type": "text", "field_type": "column"},
+            "rating": {"data_type": "bigint", "field_type": "column"},
+            "rating_float": {"data_type": "double", "field_type": "column"},
+            "ratings_formula": {"data_type": "text", "field_type": "column"},
+            "ratings_hash": {"data_type": "text", "field_type": "column"},
+            "reasonability_rating*": {"data_type": "bigint", "field_type": "column"},
+            "recommendation": {"data_type": "text", "field_type": "column"},
+            "request_hierarchy": {"data_type": "text", "field_type": "string"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "request_org_acronym": {"data_type": "text", "field_type": "string"},
+            "request_org_name": {"data_type": "text", "field_type": "string"},
+            "request_review_set_id": {"data_type": "bigint", "field_type": "column"},
+            "research_applied*": {"data_type": "text", "field_type": "column"},
+            "research_collaborative*": {"data_type": "text", "field_type": "column"},
+            "research_novel*": {"data_type": "text", "field_type": "column"},
+            "responds_to_needs_rating*": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "response_to_legal_questions*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "review_type": {"data_type": "text", "field_type": "column"},
+            "reviewer_name*": {"data_type": "text", "field_type": "column"},
+            "roles_and_relationships_comments*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "roles_and_relationships_rating*": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "start_review": {"data_type": "bool", "field_type": "column"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "strengths_weaknesses_feedback*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "suitability_rating*": {"data_type": "bigint", "field_type": "column"},
+            "support_funding*": {"data_type": "text", "field_type": "column"},
+            "support_funding_btn_small*": {"data_type": "text", "field_type": "column"},
+            "support_funding_conditions*": {
+                "data_type": "text",
+                "field_type": "column",
+            },
+            "support_funding_no*": {"data_type": "text", "field_type": "column"},
+            "support_funding_yes*": {"data_type": "double", "field_type": "column"},
+            "sustainability_rating*": {"data_type": "bigint", "field_type": "column"},
+            "technical_rating*": {"data_type": "bigint", "field_type": "column"},
+            "timing_rating*": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "type_of_conflict*": {"data_type": "text", "field_type": "column"},
+            "type_of_conflict_other*": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "request_review_set": {
+        "endpoint": "request_review_set",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "grant_request_workflow_state": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "pre_create_reviews": {"data_type": "bool", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "request_id": {"data_type": "bigint", "field_type": "column"},
+            "request_review_model_theme_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "reviewer_group_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "state": {"data_type": "text", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "states_json": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "request_reviewer_assignment": {
+        "endpoint": "request_reviewer_assignment",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "request_review_set_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "role": {
+        "endpoint": "role",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "roleable_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "role_user": {
+        "endpoint": "role_user",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_for_all": {"data_type": "bool", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "role_id": {"data_type": "bigint", "field_type": "column"},
+            "roleable_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "section": {
+        "endpoint": "section",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "segment": {
+        "endpoint": "segment",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "program_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_tag_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "segment_tag": {
+        "endpoint": "segment_tag",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "retired": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "shared_card": {
+        "endpoint": "shared_card",
+        "fields": {
+            "card": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "sms_log": {
+        "endpoint": "sms_log",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "message_id": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "spending_forecast": {
+        "endpoint": "spending_forecast",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "forecast_amount": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "spending_year": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "sphinx_check": {
+        "endpoint": "sphinx_check",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "check_ts": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "sphinx_id": {"data_type": "bigint", "field_type": "long"},
+            "string": {"data_type": "date", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "stencil": {
+        "endpoint": "stencil",
+        "fields": {
+            "compiled": {"data_type": "bool", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "enabled": {"data_type": "bool", "field_type": "column"},
+            "form_type": {"data_type": "text", "field_type": "column"},
+            "has_custom_ruby_code": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "json": {"data_type": "text", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "model_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "settings_json": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "user_profile": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "stencil_book": {
+        "endpoint": "stencil_book",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "stencil_book_page": {
+        "endpoint": "stencil_book_page",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "stencil_book_id": {"data_type": "bigint", "field_type": "column"},
+            "stencil_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "stencil_form": {
+        "endpoint": "stencil_form",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deployed_version": {"data_type": "text", "field_type": "column"},
+            "form_type": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "stencil_id": {"data_type": "bigint", "field_type": "column"},
+            "underscore_template": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "sub_model": {
+        "endpoint": "sub_model",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "sub_modelable_id": {"data_type": "bigint", "field_type": "column"},
+            "sub_modelable_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "table_view": {
+        "endpoint": "table_view",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "data": {"data_type": "text", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "shared": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "table_view_favorite": {
+        "endpoint": "table_view_favorite",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "tag": {
+        "endpoint": "tag",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "owner_id": {"data_type": "bigint", "field_type": "column"},
+            "private_tag": {"data_type": "bool", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "tagging": {
+        "endpoint": "tagging",
+        "fields": {
+            "context": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "tag_id": {"data_type": "bigint", "field_type": "column"},
+            "taggable_id": {"data_type": "bigint", "field_type": "column"},
+            "taggable_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "transaction_report_dependency": {
+        "endpoint": "transaction_report_dependency",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "request_report_id": {"data_type": "bigint", "field_type": "column"},
+            "request_transaction_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "translator_assignment": {
+        "endpoint": "translator_assignment",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "comment": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "priority": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "translator_assignable_id": {"data_type": "bigint", "field_type": "column"},
+            "translator_assignable_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "translator_language": {
+        "endpoint": "translator_language",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "language_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "user_email": {
+        "endpoint": "user_email",
+        "fields": {
+            "body": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "from": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "reply_to": {"data_type": "text", "field_type": "column"},
+            "return_path": {"data_type": "text", "field_type": "column"},
+            "status": {"data_type": "text", "field_type": "column"},
+            "subject": {"data_type": "text", "field_type": "column"},
+            "to": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "user_permission": {
+        "endpoint": "user_permission",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "user_profile": {
+        "endpoint": "user_profile",
+        "fields": {
+            "can_access_bulk_update_menu": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "can_access_chatbot": {"data_type": "bool", "field_type": "column"},
+            "can_access_dedupe_tool": {"data_type": "bool", "field_type": "column"},
+            "can_access_word_excel_addins": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "can_add_specific_grantee_budget_config": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "can_assign": {"data_type": "bool", "field_type": "column"},
+            "can_assign_profiles_and_roles": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "can_bulk_bridger_status_check": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "can_bulk_generate_documents": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "can_bulk_run_charity_check": {"data_type": "bool", "field_type": "column"},
+            "can_bulk_schedule_payments": {"data_type": "bool", "field_type": "column"},
+            "can_bulk_schedule_reports": {"data_type": "bool", "field_type": "column"},
+            "can_bulk_send_email_alerts": {"data_type": "bool", "field_type": "column"},
+            "can_bulk_update_attribute": {"data_type": "bool", "field_type": "column"},
+            "can_bulk_update_status": {"data_type": "bool", "field_type": "column"},
+            "can_crud_funding_sources": {"data_type": "bool", "field_type": "column"},
+            "can_crud_payment_contingencies": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "can_crud_reports": {"data_type": "bool", "field_type": "column"},
+            "can_crud_rfs_on_active_grants": {
+                "data_type": "bool",
+                "field_type": "column",
+            },
+            "can_edit_dropdown_fields": {"data_type": "bool", "field_type": "column"},
+            "can_edit_mavs": {"data_type": "bool", "field_type": "column"},
+            "can_impersonate": {"data_type": "bool", "field_type": "column"},
+            "can_impersonate_donor": {"data_type": "bool", "field_type": "column"},
+            "can_impersonate_reviewer": {"data_type": "bool", "field_type": "column"},
+            "can_impersonate_translator": {"data_type": "bool", "field_type": "column"},
+            "can_listview_alert_emails": {"data_type": "bool", "field_type": "column"},
+            "can_listview_jobs": {"data_type": "bool", "field_type": "column"},
+            "can_manage_document_type": {"data_type": "bool", "field_type": "column"},
+            "can_manage_email_template": {"data_type": "bool", "field_type": "column"},
+            "can_manage_letters": {"data_type": "bool", "field_type": "column"},
+            "can_switch_themes": {"data_type": "bool", "field_type": "column"},
+            "can_update_alert_emails": {"data_type": "bool", "field_type": "column"},
+            "can_update_jobs": {"data_type": "bool", "field_type": "column"},
+            "can_update_sso_uid": {"data_type": "bool", "field_type": "column"},
+            "can_update_user_login": {"data_type": "bool", "field_type": "column"},
+            "can_update_user_password": {"data_type": "bool", "field_type": "column"},
+            "categories": {"data_type": "text", "field_type": "column"},
+            "cloned_user_profile_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "dashboard_config": {"data_type": "text", "field_type": "column"},
+            "dashboard_template_ids": {"data_type": "text", "field_type": "column"},
+            "dashboard_theme_id": {"data_type": "bigint", "field_type": "column"},
+            "disable_workflow_notes": {"data_type": "bool", "field_type": "column"},
+            "hide_universal_search": {"data_type": "bool", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "lock_dashboard_manager": {"data_type": "bool", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "must_segment": {"data_type": "bool", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "user_profile_rule": {
+        "endpoint": "user_profile_rule",
+        "fields": {
+            "allowed": {"data_type": "bool", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "permission_name": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_profile_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "user_segment_tag": {
+        "endpoint": "user_segment_tag",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "is_default": {"data_type": "bool", "field_type": "column"},
+            "is_read_only": {"data_type": "bool", "field_type": "column"},
+            "segment_tag_id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "webhook_subscription": {
+        "endpoint": "webhook_subscription",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "event": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "platform": {"data_type": "text", "field_type": "column"},
+            "tracked_fields": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "url": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "wiki_document": {
+        "endpoint": "wiki_document",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "model_id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "note": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "title": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+            "wiki_document_template_id": {
+                "data_type": "bigint",
+                "field_type": "column",
+            },
+            "wiki_order": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "wiki_document_template": {
+        "endpoint": "wiki_document_template",
+        "fields": {
+            "category": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_id": {"data_type": "bigint", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "description": {"data_type": "text", "field_type": "column"},
+            "document": {"data_type": "text", "field_type": "column"},
+            "document_type": {"data_type": "text", "field_type": "column"},
+            "filename": {"data_type": "text", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "model_type": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
+    "work_task": {
+        "endpoint": "work_task",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "completed_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "deleted_at": {"data_type": "timestamp", "field_type": "column"},
+            "delta": {"data_type": "bool", "field_type": "column"},
+            "due_at": {"data_type": "timestamp", "field_type": "column"},
+            "filter_state": {"data_type": "text", "field_type": "string"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "locked_by_id": {"data_type": "bigint", "field_type": "column"},
+            "locked_until": {"data_type": "timestamp", "field_type": "column"},
+            "machine_state_id": {"data_type": "bigint", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "previous_state": {"data_type": "text", "field_type": "string"},
+            "related_work_task_id": {"data_type": "bigint", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "state": {"data_type": "bigint", "field_type": "column"},
+            "state_description": {"data_type": "text", "field_type": "string"},
+            "state_to_english": {"data_type": "text", "field_type": "string"},
+            "task_completed": {"data_type": "bool", "field_type": "column"},
+            "task_order": {"data_type": "bigint", "field_type": "column"},
+            "task_text": {"data_type": "text", "field_type": "column"},
+            "taskable_id": {"data_type": "bigint", "field_type": "column"},
+            "taskable_type": {"data_type": "text", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
+    },
+    "workflow_event": {
+        "endpoint": "workflow_event",
+        "fields": {
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "change_type": {"data_type": "text", "field_type": "column"},
+            "comment": {"data_type": "text", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "created_by_email": {"data_type": "text", "field_type": "string"},
+            "created_by_first_name_first": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "created_by_last_name_first": {"data_type": "text", "field_type": "string"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "ip_address": {"data_type": "text", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            "new_state": {"data_type": "text", "field_type": "column"},
+            "old_state": {"data_type": "text", "field_type": "column"},
+            "related_workflowable_id": {"data_type": "bigint", "field_type": "column"},
+            "related_workflowable_type": {"data_type": "text", "field_type": "column"},
+            "segment_id": {"data_type": "bigint", "field_type": "column"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "workflowable_id": {"data_type": "bigint", "field_type": "column"},
+            "workflowable_type": {"data_type": "text", "field_type": "column"},
+        },
+    },
+    "zenith_user_configuration": {
+        "endpoint": "zenith_user_configuration",
+        "fields": {
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "json": {"data_type": "text", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            "user_id": {"data_type": "bigint", "field_type": "column"},
+        },
+    },
 }
 
 

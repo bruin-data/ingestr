@@ -31,11 +31,14 @@ test-specific: venv lock-deps
 	. venv/bin/activate; set -a; source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto  -rP -vv --tb=short --capture=no -k $(test)
 
 lint-ci:
-	ruff format ingestr && ruff check ingestr --fix
-	mypy --config-file pyproject.toml --explicit-package-bases ingestr
+	@ruff format --diff ingestr && ruff check ingestr && mypy --config-file pyproject.toml --explicit-package-bases ingestr
+
+format:
+	@ruff format ingestr && ruff check ingestr --fix
+	@mypy --config-file pyproject.toml --explicit-package-bases ingestr
 
 lint: venv lock-deps
-	. venv/bin/activate; $(MAKE) lint-ci
+	. venv/bin/activate; $(MAKE) format
 
 lint-docs:
 	vale docs --glob='!**/.vitepress/**'
