@@ -2,7 +2,6 @@
 Unit tests for MongoDB shell syntax to Extended JSON conversion
 """
 
-import json
 import unittest
 from datetime import datetime
 

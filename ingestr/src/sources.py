@@ -430,6 +430,7 @@ class MongoDbSource:
             # Parse the query using MongoDB's extended JSON parser
             # First, convert MongoDB shell syntax to Extended JSON format
             from bson import json_util
+
             from ingestr.src.mongodb.helpers import convert_mongo_shell_to_extended_json
 
             # Convert MongoDB shell constructs to Extended JSON v2 format
