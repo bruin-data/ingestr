@@ -122,6 +122,7 @@ export default defineConfig({
               { text: "Attio", link: "/supported-sources/attio.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               { text: "ClickUp", link: "/supported-sources/clickup.md" },
+              { text: "Docebo", link: "/supported-sources/docebo.md" },
               {
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",

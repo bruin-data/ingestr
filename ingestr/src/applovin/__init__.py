@@ -224,7 +224,7 @@ def resource(
 def custom_report_from_spec(spec: str) -> EndpointResource:
     parts = spec.split(":")
     if len(parts) != 4:
-        raise InvalidCustomReportError() 
+        raise InvalidCustomReportError()
 
     _, endpoint, report, dims = parts
     report_type = ReportType(report.strip())
