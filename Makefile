@@ -33,12 +33,12 @@ test-specific: venv lock-deps
 lint-ci:
 	@ruff format --diff ingestr && ruff check ingestr && mypy --config-file pyproject.toml --explicit-package-bases ingestr
 
-lint-dev:
+format:
 	@ruff format ingestr && ruff check ingestr --fix
 	@mypy --config-file pyproject.toml --explicit-package-bases ingestr
 
 lint: venv lock-deps
-	. venv/bin/activate; $(MAKE) lint-dev
+	. venv/bin/activate; $(MAKE) format
 
 lint-docs:
 	vale docs --glob='!**/.vitepress/**'
