@@ -3623,3 +3623,31 @@ class WiseSource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(table)
+
+
+class FundraiseupSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        api_key = params.get("api_key")
+        if api_key is None:
+            raise MissingValueError("api_key", "Fundraiseup")
+
+        if table not in [
+            "donations",
+            "events",
+            "fundraisers",
+            "recurring_plans",
+            "supporters",
+        ]:
+            raise UnsupportedResourceError(table, "Fundraiseup")
+
+        from ingestr.src.fundraiseup import fundraiseup_source
+
+        return fundraiseup_source(
+            api_key=api_key[0],
+        ).with_resources(table)
