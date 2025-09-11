@@ -3586,9 +3586,9 @@ def frankfurter_test_cases() -> Iterable[Callable]:
 
         # Assert that the rate for GBP is 0.82993
         assert len(rows) > 0, "No data found for GBP"
-        assert abs(rows[0][0] - 0.82993) <= 1e-6, (
-            f"Expected rate 0.82993, but got {rows[0][0]}"
-        )
+        assert (
+            abs(rows[0][0] - 0.82993) <= 1e-6
+        ), f"Expected rate 0.82993, but got {rows[0][0]}"
 
     return [
         invalid_source_table,
