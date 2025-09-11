@@ -144,7 +144,7 @@ def anthropic_source(
             api_key,
             starting_at=start_iso,
             ending_at=end_iso,
-            bucket_width="1d",  # Daily buckets by default
+            bucket_width="1h",  # Hourly buckets by default
         ):
             yield record
 
