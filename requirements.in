@@ -3,7 +3,7 @@ confluent-kafka==2.8.0
 databricks-sql-connector==4.0.5
 databricks-sqlalchemy==1.0.2
 dataclasses-json==0.6.7
-dlt==1.11.0
+dlt==1.12.3
 dlt-cratedb==0.0.2
 duckdb_engine==0.17.0
 duckdb==1.2.1

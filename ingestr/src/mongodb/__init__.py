@@ -107,7 +107,7 @@ def mongodb_collection(
     projection: Optional[Union[Mapping[str, Any], Iterable[str]]] = dlt.config.value,
     pymongoarrow_schema: Optional[Any] = None,
     custom_query: Optional[List[Dict[str, Any]]] = None,
-) -> Any:
+) -> DltResource:
     """
     A DLT source which loads a collection from a mongo database using PyMongo.
 

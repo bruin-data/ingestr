@@ -7,7 +7,7 @@ from typing import Iterator, List, Optional, Union
 import dlt
 from dlt.common import pendulum
 from dlt.common.typing import DictStrAny, TDataItem
-from dlt.extract import DltResource
+from dlt.sources import DltResource
 from dlt.sources.credentials import GcpOAuthCredentials, GcpServiceAccountCredentials
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
