@@ -41,8 +41,16 @@ def anthropic_source(
     """
 
     # Default start date to 2023-01-01 if not provided
-    if initial_start_date is None:
-        initial_start_date = pendulum.datetime(2023, 1, 1)
+    start_date: pendulum.DateTime = (
+        initial_start_date
+        if initial_start_date is not None
+        else pendulum.datetime(2023, 1, 1)
+    )
+
+    # Prepare end_value for incremental
+    end_value_str = None
+    if end_date is not None:
+        end_value_str = end_date.to_date_string()
 
     @dlt.resource(
         name="claude_code_usage",
@@ -52,8 +60,8 @@ def anthropic_source(
     def claude_code_usage(
         date: dlt.sources.incremental[str] = dlt.sources.incremental(
             "date",
-            initial_value=initial_start_date.to_date_string(),
-            end_value=end_date.to_date_string() if end_date else None,
+            initial_value=start_date.to_date_string(),
+            end_value=end_value_str,
         ),
     ) -> Iterator[Dict[str, Any]]:
         """
@@ -73,11 +81,32 @@ def anthropic_source(
 
         # Get the date range from the incremental state
         start_value = date.last_value if date.last_value else date.initial_value
-        start_date = pendulum.parse(start_value) if start_value else pendulum.now()
+        start_date_parsed = (
+            pendulum.parse(start_value) if start_value else pendulum.now()
+        )
+
+        # Ensure we have a DateTime object
+        if isinstance(start_date_parsed, pendulum.DateTime):
+            start_date = start_date_parsed
+        elif isinstance(start_date_parsed, pendulum.Date):
+            start_date = pendulum.datetime(
+                start_date_parsed.year, start_date_parsed.month, start_date_parsed.day
+            )
+        else:
+            start_date = pendulum.now()
 
         end_filter = pendulum.now()
         if date.end_value:
-            end_filter = pendulum.parse(date.end_value)
+            end_filter_parsed = pendulum.parse(date.end_value)
+            # Ensure we have a DateTime object
+            if isinstance(end_filter_parsed, pendulum.DateTime):
+                end_filter = end_filter_parsed
+            elif isinstance(end_filter_parsed, pendulum.Date):
+                end_filter = pendulum.datetime(
+                    end_filter_parsed.year,
+                    end_filter_parsed.month,
+                    end_filter_parsed.day,
+                )
 
         # Iterate through each day in the range
         current_date = start_date
@@ -104,11 +133,7 @@ def anthropic_source(
         """
 
         # Convert dates to ISO format with timezone
-        start_iso = (
-            initial_start_date.to_iso8601_string()
-            if initial_start_date
-            else pendulum.datetime(2023, 1, 1).to_iso8601_string()
-        )
+        start_iso = start_date.to_iso8601_string()
         end_iso = (
             end_date.to_iso8601_string()
             if end_date
@@ -136,11 +161,7 @@ def anthropic_source(
         """
 
         # Convert dates to ISO format with timezone
-        start_iso = (
-            initial_start_date.to_iso8601_string()
-            if initial_start_date
-            else pendulum.datetime(2023, 1, 1).to_iso8601_string()
-        )
+        start_iso = start_date.to_iso8601_string()
         end_iso = (
             end_date.to_iso8601_string()
             if end_date
