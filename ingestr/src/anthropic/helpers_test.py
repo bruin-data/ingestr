@@ -364,9 +364,9 @@ class TestAnthropicHelpers(unittest.TestCase):
         mock_get.assert_called_once_with(
             "https://api.anthropic.com/v1/organizations/me",
             headers={
-                "x-api-key": "sk-ant-admin-test",
-                "accept": "application/json",
                 "anthropic-version": "2023-06-01",
+                "x-api-key": "sk-ant-admin-test",
+                "User-Agent": "ingestr/1.0.0 (https://github.com/bruin-data/ingestr)",
             },
         )
 
@@ -516,7 +516,8 @@ class TestAnthropicHelpers(unittest.TestCase):
         self.assertEqual(results[0]["user_id"], "user-1")
         mock_get.assert_called_once()
         call_args = mock_get.call_args
-        self.assertIn("ws-1", call_args[0][0])
+        # Check that workspace_id is in the params
+        self.assertEqual(call_args[1]["params"]["workspace_id"], "ws-1")
 
 
 if __name__ == "__main__":
