@@ -703,3 +703,122 @@ class GCSDestination(BlobStorageDestination):
             credentials = json.loads(base64.b64decode(credentials_base64[0]).decode())  # type: ignore
 
         return credentials
+
+
+def _extract_table_name(table) -> str:
+    """Extract table name from various table parameter formats."""
+    if isinstance(table, dict) and 'name' in table:
+        return table['name']
+    elif hasattr(table, 'name'):
+        return table.name
+    elif hasattr(table, 'table_name'):
+        return table.table_name
+    elif hasattr(table, '_name'):
+        return table._name
+    elif isinstance(table, str):
+        return table
+    else:
+        return getattr(table, '__name__', 'data')
+
+
+
+
+
+
+def _process_file_items(file_path: str) -> list[dict]:
+    """Process items from a file path (JSONL format)."""
+    import json
+
+    documents = []
+    with open(file_path, 'r') as f:
+        for line in f:
+            if line.strip():
+                doc = json.loads(line.strip())
+                documents.append(doc)  # Include all fields including DLT metadata
+    return documents
+
+
+def _process_iterable_items(items) -> list[dict]:
+    """Process items from an iterable."""
+    documents = []
+    for item in items:
+        if isinstance(item, dict):
+            documents.append(item)  # Include all fields including DLT metadata
+    return documents
+
+
+@dlt.destination(
+    name="mongodb",
+    loader_file_format="typed-jsonl",
+    batch_size=1000,
+    naming_convention="snake_case"
+)
+def mongodb_insert(
+    items,
+    table,
+    connection_string: str = dlt.secrets.value
+) -> None:
+    """Insert data into MongoDB collection.
+
+    Args:
+        items: Data items (file path or iterable)
+        table: Table metadata containing name and schema info
+        connection_string: MongoDB connection string
+    """
+    from pymongo import MongoClient
+    from urllib.parse import urlparse
+
+    # Extract database name from connection string
+    parsed = urlparse(connection_string)
+    database_name = parsed.path.lstrip("/") if parsed.path.lstrip("/") else "ingestr_db"
+
+    # Get collection name from table metadata
+    collection_name = _extract_table_name(table)
+
+    # Connect to MongoDB
+    with MongoClient(connection_string) as client:
+        db = client[database_name]
+        collection = db[collection_name]
+
+        # Process and insert documents
+        if isinstance(items, str):
+            documents = _process_file_items(items)
+        else:
+            documents = _process_iterable_items(items)
+
+        if documents:
+            collection.insert_many(documents)
+
+
+class MongoDBDestination:
+    def dlt_dest(self, uri: str, **kwargs):
+        from urllib.parse import parse_qs, urlparse
+
+        parsed_uri = urlparse(uri)
+
+        # Extract connection details from URI
+        host = parsed_uri.hostname or "localhost"
+        port = parsed_uri.port or 27017
+        username = parsed_uri.username
+        password = parsed_uri.password
+        database = parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+
+        # Build connection string
+        if username and password:
+            connection_string = f"mongodb://{username}:{password}@{host}:{port}/{database}"
+        else:
+            connection_string = f"mongodb://{host}:{port}/{database}"
+
+        # Add query parameters if any
+        if parsed_uri.query:
+            connection_string += f"?{parsed_uri.query}"
+
+        return mongodb_insert(connection_string=connection_string)
+
+    def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
+        return {
+            "table_name": table,
+        }
+
+    def post_load(self):
+        pass
