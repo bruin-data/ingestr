@@ -178,6 +178,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>❌</td>
     </tr>
     <tr>
+        <td>Trino</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
         <td colspan="3" style='text-align:center;'><strong>Platforms</strong></td>
     </tr>
         <td>Adjust</td>
