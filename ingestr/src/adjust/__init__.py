@@ -46,7 +46,7 @@ def adjust_source(
     filters: Optional[dict] = None,
 ) -> Sequence[DltResource]:
     @dlt.resource(write_disposition="merge", merge_key="day")
-    def campaigns():
+    def campaigns() -> DltResource:
         adjust_api = AdjustAPI(api_key=api_key)
         yield from adjust_api.fetch_report_data(
             start_date=start_date,
@@ -57,12 +57,12 @@ def adjust_source(
         )
 
     @dlt.resource(write_disposition="replace", primary_key="id")
-    def events():
+    def events() -> DltResource:
         adjust_api = AdjustAPI(api_key=api_key)
         yield adjust_api.fetch_events()
 
     @dlt.resource(write_disposition="merge", merge_key="day")
-    def creatives():
+    def creatives() -> DltResource:
         adjust_api = AdjustAPI(api_key=api_key)
         yield from adjust_api.fetch_report_data(
             start_date=start_date,
@@ -95,7 +95,7 @@ def adjust_source(
         primary_key=dimensions,
         columns=type_hints,
     )
-    def custom():
+    def custom() -> DltResource:
         adjust_api = AdjustAPI(api_key=api_key)
         yield from adjust_api.fetch_report_data(
             start_date=start_date,
