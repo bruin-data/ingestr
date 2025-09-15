@@ -7,6 +7,7 @@ import os
 import shutil
 import struct
 import tempfile
+from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
@@ -707,22 +708,18 @@ class GCSDestination(BlobStorageDestination):
 
 def _extract_table_name(table) -> str:
     """Extract table name from various table parameter formats."""
-    if isinstance(table, dict) and 'name' in table:
-        return table['name']
-    elif hasattr(table, 'name'):
+    if isinstance(table, dict) and "name" in table:
+        return table["name"]
+    elif hasattr(table, "name"):
         return table.name
-    elif hasattr(table, 'table_name'):
+    elif hasattr(table, "table_name"):
         return table.table_name
-    elif hasattr(table, '_name'):
+    elif hasattr(table, "_name"):
         return table._name
     elif isinstance(table, str):
         return table
     else:
-        return getattr(table, '__name__', 'data')
-
-
-
-
+        return getattr(table, "__name__", "data")
 
 
 def _process_file_items(file_path: str) -> list[dict]:
@@ -730,7 +727,7 @@ def _process_file_items(file_path: str) -> list[dict]:
     import json
 
     documents = []
-    with open(file_path, 'r') as f:
+    with open(file_path, "r") as f:
         for line in f:
             if line.strip():
                 doc = json.loads(line.strip())
@@ -751,13 +748,9 @@ def _process_iterable_items(items) -> list[dict]:
     name="mongodb",
     loader_file_format="typed-jsonl",
     batch_size=10000000,
-    naming_convention="snake_case"
+    naming_convention="snake_case",
 )
-def mongodb_insert(
-    items,
-    table,
-    connection_string: str = dlt.secrets.value
-) -> None:
+def mongodb_insert(items, table, connection_string: str = dlt.secrets.value) -> None:
     """Insert data into MongoDB collection.
 
     Args:
@@ -765,8 +758,9 @@ def mongodb_insert(
         table: Table metadata containing name and schema info
         connection_string: MongoDB connection string
     """
-    from pymongo import MongoClient
     from urllib.parse import urlparse
+
+    from pymongo import MongoClient
 
     # Extract database name from connection string
     parsed = urlparse(connection_string)
@@ -776,8 +770,9 @@ def mongodb_insert(
     collection_name = _extract_table_name(table)
 
     # Connect to MongoDB
+    client: MongoClient
     with MongoClient(connection_string) as client:
-        db = client[database_name]
+        db: Any = client[database_name]
         collection = db[collection_name]
 
         # Process and insert documents
@@ -787,12 +782,14 @@ def mongodb_insert(
             documents = _process_iterable_items(items)
 
         if documents:
-            collection.insert_many(documents)
+            # Replace strategy: Clear collection and insert all documents
+            collection.delete_many({})  # Clear existing data
+            collection.insert_many(documents)  # Insert all new data
 
 
 class MongoDBDestination:
     def dlt_dest(self, uri: str, **kwargs):
-        from urllib.parse import parse_qs, urlparse
+        from urllib.parse import urlparse
 
         parsed_uri = urlparse(uri)
 
@@ -801,11 +798,15 @@ class MongoDBDestination:
         port = parsed_uri.port or 27017
         username = parsed_uri.username
         password = parsed_uri.password
-        database = parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+        database = (
+            parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+        )
 
         # Build connection string
         if username and password:
-            connection_string = f"mongodb://{username}:{password}@{host}:{port}/{database}"
+            connection_string = (
+                f"mongodb://{username}:{password}@{host}:{port}/{database}"
+            )
         else:
             connection_string = f"mongodb://{host}:{port}/{database}"
 
