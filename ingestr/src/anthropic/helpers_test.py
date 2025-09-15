@@ -238,7 +238,9 @@ class TestAnthropicHelpers(unittest.TestCase):
         call_args = mock_get.call_args
         self.assertEqual(call_args[0][0], "organizations/usage_report/claude_code")
         # params is the second positional argument
-        params = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("params", {})
+        params = (
+            call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("params", {})
+        )
         self.assertEqual(params["starting_at"], "2025-09-01")
         self.assertEqual(params["ending_at"], "2025-09-01")
 
@@ -510,7 +512,9 @@ class TestAnthropicHelpers(unittest.TestCase):
         call_args = mock_get.call_args
         # Check that workspace_id is in the params
         self.assertEqual(call_args[0][0], "workspace_members")
-        params = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("params", {})
+        params = (
+            call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("params", {})
+        )
         self.assertEqual(params["workspace_id"], "ws-1")
 
 

@@ -1,7 +1,7 @@
 """Helper functions for the Anthropic source using common HTTP client."""
 
 import logging
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import requests
 
@@ -24,7 +24,9 @@ class AnthropicClient:
         # Create client with retry logic for common error codes
         self.client = create_client(retry_status_codes=[429, 502, 503, 504])
 
-    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> requests.Response:
+    def get(
+        self, path: str, params: Optional[Dict[str, Any]] = None
+    ) -> requests.Response:
         """Make a GET request to the Anthropic API."""
         url = f"{self.base_url}/{path}"
         return self.client.get(url, headers=self.headers, params=params)
@@ -33,55 +35,55 @@ class AnthropicClient:
         self,
         path: str,
         params: Optional[Dict[str, Any]] = None,
-        flatten_func: Optional[callable] = None,
+        flatten_func: Optional[Callable] = None,
         handle_404: bool = False,
     ) -> Iterator[Dict[str, Any]]:
         """
         Fetch paginated data from the Anthropic API.
-        
+
         Args:
             path: API endpoint path
             params: Query parameters
             flatten_func: Optional function to flatten records
             handle_404: If True, treat 404 as empty result instead of error
-            
+
         Yields:
             Flattened records
         """
         if params is None:
             params = {}
-        
+
         # Make a copy to avoid modifying the original
         params = dict(params)
-        
+
         has_more = True
         next_page = None
-        
+
         while has_more:
             current_params = dict(params)
-            
+
             if next_page:
                 current_params["page"] = next_page
                 # Remove limit from subsequent requests as page cursor includes it
                 current_params.pop("limit", None)
-            
+
             try:
                 response = self.get(path, current_params)
                 response.raise_for_status()
-                
+
                 data = response.json()
-                
+
                 # Process each record
                 for record in data.get("data", []):
                     if flatten_func:
                         yield flatten_func(record)
                     else:
                         yield record
-                
+
                 # Check for more pages
                 has_more = data.get("has_more", False)
                 next_page = data.get("next_page")
-                
+
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 401:
                     raise ValueError(
@@ -106,10 +108,10 @@ class AnthropicClient:
     def fetch_single(self, path: str) -> Optional[Dict[str, Any]]:
         """
         Fetch a single resource from the API.
-        
+
         Args:
             path: API endpoint path
-            
+
         Returns:
             The resource data or None if not found
         """
@@ -230,12 +232,8 @@ def fetch_claude_code_usage(
         Flattened usage records
     """
     client = AnthropicClient(api_key)
-    params = {
-        "starting_at": date,
-        "ending_at": date,
-        "limit": min(limit, 1000)
-    }
-    
+    params = {"starting_at": date, "ending_at": date, "limit": min(limit, 1000)}
+
     for record in client.fetch_paginated(
         "organizations/usage_report/claude_code",
         params=params,
@@ -322,10 +320,10 @@ def fetch_usage_report(
         Flattened usage records
     """
     client = AnthropicClient(api_key)
-    
+
     # Adjust limit based on bucket_width
     max_limit = 31 if bucket_width == "1d" else (168 if bucket_width == "1h" else 1440)
-    
+
     params = {
         "starting_at": starting_at,
         "ending_at": ending_at,
@@ -352,7 +350,7 @@ def fetch_usage_report(
     if workspace_ids:
         for i, workspace_id in enumerate(workspace_ids):
             params[f"workspace_ids[{i}]"] = workspace_id
-    
+
     for record in client.fetch_paginated(
         "organizations/usage_report/messages",
         params=params,
@@ -385,13 +383,13 @@ def fetch_cost_report(
         Cost records
     """
     client = AnthropicClient(api_key)
-    
+
     params = {
         "starting_at": starting_at,
         "ending_at": ending_at,
         "limit": min(limit, 31),  # Max 31 for cost reports
     }
-    
+
     # Add optional filters
     if group_by:
         for i, field in enumerate(group_by):
@@ -399,7 +397,7 @@ def fetch_cost_report(
     if workspace_ids:
         for i, workspace_id in enumerate(workspace_ids):
             params[f"workspace_ids[{i}]"] = workspace_id
-    
+
     def flatten_cost_record(record: Dict[str, Any]) -> Dict[str, Any]:
         """Flatten cost record with defaults for nullable fields."""
         return {
@@ -408,7 +406,7 @@ def fetch_cost_report(
             "description": record.get("description", ""),
             "amount_cents": record.get("amount_cents", 0),
         }
-    
+
     for record in client.fetch_paginated(
         "organizations/cost_report",
         params=params,
@@ -418,7 +416,7 @@ def fetch_cost_report(
         yield record
 
 
-def fetch_organization_info(api_key: str) -> Dict[str, Any]:
+def fetch_organization_info(api_key: str) -> Optional[Dict[str, Any]]:
     """
     Fetch organization information.
 
@@ -445,7 +443,7 @@ def fetch_workspaces(api_key: str, limit: int = 100) -> Iterator[Dict[str, Any]]
     """
     client = AnthropicClient(api_key)
     params = {"limit": min(limit, 100)}
-    
+
     for record in client.fetch_paginated("workspaces", params=params):
         yield record
 
@@ -463,7 +461,7 @@ def fetch_api_keys(api_key: str, limit: int = 100) -> Iterator[Dict[str, Any]]:
     """
     client = AnthropicClient(api_key)
     params = {"limit": min(limit, 100)}
-    
+
     for record in client.fetch_paginated("api_keys", params=params):
         yield record
 
@@ -481,7 +479,7 @@ def fetch_invites(api_key: str, limit: int = 100) -> Iterator[Dict[str, Any]]:
     """
     client = AnthropicClient(api_key)
     params = {"limit": min(limit, 100)}
-    
+
     for record in client.fetch_paginated("invites", params=params):
         yield record
 
@@ -499,7 +497,7 @@ def fetch_users(api_key: str, limit: int = 100) -> Iterator[Dict[str, Any]]:
     """
     client = AnthropicClient(api_key)
     params = {"limit": min(limit, 100)}
-    
+
     for record in client.fetch_paginated("users", params=params):
         yield record
 
@@ -519,9 +517,9 @@ def fetch_workspace_members(
         Workspace member records
     """
     client = AnthropicClient(api_key)
-    params = {"limit": min(limit, 100)}
+    params: Dict[str, Any] = {"limit": min(limit, 100)}
     if workspace_id:
         params["workspace_id"] = workspace_id
-    
+
     for record in client.fetch_paginated("workspace_members", params=params):
         yield record
