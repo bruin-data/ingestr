@@ -237,6 +237,9 @@ class SqlSource:
                 backend_kwargs: Dict[str, Any] = None,  # type: ignore
                 type_adapter_callback: Optional[TTypeAdapter] = None,
                 included_columns: Optional[List[str]] = None,
+                excluded_columns: Optional[
+                    List[str]
+                ] = None,  # Added for dlt 1.16.0 compatibility
                 query_adapter_callback: Optional[TQueryAdapter] = None,
                 resolve_foreign_keys: bool = False,
             ) -> Iterator[TDataItem]:

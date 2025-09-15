@@ -96,7 +96,7 @@ decorator==5.2.1
     # via gcsfs
 deprecation==2.1.0
     # via rudder-sdk-python
-dlt==1.12.3
+dlt==1.16.0
     # via
     #   -r requirements.in
     #   dlt-cratedb
