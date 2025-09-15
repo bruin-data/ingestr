@@ -196,7 +196,7 @@ class TestAnthropicHelpers(unittest.TestCase):
             "claude-3-5-sonnet-20241022,claude-3-opus-20240229",
         )
 
-    @patch("ingestr.src.anthropic.helpers.requests.get")
+    @patch("ingestr.src.anthropic.helpers.AnthropicClient.get")
     def test_fetch_claude_code_usage_success(self, mock_get):
         """Test successful API fetch."""
         mock_response = Mock()
@@ -236,14 +236,13 @@ class TestAnthropicHelpers(unittest.TestCase):
         # Verify API call
         mock_get.assert_called_once()
         call_args = mock_get.call_args
-        self.assertEqual(
-            call_args[0][0],
-            "https://api.anthropic.com/v1/organizations/usage_report/claude_code",
-        )
-        self.assertEqual(call_args[1]["headers"]["x-api-key"], "sk-ant-admin-test")
-        self.assertEqual(call_args[1]["params"]["starting_at"], "2025-09-01")
+        self.assertEqual(call_args[0][0], "organizations/usage_report/claude_code")
+        # params is the second positional argument
+        params = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("params", {})
+        self.assertEqual(params["starting_at"], "2025-09-01")
+        self.assertEqual(params["ending_at"], "2025-09-01")
 
-    @patch("ingestr.src.anthropic.helpers.requests.get")
+    @patch("ingestr.src.anthropic.helpers.AnthropicClient.get")
     def test_fetch_claude_code_usage_pagination(self, mock_get):
         """Test API pagination handling."""
         # First page response
@@ -313,7 +312,7 @@ class TestAnthropicHelpers(unittest.TestCase):
         # Verify both API calls
         self.assertEqual(mock_get.call_count, 2)
 
-    @patch("ingestr.src.anthropic.helpers.requests.get")
+    @patch("ingestr.src.anthropic.helpers.AnthropicClient.get")
     def test_fetch_claude_code_usage_auth_error(self, mock_get):
         """Test handling of authentication error."""
         from requests.exceptions import HTTPError
@@ -329,7 +328,7 @@ class TestAnthropicHelpers(unittest.TestCase):
 
         self.assertIn("Invalid API key", str(context.exception))
 
-    @patch("ingestr.src.anthropic.helpers.requests.get")
+    @patch("ingestr.src.anthropic.helpers.AnthropicClient.get")
     def test_fetch_claude_code_usage_no_data(self, mock_get):
         """Test handling when no data is available for a date."""
         from requests.exceptions import HTTPError
@@ -344,7 +343,7 @@ class TestAnthropicHelpers(unittest.TestCase):
 
         self.assertEqual(len(results), 0)
 
-    @patch("ingestr.src.anthropic.helpers.requests.get")
+    @patch("ingestr.src.anthropic.helpers.AnthropicClient.get")
     def test_fetch_organization_info(self, mock_get):
         """Test fetching organization information."""
         mock_response = Mock()
@@ -361,16 +360,9 @@ class TestAnthropicHelpers(unittest.TestCase):
 
         self.assertEqual(result["id"], "org-123")
         self.assertEqual(result["name"], "Test Organization")
-        mock_get.assert_called_once_with(
-            "https://api.anthropic.com/v1/organizations/me",
-            headers={
-                "anthropic-version": "2023-06-01",
-                "x-api-key": "sk-ant-admin-test",
-                "User-Agent": "ingestr/1.0.0 (https://github.com/bruin-data/ingestr)",
-            },
-        )
+        mock_get.assert_called_once_with("organizations/me")
 
-    @patch("ingestr.src.anthropic.helpers.requests.get")
+    @patch("ingestr.src.anthropic.helpers.AnthropicClient.get")
     def test_fetch_workspaces(self, mock_get):
         """Test fetching workspaces with pagination."""
         # First page
@@ -414,7 +406,7 @@ class TestAnthropicHelpers(unittest.TestCase):
         self.assertEqual(results[1]["id"], "ws-2")
         self.assertEqual(mock_get.call_count, 2)
 
-    @patch("ingestr.src.anthropic.helpers.requests.get")
+    @patch("ingestr.src.anthropic.helpers.AnthropicClient.get")
     def test_fetch_api_keys(self, mock_get):
         """Test fetching API keys."""
         mock_response = Mock()
@@ -440,7 +432,7 @@ class TestAnthropicHelpers(unittest.TestCase):
         self.assertEqual(results[0]["id"], "key-1")
         self.assertEqual(results[0]["name"], "Production Key")
 
-    @patch("ingestr.src.anthropic.helpers.requests.get")
+    @patch("ingestr.src.anthropic.helpers.AnthropicClient.get")
     def test_fetch_invites(self, mock_get):
         """Test fetching invites."""
         mock_response = Mock()
@@ -465,7 +457,7 @@ class TestAnthropicHelpers(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["email"], "user@example.com")
 
-    @patch("ingestr.src.anthropic.helpers.requests.get")
+    @patch("ingestr.src.anthropic.helpers.AnthropicClient.get")
     def test_fetch_users(self, mock_get):
         """Test fetching users."""
         mock_response = Mock()
@@ -490,7 +482,7 @@ class TestAnthropicHelpers(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["email"], "admin@example.com")
 
-    @patch("ingestr.src.anthropic.helpers.requests.get")
+    @patch("ingestr.src.anthropic.helpers.AnthropicClient.get")
     def test_fetch_workspace_members(self, mock_get):
         """Test fetching workspace members."""
         mock_response = Mock()
@@ -517,7 +509,9 @@ class TestAnthropicHelpers(unittest.TestCase):
         mock_get.assert_called_once()
         call_args = mock_get.call_args
         # Check that workspace_id is in the params
-        self.assertEqual(call_args[1]["params"]["workspace_id"], "ws-1")
+        self.assertEqual(call_args[0][0], "workspace_members")
+        params = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("params", {})
+        self.assertEqual(params["workspace_id"], "ws-1")
 
 
 if __name__ == "__main__":
