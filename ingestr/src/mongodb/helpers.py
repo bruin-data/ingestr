@@ -1,4 +1,4 @@
-"""Mongo database source helpers"""
+"""Mongo database source helpers and destination utilities"""
 
 import re
 from itertools import islice
@@ -945,3 +945,70 @@ def convert_mongo_shell_to_extended_json(query_string: str) -> str:
 
 
 __source_name__ = "mongodb"
+
+
+# MongoDB destination helper functions
+def process_file_items(file_path: str) -> list[dict]:
+    """Process items from a file path (JSONL format)."""
+    import json
+
+    documents = []
+    with open(file_path, "r") as f:
+        for line in f:
+            if line.strip():
+                doc = json.loads(line.strip())
+                documents.append(doc)  # Include all fields including DLT metadata
+    return documents
+
+
+def process_iterable_items(items) -> list[dict]:
+    """Process items from an iterable."""
+    documents = []
+    for item in items:
+        if isinstance(item, dict):
+            documents.append(item)  # Include all fields including DLT metadata
+    return documents
+
+
+@dlt.destination(
+    name="mongodb",
+    loader_file_format="typed-jsonl",
+    batch_size=10000000,
+    naming_convention="snake_case",
+)
+def mongodb_insert(items, table, connection_string: str = dlt.secrets.value) -> None:
+    """Insert data into MongoDB collection.
+
+    Args:
+        items: Data items (file path or iterable)
+        table: Table metadata containing name and schema info
+        connection_string: MongoDB connection string
+    """
+    from typing import Any
+    from urllib.parse import urlparse
+
+    from pymongo import MongoClient
+
+    # Extract database name from connection string
+    parsed = urlparse(connection_string)
+    database_name = parsed.path.lstrip("/") if parsed.path.lstrip("/") else "ingestr_db"
+
+    # Get collection name from table metadata
+    collection_name = table["name"]
+
+    # Connect to MongoDB
+    client: MongoClient
+    with MongoClient(connection_string) as client:
+        db: Any = client[database_name]
+        collection = db[collection_name]
+
+        # Process and insert documents
+        if isinstance(items, str):
+            documents = process_file_items(items)
+        else:
+            documents = process_iterable_items(items)
+
+        if documents:
+            # Replace strategy: Clear collection and insert all documents
+            collection.delete_many({})  # Clear existing data
+            collection.insert_many(documents)  # Insert all new data
