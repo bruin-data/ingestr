@@ -1,7 +1,7 @@
 """Elasticsearch destination helpers"""
 
 import json
-from typing import Any, Dict, List, Iterator
+from typing import Any, Dict, Iterator
 from urllib.parse import urlparse
 
 import dlt
@@ -103,9 +103,7 @@ def elasticsearch_insert(
         _, failed_items = bulk(client, doc_generator(), request_timeout=60)
         if failed_items:
             failed_count = (
-                len(failed_items)
-                if isinstance(failed_items, list)
-                else failed_items
+                len(failed_items) if isinstance(failed_items, list) else failed_items
             )
             raise Exception(
                 f"Failed to insert {failed_count} documents: {failed_items}"
