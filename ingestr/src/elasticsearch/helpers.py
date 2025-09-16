@@ -1,7 +1,7 @@
 """Elasticsearch destination helpers"""
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Iterator
 from urllib.parse import urlparse
 
 import dlt
@@ -10,9 +10,8 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 
 
-def process_file_items(file_path: str) -> List[Dict[str, Any]]:
+def process_file_items(file_path: str) -> Iterator[Dict[str, Any]]:
     """Process items from a file path (JSONL format)."""
-    documents = []
     with open(file_path, "r") as f:
         for line in f:
             if line.strip():
@@ -21,19 +20,16 @@ def process_file_items(file_path: str) -> List[Dict[str, Any]]:
                 cleaned_doc = {
                     k: v for k, v in doc.items() if not k.startswith("_dlt_")
                 }
-                documents.append(cleaned_doc)
-    return documents
+                yield cleaned_doc
 
 
-def process_iterable_items(items: Any) -> List[Dict[str, Any]]:
+def process_iterable_items(items: Any) -> Iterator[Dict[str, Any]]:
     """Process items from an iterable."""
-    documents = []
     for item in items:
         if isinstance(item, dict):
             # Clean DLT metadata
             cleaned_item = {k: v for k, v in item.items() if not k.startswith("_dlt_")}
-            documents.append(cleaned_item)
-    return documents
+            yield cleaned_item
 
 
 @dlt.destination(
@@ -76,15 +72,18 @@ def elasticsearch_insert(
     # Connect to Elasticsearch
     client = Elasticsearch(**es_config)
 
+    # Replace mode: delete existing index if it exists
+    if client.indices.exists(index=index_name):
+        client.indices.delete(index=index_name)
+
     # Process and insert documents
     if isinstance(items, str):
         documents = process_file_items(items)
     else:
         documents = process_iterable_items(items)
 
-    if documents:
-        # Prepare documents for bulk insert
-        docs_for_bulk = []
+    # Prepare documents for bulk insert as generator
+    def doc_generator():
         for doc in documents:
             es_doc: Dict[str, Any] = {"_index": index_name, "_source": doc.copy()}
 
@@ -97,19 +96,19 @@ def elasticsearch_insert(
             elif "id" in doc:
                 es_doc["_id"] = str(doc["id"])
 
-            docs_for_bulk.append(es_doc)
+            yield es_doc
 
-        # Bulk insert
-        try:
-            _, failed_items = bulk(client, docs_for_bulk, request_timeout=60)
-            if failed_items:
-                failed_count = (
-                    len(failed_items)
-                    if isinstance(failed_items, list)
-                    else failed_items
-                )
-                raise Exception(
-                    f"Failed to insert {failed_count} documents: {failed_items}"
-                )
-        except Exception as e:
-            raise Exception(f"Elasticsearch bulk insert failed: {str(e)}")
+    # Bulk insert
+    try:
+        _, failed_items = bulk(client, doc_generator(), request_timeout=60)
+        if failed_items:
+            failed_count = (
+                len(failed_items)
+                if isinstance(failed_items, list)
+                else failed_items
+            )
+            raise Exception(
+                f"Failed to insert {failed_count} documents: {failed_items}"
+            )
+    except Exception as e:
+        raise Exception(f"Elasticsearch bulk insert failed: {str(e)}")
