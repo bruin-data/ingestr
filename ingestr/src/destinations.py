@@ -7,7 +7,6 @@ import os
 import shutil
 import struct
 import tempfile
-from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
@@ -707,7 +706,6 @@ class GCSDestination(BlobStorageDestination):
         return credentials
 
 
-
 class MongoDBDestination:
     def dlt_dest(self, uri: str, **kwargs):
         from urllib.parse import urlparse
@@ -744,4 +742,3 @@ class MongoDBDestination:
 
     def post_load(self):
         pass
-

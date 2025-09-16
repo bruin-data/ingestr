@@ -984,8 +984,9 @@ def mongodb_insert(items, table, connection_string: str = dlt.secrets.value) -> 
         table: Table metadata containing name and schema info
         connection_string: MongoDB connection string
     """
-    from urllib.parse import urlparse
     from typing import Any
+    from urllib.parse import urlparse
+
     from pymongo import MongoClient
 
     # Extract database name from connection string
