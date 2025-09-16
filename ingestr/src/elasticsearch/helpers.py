@@ -1,15 +1,16 @@
 """Elasticsearch destination helpers"""
 
 import json
-from typing import Any
+from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 import dlt
+
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 
 
-def process_file_items(file_path: str) -> list[dict]:
+def process_file_items(file_path: str) -> List[Dict[str, Any]]:
     """Process items from a file path (JSONL format)."""
     documents = []
     with open(file_path, "r") as f:
@@ -17,18 +18,20 @@ def process_file_items(file_path: str) -> list[dict]:
             if line.strip():
                 doc = json.loads(line.strip())
                 # Clean DLT metadata
-                cleaned_doc = {k: v for k, v in doc.items() if not k.startswith('_dlt_')}
+                cleaned_doc = {
+                    k: v for k, v in doc.items() if not k.startswith("_dlt_")
+                }
                 documents.append(cleaned_doc)
     return documents
 
 
-def process_iterable_items(items) -> list[dict]:
+def process_iterable_items(items: Any) -> List[Dict[str, Any]]:
     """Process items from an iterable."""
     documents = []
     for item in items:
         if isinstance(item, dict):
             # Clean DLT metadata
-            cleaned_item = {k: v for k, v in item.items() if not k.startswith('_dlt_')}
+            cleaned_item = {k: v for k, v in item.items() if not k.startswith("_dlt_")}
             documents.append(cleaned_item)
     return documents
 
@@ -39,7 +42,9 @@ def process_iterable_items(items) -> list[dict]:
     batch_size=1000,
     naming_convention="snake_case",
 )
-def elasticsearch_insert(items, table, connection_string: str = dlt.secrets.value) -> None:
+def elasticsearch_insert(
+    items, table, connection_string: str = dlt.secrets.value
+) -> None:
     """Insert data into Elasticsearch index.
 
     Args:
@@ -51,17 +56,19 @@ def elasticsearch_insert(items, table, connection_string: str = dlt.secrets.valu
     parsed = urlparse(connection_string)
 
     # Build Elasticsearch client configuration
-    es_config = {
-        'hosts': [{
-            'host': parsed.hostname or 'localhost',
-            'port': parsed.port or 9200,
-            'scheme': parsed.scheme or 'http'
-        }]
-    }
+    hosts = [
+        {
+            "host": parsed.hostname or "localhost",
+            "port": parsed.port or 9200,
+            "scheme": parsed.scheme or "http",
+        }
+    ]
+
+    es_config: Dict[str, Any] = {"hosts": hosts}
 
     # Add authentication if present
     if parsed.username and parsed.password:
-        es_config['http_auth'] = (parsed.username, parsed.password)
+        es_config["http_auth"] = (parsed.username, parsed.password)
 
     # Get index name from table metadata
     index_name = table["name"]
@@ -79,16 +86,14 @@ def elasticsearch_insert(items, table, connection_string: str = dlt.secrets.valu
         # Prepare documents for bulk insert
         docs_for_bulk = []
         for doc in documents:
-            es_doc = {
-                "_index": index_name,
-                "_source": doc
-            }
+            es_doc: Dict[str, Any] = {"_index": index_name, "_source": doc.copy()}
 
             # Use _id if present, otherwise let ES generate one
             if "_id" in doc:
                 es_doc["_id"] = str(doc["_id"])
                 # Remove _id from source since it's metadata
-                del doc["_id"]
+                if "_id" in es_doc["_source"]:
+                    del es_doc["_source"]["_id"]
             elif "id" in doc:
                 es_doc["_id"] = str(doc["id"])
 
@@ -96,8 +101,15 @@ def elasticsearch_insert(items, table, connection_string: str = dlt.secrets.valu
 
         # Bulk insert
         try:
-            success, failed = bulk(client, docs_for_bulk, request_timeout=60)
-            if failed:
-                raise Exception(f"Failed to insert {len(failed)} documents: {failed}")
+            _, failed_items = bulk(client, docs_for_bulk, request_timeout=60)
+            if failed_items:
+                failed_count = (
+                    len(failed_items)
+                    if isinstance(failed_items, list)
+                    else failed_items
+                )
+                raise Exception(
+                    f"Failed to insert {failed_count} documents: {failed_items}"
+                )
         except Exception as e:
             raise Exception(f"Elasticsearch bulk insert failed: {str(e)}")
