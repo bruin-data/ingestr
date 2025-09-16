@@ -21,6 +21,7 @@ from ingestr.src.destinations import (
     SnowflakeDestination,
     SqliteDestination,
     SynapseDestination,
+    TrinoDestination,
 )
 from ingestr.src.sources import (
     AdjustSource,
@@ -108,6 +109,7 @@ SQL_SOURCE_SCHEMES = [
     "databricks",
     "db2",
     "spanner",
+    "trino",
 ]
 
 
@@ -230,6 +232,7 @@ class SourceDestinationFactory:
         "sqlite": SqliteDestination,
         "mysql": MySqlDestination,
         "mysql+pymysql": MySqlDestination,
+        "trino": TrinoDestination,
     }
 
     def __init__(self, source_uri: str, destination_uri: str):
