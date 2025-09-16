@@ -1,0 +1,103 @@
+"""Elasticsearch destination helpers"""
+
+import json
+from typing import Any
+from urllib.parse import urlparse
+
+import dlt
+from elasticsearch import Elasticsearch
+from elasticsearch.helpers import bulk
+
+
+def process_file_items(file_path: str) -> list[dict]:
+    """Process items from a file path (JSONL format)."""
+    documents = []
+    with open(file_path, "r") as f:
+        for line in f:
+            if line.strip():
+                doc = json.loads(line.strip())
+                # Clean DLT metadata
+                cleaned_doc = {k: v for k, v in doc.items() if not k.startswith('_dlt_')}
+                documents.append(cleaned_doc)
+    return documents
+
+
+def process_iterable_items(items) -> list[dict]:
+    """Process items from an iterable."""
+    documents = []
+    for item in items:
+        if isinstance(item, dict):
+            # Clean DLT metadata
+            cleaned_item = {k: v for k, v in item.items() if not k.startswith('_dlt_')}
+            documents.append(cleaned_item)
+    return documents
+
+
+@dlt.destination(
+    name="elasticsearch",
+    loader_file_format="typed-jsonl",
+    batch_size=1000,
+    naming_convention="snake_case",
+)
+def elasticsearch_insert(items, table, connection_string: str = dlt.secrets.value) -> None:
+    """Insert data into Elasticsearch index.
+
+    Args:
+        items: Data items (file path or iterable)
+        table: Table metadata containing name and schema info
+        connection_string: Elasticsearch connection string
+    """
+    # Parse connection string
+    parsed = urlparse(connection_string)
+
+    # Build Elasticsearch client configuration
+    es_config = {
+        'hosts': [{
+            'host': parsed.hostname or 'localhost',
+            'port': parsed.port or 9200,
+            'scheme': parsed.scheme or 'http'
+        }]
+    }
+
+    # Add authentication if present
+    if parsed.username and parsed.password:
+        es_config['http_auth'] = (parsed.username, parsed.password)
+
+    # Get index name from table metadata
+    index_name = table["name"]
+
+    # Connect to Elasticsearch
+    client = Elasticsearch(**es_config)
+
+    # Process and insert documents
+    if isinstance(items, str):
+        documents = process_file_items(items)
+    else:
+        documents = process_iterable_items(items)
+
+    if documents:
+        # Prepare documents for bulk insert
+        docs_for_bulk = []
+        for doc in documents:
+            es_doc = {
+                "_index": index_name,
+                "_source": doc
+            }
+
+            # Use _id if present, otherwise let ES generate one
+            if "_id" in doc:
+                es_doc["_id"] = str(doc["_id"])
+                # Remove _id from source since it's metadata
+                del doc["_id"]
+            elif "id" in doc:
+                es_doc["_id"] = str(doc["id"])
+
+            docs_for_bulk.append(es_doc)
+
+        # Bulk insert
+        try:
+            success, failed = bulk(client, docs_for_bulk, request_timeout=60)
+            if failed:
+                raise Exception(f"Failed to insert {len(failed)} documents: {failed}")
+        except Exception as e:
+            raise Exception(f"Elasticsearch bulk insert failed: {str(e)}")
