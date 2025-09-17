@@ -973,7 +973,7 @@ def process_iterable_items(items) -> list[dict]:
 @dlt.destination(
     name="mongodb",
     loader_file_format="typed-jsonl",
-    batch_size=10000000,
+    batch_size=1000,
     naming_convention="snake_case",
 )
 def mongodb_insert(items, table, connection_string: str = dlt.secrets.value) -> None:
