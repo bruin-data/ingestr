@@ -575,6 +575,7 @@ mysqlDocker = DockerImage(
     "mysql", lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
 )
 
+
 SOURCES = {
     "postgres": pgDocker,
     "duckdb": EphemeralDuckDb(),
@@ -587,9 +588,9 @@ SOURCES = {
 }
 
 DESTINATIONS = {
-    # "postgres": pgDocker,
+    "postgres": pgDocker,
     "duckdb": EphemeralDuckDb(),
-    # "clickhouse+native": clickHouseDocker,
+    "clickhouse+native": clickHouseDocker,
 }
 
 
@@ -4932,3 +4933,17 @@ def revenuecat_test_cases():
 def test_revenuecat_source(testcase, dest):
     testcase(dest.start())
     dest.stop()
+
+
+def test_csv_to_mongodb():
+    with MongoDbContainer("mongo:8.0.13") as mongo:
+        result = invoke_ingest_command(
+            "csv://ingestr/testdata/create_replace.csv",
+            "raw.input",
+            mongo.get_connection_url(),
+            "output",
+        )
+        assert result.exit_code == 0
+
+        client = mongo.get_connection_client()
+        assert client["ingestr_db"]["output"].count_documents({}) == 20

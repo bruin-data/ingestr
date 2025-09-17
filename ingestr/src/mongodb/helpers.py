@@ -23,6 +23,7 @@ from bson.timestamp import Timestamp
 from dlt.common import logger
 from dlt.common.configuration.specs import BaseConfiguration, configspec
 from dlt.common.data_writers import TDataItemFormat
+from dlt.common.schema import TTableSchema
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TDataItem
 from dlt.common.utils import map_nested_in_place
@@ -961,22 +962,7 @@ def process_file_items(file_path: str) -> list[dict]:
     return documents
 
 
-def process_iterable_items(items) -> list[dict]:
-    """Process items from an iterable."""
-    documents = []
-    for item in items:
-        if isinstance(item, dict):
-            documents.append(item)  # Include all fields including DLT metadata
-    return documents
-
-
-@dlt.destination(
-    name="mongodb",
-    loader_file_format="typed-jsonl",
-    batch_size=1000,
-    naming_convention="snake_case",
-)
-def mongodb_insert(items, table, connection_string: str = dlt.secrets.value) -> None:
+def mongodb_insert(uri: str, database: str):
     """Insert data into MongoDB collection.
 
     Args:
@@ -984,31 +970,36 @@ def mongodb_insert(items, table, connection_string: str = dlt.secrets.value) -> 
         table: Table metadata containing name and schema info
         connection_string: MongoDB connection string
     """
-    from typing import Any
-    from urllib.parse import urlparse
 
-    from pymongo import MongoClient
+    def destination(items: TDataItem, table: TTableSchema) -> None:
+        from pymongo import MongoClient
 
-    # Extract database name from connection string
-    parsed = urlparse(connection_string)
-    database_name = parsed.path.lstrip("/") if parsed.path.lstrip("/") else "ingestr_db"
+        # Extract database name from connection string
+        # Get collection name from table metadata
+        collection_name = table["name"]
 
-    # Get collection name from table metadata
-    collection_name = table["name"]
+        # Connect to MongoDB
+        client: MongoClient
 
-    # Connect to MongoDB
-    client: MongoClient
-    with MongoClient(connection_string) as client:
-        db: Any = client[database_name]
-        collection = db[collection_name]
+        with MongoClient(uri) as client:
+            db = client[database]
+            collection = db[collection_name]
 
-        # Process and insert documents
-        if isinstance(items, str):
-            documents = process_file_items(items)
-        else:
-            documents = process_iterable_items(items)
+            # Process and insert documents
+            if isinstance(items, str):
+                documents = process_file_items(items)
+            else:
+                documents = [item for item in items if isinstance(item, dict)]
 
-        if documents:
-            # Replace strategy: Clear collection and insert all documents
-            collection.delete_many({})  # Clear existing data
-            collection.insert_many(documents)  # Insert all new data
+            if documents:
+                # Replace strategy: Clear collection and insert all documents
+                collection.delete_many({})  # Clear existing data
+                collection.insert_many(documents)  # Insert all new data
+
+    return dlt.destination(
+        destination,
+        name="mongodb",
+        loader_file_format="typed-jsonl",
+        batch_size=1000,
+        naming_convention="snake_case",
+    )
