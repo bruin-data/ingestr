@@ -972,6 +972,7 @@ def mongodb_insert(uri: str, database: str):
     """
 
     def destination(items: TDataItem, table: TTableSchema) -> None:
+        import pyarrow
         from pymongo import MongoClient
 
         # Extract database name from connection string
@@ -988,12 +989,12 @@ def mongodb_insert(uri: str, database: str):
             # Process and insert documents
             if isinstance(items, str):
                 documents = process_file_items(items)
+            elif isinstance(items, pyarrow.RecordBatch):
+                documents = [item for item in items.to_pylist()]
             else:
                 documents = [item for item in items if isinstance(item, dict)]
 
             if documents:
-                # Replace strategy: Clear collection and insert all documents
-                collection.delete_many({})  # Clear existing data
                 collection.insert_many(documents)  # Insert all new data
 
     return dlt.destination(

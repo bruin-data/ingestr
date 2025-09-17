@@ -564,6 +564,7 @@ POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
 MYSQL8_IMAGE = "mysql:8.4.1"
 MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-CU13-ubuntu-22.04"
 CLICKHOUSE_IMAGE = "clickhouse/clickhouse-server:24.12"
+MONGODB_IMAGE = "mongo:8.0.13"
 
 pgDocker = DockerImage(
     "postgres", lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()
@@ -574,6 +575,14 @@ clickHouseDocker = ClickhouseDockerImage(
 mysqlDocker = DockerImage(
     "mysql", lambda: MySqlContainer(MYSQL8_IMAGE, username="root").start()
 )
+
+
+@pytest.fixture(scope="session")
+def mongodb_server():
+    container = MongoDbContainer(MONGODB_IMAGE)
+    container.start()
+    yield container
+    container.stop()
 
 
 SOURCES = {
@@ -4935,15 +4944,56 @@ def test_revenuecat_source(testcase, dest):
     dest.stop()
 
 
-def test_csv_to_mongodb():
-    with MongoDbContainer("mongo:8.0.13") as mongo:
+def mongodb_test_cases():
+    def smoke_test(mongo):
+        collection = f"smoke_test_{get_random_string(5)}"
         result = invoke_ingest_command(
             "csv://ingestr/testdata/create_replace.csv",
             "raw.input",
             mongo.get_connection_url(),
-            "output",
+            collection,
         )
         assert result.exit_code == 0
 
         client = mongo.get_connection_client()
-        assert client["ingestr_db"]["output"].count_documents({}) == 20
+        assert client["ingestr_db"][collection].count_documents({}) == 20
+
+    def large_insert(mongo):
+        """
+        Insert more than batch_size items.
+        """
+        DOC_COUNT = 5000
+        table = pa.Table.from_pandas(
+            pd.DataFrame(
+                {
+                    "id": range(DOC_COUNT),
+                }
+            )
+        )
+        with tempfile.NamedTemporaryFile(suffix=".arrow") as fd:
+            with pa.OSFile(fd.name, "wb") as f:
+                writer = ipc.new_file(f, table.schema)
+                writer.write_table(table)
+                writer.close()
+
+            collection = f"large_insert_{get_random_string(5)}"
+            result = invoke_ingest_command(
+                f"mmap://{fd.name}",
+                "raw.input",
+                mongo.get_connection_url(),
+                collection,
+            )
+            assert result.exit_code == 0
+
+            client = mongo.get_connection_client()
+            assert client["ingestr_db"][collection].count_documents({}) == DOC_COUNT
+
+    return [
+        smoke_test,
+        large_insert,
+    ]
+
+
+@pytest.mark.parametrize("testcase", mongodb_test_cases())
+def test_mongodb_dest(testcase, mongodb_server):
+    testcase(mongodb_server)
