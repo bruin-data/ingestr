@@ -115,7 +115,7 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     <tr>
         <td>Elasticsearch</td>
         <td>✅</td>
-        <td>-</td>
+        <td>✅</td>
     </tr>
      <tr>
         <td>GCP Spanner</td>
@@ -135,7 +135,7 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     <tr>
         <td>MongoDB</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>✅</td>
     </tr>
     <tr>
         <td>MotherDuck</td>
