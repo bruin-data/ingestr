@@ -971,9 +971,8 @@ def mongodb_insert(uri: str, database: str):
         connection_string: MongoDB connection string
     """
 
-    state = {
-        "first_batch": True
-    }
+    state = {"first_batch": True}
+
     def destination(items: TDataItem, table: TTableSchema) -> None:
         import pyarrow
         from pymongo import MongoClient
@@ -981,7 +980,6 @@ def mongodb_insert(uri: str, database: str):
         # Extract database name from connection string
         # Get collection name from table metadata
         collection_name = table["name"]
-
 
         # Connect to MongoDB
         client: MongoClient
