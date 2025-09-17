@@ -971,6 +971,9 @@ def mongodb_insert(uri: str, database: str):
         connection_string: MongoDB connection string
     """
 
+    state = {
+        "first_batch": True
+    }
     def destination(items: TDataItem, table: TTableSchema) -> None:
         import pyarrow
         from pymongo import MongoClient
@@ -978,6 +981,7 @@ def mongodb_insert(uri: str, database: str):
         # Extract database name from connection string
         # Get collection name from table metadata
         collection_name = table["name"]
+
 
         # Connect to MongoDB
         client: MongoClient
@@ -994,6 +998,10 @@ def mongodb_insert(uri: str, database: str):
             else:
                 documents = [item for item in items if isinstance(item, dict)]
 
+            if state["first_batch"] and documents:
+                collection.delete_many({})
+                state["first_batch"] = False
+
             if documents:
                 collection.insert_many(documents)  # Insert all new data
 
@@ -1003,4 +1011,5 @@ def mongodb_insert(uri: str, database: str):
         loader_file_format="typed-jsonl",
         batch_size=1000,
         naming_convention="snake_case",
+        loader_parallelism_strategy="sequential",
     )
