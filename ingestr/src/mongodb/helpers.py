@@ -963,12 +963,14 @@ def process_file_items(file_path: str) -> list[dict]:
 
 
 def mongodb_insert(uri: str, database: str):
-    """Insert data into MongoDB collection.
+    """Creates a dlt.destination for inserting data into a MongoDB collection.
 
     Args:
-        items: Data items (file path or iterable)
-        table: Table metadata containing name and schema info
-        connection_string: MongoDB connection string
+        uri (str): MongoDB connection URI.
+        database (str): Name of the MongoDB database.
+
+    Returns:
+        dlt.destination: A DLT destination object configured for MongoDB.
     """
 
     state = {"first_batch": True}
