@@ -828,17 +828,15 @@ class MongoDBDestination:
 
         # Build connection string
         if username and password:
-            connection_string = (
-                f"mongodb://{username}:{password}@{host}:{port}/{database}"
-            )
+            connection_string = f"mongodb://{username}:{password}@{host}:{port}"
         else:
-            connection_string = f"mongodb://{host}:{port}/{database}"
+            connection_string = f"mongodb://{host}:{port}"
 
         # Add query parameters if any
         if parsed_uri.query:
             connection_string += f"?{parsed_uri.query}"
 
-        return mongodb_insert(connection_string=connection_string)
+        return mongodb_insert(connection_string, database)
 
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
         return {

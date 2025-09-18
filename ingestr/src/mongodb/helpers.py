@@ -23,6 +23,7 @@ from bson.timestamp import Timestamp
 from dlt.common import logger
 from dlt.common.configuration.specs import BaseConfiguration, configspec
 from dlt.common.data_writers import TDataItemFormat
+from dlt.common.schema import TTableSchema
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TDataItem
 from dlt.common.utils import map_nested_in_place
@@ -961,54 +962,54 @@ def process_file_items(file_path: str) -> list[dict]:
     return documents
 
 
-def process_iterable_items(items) -> list[dict]:
-    """Process items from an iterable."""
-    documents = []
-    for item in items:
-        if isinstance(item, dict):
-            documents.append(item)  # Include all fields including DLT metadata
-    return documents
-
-
-@dlt.destination(
-    name="mongodb",
-    loader_file_format="typed-jsonl",
-    batch_size=1000,
-    naming_convention="snake_case",
-)
-def mongodb_insert(items, table, connection_string: str = dlt.secrets.value) -> None:
-    """Insert data into MongoDB collection.
+def mongodb_insert(uri: str, database: str):
+    """Creates a dlt.destination for inserting data into a MongoDB collection.
 
     Args:
-        items: Data items (file path or iterable)
-        table: Table metadata containing name and schema info
-        connection_string: MongoDB connection string
+        uri (str): MongoDB connection URI.
+        database (str): Name of the MongoDB database.
+
+    Returns:
+        dlt.destination: A DLT destination object configured for MongoDB.
     """
-    from typing import Any
-    from urllib.parse import urlparse
 
-    from pymongo import MongoClient
+    state = {"first_batch": True}
 
-    # Extract database name from connection string
-    parsed = urlparse(connection_string)
-    database_name = parsed.path.lstrip("/") if parsed.path.lstrip("/") else "ingestr_db"
+    def destination(items: TDataItem, table: TTableSchema) -> None:
+        import pyarrow
+        from pymongo import MongoClient
 
-    # Get collection name from table metadata
-    collection_name = table["name"]
+        # Extract database name from connection string
+        # Get collection name from table metadata
+        collection_name = table["name"]
 
-    # Connect to MongoDB
-    client: MongoClient
-    with MongoClient(connection_string) as client:
-        db: Any = client[database_name]
-        collection = db[collection_name]
+        # Connect to MongoDB
+        client: MongoClient
 
-        # Process and insert documents
-        if isinstance(items, str):
-            documents = process_file_items(items)
-        else:
-            documents = process_iterable_items(items)
+        with MongoClient(uri) as client:
+            db = client[database]
+            collection = db[collection_name]
 
-        if documents:
-            # Replace strategy: Clear collection and insert all documents
-            collection.delete_many({})  # Clear existing data
-            collection.insert_many(documents)  # Insert all new data
+            # Process and insert documents
+            if isinstance(items, str):
+                documents = process_file_items(items)
+            elif isinstance(items, pyarrow.RecordBatch):
+                documents = [item for item in items.to_pylist()]
+            else:
+                documents = [item for item in items if isinstance(item, dict)]
+
+            if state["first_batch"] and documents:
+                collection.delete_many({})
+                state["first_batch"] = False
+
+            if documents:
+                collection.insert_many(documents)  # Insert all new data
+
+    return dlt.destination(
+        destination,
+        name="mongodb",
+        loader_file_format="typed-jsonl",
+        batch_size=1000,
+        naming_convention="snake_case",
+        loader_parallelism_strategy="sequential",
+    )
