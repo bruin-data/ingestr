@@ -44,9 +44,8 @@ def docebo_source(
     @dlt.resource(
         name="users",
         write_disposition="replace",
-        primary_key="user_id",
         columns={
-            "user_id": {"data_type": "text", "nullable": False},
+            "user_id": {"data_type": "text", "nullable": True},
             "username": {"data_type": "text", "nullable": True},
             "first_name": {"data_type": "text", "nullable": True},
             "last_name": {"data_type": "text", "nullable": True},
@@ -85,10 +84,9 @@ def docebo_source(
     @dlt.resource(
         name="courses",
         write_disposition="replace",
-        primary_key="id_course",
         parallelized=True,
         columns={
-            "id_course": {"data_type": "bigint", "nullable": False},
+            "id_course": {"data_type": "bigint", "nullable": True},
             "name": {"data_type": "text", "nullable": True},
             "uidCourse": {"data_type": "text", "nullable": True},
             "description": {"data_type": "text", "nullable": True},
@@ -130,17 +128,13 @@ def docebo_source(
             for course in courses_batch:
                 yield normalize_docebo_dates(course)
 
-            # normalized_courses = [normalize_docebo_dates(course) for course in courses_batch]
-            # print("yielding a batch for courses")
-            # yield normalized_courses
 
-    # Phase 1: Core User and Organization Resources
     @dlt.resource(
         name="user_fields",
         write_disposition="replace",
         primary_key="id",
         columns={
-            "id": {"data_type": "bigint", "nullable": False},
+            "id": {"data_type": "bigint", "nullable": True},
             "name": {"data_type": "text", "nullable": True},
             "type": {"data_type": "text", "nullable": True},
             "mandatory": {"data_type": "bool", "nullable": True},
@@ -161,9 +155,8 @@ def docebo_source(
     @dlt.resource(
         name="branches",
         write_disposition="replace",
-        primary_key="id_org",
         columns={
-            "id_org": {"data_type": "bigint", "nullable": False},
+            "id_org": {"data_type": "bigint", "nullable": True},
             "id_parent": {"data_type": "bigint", "nullable": True},
             "lft": {"data_type": "bigint", "nullable": True},
             "rgt": {"data_type": "bigint", "nullable": True},
@@ -185,7 +178,7 @@ def docebo_source(
         write_disposition="replace",
         primary_key="group_id",
         columns={
-            "group_id": {"data_type": "bigint", "nullable": False},
+            "group_id": {"data_type": "bigint", "nullable": True},
             "name": {"data_type": "text", "nullable": True},
             "description": {"data_type": "text", "nullable": True},
             "language": {"data_type": "text", "nullable": True},
@@ -210,8 +203,8 @@ def docebo_source(
         write_disposition="replace",
         primary_key=["group_id", "user_id"],
         columns={
-            "group_id": {"data_type": "bigint", "nullable": False},
-            "user_id": {"data_type": "text", "nullable": False},
+            "group_id": {"data_type": "bigint", "nullable": True},
+            "user_id": {"data_type": "text", "nullable": True},
             "username": {"data_type": "text", "nullable": True},
             "first_name": {"data_type": "text", "nullable": True},
             "last_name": {"data_type": "text", "nullable": True},
@@ -232,7 +225,7 @@ def docebo_source(
         write_disposition="replace",
         primary_key="field_id",
         columns={
-            "field_id": {"data_type": "bigint", "nullable": False},
+            "field_id": {"data_type": "bigint", "nullable": True},
             "type_field": {"data_type": "text", "nullable": True},
             "name_field": {"data_type": "text", "nullable": True},
             "is_mandatory": {"data_type": "bool", "nullable": True},
@@ -252,11 +245,10 @@ def docebo_source(
         name="learning_objects",
         data_from=courses,
         write_disposition="replace",
-        primary_key=["course_id", "id_org"],
         parallelized=True,
         columns={
-            "course_id": {"data_type": "bigint", "nullable": False},
-            "id_org": {"data_type": "bigint", "nullable": False},
+            "course_id": {"data_type": "bigint", "nullable": True},
+            "id_org": {"data_type": "bigint", "nullable": True},
             "object_id": {"data_type": "bigint", "nullable": True},
             "lo_code": {"data_type": "text", "nullable": True},
             "lo_name": {"data_type": "text", "nullable": True},
@@ -286,9 +278,8 @@ def docebo_source(
     @dlt.resource(
         name="learning_plans",
         write_disposition="replace",
-        primary_key="learning_plan_id",
         columns={
-            "learning_plan_id": {"data_type": "bigint", "nullable": False},
+            "learning_plan_id": {"data_type": "bigint", "nullable": True},
             "uuid": {"data_type": "text", "nullable": True},
             "code": {"data_type": "text", "nullable": True},
             "title": {"data_type": "text", "nullable": True},
@@ -316,10 +307,9 @@ def docebo_source(
     @dlt.resource(
         name="learning_plan_enrollments",
         write_disposition="replace",
-        primary_key=["id_path", "id_user"],
         columns={
-            "id_path": {"data_type": "bigint", "nullable": False},
-            "id_user": {"data_type": "text", "nullable": False},
+            "id_path": {"data_type": "bigint", "nullable": True},
+            "id_user": {"data_type": "text", "nullable": True},
             "enrollment_date": {"data_type": "timestamp", "nullable": True},
             "completion_date": {"data_type": "timestamp", "nullable": True},
             "enrollment_status": {"data_type": "text", "nullable": True},
@@ -339,11 +329,10 @@ def docebo_source(
     @dlt.resource(
         name="learning_plan_course_enrollments",
         write_disposition="replace",
-        primary_key=["learning_plan_id", "course_id", "user_id"],
         columns={
-            "learning_plan_id": {"data_type": "bigint", "nullable": False},
-            "course_id": {"data_type": "bigint", "nullable": False},
-            "user_id": {"data_type": "text", "nullable": False},
+            "learning_plan_id": {"data_type": "bigint", "nullable": True},
+            "course_id": {"data_type": "bigint", "nullable": True},
+            "user_id": {"data_type": "text", "nullable": True},
             "enrollment_date": {"data_type": "timestamp", "nullable": True},
             "completion_date": {"data_type": "timestamp", "nullable": True},
             "status": {"data_type": "text", "nullable": True},
@@ -362,10 +351,9 @@ def docebo_source(
     @dlt.resource(
         name="course_enrollments",
         write_disposition="replace",
-        primary_key=["course_id", "user_id"],
         columns={
-            "course_id": {"data_type": "bigint", "nullable": False},
-            "user_id": {"data_type": "text", "nullable": False},
+            "course_id": {"data_type": "bigint", "nullable": True},
+            "user_id": {"data_type": "text", "nullable": True},
             "enrollment_date": {"data_type": "timestamp", "nullable": True},
             "completion_date": {"data_type": "timestamp", "nullable": True},
             "status": {"data_type": "text", "nullable": True},
@@ -388,10 +376,9 @@ def docebo_source(
     @dlt.resource(
         name="sessions",
         write_disposition="replace",
-        primary_key=["course_id", "session_id"],
         columns={
-            "course_id": {"data_type": "bigint", "nullable": False},
-            "session_id": {"data_type": "bigint", "nullable": False},
+            "course_id": {"data_type": "bigint", "nullable": True},
+            "session_id": {"data_type": "bigint", "nullable": True},
             "name": {"data_type": "text", "nullable": True},
             "code": {"data_type": "text", "nullable": True},
             "date_start": {"data_type": "timestamp", "nullable": True},
@@ -416,9 +403,8 @@ def docebo_source(
     @dlt.resource(
         name="categories",
         write_disposition="replace",
-        primary_key="id_cat",
         columns={
-            "id_cat": {"data_type": "bigint", "nullable": False},
+            "id_cat": {"data_type": "bigint", "nullable": True},
             "code": {"data_type": "text", "nullable": True},
             "description": {"data_type": "text", "nullable": True},
             "id_parent": {"data_type": "bigint", "nullable": True},
@@ -437,9 +423,8 @@ def docebo_source(
     @dlt.resource(
         name="certifications",
         write_disposition="replace",
-        primary_key="id_cert",
         columns={
-            "id_cert": {"data_type": "bigint", "nullable": False},
+            "id_cert": {"data_type": "bigint", "nullable": True},
             "code": {"data_type": "text", "nullable": True},
             "title": {"data_type": "text", "nullable": True},
             "description": {"data_type": "text", "nullable": True},
@@ -463,9 +448,8 @@ def docebo_source(
     @dlt.resource(
         name="external_training",
         write_disposition="replace",
-        primary_key="external_training_id",
         columns={
-            "external_training_id": {"data_type": "bigint", "nullable": False},
+            "external_training_id": {"data_type": "bigint", "nullable": True},
             "user_id": {"data_type": "text", "nullable": True},
             "title": {"data_type": "text", "nullable": True},
             "description": {"data_type": "text", "nullable": True},
@@ -495,10 +479,9 @@ def docebo_source(
         write_disposition="replace",
         name="polls",
         parallelized=True,
-        primary_key=["poll_id", "course_id"],
         columns={
-            "poll_id": {"data_type": "bigint", "nullable": False},
-            "course_id": {"data_type": "bigint", "nullable": False},
+            "poll_id": {"data_type": "bigint", "nullable": True},
+            "course_id": {"data_type": "bigint", "nullable": True},
             "poll_title": {"data_type": "text", "nullable": True},
             "object_type": {"data_type": "text", "nullable": True},
             "lo_type": {"data_type": "text", "nullable": True},
@@ -533,10 +516,10 @@ def docebo_source(
         parallelized=True,
         name="survey_answers",
         columns={
-            "course_id": {"data_type": "bigint", "nullable": False},
-            "poll_id": {"data_type": "bigint", "nullable": False},
+            "course_id": {"data_type": "bigint", "nullable": True},
+            "poll_id": {"data_type": "bigint", "nullable": True},
             "poll_title": {"data_type": "text", "nullable": True},
-            "question_id": {"data_type": "bigint", "nullable": False},
+            "question_id": {"data_type": "bigint", "nullable": True},
             "question_type": {"data_type": "text", "nullable": True},
             "question_title": {"data_type": "text", "nullable": True},
             "answer": {"data_type": "text", "nullable": True},
