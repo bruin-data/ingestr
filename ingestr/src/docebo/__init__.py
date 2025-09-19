@@ -128,7 +128,6 @@ def docebo_source(
             for course in courses_batch:
                 yield normalize_docebo_dates(course)
 
-
     @dlt.resource(
         name="user_fields",
         write_disposition="replace",
