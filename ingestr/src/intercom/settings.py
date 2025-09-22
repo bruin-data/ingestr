@@ -26,7 +26,113 @@ REGIONAL_ENDPOINTS = {
     "au": "https://api.au.intercom.io",
 }
 
-# Core endpoints with their configuration
+# Resource configuration for automatic generation
+# Format: resource_name -> config dict
+RESOURCE_CONFIGS = {
+    # Search-based incremental resources
+    "contacts": {
+        "type": "search",
+        "incremental": True,
+        "transform_func": "transform_contact",
+        "columns": {
+            "custom_attributes": {"data_type": "json"},
+            "tags": {"data_type": "json"},
+        },
+    },
+    "conversations": {
+        "type": "search",
+        "incremental": True,
+        "transform_func": "transform_conversation",
+        "columns": {
+            "custom_attributes": {"data_type": "json"},
+            "tags": {"data_type": "json"},
+        },
+    },
+
+    # Pagination-based incremental resources
+    "companies": {
+        "type": "pagination",
+        "endpoint": "/companies",
+        "data_key": "data",
+        "pagination_type": "cursor",
+        "incremental": True,
+        "transform_func": "transform_company",
+        "params": {"per_page": 50},
+        "columns": {
+            "custom_attributes": {"data_type": "json"},
+            "tags": {"data_type": "json"},
+        },
+    },
+    "articles": {
+        "type": "pagination",
+        "endpoint": "/articles",
+        "data_key": "data",
+        "pagination_type": "cursor",
+        "incremental": True,
+        "transform_func": None,
+        "params": None,
+        "columns": {},
+    },
+
+    # Special case - tickets
+    "tickets": {
+        "type": "tickets",
+        "incremental": True,
+        "transform_func": None,
+        "columns": {
+            "ticket_attributes": {"data_type": "json"},
+        },
+    },
+
+    # Simple replace resources (non-incremental)
+    "tags": {
+        "type": "simple",
+        "endpoint": "/tags",
+        "data_key": "data",
+        "pagination_type": "simple",
+        "incremental": False,
+        "transform_func": None,
+        "columns": {},
+    },
+    "segments": {
+        "type": "simple",
+        "endpoint": "/segments",
+        "data_key": "segments",
+        "pagination_type": "cursor",
+        "incremental": False,
+        "transform_func": None,
+        "columns": {},
+    },
+    "teams": {
+        "type": "simple",
+        "endpoint": "/teams",
+        "data_key": "teams",
+        "pagination_type": "simple",
+        "incremental": False,
+        "transform_func": None,
+        "columns": {},
+    },
+    "admins": {
+        "type": "simple",
+        "endpoint": "/admins",
+        "data_key": "admins",
+        "pagination_type": "simple",
+        "incremental": False,
+        "transform_func": None,
+        "columns": {},
+    },
+    "data_attributes": {
+        "type": "simple",
+        "endpoint": "/data_attributes",
+        "data_key": "data",
+        "pagination_type": "cursor",
+        "incremental": False,
+        "transform_func": None,
+        "columns": {},
+    },
+}
+
+# Core endpoints with their configuration (kept for backwards compatibility)
 # Format: (endpoint_path, data_key, supports_incremental, pagination_type)
 CORE_ENDPOINTS: Dict[str, Tuple[str, str, bool, str]] = {
     "contacts": ("/contacts", "data", True, "cursor"),

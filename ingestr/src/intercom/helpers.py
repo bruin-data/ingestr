@@ -221,10 +221,10 @@ class IntercomAPIClient:
                     "query": search_query.get("query", {}),
                     "pagination": pagination_info,
                 }
-                
+
                 if "sort" in search_query:
                     request_data["sort"] = search_query["sort"]
-                
+
                 response = self._make_request("POST", endpoint, json_data=request_data)
                 
                 # Yield the data
@@ -374,6 +374,235 @@ def transform_conversation(conversation: Dict[str, Any]) -> Dict[str, Any]:
     return transformed
 
 
+def convert_datetime_to_timestamp(dt_obj: Any) -> int:
+    """
+    Convert datetime object to Unix timestamp for Intercom API compatibility.
+
+    Args:
+        dt_obj: DateTime object (pendulum or datetime)
+
+    Returns:
+        Unix timestamp as integer
+    """
+    if hasattr(dt_obj, 'int_timestamp'):
+        return dt_obj.int_timestamp
+    elif hasattr(dt_obj, 'timestamp'):
+        return int(dt_obj.timestamp())
+    else:
+        raise ValueError(f"Cannot convert {type(dt_obj)} to timestamp")
+
+
+def create_search_resource(
+    api_client: "IntercomAPIClient",
+    resource_name: str,
+    updated_at_incremental: Any,
+    transform_func: callable = None,
+) -> Iterator[TDataItems]:
+    """
+    Generic function for search-based incremental resources.
+
+    Args:
+        api_client: Intercom API client
+        resource_name: Name of the resource (contacts, conversations)
+        updated_at_incremental: DLT incremental object
+        transform_func: Optional transformation function
+
+    Yields:
+        Transformed resource records
+    """
+    query = build_incremental_query(
+        "updated_at",
+        updated_at_incremental.last_value,
+        updated_at_incremental.end_value,
+    )
+
+    for page in api_client.search(resource_name, query):
+        if transform_func:
+            transformed_items = [transform_func(item) for item in page]
+            yield transformed_items
+        else:
+            yield page
+
+        if updated_at_incremental.end_out_of_range:
+            return
+
+
+def create_tickets_resource(
+    api_client: "IntercomAPIClient",
+    updated_at_incremental: Any,
+) -> Iterator[TDataItems]:
+    """
+    Special function for tickets resource with updated_since parameter.
+
+    Args:
+        api_client: Intercom API client
+        updated_at_incremental: DLT incremental object
+
+    Yields:
+        Filtered ticket records
+    """
+    params = {"updated_since": updated_at_incremental.last_value}
+
+    end_timestamp = updated_at_incremental.end_value if updated_at_incremental.end_value else None
+
+    for page in api_client.get_pages("/tickets", "tickets", PaginationType.CURSOR, params=params):
+        if end_timestamp:
+            filtered_tickets = [
+                t for t in page
+                if t.get("updated_at", 0) <= end_timestamp
+            ]
+            if filtered_tickets:
+                yield filtered_tickets
+
+            if any(t.get("updated_at", 0) > end_timestamp for t in page):
+                return
+        else:
+            yield page
+
+
+def create_pagination_resource(
+    api_client: "IntercomAPIClient",
+    endpoint: str,
+    data_key: str,
+    pagination_type: PaginationType,
+    updated_at_incremental: Any,
+    transform_func: callable = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Iterator[TDataItems]:
+    """
+    Generic function for cursor/simple pagination with client-side filtering.
+
+    Args:
+        api_client: Intercom API client
+        endpoint: API endpoint path
+        data_key: Key in response containing data
+        pagination_type: Type of pagination
+        updated_at_incremental: DLT incremental object
+        transform_func: Optional transformation function
+        params: Additional query parameters
+
+    Yields:
+        Filtered and transformed resource records
+    """
+    for page in api_client.get_pages(endpoint, data_key, pagination_type, params=params):
+        filtered_items = []
+        for item in page:
+            item_updated = item.get("updated_at", 0)
+            if item_updated >= updated_at_incremental.last_value:
+                if updated_at_incremental.end_value and item_updated > updated_at_incremental.end_value:
+                    continue
+
+                if transform_func:
+                    filtered_items.append(transform_func(item))
+                else:
+                    filtered_items.append(item)
+
+        if filtered_items:
+            yield filtered_items
+
+        if updated_at_incremental.end_out_of_range:
+            return
+
+
+def create_resource_from_config(
+    resource_name: str,
+    config: Dict[str, Any],
+    api_client: "IntercomAPIClient",
+    start_timestamp: int,
+    end_timestamp: Optional[int],
+    transform_functions: Dict[str, callable],
+) -> Any:
+    """
+    Create a DLT resource from configuration.
+
+    Args:
+        resource_name: Name of the resource
+        config: Resource configuration dict
+        api_client: Intercom API client
+        start_timestamp: Start timestamp for incremental loading
+        end_timestamp: End timestamp for incremental loading
+        transform_functions: Dict mapping transform function names to actual functions
+
+    Returns:
+        DLT resource function
+    """
+    import dlt
+
+    # Determine write disposition
+    write_disposition = "merge" if config["incremental"] else "replace"
+
+    # Get transform function if specified
+    transform_func = None
+    if config.get("transform_func"):
+        transform_func = transform_functions.get(config["transform_func"])
+
+    @dlt.resource(
+        name=resource_name,
+        primary_key="id",
+        write_disposition=write_disposition,
+        columns=config.get("columns", {}),
+    )
+    def resource_function(
+        updated_at: dlt.sources.incremental[int] = dlt.sources.incremental(
+            "updated_at",
+            initial_value=start_timestamp,
+            end_value=end_timestamp,
+            allow_external_schedulers=True,
+        ) if config["incremental"] else None
+    ) -> Iterator[TDataItems]:
+        """
+        Auto-generated resource function.
+        """
+        resource_type = config["type"]
+
+        if resource_type == "search":
+            yield from create_search_resource(
+                api_client, resource_name, updated_at, transform_func
+            )
+        elif resource_type == "pagination":
+            yield from create_pagination_resource(
+                api_client,
+                config["endpoint"],
+                config["data_key"],
+                getattr(PaginationType, config["pagination_type"].upper()),
+                updated_at,
+                transform_func,
+                config.get("params"),
+            )
+        elif resource_type == "tickets":
+            yield from create_tickets_resource(api_client, updated_at)
+        elif resource_type == "simple":
+            # Non-incremental resources
+            yield from api_client.get_pages(
+                config["endpoint"],
+                config["data_key"],
+                getattr(PaginationType, config["pagination_type"].upper()),
+            )
+        else:
+            raise ValueError(f"Unknown resource type: {resource_type}")
+
+    # For non-incremental resources, we need to return a function without parameters
+    if not config["incremental"]:
+        @dlt.resource(
+            name=resource_name,
+            primary_key="id",
+            write_disposition="replace",
+            columns=config.get("columns", {}),
+        )
+        def simple_resource_function() -> Iterator[TDataItems]:
+            """
+            Auto-generated simple resource function.
+            """
+            yield from api_client.get_pages(
+                config["endpoint"],
+                config["data_key"],
+                getattr(PaginationType, config["pagination_type"].upper()),
+            )
+        return simple_resource_function
+
+    return resource_function
+
+
 def build_incremental_query(
     field: str,
     start_value: Any,
@@ -393,7 +622,7 @@ def build_incremental_query(
     conditions = [
         {
             "field": field,
-            "operator": ">=",
+            "operator": ">",
             "value": start_value,
         }
     ]
@@ -401,7 +630,7 @@ def build_incremental_query(
     if end_value is not None:
         conditions.append({
             "field": field,
-            "operator": "<=",
+            "operator": "<",
             "value": end_value,
         })
     
