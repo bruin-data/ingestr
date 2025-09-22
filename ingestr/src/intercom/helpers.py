@@ -115,7 +115,7 @@ class IntercomAPIClient:
         Returns:
             Response JSON data
         """
-        url = f"{self.base_url}/api{endpoint}" if not endpoint.startswith("/api") else f"{self.base_url}{endpoint}"
+        url = f"{self.base_url}{endpoint}"
         
         if method.upper() == "GET":
             response = self.client.get(url, headers=self.headers, params=params)
@@ -397,7 +397,7 @@ def build_incremental_query(
             "value": start_value,
         }
     ]
-    
+
     if end_value is not None:
         conditions.append({
             "field": field,
