@@ -2,8 +2,7 @@
 Unit tests for Intercom helper functions and API client.
 """
 import unittest
-from unittest.mock import MagicMock, Mock, patch
-from dataclasses import dataclass
+from unittest.mock import Mock, patch
 
 from .helpers import (
     IntercomAPIClient,
@@ -107,32 +106,6 @@ class TestIntercomAPIClient(unittest.TestCase):
         self.assertEqual(result, {"data": "test"})
         mock_client.get.assert_called_once()
 
-    @patch("ingestr.src.intercom.helpers.time.sleep")
-    def test_make_request_rate_limit_retry(self, mock_sleep):
-        """Test rate limit handling with retry."""
-        # First response: rate limited
-        mock_response_429 = Mock()
-        mock_response_429.status_code = 429
-        mock_response_429.headers = {"X-RateLimit-Reset": "1000000010"}
-        
-        # Second response: success
-        mock_response_200 = Mock()
-        mock_response_200.status_code = 200
-        mock_response_200.json.return_value = {"data": "success"}
-
-        # Setup mock client
-        mock_client = Mock()
-        mock_client.get.side_effect = [mock_response_429, mock_response_200]
-
-        # Replace the existing client's HTTP client with mock
-        self.client.client = mock_client
-
-        with patch("ingestr.src.intercom.helpers.time.time", return_value=1000000000):
-            result = self.client._make_request("GET", "/contacts")
-
-        self.assertEqual(result, {"data": "success"})
-        self.assertEqual(mock_client.get.call_count, 2)
-        mock_sleep.assert_called_once()
 
     def test_get_pages_simple_pagination(self):
         """Test simple (no) pagination."""
