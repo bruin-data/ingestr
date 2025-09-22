@@ -9879,10 +9879,7 @@ def fluxx_source(
                 if field_name in fields_to_extract:
                     filtered_fields[field_name] = fields_to_extract[field_name]
                 else:
-                    # If field is not in the resource configuration, log a warning but continue
-                    print(
-                        f"Warning: Field '{field_name}' not found in {resource_name} configuration"
-                    )
+                    filtered_fields[field_name] = {}
 
             fields_to_extract = filtered_fields
 

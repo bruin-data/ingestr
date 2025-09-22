@@ -43,12 +43,6 @@ def fluxx_api_request(
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
-    # print(f"Making request to Fluxx API:")
-    # print(f"  Method: {method}")
-    # print(f"  URL: {url}")
-    # print(f"  Headers: {headers}")
-    # print(f"  Params: {params}")
-    # print(f"  Data: {data}")
 
     response = requests.request(
         method=method,
@@ -88,7 +82,6 @@ def paginate_fluxx_resource(
             params=params,
         )
 
-        print("resssponse", response)
         if not response:
             break
 
