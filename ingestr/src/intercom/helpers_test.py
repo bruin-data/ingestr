@@ -89,22 +89,26 @@ class TestIntercomAPIClient(unittest.TestCase):
             "Bearer oauth_test"
         )
 
-    @patch("ingestr.src.intercom.helpers.client")
-    def test_make_request_success(self, mock_client):
+    def test_make_request_success(self):
         """Test successful API request."""
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"data": "test"}
-        mock_client.request.return_value = mock_response
+
+        # Setup mock client
+        mock_client = Mock()
+        mock_client.get.return_value = mock_response
+
+        # Replace the existing client's HTTP client with mock
+        self.client.client = mock_client
 
         result = self.client._make_request("GET", "/contacts")
-        
-        self.assertEqual(result, {"data": "test"})
-        mock_client.request.assert_called_once()
 
-    @patch("ingestr.src.intercom.helpers.client")
+        self.assertEqual(result, {"data": "test"})
+        mock_client.get.assert_called_once()
+
     @patch("ingestr.src.intercom.helpers.time.sleep")
-    def test_make_request_rate_limit_retry(self, mock_sleep, mock_client):
+    def test_make_request_rate_limit_retry(self, mock_sleep):
         """Test rate limit handling with retry."""
         # First response: rate limited
         mock_response_429 = Mock()
@@ -115,33 +119,42 @@ class TestIntercomAPIClient(unittest.TestCase):
         mock_response_200 = Mock()
         mock_response_200.status_code = 200
         mock_response_200.json.return_value = {"data": "success"}
-        
-        mock_client.request.side_effect = [mock_response_429, mock_response_200]
-        
+
+        # Setup mock client
+        mock_client = Mock()
+        mock_client.get.side_effect = [mock_response_429, mock_response_200]
+
+        # Replace the existing client's HTTP client with mock
+        self.client.client = mock_client
+
         with patch("ingestr.src.intercom.helpers.time.time", return_value=1000000000):
             result = self.client._make_request("GET", "/contacts")
-        
+
         self.assertEqual(result, {"data": "success"})
-        self.assertEqual(mock_client.request.call_count, 2)
+        self.assertEqual(mock_client.get.call_count, 2)
         mock_sleep.assert_called_once()
 
-    @patch("ingestr.src.intercom.helpers.client")
-    def test_get_pages_simple_pagination(self, mock_client):
+    def test_get_pages_simple_pagination(self):
         """Test simple (no) pagination."""
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"admins": [{"id": "1"}, {"id": "2"}]}
-        mock_client.request.return_value = mock_response
+
+        # Setup mock client
+        mock_client = Mock()
+        mock_client.get.return_value = mock_response
+
+        # Replace the existing client's HTTP client with mock
+        self.client.client = mock_client
 
         pages = list(self.client.get_pages(
             "/admins", "admins", PaginationType.SIMPLE
         ))
-        
+
         self.assertEqual(len(pages), 1)
         self.assertEqual(pages[0], [{"id": "1"}, {"id": "2"}])
 
-    @patch("ingestr.src.intercom.helpers.client")
-    def test_get_pages_cursor_pagination(self, mock_client):
+    def test_get_pages_cursor_pagination(self):
         """Test cursor-based pagination."""
         # First page
         mock_response_1 = Mock()
@@ -159,7 +172,12 @@ class TestIntercomAPIClient(unittest.TestCase):
             "pages": {}
         }
         
-        mock_client.request.side_effect = [mock_response_1, mock_response_2]
+        # Setup mock client
+        mock_client = Mock()
+        mock_client.get.side_effect = [mock_response_1, mock_response_2]
+
+        # Replace the existing client's HTTP client with mock
+        self.client.client = mock_client
         
         pages = list(self.client.get_pages(
             "/contacts", "data", PaginationType.CURSOR
