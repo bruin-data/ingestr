@@ -267,7 +267,7 @@ class TestTransformFunctions(unittest.TestCase):
         
         self.assertEqual(query, {
             "field": "updated_at",
-            "operator": ">=",
+            "operator": ">",
             "value": 1000000
         })
 
@@ -279,12 +279,12 @@ class TestTransformFunctions(unittest.TestCase):
         self.assertEqual(len(query["value"]), 2)
         self.assertEqual(query["value"][0], {
             "field": "updated_at",
-            "operator": ">=",
+            "operator": ">",
             "value": 1000000
         })
         self.assertEqual(query["value"][1], {
             "field": "updated_at",
-            "operator": "<=",
+            "operator": "<",
             "value": 2000000
         })
 
