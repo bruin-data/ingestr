@@ -1,25 +1,25 @@
 """
 Helper functions and API client for Intercom integration.
 """
-import time
+
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, Optional, Union
 
 from dlt.common.typing import TDataItem, TDataItems, TSecretValue
 
 from ingestr.src.http_client import create_client
+
 from .settings import (
     API_VERSION,
     DEFAULT_PAGE_SIZE,
-    RATE_LIMIT_PER_10_SECONDS,
-    RATE_LIMIT_RETRY_AFTER_DEFAULT,
     REGIONAL_ENDPOINTS,
 )
 
 
 class PaginationType(Enum):
     """Types of pagination supported by Intercom API."""
+
     CURSOR = "cursor"
     SCROLL = "scroll"
     SIMPLE = "simple"  # No pagination, single page
@@ -28,11 +28,13 @@ class PaginationType(Enum):
 
 class IntercomCredentials:
     """Base class for Intercom credentials."""
-    
+
     def __init__(self, region: str = "us"):
         self.region = region
         if self.region not in REGIONAL_ENDPOINTS:
-            raise ValueError(f"Invalid region: {self.region}. Must be one of {list(REGIONAL_ENDPOINTS.keys())}")
+            raise ValueError(
+                f"Invalid region: {self.region}. Must be one of {list(REGIONAL_ENDPOINTS.keys())}"
+            )
 
     @property
     def base_url(self) -> str:
@@ -43,9 +45,10 @@ class IntercomCredentials:
 @dataclass
 class IntercomCredentialsAccessToken(IntercomCredentials):
     """Credentials for Intercom API using Access Token authentication."""
+
     access_token: TSecretValue
     region: str = "us"  # us, eu, or au
-    
+
     def __post_init__(self):
         super().__init__(self.region)
 
@@ -53,9 +56,10 @@ class IntercomCredentialsAccessToken(IntercomCredentials):
 @dataclass
 class IntercomCredentialsOAuth(IntercomCredentials):
     """Credentials for Intercom API using OAuth authentication."""
+
     oauth_token: TSecretValue
     region: str = "us"  # us, eu, or au
-    
+
     def __post_init__(self):
         super().__init__(self.region)
 
@@ -78,21 +82,23 @@ class IntercomAPIClient:
         """
         self.credentials = credentials
         self.base_url = credentials.base_url
-        
+
         # Set up authentication headers
         self.headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Intercom-Version": API_VERSION,  # REQUIRED header
         }
-        
+
         if isinstance(credentials, IntercomCredentialsAccessToken):
             self.headers["Authorization"] = f"Bearer {credentials.access_token}"
         elif isinstance(credentials, IntercomCredentialsOAuth):
             self.headers["Authorization"] = f"Bearer {credentials.oauth_token}"
         else:
-            raise TypeError("Invalid credentials type. Must be IntercomCredentialsAccessToken or IntercomCredentialsOAuth")
-        
+            raise TypeError(
+                "Invalid credentials type. Must be IntercomCredentialsAccessToken or IntercomCredentialsOAuth"
+            )
+
         # Create HTTP client with rate limit retry for 429 status codes
         self.client = create_client(retry_status_codes=[429, 502, 503])
 
@@ -116,20 +122,24 @@ class IntercomAPIClient:
             Response JSON data
         """
         url = f"{self.base_url}{endpoint}"
-        
+
         if method.upper() == "GET":
             response = self.client.get(url, headers=self.headers, params=params)
         elif method.upper() == "POST":
-            response = self.client.post(url, headers=self.headers, json=json_data, params=params)
+            response = self.client.post(
+                url, headers=self.headers, json=json_data, params=params
+            )
         else:
-            response = self.client.request(method, url, headers=self.headers, json=json_data, params=params)
-        
+            response = self.client.request(
+                method, url, headers=self.headers, json=json_data, params=params
+            )
+
         # The create_client already handles rate limiting (429) with retries
         # Just check for other errors
         if response.status_code >= 400:
             error_msg = f"Intercom API error {response.status_code}: {response.text}"
             raise Exception(error_msg)
-        
+
         return response.json()
 
     def get_pages(
@@ -154,67 +164,69 @@ class IntercomAPIClient:
             Lists of data items from each page
         """
         params = params or {}
-        
+
         if pagination_type == PaginationType.SIMPLE:
             # Single page, no pagination
             response = self._make_request("GET", endpoint, params)
             if data_key in response:
                 yield response[data_key]
             return
-        
+
         elif pagination_type == PaginationType.CURSOR:
             # Cursor-based pagination
             params["per_page"] = params.get("per_page", DEFAULT_PAGE_SIZE)
             next_cursor = None
-            
+
             while True:
                 if next_cursor:
                     params["starting_after"] = next_cursor
-                
+
                 response = self._make_request("GET", endpoint, params)
-                
+
                 # Yield the data
                 if data_key in response and response[data_key]:
                     yield response[data_key]
-                
+
                 # Check for next page
                 pages_info = response.get("pages", {})
                 if not pages_info.get("next"):
                     break
-                    
+
                 next_cursor = pages_info.get("next", {}).get("starting_after")
                 if not next_cursor:
                     break
-        
+
         elif pagination_type == PaginationType.SCROLL:
             # Scroll API pagination (for large exports)
             scroll_param = None
-            
+
             while True:
                 scroll_endpoint = endpoint
                 if scroll_param:
                     scroll_endpoint = f"{endpoint}/scroll"
                     params = {"scroll_param": scroll_param}
-                
+
                 response = self._make_request("GET", scroll_endpoint, params)
-                
+
                 # Yield the data
                 if data_key in response and response[data_key]:
                     yield response[data_key]
-                
+
                 # Get next scroll parameter
                 scroll_param = response.get("scroll_param")
                 if not scroll_param:
                     break
-        
+
         elif pagination_type == PaginationType.SEARCH:
             # Search API pagination
             if not search_query:
                 raise ValueError("Search query required for search pagination")
-            
+
             pagination_info = search_query.get("pagination", {})
-            pagination_info["per_page"] = pagination_info.get("per_page", DEFAULT_PAGE_SIZE)
-            
+            pagination_info["per_page"] = pagination_info.get(
+                "per_page", DEFAULT_PAGE_SIZE
+            )
+
             while True:
                 # Build search request
                 request_data = {
@@ -226,20 +238,20 @@ class IntercomAPIClient:
                     request_data["sort"] = search_query["sort"]
 
                 response = self._make_request("POST", endpoint, json_data=request_data)
-                
+
                 # Yield the data
                 if data_key in response and response[data_key]:
                     yield response[data_key]
-                
+
                 # Check for next page
                 pages_info = response.get("pages", {})
                 if not pages_info.get("next"):
                     break
-                
+
                 next_cursor = pages_info.get("next", {}).get("starting_after")
                 if not next_cursor:
                     break
-                    
+
                 pagination_info["starting_after"] = next_cursor
 
     def get_single_resource(self, endpoint: str, resource_id: str) -> TDataItem:
@@ -274,10 +286,10 @@ class IntercomAPIClient:
         """
         endpoint = f"/{resource_type}/search"
         search_query = {"query": query}
-        
+
         if sort:
             search_query["sort"] = sort
-        
+
         yield from self.get_pages(
             endpoint=endpoint,
             data_key="data",
@@ -298,24 +310,26 @@ def transform_contact(contact: Dict[str, Any]) -> Dict[str, Any]:
     """
     # Ensure consistent field names and types
     transformed = contact.copy()
-    
+
     # Flatten location data if present
     if "location" in transformed and isinstance(transformed["location"], dict):
         location = transformed.pop("location")
         transformed["location_country"] = location.get("country")
         transformed["location_region"] = location.get("region")
         transformed["location_city"] = location.get("city")
-    
+
     # Flatten companies relationship
     if "companies" in transformed and isinstance(transformed["companies"], dict):
         companies_data = transformed["companies"].get("data", [])
-        transformed["company_ids"] = [c.get("id") for c in companies_data if c.get("id")]
+        transformed["company_ids"] = [
+            c.get("id") for c in companies_data if c.get("id")
+        ]
         transformed["companies_count"] = len(companies_data)
-    
+
     # Ensure custom_attributes is always a dict
     if "custom_attributes" not in transformed:
         transformed["custom_attributes"] = {}
-    
+
     return transformed
 
 
@@ -330,17 +344,17 @@ def transform_company(company: Dict[str, Any]) -> Dict[str, Any]:
         Transformed company data
     """
     transformed = company.copy()
-    
+
     # Ensure custom_attributes is always a dict
     if "custom_attributes" not in transformed:
         transformed["custom_attributes"] = {}
-    
+
     # Flatten plan information if it's an object
     if "plan" in transformed and isinstance(transformed["plan"], dict):
         plan = transformed.pop("plan")
         transformed["plan_id"] = plan.get("id")
         transformed["plan_name"] = plan.get("name")
-    
+
     return transformed
 
 
@@ -355,7 +369,7 @@ def transform_conversation(conversation: Dict[str, Any]) -> Dict[str, Any]:
         Transformed conversation data
     """
     transformed = conversation.copy()
-    
+
     # Extract statistics if present
     if "statistics" in transformed and isinstance(transformed["statistics"], dict):
         stats = transformed.pop("statistics")
@@ -365,12 +379,14 @@ def transform_conversation(conversation: Dict[str, Any]) -> Dict[str, Any]:
         transformed["last_admin_reply_at"] = stats.get("last_admin_reply_at")
         transformed["median_admin_reply_time"] = stats.get("median_admin_reply_time")
         transformed["mean_admin_reply_time"] = stats.get("mean_admin_reply_time")
-    
+
     # Flatten conversation parts count
-    if "conversation_parts" in transformed and isinstance(transformed["conversation_parts"], dict):
+    if "conversation_parts" in transformed and isinstance(
+        transformed["conversation_parts"], dict
+    ):
         parts = transformed["conversation_parts"]
         transformed["conversation_parts_count"] = parts.get("total_count", 0)
-    
+
     return transformed
 
 
@@ -384,9 +400,9 @@ def convert_datetime_to_timestamp(dt_obj: Any) -> int:
     Returns:
         Unix timestamp as integer
     """
-    if hasattr(dt_obj, 'int_timestamp'):
+    if hasattr(dt_obj, "int_timestamp"):
         return dt_obj.int_timestamp
-    elif hasattr(dt_obj, 'timestamp'):
+    elif hasattr(dt_obj, "timestamp"):
         return int(dt_obj.timestamp())
     else:
         raise ValueError(f"Cannot convert {type(dt_obj)} to timestamp")
@@ -396,7 +412,7 @@ def create_search_resource(
     api_client: "IntercomAPIClient",
     resource_name: str,
     updated_at_incremental: Any,
-    transform_func: callable = None,
+    transform_func: Optional[Callable] = None,
 ) -> Iterator[TDataItems]:
     """
     Generic function for search-based incremental resources.
@@ -443,13 +459,16 @@ def create_tickets_resource(
     """
     params = {"updated_since": updated_at_incremental.last_value}
 
-    end_timestamp = updated_at_incremental.end_value if updated_at_incremental.end_value else None
+    end_timestamp = (
+        updated_at_incremental.end_value if updated_at_incremental.end_value else None
+    )
 
-    for page in api_client.get_pages("/tickets", "tickets", PaginationType.CURSOR, params=params):
+    for page in api_client.get_pages(
+        "/tickets", "tickets", PaginationType.CURSOR, params=params
+    ):
         if end_timestamp:
             filtered_tickets = [
-                t for t in page
-                if t.get("updated_at", 0) <= end_timestamp
+                t for t in page if t.get("updated_at", 0) <= end_timestamp
             ]
             if filtered_tickets:
                 yield filtered_tickets
@@ -466,7 +485,7 @@ def create_pagination_resource(
     data_key: str,
     pagination_type: PaginationType,
     updated_at_incremental: Any,
-    transform_func: callable = None,
+    transform_func: Optional[Callable] = None,
     params: Optional[Dict[str, Any]] = None,
 ) -> Iterator[TDataItems]:
     """
@@ -484,12 +503,17 @@ def create_pagination_resource(
     Yields:
         Filtered and transformed resource records
     """
-    for page in api_client.get_pages(endpoint, data_key, pagination_type, params=params):
+    for page in api_client.get_pages(
+        endpoint, data_key, pagination_type, params=params
+    ):
         filtered_items = []
         for item in page:
             item_updated = item.get("updated_at", 0)
             if item_updated >= updated_at_incremental.last_value:
-                if updated_at_incremental.end_value and item_updated > updated_at_incremental.end_value:
+                if (
+                    updated_at_incremental.end_value
+                    and item_updated > updated_at_incremental.end_value
+                ):
                     continue
 
                 if transform_func:
@@ -510,7 +534,7 @@ def create_resource_from_config(
     api_client: "IntercomAPIClient",
     start_timestamp: int,
     end_timestamp: Optional[int],
-    transform_functions: Dict[str, callable],
+    transform_functions: Dict[str, Callable],
 ) -> Any:
     """
     Create a DLT resource from configuration.
@@ -536,19 +560,15 @@ def create_resource_from_config(
     if config.get("transform_func"):
         transform_func = transform_functions.get(config["transform_func"])
 
-    @dlt.resource(
-        name=resource_name,
-        primary_key="id",
-        write_disposition=write_disposition,
-        columns=config.get("columns", {}),
-    )
     def resource_function(
-        updated_at: dlt.sources.incremental[int] = dlt.sources.incremental(
+        updated_at: Optional[dlt.sources.incremental[int]] = dlt.sources.incremental(
             "updated_at",
             initial_value=start_timestamp,
             end_value=end_timestamp,
             allow_external_schedulers=True,
-        ) if config["incremental"] else None
+        )
+        if config["incremental"]
+        else None,
     ) -> Iterator[TDataItems]:
         """
         Auto-generated resource function.
@@ -583,6 +603,7 @@ def create_resource_from_config(
 
     # For non-incremental resources, we need to return a function without parameters
     if not config["incremental"]:
+
         @dlt.resource(
             name=resource_name,
             primary_key="id",
@@ -598,9 +619,17 @@ def create_resource_from_config(
                 config["data_key"],
                 getattr(PaginationType, config["pagination_type"].upper()),
             )
+
         return simple_resource_function
 
-    return resource_function
+    # Apply the decorator to the function
+    return dlt.resource(  # type: ignore[call-overload]
+        resource_function,
+        name=resource_name,
+        primary_key="id",
+        write_disposition=write_disposition,
+        columns=config.get("columns", {}),
+    )
 
 
 def build_incremental_query(
@@ -628,12 +657,14 @@ def build_incremental_query(
     ]
 
     if end_value is not None:
-        conditions.append({
-            "field": field,
-            "operator": "<",
-            "value": end_value,
-        })
-    
+        conditions.append(
+            {
+                "field": field,
+                "operator": "<",
+                "value": end_value,
+            }
+        )
+
     if len(conditions) == 1:
         return conditions[0]
     else:

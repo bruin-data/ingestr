@@ -4,23 +4,26 @@ Intercom source implementation for data ingestion.
 This module provides DLT sources for retrieving data from Intercom API endpoints
 including contacts, companies, conversations, tickets, and more.
 """
+
 from typing import Optional, Sequence
 
 import dlt
 from dlt.common.time import ensure_pendulum_datetime
-from dlt.common.typing import TAnyDateTime, TDataItems
-from dlt.sources import DltResource
+from dlt.common.typing import TAnyDateTime
+from dlt.sources import DltResource, DltSource
 
 from .helpers import (
     IntercomAPIClient,
     IntercomCredentialsAccessToken,
-    IntercomCredentialsOAuth,
     TIntercomCredentials,
     convert_datetime_to_timestamp,
     create_resource_from_config,
     transform_company,
     transform_contact,
     transform_conversation,
+)
+from .helpers import (
+    IntercomCredentialsOAuth as IntercomCredentialsOAuth,
 )
 from .settings import (
     DEFAULT_START_DATE,
@@ -65,12 +68,20 @@ def intercom_source(
     api_client = IntercomAPIClient(credentials)
 
     # Convert dates to pendulum and then to unix timestamps for Intercom API
-    start_date_obj = ensure_pendulum_datetime(start_date)
+    start_date_obj = ensure_pendulum_datetime(start_date) if start_date else None
     end_date_obj = ensure_pendulum_datetime(end_date) if end_date else None
 
     # Convert to unix timestamps for API compatibility
+    # Use default start date if none provided
+    if not start_date_obj:
+        from .settings import DEFAULT_START_DATE
+
+        start_date_obj = ensure_pendulum_datetime(DEFAULT_START_DATE)
+
     start_timestamp = convert_datetime_to_timestamp(start_date_obj)
-    end_timestamp = convert_datetime_to_timestamp(end_date_obj) if end_date_obj else None
+    end_timestamp = (
+        convert_datetime_to_timestamp(end_date_obj) if end_date_obj else None
+    )
 
     # Transform function mapping
     transform_functions = {
@@ -102,7 +113,7 @@ def intercom(
     region: str = "us",
     start_date: Optional[TAnyDateTime] = DEFAULT_START_DATE,
     end_date: Optional[TAnyDateTime] = None,
-) -> Sequence[DltResource]:
+) -> DltSource:
     """
     Convenience function to create Intercom source with access token.
 
@@ -122,10 +133,7 @@ def intercom(
         ...     start_date=datetime(2024, 1, 1)
         ... )
     """
-    credentials = IntercomCredentialsAccessToken(
-        access_token=api_key,
-        region=region
-    )
+    credentials = IntercomCredentialsAccessToken(access_token=api_key, region=region)
 
     return intercom_source(
         credentials=credentials,

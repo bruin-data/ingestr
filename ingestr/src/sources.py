@@ -3736,7 +3736,7 @@ class IntercomSource:
             "articles",
             "data_attributes",
         ]
-        
+
         if table not in supported_tables:
             raise UnsupportedResourceError(table, "Intercom")
 
@@ -3752,17 +3752,23 @@ class IntercomSource:
             end_date = ensure_pendulum_datetime(end_date)
 
         # Import and initialize the source
-        from ingestr.src.intercom import IntercomCredentialsAccessToken, IntercomCredentialsOAuth, intercom_source
+        from ingestr.src.intercom import (
+            IntercomCredentialsAccessToken,
+            IntercomCredentialsOAuth,
+            TIntercomCredentials,
+            intercom_source,
+        )
 
+        credentials: TIntercomCredentials
         if access_token:
             credentials = IntercomCredentialsAccessToken(
-                access_token=access_token[0],
-                region=region
+                access_token=access_token[0], region=region
             )
         else:
+            if not oauth_token:
+                raise MissingValueError("oauth_token", "Intercom")
             credentials = IntercomCredentialsOAuth(
-                oauth_token=oauth_token[0],
-                region=region
+                oauth_token=oauth_token[0], region=region
             )
 
         return intercom_source(

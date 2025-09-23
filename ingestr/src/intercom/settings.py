@@ -1,6 +1,7 @@
 """
 Configuration settings and constants for Intercom API integration.
 """
+
 from datetime import datetime
 from typing import Dict, List, Tuple
 
@@ -48,7 +49,6 @@ RESOURCE_CONFIGS = {
             "tags": {"data_type": "json"},
         },
     },
-
     # Pagination-based incremental resources
     "companies": {
         "type": "pagination",
@@ -73,7 +73,6 @@ RESOURCE_CONFIGS = {
         "params": None,
         "columns": {},
     },
-
     # Special case - tickets
     "tickets": {
         "type": "tickets",
@@ -83,7 +82,6 @@ RESOURCE_CONFIGS = {
             "ticket_attributes": {"data_type": "json"},
         },
     },
-
     # Simple replace resources (non-incremental)
     "tags": {
         "type": "simple",

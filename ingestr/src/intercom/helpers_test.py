@@ -1,6 +1,7 @@
 """
 Unit tests for Intercom helper functions and API client.
 """
+
 import unittest
 from unittest.mock import Mock, patch
 
@@ -22,20 +23,14 @@ class TestIntercomCredentials(unittest.TestCase):
 
     def test_access_token_credentials(self):
         """Test access token credentials initialization."""
-        creds = IntercomCredentialsAccessToken(
-            access_token="test_token",
-            region="eu"
-        )
+        creds = IntercomCredentialsAccessToken(access_token="test_token", region="eu")
         self.assertEqual(creds.access_token, "test_token")
         self.assertEqual(creds.region, "eu")
         self.assertEqual(creds.base_url, REGIONAL_ENDPOINTS["eu"])
 
     def test_oauth_credentials(self):
         """Test OAuth credentials initialization."""
-        creds = IntercomCredentialsOAuth(
-            oauth_token="oauth_token",
-            region="us"
-        )
+        creds = IntercomCredentialsOAuth(oauth_token="oauth_token", region="us")
         self.assertEqual(creds.oauth_token, "oauth_token")
         self.assertEqual(creds.region, "us")
         self.assertEqual(creds.base_url, REGIONAL_ENDPOINTS["us"])
@@ -43,10 +38,7 @@ class TestIntercomCredentials(unittest.TestCase):
     def test_invalid_region(self):
         """Test that invalid region raises error."""
         with self.assertRaises(ValueError) as context:
-            IntercomCredentialsAccessToken(
-                access_token="test",
-                region="invalid"
-            )
+            IntercomCredentialsAccessToken(access_token="test", region="invalid")
         self.assertIn("Invalid region", str(context.exception))
 
     def test_default_region(self):
@@ -62,31 +54,21 @@ class TestIntercomAPIClient(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.creds = IntercomCredentialsAccessToken(
-            access_token="test_token",
-            region="us"
+            access_token="test_token", region="us"
         )
         self.client = IntercomAPIClient(self.creds)
 
     def test_client_initialization_access_token(self):
         """Test client initialization with access token."""
-        self.assertEqual(
-            self.client.headers["Authorization"],
-            "Bearer test_token"
-        )
-        self.assertEqual(
-            self.client.headers["Intercom-Version"],
-            API_VERSION
-        )
+        self.assertEqual(self.client.headers["Authorization"], "Bearer test_token")
+        self.assertEqual(self.client.headers["Intercom-Version"], API_VERSION)
         self.assertEqual(self.client.base_url, REGIONAL_ENDPOINTS["us"])
 
     def test_client_initialization_oauth(self):
         """Test client initialization with OAuth token."""
         oauth_creds = IntercomCredentialsOAuth(oauth_token="oauth_test")
         client = IntercomAPIClient(oauth_creds)
-        self.assertEqual(
-            client.headers["Authorization"],
-            "Bearer oauth_test"
-        )
+        self.assertEqual(client.headers["Authorization"], "Bearer oauth_test")
 
     def test_make_request_success(self):
         """Test successful API request."""
@@ -106,7 +88,6 @@ class TestIntercomAPIClient(unittest.TestCase):
         self.assertEqual(result, {"data": "test"})
         mock_client.get.assert_called_once()
 
-
     def test_get_pages_simple_pagination(self):
         """Test simple (no) pagination."""
         mock_response = Mock()
@@ -120,9 +101,7 @@ class TestIntercomAPIClient(unittest.TestCase):
         # Replace the existing client's HTTP client with mock
         self.client.client = mock_client
 
-        pages = list(self.client.get_pages(
-            "/admins", "admins", PaginationType.SIMPLE
-        ))
+        pages = list(self.client.get_pages("/admins", "admins", PaginationType.SIMPLE))
 
         self.assertEqual(len(pages), 1)
         self.assertEqual(pages[0], [{"id": "1"}, {"id": "2"}])
@@ -134,45 +113,40 @@ class TestIntercomAPIClient(unittest.TestCase):
         mock_response_1.status_code = 200
         mock_response_1.json.return_value = {
             "data": [{"id": "1"}],
-            "pages": {"next": {"starting_after": "cursor_1"}}
+            "pages": {"next": {"starting_after": "cursor_1"}},
         }
-        
+
         # Second page (last)
         mock_response_2 = Mock()
         mock_response_2.status_code = 200
-        mock_response_2.json.return_value = {
-            "data": [{"id": "2"}],
-            "pages": {}
-        }
-        
+        mock_response_2.json.return_value = {"data": [{"id": "2"}], "pages": {}}
+
         # Setup mock client
         mock_client = Mock()
         mock_client.get.side_effect = [mock_response_1, mock_response_2]
 
         # Replace the existing client's HTTP client with mock
         self.client.client = mock_client
-        
-        pages = list(self.client.get_pages(
-            "/contacts", "data", PaginationType.CURSOR
-        ))
-        
+
+        pages = list(self.client.get_pages("/contacts", "data", PaginationType.CURSOR))
+
         self.assertEqual(len(pages), 2)
         self.assertEqual(pages[0], [{"id": "1"}])
         self.assertEqual(pages[1], [{"id": "2"}])
 
     def test_search_method(self):
         """Test search method builds correct query."""
-        with patch.object(self.client, 'get_pages') as mock_get_pages:
+        with patch.object(self.client, "get_pages") as mock_get_pages:
             mock_get_pages.return_value = iter([[{"id": "1"}]])
-            
+
             query = {"field": "email", "operator": "=", "value": "test@example.com"}
             list(self.client.search("contacts", query))
-            
+
             mock_get_pages.assert_called_once_with(
                 endpoint="/contacts/search",
                 data_key="data",
                 pagination_type=PaginationType.SEARCH,
-                search_query={"query": query}
+                search_query={"query": query},
             )
 
 
@@ -184,21 +158,12 @@ class TestTransformFunctions(unittest.TestCase):
         raw_contact = {
             "id": "123",
             "email": "test@example.com",
-            "location": {
-                "country": "US",
-                "region": "CA",
-                "city": "San Francisco"
-            },
-            "companies": {
-                "data": [
-                    {"id": "comp_1"},
-                    {"id": "comp_2"}
-                ]
-            }
+            "location": {"country": "US", "region": "CA", "city": "San Francisco"},
+            "companies": {"data": [{"id": "comp_1"}, {"id": "comp_2"}]},
         }
-        
+
         transformed = transform_contact(raw_contact)
-        
+
         self.assertEqual(transformed["id"], "123")
         self.assertEqual(transformed["email"], "test@example.com")
         self.assertEqual(transformed["location_country"], "US")
@@ -212,7 +177,7 @@ class TestTransformFunctions(unittest.TestCase):
         """Test contact transformation with minimal data."""
         raw_contact = {"id": "123", "email": "test@example.com"}
         transformed = transform_contact(raw_contact)
-        
+
         self.assertEqual(transformed["id"], "123")
         self.assertEqual(transformed["email"], "test@example.com")
         self.assertIn("custom_attributes", transformed)
@@ -223,14 +188,11 @@ class TestTransformFunctions(unittest.TestCase):
         raw_company = {
             "id": "456",
             "name": "Test Corp",
-            "plan": {
-                "id": "plan_1",
-                "name": "Enterprise"
-            }
+            "plan": {"id": "plan_1", "name": "Enterprise"},
         }
-        
+
         transformed = transform_company(raw_company)
-        
+
         self.assertEqual(transformed["id"], "456")
         self.assertEqual(transformed["name"], "Test Corp")
         self.assertEqual(transformed["plan_id"], "plan_1")
@@ -245,15 +207,13 @@ class TestTransformFunctions(unittest.TestCase):
             "statistics": {
                 "first_contact_reply_at": 123456,
                 "first_admin_reply_at": 123457,
-                "median_admin_reply_time": 60
+                "median_admin_reply_time": 60,
             },
-            "conversation_parts": {
-                "total_count": 5
-            }
+            "conversation_parts": {"total_count": 5},
         }
-        
+
         transformed = transform_conversation(raw_conversation)
-        
+
         self.assertEqual(transformed["id"], "789")
         self.assertEqual(transformed["state"], "open")
         self.assertEqual(transformed["first_contact_reply_at"], 123456)
@@ -264,29 +224,25 @@ class TestTransformFunctions(unittest.TestCase):
     def test_build_incremental_query_single_condition(self):
         """Test building incremental query with single condition."""
         query = build_incremental_query("updated_at", 1000000)
-        
-        self.assertEqual(query, {
-            "field": "updated_at",
-            "operator": ">",
-            "value": 1000000
-        })
+
+        self.assertEqual(
+            query, {"field": "updated_at", "operator": ">", "value": 1000000}
+        )
 
     def test_build_incremental_query_range(self):
         """Test building incremental query with range."""
         query = build_incremental_query("updated_at", 1000000, 2000000)
-        
+
         self.assertEqual(query["operator"], "AND")
         self.assertEqual(len(query["value"]), 2)
-        self.assertEqual(query["value"][0], {
-            "field": "updated_at",
-            "operator": ">",
-            "value": 1000000
-        })
-        self.assertEqual(query["value"][1], {
-            "field": "updated_at",
-            "operator": "<",
-            "value": 2000000
-        })
+        self.assertEqual(
+            query["value"][0],
+            {"field": "updated_at", "operator": ">", "value": 1000000},
+        )
+        self.assertEqual(
+            query["value"][1],
+            {"field": "updated_at", "operator": "<", "value": 2000000},
+        )
 
 
 if __name__ == "__main__":
