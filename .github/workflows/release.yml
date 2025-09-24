@@ -95,6 +95,7 @@ jobs:
         run: |
           mkdir -p ${{ runner.temp }}/digests
           digest="${{ steps.build.outputs.digest }}"
+          # The following strips the 'sha256:' prefix from the digest using bash parameter expansion.
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
     
       - name: Upload digest
