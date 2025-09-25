@@ -26,7 +26,7 @@ RUN \
   export ACCEPT_EULA='Y' && \
   # Install build dependencies
   apt-get update && \
-  apt-get install -y curl gcc gpg libpq-dev build-essential unixodbc-dev g++ apt-transport-https
+  apt-get install -y curl gcc gpg libpq-dev build-essential unixodbc-dev g++ apt-transport-https git
 
 RUN \ 
   # Install pyodbc db drivers for MSSQL and PostgreSQL
@@ -49,6 +49,9 @@ COPY . /app
 RUN if [ "$(uname -m)" = "aarch64" ]; then \
     cp /app/requirements_arm64.txt /app/requirements.txt; \
 fi
+
+# Generate version file
+RUN make write-build-info
 
 # Install all required packages and the application.
 RUN uv pip install --requirement requirements.txt pyodbc .
