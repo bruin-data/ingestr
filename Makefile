@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .ONESHELL:
-.PHONY: test lint format test-ci lint-ci build upload-release setup docker-shell
+.PHONY: test lint format test-ci lint-ci build upload-release setup docker-shell write-build-info remove-build-info
 
 BUILDINFO=ingestr/src/buildinfo.py
 
@@ -46,8 +46,14 @@ lint-docs:
 tl: test lint
 
 build: lock-deps
-	cat > ${BUILDINFO} <<< "version = \"$$(git describe --tags --abbrev=0)\""
+	$(MAKE) write-build-info
 	rm -rf dist && python3 -m build
+	$(MAKE) remove-build-info
+
+write-build-info:
+	cat > ${BUILDINFO} <<< "version = \"$$(git describe --tags --abbrev=0)\""
+
+remove-build-info:
 	rm -f ${BUILDINFO}
 
 upload-release:
