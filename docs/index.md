@@ -7,7 +7,7 @@ hero:
   text: Copy data between any source and any destination
   tagline: "ingestr is a command-line application that allows copying data from any source into any destination database."
   image:
-    src: https://github.com/bruin-data/ingestr/blob/main/resources/demo.gif?raw=true
+    src: /demo.gif
     alt: ingestr logo
   actions:
     - theme: brand
