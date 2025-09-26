@@ -104,6 +104,7 @@ Fluxx source allows ingesting the following sources into separate tables:
 | `affiliate_type` | id | - | replace | Affiliate Type management and tracking |
 | `aha_requirements_tickets` | id | - | replace | Aha Requirements Tickets management and tracking |
 | `alert` | id | - | replace | Alert management and tracking |
+| `alert_email` | id | - | replace | Alert email configurations and templates for notification delivery |
 | `alert_email_user` | id | - | replace | Alert Email User management and tracking |
 | `alert_model_log` | id | - | replace | Alert Model Log management and tracking |
 | `alert_recipient` | id | - | replace | Alert Recipient management and tracking |
