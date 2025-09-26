@@ -99,11 +99,11 @@ FLUXX_RESOURCES = {
     "alert_email": {
         "endpoint": "alert_email",
         "fields": {
-            "alert_id": { "data_type": "bigint", "field_type": "column" },
-            "created_at": { "data_type": "timestamp", "field_type": "column" },
-            "id": { "data_type": "bigint", "field_type": "column" },
-            "updated_at": { "data_type": "timestamp", "field_type": "column" }
-        }
+            "alert_id": {"data_type": "bigint", "field_type": "column"},
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "id": {"data_type": "bigint", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+        },
     },
     "affiliate": {
         "endpoint": "affiliate",
