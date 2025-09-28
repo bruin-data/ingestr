@@ -11,8 +11,8 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 
 # Suppress Elasticsearch transport logging
-logging.getLogger('elasticsearch.transport').setLevel(logging.WARNING)
-logging.getLogger('elastic_transport.transport').setLevel(logging.WARNING)
+logging.getLogger("elasticsearch.transport").setLevel(logging.WARNING)
+logging.getLogger("elastic_transport.transport").setLevel(logging.WARNING)
 
 
 def process_file_items(file_path: str) -> Iterator[Dict[str, Any]]:
