@@ -962,16 +962,46 @@ def process_file_items(file_path: str) -> list[dict]:
     return documents
 
 
-def mongodb_insert(uri: str, database: str):
+def mongodb_insert(uri: str):
     """Creates a dlt.destination for inserting data into a MongoDB collection.
 
     Args:
-        uri (str): MongoDB connection URI.
-        database (str): Name of the MongoDB database.
+        uri (str): MongoDB connection URI including database.
 
     Returns:
         dlt.destination: A DLT destination object configured for MongoDB.
     """
+    from urllib.parse import urlparse
+
+    parsed_uri = urlparse(uri)
+
+    # Handle both mongodb:// and mongodb+srv:// schemes
+    if uri.startswith("mongodb+srv://") or uri.startswith("mongodb://"):
+        # For modern connection strings (MongoDB Atlas), use the URI as-is
+        connection_string = uri
+        # Extract database from path or use default
+        database = (
+            parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+        )
+    else:
+        # Legacy handling for backwards compatibility
+        host = parsed_uri.hostname or "localhost"
+        port = parsed_uri.port or 27017
+        username = parsed_uri.username
+        password = parsed_uri.password
+        database = (
+            parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+        )
+
+        # Build connection string
+        if username and password:
+            connection_string = f"mongodb://{username}:{password}@{host}:{port}"
+        else:
+            connection_string = f"mongodb://{host}:{port}"
+
+        # Add query parameters if any
+        if parsed_uri.query:
+            connection_string += f"?{parsed_uri.query}"
 
     state = {"first_batch": True}
 
@@ -984,9 +1014,7 @@ def mongodb_insert(uri: str, database: str):
         collection_name = table["name"]
 
         # Connect to MongoDB
-        client: MongoClient
-
-        with MongoClient(uri) as client:
+        with MongoClient(connection_string) as client:
             db = client[database]
             collection = db[collection_name]
 
