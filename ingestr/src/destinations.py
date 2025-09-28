@@ -817,24 +817,34 @@ class MongoDBDestination:
 
         parsed_uri = urlparse(uri)
 
-        # Extract connection details from URI
-        host = parsed_uri.hostname or "localhost"
-        port = parsed_uri.port or 27017
-        username = parsed_uri.username
-        password = parsed_uri.password
-        database = (
-            parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
-        )
+        # Handle both mongodb:// and mongodb+srv:// schemes
+        if uri.startswith("mongodb+srv://") or uri.startswith("mongodb://"):
+            # For modern connection strings (MongoDB Atlas), use the URI as-is
+            connection_string = uri
 
-        # Build connection string
-        if username and password:
-            connection_string = f"mongodb://{username}:{password}@{host}:{port}"
+            # Extract database from path or use default
+            database = (
+                parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+            )
         else:
-            connection_string = f"mongodb://{host}:{port}"
+            # Legacy handling for backwards compatibility
+            host = parsed_uri.hostname or "localhost"
+            port = parsed_uri.port or 27017
+            username = parsed_uri.username
+            password = parsed_uri.password
+            database = (
+                parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+            )
 
-        # Add query parameters if any
-        if parsed_uri.query:
-            connection_string += f"?{parsed_uri.query}"
+            # Build connection string
+            if username and password:
+                connection_string = f"mongodb://{username}:{password}@{host}:{port}"
+            else:
+                connection_string = f"mongodb://{host}:{port}"
+
+            # Add query parameters if any
+            if parsed_uri.query:
+                connection_string += f"?{parsed_uri.query}"
 
         return mongodb_insert(connection_string, database)
 
