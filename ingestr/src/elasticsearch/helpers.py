@@ -1,6 +1,7 @@
 """Elasticsearch destination helpers"""
 
 import json
+import logging
 from typing import Any, Dict, Iterator
 from urllib.parse import urlparse
 
@@ -8,6 +9,10 @@ import dlt
 
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
+
+# Suppress Elasticsearch transport logging
+logging.getLogger('elasticsearch.transport').setLevel(logging.WARNING)
+logging.getLogger('elastic_transport.transport').setLevel(logging.WARNING)
 
 
 def process_file_items(file_path: str) -> Iterator[Dict[str, Any]]:
@@ -52,15 +57,20 @@ def elasticsearch_insert(
     parsed = urlparse(connection_string)
 
     # Build Elasticsearch client configuration
-    hosts = [
-        {
-            "host": parsed.hostname or "localhost",
-            "port": parsed.port or 9200,
-            "scheme": parsed.scheme or "http",
-        }
-    ]
+    # Handle the case where the connection string might have elasticsearch:// prefix
+    # but the actual URL is embedded within it
+    actual_url = connection_string
+    if connection_string.startswith("elasticsearch://"):
+        actual_url = connection_string.replace("elasticsearch://", "")
+        if not actual_url.startswith(("http://", "https://")):
+            actual_url = "https://" + actual_url
+        parsed = urlparse(actual_url)
 
-    es_config: Dict[str, Any] = {"hosts": hosts}
+    es_config: Dict[str, Any] = {
+        "hosts": [actual_url],
+        "verify_certs": True,
+        "ssl_show_warn": False,
+    }
 
     # Add authentication if present
     if parsed.username and parsed.password:
