@@ -126,7 +126,9 @@ RESOURCE_CONFIGS = {
         "pagination_type": "cursor",
         "incremental": False,
         "transform_func": None,
-        "columns": {},
+        "columns": {
+            "id": {"data_type": "bigint", "nullable": True},
+        },
     },
 }
 
