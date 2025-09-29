@@ -4871,7 +4871,6 @@ def jira_test_cases():
         "statuses",
         "priorities",
         "resolutions",
-       
     ]
 
     def create_table_test(table_name):
@@ -4887,7 +4886,9 @@ def jira_test_cases():
 
             # Extract domain from base_url (remove https:// if present)
             domain = jira_base_url.replace("https://", "").replace("http://", "")
-            source_uri = f"jira://{domain}?email={jira_email}&api_token={jira_api_token}"
+            source_uri = (
+                f"jira://{domain}?email={jira_email}&api_token={jira_api_token}"
+            )
             source_table = table_name
             schema_rand_prefix = f"testschema_jira_{get_random_string(5)}"
             dest_table = f"{schema_rand_prefix}.{table_name}_{get_random_string(5)}"
@@ -4934,11 +4935,13 @@ def jira_test_cases():
 
 
 @pytest.mark.skipif(
-    not all([
-        os.environ.get("INGESTR_TEST_JIRA_BASE_URL"),
-        os.environ.get("INGESTR_TEST_JIRA_EMAIL"),
-        os.environ.get("INGESTR_TEST_JIRA_API_TOKEN")
-    ]),
+    not all(
+        [
+            os.environ.get("INGESTR_TEST_JIRA_BASE_URL"),
+            os.environ.get("INGESTR_TEST_JIRA_EMAIL"),
+            os.environ.get("INGESTR_TEST_JIRA_API_TOKEN"),
+        ]
+    ),
     reason="INGESTR_TEST_JIRA_BASE_URL, INGESTR_TEST_JIRA_EMAIL, or INGESTR_TEST_JIRA_API_TOKEN environment variables are not set",
 )
 @pytest.mark.parametrize("testcase", jira_test_cases())

@@ -112,7 +112,11 @@ def issues(
             main_query = jql[:order_by_index].strip()
             order_clause = jql[order_by_index:].strip()
 
-            if main_query and ("WHERE" in main_query.upper() or "AND" in main_query.upper() or "OR" in main_query.upper()):
+            if main_query and (
+                "WHERE" in main_query.upper()
+                or "AND" in main_query.upper()
+                or "OR" in main_query.upper()
+            ):
                 incremental_jql = f"({main_query}) AND {date_filter} {order_clause}"
             else:
                 if main_query:
