@@ -103,10 +103,28 @@ def issues(
     incremental_jql = jql
     if updated.start_value:
         date_filter = f"updated >= '{updated.start_value}'"
-        if "WHERE" in jql.upper() or "AND" in jql.upper() or "OR" in jql.upper():
-            incremental_jql = f"({jql}) AND {date_filter}"
+
+        # Check if JQL has ORDER BY clause and handle it properly
+        jql_upper = jql.upper()
+        if "ORDER BY" in jql_upper:
+            # Split at ORDER BY and add filter before it
+            order_by_index = jql_upper.find("ORDER BY")
+            main_query = jql[:order_by_index].strip()
+            order_clause = jql[order_by_index:].strip()
+
+            if main_query and ("WHERE" in main_query.upper() or "AND" in main_query.upper() or "OR" in main_query.upper()):
+                incremental_jql = f"({main_query}) AND {date_filter} {order_clause}"
+            else:
+                if main_query:
+                    incremental_jql = f"{main_query} AND {date_filter} {order_clause}"
+                else:
+                    incremental_jql = f"{date_filter} {order_clause}"
         else:
-            incremental_jql = f"{jql} AND {date_filter}"
+            # No ORDER BY clause, use original logic
+            if "WHERE" in jql_upper or "AND" in jql_upper or "OR" in jql_upper:
+                incremental_jql = f"({jql}) AND {date_filter}"
+            else:
+                incremental_jql = f"{jql} AND {date_filter}"
 
     # Use default fields if not specified
     if fields is None:
