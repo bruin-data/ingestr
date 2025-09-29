@@ -13,9 +13,9 @@ from dlt.common.typing import TDataItem
 
 from .helpers import get_client
 from .settings import (
+    DEFAULT_PAGE_SIZE,
     DEFAULT_START_DATE,
     ISSUE_FIELDS,
-    DEFAULT_PAGE_SIZE,
 )
 
 
@@ -46,7 +46,7 @@ def projects(
     email: str = dlt.secrets.value,
     api_token: str = dlt.secrets.value,
     expand: Optional[str] = None,
-    recent: Optional[int] = None
+    recent: Optional[int] = None,
 ) -> Iterable[TDataItem]:
     """
     Fetches and returns a list of projects from Jira.
@@ -113,10 +113,7 @@ def issues(
         fields = ",".join(ISSUE_FIELDS)
 
     yield from client.search_issues(
-        jql=incremental_jql,
-        fields=fields,
-        expand=expand,
-        max_results=max_results
+        jql=incremental_jql, fields=fields, expand=expand, max_results=max_results
     )
 
 
@@ -127,7 +124,7 @@ def users(
     api_token: str = dlt.secrets.value,
     username: Optional[str] = None,
     account_id: Optional[str] = None,
-    max_results: int = DEFAULT_PAGE_SIZE
+    max_results: int = DEFAULT_PAGE_SIZE,
 ) -> Iterable[TDataItem]:
     """
     Fetches users from Jira.
@@ -145,9 +142,7 @@ def users(
     """
     client = get_client(base_url, email, api_token)
     yield from client.get_users(
-        username=username,
-        account_id=account_id,
-        max_results=max_results
+        username=username, account_id=account_id, max_results=max_results
     )
 
 

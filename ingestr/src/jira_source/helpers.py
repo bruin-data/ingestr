@@ -3,11 +3,12 @@
 import base64
 import logging
 import time
-import requests
-from typing import Dict, Any, Optional, Iterator, Tuple
+from typing import Any, Dict, Iterator, Optional
 from urllib.parse import urljoin
 
-from .settings import API_BASE_PATH, REQUEST_TIMEOUT, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+import requests
+
+from .settings import API_BASE_PATH, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, REQUEST_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,12 @@ logger = logging.getLogger(__name__)
 class JiraAPIError(Exception):
     """Custom exception for Jira API errors."""
 
-    def __init__(self, message: str, status_code: Optional[int] = None, response_text: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        response_text: Optional[str] = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.response_text = response_text
@@ -23,11 +29,13 @@ class JiraAPIError(Exception):
 
 class JiraAuthenticationError(JiraAPIError):
     """Exception raised for authentication failures."""
+
     pass
 
 
 class JiraRateLimitError(JiraAPIError):
     """Exception raised when rate limit is exceeded."""
+
     pass
 
 
@@ -35,11 +43,7 @@ class JiraClient:
     """Jira REST API client with authentication and pagination support."""
 
     def __init__(
-        self,
-        base_url: str,
-        email: str,
-        api_token: str,
-        timeout: int = REQUEST_TIMEOUT
+        self, base_url: str, email: str, api_token: str, timeout: int = REQUEST_TIMEOUT
     ):
         """
         Initialize Jira client with basic auth.
@@ -50,7 +54,7 @@ class JiraClient:
             api_token: API token for authentication
             timeout: Request timeout in seconds
         """
-        self.base_url = base_url.rstrip('/')
+        self.base_url = base_url.rstrip("/")
         self.api_url = urljoin(self.base_url, API_BASE_PATH)
         self.timeout = timeout
 
@@ -61,7 +65,7 @@ class JiraClient:
         self.headers = {
             "Authorization": f"Basic {encoded_credentials}",
             "Accept": "application/json",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
     def _make_request(
@@ -70,7 +74,7 @@ class JiraClient:
         params: Optional[Dict[str, Any]] = None,
         method: str = "GET",
         max_retries: int = 3,
-        backoff_factor: float = 1.0
+        backoff_factor: float = 1.0,
     ) -> Dict[str, Any]:
         """
         Make HTTP request to Jira API with retry logic.
@@ -101,7 +105,7 @@ class JiraClient:
                     url=url,
                     headers=self.headers,
                     params=params,
-                    timeout=self.timeout
+                    timeout=self.timeout,
                 )
 
                 # Handle different error status codes
@@ -109,39 +113,43 @@ class JiraClient:
                     raise JiraAuthenticationError(
                         "Authentication failed. Please check your email and API token.",
                         status_code=response.status_code,
-                        response_text=response.text
+                        response_text=response.text,
                     )
                 elif response.status_code == 403:
                     raise JiraAuthenticationError(
                         "Access forbidden. Please check your permissions.",
                         status_code=response.status_code,
-                        response_text=response.text
+                        response_text=response.text,
                     )
                 elif response.status_code == 429:
                     # Rate limit exceeded
                     retry_after = int(response.headers.get("Retry-After", 60))
                     if attempt < max_retries:
-                        logger.warning(f"Rate limit exceeded. Waiting {retry_after} seconds before retry.")
-                        time.sleep(retry_after)
+                        logger.warning(
+                            f"Rate limit exceeded. Waiting {retry_after} seconds before retry."
+                        )
+                        time.sleep(retry_after)  # type: ignore
                         continue
                     else:
                         raise JiraRateLimitError(
                             f"Rate limit exceeded after {max_retries} retries.",
                             status_code=response.status_code,
-                            response_text=response.text
+                            response_text=response.text,
                         )
                 elif response.status_code >= 500:
                     # Server error - retry with backoff
                     if attempt < max_retries:
-                        wait_time = backoff_factor * (2 ** attempt)
-                        logger.warning(f"Server error {response.status_code}. Retrying in {wait_time} seconds.")
-                        time.sleep(wait_time)
+                        wait_time = backoff_factor * (2**attempt)
+                        logger.warning(
+                            f"Server error {response.status_code}. Retrying in {wait_time} seconds."
+                        )
+                        time.sleep(wait_time)  # type: ignore
                         continue
                     else:
                         raise JiraAPIError(
                             f"Server error after {max_retries} retries.",
                             status_code=response.status_code,
-                            response_text=response.text
+                            response_text=response.text,
                         )
 
                 # Raise for other HTTP errors
@@ -154,17 +162,21 @@ class JiraClient:
                     raise JiraAPIError(
                         f"Invalid JSON response: {str(e)}",
                         status_code=response.status_code,
-                        response_text=response.text
+                        response_text=response.text,
                     )
 
             except requests.RequestException as e:
                 if attempt < max_retries:
-                    wait_time = backoff_factor * (2 ** attempt)
-                    logger.warning(f"Request failed: {str(e)}. Retrying in {wait_time} seconds.")
-                    time.sleep(wait_time)
+                    wait_time = backoff_factor * (2**attempt)
+                    logger.warning(
+                        f"Request failed: {str(e)}. Retrying in {wait_time} seconds."
+                    )
+                    time.sleep(wait_time)  # type: ignore
                     continue
                 else:
-                    raise JiraAPIError(f"Request failed after {max_retries} retries: {str(e)}")
+                    raise JiraAPIError(
+                        f"Request failed after {max_retries} retries: {str(e)}"
+                    )
 
         raise JiraAPIError(f"Request failed after {max_retries} retries")
 
@@ -173,7 +185,7 @@ class JiraClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         page_size: int = DEFAULT_PAGE_SIZE,
-        max_results: Optional[int] = None
+        max_results: Optional[int] = None,
     ) -> Iterator[Dict[str, Any]]:
         """
         Get paginated results from Jira API with error handling.
@@ -202,7 +214,9 @@ class JiraClient:
         consecutive_empty_pages = 0
         max_empty_pages = 3
 
-        logger.info(f"Starting paginated request to {endpoint} with page_size={page_size}")
+        logger.info(
+            f"Starting paginated request to {endpoint} with page_size={page_size}"
+        )
 
         while True:
             try:
@@ -232,12 +246,16 @@ class JiraClient:
                 if not items:
                     consecutive_empty_pages += 1
                     if consecutive_empty_pages >= max_empty_pages:
-                        logger.warning(f"Received {consecutive_empty_pages} consecutive empty pages, stopping pagination")
+                        logger.warning(
+                            f"Received {consecutive_empty_pages} consecutive empty pages, stopping pagination"
+                        )
                         break
                 else:
                     consecutive_empty_pages = 0
 
-                logger.debug(f"Retrieved {len(items)} items from {endpoint} (page {params['startAt'] // page_size + 1})")
+                logger.debug(
+                    f"Retrieved {len(items)} items from {endpoint} (page {params['startAt'] // page_size + 1})"
+                )
 
                 for item in items:
                     if max_results and total_returned >= max_results:
@@ -253,7 +271,9 @@ class JiraClient:
 
                 # Check if we've got all available items
                 if total and total_returned >= total:
-                    logger.debug(f"Retrieved all {total} available items from {endpoint}")
+                    logger.debug(
+                        f"Retrieved all {total} available items from {endpoint}"
+                    )
                     break
 
                 # Move to next page
@@ -261,17 +281,23 @@ class JiraClient:
 
                 # Safety check to prevent infinite loops
                 if params["startAt"] > 100000:  # Arbitrary large number
-                    logger.warning(f"Pagination safety limit reached for {endpoint}, stopping")
+                    logger.warning(
+                        f"Pagination safety limit reached for {endpoint}, stopping"
+                    )
                     break
 
             except JiraAPIError as e:
                 logger.error(f"API error during pagination of {endpoint}: {str(e)}")
                 raise
             except Exception as e:
-                logger.error(f"Unexpected error during pagination of {endpoint}: {str(e)}")
+                logger.error(
+                    f"Unexpected error during pagination of {endpoint}: {str(e)}"
+                )
                 raise JiraAPIError(f"Pagination failed: {str(e)}")
 
-        logger.info(f"Completed pagination for {endpoint}, returned {total_returned} items")
+        logger.info(
+            f"Completed pagination for {endpoint}, returned {total_returned} items"
+        )
 
     def search_issues(
         self,
@@ -279,7 +305,7 @@ class JiraClient:
         fields: Optional[str] = None,
         expand: Optional[str] = None,
         page_size: int = DEFAULT_PAGE_SIZE,
-        max_results: Optional[int] = None
+        max_results: Optional[int] = None,
     ) -> Iterator[Dict[str, Any]]:
         """
         Search for issues using JQL.
@@ -301,16 +327,11 @@ class JiraClient:
             params["expand"] = expand
 
         yield from self.get_paginated(
-            "search",
-            params=params,
-            page_size=page_size,
-            max_results=max_results
+            "search", params=params, page_size=page_size, max_results=max_results
         )
 
     def get_projects(
-        self,
-        expand: Optional[str] = None,
-        recent: Optional[int] = None
+        self, expand: Optional[str] = None, recent: Optional[int] = None
     ) -> Iterator[Dict[str, Any]]:
         """
         Get all projects.
@@ -326,7 +347,7 @@ class JiraClient:
         if expand:
             params["expand"] = expand
         if recent:
-            params["recent"] = recent
+            params["recent"] = str(recent)
 
         yield from self.get_paginated("project", params=params)
 
@@ -335,7 +356,7 @@ class JiraClient:
         username: Optional[str] = None,
         account_id: Optional[str] = None,
         start_at: int = 0,
-        max_results: int = DEFAULT_PAGE_SIZE
+        max_results: int = DEFAULT_PAGE_SIZE,
     ) -> Iterator[Dict[str, Any]]:
         """
         Get users.
@@ -350,8 +371,8 @@ class JiraClient:
             User data
         """
         params = {
-            "startAt": start_at,
-            "maxResults": min(max_results, MAX_PAGE_SIZE)
+            "startAt": str(start_at),
+            "maxResults": str(min(max_results, MAX_PAGE_SIZE)),
         }
         if username:
             params["username"] = username
@@ -363,26 +384,30 @@ class JiraClient:
     def get_issue_types(self) -> Iterator[Dict[str, Any]]:
         """Get all issue types."""
         response = self._make_request("issuetype")
-        for issue_type in response:
-            yield issue_type
+        if isinstance(response, list):
+            for issue_type in response:
+                yield issue_type
 
     def get_statuses(self) -> Iterator[Dict[str, Any]]:
         """Get all statuses."""
         response = self._make_request("status")
-        for status in response:
-            yield status
+        if isinstance(response, list):
+            for status in response:
+                yield status
 
     def get_priorities(self) -> Iterator[Dict[str, Any]]:
         """Get all priorities."""
         response = self._make_request("priority")
-        for priority in response:
-            yield priority
+        if isinstance(response, list):
+            for priority in response:
+                yield priority
 
     def get_resolutions(self) -> Iterator[Dict[str, Any]]:
         """Get all resolutions."""
         response = self._make_request("resolution")
-        for resolution in response:
-            yield resolution
+        if isinstance(response, list):
+            for resolution in response:
+                yield resolution
 
     def get_project_versions(self, project_key: str) -> Iterator[Dict[str, Any]]:
         """
@@ -410,10 +435,7 @@ class JiraClient:
 
 
 def get_client(
-    base_url: str,
-    email: str,
-    api_token: str,
-    timeout: int = REQUEST_TIMEOUT
+    base_url: str, email: str, api_token: str, timeout: int = REQUEST_TIMEOUT
 ) -> JiraClient:
     """
     Create and return a Jira API client.
