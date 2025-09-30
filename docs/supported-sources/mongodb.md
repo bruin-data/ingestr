@@ -1,11 +1,13 @@
 # MongoDB
 MongoDB is a popular, open source NoSQL database known for its flexibility, scalability, and wide adoption in a variety of applications.
 
-ingestr supports MongoDB as a source.
+ingestr supports MongoDB as both a source and destination.
 
 ## URI format
-The URI format for MongoDB is as follows:
 
+MongoDB supports two connection string formats:
+
+### Standard format (local/self-hosted)
 ```plaintext
 mongodb://user:password@host:port
 ```
@@ -16,12 +18,21 @@ URI parameters:
 - `host`: the host address of the database server
 - `port`: the port number the database server is listening on, default is 27017 for MongoDB
 
+### SRV format (MongoDB Atlas)
+```plaintext
+mongodb+srv://user:password@cluster.xxxxx.mongodb.net/?retryWrites=true&w=majority
+```
+
+URI parameters:
+- `user`: the user name to connect to the database
+- `password`: the password for the user
+- `cluster.xxxxx.mongodb.net`: the cluster hostname provided by MongoDB Atlas
+- Query parameters like `retryWrites` and `w` are optional but recommended for Atlas connections
 
 > [!CAUTION]
-> Do not put the database name at the end of the URI for MongoDB, instead make it a part of `--source-table` option as `database.collection` format.
+> Do not put the database name at the end of the URI for MongoDB, instead make it a part of `--source-table` or `--dest-table` option as `database.collection` format.
 
-
-You can read more about MongoDB's connection string format [here](https://docs.mongodb.com/manual/reference/connection-string/).
+The same URI structure can be used both for sources and destinations. You can read more about MongoDB's connection string format [here](https://docs.mongodb.com/manual/reference/connection-string/).
 
 ## Source table format
 
@@ -148,3 +159,43 @@ ingestr performs several validations on custom aggregation pipelines:
 - Add appropriate indexes to support your aggregation pipeline
 - Consider using `$limit` to restrict the number of documents processed
 - For large datasets, MongoDB's `allowDiskUse: true` option is automatically enabled for aggregation pipelines
+
+## Using MongoDB as a destination
+
+MongoDB can be used as a destination to load data from various sources. The `--dest-table` option follows the same format: `database.collection`.
+
+### MongoDB Atlas
+
+```bash
+ingestr ingest \
+  --source-uri "postgres://user:pass@localhost:5432/mydb" \
+  --source-table "public.users" \
+  --dest-uri "mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority" \
+  --dest-table "mydb.users"
+```
+
+> [!NOTE]
+> When using MongoDB Atlas as a destination, ensure your IP address is whitelisted in Network Access settings.
+
+### Local MongoDB with authentication
+
+```bash
+ingestr ingest \
+  --source-uri "csv:///path/to/data.csv" \
+  --source-table "data" \
+  --dest-uri "mongodb://username:password@localhost:27017/?authSource=admin" \
+  --dest-table "mydb.mycollection"
+```
+
+### Local MongoDB without authentication
+
+```bash
+ingestr ingest \
+  --source-uri "csv:///path/to/data.csv" \
+  --source-table "data" \
+  --dest-uri "mongodb://localhost:27017" \
+  --dest-table "mydb.mycollection"
+```
+
+> [!TIP]
+> By default, ingestr uses a "replace" strategy which deletes existing data in the collection before loading new data. The target database and collection will be created automatically if they don't exist.
