@@ -63,8 +63,6 @@ def hubspot(
     include_custom_props: bool = True,
     custom_object: str = None,
 ) -> Sequence[DltResource]:
-
-    props: Sequence[str] = DEFAULT_PRODUCT_PROPS,
     """
     A DLT source that retrieves data from the HubSpot API using the
     specified API key.
@@ -93,6 +91,7 @@ def hubspot(
 
     @dlt.resource(name="companies", write_disposition="replace")
     def companies(
+        api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
@@ -101,12 +100,13 @@ def hubspot(
             "company",
             api_key,
             include_history=include_history,
-            props=props,
+            props=DEFAULT_COMPANY_PROPS,
             include_custom_props=include_custom_props,
         )
 
     @dlt.resource(name="contacts", write_disposition="replace")
     def contacts(
+        api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
@@ -115,12 +115,13 @@ def hubspot(
             "contact",
             api_key,
             include_history,
-            props,
+            DEFAULT_CONTACT_PROPS,
             include_custom_props,
         )
 
     @dlt.resource(name="deals", write_disposition="replace")
     def deals(
+        api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
@@ -129,12 +130,13 @@ def hubspot(
             "deal",
             api_key,
             include_history,
-            props,
+            DEFAULT_DEAL_PROPS,
             include_custom_props,
         )
 
     @dlt.resource(name="tickets", write_disposition="replace")
     def tickets(
+        api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
@@ -143,29 +145,35 @@ def hubspot(
             "ticket",
             api_key,
             include_history,
-            props,
+            DEFAULT_TICKET_PROPS,
             include_custom_props,
         )
 
     @dlt.resource(name="products", write_disposition="replace")
-    def products() -> Iterator[TDataItems]:
+    def products(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+    ) -> Iterator[TDataItems]:
         """Hubspot products resource"""
         yield from crm_objects(
             "product",
             api_key,
             include_history,
-            props,
+            DEFAULT_PRODUCT_PROPS,
             include_custom_props,
         )
 
     @dlt.resource(name="schemas", write_disposition="merge", primary_key="id")
     def schemas(
+        api_key: str = api_key,
     ) -> Iterator[TDataItems]:
         """Hubspot schemas resource"""
         yield from fetch_data(CRM_SCHEMAS_ENDPOINT, api_key, resource_name="schemas")
 
     @dlt.resource(name="quotes", write_disposition="replace")
     def quotes(
+        api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
@@ -174,12 +182,13 @@ def hubspot(
             "quote",
             api_key,
             include_history,
-            props,
+            DEFAULT_QUOTE_PROPS,
             include_custom_props,
         )
 
     @dlt.resource(write_disposition="merge", primary_key="hs_object_id")
     def custom(
+        api_key: str = api_key,
         custom_object_name: str = custom_object,
     ) -> Iterator[TDataItems]:
         custom_objects = fetch_data_raw(CRM_SCHEMAS_ENDPOINT, api_key)
