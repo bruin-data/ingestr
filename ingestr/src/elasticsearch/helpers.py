@@ -57,18 +57,34 @@ def elasticsearch_insert(
     parsed = urlparse(connection_string)
 
     # Build Elasticsearch client configuration
-    # Handle the case where the connection string might have elasticsearch:// prefix
-    # but the actual URL is embedded within it
     actual_url = connection_string
+    secure = True  # Default to HTTPS (secure by default)
+
     if connection_string.startswith("elasticsearch://"):
         actual_url = connection_string.replace("elasticsearch://", "")
-        if not actual_url.startswith(("http://", "https://")):
-            actual_url = "https://" + actual_url
+
+        # Parse to check for query parameters
+        temp_parsed = urlparse("http://" + actual_url)
+        from urllib.parse import parse_qs
+
+        query_params = parse_qs(temp_parsed.query)
+
+        # Check ?secure parameter (defaults to true)
+        if "secure" in query_params:
+            secure = query_params["secure"][0].lower() in ["true", "1", "yes"]
+
+        # Remove query params from URL for ES client
+        actual_url = actual_url.split("?")[0]
+
+        # Add scheme
+        scheme = "https" if secure else "http"
+        actual_url = f"{scheme}://{actual_url}"
+
         parsed = urlparse(actual_url)
 
     es_config: Dict[str, Any] = {
         "hosts": [actual_url],
-        "verify_certs": True,
+        "verify_certs": secure,
         "ssl_show_warn": False,
     }
 
