@@ -66,6 +66,7 @@ def elasticsearch_insert(
         # Parse to check for query parameters
         temp_parsed = urlparse("http://" + actual_url)
         from urllib.parse import parse_qs
+
         query_params = parse_qs(temp_parsed.query)
 
         # Check ?secure parameter (defaults to true)
