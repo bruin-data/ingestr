@@ -93,7 +93,6 @@ def hubspot(
     def companies(
         api_key: str = api_key,
         include_history: bool = include_history,
-        props: Sequence[str] = DEFAULT_COMPANY_PROPS,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
         """Hubspot companies resource"""
@@ -101,7 +100,7 @@ def hubspot(
             "company",
             api_key,
             include_history=include_history,
-            props=props,
+            props=DEFAULT_COMPANY_PROPS,
             include_custom_props=include_custom_props,
         )
 
@@ -109,7 +108,6 @@ def hubspot(
     def contacts(
         api_key: str = api_key,
         include_history: bool = include_history,
-        props: Sequence[str] = DEFAULT_CONTACT_PROPS,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
         """Hubspot contacts resource"""
@@ -117,7 +115,7 @@ def hubspot(
             "contact",
             api_key,
             include_history,
-            props,
+            DEFAULT_CONTACT_PROPS,
             include_custom_props,
         )
 
@@ -125,7 +123,6 @@ def hubspot(
     def deals(
         api_key: str = api_key,
         include_history: bool = include_history,
-        props: Sequence[str] = DEFAULT_DEAL_PROPS,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
         """Hubspot deals resource"""
@@ -133,7 +130,7 @@ def hubspot(
             "deal",
             api_key,
             include_history,
-            props,
+            DEFAULT_DEAL_PROPS,
             include_custom_props,
         )
 
@@ -141,7 +138,6 @@ def hubspot(
     def tickets(
         api_key: str = api_key,
         include_history: bool = include_history,
-        props: Sequence[str] = DEFAULT_TICKET_PROPS,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
         """Hubspot tickets resource"""
@@ -149,7 +145,7 @@ def hubspot(
             "ticket",
             api_key,
             include_history,
-            props,
+            DEFAULT_TICKET_PROPS,
             include_custom_props,
         )
 
@@ -157,7 +153,6 @@ def hubspot(
     def products(
         api_key: str = api_key,
         include_history: bool = include_history,
-        props: Sequence[str] = DEFAULT_PRODUCT_PROPS,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
         """Hubspot products resource"""
@@ -165,7 +160,7 @@ def hubspot(
             "product",
             api_key,
             include_history,
-            props,
+            DEFAULT_PRODUCT_PROPS,
             include_custom_props,
         )
 
@@ -180,7 +175,6 @@ def hubspot(
     def quotes(
         api_key: str = api_key,
         include_history: bool = include_history,
-        props: Sequence[str] = DEFAULT_QUOTE_PROPS,
         include_custom_props: bool = include_custom_props,
     ) -> Iterator[TDataItems]:
         """Hubspot quotes resource"""
@@ -188,7 +182,7 @@ def hubspot(
             "quote",
             api_key,
             include_history,
-            props,
+            DEFAULT_QUOTE_PROPS,
             include_custom_props,
         )
 
