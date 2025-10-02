@@ -2878,6 +2878,10 @@ class FreshdeskSource:
         else:
             end_date = None
 
+        custom_query: Optional[str] = None
+        if ":" in table:
+            table, custom_query = table.split(":", 1)
+
         if table not in [
             "agents",
             "companies",
@@ -2888,6 +2892,9 @@ class FreshdeskSource:
         ]:
             raise UnsupportedResourceError(table, "Freshdesk")
 
+        if custom_query and table != "tickets":
+            raise ValueError(f"Custom query is not supported for {table}")
+
         from ingestr.src.freshdesk import freshdesk_source
 
         return freshdesk_source(
@@ -2895,6 +2902,7 @@ class FreshdeskSource:
             domain=domain,
             start_date=start_date,
             end_date=end_date,
+            query=custom_query,
         ).with_resources(table)
 
 

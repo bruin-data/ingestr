@@ -20,6 +20,7 @@ def freshdesk_source(
     end_date: Optional[pendulum.DateTime] = None,
     per_page: int = 100,
     endpoints: Optional[List[str]] = None,
+    query: Optional[str] = None,
 ) -> Iterable[DltResource]:
     """
     Retrieves data from specified Freshdesk API endpoints.
@@ -72,6 +73,7 @@ def freshdesk_source(
             per_page=per_page,
             start_date=start_date,
             end_date=end_date,
+            query=query,
         )
 
     # Set default endpoints if not provided

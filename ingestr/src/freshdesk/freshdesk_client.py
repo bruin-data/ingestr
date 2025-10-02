@@ -2,7 +2,7 @@
 
 import logging
 import time
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Optional
 
 import pendulum
 from dlt.common.typing import TDataItem
@@ -70,6 +70,7 @@ class FreshdeskClient:
         per_page: int,
         start_date: pendulum.DateTime,
         end_date: pendulum.DateTime,
+        query: Optional[str] = None,
     ) -> Iterable[TDataItem]:
         """
         Fetches a paginated response from a specified endpoint.
@@ -79,6 +80,9 @@ class FreshdeskClient:
         updated at the specified timestamp.
         """
         page = 1
+        if query is not None:
+            query = query.replace('"', "").strip()
+
         while True:
             # Construct the URL for the specific endpoint
             url = f"{self.base_url}/{endpoint}"
@@ -93,10 +97,20 @@ class FreshdeskClient:
 
                 params[param_key] = start_date.to_iso8601_string()
 
+            if query and endpoint == "tickets":
+                url = f"{self.base_url}/search/tickets"
+                params = {
+                    "query": f'"{query}"',
+                    "page": page,
+                }
+
             # Handle requests with rate-limiting
             # A maximum of 300 pages (30000 tickets) will be returned.
             response = self._request_with_rate_limit(url, params=params)
             data = response.json()
+
+            if query and endpoint == "tickets":
+                data = data["results"]
 
             if not data:
                 break  # Stop if no data or max page limit reached
