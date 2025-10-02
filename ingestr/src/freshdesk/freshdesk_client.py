@@ -80,7 +80,8 @@ class FreshdeskClient:
         updated at the specified timestamp.
         """
         page = 1
-        query = query.replace('"', '').strip()
+        if query is not None:
+            query = query.replace('"', '').strip()
         while True:
             # Construct the URL for the specific endpoint
             url = f"{self.base_url}/{endpoint}"
