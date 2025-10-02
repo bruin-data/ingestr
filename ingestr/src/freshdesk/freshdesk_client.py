@@ -96,12 +96,19 @@ class FreshdeskClient:
             
             if query and endpoint == "tickets":
                 url = f"{self.base_url}/search/tickets"
-                params["query"] = query
+                params = {
+                    "query": f'"{query}"',
+                    "page": page,
+                }
 
             # Handle requests with rate-limiting
             # A maximum of 300 pages (30000 tickets) will be returned.
             response = self._request_with_rate_limit(url, params=params)
             data = response.json()
+
+            if query:
+                data = data["results"]
+                
 
             if not data:
                 break  # Stop if no data or max page limit reached
