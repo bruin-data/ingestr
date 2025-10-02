@@ -37,6 +37,7 @@ def jira_source() -> Any:
         resolutions,
         project_versions,
         project_components,
+        events,
     ]
 
 
@@ -65,7 +66,11 @@ def projects(
     yield from client.get_projects(expand=expand, recent=recent)
 
 
-@dlt.resource(write_disposition="merge", primary_key="id")
+@dlt.resource(
+    write_disposition="merge",
+    primary_key="id",
+    max_table_nesting=2,
+)
 def issues(
     base_url: str = dlt.secrets.value,
     email: str = dlt.secrets.value,
@@ -312,3 +317,24 @@ def project_components(
         return []
 
     return list(client.get_project_components(project_key))
+
+
+@dlt.resource(write_disposition="replace")
+def events(
+    base_url: str = dlt.secrets.value,
+    email: str = dlt.secrets.value,
+    api_token: str = dlt.secrets.value,
+) -> Iterable[TDataItem]:
+    """
+    Fetches all event types from Jira (e.g., Issue Created, Issue Updated, etc.).
+
+    Args:
+        base_url (str): Jira instance URL
+        email (str): User email for authentication
+        api_token (str): API token for authentication
+
+    Yields:
+        dict: The event data.
+    """
+    client = get_client(base_url, email, api_token)
+    yield from client.get_events()

@@ -327,7 +327,7 @@ class JiraClient:
             params["expand"] = expand
 
         yield from self.get_paginated(
-            "search", params=params, page_size=page_size, max_results=max_results
+            "search/jql", params=params, page_size=page_size, max_results=max_results
         )
 
     def get_projects(
@@ -432,6 +432,13 @@ class JiraClient:
             Component data
         """
         yield from self.get_paginated(f"project/{project_key}/component")
+
+    def get_events(self) -> Iterator[Dict[str, Any]]:
+        """Get all events (issue events like created, updated, etc.)."""
+        response = self._make_request("events")
+        if isinstance(response, list):
+            for event in response:
+                yield event
 
 
 def get_client(
