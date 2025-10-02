@@ -81,7 +81,8 @@ class FreshdeskClient:
         """
         page = 1
         if query is not None:
-            query = query.replace('"', '').strip()
+            query = query.replace('"', "").strip()
+
         while True:
             # Construct the URL for the specific endpoint
             url = f"{self.base_url}/{endpoint}"
@@ -95,7 +96,7 @@ class FreshdeskClient:
                 )
 
                 params[param_key] = start_date.to_iso8601_string()
-            
+
             if query and endpoint == "tickets":
                 url = f"{self.base_url}/search/tickets"
                 params = {
@@ -110,7 +111,6 @@ class FreshdeskClient:
 
             if query and endpoint == "tickets":
                 data = data["results"]
-                
 
             if not data:
                 break  # Stop if no data or max page limit reached
