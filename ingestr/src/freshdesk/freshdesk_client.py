@@ -108,7 +108,7 @@ class FreshdeskClient:
             response = self._request_with_rate_limit(url, params=params)
             data = response.json()
 
-            if query:
+            if query and endpoint == "tickets":
                 data = data["results"]
                 
 
