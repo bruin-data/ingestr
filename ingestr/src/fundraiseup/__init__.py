@@ -19,7 +19,7 @@ RESOURCES = {
     "supporters": {"write_disposition": "replace", "primary_key": "id"},
 }
 
-INCREMENTAL_SUFFIX="-incremental"
+INCREMENTAL_SUFFIX = "-incremental"
 
 def read_remote_state(name):
     p = dlt.current.pipeline()
