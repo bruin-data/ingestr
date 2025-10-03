@@ -73,7 +73,7 @@ def fundraiseup_source(api_key: str) -> Iterable[DltResource]:
                 yield batch  # type: ignore[misc]
                 state[primary_key] = batch[-1].get("id")
 
-        return generic_resource
+        return generic_resource()
 
     # Return all resources
     return [create_resource(name, config) for name, config in RESOURCES.items()]
