@@ -3764,6 +3764,7 @@ class AnthropicSource:
 class PlusVibeAISource:
     resources = [
         "campaigns",
+        "leads",
     ]
 
     def handles_incrementality(self) -> bool:

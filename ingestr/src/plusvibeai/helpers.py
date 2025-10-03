@@ -190,6 +190,7 @@ class PlusVibeAIClient:
         params: Optional[Dict[str, Any]] = None,
         page_size: int = DEFAULT_PAGE_SIZE,
         max_results: Optional[int] = None,
+        use_page_param: bool = False,
     ) -> Iterator[Dict[str, Any]]:
         """
         Get paginated results from PlusVibeAI API with error handling.
@@ -199,6 +200,7 @@ class PlusVibeAIClient:
             params: Query parameters
             page_size: Number of items per page
             max_results: Maximum total results to return
+            use_page_param: If True, use 'page' parameter (1-based) instead of 'skip' (0-based)
 
         Yields:
             Individual items from paginated response
@@ -210,7 +212,11 @@ class PlusVibeAIClient:
             params = {}
 
         params["limit"] = page_size
-        params["skip"] = 0
+
+        if use_page_param:
+            params["page"] = 1
+        else:
+            params["skip"] = 0
 
         total_returned = 0
         consecutive_empty_pages = 0
@@ -262,14 +268,22 @@ class PlusVibeAIClient:
                     break
 
                 # Move to next page
-                params["skip"] += page_size
-
-                # Safety check to prevent infinite loops
-                if params["skip"] > 100000:
-                    logger.warning(
-                        f"Pagination safety limit reached for {endpoint}, stopping"
-                    )
-                    break
+                if use_page_param:
+                    params["page"] += 1
+                    # Safety check
+                    if params["page"] > 10000:
+                        logger.warning(
+                            f"Pagination safety limit reached for {endpoint}, stopping"
+                        )
+                        break
+                else:
+                    params["skip"] += page_size
+                    # Safety check
+                    if params["skip"] > 100000:
+                        logger.warning(
+                            f"Pagination safety limit reached for {endpoint}, stopping"
+                        )
+                        break
 
             except PlusVibeAIAPIError as e:
                 logger.error(f"API error during pagination of {endpoint}: {str(e)}")
@@ -297,6 +311,28 @@ class PlusVibeAIClient:
         """
         yield from self.get_paginated(
             "campaign/list-all", page_size=page_size, max_results=max_results
+        )
+
+    def get_leads(
+        self,
+        page_size: int = DEFAULT_PAGE_SIZE,
+        max_results: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Get workspace leads from PlusVibeAI.
+
+        Args:
+            page_size: Number of items per page
+            max_results: Maximum total results to return
+
+        Yields:
+            Lead data
+        """
+        yield from self.get_paginated(
+            "lead/workspace-leads",
+            page_size=page_size,
+            max_results=max_results,
+            use_page_param=True,  # Leads endpoint uses 'page' parameter instead of 'skip'
         )
 
 

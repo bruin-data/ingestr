@@ -96,3 +96,69 @@ CAMPAIGN_FIELDS = (
     # Custom Data
     "custom_fields",
 )
+
+# Lead fields to retrieve from PlusVibeAI API
+LEAD_FIELDS = (
+    # Basic Information
+    "_id",
+    "organization_id",
+    "campaign_id",
+    "workspace_id",
+
+    # Lead Status & Progress
+    "is_completed",
+    "current_step",
+    "status",
+    "label",
+
+    # Email Account Info
+    "email_account_id",
+    "email_acc_name",
+
+    # Campaign Info
+    "camp_name",
+
+    # Timestamps
+    "created_at",
+    "modified_at",
+    "last_sent_at",
+
+    # Email Engagement Metrics
+    "sent_step",
+    "replied_count",
+    "opened_count",
+
+    # Email Verification
+    "is_mx",
+    "mx",
+
+    # Contact Information
+    "email",
+    "first_name",
+    "last_name",
+    "phone_number",
+
+    # Address Information
+    "address_line",
+    "city",
+    "state",
+    "country",
+    "country_code",
+
+    # Professional Information
+    "job_title",
+    "department",
+    "company_name",
+    "company_website",
+    "industry",
+
+    # Social Media
+    "linkedin_person_url",
+    "linkedin_company_url",
+
+    # Workflow
+    "total_steps",
+
+    # Bounce Information
+    "bounce_msg",
+)
