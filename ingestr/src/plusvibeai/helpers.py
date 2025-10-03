@@ -455,6 +455,48 @@ class PlusVibeAIClient:
             else:
                 break
 
+    def get_webhooks(
+        self,
+        page_size: int = DEFAULT_PAGE_SIZE,
+        max_results: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Get webhooks from PlusVibeAI.
+
+        Args:
+            page_size: Number of items per page
+            max_results: Maximum total results to return
+
+        Yields:
+            Webhook data
+        """
+        # Webhooks endpoint returns data in 'hooks' key
+        response = self._make_request("hook/list")
+        
+        if isinstance(response, dict) and "hooks" in response:
+            hooks = response["hooks"]
+            if isinstance(hooks, list):
+                count = 0
+                for hook in hooks:
+                    if max_results and count >= max_results:
+                        break
+                    yield hook
+                    count += 1
+            else:
+                # Single hook response
+                yield hooks
+        elif isinstance(response, list):
+            # Direct array response
+            count = 0
+            for hook in response:
+                if max_results and count >= max_results:
+                    break
+                yield hook
+                count += 1
+        else:
+            # Single item response
+            yield response
+
 
 def get_client(
     api_key: str,

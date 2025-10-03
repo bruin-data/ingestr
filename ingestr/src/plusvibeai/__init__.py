@@ -28,6 +28,7 @@ def plusvibeai_source() -> Any:
         email_accounts,
         emails,
         blocklist,
+        webhooks,
     ]
 
 
@@ -245,3 +246,47 @@ def blocklist(
                 continue
 
         yield entry
+
+
+@dlt.resource(
+    write_disposition="merge",
+    primary_key="_id",
+    max_table_nesting=0,
+)
+def webhooks(
+    api_key: str = dlt.secrets.value,
+    workspace_id: str = dlt.secrets.value,
+    base_url: str = "https://api.plusvibe.ai",
+    max_results: Optional[int] = None,
+    updated: dlt.sources.incremental[str] = dlt.sources.incremental(
+        "modified_at",
+        initial_value=DEFAULT_START_DATE,
+        range_end="closed",
+        range_start="closed",
+    ),
+) -> Iterable[TDataItem]:
+    """
+    Fetches webhooks from PlusVibeAI.
+
+    Args:
+        api_key (str): API key for authentication
+        workspace_id (str): Workspace ID to access
+        base_url (str): PlusVibeAI API base URL
+        max_results (int): Maximum number of results to return
+        updated (str): The date from which to fetch updated webhooks
+
+    Yields:
+        dict: The webhook data.
+    """
+    client = get_client(api_key, workspace_id, base_url)
+
+    for webhook in client.get_webhooks(
+        page_size=DEFAULT_PAGE_SIZE, max_results=max_results
+    ):
+        # Apply incremental filter if needed
+        if updated.start_value:
+            webhook_updated = webhook.get("modified_at")
+            if webhook_updated and webhook_updated < updated.start_value:
+                continue
+
+        yield webhook

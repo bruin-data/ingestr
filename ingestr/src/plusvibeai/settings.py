@@ -239,3 +239,37 @@ BLOCKLIST_FIELDS = (
     # Timestamps
     "created_at",
 )
+
+# Webhook fields to retrieve from PlusVibeAI API
+WEBHOOK_FIELDS = (
+    # Basic Information
+    "_id",
+    "workspace_id",
+    "org_id",
+    "url",
+    "name",
+    "secret",
+    
+    # Configuration
+    "camp_ids",
+    "evt_types",
+    "status",
+    "integration_type",
+    
+    # Settings
+    "ignore_ooo",
+    "ignore_automatic",
+    
+    # Timestamps
+    "created_at",
+    "modified_at",
+    "last_run",
+    
+    # Response Data
+    "last_resp",
+    "last_recv_resp",
+    
+    # User Information
+    "created_by",
+    "modified_by",
+)
