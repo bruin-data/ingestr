@@ -227,3 +227,15 @@ EMAIL_FIELDS = (
     "timestamp_created",
     "source_modified_at",
 )
+
+# Blocklist fields to retrieve from PlusVibeAI API
+BLOCKLIST_FIELDS = (
+    # Basic Information
+    "_id",
+    "workspace_id",
+    "value",
+    "created_by_label",
+    
+    # Timestamps
+    "created_at",
+)

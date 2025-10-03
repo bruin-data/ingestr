@@ -3767,6 +3767,7 @@ class PlusVibeAISource:
         "leads",
         "email_accounts",
         "emails",
+        "blocklist",
     ]
 
     def handles_incrementality(self) -> bool:

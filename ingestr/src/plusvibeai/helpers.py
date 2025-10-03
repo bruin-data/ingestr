@@ -402,6 +402,59 @@ class PlusVibeAIClient:
             else:
                 break
 
+    def get_blocklist(
+        self,
+        page_size: int = DEFAULT_PAGE_SIZE,
+        max_results: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Get blocklist entries from PlusVibeAI.
+        
+        Note: Blocklist API returns data in format {"0": {...}, "1": {...}} 
+        instead of standard array format.
+
+        Args:
+            page_size: Number of items per page
+            max_results: Maximum total results to return
+
+        Yields:
+            Blocklist entry data
+        """
+        if max_results is None:
+            max_results = float('inf')
+            
+        params = {"limit": page_size, "skip": 0}
+        total_returned = 0
+        
+        while total_returned < max_results:
+            response = self._make_request("blocklist/list", params)
+            
+            # Blocklist API returns {"0": {...}, "1": {...}} format
+            if isinstance(response, dict):
+                # Extract items from numbered keys
+                items = []
+                for key in sorted(response.keys(), key=lambda x: int(x) if x.isdigit() else float('inf')):
+                    if key.isdigit():
+                        items.append(response[key])
+                
+                if not items:
+                    break
+                    
+                for item in items:
+                    if total_returned >= max_results:
+                        return
+                    yield item
+                    total_returned += 1
+                
+                # If we got fewer items than page_size, we're done
+                if len(items) < page_size:
+                    break
+                    
+                # Move to next page
+                params["skip"] += page_size
+            else:
+                break
+
 
 def get_client(
     api_key: str,
