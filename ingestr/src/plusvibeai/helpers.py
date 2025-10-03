@@ -162,7 +162,9 @@ class PlusVibeAIClient:
                 try:
                     return response.json()
                 except ValueError as e:
-                    logger.error(f"Invalid JSON response. Status: {response.status_code}, URL: {url}, Response text: {response.text[:500]}")
+                    logger.error(
+                        f"Invalid JSON response. Status: {response.status_code}, URL: {url}, Response text: {response.text[:500]}"
+                    )
                     raise PlusVibeAIAPIError(
                         f"Invalid JSON response: {str(e)}",
                         status_code=response.status_code,
@@ -384,7 +386,6 @@ class PlusVibeAIClient:
                 items = response.get("data", [])
                 page_trail = response.get("page_trail")
 
-
                 if not items:
                     break
 
@@ -409,8 +410,8 @@ class PlusVibeAIClient:
     ) -> Iterator[Dict[str, Any]]:
         """
         Get blocklist entries from PlusVibeAI.
-        
-        Note: Blocklist API returns data in format {"0": {...}, "1": {...}} 
+
+        Note: Blocklist API returns data in format {"0": {...}, "1": {...}}
         instead of standard array format.
 
         Args:
@@ -421,35 +422,40 @@ class PlusVibeAIClient:
             Blocklist entry data
         """
         if max_results is None:
-            max_results = float('inf')
-            
+            max_results_limit = float("inf")
+        else:
+            max_results_limit = max_results
+
         params = {"limit": page_size, "skip": 0}
         total_returned = 0
-        
-        while total_returned < max_results:
+
+        while total_returned < max_results_limit:
             response = self._make_request("blocklist/list", params)
-            
+
             # Blocklist API returns {"0": {...}, "1": {...}} format
             if isinstance(response, dict):
                 # Extract items from numbered keys
                 items = []
-                for key in sorted(response.keys(), key=lambda x: int(x) if x.isdigit() else float('inf')):
+                for key in sorted(
+                    response.keys(),
+                    key=lambda x: int(x) if x.isdigit() else float("inf"),
+                ):
                     if key.isdigit():
                         items.append(response[key])
-                
+
                 if not items:
                     break
-                    
+
                 for item in items:
-                    if total_returned >= max_results:
+                    if max_results and total_returned >= max_results:
                         return
                     yield item
                     total_returned += 1
-                
+
                 # If we got fewer items than page_size, we're done
                 if len(items) < page_size:
                     break
-                    
+
                 # Move to next page
                 params["skip"] += page_size
             else:
@@ -472,7 +478,7 @@ class PlusVibeAIClient:
         """
         # Webhooks endpoint returns data in 'hooks' key
         response = self._make_request("hook/list")
-        
+
         if isinstance(response, dict) and "hooks" in response:
             hooks = response["hooks"]
             if isinstance(hooks, list):
