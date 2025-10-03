@@ -361,6 +361,47 @@ class PlusVibeAIClient:
             else:
                 yield response
 
+    def get_emails(
+        self,
+        max_results: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Get emails from PlusVibeAI (uses cursor-based pagination with page_trail).
+
+        Args:
+            max_results: Maximum total results to return
+
+        Yields:
+            Email data
+        """
+        params: Dict[str, Any] = {}
+        total_returned = 0
+
+        while True:
+            response = self._make_request("unibox/emails", params)
+
+            if isinstance(response, dict):
+                items = response.get("data", [])
+                page_trail = response.get("page_trail")
+
+
+                if not items:
+                    break
+
+                for item in items:
+                    if max_results and total_returned >= max_results:
+                        return
+                    yield item
+                    total_returned += 1
+
+                # page_trail can be empty string when there are no more pages
+                if page_trail and page_trail.strip():
+                    params["page_trail"] = page_trail
+                else:
+                    break
+            else:
+                break
+
 
 def get_client(
     api_key: str,

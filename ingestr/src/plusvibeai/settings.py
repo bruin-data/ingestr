@@ -188,3 +188,42 @@ EMAIL_ACCOUNT_FIELDS = (
     # - tags, cmps
     # - analytics (health_scores, reply_rates, daily_counters)
 )
+
+# Email fields to retrieve from PlusVibeAI API
+EMAIL_FIELDS = (
+    # Basic Information
+    "id",
+    "message_id",
+    "is_unread",
+
+    # Lead Information
+    "lead",
+    "lead_id",
+    "campaign_id",
+
+    # From Address
+    "from_address_email",
+    "from_address_json",
+
+    # Subject & Content
+    "subject",
+    "content_preview",
+    "body",
+
+    # Headers & Metadata
+    "headers",
+    "label",
+    "thread_id",
+    "eaccount",
+
+    # To/CC/BCC Addresses
+    "to_address_email_list",
+    "to_address_json",
+    "cc_address_email_list",
+    "cc_address_json",
+    "bcc_address_email_list",
+
+    # Timestamps
+    "timestamp_created",
+    "source_modified_at",
+)
