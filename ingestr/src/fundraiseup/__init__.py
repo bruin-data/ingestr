@@ -71,7 +71,8 @@ def fundraiseup_source(api_key: str) -> Iterable[DltResource]:
 
             for batch in client.get_paginated_data(name, params):
                 yield batch  # type: ignore[misc]
-                state[primary_key] = batch[-1].get("id")
+                if batch:
+                    state[primary_key] = batch[-1].get("id")
 
         return generic_resource()
 
