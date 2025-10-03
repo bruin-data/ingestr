@@ -162,6 +162,7 @@ export default defineConfig({
               { text: "PhantomBuster", link: "/supported-sources/phantombuster.md" },
               { text: "Pinterest", link: "/supported-sources/pinterest.md" },
               { text: "Pipedrive", link: "/supported-sources/pipedrive.md" },
+              { text: "Plus Vibe AI", link: "/supported-sources/plusvibeai.md" },
               { text: "QuickBooks", link: "/supported-sources/quickbooks.md" },
               { text: "RevenueCat", link: "/supported-sources/revenuecat.md" },
               { text: "S3", link: "/supported-sources/s3.md" },
