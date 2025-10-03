@@ -25,6 +25,7 @@ def plusvibeai_source() -> Any:
     return [
         campaigns,
         leads,
+        email_accounts,
     ]
 
 
@@ -112,3 +113,47 @@ def leads(
                 continue
 
         yield lead
+
+
+@dlt.resource(
+    write_disposition="merge",
+    primary_key="_id",
+    max_table_nesting=0,
+)
+def email_accounts(
+    api_key: str = dlt.secrets.value,
+    workspace_id: str = dlt.secrets.value,
+    base_url: str = "https://api.plusvibe.ai",
+    max_results: Optional[int] = None,
+    updated: dlt.sources.incremental[str] = dlt.sources.incremental(
+        "timestamp_updated",
+        initial_value=DEFAULT_START_DATE,
+        range_end="closed",
+        range_start="closed",
+    ),
+) -> Iterable[TDataItem]:
+    """
+    Fetches email accounts from PlusVibeAI.
+
+    Args:
+        api_key (str): API key for authentication
+        workspace_id (str): Workspace ID to access
+        base_url (str): PlusVibeAI API base URL
+        max_results (int): Maximum number of results to return
+        updated (str): The date from which to fetch updated email accounts
+
+    Yields:
+        dict: The email account data.
+    """
+    client = get_client(api_key, workspace_id, base_url)
+
+    for account in client.get_email_accounts(
+        page_size=DEFAULT_PAGE_SIZE, max_results=max_results
+    ):
+        # Apply incremental filter if needed
+        if updated.start_value:
+            account_updated = account.get("timestamp_updated")
+            if account_updated and account_updated < updated.start_value:
+                continue
+
+        yield account

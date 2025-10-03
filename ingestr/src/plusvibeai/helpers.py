@@ -335,6 +335,32 @@ class PlusVibeAIClient:
             use_page_param=True,  # Leads endpoint uses 'page' parameter instead of 'skip'
         )
 
+    def get_email_accounts(
+        self,
+        page_size: int = DEFAULT_PAGE_SIZE,
+        max_results: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Get email accounts from PlusVibeAI.
+
+        Args:
+            page_size: Number of items per page
+            max_results: Maximum total results to return
+
+        Yields:
+            Email account data
+        """
+        # Email accounts endpoint returns data in 'accounts' key
+        for response in self.get_paginated(
+            "account/list", page_size=page_size, max_results=max_results
+        ):
+            # Response structure: {"accounts": [...]}
+            if isinstance(response, dict) and "accounts" in response:
+                for account in response["accounts"]:
+                    yield account
+            else:
+                yield response
+
 
 def get_client(
     api_key: str,

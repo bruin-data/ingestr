@@ -162,3 +162,29 @@ LEAD_FIELDS = (
     # Bounce Information
     "bounce_msg",
 )
+
+# Email Account fields to retrieve from PlusVibeAI API
+EMAIL_ACCOUNT_FIELDS = (
+    # Basic Information
+    "_id",
+    "email",
+    "status",
+    "warmup_status",
+
+    # Timestamps
+    "timestamp_created",
+    "timestamp_updated",
+
+    # Payload - nested object containing all configuration
+    "payload",
+
+    # Payload sub-fields (for reference, stored in payload object):
+    # - name (first_name, last_name)
+    # - warmup (limit, warmup_custom_words, warmup_signature, advanced, increment, reply_rate)
+    # - imap_host, imap_port
+    # - smtp_host, smtp_port
+    # - daily_limit, sending_gap
+    # - reply_to, custom_domain, signature
+    # - tags, cmps
+    # - analytics (health_scores, reply_rates, daily_counters)
+)
