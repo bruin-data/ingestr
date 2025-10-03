@@ -3695,7 +3695,6 @@ class FundraiseupSource:
         if api_key is None:
             raise MissingValueError("api_key", "Fundraiseup")
 
-
         from ingestr.src.fundraiseup import fundraiseup_source
 
         src = fundraiseup_source(api_key=api_key[0])

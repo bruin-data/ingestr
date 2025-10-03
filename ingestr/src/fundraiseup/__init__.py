@@ -21,6 +21,7 @@ RESOURCES = {
 
 INCREMENTAL_SUFFIX = "-incremental"
 
+
 def read_remote_state(name):
     p = dlt.current.pipeline()
     if p.first_run:
@@ -49,6 +50,7 @@ def fundraiseup_source(api_key: str) -> Iterable[DltResource]:
         """Create a DLT resource dynamically."""
 
         incremental = resource_name.endswith(INCREMENTAL_SUFFIX)
+
         @dlt.resource(
             name=resource_name,
             write_disposition=config["write_disposition"],
@@ -56,16 +58,17 @@ def fundraiseup_source(api_key: str) -> Iterable[DltResource]:
         )
         def generic_resource() -> Generator[Dict[str, Any], None, None]:
             """Generic resource that yields batches directly."""
-            name = resource_name if incremental is False else resource_name.removesuffix(INCREMENTAL_SUFFIX)
+            name = (
+                resource_name
+                if incremental is False
+                else resource_name.removesuffix(INCREMENTAL_SUFFIX)
+            )
             state = dlt.current.resource_state()
             params = {}
             primary_key = config["primary_key"]
             if incremental:
                 remote = read_remote_state(resource_name)
-                last_id = state.setdefault(
-                    primary_key,
-                    remote.get(primary_key, None) 
-                )
+                last_id = state.setdefault(primary_key, remote.get(primary_key, None))
                 if last_id:
                     params["starting_after"] = last_id
 
