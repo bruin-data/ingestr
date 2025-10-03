@@ -273,3 +273,19 @@ WEBHOOK_FIELDS = (
     "created_by",
     "modified_by",
 )
+
+# Tag fields to retrieve from PlusVibeAI API
+TAG_FIELDS = (
+    # Basic Information
+    "_id",
+    "workspace_id",
+    "org_id",
+    "name",
+    "color",
+    "description",
+    "status",
+    
+    # Timestamps
+    "created_at",
+    "modified_at",
+)

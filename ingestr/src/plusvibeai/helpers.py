@@ -497,6 +497,25 @@ class PlusVibeAIClient:
             # Single item response
             yield response
 
+    def get_tags(
+        self,
+        page_size: int = DEFAULT_PAGE_SIZE,
+        max_results: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Get tags from PlusVibeAI.
+
+        Args:
+            page_size: Number of items per page
+            max_results: Maximum total results to return
+
+        Yields:
+            Tag data
+        """
+        yield from self.get_paginated(
+            "tags/list", page_size=page_size, max_results=max_results
+        )
+
 
 def get_client(
     api_key: str,

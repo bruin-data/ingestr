@@ -29,6 +29,7 @@ def plusvibeai_source() -> Any:
         emails,
         blocklist,
         webhooks,
+        tags,
     ]
 
 
@@ -290,3 +291,45 @@ def webhooks(
                 continue
 
         yield webhook
+
+
+@dlt.resource(
+    write_disposition="merge",
+    primary_key="_id",
+    max_table_nesting=0,
+)
+def tags(
+    api_key: str = dlt.secrets.value,
+    workspace_id: str = dlt.secrets.value,
+    base_url: str = "https://api.plusvibe.ai",
+    max_results: Optional[int] = None,
+    updated: dlt.sources.incremental[str] = dlt.sources.incremental(
+        "modified_at",
+        initial_value=DEFAULT_START_DATE,
+        range_end="closed",
+        range_start="closed",
+    ),
+) -> Iterable[TDataItem]:
+    """
+    Fetches tags from PlusVibeAI.
+
+    Args:
+        api_key (str): API key for authentication
+        workspace_id (str): Workspace ID to access
+        base_url (str): PlusVibeAI API base URL
+        max_results (int): Maximum number of results to return
+        updated (str): The date from which to fetch updated tags
+
+    Yields:
+        dict: The tag data.
+    """
+    client = get_client(api_key, workspace_id, base_url)
+
+    for tag in client.get_tags(page_size=DEFAULT_PAGE_SIZE, max_results=max_results):
+        # Apply incremental filter if needed
+        if updated.start_value:
+            tag_updated = tag.get("modified_at")
+            if tag_updated and tag_updated < updated.start_value:
+                continue
+
+        yield tag
