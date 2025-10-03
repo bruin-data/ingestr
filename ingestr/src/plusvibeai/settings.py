@@ -1,0 +1,98 @@
+"""PlusVibeAI source settings and constants"""
+
+# Default start date for PlusVibeAI API requests
+DEFAULT_START_DATE = "2020-01-01"
+
+# PlusVibeAI API request timeout in seconds
+REQUEST_TIMEOUT = 300
+
+# Default page size for paginated requests
+DEFAULT_PAGE_SIZE = 100
+
+# Maximum page size (adjust based on API limits)
+MAX_PAGE_SIZE = 1000
+
+# Base API path for PlusVibeAI
+API_BASE_PATH = "/api/v1"
+
+# Campaign fields to retrieve from PlusVibeAI API
+CAMPAIGN_FIELDS = (
+    # Basic Information
+    "id",
+    "camp_name",
+    "parent_camp_id",
+    "campaign_type",
+    "organization_id",
+    "workspace_id",
+    "status",
+
+    # Timestamps
+    "created_at",
+    "modified_at",
+    "last_lead_sent",
+    "last_paused_at_bounced",
+
+    # Campaign Configuration
+    "tags",
+    "template_id",
+    "email_accounts",
+    "daily_limit",
+    "interval_limit_in_min",
+    "send_priority",
+    "send_as_txt",
+
+    # Tracking & Settings
+    "is_emailopened_tracking",
+    "is_unsubscribed_link",
+    "exclude_ooo",
+    "is_acc_based_sending",
+    "send_risky_email",
+    "unsub_blocklist",
+    "other_email_acc",
+    "is_esp_match",
+    "stop_on_lead_replied",
+
+    # Bounce Settings
+    "is_pause_on_bouncerate",
+    "bounce_rate_limit",
+    "is_paused_at_bounced",
+
+    # Schedule
+    "schedule",
+    "first_wait_time",
+    "camp_st_date",
+    "camp_end_date",
+
+    # Events & Sequences
+    "events",
+    "sequences",
+    "sequence_steps",
+    "camp_emails",
+
+    # Lead Statistics
+    "lead_count",
+    "completed_lead_count",
+    "lead_contacted_count",
+
+    # Email Performance Metrics
+    "sent_count",
+    "opened_count",
+    "unique_opened_count",
+    "replied_count",
+    "bounced_count",
+    "unsubscribed_count",
+
+    # Reply Classification
+    "positive_reply_count",
+    "negative_reply_count",
+    "neutral_reply_count",
+
+    # Daily & Business Metrics
+    "email_sent_today",
+    "opportunity_val",
+    "open_rate",
+    "replied_rate",
+
+    # Custom Data
+    "custom_fields",
+)

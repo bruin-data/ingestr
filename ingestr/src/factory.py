@@ -70,6 +70,7 @@ from ingestr.src.sources import (
     PhantombusterSource,
     PinterestSource,
     PipedriveSource,
+    PlusVibeAISource,
     QuickBooksSource,
     RevenueCatSource,
     S3Source,
@@ -212,6 +213,7 @@ class SourceDestinationFactory:
         "clickup": ClickupSource,
         "influxdb": InfluxDBSource,
         "wise": WiseSource,
+        "plusvibeai": PlusVibeAISource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
