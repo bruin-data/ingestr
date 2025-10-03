@@ -48,7 +48,7 @@ def fundraiseup_source(api_key: str) -> Iterable[DltResource]:
     def create_resource(resource_name: str, config: Dict[str, Any]) -> DltResource:
         """Create a DLT resource dynamically."""
 
-        incremental = resource_name.endswith(INCREMENTAL_SUFFIX)    
+        incremental = resource_name.endswith(INCREMENTAL_SUFFIX)
         @dlt.resource(
             name=resource_name,
             write_disposition=config["write_disposition"],
