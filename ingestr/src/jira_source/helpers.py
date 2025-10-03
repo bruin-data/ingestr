@@ -98,8 +98,6 @@ class JiraClient:
 
         for attempt in range(max_retries + 1):
             try:
-                logger.debug(f"Making request to {url} (attempt {attempt + 1})")
-
                 response = requests.request(
                     method=method,
                     url=url,
@@ -214,10 +212,6 @@ class JiraClient:
         consecutive_empty_pages = 0
         max_empty_pages = 3
 
-        logger.info(
-            f"Starting paginated request to {endpoint} with page_size={page_size}"
-        )
-
         while True:
             try:
                 response = self._make_request(endpoint, params)
@@ -238,7 +232,6 @@ class JiraClient:
                     is_last = True
                 else:
                     # Single item response
-                    logger.debug(f"Received single item response from {endpoint}")
                     yield response
                     break
 
@@ -253,27 +246,18 @@ class JiraClient:
                 else:
                     consecutive_empty_pages = 0
 
-                logger.debug(
-                    f"Retrieved {len(items)} items from {endpoint} (page {params['startAt'] // page_size + 1})"
-                )
-
                 for item in items:
                     if max_results and total_returned >= max_results:
-                        logger.info(f"Reached max_results limit of {max_results}")
                         return
                     yield item
                     total_returned += 1
 
                 # Check if we've reached the end
                 if is_last or len(items) < page_size:
-                    logger.debug(f"Reached end of pagination for {endpoint}")
                     break
 
                 # Check if we've got all available items
                 if total and total_returned >= total:
-                    logger.debug(
-                        f"Retrieved all {total} available items from {endpoint}"
-                    )
                     break
 
                 # Move to next page
@@ -294,10 +278,6 @@ class JiraClient:
                     f"Unexpected error during pagination of {endpoint}: {str(e)}"
                 )
                 raise JiraAPIError(f"Pagination failed: {str(e)}")
-
-        logger.info(
-            f"Completed pagination for {endpoint}, returned {total_returned} items"
-        )
 
     def search_issues(
         self,
@@ -327,7 +307,7 @@ class JiraClient:
             params["expand"] = expand
 
         yield from self.get_paginated(
-            "search", params=params, page_size=page_size, max_results=max_results
+            "search/jql", params=params, page_size=page_size, max_results=max_results
         )
 
     def get_projects(
@@ -432,6 +412,13 @@ class JiraClient:
             Component data
         """
         yield from self.get_paginated(f"project/{project_key}/component")
+
+    def get_events(self) -> Iterator[Dict[str, Any]]:
+        """Get all events (issue events like created, updated, etc.)."""
+        response = self._make_request("events")
+        if isinstance(response, list):
+            for event in response:
+                yield event
 
 
 def get_client(
