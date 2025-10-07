@@ -59,4 +59,19 @@ def monday_source(
 
         yield from monday_client.get_account_roles()
 
-    return (fetch_account, fetch_account_roles)
+    @dlt.resource(
+        name="users",
+        write_disposition="replace",
+    )
+    def fetch_users() -> Iterator[dict[str, Any]]:
+        """
+        Fetch users from Monday.com.
+
+        Table format: users (no parameters needed)
+        """
+        if len(params) != 0:
+            raise ValueError("Users table must be in the format `users`")
+
+        yield from monday_client.get_users()
+
+    return (fetch_account, fetch_account_roles, fetch_users)

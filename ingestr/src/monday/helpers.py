@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from ingestr.src.http_client import create_client
 
-from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, MAX_PAGE_SIZE
+from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, MAX_PAGE_SIZE, USERS_QUERY
 
 
 def normalize_dict(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -116,3 +116,36 @@ class MondayClient:
 
         for role in roles:
             yield normalize_dict(role)
+
+    def get_users(self, limit: int = MAX_PAGE_SIZE) -> Iterator[Dict[str, Any]]:
+        """
+        Fetch users from Monday.com API with pagination.
+
+        Args:
+            limit: Number of results per page (max 100)
+
+        Yields:
+            Dict containing user data
+        """
+        page = 1
+
+        while True:
+            variables = {
+                "limit": min(limit, MAX_PAGE_SIZE),
+                "page": page,
+            }
+
+            data = self._execute_query(USERS_QUERY, variables)
+            users = data.get("users", [])
+
+            if not users:
+                break
+
+            for user in users:
+                yield normalize_dict(user)
+
+            # If we got fewer results than the limit, we've reached the end
+            if len(users) < limit:
+                break
+
+            page += 1

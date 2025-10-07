@@ -67,5 +67,39 @@ query {
 }
 """
 
+# GraphQL query for fetching users
+USERS_QUERY = """
+query ($limit: Int!, $page: Int!) {
+    users(limit: $limit, page: $page) {
+        id
+        name
+        email
+        enabled
+        is_admin
+        is_guest
+        is_pending
+        is_view_only
+        created_at
+        birthday
+        country_code
+        join_date
+        location
+        mobile_phone
+        phone
+        photo_original
+        photo_thumb
+        photo_tiny
+        time_zone_identifier
+        title
+        url
+        utc_hours_diff
+        current_language
+        account {
+            id
+        }
+    }
+}
+"""
+
 # Maximum number of results per page
 MAX_PAGE_SIZE = 100
