@@ -141,5 +141,65 @@ query ($board_id: ID!) {
 }
 """
 
+# GraphQL query for fetching updates
+UPDATES_QUERY = """
+query ($limit: Int!, $from_date: String, $to_date: String) {
+    updates(limit: $limit, from_date: $from_date, to_date: $to_date) {
+        id
+        body
+        text_body
+        created_at
+        updated_at
+        edited_at
+        creator_id
+        item_id
+        creator {
+            id
+        }
+        item {
+            id
+        }
+        assets {
+            id
+            name
+            file_extension
+            file_size
+            public_url
+            url
+            url_thumbnail
+            created_at
+            original_geometry
+            uploaded_by {
+                id
+            }
+        }
+        replies {
+            id
+            body
+            text_body
+            created_at
+            updated_at
+            creator_id
+            creator {
+                id
+            }
+        }
+        likes {
+            id
+        }
+        pinned_to_top {
+            item_id
+        }
+        viewers {
+            medium
+            user_id
+            user {
+                id
+            }
+        }
+    }
+}
+"""
+
 # Maximum number of results per page
 MAX_PAGE_SIZE = 100

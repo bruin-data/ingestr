@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from ingestr.src.http_client import create_client
 
-from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
+from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, UPDATES_QUERY, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
 
 
 def _paginate(
@@ -10,6 +10,7 @@ def _paginate(
     query: str,
     field_name: str,
     limit: int = 100,
+    extra_variables: Optional[Dict[str, Any]] = None,
 ) -> Iterator[Dict[str, Any]]:
     """
     Helper function to paginate through Monday.com API results.
@@ -19,6 +20,7 @@ def _paginate(
         query: GraphQL query with $limit and $page variables
         field_name: Name of the field in the response to extract
         limit: Number of results per page
+        extra_variables: Additional variables to pass to the query
 
     Yields:
         Normalized dictionaries from the API response
@@ -30,6 +32,9 @@ def _paginate(
             "limit": min(limit, MAX_PAGE_SIZE),
             "page": page,
         }
+
+        if extra_variables:
+            variables.update(extra_variables)
 
         data = client._execute_query(query, variables)
         items = data.get(field_name, [])
@@ -231,3 +236,33 @@ class MondayClient:
 
             for webhook in webhooks:
                 yield normalize_dict(webhook)
+
+    def get_updates(
+        self,
+        limit: int = MAX_PAGE_SIZE,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Fetch updates from Monday.com API.
+
+        Args:
+            limit: Number of results (max 100)
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+
+        Yields:
+            Dict containing update data
+        """
+        variables = {"limit": min(limit, MAX_PAGE_SIZE)}
+
+        if start_date:
+            variables["from_date"] = start_date
+        if end_date:
+            variables["to_date"] = end_date
+
+        data = self._execute_query(UPDATES_QUERY, variables)
+        updates = data.get("updates", [])
+
+        for update in updates:
+            yield normalize_dict(update)

@@ -16,6 +16,8 @@ from .helpers import MondayClient, normalize_dict
 def monday_source(
     api_token: str,
     params: list[str],
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> Iterator[DltResource]:
     """
     Monday.com data source.
@@ -23,6 +25,8 @@ def monday_source(
     Args:
         api_token: Monday.com API token for authentication
         params: Table-specific parameters in format [table_type, ...params]
+        start_date: Optional start date for date-filtered queries (YYYY-MM-DD)
+        end_date: Optional end date for date-filtered queries (YYYY-MM-DD)
 
     Yields:
         DltResource: Data resource for the requested table
@@ -119,4 +123,20 @@ def monday_source(
 
         yield from monday_client.get_webhooks()
 
-    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces, fetch_webhooks)
+    @dlt.resource(
+        name="updates",
+        write_disposition="replace",
+    )
+    def fetch_updates() -> Iterator[dict[str, Any]]:
+        """
+        Fetch updates from Monday.com.
+
+        Table format: updates (no parameters needed)
+        Requires start_date and end_date parameters
+        """
+        if len(params) != 0:
+            raise ValueError("Updates table must be in the format `updates`")
+
+        yield from monday_client.get_updates(start_date=start_date, end_date=end_date)
+
+    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces, fetch_webhooks, fetch_updates)

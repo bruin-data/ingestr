@@ -3939,11 +3939,22 @@ class MondaySource:
         table_name = parts[0]
         params = parts[1:]
 
+        # Get interval_start and interval_end from kwargs (command line args)
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        # Convert datetime to string format YYYY-MM-DD
+        start_date = interval_start.strftime("%Y-%m-%d") if interval_start else None
+        end_date = interval_end.strftime("%Y-%m-%d") if interval_end else None
+
         from ingestr.src.monday import monday_source
 
         try:
-            return monday_source(api_token=api_token[0], params=params).with_resources(
-                table_name
-            )
+            return monday_source(
+                api_token=api_token[0],
+                params=params,
+                start_date=start_date,
+                end_date=end_date,
+            ).with_resources(table_name)
         except ResourcesNotFoundError:
             raise UnsupportedResourceError(table_name, "Monday")
