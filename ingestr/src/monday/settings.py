@@ -111,5 +111,23 @@ query ($limit: Int!, $page: Int!) {
 }
 """
 
+# GraphQL query for fetching workspaces by IDs
+WORKSPACES_QUERY = """
+query ($ids: [ID!]) {
+    workspaces(ids: $ids) {
+        id
+        name
+        kind
+        description
+        created_at
+        is_default_workspace
+        state
+        account_product {
+            id
+        }
+    }
+}
+"""
+
 # Maximum number of results per page
 MAX_PAGE_SIZE = 100

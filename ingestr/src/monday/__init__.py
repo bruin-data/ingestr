@@ -89,4 +89,19 @@ def monday_source(
 
         yield from monday_client.get_boards()
 
-    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards)
+    @dlt.resource(
+        name="workspaces",
+        write_disposition="replace",
+    )
+    def fetch_workspaces() -> Iterator[dict[str, Any]]:
+        """
+        Fetch workspaces from Monday.com.
+
+        Table format: workspaces (no parameters needed)
+        """
+        if len(params) != 0:
+            raise ValueError("Workspaces table must be in the format `workspaces`")
+
+        yield from monday_client.get_workspaces()
+
+    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces)

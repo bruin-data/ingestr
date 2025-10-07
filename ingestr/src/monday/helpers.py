@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from ingestr.src.http_client import create_client
 
-from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, USERS_QUERY
+from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, USERS_QUERY, WORKSPACES_QUERY
 
 
 def _paginate(
@@ -181,3 +181,30 @@ class MondayClient:
             Dict containing board data
         """
         yield from _paginate(self, BOARDS_QUERY, "boards", limit)
+
+    def get_workspaces(self) -> Iterator[Dict[str, Any]]:
+        """
+        Fetch workspaces from Monday.com API.
+        First gets all boards to extract unique workspace IDs,
+        then fetches workspace details.
+
+        Yields:
+            Dict containing workspace data
+        """
+        # Collect unique workspace IDs from boards
+        workspace_ids = set()
+        for board in _paginate(self, BOARDS_QUERY, "boards", MAX_PAGE_SIZE):
+            workspace_id = board.get("workspace_id")
+            if workspace_id:
+                workspace_ids.add(str(workspace_id))
+
+        if not workspace_ids:
+            return
+
+        # Fetch workspace details
+        variables = {"ids": list(workspace_ids)}
+        data = self._execute_query(WORKSPACES_QUERY, variables)
+        workspaces = data.get("workspaces", [])
+
+        for workspace in workspaces:
+            yield normalize_dict(workspace)
