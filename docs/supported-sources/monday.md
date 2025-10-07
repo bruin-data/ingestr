@@ -57,5 +57,3 @@ Use these as `--source-table` parameter in the `ingestr ingest` command.
 > [!NOTE]
 > Monday.com has rate limits for API requests. The source handles pagination automatically and respects the API's maximum page size of 100 items.
 
-> [!TIP]
-> Use incremental loading for `boards` and `updates` tables to optimize performance and reduce API calls. The source automatically tracks the last `updated_at` value and only fetches new or modified records.
