@@ -106,11 +106,56 @@ BOARDS_QUERY = """
 query ($limit: Int!, $page: Int!) {
     boards(limit: $limit, page: $page) {
         id
+        name
+        description
+        state
+        board_kind
+        board_folder_id
         workspace_id
+        permissions
+        item_terminology
+        items_count
+        updated_at
+        url
+        communication
+        object_type_unique_key
+        type
+        creator {
+            id
+        }
+        owners {
+            id
+        }
+        subscribers {
+            id
+        }
+        team_owners {
+            id
+        }
+        team_subscribers {
+            id
+        }
         tags {
             id
+            
+        }
+    }
+}
+"""
+
+# GraphQL query for fetching board views
+BOARD_VIEWS_QUERY = """
+query ($board_ids: [ID!]) {
+    boards(ids: $board_ids) {
+        id
+        views {
+            id
             name
-            color
+            type
+            settings_str
+            view_specific_data_str
+            source_view_id
+            access_level
         }
     }
 }
@@ -129,6 +174,21 @@ query ($ids: [ID!]) {
         state
         account_product {
             id
+        }
+        owners_subscribers {
+            id
+        }
+        team_owners_subscribers {
+            id
+        }
+        teams_subscribers {
+            id
+        }
+        users_subscribers {
+            id
+        }
+        settings {
+            icon
         }
     }
 }

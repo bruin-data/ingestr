@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from ingestr.src.http_client import create_client
 
-from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, TEAMS_QUERY, UPDATES_QUERY, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
+from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARD_VIEWS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, TEAMS_QUERY, UPDATES_QUERY, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
 
 
 def _paginate(
@@ -49,6 +49,24 @@ def _paginate(
             break
 
         page += 1
+
+
+def _get_all_board_ids(client: "MondayClient") -> list[str]:
+    """
+    Collect all board IDs from the Monday.com API.
+
+    Args:
+        client: MondayClient instance
+
+    Returns:
+        List of board IDs as strings
+    """
+    board_ids = []
+    for board in _paginate(client, BOARDS_QUERY, "boards", MAX_PAGE_SIZE):
+        board_id = board.get("id")
+        if board_id:
+            board_ids.append(str(board_id))
+    return board_ids
 
 
 def normalize_dict(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -223,14 +241,12 @@ class MondayClient:
         Yields:
             Dict containing webhook data
         """
-        # Collect board IDs from boards
-        for board in _paginate(self, BOARDS_QUERY, "boards", MAX_PAGE_SIZE):
-            board_id = board.get("id")
-            if not board_id:
-                continue
+        # Collect board IDs
+        board_ids = _get_all_board_ids(self)
 
+        for board_id in board_ids:
             # Fetch webhooks for this board
-            variables = {"board_id": str(board_id)}
+            variables = {"board_id": board_id}
             data = self._execute_query(WEBHOOKS_QUERY, variables)
             webhooks = data.get("webhooks", [])
 
@@ -299,3 +315,32 @@ class MondayClient:
                     tag_data = tag.copy()
                     tag_data["board_id"] = board_id
                     yield normalize_dict(tag_data)
+
+    def get_board_views(self) -> Iterator[Dict[str, Any]]:
+        """
+        Fetch board views from Monday.com API.
+        First gets all board IDs, then fetches views for each board.
+
+        Yields:
+            Dict containing board view data with board_id
+        """
+        # Collect board IDs
+        board_ids = _get_all_board_ids(self)
+
+        if not board_ids:
+            return
+
+        # Fetch views for each board
+        for board_id in board_ids:
+            variables = {"board_ids": [board_id]}
+            data = self._execute_query(BOARD_VIEWS_QUERY, variables)
+            boards = data.get("boards", [])
+
+            for board in boards:
+                views = board.get("views", [])
+
+                if views and isinstance(views, list):
+                    for view in views:
+                        view_data = view.copy()
+                        view_data["board_id"] = board.get("id")
+                        yield normalize_dict(view_data)

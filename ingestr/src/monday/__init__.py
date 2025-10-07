@@ -169,4 +169,19 @@ def monday_source(
 
         yield from monday_client.get_tags()
 
-    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces, fetch_webhooks, fetch_updates, fetch_teams, fetch_tags)
+    @dlt.resource(
+        name="board_views",
+        write_disposition="replace",
+    )
+    def fetch_board_views() -> Iterator[dict[str, Any]]:
+        """
+        Fetch board views from Monday.com.
+
+        Table format: board_views (no parameters needed)
+        """
+        if len(params) != 0:
+            raise ValueError("Board views table must be in the format `board_views`")
+
+        yield from monday_client.get_board_views()
+
+    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces, fetch_webhooks, fetch_updates, fetch_teams, fetch_tags, fetch_board_views)
