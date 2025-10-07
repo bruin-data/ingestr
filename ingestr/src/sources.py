@@ -3879,8 +3879,10 @@ class IntercomSource:
             end_date=end_date,
         ).with_resources(table)
 
+
 class HttpSource:
     """Source for reading CSV, JSON, and Parquet files from HTTP URLs"""
+
     def handles_incrementality(self) -> bool:
         return False
 
@@ -3922,7 +3924,8 @@ class HttpSource:
             source.apply_hints(merge_key=merge_key)
 
         return source
- 
+
+
 class MondaySource:
     def handles_incrementality(self) -> bool:
         return False

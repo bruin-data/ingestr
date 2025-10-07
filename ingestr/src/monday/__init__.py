@@ -4,7 +4,7 @@ Monday.com source for data extraction via GraphQL API.
 This source provides access to Monday.com app installation data.
 """
 
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 import dlt
 from dlt.sources import DltResource
@@ -18,7 +18,7 @@ def monday_source(
     params: list[str],
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-) -> Iterator[DltResource]:
+) -> Iterable[DltResource]:
     """
     Monday.com data source.
 
@@ -59,7 +59,9 @@ def monday_source(
         Table format: account_roles (no parameters needed)
         """
         if len(params) != 0:
-            raise ValueError("Account roles table must be in the format `account_roles`")
+            raise ValueError(
+                "Account roles table must be in the format `account_roles`"
+            )
 
         yield from monday_client.get_account_roles()
 
@@ -86,7 +88,7 @@ def monday_source(
     def fetch_boards(
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "updated_at", initial_value=start_date
-        )
+        ),
     ) -> Iterator[dict[str, Any]]:
         """
         Fetch boards from Monday.com.
@@ -136,7 +138,7 @@ def monday_source(
     def fetch_updates(
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             "updated_at", initial_value=start_date
-        )
+        ),
     ) -> Iterator[dict[str, Any]]:
         """
         Fetch updates from Monday.com.
@@ -190,7 +192,9 @@ def monday_source(
         Table format: custom_activities (no parameters needed)
         """
         if len(params) != 0:
-            raise ValueError("Custom activities table must be in the format `custom_activities`")
+            raise ValueError(
+                "Custom activities table must be in the format `custom_activities`"
+            )
 
         yield from monday_client.get_custom_activities()
 
@@ -205,7 +209,9 @@ def monday_source(
         Table format: board_columns (no parameters needed)
         """
         if len(params) != 0:
-            raise ValueError("Board columns table must be in the format `board_columns`")
+            raise ValueError(
+                "Board columns table must be in the format `board_columns`"
+            )
 
         yield from monday_client.get_board_columns()
 
@@ -224,4 +230,17 @@ def monday_source(
 
         yield from monday_client.get_board_views()
 
-    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces, fetch_webhooks, fetch_updates, fetch_teams, fetch_tags, fetch_custom_activities, fetch_board_columns, fetch_board_views)
+    return (
+        fetch_account,
+        fetch_account_roles,
+        fetch_users,
+        fetch_boards,
+        fetch_workspaces,
+        fetch_webhooks,
+        fetch_updates,
+        fetch_teams,
+        fetch_tags,
+        fetch_custom_activities,
+        fetch_board_columns,
+        fetch_board_views,
+    )

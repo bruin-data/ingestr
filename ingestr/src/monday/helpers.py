@@ -2,7 +2,21 @@ from typing import Any, Dict, Iterator, Optional
 
 from ingestr.src.http_client import create_client
 
-from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARD_COLUMNS_QUERY, BOARD_VIEWS_QUERY, BOARDS_QUERY, CUSTOM_ACTIVITIES_QUERY, MAX_PAGE_SIZE, TAGS_QUERY, TEAMS_QUERY, UPDATES_QUERY, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
+from .settings import (
+    ACCOUNT_QUERY,
+    ACCOUNT_ROLES_QUERY,
+    BOARD_COLUMNS_QUERY,
+    BOARD_VIEWS_QUERY,
+    BOARDS_QUERY,
+    CUSTOM_ACTIVITIES_QUERY,
+    MAX_PAGE_SIZE,
+    TAGS_QUERY,
+    TEAMS_QUERY,
+    UPDATES_QUERY,
+    USERS_QUERY,
+    WEBHOOKS_QUERY,
+    WORKSPACES_QUERY,
+)
 
 
 def _paginate(
@@ -70,9 +84,7 @@ def _get_all_board_ids(client: "MondayClient") -> list[str]:
 
 
 def _fetch_nested_board_data(
-    client: "MondayClient",
-    query: str,
-    nested_field: str
+    client: "MondayClient", query: str, nested_field: str
 ) -> Iterator[Dict[str, Any]]:
     """
     Fetch nested data from boards (columns, views, etc).
@@ -106,9 +118,7 @@ def _fetch_nested_board_data(
 
 
 def _fetch_simple_list(
-    client: "MondayClient",
-    query: str,
-    field_name: str
+    client: "MondayClient", query: str, field_name: str
 ) -> Iterator[Dict[str, Any]]:
     """
     Fetch a simple list of items from Monday.com API without pagination.
@@ -148,7 +158,7 @@ def normalize_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     import json
 
-    normalized = {}
+    normalized: Dict[str, Any] = {}
 
     for key, value in data.items():
         if value is None:
@@ -176,9 +186,6 @@ def normalize_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-
-
-
 class MondayClient:
     """Monday.com GraphQL API client."""
 
@@ -193,9 +200,11 @@ class MondayClient:
             "Content-Type": "application/json",
         }
 
-    def _execute_query(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _execute_query(
+        self, query: str, variables: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Execute a GraphQL query against Monday.com API."""
-        payload = {"query": query}
+        payload: Dict[str, Any] = {"query": query}
         if variables:
             payload["variables"] = variables
 
@@ -322,7 +331,7 @@ class MondayClient:
         Yields:
             Dict containing update data
         """
-        variables = {"limit": min(limit, MAX_PAGE_SIZE)}
+        variables: Dict[str, Any] = {"limit": min(limit, MAX_PAGE_SIZE)}
 
         if start_date:
             variables["from_date"] = start_date
