@@ -19,18 +19,17 @@ export default defineConfig({
   head: [
     [
       "script",
-      {
-        async: "",
-        src: "https://www.googletagmanager.com/gtag/js?id=G-MZJ20PP4MJ",
-      },
+      {},
+      `(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+})(window,document,'script','dataLayer','GTM-K2L7S5FP');`,
     ],
     [
-      "script",
+      "noscript",
       {},
-      `window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-      gtag('config', 'G-MZJ20PP4MJ');`,
+      `<iframe src="https://www.googletagmanager.com/ns.html?id=GTM-K2L7S5FP" height="0" width="0" style="display:none;visibility:hidden"></iframe>`,
     ],
   ],
   themeConfig: {
