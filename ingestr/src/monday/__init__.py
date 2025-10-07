@@ -104,4 +104,19 @@ def monday_source(
 
         yield from monday_client.get_workspaces()
 
-    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces)
+    @dlt.resource(
+        name="webhooks",
+        write_disposition="replace",
+    )
+    def fetch_webhooks() -> Iterator[dict[str, Any]]:
+        """
+        Fetch webhooks from Monday.com.
+
+        Table format: webhooks (no parameters needed)
+        """
+        if len(params) != 0:
+            raise ValueError("Webhooks table must be in the format `webhooks`")
+
+        yield from monday_client.get_webhooks()
+
+    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces, fetch_webhooks)

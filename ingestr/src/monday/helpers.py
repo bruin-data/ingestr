@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from ingestr.src.http_client import create_client
 
-from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, USERS_QUERY, WORKSPACES_QUERY
+from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
 
 
 def _paginate(
@@ -208,3 +208,26 @@ class MondayClient:
 
         for workspace in workspaces:
             yield normalize_dict(workspace)
+
+    def get_webhooks(self) -> Iterator[Dict[str, Any]]:
+        """
+        Fetch webhooks from Monday.com API.
+        First gets all boards to extract board IDs,
+        then fetches webhooks for each board.
+
+        Yields:
+            Dict containing webhook data
+        """
+        # Collect board IDs from boards
+        for board in _paginate(self, BOARDS_QUERY, "boards", MAX_PAGE_SIZE):
+            board_id = board.get("id")
+            if not board_id:
+                continue
+
+            # Fetch webhooks for this board
+            variables = {"board_id": str(board_id)}
+            data = self._execute_query(WEBHOOKS_QUERY, variables)
+            webhooks = data.get("webhooks", [])
+
+            for webhook in webhooks:
+                yield normalize_dict(webhook)

@@ -129,5 +129,17 @@ query ($ids: [ID!]) {
 }
 """
 
+# GraphQL query for fetching webhooks by board ID
+WEBHOOKS_QUERY = """
+query ($board_id: ID!) {
+    webhooks(board_id: $board_id) {
+        id
+        event
+        board_id
+        config
+    }
+}
+"""
+
 # Maximum number of results per page
 MAX_PAGE_SIZE = 100
