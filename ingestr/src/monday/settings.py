@@ -107,6 +107,11 @@ query ($limit: Int!, $page: Int!) {
     boards(limit: $limit, page: $page) {
         id
         workspace_id
+        tags {
+            id
+            name
+            color
+        }
     }
 }
 """
@@ -196,6 +201,22 @@ query ($limit: Int!, $from_date: String, $to_date: String) {
             user {
                 id
             }
+        }
+    }
+}
+"""
+
+# GraphQL query for fetching teams
+TEAMS_QUERY = """
+query {
+    teams {
+        id
+        name
+        picture_url
+        users {
+            id
+            created_at
+            phone
         }
     }
 }

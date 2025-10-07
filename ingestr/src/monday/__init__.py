@@ -139,4 +139,34 @@ def monday_source(
 
         yield from monday_client.get_updates(start_date=start_date, end_date=end_date)
 
-    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces, fetch_webhooks, fetch_updates)
+    @dlt.resource(
+        name="teams",
+        write_disposition="replace",
+    )
+    def fetch_teams() -> Iterator[dict[str, Any]]:
+        """
+        Fetch teams from Monday.com.
+
+        Table format: teams (no parameters needed)
+        """
+        if len(params) != 0:
+            raise ValueError("Teams table must be in the format `teams`")
+
+        yield from monday_client.get_teams()
+
+    @dlt.resource(
+        name="tags",
+        write_disposition="replace",
+    )
+    def fetch_tags() -> Iterator[dict[str, Any]]:
+        """
+        Fetch tags from Monday.com.
+
+        Table format: tags (no parameters needed)
+        """
+        if len(params) != 0:
+            raise ValueError("Tags table must be in the format `tags`")
+
+        yield from monday_client.get_tags()
+
+    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces, fetch_webhooks, fetch_updates, fetch_teams, fetch_tags)

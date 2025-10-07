@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from ingestr.src.http_client import create_client
 
-from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, UPDATES_QUERY, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
+from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, TEAMS_QUERY, UPDATES_QUERY, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
 
 
 def _paginate(
@@ -266,3 +266,36 @@ class MondayClient:
 
         for update in updates:
             yield normalize_dict(update)
+
+    def get_teams(self) -> Iterator[Dict[str, Any]]:
+        """
+        Fetch teams from Monday.com API.
+
+        Yields:
+            Dict containing team data
+        """
+        data = self._execute_query(TEAMS_QUERY)
+        teams = data.get("teams", [])
+
+        for team in teams:
+            yield normalize_dict(team)
+
+    def get_tags(self) -> Iterator[Dict[str, Any]]:
+        """
+        Fetch tags from Monday.com API.
+        First gets all boards to extract board IDs,
+        then extracts tags from each board.
+
+        Yields:
+            Dict containing tag data with board_id
+        """
+        # Collect tags from all boards
+        for board in _paginate(self, BOARDS_QUERY, "boards", MAX_PAGE_SIZE):
+            board_id = board.get("id")
+            tags = board.get("tags", [])
+
+            if tags and isinstance(tags, list):
+                for tag in tags:
+                    tag_data = tag.copy()
+                    tag_data["board_id"] = board_id
+                    yield normalize_dict(tag_data)
