@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from ingestr.src.http_client import create_client
 
-from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARD_VIEWS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, TEAMS_QUERY, UPDATES_QUERY, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
+from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARD_COLUMNS_QUERY, BOARD_VIEWS_QUERY, BOARDS_QUERY, CUSTOM_ACTIVITIES_QUERY, MAX_PAGE_SIZE, TEAMS_QUERY, UPDATES_QUERY, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
 
 
 def _paginate(
@@ -67,6 +67,42 @@ def _get_all_board_ids(client: "MondayClient") -> list[str]:
         if board_id:
             board_ids.append(str(board_id))
     return board_ids
+
+
+def _fetch_nested_board_data(
+    client: "MondayClient",
+    query: str,
+    nested_field: str
+) -> Iterator[Dict[str, Any]]:
+    """
+    Fetch nested data from boards (columns, views, etc).
+
+    Args:
+        client: MondayClient instance
+        query: GraphQL query to execute
+        nested_field: Name of the nested field to extract (e.g., "columns", "views")
+
+    Yields:
+        Dict containing nested data with board_id added
+    """
+    board_ids = _get_all_board_ids(client)
+
+    if not board_ids:
+        return
+
+    for board_id in board_ids:
+        variables = {"board_ids": [board_id]}
+        data = client._execute_query(query, variables)
+        boards = data.get("boards", [])
+
+        for board in boards:
+            nested_items = board.get(nested_field, [])
+
+            if nested_items and isinstance(nested_items, list):
+                for item in nested_items:
+                    item_data = item.copy()
+                    item_data["board_id"] = board.get("id")
+                    yield normalize_dict(item_data)
 
 
 def normalize_dict(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -316,6 +352,29 @@ class MondayClient:
                     tag_data["board_id"] = board_id
                     yield normalize_dict(tag_data)
 
+    def get_custom_activities(self) -> Iterator[Dict[str, Any]]:
+        """
+        Fetch custom activities from Monday.com API.
+
+        Yields:
+            Dict containing custom activity data
+        """
+        data = self._execute_query(CUSTOM_ACTIVITIES_QUERY)
+        activities = data.get("custom_activity", [])
+
+        for activity in activities:
+            yield normalize_dict(activity)
+
+    def get_board_columns(self) -> Iterator[Dict[str, Any]]:
+        """
+        Fetch board columns from Monday.com API.
+        First gets all board IDs, then fetches columns for each board.
+
+        Yields:
+            Dict containing board column data with board_id
+        """
+        yield from _fetch_nested_board_data(self, BOARD_COLUMNS_QUERY, "columns")
+
     def get_board_views(self) -> Iterator[Dict[str, Any]]:
         """
         Fetch board views from Monday.com API.
@@ -324,23 +383,4 @@ class MondayClient:
         Yields:
             Dict containing board view data with board_id
         """
-        # Collect board IDs
-        board_ids = _get_all_board_ids(self)
-
-        if not board_ids:
-            return
-
-        # Fetch views for each board
-        for board_id in board_ids:
-            variables = {"board_ids": [board_id]}
-            data = self._execute_query(BOARD_VIEWS_QUERY, variables)
-            boards = data.get("boards", [])
-
-            for board in boards:
-                views = board.get("views", [])
-
-                if views and isinstance(views, list):
-                    for view in views:
-                        view_data = view.copy()
-                        view_data["board_id"] = board.get("id")
-                        yield normalize_dict(view_data)
+        yield from _fetch_nested_board_data(self, BOARD_VIEWS_QUERY, "views")

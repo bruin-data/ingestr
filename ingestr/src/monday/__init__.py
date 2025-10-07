@@ -170,6 +170,36 @@ def monday_source(
         yield from monday_client.get_tags()
 
     @dlt.resource(
+        name="custom_activities",
+        write_disposition="replace",
+    )
+    def fetch_custom_activities() -> Iterator[dict[str, Any]]:
+        """
+        Fetch custom activities from Monday.com.
+
+        Table format: custom_activities (no parameters needed)
+        """
+        if len(params) != 0:
+            raise ValueError("Custom activities table must be in the format `custom_activities`")
+
+        yield from monday_client.get_custom_activities()
+
+    @dlt.resource(
+        name="board_columns",
+        write_disposition="replace",
+    )
+    def fetch_board_columns() -> Iterator[dict[str, Any]]:
+        """
+        Fetch board columns from Monday.com.
+
+        Table format: board_columns (no parameters needed)
+        """
+        if len(params) != 0:
+            raise ValueError("Board columns table must be in the format `board_columns`")
+
+        yield from monday_client.get_board_columns()
+
+    @dlt.resource(
         name="board_views",
         write_disposition="replace",
     )
@@ -184,4 +214,4 @@ def monday_source(
 
         yield from monday_client.get_board_views()
 
-    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces, fetch_webhooks, fetch_updates, fetch_teams, fetch_tags, fetch_board_views)
+    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards, fetch_workspaces, fetch_webhooks, fetch_updates, fetch_teams, fetch_tags, fetch_custom_activities, fetch_board_columns, fetch_board_views)

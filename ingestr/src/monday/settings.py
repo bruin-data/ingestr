@@ -143,6 +143,37 @@ query ($limit: Int!, $page: Int!) {
 }
 """
 
+# GraphQL query for fetching custom activities
+CUSTOM_ACTIVITIES_QUERY = """
+query {
+    custom_activity {
+        id
+        name
+        type
+        color
+        icon_id
+    }
+}
+"""
+
+# GraphQL query for fetching board columns
+BOARD_COLUMNS_QUERY = """
+query ($board_ids: [ID!]) {
+    boards(ids: $board_ids) {
+        id
+        columns {
+            id
+            title
+            type
+            archived
+            description
+            settings_str
+            width
+        }
+    }
+}
+"""
+
 # GraphQL query for fetching board views
 BOARD_VIEWS_QUERY = """
 query ($board_ids: [ID!]) {
