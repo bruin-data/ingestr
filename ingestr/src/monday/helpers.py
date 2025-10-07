@@ -2,7 +2,48 @@ from typing import Any, Dict, Iterator, Optional
 
 from ingestr.src.http_client import create_client
 
-from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, MAX_PAGE_SIZE, USERS_QUERY
+from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARDS_QUERY, MAX_PAGE_SIZE, USERS_QUERY
+
+
+def _paginate(
+    client: "MondayClient",
+    query: str,
+    field_name: str,
+    limit: int = 100,
+) -> Iterator[Dict[str, Any]]:
+    """
+    Helper function to paginate through Monday.com API results.
+
+    Args:
+        client: MondayClient instance
+        query: GraphQL query with $limit and $page variables
+        field_name: Name of the field in the response to extract
+        limit: Number of results per page
+
+    Yields:
+        Normalized dictionaries from the API response
+    """
+    page = 1
+
+    while True:
+        variables = {
+            "limit": min(limit, MAX_PAGE_SIZE),
+            "page": page,
+        }
+
+        data = client._execute_query(query, variables)
+        items = data.get(field_name, [])
+
+        if not items:
+            break
+
+        for item in items:
+            yield normalize_dict(item)
+
+        if len(items) < limit:
+            break
+
+        page += 1
 
 
 def normalize_dict(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -127,25 +168,16 @@ class MondayClient:
         Yields:
             Dict containing user data
         """
-        page = 1
+        yield from _paginate(self, USERS_QUERY, "users", limit)
 
-        while True:
-            variables = {
-                "limit": min(limit, MAX_PAGE_SIZE),
-                "page": page,
-            }
+    def get_boards(self, limit: int = MAX_PAGE_SIZE) -> Iterator[Dict[str, Any]]:
+        """
+        Fetch boards from Monday.com API with pagination.
 
-            data = self._execute_query(USERS_QUERY, variables)
-            users = data.get("users", [])
+        Args:
+            limit: Number of results per page (max 100)
 
-            if not users:
-                break
-
-            for user in users:
-                yield normalize_dict(user)
-
-            # If we got fewer results than the limit, we've reached the end
-            if len(users) < limit:
-                break
-
-            page += 1
+        Yields:
+            Dict containing board data
+        """
+        yield from _paginate(self, BOARDS_QUERY, "boards", limit)

@@ -74,4 +74,19 @@ def monday_source(
 
         yield from monday_client.get_users()
 
-    return (fetch_account, fetch_account_roles, fetch_users)
+    @dlt.resource(
+        name="boards",
+        write_disposition="replace",
+    )
+    def fetch_boards() -> Iterator[dict[str, Any]]:
+        """
+        Fetch boards from Monday.com.
+
+        Table format: boards (no parameters needed)
+        """
+        if len(params) != 0:
+            raise ValueError("Boards table must be in the format `boards`")
+
+        yield from monday_client.get_boards()
+
+    return (fetch_account, fetch_account_roles, fetch_users, fetch_boards)

@@ -101,5 +101,15 @@ query ($limit: Int!, $page: Int!) {
 }
 """
 
+# GraphQL query for fetching boards
+BOARDS_QUERY = """
+query ($limit: Int!, $page: Int!) {
+    boards(limit: $limit, page: $page) {
+        id
+        workspace_id
+    }
+}
+"""
+
 # Maximum number of results per page
 MAX_PAGE_SIZE = 100
