@@ -54,18 +54,6 @@ Monday.com source allows ingesting the following resources into separate tables:
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
-## Date Filtering
-
-For certain endpoints that support date filtering (like `updates`), you can pass start and end dates:
-
-```sh
-ingestr ingest \
-  --source-uri "monday://?api_token=fake_token&start_date=2025-01-01&end_date=2025-01-31" \
-  --source-table "updates" \
-  --dest-uri "duckdb://./monday.db" \
-  --dest-table "public.updates"
-```
-
 > [!NOTE]
 > Monday.com has rate limits for API requests. The source handles pagination automatically and respects the API's maximum page size of 100 items.
 

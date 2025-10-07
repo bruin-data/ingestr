@@ -157,7 +157,7 @@ export default defineConfig({
               { text: "Linear", link: "/supported-sources/linear.md" },
               { text: "LinkedIn Ads", link: "/supported-sources/linkedin_ads.md" },
               { text: "Mixpanel", link: "/supported-sources/mixpanel.md" },
-              { text: "Monday.com", link: "/supported-sources/monday.md" },
+              { text: "Monday", link: "/supported-sources/monday.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Personio", link: "/supported-sources/personio.md" },
               { text: "PhantomBuster", link: "/supported-sources/phantombuster.md" },
