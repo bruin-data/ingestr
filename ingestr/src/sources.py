@@ -3878,3 +3878,49 @@ class IntercomSource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(table)
+
+
+class HttpSource:
+    """Source for reading CSV, JSON, and Parquet files from HTTP URLs"""
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        """
+        Create a dlt source for reading files from HTTP URLs.
+
+        URI format: http://example.com/file.csv or https://example.com/file.json
+
+        Args:
+            uri: HTTP(S) URL to the file
+            table: Not used for HTTP source (files are read directly)
+            **kwargs: Additional arguments:
+                - file_format: Optional file format override ('csv', 'json', 'parquet')
+                - chunksize: Number of records to process at once (default varies by format)
+                - merge_key: Merge key for the resource
+
+        Returns:
+            DltResource for the HTTP file
+        """
+        from ingestr.src.http import http_source
+
+        # Extract the actual URL (remove the http:// or https:// scheme if duplicated)
+        url = uri
+        if uri.startswith("http://http://") or uri.startswith("https://https://"):
+            url = uri.split("://", 1)[1]
+
+        file_format = kwargs.get("file_format")
+        chunksize = kwargs.get("chunksize")
+        merge_key = kwargs.get("merge_key")
+
+        reader_kwargs = {}
+        if chunksize is not None:
+            reader_kwargs["chunksize"] = chunksize
+
+        source = http_source(url=url, file_format=file_format, **reader_kwargs)
+
+        if merge_key:
+            source.apply_hints(merge_key=merge_key)
+
+        return source
