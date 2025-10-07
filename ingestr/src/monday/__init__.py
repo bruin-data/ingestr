@@ -80,9 +80,14 @@ def monday_source(
 
     @dlt.resource(
         name="boards",
-        write_disposition="replace",
+        write_disposition="merge",
+        primary_key="id",
     )
-    def fetch_boards() -> Iterator[dict[str, Any]]:
+    def fetch_boards(
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updated_at", initial_value=start_date
+        )
+    ) -> Iterator[dict[str, Any]]:
         """
         Fetch boards from Monday.com.
 
@@ -125,9 +130,14 @@ def monday_source(
 
     @dlt.resource(
         name="updates",
-        write_disposition="replace",
+        write_disposition="merge",
+        primary_key="id",
     )
-    def fetch_updates() -> Iterator[dict[str, Any]]:
+    def fetch_updates(
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updated_at", initial_value=start_date
+        )
+    ) -> Iterator[dict[str, Any]]:
         """
         Fetch updates from Monday.com.
 
