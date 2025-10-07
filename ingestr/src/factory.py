@@ -65,6 +65,7 @@ from ingestr.src.sources import (
     LinkedInAdsSource,
     LocalCsvSource,
     MixpanelSource,
+    MondaySource,
     MongoDbSource,
     NotionSource,
     PersonioSource,
@@ -217,6 +218,7 @@ class SourceDestinationFactory:
         "influxdb": InfluxDBSource,
         "wise": WiseSource,
         "plusvibeai": PlusVibeAISource,
+        "monday": MondaySource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

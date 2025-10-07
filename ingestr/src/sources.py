@@ -3879,10 +3879,8 @@ class IntercomSource:
             end_date=end_date,
         ).with_resources(table)
 
-
 class HttpSource:
     """Source for reading CSV, JSON, and Parquet files from HTTP URLs"""
-
     def handles_incrementality(self) -> bool:
         return False
 
@@ -3924,3 +3922,28 @@ class HttpSource:
             source.apply_hints(merge_key=merge_key)
 
         return source
+ 
+class MondaySource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        query_params = parse_qs(parsed_uri.query)
+        api_token = query_params.get("api_token")
+
+        if api_token is None:
+            raise MissingValueError("api_token", "Monday")
+
+        parts = table.replace(" ", "").split(":")
+        table_name = parts[0]
+        params = parts[1:]
+
+        from ingestr.src.monday import monday_source
+
+        try:
+            return monday_source(api_token=api_token[0], params=params).with_resources(
+                table_name
+            )
+        except ResourcesNotFoundError:
+            raise UnsupportedResourceError(table_name, "Monday")
