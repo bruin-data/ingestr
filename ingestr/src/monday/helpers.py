@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from ingestr.src.http_client import create_client
 
-from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARD_COLUMNS_QUERY, BOARD_VIEWS_QUERY, BOARDS_QUERY, CUSTOM_ACTIVITIES_QUERY, MAX_PAGE_SIZE, TEAMS_QUERY, UPDATES_QUERY, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
+from .settings import ACCOUNT_QUERY, ACCOUNT_ROLES_QUERY, APP_INSTALLS_QUERY, BOARD_COLUMNS_QUERY, BOARD_VIEWS_QUERY, BOARDS_QUERY, CUSTOM_ACTIVITIES_QUERY, MAX_PAGE_SIZE, TAGS_QUERY, TEAMS_QUERY, UPDATES_QUERY, USERS_QUERY, WEBHOOKS_QUERY, WORKSPACES_QUERY
 
 
 def _paginate(
@@ -103,6 +103,29 @@ def _fetch_nested_board_data(
                     item_data = item.copy()
                     item_data["board_id"] = board.get("id")
                     yield normalize_dict(item_data)
+
+
+def _fetch_simple_list(
+    client: "MondayClient",
+    query: str,
+    field_name: str
+) -> Iterator[Dict[str, Any]]:
+    """
+    Fetch a simple list of items from Monday.com API without pagination.
+
+    Args:
+        client: MondayClient instance
+        query: GraphQL query to execute
+        field_name: Name of the field in the response to extract
+
+    Yields:
+        Normalized dictionaries from the API response
+    """
+    data = client._execute_query(query)
+    items = data.get(field_name, [])
+
+    for item in items:
+        yield normalize_dict(item)
 
 
 def normalize_dict(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -211,11 +234,7 @@ class MondayClient:
         Yields:
             Dict containing account role data
         """
-        data = self._execute_query(ACCOUNT_ROLES_QUERY)
-        roles = data.get("account_roles", [])
-
-        for role in roles:
-            yield normalize_dict(role)
+        yield from _fetch_simple_list(self, ACCOUNT_ROLES_QUERY, "account_roles")
 
     def get_users(self, limit: int = MAX_PAGE_SIZE) -> Iterator[Dict[str, Any]]:
         """
@@ -271,17 +290,14 @@ class MondayClient:
     def get_webhooks(self) -> Iterator[Dict[str, Any]]:
         """
         Fetch webhooks from Monday.com API.
-        First gets all boards to extract board IDs,
-        then fetches webhooks for each board.
+        First gets all board IDs, then fetches webhooks for each board.
 
         Yields:
             Dict containing webhook data
         """
-        # Collect board IDs
         board_ids = _get_all_board_ids(self)
 
         for board_id in board_ids:
-            # Fetch webhooks for this board
             variables = {"board_id": board_id}
             data = self._execute_query(WEBHOOKS_QUERY, variables)
             webhooks = data.get("webhooks", [])
@@ -326,31 +342,16 @@ class MondayClient:
         Yields:
             Dict containing team data
         """
-        data = self._execute_query(TEAMS_QUERY)
-        teams = data.get("teams", [])
-
-        for team in teams:
-            yield normalize_dict(team)
+        yield from _fetch_simple_list(self, TEAMS_QUERY, "teams")
 
     def get_tags(self) -> Iterator[Dict[str, Any]]:
         """
         Fetch tags from Monday.com API.
-        First gets all boards to extract board IDs,
-        then extracts tags from each board.
 
         Yields:
-            Dict containing tag data with board_id
+            Dict containing tag data
         """
-        # Collect tags from all boards
-        for board in _paginate(self, BOARDS_QUERY, "boards", MAX_PAGE_SIZE):
-            board_id = board.get("id")
-            tags = board.get("tags", [])
-
-            if tags and isinstance(tags, list):
-                for tag in tags:
-                    tag_data = tag.copy()
-                    tag_data["board_id"] = board_id
-                    yield normalize_dict(tag_data)
+        yield from _fetch_simple_list(self, TAGS_QUERY, "tags")
 
     def get_custom_activities(self) -> Iterator[Dict[str, Any]]:
         """
@@ -359,11 +360,7 @@ class MondayClient:
         Yields:
             Dict containing custom activity data
         """
-        data = self._execute_query(CUSTOM_ACTIVITIES_QUERY)
-        activities = data.get("custom_activity", [])
-
-        for activity in activities:
-            yield normalize_dict(activity)
+        yield from _fetch_simple_list(self, CUSTOM_ACTIVITIES_QUERY, "custom_activity")
 
     def get_board_columns(self) -> Iterator[Dict[str, Any]]:
         """

@@ -313,5 +313,16 @@ query {
 }
 """
 
+# GraphQL query for fetching tags
+TAGS_QUERY = """
+query {
+    tags {
+        id
+        name
+        color
+    }
+}
+"""
+
 # Maximum number of results per page
 MAX_PAGE_SIZE = 100
