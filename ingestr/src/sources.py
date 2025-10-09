@@ -1849,6 +1849,14 @@ class JiraSource:
         if not api_token:
             raise ValueError("api_token is required for connecting to Jira")
 
+        flags = {
+            "skip_archived": False,
+        }
+        if ":" in table:
+            table, rest = table.split(":", 1)  # type: ignore
+            for k in rest.split(":"):
+                flags[k] = True
+
         if table not in self.resources:
             raise ValueError(
                 f"Resource '{table}' is not supported for Jira source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
@@ -1863,6 +1871,8 @@ class JiraSource:
         dlt.secrets["sources.jira_source.api_token"] = api_token[0]
 
         src = jira_source()
+        if flags["skip_archived"]:
+            src.projects.add_filter(lambda p: not p.get("archived", False))
         return src.with_resources(table)
 
 

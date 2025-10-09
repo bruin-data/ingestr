@@ -53,6 +53,21 @@ Jira source allows ingesting the following tables:
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
+## Filtering archived projects
+
+`projects`, `project_versions` and `project_components` can be suffixed with `:skip_archived` to filter out archived projects.
+
+For instance:
+```bash
+ingestr ingest \
+  --source-uri 'jira://company.atlassian.net?email=user@company.com&api_token=ATATT3xFfGF0...' \
+  --source-table 'project_versions:skip_archived' \
+  --dest-uri duckdb:///jira.duckdb \
+  --dest-table 'dest.live_project_versions'
+```
+
+Will only load versions of non-archived projects.
+
 ## Incremental Loading
 
 The `issues` table supports incremental loading based on the `updated` field. This means subsequent runs will only fetch issues that have been modified since the last run, making the data ingestion more efficient for large Jira instances.
