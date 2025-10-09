@@ -1853,8 +1853,8 @@ class JiraSource:
             "skip_archived": False,
         }
         if ":" in table:
-            table, params = table.split(":", 1)
-            for k in params.split(":"):
+            table, rest = table.split(":", 1)  # type: ignore
+            for k in rest.split(":"):
                 flags[k] = True
 
         if table not in self.resources:
@@ -1872,7 +1872,7 @@ class JiraSource:
 
         src = jira_source()
         if flags["skip_archived"]:
-            src.projects.add_filter(lambda p: p.get("archived", False) == False)
+            src.projects.add_filter(lambda p: not p.get("archived", False))
         return src.with_resources(table)
 
 
