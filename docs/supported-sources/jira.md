@@ -55,7 +55,7 @@ Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
 ## Filtering archived projects
 
-`projects`, `projects_versions` and `project_components` can be suffixed with `:skip_archived` to filter out archived projects.
+`projects`, `project_versions` and `project_components` can be suffixed with `:skip_archived` to filter out archived projects.
 
 For instance:
 ```bash
