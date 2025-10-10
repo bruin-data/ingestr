@@ -10,6 +10,8 @@ from dlt.sources.helpers import requests
 
 from ingestr.src.errors import HTTPError
 
+TICKETS_QUERY_MAX_PAGE = 10
+
 
 class FreshdeskClient:
     """
@@ -85,6 +87,8 @@ class FreshdeskClient:
         if query is not None:
             query = query.replace('"', "").strip()
 
+        is_tickets_query = query and endpoint == "tickets"
+
         while True:
             # Construct the URL for the specific endpoint
             url = f"{self.base_url}/{endpoint}"
@@ -99,7 +103,7 @@ class FreshdeskClient:
 
                 params[param_key] = start_date.to_iso8601_string()
 
-            if query and endpoint == "tickets":
+            if is_tickets_query:
                 url = f"{self.base_url}/search/tickets"
                 params = {
                     "query": f'"{query}"',
@@ -127,3 +131,7 @@ class FreshdeskClient:
                 break
             yield filtered_data
             page += 1
+
+            # https://developers.freshdesk.com/api/#filter_tickets
+            if is_tickets_query and page > TICKETS_QUERY_MAX_PAGE:
+                break
