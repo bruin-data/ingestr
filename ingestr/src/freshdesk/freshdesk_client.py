@@ -64,7 +64,7 @@ class FreshdeskClient:
                 else:
                     # If the error is not a rate limit (429), raise the exception to be
                     # handled elsewhere or stop execution
-                    raise HTTPError(e)
+                    raise HTTPError(e) from e
 
     def paginated_response(
         self,
