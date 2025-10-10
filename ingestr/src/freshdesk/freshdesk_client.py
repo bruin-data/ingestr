@@ -8,6 +8,8 @@ import pendulum
 from dlt.common.typing import TDataItem
 from dlt.sources.helpers import requests
 
+from ingestr.src.errors import HTTPError
+
 
 class FreshdeskClient:
     """
@@ -62,7 +64,7 @@ class FreshdeskClient:
                 else:
                     # If the error is not a rate limit (429), raise the exception to be
                     # handled elsewhere or stop execution
-                    raise
+                    raise HTTPError(e) from e
 
     def paginated_response(
         self,
