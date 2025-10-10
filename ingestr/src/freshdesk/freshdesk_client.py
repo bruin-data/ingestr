@@ -134,4 +134,4 @@ class FreshdeskClient:
 
             # https://developers.freshdesk.com/api/#filter_tickets
             if is_tickets_query and page > TICKETS_QUERY_MAX_PAGE:
-                return []
+                break
