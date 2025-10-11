@@ -13,6 +13,24 @@ from ingestr.src.http_client import create_client
 from ingestr.src.mailchimp.helpers import fetch_paginated
 
 
+# Endpoint configurations: (resource_name, endpoint_path, data_key, primary_key)
+ENDPOINTS = [
+    ("account_exports", "account-exports", "exports", None),
+    ("audiences", "lists", "lists", "id"),
+    ("authorized_apps", "authorized-apps", "apps", "id"),
+    ("automations", "automations", "automations", "id"),
+    ("batches", "batches", "batches", None),
+    ("campaign_folders", "campaign-folders", "folders", "id"),
+    ("campaigns", "campaigns", "campaigns", "id"),
+    ("chimp_chatter", "activity-feed/chimp-chatter", "chimp_chatter", None),
+    ("connected_sites", "connected-sites", "sites", "id"),
+    ("conversations", "conversations", "conversations", "id"),
+    ("ecommerce_stores", "ecommerce/stores", "stores", "id"),
+    ("facebook_ads", "facebook-ads", "facebook_ads", "id"),
+    ("landing_pages", "landing-pages", "landing_pages", "id"),
+]
+
+
 @dlt.source(max_table_nesting=0, name="mailchimp_source")
 def mailchimp_source(
     api_key: str,
@@ -47,45 +65,23 @@ def mailchimp_source(
         data = response.json()
         yield data
 
-    @dlt.resource(
-        name="account_exports",
-        write_disposition="replace",
-    )
-    def fetch_account_exports() -> Iterator[dict[str, Any]]:
-        """
-        Fetch account exports from Mailchimp.
+    # Create resources dynamically from ENDPOINTS config
+    resources = [fetch_account]
 
-        Table format: account_exports (no parameters needed)
-        """
-        url = f"{base_url}/account-exports"
-        yield from fetch_paginated(session, url, auth, data_key="exports")
+    for resource_name, endpoint_path, data_key, primary_key in ENDPOINTS:
 
-    @dlt.resource(
-        name="audiences",
-        write_disposition="replace",
-        primary_key="id",
-    )
-    def fetch_audiences() -> Iterator[dict[str, Any]]:
-        """
-        Fetch audiences (lists) from Mailchimp.
+        def make_resource(name, path, key, pk):
+            @dlt.resource(
+                name=name,
+                write_disposition="replace",
+                primary_key=pk,
+            )
+            def fetch_data() -> Iterator[dict[str, Any]]:
+                url = f"{base_url}/{path}"
+                yield from fetch_paginated(session, url, auth, data_key=key)
 
-        Table format: audiences (no parameters needed)
-        """
-        url = f"{base_url}/lists"
-        yield from fetch_paginated(session, url, auth, data_key="lists")
+            return fetch_data
 
-    @dlt.resource(
-        name="authorized_apps",
-        write_disposition="replace",
-        primary_key="id",
-    )
-    def fetch_authorized_apps() -> Iterator[dict[str, Any]]:
-        """
-        Fetch authorized apps from Mailchimp.
+        resources.append(make_resource(resource_name, endpoint_path, data_key, primary_key))
 
-        Table format: authorized_apps (no parameters needed)
-        """
-        url = f"{base_url}/authorized-apps"
-        yield from fetch_paginated(session, url, auth, data_key="apps")
-
-    return fetch_account, fetch_account_exports, fetch_audiences, fetch_authorized_apps
+    return tuple(resources)
