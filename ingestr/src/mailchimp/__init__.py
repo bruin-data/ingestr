@@ -10,24 +10,32 @@ import dlt
 from dlt.sources import DltResource
 
 from ingestr.src.http_client import create_client
-from ingestr.src.mailchimp.helpers import fetch_paginated
+from ingestr.src.mailchimp.helpers import (
+    create_merge_resource,
+    create_replace_resource,
+)
 
 
-# Endpoint configurations: (resource_name, endpoint_path, data_key, primary_key)
-ENDPOINTS = [
+# Endpoints with merge disposition (have both primary_key and incremental_key)
+MERGE_ENDPOINTS = [
+    ("audiences", "lists", "lists", "id", "date_created"),
+    ("automations", "automations", "automations", "id", "create_time"),
+    ("campaigns", "campaigns", "campaigns", "id", "create_time"),
+    ("connected_sites", "connected-sites", "sites", "id", "updated_at"),
+    ("conversations", "conversations", "conversations", "id", "last_message.timestamp"),
+    ("ecommerce_stores", "ecommerce/stores", "stores", "id", "updated_at"),
+    ("facebook_ads", "facebook-ads", "facebook_ads", "id", "updated_at"),
+    ("landing_pages", "landing-pages", "landing_pages", "id", "updated_at"),
+    ("reports", "reports", "reports", "id", "send_time"),
+]
+
+# Endpoints with replace disposition
+REPLACE_ENDPOINTS = [
     ("account_exports", "account-exports", "exports", None),
-    ("audiences", "lists", "lists", "id"),
     ("authorized_apps", "authorized-apps", "apps", "id"),
-    ("automations", "automations", "automations", "id"),
     ("batches", "batches", "batches", None),
     ("campaign_folders", "campaign-folders", "folders", "id"),
-    ("campaigns", "campaigns", "campaigns", "id"),
     ("chimp_chatter", "activity-feed/chimp-chatter", "chimp_chatter", None),
-    ("connected_sites", "connected-sites", "sites", "id"),
-    ("conversations", "conversations", "conversations", "id"),
-    ("ecommerce_stores", "ecommerce/stores", "stores", "id"),
-    ("facebook_ads", "facebook-ads", "facebook_ads", "id"),
-    ("landing_pages", "landing-pages", "landing_pages", "id"),
 ]
 
 
@@ -65,23 +73,27 @@ def mailchimp_source(
         data = response.json()
         yield data
 
-    # Create resources dynamically from ENDPOINTS config
+    # Create resources dynamically
     resources = [fetch_account]
 
-    for resource_name, endpoint_path, data_key, primary_key in ENDPOINTS:
-
-        def make_resource(name, path, key, pk):
-            @dlt.resource(
-                name=name,
-                write_disposition="replace",
-                primary_key=pk,
+    # Create merge resources (with incremental loading)
+    for resource_name, endpoint_path, data_key, primary_key, incremental_key in MERGE_ENDPOINTS:
+        resources.append(
+            create_merge_resource(
+                base_url, session, auth,
+                resource_name, endpoint_path, data_key,
+                primary_key, incremental_key
             )
-            def fetch_data() -> Iterator[dict[str, Any]]:
-                url = f"{base_url}/{path}"
-                yield from fetch_paginated(session, url, auth, data_key=key)
+        )
 
-            return fetch_data
-
-        resources.append(make_resource(resource_name, endpoint_path, data_key, primary_key))
+    # Create replace resources (without incremental loading)
+    for resource_name, endpoint_path, data_key, primary_key in REPLACE_ENDPOINTS:
+        resources.append(
+            create_replace_resource(
+                base_url, session, auth,
+                resource_name, endpoint_path, data_key,
+                primary_key
+            )
+        )
 
     return tuple(resources)

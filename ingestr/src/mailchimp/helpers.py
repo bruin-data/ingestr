@@ -4,6 +4,8 @@ Helper functions for Mailchimp source.
 
 from typing import Any, Iterator
 
+import dlt
+
 
 def fetch_paginated(
     session,
@@ -52,3 +54,81 @@ def fetch_paginated(
             break
 
         offset += count
+
+
+def create_merge_resource(
+    base_url: str,
+    session,
+    auth: tuple,
+    name: str,
+    path: str,
+    key: str,
+    pk: str,
+    ik: str,
+):
+    """
+    Create a DLT resource with merge disposition for incremental loading.
+
+    Args:
+        base_url: Base API URL
+        session: HTTP session
+        auth: Authentication tuple
+        name: Resource name
+        path: API endpoint path
+        key: Data key in response
+        pk: Primary key field
+        ik: Incremental key field
+
+    Returns:
+        DLT resource function
+    """
+    @dlt.resource(
+        name=name,
+        write_disposition="merge",
+        primary_key=pk,
+    )
+    def fetch_data(
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            ik, initial_value=None
+        )
+    ) -> Iterator[dict[str, Any]]:
+        url = f"{base_url}/{path}"
+        yield from fetch_paginated(session, url, auth, data_key=key)
+
+    return fetch_data
+
+
+def create_replace_resource(
+    base_url: str,
+    session,
+    auth: tuple,
+    name: str,
+    path: str,
+    key: str,
+    pk: str | None,
+):
+    """
+    Create a DLT resource with replace disposition.
+
+    Args:
+        base_url: Base API URL
+        session: HTTP session
+        auth: Authentication tuple
+        name: Resource name
+        path: API endpoint path
+        key: Data key in response
+        pk: Primary key field (optional)
+
+    Returns:
+        DLT resource function
+    """
+    @dlt.resource(
+        name=name,
+        write_disposition="replace",
+        primary_key=pk,
+    )
+    def fetch_data() -> Iterator[dict[str, Any]]:
+        url = f"{base_url}/{path}"
+        yield from fetch_paginated(session, url, auth, data_key=key)
+
+    return fetch_data
