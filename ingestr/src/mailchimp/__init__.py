@@ -4,19 +4,20 @@ Mailchimp source for data extraction via REST API.
 This source provides access to Mailchimp account data.
 """
 
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 import dlt
 from dlt.sources import DltResource
 
 from ingestr.src.http_client import create_client
+from ingestr.src.mailchimp.helpers import fetch_paginated
 
 
 @dlt.source(max_table_nesting=0, name="mailchimp_source")
 def mailchimp_source(
     api_key: str,
     server: str,
-) -> DltResource:
+) -> Iterable[DltResource]:
     """
     Mailchimp data source.
 
@@ -25,10 +26,11 @@ def mailchimp_source(
         server: Server prefix (e.g., 'us10')
 
     Yields:
-        DltResource: Data resource for account information
+        DltResource: Data resources for Mailchimp data
     """
     base_url = f"https://{server}.api.mailchimp.com/3.0"
     session = create_client()
+    auth = ("anystring", api_key)
 
     @dlt.resource(
         name="account",
@@ -40,12 +42,36 @@ def mailchimp_source(
 
         Table format: account (no parameters needed)
         """
-        response = session.get(
-            f"{base_url}/",
-            auth=("anystring", api_key),
-        )
+        response = session.get(f"{base_url}/", auth=auth)
         response.raise_for_status()
         data = response.json()
         yield data
 
-    return fetch_account
+    @dlt.resource(
+        name="account_exports",
+        write_disposition="replace",
+    )
+    def fetch_account_exports() -> Iterator[dict[str, Any]]:
+        """
+        Fetch account exports from Mailchimp.
+
+        Table format: account_exports (no parameters needed)
+        """
+        url = f"{base_url}/account-exports"
+        yield from fetch_paginated(session, url, auth, data_key="exports")
+
+    @dlt.resource(
+        name="audiences",
+        write_disposition="replace",
+        primary_key="id",
+    )
+    def fetch_audiences() -> Iterator[dict[str, Any]]:
+        """
+        Fetch audiences (lists) from Mailchimp.
+
+        Table format: audiences (no parameters needed)
+        """
+        url = f"{base_url}/lists"
+        yield from fetch_paginated(session, url, auth, data_key="lists")
+
+    return fetch_account, fetch_account_exports, fetch_audiences
