@@ -13,7 +13,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs-only: ${{ steps.filter.outputs.docs-only }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docs-only:
+              - '!**'
+              - '**/*.md'
+              - 'docs/**'
+
   tests:
+    needs: check-changes
+    if: needs.check-changes.outputs.docs-only != 'true'
     strategy:
       matrix:
         # I tried running stuff on macOS but it was too slow and unreliable.
