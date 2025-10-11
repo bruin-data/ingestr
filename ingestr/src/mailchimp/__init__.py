@@ -74,4 +74,18 @@ def mailchimp_source(
         url = f"{base_url}/lists"
         yield from fetch_paginated(session, url, auth, data_key="lists")
 
-    return fetch_account, fetch_account_exports, fetch_audiences
+    @dlt.resource(
+        name="authorized_apps",
+        write_disposition="replace",
+        primary_key="id",
+    )
+    def fetch_authorized_apps() -> Iterator[dict[str, Any]]:
+        """
+        Fetch authorized apps from Mailchimp.
+
+        Table format: authorized_apps (no parameters needed)
+        """
+        url = f"{base_url}/authorized-apps"
+        yield from fetch_paginated(session, url, auth, data_key="apps")
+
+    return fetch_account, fetch_account_exports, fetch_audiences, fetch_authorized_apps
