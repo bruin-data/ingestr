@@ -155,6 +155,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Klaviyo", link: "/supported-sources/klaviyo.md" },
               { text: "Linear", link: "/supported-sources/linear.md" },
               { text: "LinkedIn Ads", link: "/supported-sources/linkedin_ads.md" },
+              { text: "Mailchimp", link: "/supported-sources/mailchimp.md" },
               { text: "Mixpanel", link: "/supported-sources/mixpanel.md" },
               { text: "Monday", link: "/supported-sources/monday.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
