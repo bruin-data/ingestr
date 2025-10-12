@@ -64,6 +64,7 @@ from ingestr.src.sources import (
     LinearSource,
     LinkedInAdsSource,
     LocalCsvSource,
+    MailchimpSource,
     MixpanelSource,
     MondaySource,
     MongoDbSource,
@@ -219,6 +220,7 @@ class SourceDestinationFactory:
         "wise": WiseSource,
         "plusvibeai": PlusVibeAISource,
         "monday": MondaySource,
+        "mailchimp": MailchimpSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
