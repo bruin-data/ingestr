@@ -12,30 +12,14 @@ from dlt.sources import DltResource
 from ingestr.src.http_client import create_client
 from ingestr.src.mailchimp.helpers import (
     create_merge_resource,
+    create_nested_resource,
     create_replace_resource,
 )
-
-# Endpoints with merge disposition (have both primary_key and incremental_key)
-MERGE_ENDPOINTS = [
-    ("audiences", "lists", "lists", "id", "date_created"),
-    ("automations", "automations", "automations", "id", "create_time"),
-    ("campaigns", "campaigns", "campaigns", "id", "create_time"),
-    ("connected_sites", "connected-sites", "sites", "id", "updated_at"),
-    ("conversations", "conversations", "conversations", "id", "last_message.timestamp"),
-    ("ecommerce_stores", "ecommerce/stores", "stores", "id", "updated_at"),
-    ("facebook_ads", "facebook-ads", "facebook_ads", "id", "updated_at"),
-    ("landing_pages", "landing-pages", "landing_pages", "id", "updated_at"),
-    ("reports", "reports", "reports", "id", "send_time"),
-]
-
-# Endpoints with replace disposition
-REPLACE_ENDPOINTS: list[tuple[str, str, str, str | None]] = [
-    ("account_exports", "account-exports", "exports", None),
-    ("authorized_apps", "authorized-apps", "apps", "id"),
-    ("batches", "batches", "batches", None),
-    ("campaign_folders", "campaign-folders", "folders", "id"),
-    ("chimp_chatter", "activity-feed/chimp-chatter", "chimp_chatter", None),
-]
+from ingestr.src.mailchimp.settings import (
+    MERGE_ENDPOINTS,
+    NESTED_ENDPOINTS,
+    REPLACE_ENDPOINTS,
+)
 
 
 @dlt.source(max_table_nesting=0, name="mailchimp_source")
@@ -97,8 +81,8 @@ def mailchimp_source(
         )
 
     # Create replace resources (without incremental loading)
-    for endpoint in REPLACE_ENDPOINTS:
-        resource_name, endpoint_path, data_key, pk = endpoint
+    for replace_endpoint in REPLACE_ENDPOINTS:
+        resource_name, endpoint_path, data_key, pk = replace_endpoint
         resources.append(
             create_replace_resource(
                 base_url,
@@ -107,6 +91,34 @@ def mailchimp_source(
                 resource_name,
                 endpoint_path,
                 data_key,
+                pk,
+            )
+        )
+
+    # Create nested resources (depend on parent resources)
+    for nested_endpoint in NESTED_ENDPOINTS:
+        (
+            parent_name,
+            parent_path,
+            parent_key,
+            parent_id_field,
+            nested_name,
+            nested_path,
+            nested_key,
+            pk,
+        ) = nested_endpoint
+        resources.append(
+            create_nested_resource(
+                base_url,
+                session,
+                auth,
+                parent_name,
+                parent_path,
+                parent_key,
+                parent_id_field,
+                nested_name,
+                nested_path,
+                nested_key,
                 pk,
             )
         )
