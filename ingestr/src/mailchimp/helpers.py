@@ -11,7 +11,7 @@ def fetch_paginated(
     session,
     url: str,
     auth: tuple,
-    data_key: str = None,
+    data_key: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """
     Helper function to fetch paginated data from Mailchimp API.
@@ -82,6 +82,7 @@ def create_merge_resource(
     Returns:
         DLT resource function
     """
+
     @dlt.resource(
         name=name,
         write_disposition="merge",
@@ -90,7 +91,7 @@ def create_merge_resource(
     def fetch_data(
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
             ik, initial_value=None
-        )
+        ),
     ) -> Iterator[dict[str, Any]]:
         url = f"{base_url}/{path}"
         yield from fetch_paginated(session, url, auth, data_key=key)
@@ -122,13 +123,22 @@ def create_replace_resource(
     Returns:
         DLT resource function
     """
-    @dlt.resource(
-        name=name,
-        write_disposition="replace",
-        primary_key=pk,
-    )
+
     def fetch_data() -> Iterator[dict[str, Any]]:
         url = f"{base_url}/{path}"
         yield from fetch_paginated(session, url, auth, data_key=key)
 
-    return fetch_data
+    # Apply the resource decorator with conditional primary_key
+    if pk is not None:
+        return dlt.resource(
+            fetch_data,
+            name=name,
+            write_disposition="replace",
+            primary_key=pk,
+        )
+    else:
+        return dlt.resource(
+            fetch_data,
+            name=name,
+            write_disposition="replace",
+        )

@@ -15,7 +15,6 @@ from ingestr.src.mailchimp.helpers import (
     create_replace_resource,
 )
 
-
 # Endpoints with merge disposition (have both primary_key and incremental_key)
 MERGE_ENDPOINTS = [
     ("audiences", "lists", "lists", "id", "date_created"),
@@ -30,7 +29,7 @@ MERGE_ENDPOINTS = [
 ]
 
 # Endpoints with replace disposition
-REPLACE_ENDPOINTS = [
+REPLACE_ENDPOINTS: list[tuple[str, str, str, str | None]] = [
     ("account_exports", "account-exports", "exports", None),
     ("authorized_apps", "authorized-apps", "apps", "id"),
     ("batches", "batches", "batches", None),
@@ -77,22 +76,38 @@ def mailchimp_source(
     resources = [fetch_account]
 
     # Create merge resources (with incremental loading)
-    for resource_name, endpoint_path, data_key, primary_key, incremental_key in MERGE_ENDPOINTS:
+    for (
+        resource_name,
+        endpoint_path,
+        data_key,
+        primary_key,
+        incremental_key,
+    ) in MERGE_ENDPOINTS:
         resources.append(
             create_merge_resource(
-                base_url, session, auth,
-                resource_name, endpoint_path, data_key,
-                primary_key, incremental_key
+                base_url,
+                session,
+                auth,
+                resource_name,
+                endpoint_path,
+                data_key,
+                primary_key,
+                incremental_key,
             )
         )
 
     # Create replace resources (without incremental loading)
-    for resource_name, endpoint_path, data_key, primary_key in REPLACE_ENDPOINTS:
+    for endpoint in REPLACE_ENDPOINTS:
+        resource_name, endpoint_path, data_key, pk = endpoint
         resources.append(
             create_replace_resource(
-                base_url, session, auth,
-                resource_name, endpoint_path, data_key,
-                primary_key
+                base_url,
+                session,
+                auth,
+                resource_name,
+                endpoint_path,
+                data_key,
+                pk,
             )
         )
 
