@@ -8,7 +8,6 @@ import time
 from typing import Any, Iterator
 
 import dlt
-import pandas as pd
 
 from ingestr.src.http_client import create_client
 
@@ -87,7 +86,11 @@ def allium_source(
             if status == "success":
                 break
             elif status == "failed":
-                error_msg = status_data.get("error", "Unknown error") if isinstance(status_data, dict) else "Unknown error"
+                error_msg = (
+                    status_data.get("error", "Unknown error")
+                    if isinstance(status_data, dict)
+                    else "Unknown error"
+                )
                 raise ValueError(f"Query execution failed: {error_msg}")
             elif status in ["pending", "running", "queued"]:
                 time.sleep(poll_interval)
