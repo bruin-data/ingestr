@@ -3997,3 +3997,37 @@ class MailchimpSource:
             ).with_resources(table)
         except ResourcesNotFoundError:
             raise UnsupportedResourceError(table, "Mailchimp")
+
+
+class AlliumSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        query_params = parse_qs(parsed_uri.query)
+        api_key = query_params.get("api_key")
+
+        if api_key is None:
+            raise MissingValueError("api_key", "Allium")
+
+        # Extract query_id from table parameter
+        # Format: query_id or query_id:actual_query_id
+        query_id = table
+        if ":" in table:
+            parts = table.split(":", 1)
+            query_id = parts[1]
+
+        # Extract parameters from URI query string
+        parameters = {}
+        for key, value in query_params.items():
+            if key != "api_key":
+                parameters[key] = value[0] if len(value) == 1 else value
+
+        from ingestr.src.allium import allium_source
+
+        return allium_source(
+            api_key=api_key[0],
+            query_id=query_id,
+            parameters=parameters if parameters else None,
+        )

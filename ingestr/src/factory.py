@@ -28,6 +28,7 @@ from ingestr.src.destinations import (
 from ingestr.src.sources import (
     AdjustSource,
     AirtableSource,
+    AlliumSource,
     AnthropicSource,
     AppleAppStoreSource,
     ApplovinMaxSource,
@@ -156,6 +157,7 @@ class SourceDestinationFactory:
     source_scheme: str
     destination_scheme: str
     sources: Dict[str, Type[SourceProtocol]] = {
+        "allium": AlliumSource,
         "anthropic": AnthropicSource,
         "csv": LocalCsvSource,
         "docebo": DoceboSource,
