@@ -3,6 +3,14 @@
 
 ingestr supports IBM Db2 as a source.
 
+## Installation
+
+To use IBM Db2 with ingestr, you need to install the `ibm-db` add-on as well. You can do this by running:
+
+```bash
+pip install ingestr[ibm-db]
+```
+
 ## URI format
 The URI format for DB2 is as follows:
 
