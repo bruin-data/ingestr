@@ -166,6 +166,10 @@ oracle = [
 odbc = [
     "pyodbc==5.1.0",
 ]
+ibm-db = [
+    "ibm-db==3.2.6",
+    "ibm-db-sa==0.4.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/bruin-data/ingestr"

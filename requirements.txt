@@ -212,8 +212,6 @@ googleapis-common-protos==1.69.0
     #   google-api-core
     #   grpc-google-iam-v1
     #   grpcio-status
-greenlet==3.2.4
-    # via sqlalchemy
 grpc-google-iam-v1==0.14.2
     # via google-cloud-spanner
 grpc-interceptor==0.15.4
@@ -240,12 +238,6 @@ httplib2==0.22.0
     #   google-auth-httplib2
 humanize==4.12.1
     # via dlt
-ibm-db==3.2.6
-    # via
-    #   -r requirements.in
-    #   ibm-db-sa
-ibm-db-sa==0.4.1
-    # via -r requirements.in
 idna==3.10
     # via
     #   requests
@@ -548,7 +540,6 @@ sqlalchemy==1.4.52
     #   clickhouse-sqlalchemy
     #   databricks-sqlalchemy
     #   duckdb-engine
-    #   ibm-db-sa
     #   snowflake-sqlalchemy
     #   sqlalchemy-bigquery
     #   sqlalchemy-cratedb
