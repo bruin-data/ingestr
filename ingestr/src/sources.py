@@ -4018,11 +4018,21 @@ class AlliumSource:
             parts = table.split(":", 1)
             query_id = parts[1]
 
-        # Extract parameters from URI query string
+        # Extract parameters from interval_start and interval_end
+        # Default: 2 days ago 00:00 to yesterday 00:00
+        now = pendulum.now()
+        default_start = now.subtract(days=2).start_of("day")
+        default_end = now.subtract(days=1).start_of("day")
+
         parameters = {}
-        for key, value in query_params.items():
-            if key != "api_key":
-                parameters[key] = value[0] if len(value) == 1 else value
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        start_date = interval_start if interval_start is not None else default_start
+        end_date = interval_end if interval_end is not None else default_end
+
+        parameters["start_date"] = start_date.strftime("%Y-%m-%d")
+        parameters["end_date"] = end_date.strftime("%Y-%m-%d")
 
         from ingestr.src.allium import allium_source
 
