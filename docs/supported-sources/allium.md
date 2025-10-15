@@ -45,11 +45,11 @@ The result of this command will be a table in the `allium.duckdb` database.
 
 ## Tables
 
-Allium source uses query IDs as table identifiers. The query ID should be passed as the `--source-table` parameter with the `query:` prefix:
+Allium source uses query IDs as table identifiers. The query ID should be passed as the `--source-table` parameter with the `query:` prefix.
 
-```sh
---source-table 'query:abc123def456'
-```
+| Parameter | Format | Example | Description |
+|-----------|--------|---------|-------------|
+| `--source-table` | `query:<query_id>` | `query:abc123def456` | The query ID from Allium explorer |
 
 Each query ID represents a specific blockchain data query that you've created in the Allium explorer.
 
