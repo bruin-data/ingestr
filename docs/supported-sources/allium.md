@@ -58,7 +58,7 @@ Each query ID represents a specific blockchain data query that you've created in
 The Allium source connector:
 
 1. **Starts an async query execution** using your query ID and parameters
-2. **Polls for completion status** every 5 seconds (max 5 minutes)
+2. **Polls for completion status** every 5 seconds (max 12 hours)
 3. **Fetches and returns the results** once the query completes successfully
 
 ## Examples
@@ -89,9 +89,11 @@ ingestr ingest \
 
 > [!NOTE]
 > - Query execution is asynchronous and may take time depending on the complexity of your query
-> - The connector will wait up to 5 minutes for query completion
+> - The connector will wait up to 12 hours for query completion
 > - Use `--interval-start` and `--interval-end` flags to pass date parameters to your Allium query
-> - The dates will be automatically converted to `start_date` and `end_date` parameters in the format `YYYY-MM-DD`
+> - The dates will be automatically converted to:
+>   - `start_date` and `end_date` parameters in the format `YYYY-MM-DD`
+>   - `start_timestamp` and `end_timestamp` parameters as Unix timestamps (seconds since epoch)
 > - **Default dates**: If not specified, defaults to 2 days ago (00:00) to yesterday (00:00)
 > - Make sure your query ID is valid and accessible with your API key
 > - The source table format must be `query:your_query_id`

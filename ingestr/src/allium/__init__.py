@@ -65,7 +65,7 @@ def allium_source(
         run_id = run_data["run_id"]
 
         # Step 2: Poll for completion
-        max_retries = 60  # Max 5 minutes with 5-second intervals
+        max_retries = 8640  # Max 12 hours with 5-second intervals
         retry_count = 0
         poll_interval = 5  # seconds
 

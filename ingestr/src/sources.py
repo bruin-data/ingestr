@@ -4033,6 +4033,8 @@ class AlliumSource:
 
         parameters["start_date"] = start_date.strftime("%Y-%m-%d")
         parameters["end_date"] = end_date.strftime("%Y-%m-%d")
+        parameters["start_timestamp"] = int(start_date.timestamp())
+        parameters["end_timestamp"] = int(end_date.timestamp())
 
         from ingestr.src.allium import allium_source
 
