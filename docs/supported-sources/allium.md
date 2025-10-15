@@ -50,8 +50,18 @@ Allium source uses query IDs as table identifiers. The query ID should be passed
 | Parameter | Format | Example | Description |
 |-----------|--------|---------|-------------|
 | `--source-table` | `query:<query_id>` | `query:abc123def456` | The query ID from Allium explorer |
+| `--source-table` | `query:<query_id>:<params>` | `query:abc123def456:network=ethereum&limit=100` | Query ID with custom parameters |
 
 Each query ID represents a specific blockchain data query that you've created in the Allium explorer.
+
+### Custom Query Parameters
+
+You can pass additional custom parameters to your Allium query using the format:
+```
+query:<query_id>:param1=value1&param2=value2
+```
+
+These custom parameters will be merged with the default date parameters. If a custom parameter has the same name as a default parameter, the custom value will take precedence.
 
 ## How it works
 
@@ -85,6 +95,20 @@ ingestr ingest \
   --dest-table 'allium.daily_transactions'
 ```
 
+### Query with Custom Parameters
+
+```sh
+ingestr ingest \
+  --source-uri 'allium://?api_key=your_api_key' \
+  --source-table 'query:abc123def456:network=ethereum&min_value=1000' \
+  --interval-start '2025-02-01' \
+  --interval-end '2025-02-02' \
+  --dest-uri duckdb:///allium.duckdb \
+  --dest-table 'allium.filtered_transactions'
+```
+
+In this example, the query will receive both the default date parameters and the custom parameters `network` and `min_value`.
+
 ## Notes
 
 > [!NOTE]
@@ -95,5 +119,6 @@ ingestr ingest \
 >   - `start_date` and `end_date` parameters in the format `YYYY-MM-DD`
 >   - `start_timestamp` and `end_timestamp` parameters as Unix timestamps (seconds since epoch)
 > - **Default dates**: If not specified, defaults to 2 days ago (00:00) to yesterday (00:00)
+> - Custom parameters can be added to the source table format: `query:your_query_id:param1=value1&param2=value2`
+> - Custom parameters will override default parameters if they have the same name
 > - Make sure your query ID is valid and accessible with your API key
-> - The source table format must be `query:your_query_id`

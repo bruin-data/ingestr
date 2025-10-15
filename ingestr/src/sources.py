@@ -4011,12 +4011,22 @@ class AlliumSource:
         if api_key is None:
             raise MissingValueError("api_key", "Allium")
 
-        # Extract query_id from table parameter
-        # Format: query_id or query_id:actual_query_id
+        # Extract query_id and custom parameters from table parameter
+        # Format: query_id or query:query_id or query:query_id:param1=value1&param2=value2
         query_id = table
+        custom_params = {}
+
         if ":" in table:
-            parts = table.split(":", 1)
-            query_id = parts[1]
+            parts = table.split(":", 2)  # Split into max 3 parts
+            if len(parts) >= 2:
+                query_id = parts[1]
+            if len(parts) == 3:
+                # Parse custom parameters from query string format
+                param_string = parts[2]
+                for param in param_string.split("&"):
+                    if "=" in param:
+                        key, value = param.split("=", 1)
+                        custom_params[key] = value
 
         # Extract parameters from interval_start and interval_end
         # Default: 2 days ago 00:00 to yesterday 00:00
@@ -4035,6 +4045,9 @@ class AlliumSource:
         parameters["end_date"] = end_date.strftime("%Y-%m-%d")
         parameters["start_timestamp"] = int(start_date.timestamp())
         parameters["end_timestamp"] = int(end_date.timestamp())
+
+        # Merge custom parameters (they override default parameters)
+        parameters.update(custom_params)
 
         from ingestr.src.allium import allium_source
 
