@@ -53,23 +53,19 @@ def allium_source(
         3. Fetches and yields the results
         """
         # Step 1: Start async query execution
-        run_config = {}
+        run_config: dict[str, Any] = {}
         if limit is not None:
             run_config["limit"] = limit
         if compute_profile is not None:
             run_config["compute_profile"] = compute_profile
 
-        run_payload = {
-            "parameters": parameters or {},
-            "run_config": run_config
-        }
+        run_payload = {"parameters": parameters or {}, "run_config": run_config}
 
         run_response = session.post(
             f"{base_url}/queries/{query_id}/run-async",
             json=run_payload,
             headers=headers,
         )
-
 
         run_data = run_response.json()
 
