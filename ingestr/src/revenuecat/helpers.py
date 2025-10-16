@@ -64,12 +64,9 @@ def _paginate(
     while True:
         data = _make_request(api_key, endpoint, current_params)
 
-        # Yield items from the current page
         if "items" in data and data["items"] is not None:
-            for item in data["items"]:
-                yield item
+            yield data["items"]
 
-        # Check if there's a next page
         if "next_page" not in data:
             break
 
@@ -88,7 +85,6 @@ def convert_timestamps_to_iso(
     """Convert timestamp fields from milliseconds to ISO format."""
     for field in timestamp_fields:
         if field in record and record[field] is not None:
-            # Convert from milliseconds timestamp to ISO datetime string
             timestamp_ms = record[field]
             dt = pendulum.from_timestamp(timestamp_ms / 1000)
             record[field] = dt.to_iso8601_string()
@@ -177,87 +173,37 @@ async def _paginate_async(
     return items
 
 
-async def fetch_and_process_nested_resource_async(
-    session: aiohttp.ClientSession,
-    api_key: str,
-    project_id: str,
-    customer_id: str,
-    customer: Dict[str, Any],
-    resource_name: str,
-    timestamp_fields: Optional[List[str]] = None,
-) -> None:
-    """
-    Fetch and process any nested resource for a customer asynchronously.
-
-    Args:
-        session: aiohttp ClientSession
-        api_key: RevenueCat API key
-        project_id: Project ID
-        customer_id: Customer ID
-        customer: Customer data dictionary to modify
-        resource_name: Name of the nested resource (e.g., 'purchases', 'subscriptions', 'events')
-        timestamp_fields: List of timestamp fields to convert to ISO format
-    """
-    # If resource not included in customer data, fetch separately
-    if resource_name not in customer or customer[resource_name] is None:
-        endpoint = f"/projects/{project_id}/customers/{customer_id}/{resource_name}"
-        customer[resource_name] = await _paginate_async(session, api_key, endpoint)
-
-    # Convert timestamps if fields specified
-    if (
-        timestamp_fields
-        and resource_name in customer
-        and customer[resource_name] is not None
-    ):
-        for item in customer[resource_name]:
-            convert_timestamps_to_iso(item, timestamp_fields)
-
-
 async def process_customer_with_nested_resources_async(
     session: aiohttp.ClientSession,
     api_key: str,
     project_id: str,
     customer: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    Process a customer and fetch nested resources concurrently.
-
-    Args:
-        session: aiohttp ClientSession
-        api_key: RevenueCat API key
-        project_id: Project ID
-        customer: Customer data to process
-
-    Returns:
-        Customer data with nested resources populated
-    """
     customer_id = customer["id"]
-
-    # Convert customer timestamps
     customer = convert_timestamps_to_iso(customer, ["first_seen_at", "last_seen_at"])
-
-    # Define nested resources to fetch concurrently
     nested_resources = [
         ("subscriptions", ["purchased_at", "expires_at", "grace_period_expires_at"]),
         ("purchases", ["purchased_at", "expires_at"]),
     ]
 
-    # Create concurrent tasks for fetching nested resources
-    tasks = []
-    for resource_name, timestamp_fields in nested_resources:
-        task = fetch_and_process_nested_resource_async(
-            session,
-            api_key,
-            project_id,
-            customer_id,
-            customer,
-            resource_name,
-            timestamp_fields,
-        )
-        tasks.append(task)
+    async def fetch_and_convert(resource_name, timestamp_fields):
+        if resource_name not in customer or customer[resource_name] is None:
+            endpoint = f"/projects/{project_id}/customers/{customer_id}/{resource_name}"
+            customer[resource_name] = await _paginate_async(session, api_key, endpoint)
+        if (
+            timestamp_fields
+            and resource_name in customer
+            and customer[resource_name] is not None
+        ):
+            for item in customer[resource_name]:
+                convert_timestamps_to_iso(item, timestamp_fields)
 
-    # Wait for all nested resources to be fetched
-    await asyncio.gather(*tasks)
+    await asyncio.gather(
+        *[
+            fetch_and_convert(resource_name, timestamp_fields)
+            for resource_name, timestamp_fields in nested_resources
+        ]
+    )
 
     return customer
 
