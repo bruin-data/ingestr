@@ -4015,6 +4015,8 @@ class AlliumSource:
         # Format: query_id or query:query_id or query:query_id:param1=value1&param2=value2
         query_id = table
         custom_params = {}
+        limit = None
+        compute_profile = None
 
         if ":" in table:
             parts = table.split(":", 2)  # Split into max 3 parts
@@ -4026,7 +4028,13 @@ class AlliumSource:
                 for param in param_string.split("&"):
                     if "=" in param:
                         key, value = param.split("=", 1)
-                        custom_params[key] = value
+                        # Extract run_config parameters
+                        if key == "limit":
+                            limit = int(value)
+                        elif key == "compute_profile":
+                            compute_profile = value
+                        else:
+                            custom_params[key] = value
 
         # Extract parameters from interval_start and interval_end
         # Default: 2 days ago 00:00 to yesterday 00:00
@@ -4055,4 +4063,6 @@ class AlliumSource:
             api_key=api_key[0],
             query_id=query_id,
             parameters=parameters if parameters else None,
+            limit=limit,
+            compute_profile=compute_profile,
         )

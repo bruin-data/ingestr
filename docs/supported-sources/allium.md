@@ -43,16 +43,26 @@ ingestr ingest \
 
 The result of this command will be a table in the `allium.duckdb` database.
 
-## Tables
+## Query ID Format
 
-Allium source uses query IDs as table identifiers. The query ID should be passed as the `--source-table` parameter with the `query:` prefix.
+Allium source uses query IDs to identify which query to execute. The query ID should be passed as the `--source-table` parameter with the `query:` prefix.
 
-| Parameter | Format | Example | Description |
-|-----------|--------|---------|-------------|
-| `--source-table` | `query:<query_id>` | `query:abc123def456` | The query ID from Allium explorer |
-| `--source-table` | `query:<query_id>:<params>` | `query:abc123def456:network=ethereum&limit=100` | Query ID with custom parameters |
+| Format | Example | Description |
+|--------|---------|-------------|
+| `query:<query_id>` | `query:abc123def456` | The query ID from Allium explorer |
+| `query:<query_id>:<params>` | `query:abc123def456:network=ethereum&min_value=1000` | Query ID with custom parameters |
+| `query:<query_id>:<params>` | `query:abc123def456:limit=5000&compute_profile=standard` | Query ID with run_config parameters |
 
 Each query ID represents a specific blockchain data query that you've created in the Allium explorer.
+
+### Run Config Parameters
+
+Special parameters that control query execution (part of `run_config`):
+
+- `limit`: Limit the number of rows in the result (max 250,000)
+- `compute_profile`: Compute profile identifier
+
+These parameters are passed in the same format as custom parameters but are used for query execution control.
 
 ### Custom Query Parameters
 
@@ -109,6 +119,34 @@ ingestr ingest \
 
 In this example, the query will receive both the default date parameters and the custom parameters `network` and `min_value`.
 
+### Query with Run Config Parameters
+
+```sh
+ingestr ingest \
+  --source-uri 'allium://?api_key=your_api_key' \
+  --source-table 'query:abc123def456:limit=5000&compute_profile=standard' \
+  --interval-start '2025-02-01' \
+  --interval-end '2025-02-02' \
+  --dest-uri duckdb:///allium.duckdb \
+  --dest-table 'allium.query_results'
+```
+
+This example limits the result to 5000 rows and uses the 'standard' compute profile.
+
+### Query with Both Custom and Run Config Parameters
+
+```sh
+ingestr ingest \
+  --source-uri 'allium://?api_key=your_api_key' \
+  --source-table 'query:abc123def456:network=ethereum&limit=10000&compute_profile=large' \
+  --interval-start '2025-02-01' \
+  --interval-end '2025-02-02' \
+  --dest-uri duckdb:///allium.duckdb \
+  --dest-table 'allium.filtered_transactions'
+```
+
+This example combines custom query parameters (`network`) with run config parameters (`limit` and `compute_profile`).
+
 ## Notes
 
 > [!NOTE]
@@ -120,5 +158,7 @@ In this example, the query will receive both the default date parameters and the
 >   - `start_timestamp` and `end_timestamp` parameters as Unix timestamps (seconds since epoch)
 > - **Default dates**: If not specified, defaults to 2 days ago (00:00) to yesterday (00:00)
 > - Custom parameters can be added to the source table format: `query:your_query_id:param1=value1&param2=value2`
+> - Run config parameters (`limit`, `compute_profile`) are also passed in the source table format
 > - Custom parameters will override default parameters if they have the same name
+> - The `limit` parameter has a maximum value of 250,000 rows
 > - Make sure your query ID is valid and accessible with your API key

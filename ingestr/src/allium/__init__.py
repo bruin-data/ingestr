@@ -17,6 +17,8 @@ def allium_source(
     api_key: str,
     query_id: str,
     parameters: dict[str, Any] | None = None,
+    limit: int | None = None,
+    compute_profile: str | None = None,
 ) -> Any:
     """
     Allium data source for blockchain data extraction.
@@ -27,6 +29,8 @@ def allium_source(
         api_key: Allium API key for authentication
         query_id: The query ID to execute (e.g., 'abc123')
         parameters: Optional parameters for the query (e.g., {'start_date': '2025-02-01', 'end_date': '2025-02-02'})
+        limit: Limit the number of rows in the result (max 250,000)
+        compute_profile: Compute profile identifier
 
     Yields:
         DltResource: Data resources for Allium query results
@@ -49,7 +53,16 @@ def allium_source(
         3. Fetches and yields the results
         """
         # Step 1: Start async query execution
-        run_payload = {"parameters": parameters or {}, "run_config": {}}
+        run_config = {}
+        if limit is not None:
+            run_config["limit"] = limit
+        if compute_profile is not None:
+            run_config["compute_profile"] = compute_profile
+
+        run_payload = {
+            "parameters": parameters or {},
+            "run_config": run_config
+        }
 
         run_response = session.post(
             f"{base_url}/queries/{query_id}/run-async",
@@ -112,9 +125,7 @@ def allium_source(
         results_response.raise_for_status()
         query_output = results_response.json()
 
-        # Extract data and yield each row
-        data = query_output.get("data", [])
-        for row in data:
-            yield row
+        # Extract and yield all data
+        yield query_output.get("data", [])
 
     return (fetch_query_results,)
