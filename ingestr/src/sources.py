@@ -3979,6 +3979,13 @@ class MailchimpSource:
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
+
+        if parsed_uri.scheme != "mailchimp":
+            raise ValueError(
+                f"Invalid URI scheme '{parsed_uri.scheme}' for Mailchimp. "
+                "Expected 'mailchimp://'"
+            )
+
         query_params = parse_qs(parsed_uri.query)
         api_key = query_params.get("api_key")
         server = query_params.get("server")
