@@ -69,7 +69,8 @@ def allium_source(
             json=run_payload,
             headers=headers,
         )
-        run_response.raise_for_status()
+
+
         run_data = run_response.json()
 
         if "run_id" not in run_data:

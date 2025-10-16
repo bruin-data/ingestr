@@ -4051,8 +4051,8 @@ class AlliumSource:
 
         parameters["start_date"] = start_date.strftime("%Y-%m-%d")
         parameters["end_date"] = end_date.strftime("%Y-%m-%d")
-        parameters["start_timestamp"] = int(start_date.timestamp())
-        parameters["end_timestamp"] = int(end_date.timestamp())
+        parameters["start_timestamp"] = str(int(start_date.timestamp()))
+        parameters["end_timestamp"] = str(int(end_date.timestamp()))
 
         # Merge custom parameters (they override default parameters)
         parameters.update(custom_params)
