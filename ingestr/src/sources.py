@@ -609,6 +609,109 @@ class MongoDbSource:
         return replace_placeholders(query)
 
 
+class CouchbaseSource:
+    table_builder: Callable
+
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.couchbase import couchbase_collection
+
+            table_builder = couchbase_collection
+
+        self.table_builder = table_builder
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        import dlt
+        from ingestr.src.couchbase.helpers import (
+            cluster_from_credentials,
+            collection_documents,
+            parse_couchbase_uri,
+        )
+
+        # Parse the URI to extract connection details
+        connection_string, username, password, bucket, scope, collection = parse_couchbase_uri(uri)
+
+        # Parse table parameter
+        # Format can be:
+        # 1. "collection_name" - simple collection name
+        # 2. "bucket.scope.collection" - full path
+        # 3. "collection:n1ql_query" - collection with custom N1QL query
+
+        custom_query = None
+        if ":" in table:
+            # Custom N1QL query format
+            table_name, custom_query = table.split(":", 1)
+        else:
+            table_name = table
+
+        # Parse table name to extract bucket, scope, and collection
+        parts = table_name.split(".")
+        if len(parts) == 3:
+            # Full path: bucket.scope.collection
+            bucket = parts[0]
+            scope = parts[1]
+            collection = parts[2]
+        elif len(parts) == 2:
+            # scope.collection format
+            scope = parts[0]
+            collection = parts[1]
+            # Use bucket from URI if provided
+            if not bucket:
+                raise ValueError("Bucket must be specified in URI or table parameter")
+        elif len(parts) == 1:
+            # Just collection name
+            collection = parts[0]
+            # Use bucket and scope from URI or defaults
+            if not bucket:
+                raise ValueError("Bucket must be specified in URI or table parameter")
+            if not scope:
+                scope = "_default"
+        else:
+            raise ValueError(f"Invalid table format: {table}")
+
+        # Check for incremental load
+        incremental = None
+        if kwargs.get("incremental_key"):
+            start_value = kwargs.get("interval_start")
+            end_value = kwargs.get("interval_end")
+
+            incremental = dlt_incremental(
+                kwargs.get("incremental_key", ""),
+                initial_value=start_value,
+                end_value=end_value,
+            )
+
+        # Build the resource directly, similar to how the couchbase() source does it
+        # This avoids issues with calling a pre-decorated resource
+        cluster = cluster_from_credentials(connection_string, username, password)
+        scope_name = scope or "_default"
+
+        table_instance = dlt.resource(  # type: ignore
+            collection_documents,
+            name=collection,
+            primary_key="_id",
+            write_disposition=None,
+        )(
+            cluster,
+            bucket,
+            scope_name,
+            collection,
+            incremental=incremental,
+            limit=None,
+            chunk_size=10000,
+            filter_={},
+            projection=None,
+            custom_query=custom_query,
+            kv_mode=False,
+            document_keys=None,
+        )
+
+        return table_instance
+
+
 class LocalCsvSource:
     def handles_incrementality(self) -> bool:
         return False
