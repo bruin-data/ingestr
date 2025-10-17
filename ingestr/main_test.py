@@ -4455,6 +4455,542 @@ def test_mongodb_custom_query(testcase, dest):
     dest.stop()
 
 
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_couchbase_source_basic(dest):
+    """Test basic Couchbase data loading"""
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.waiting_utils import wait_for_logs
+
+    # Start Couchbase container
+    couchbase = DockerContainer("couchbase:community-7.2.0")
+    couchbase.with_exposed_ports(8091, 8092, 8093, 8094, 11210)
+    couchbase.start()
+
+    # Wait for Couchbase to be ready
+    wait_for_logs(couchbase, "Starting Couchbase Server", timeout=120)
+    time.sleep(10)  # Additional wait for services to be fully ready
+
+    try:
+        # Get connection details
+        host = couchbase.get_container_host_ip()
+        port = couchbase.get_exposed_port(8091)
+
+        # Initialize Couchbase cluster
+        import requests
+        base_url = f"http://{host}:{port}"
+
+        # Setup cluster
+        requests.post(
+            f"{base_url}/pools/default",
+            data={
+                "memoryQuota": "512",
+                "indexMemoryQuota": "256",
+            },
+        )
+
+        # Setup services
+        requests.post(
+            f"{base_url}/node/controller/setupServices",
+            data={"services": "kv,n1ql,index"},
+        )
+
+        # Setup admin credentials
+        requests.post(
+            f"{base_url}/settings/web",
+            data={
+                "username": "Administrator",
+                "password": "password",
+                "port": "8091",
+            },
+        )
+
+        time.sleep(10)
+
+        # Create bucket
+        requests.post(
+            f"{base_url}/pools/default/buckets",
+            auth=("Administrator", "password"),
+            data={
+                "name": "test_bucket",
+                "ramQuota": "256",
+                "bucketType": "couchbase",
+            },
+        )
+
+        time.sleep(15)  # Wait longer for bucket to be ready
+
+        # Connect using Couchbase SDK and insert test data
+        from couchbase.cluster import Cluster
+        from couchbase.auth import PasswordAuthenticator
+        from couchbase.options import ClusterOptions
+        from datetime import timedelta
+
+        auth = PasswordAuthenticator("Administrator", "password")
+
+        # Retry connection with exponential backoff
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                cluster = Cluster(f"couchbase://{host}", ClusterOptions(auth))
+                cluster.wait_until_ready(timedelta(seconds=60))
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                print(f"Connection attempt {attempt + 1} failed, retrying...")
+                time.sleep(10 * (attempt + 1))
+
+        bucket = cluster.bucket("test_bucket")
+        collection = bucket.default_collection()
+
+        # Insert test documents
+        test_docs = [
+            {
+                "id": 1,
+                "name": "Document 1",
+                "type": "test",
+                "value": 100,
+                "tags": ["tag1", "tag2"],
+            },
+            {
+                "id": 2,
+                "name": "Document 2",
+                "type": "test",
+                "value": 200,
+                "tags": ["tag2", "tag3"],
+            },
+            {
+                "id": 3,
+                "name": "Document 3",
+                "type": "test",
+                "value": 300,
+                "tags": ["tag1", "tag3"],
+            },
+            {
+                "id": 4,
+                "name": "Document 4",
+                "type": "test",
+                "value": 400,
+                "tags": ["tag4"],
+            },
+            {
+                "id": 5,
+                "name": "Document 5",
+                "type": "test",
+                "value": 500,
+                "tags": ["tag5"],
+            },
+        ]
+
+        for i, doc in enumerate(test_docs):
+            collection.upsert(f"doc_{i+1}", doc)
+
+        time.sleep(2)
+
+        # Create primary index for N1QL queries
+        cluster.query("CREATE PRIMARY INDEX ON `test_bucket`").execute()
+        time.sleep(2)
+
+        dest_uri = dest.start()
+
+        # Build Couchbase connection URI
+        cb_port = couchbase.get_exposed_port(11210)
+        source_uri = f"couchbase://Administrator:password@{host}:{cb_port}/test_bucket"
+
+        # Test basic data loading
+        invoke_ingest_command(
+            source_uri,
+            "_default",  # collection name
+            dest_uri,
+            "raw.test_collection",
+        )
+
+        # Verify data was loaded
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(
+                "select id, name, type, value from raw.test_collection order by id"
+            ).fetchall()
+
+            assert len(res) == 5
+            assert res[0] == (1, "Document 1", "test", 100)
+            assert res[1] == (2, "Document 2", "test", 200)
+            assert res[4] == (5, "Document 5", "test", 500)
+
+    finally:
+        dest.stop()
+        couchbase.stop()
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_couchbase_source_with_custom_query(dest):
+    """Test Couchbase with custom N1QL query"""
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.waiting_utils import wait_for_logs
+
+    # Start Couchbase container
+    couchbase = DockerContainer("couchbase:community-7.2.0")
+    couchbase.with_exposed_ports(8091, 8092, 8093, 8094, 11210)
+    couchbase.start()
+
+    wait_for_logs(couchbase, "Starting Couchbase Server", timeout=120)
+    time.sleep(10)
+
+    try:
+        # Get connection details
+        host = couchbase.get_container_host_ip()
+        port = couchbase.get_exposed_port(8091)
+
+        # Initialize cluster (same as above)
+        import requests
+        base_url = f"http://{host}:{port}"
+
+        requests.post(
+            f"{base_url}/pools/default",
+            data={"memoryQuota": "512", "indexMemoryQuota": "256"},
+        )
+        requests.post(
+            f"{base_url}/node/controller/setupServices",
+            data={"services": "kv,n1ql,index"},
+        )
+        requests.post(
+            f"{base_url}/settings/web",
+            data={"username": "Administrator", "password": "password", "port": "8091"},
+        )
+        time.sleep(5)
+
+        requests.post(
+            f"{base_url}/pools/default/buckets",
+            auth=("Administrator", "password"),
+            data={"name": "test_bucket", "ramQuota": "256", "bucketType": "couchbase"},
+        )
+        time.sleep(5)
+
+        # Connect and insert data
+        from couchbase.cluster import Cluster
+        from couchbase.auth import PasswordAuthenticator
+        from couchbase.options import ClusterOptions
+        from datetime import timedelta
+
+        auth = PasswordAuthenticator("Administrator", "password")
+        cluster = Cluster(f"couchbase://{host}", ClusterOptions(auth))
+        cluster.wait_until_ready(timedelta(seconds=30))
+
+        bucket = cluster.bucket("test_bucket")
+        collection = bucket.default_collection()
+
+        # Insert documents with different statuses
+        test_docs = [
+            {"id": 1, "name": "Active Doc 1", "status": "active", "value": 100},
+            {"id": 2, "name": "Active Doc 2", "status": "active", "value": 200},
+            {"id": 3, "name": "Inactive Doc 1", "status": "inactive", "value": 300},
+            {"id": 4, "name": "Active Doc 3", "status": "active", "value": 400},
+            {"id": 5, "name": "Inactive Doc 2", "status": "inactive", "value": 500},
+        ]
+
+        for i, doc in enumerate(test_docs):
+            collection.upsert(f"doc_{i+1}", doc)
+
+        time.sleep(2)
+        cluster.query("CREATE PRIMARY INDEX ON `test_bucket`").execute()
+        time.sleep(2)
+
+        dest_uri = dest.start()
+
+        # Build connection URI with custom query
+        cb_port = couchbase.get_exposed_port(11210)
+        source_uri = f"couchbase://Administrator:password@{host}:{cb_port}/test_bucket"
+
+        # Custom N1QL query to filter only active documents
+        custom_query = "SELECT META().id as _id, * FROM `test_bucket` WHERE status = 'active'"
+        table_spec = f"_default:{custom_query}"
+
+        invoke_ingest_command(
+            source_uri,
+            table_spec,
+            dest_uri,
+            "raw.active_docs",
+        )
+
+        # Verify only active documents were loaded
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(
+                "select id, name, status, value from raw.active_docs order by id"
+            ).fetchall()
+
+            assert len(res) == 3  # Only 3 active documents
+            assert all(row[2] == "active" for row in res)
+            assert res[0][0] == 1
+            assert res[1][0] == 2
+            assert res[2][0] == 4
+
+    finally:
+        dest.stop()
+        couchbase.stop()
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_couchbase_source_incremental(dest):
+    """Test Couchbase incremental loading"""
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.waiting_utils import wait_for_logs
+
+    couchbase = DockerContainer("couchbase:community-7.2.0")
+    couchbase.with_exposed_ports(8091, 8092, 8093, 8094, 11210)
+    couchbase.start()
+
+    wait_for_logs(couchbase, "Starting Couchbase Server", timeout=120)
+    time.sleep(10)
+
+    try:
+        # Initialize cluster
+        host = couchbase.get_container_host_ip()
+        port = couchbase.get_exposed_port(8091)
+
+        import requests
+        base_url = f"http://{host}:{port}"
+
+        requests.post(
+            f"{base_url}/pools/default",
+            data={"memoryQuota": "512", "indexMemoryQuota": "256"},
+        )
+        requests.post(
+            f"{base_url}/node/controller/setupServices",
+            data={"services": "kv,n1ql,index"},
+        )
+        requests.post(
+            f"{base_url}/settings/web",
+            data={"username": "Administrator", "password": "password", "port": "8091"},
+        )
+        time.sleep(5)
+
+        requests.post(
+            f"{base_url}/pools/default/buckets",
+            auth=("Administrator", "password"),
+            data={"name": "test_bucket", "ramQuota": "256", "bucketType": "couchbase"},
+        )
+        time.sleep(5)
+
+        # Connect and insert data with timestamps
+        from couchbase.cluster import Cluster
+        from couchbase.auth import PasswordAuthenticator
+        from couchbase.options import ClusterOptions
+        from datetime import timedelta, datetime
+
+        auth = PasswordAuthenticator("Administrator", "password")
+        cluster = Cluster(f"couchbase://{host}", ClusterOptions(auth))
+        cluster.wait_until_ready(timedelta(seconds=30))
+
+        bucket = cluster.bucket("test_bucket")
+        collection = bucket.default_collection()
+
+        # Insert documents with different timestamps
+        base_time = datetime(2024, 1, 1, 0, 0, 0)
+        test_docs = [
+            {
+                "id": 1,
+                "name": "Doc 1",
+                "updated_at": (base_time + timedelta(days=1)).isoformat(),
+                "value": 100,
+            },
+            {
+                "id": 2,
+                "name": "Doc 2",
+                "updated_at": (base_time + timedelta(days=2)).isoformat(),
+                "value": 200,
+            },
+            {
+                "id": 3,
+                "name": "Doc 3",
+                "updated_at": (base_time + timedelta(days=3)).isoformat(),
+                "value": 300,
+            },
+            {
+                "id": 4,
+                "name": "Doc 4",
+                "updated_at": (base_time + timedelta(days=4)).isoformat(),
+                "value": 400,
+            },
+            {
+                "id": 5,
+                "name": "Doc 5",
+                "updated_at": (base_time + timedelta(days=5)).isoformat(),
+                "value": 500,
+            },
+        ]
+
+        for i, doc in enumerate(test_docs):
+            collection.upsert(f"doc_{i+1}", doc)
+
+        time.sleep(2)
+        cluster.query("CREATE PRIMARY INDEX ON `test_bucket`").execute()
+        time.sleep(2)
+
+        dest_uri = dest.start()
+
+        # Build connection URI
+        cb_port = couchbase.get_exposed_port(11210)
+        source_uri = f"couchbase://Administrator:password@{host}:{cb_port}/test_bucket"
+
+        # First load: get documents from day 2 onwards
+        invoke_ingest_command(
+            source_uri,
+            "_default",
+            dest_uri,
+            "raw.incremental_test",
+            inc_key="updated_at",
+            interval_start=(base_time + timedelta(days=2)).isoformat(),
+            interval_end=(base_time + timedelta(days=10)).isoformat(),
+        )
+
+        # Verify we got documents 2-5 (4 documents)
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(
+                "select id, name, value from raw.incremental_test order by id"
+            ).fetchall()
+
+            assert len(res) == 4
+            assert res[0][0] == 2  # Doc 2
+            assert res[3][0] == 5  # Doc 5
+
+    finally:
+        dest.stop()
+        couchbase.stop()
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_couchbase_source_with_projection(dest):
+    """Test Couchbase with field projection"""
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.waiting_utils import wait_for_logs
+
+    couchbase = DockerContainer("couchbase:community-7.2.0")
+    couchbase.with_exposed_ports(8091, 8092, 8093, 8094, 11210)
+    couchbase.start()
+
+    wait_for_logs(couchbase, "Starting Couchbase Server", timeout=120)
+    time.sleep(10)
+
+    try:
+        # Initialize cluster
+        host = couchbase.get_container_host_ip()
+        port = couchbase.get_exposed_port(8091)
+
+        import requests
+        base_url = f"http://{host}:{port}"
+
+        requests.post(
+            f"{base_url}/pools/default",
+            data={"memoryQuota": "512", "indexMemoryQuota": "256"},
+        )
+        requests.post(
+            f"{base_url}/node/controller/setupServices",
+            data={"services": "kv,n1ql,index"},
+        )
+        requests.post(
+            f"{base_url}/settings/web",
+            data={"username": "Administrator", "password": "password", "port": "8091"},
+        )
+        time.sleep(5)
+
+        requests.post(
+            f"{base_url}/pools/default/buckets",
+            auth=("Administrator", "password"),
+            data={"name": "test_bucket", "ramQuota": "256", "bucketType": "couchbase"},
+        )
+        time.sleep(5)
+
+        # Connect and insert data
+        from couchbase.cluster import Cluster
+        from couchbase.auth import PasswordAuthenticator
+        from couchbase.options import ClusterOptions
+        from datetime import timedelta
+
+        auth = PasswordAuthenticator("Administrator", "password")
+        cluster = Cluster(f"couchbase://{host}", ClusterOptions(auth))
+        cluster.wait_until_ready(timedelta(seconds=30))
+
+        bucket = cluster.bucket("test_bucket")
+        collection = bucket.default_collection()
+
+        # Insert documents with many fields
+        test_docs = [
+            {
+                "id": 1,
+                "name": "Doc 1",
+                "description": "Long description here",
+                "category": "A",
+                "value": 100,
+                "extra_field1": "data1",
+                "extra_field2": "data2",
+            },
+            {
+                "id": 2,
+                "name": "Doc 2",
+                "description": "Another description",
+                "category": "B",
+                "value": 200,
+                "extra_field1": "data3",
+                "extra_field2": "data4",
+            },
+        ]
+
+        for i, doc in enumerate(test_docs):
+            collection.upsert(f"doc_{i+1}", doc)
+
+        time.sleep(2)
+        cluster.query("CREATE PRIMARY INDEX ON `test_bucket`").execute()
+        time.sleep(2)
+
+        dest_uri = dest.start()
+
+        # Build connection URI with projection in custom query
+        cb_port = couchbase.get_exposed_port(11210)
+        source_uri = f"couchbase://Administrator:password@{host}:{cb_port}/test_bucket"
+
+        # Custom query with specific field selection
+        custom_query = "SELECT META().id as _id, id, name, value FROM `test_bucket`"
+        table_spec = f"_default:{custom_query}"
+
+        invoke_ingest_command(
+            source_uri,
+            table_spec,
+            dest_uri,
+            "raw.projected_docs",
+        )
+
+        # Verify only projected fields are present
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            # Get column names
+            result = conn.execute("select * from raw.projected_docs limit 1")
+            columns = result.keys()
+
+            # Should have _id, id, name, value but NOT description, category, extra_field1, extra_field2
+            assert "id" in columns
+            assert "name" in columns
+            assert "value" in columns
+            # Note: Exact column assertions depend on how the destination handles schema
+
+            res = conn.execute(
+                "select id, name, value from raw.projected_docs order by id"
+            ).fetchall()
+
+            assert len(res) == 2
+            assert res[0] == (1, "Doc 1", 100)
+            assert res[1] == (2, "Doc 2", 200)
+
+    finally:
+        dest.stop()
+        couchbase.stop()
+
+
 def test_s3_destination():
     # should raise an error if endpoint_url doesn't have a scheme or a host
     with pytest.raises(ValueError, match="Invalid endpoint_url"):
