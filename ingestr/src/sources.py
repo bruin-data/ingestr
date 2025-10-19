@@ -1876,6 +1876,53 @@ class JiraSource:
         return src.with_resources(table)
 
 
+class CouchbaseSource:
+    resources = [
+        "pools_default",
+    ]
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        # Couchbase Cloud uses HTTPS by default
+        # Check if port 18091 is specified (standard Couchbase REST API port)
+        if ":18091" in parsed_uri.netloc or ":8091" in parsed_uri.netloc:
+            scheme = "https" if ":18091" in parsed_uri.netloc else "http"
+        else:
+            scheme = "https"  # Default to HTTPS for Couchbase Cloud
+
+        base_url = f"{scheme}://{parsed_uri.netloc}"
+
+        username = params.get("username")
+        password = params.get("password")
+
+        if not username:
+            raise ValueError("username must be specified in the URI query parameters")
+
+        if not password:
+            raise ValueError("password is required for connecting to Couchbase")
+
+        if table not in self.resources:
+            raise ValueError(
+                f"Resource '{table}' is not supported for Couchbase source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        import dlt
+
+        from ingestr.src.couchbase_source import couchbase_source
+
+        dlt.secrets["sources.couchbase_source.base_url"] = base_url
+        dlt.secrets["sources.couchbase_source.username"] = username[0]
+        dlt.secrets["sources.couchbase_source.password"] = password[0]
+
+        src = couchbase_source()
+        return src.with_resources(table)
+
+
 class DynamoDBSource:
     AWS_ENDPOINT_PATTERN = re.compile(".*\.(.+)\.amazonaws\.com")
 
