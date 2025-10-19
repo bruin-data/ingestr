@@ -1879,6 +1879,8 @@ class JiraSource:
 class CouchbaseSource:
     resources = [
         "pools_default",
+        "buckets",
+        "scopes",
     ]
 
     def handles_incrementality(self) -> bool:
@@ -1888,14 +1890,8 @@ class CouchbaseSource:
         parsed_uri = urlparse(uri)
         params = parse_qs(parsed_uri.query)
 
-        # Couchbase Cloud uses HTTPS by default
-        # Check if port 18091 is specified (standard Couchbase REST API port)
-        if ":18091" in parsed_uri.netloc or ":8091" in parsed_uri.netloc:
-            scheme = "https" if ":18091" in parsed_uri.netloc else "http"
-        else:
-            scheme = "https"  # Default to HTTPS for Couchbase Cloud
-
-        base_url = f"{scheme}://{parsed_uri.netloc}"
+        # Couchbase Cloud uses HTTPS
+        base_url = f"https://{parsed_uri.netloc}"
 
         username = params.get("username")
         password = params.get("password")

@@ -73,111 +73,34 @@ class CouchbaseClient:
         method: str = "GET",
         params: Optional[Dict[str, Any]] = None,
         data: Optional[Dict[str, Any]] = None,
-        max_retries: int = 3,
-        backoff_factor: float = 1.0,
     ) -> Dict[str, Any]:
         """
-        Make HTTP request to Couchbase API with retry logic.
+        Make HTTP request to Couchbase API.
 
         Args:
             endpoint: API endpoint path
             method: HTTP method (GET, POST, etc.)
             params: Query parameters
             data: Request body data
-            max_retries: Maximum number of retry attempts
-            backoff_factor: Factor for exponential backoff
 
         Returns:
             JSON response data
-
-        Raises:
-            CouchbaseAPIError: If request fails after retries
-            CouchbaseAuthenticationError: If authentication fails
-            CouchbaseRateLimitError: If rate limit is exceeded
         """
         url = urljoin(self.base_url + "/", endpoint.lstrip("/"))
 
-        for attempt in range(max_retries + 1):
-            try:
-                response = requests.request(
-                    method=method,
-                    url=url,
-                    headers=self.headers,
-                    params=params,
-                    json=data,
-                    auth=(self.username, self.password),
-                    timeout=self.timeout,
-                    verify=False,  # Disable SSL verification for self-signed certificates
-                )
+        response = requests.request(
+            method=method,
+            url=url,
+            headers=self.headers,
+            params=params,
+            json=data,
+            auth=(self.username, self.password),
+            timeout=self.timeout,
+            verify=False,
+        )
 
-                # Handle different error status codes
-                if response.status_code == 401:
-                    raise CouchbaseAuthenticationError(
-                        "Authentication failed. Please check your username and password.",
-                        status_code=response.status_code,
-                        response_text=response.text,
-                    )
-                elif response.status_code == 403:
-                    raise CouchbaseAuthenticationError(
-                        "Access forbidden. Please check your permissions.",
-                        status_code=response.status_code,
-                        response_text=response.text,
-                    )
-                elif response.status_code == 429:
-                    # Rate limit exceeded
-                    retry_after = int(response.headers.get("Retry-After", 60))
-                    if attempt < max_retries:
-                        logger.warning(
-                            f"Rate limit exceeded. Waiting {retry_after} seconds before retry."
-                        )
-                        time.sleep(retry_after)
-                        continue
-                    else:
-                        raise CouchbaseRateLimitError(
-                            f"Rate limit exceeded after {max_retries} retries.",
-                            status_code=response.status_code,
-                            response_text=response.text,
-                        )
-                elif response.status_code >= 500:
-                    # Server error - retry with backoff
-                    if attempt < max_retries:
-                        wait_time = backoff_factor * (2**attempt)
-                        logger.warning(
-                            f"Server error {response.status_code}. Retrying in {wait_time} seconds."
-                        )
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        raise CouchbaseAPIError(
-                            f"Server error after {max_retries} retries.",
-                            status_code=response.status_code,
-                            response_text=response.text,
-                        )
-
-                # Raise for other HTTP errors
-                response.raise_for_status()
-
-                # Try to parse JSON response
-                try:
-                    return response.json()
-                except ValueError:
-                    # If response is not JSON, return empty dict
-                    return {"status": "success", "raw_response": response.text}
-
-            except requests.RequestException as e:
-                if attempt < max_retries:
-                    wait_time = backoff_factor * (2**attempt)
-                    logger.warning(
-                        f"Request failed: {str(e)}. Retrying in {wait_time} seconds."
-                    )
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    raise CouchbaseAPIError(
-                        f"Request failed after {max_retries} retries: {str(e)}"
-                    )
-
-        raise CouchbaseAPIError(f"Request failed after {max_retries} retries")
+        response.raise_for_status()
+        return response.json()
 
     def get_pools_default(self) -> Dict[str, Any]:
         """
@@ -188,6 +111,45 @@ class CouchbaseClient:
         """
         logger.info("Fetching pools/default information")
         return self._make_request("/pools/default")
+
+    def get_buckets(self) -> List[Dict[str, Any]]:
+        """
+        Get all buckets defined on the cluster.
+
+        Returns:
+            List of all buckets
+        """
+        logger.info("Fetching all buckets")
+        response = self._make_request("/pools/default/buckets")
+        if isinstance(response, list):
+            return response
+        return [response]
+
+    def get_bucket(self, bucket_name: str) -> Dict[str, Any]:
+        """
+        Get detailed information for a specific bucket including streaming URI.
+
+        Args:
+            bucket_name: Name of the bucket
+
+        Returns:
+            Bucket information with streaming URI
+        """
+        logger.info(f"Fetching bucket details: {bucket_name}")
+        return self._make_request(f"/pools/default/buckets/{bucket_name}")
+
+    def get_bucket_scopes(self, bucket_name: str) -> Dict[str, Any]:
+        """
+        Get scopes and collections for a specific bucket.
+
+        Args:
+            bucket_name: Name of the bucket
+
+        Returns:
+            Scopes and collections information
+        """
+        logger.info(f"Fetching scopes for bucket: {bucket_name}")
+        return self._make_request(f"/pools/default/buckets/{bucket_name}/scopes/")
 
 
 def get_client(
