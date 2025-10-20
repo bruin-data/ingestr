@@ -4091,10 +4091,15 @@ class CouchbaseSource:
         Note: If password contains special characters (@, :, /, etc.), they must be URL-encoded.
 
         Examples:
+            Local/Self-hosted:
             - Simple: couchbase://admin:password123@localhost
             - With special chars: couchbase://admin:MyPass%40123%21@localhost
                 (for password "MyPass@123!")
-            - Secure: couchbases://admin:password@secure.example.com
+
+            Capella (Cloud):
+            - Secure: couchbases://username:Password!123@your-instance.dp.cloud.couchbase.com
+            - With encoded password: couchbases://username:Password%21123@your-instance.dp.cloud.couchbase.com
+                (for password "Password!123")
 
         To encode password in Python:
             from urllib.parse import quote
@@ -4103,9 +4108,12 @@ class CouchbaseSource:
 
         Args:
             uri: Couchbase connection URI
-            table: Must be in format bucket.scope.collection (e.g., "deneme._default._default")
+            table: Must be in format bucket.scope.collection (e.g., "travel-sample.inventory.airline")
             **kwargs: Additional arguments:
                 - limit: Maximum number of documents to fetch
+                - incremental_key: Field to use for incremental loading
+                - interval_start: Start value for incremental loading
+                - interval_end: End value for incremental loading
 
         Returns:
             DltResource for the Couchbase collection
@@ -4135,6 +4143,11 @@ class CouchbaseSource:
         # Remove username:password@ from netloc if present
         if "@" in netloc:
             netloc = netloc.split("@", 1)[1]
+
+        # Auto-detect Capella and use secure connection
+        # If hostname contains 'cloud.couchbase.com', use couchbases://
+        if 'cloud.couchbase.com' in netloc and scheme == 'couchbase':
+            scheme = 'couchbases'
 
         connection_string = f"{scheme}://{netloc}"
 

@@ -30,7 +30,9 @@ def client_from_credentials(
     Create a Couchbase cluster client from credentials.
 
     Args:
-        connection_string: Couchbase connection string (e.g., 'couchbase://localhost')
+        connection_string: Couchbase connection string
+            - Local/self-hosted: 'couchbase://localhost'
+            - Capella (cloud): 'couchbases://your-instance.cloud.couchbase.com'
         username: Couchbase username
         password: Couchbase password
 
@@ -39,6 +41,12 @@ def client_from_credentials(
     """
     auth = PasswordAuthenticator(username, password)
     options = ClusterOptions(auth)
+
+    # Apply wan_development profile for Capella (couchbases://) connections
+    # This helps avoid latency issues when accessing from different networks
+    if connection_string.startswith('couchbases://'):
+        options.apply_profile('wan_development')
+
     cluster = Cluster(connection_string, options)
     cluster.wait_until_ready(timedelta(seconds=30))
 
