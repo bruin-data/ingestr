@@ -95,9 +95,8 @@ class TestPaginate:
 
         results = list(_paginate("test_api_key", "/test"))
 
-        assert len(results) == 2
-        assert results[0] == {"id": 1}
-        assert results[1] == {"id": 2}
+        assert len(results) == 1  # One page
+        assert results[0] == [{"id": 1}, {"id": 2}]  # Page contains two items
         mock_make_request.assert_called_once()
 
     @patch("revenuecat.helpers._make_request")
@@ -114,9 +113,9 @@ class TestPaginate:
 
         results = list(_paginate("test_api_key", "/test"))
 
-        assert len(results) == 2
-        assert results[0] == {"id": 1}
-        assert results[1] == {"id": 2}
+        assert len(results) == 2  # Two pages
+        assert results[0] == [{"id": 1}]  # First page contains one item
+        assert results[1] == [{"id": 2}]  # Second page contains one item
         assert mock_make_request.call_count == 2
 
 
