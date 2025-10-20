@@ -4073,6 +4073,7 @@ class CouchbaseSource:
         return False
 
     # couchbase://host:port?username=<username>&password=<password>&bucket_name=<bucket_name>
+    # couchbases://host:port?username=<username>&password=<password>  (for Capella/Cloud with SSL)
     # For scopes: table format: scopes (requires bucket_name in URI)
 
     def dlt_source(self, uri: str, table: str, **kwargs):
@@ -4085,26 +4086,42 @@ class CouchbaseSource:
         source_parts = urlparse(uri)
         source_fields = parse_qs(source_parts.query)
 
+        # Detect if using Capella/Cloud (couchbases://) or local server (couchbase://)
+        use_ssl = source_parts.scheme == "couchbases"
+
         username = source_fields.get("username")
         password = source_fields.get("password")
         bucket_name = source_fields.get("bucket_name", [None])[0]
+        api_token = source_fields.get("api_token", [None])[0]
 
-        if not username:
-            raise ValueError("username in the URI is required to connect to Couchbase")
+        # For Capella Cloud API endpoints, api_token is required instead of username/password
+        if table.startswith("capella_"):
+            if not api_token:
+                raise ValueError("api_token in the URI is required for Capella Cloud API endpoints")
+            # For Capella Cloud API, we use cloudapi.cloud.couchbase.com
+            host = "cloudapi.cloud.couchbase.com"
+            port = 443  # HTTPS port
+            use_ssl = True
+        else:
+            if not username:
+                raise ValueError("username in the URI is required to connect to Couchbase")
 
-        if not password:
-            raise ValueError("password in the URI is required to connect to Couchbase")
+            if not password:
+                raise ValueError("password in the URI is required to connect to Couchbase")
 
-        host = source_parts.hostname or "localhost"
-        port = source_parts.port or 8091
+            host = source_parts.hostname or "localhost"
+            # Default port: 18091 for Capella SSL, 8091 for local server
+            port = source_parts.port or (18091 if use_ssl else 8091)
 
         from ingestr.src.couchbase_source import couchbase_source
 
         return couchbase_source(
             host=host,
-            username=username[0],
-            password=password[0],
+            username=username[0] if username else None,
+            password=password[0] if password else None,
             port=port,
             table_name=table,
             bucket_name=bucket_name,
+            use_ssl=use_ssl,
+            api_token=api_token,
         )
