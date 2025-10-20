@@ -47,7 +47,7 @@ def couchbase_source(
 
     resource_name = f"{bucket}_{scope}_{collection}"
 
-    return dlt.resource(  # type: ignore
+    return dlt.resource(  # type: ignore[call-overload, arg-type]
         fetch_documents,
         name=resource_name,
         primary_key="id",
@@ -67,7 +67,7 @@ def couchbase_source(
 @dlt.resource(
     name=lambda args: f"{args['bucket']}_{args['scope']}_{args['collection']}",
     standalone=True,
-    spec=CouchbaseConfiguration,
+    spec=CouchbaseConfiguration,  # type: ignore[arg-type]
 )
 def couchbase_collection(
     connection_string: str = dlt.secrets.value,
@@ -102,7 +102,7 @@ def couchbase_collection(
     # Set up Couchbase client
     cluster = client_from_credentials(connection_string, username, password)
 
-    return dlt.resource(  # type: ignore
+    return dlt.resource(  # type: ignore[call-overload]
         fetch_documents,
         name=f"{bucket}_{scope}_{collection}",
         primary_key="id",
