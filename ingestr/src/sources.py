@@ -4072,7 +4072,8 @@ class CouchbaseSource:
     def handles_incrementality(self) -> bool:
         return False
 
-    # couchbase://host:port?username=<username>&password=<password>
+    # couchbase://host:port?username=<username>&password=<password>&bucket_name=<bucket_name>
+    # For scopes: table format: scopes (requires bucket_name in URI)
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
@@ -4086,6 +4087,7 @@ class CouchbaseSource:
 
         username = source_fields.get("username")
         password = source_fields.get("password")
+        bucket_name = source_fields.get("bucket_name", [None])[0]
 
         if not username:
             raise ValueError("username in the URI is required to connect to Couchbase")
@@ -4103,4 +4105,6 @@ class CouchbaseSource:
             username=username[0],
             password=password[0],
             port=port,
+            table_name=table,
+            bucket_name=bucket_name,
         )
