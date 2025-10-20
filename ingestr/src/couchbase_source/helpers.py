@@ -44,8 +44,8 @@ def client_from_credentials(
 
     # Apply wan_development profile for Capella (couchbases://) connections
     # This helps avoid latency issues when accessing from different networks
-    if connection_string.startswith('couchbases://'):
-        options.apply_profile('wan_development')
+    if connection_string.startswith("couchbases://"):
+        options.apply_profile("wan_development")
 
     cluster = Cluster(connection_string, options)
     cluster.wait_until_ready(timedelta(seconds=30))
@@ -79,11 +79,12 @@ def fetch_documents(
     """
     # Build N1QL query with full path
     full_collection_path = f"`{bucket_name}`.`{scope_name}`.`{collection_name}`"
-    n1ql_query = f"SELECT META().id as id, {full_collection_path}.* FROM {full_collection_path}"
+    n1ql_query = (
+        f"SELECT META().id as id, {full_collection_path}.* FROM {full_collection_path}"
+    )
 
     # Add incremental filter if provided
     if incremental and incremental.cursor_path:
-        start_value = incremental.last_value
         where_clause = f" WHERE {incremental.cursor_path} >= $start_value"
         if incremental.end_value is not None:
             where_clause += f" AND {incremental.cursor_path} < $end_value"
@@ -112,10 +113,16 @@ def fetch_documents(
             doc = dict(row)
 
             # Convert datetime fields to proper format
-            if incremental and incremental.cursor_path and incremental.cursor_path in doc:
+            if (
+                incremental
+                and incremental.cursor_path
+                and incremental.cursor_path in doc
+            ):
                 cursor_value = doc[incremental.cursor_path]
                 if isinstance(cursor_value, (str, datetime)):
-                    doc[incremental.cursor_path] = ensure_pendulum_datetime(cursor_value)
+                    doc[incremental.cursor_path] = ensure_pendulum_datetime(
+                        cursor_value
+                    )
 
             yield doc
 

@@ -1,6 +1,6 @@
 """Source that loads data from Couchbase buckets, supports incremental loads."""
 
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Optional
 
 import dlt
 from dlt.sources import DltResource
