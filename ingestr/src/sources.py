@@ -4066,3 +4066,117 @@ class AlliumSource:
             limit=limit,
             compute_profile=compute_profile,
         )
+
+
+class CouchbaseSource:
+    table_builder: Callable
+
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.couchbase_source import couchbase_collection
+
+            table_builder = couchbase_collection
+
+        self.table_builder = table_builder
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        """
+        Create a dlt source for reading data from Couchbase.
+
+        URI format: couchbase://username:password@host or couchbases://username:password@host
+
+        Note: If password contains special characters (@, :, /, etc.), they must be URL-encoded.
+
+        Examples:
+            - Simple: couchbase://admin:password123@localhost
+            - With special chars: couchbase://admin:MyPass%40123%21@localhost
+                (for password "MyPass@123!")
+            - Secure: couchbases://admin:password@secure.example.com
+
+        To encode password in Python:
+            from urllib.parse import quote
+            encoded_pwd = quote("MyPass@123!", safe='')
+            uri = f"couchbase://admin:{encoded_pwd}@localhost"
+
+        Args:
+            uri: Couchbase connection URI
+            table: Must be in format bucket.scope.collection (e.g., "deneme._default._default")
+            **kwargs: Additional arguments:
+                - limit: Maximum number of documents to fetch
+                - query: Custom N1QL query
+
+        Returns:
+            DltResource for the Couchbase collection
+        """
+        # Parse the URI to extract connection details
+        # urlparse automatically decodes URL-encoded credentials
+        from urllib.parse import unquote
+
+        parsed = urlparse(uri)
+
+        # Extract username and password from URI (automatically decoded by urlparse)
+        username = parsed.username
+        password = parsed.password
+
+        if not username or not password:
+            raise ValueError(
+                "Username and password must be provided in the URI.\n"
+                "Format: couchbase://username:password@host\n"
+                "If password has special characters (@, :, /), URL-encode them.\n"
+                "Example: couchbase://admin:MyPass%40123@localhost for password 'MyPass@123'"
+            )
+
+        # Reconstruct connection string without credentials
+        scheme = parsed.scheme  # couchbase or couchbases
+        netloc = parsed.netloc
+
+        # Remove username:password@ from netloc if present
+        if "@" in netloc:
+            netloc = netloc.split("@", 1)[1]
+
+        connection_string = f"{scheme}://{netloc}"
+
+        # Parse table format: bucket.scope.collection (required)
+        table_parts = table.split(".")
+        if len(table_parts) == 3:
+            bucket, scope, collection = table_parts
+        else:
+            raise ValueError(
+                "Table format must be 'bucket.scope.collection'. "
+                f"Got: {table}\n"
+                "Example: deneme._default._default"
+            )
+
+        # Handle incremental loading
+        incremental = None
+        if kwargs.get("incremental_key"):
+            start_value = kwargs.get("interval_start")
+            end_value = kwargs.get("interval_end")
+
+            incremental = dlt_incremental(
+                kwargs.get("incremental_key", ""),
+                initial_value=start_value,
+                end_value=end_value,
+                range_end="closed",
+                range_start="closed",
+            )
+
+        # Get optional parameters
+        limit = kwargs.get("limit")
+        table_instance = self.table_builder(
+            connection_string=connection_string,
+            username=username,
+            password=password,
+            bucket=bucket,
+            scope=scope,
+            collection=collection,
+            incremental=incremental,
+            limit=limit,
+            query=query,
+        )
+        table_instance.max_table_nesting = 1
+
+        return table_instance

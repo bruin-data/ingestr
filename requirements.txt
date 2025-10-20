@@ -76,6 +76,8 @@ clickhouse-sqlalchemy==0.2.7
     # via -r requirements.in
 confluent-kafka==2.8.0
     # via -r requirements.in
+couchbase==4.3.6
+    # via -r requirements.in
 crate==2.0.0
     # via sqlalchemy-cratedb
 cryptography==44.0.2
