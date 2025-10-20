@@ -4145,8 +4145,9 @@ class CouchbaseSource:
             netloc = netloc.split("@", 1)[1]
 
         # Auto-detect Capella and use secure connection
-        # If hostname contains 'cloud.couchbase.com', use couchbases://
-        if 'cloud.couchbase.com' in netloc and scheme == 'couchbase':
+        # If hostname matches 'cloud.couchbase.com' or its subdomains, use couchbases://
+        hostname = parsed.hostname
+        if hostname and (hostname == 'cloud.couchbase.com' or hostname.endswith('.cloud.couchbase.com')) and scheme == 'couchbase':
             scheme = 'couchbases'
 
         connection_string = f"{scheme}://{netloc}"
