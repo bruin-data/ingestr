@@ -4106,7 +4106,6 @@ class CouchbaseSource:
             table: Must be in format bucket.scope.collection (e.g., "deneme._default._default")
             **kwargs: Additional arguments:
                 - limit: Maximum number of documents to fetch
-                - query: Custom N1QL query
 
         Returns:
             DltResource for the Couchbase collection
@@ -4130,7 +4129,7 @@ class CouchbaseSource:
             )
 
         # Reconstruct connection string without credentials
-        scheme = parsed.scheme  # couchbase or couchbases
+        scheme = parsed.scheme
         netloc = parsed.netloc
 
         # Remove username:password@ from netloc if present
@@ -4166,6 +4165,7 @@ class CouchbaseSource:
 
         # Get optional parameters
         limit = kwargs.get("limit")
+
         table_instance = self.table_builder(
             connection_string=connection_string,
             username=username,
@@ -4175,7 +4175,6 @@ class CouchbaseSource:
             collection=collection,
             incremental=incremental,
             limit=limit,
-            query=query,
         )
         table_instance.max_table_nesting = 1
 

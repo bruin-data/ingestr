@@ -23,7 +23,6 @@ def couchbase_source(
     incremental: Optional[dlt.sources.incremental] = None,  # type: ignore[type-arg]
     write_disposition: Optional[str] = dlt.config.value,
     limit: Optional[int] = None,
-    query: Optional[str] = None,
 ) -> DltResource:
     """
     A DLT source which loads data from a Couchbase bucket using Couchbase Python SDK.
@@ -39,14 +38,12 @@ def couchbase_source(
             E.g., `incremental=dlt.sources.incremental('updated_at', pendulum.parse('2022-01-01T00:00:00Z'))`
         write_disposition (str): Write disposition of the resource.
         limit (Optional[int]): The maximum number of documents to load.
-        query (Optional[str]): N1QL query to filter documents. If not provided, all documents are fetched.
 
     Returns:
         DltResource: A DLT resource for the Couchbase collection.
     """
     # Set up Couchbase client
     cluster = client_from_credentials(connection_string, username, password)
-
 
     resource_name = f"{bucket}_{scope}_{collection}"
 
@@ -64,7 +61,6 @@ def couchbase_source(
         collection_name=collection,
         incremental=incremental,
         limit=limit,
-        query=query,
     )
 
 
@@ -84,7 +80,6 @@ def couchbase_collection(
     write_disposition: Optional[str] = dlt.config.value,
     limit: Optional[int] = None,
     chunk_size: Optional[int] = 1000,
-    query: Optional[str] = None,
 ) -> DltResource:
     """
     A DLT resource which loads a collection from Couchbase.
@@ -100,7 +95,6 @@ def couchbase_collection(
         write_disposition (str): Write disposition of the resource.
         limit (Optional[int]): The maximum number of documents to load.
         chunk_size (Optional[int]): The number of documents to load in each batch.
-        query (Optional[str]): N1QL query to filter documents.
 
     Returns:
         DltResource: A DLT resource for the Couchbase collection.
@@ -121,5 +115,4 @@ def couchbase_collection(
         incremental=incremental,
         limit=limit,
         chunk_size=chunk_size,
-        query=query,
     )

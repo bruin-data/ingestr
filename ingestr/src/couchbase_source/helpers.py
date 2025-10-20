@@ -53,7 +53,6 @@ def fetch_documents(
     incremental: Optional[dlt.sources.incremental] = None,  # type: ignore[type-arg]
     limit: Optional[int] = None,
     chunk_size: Optional[int] = 1000,
-    query: Optional[str] = None,
 ) -> Iterator[Dict[str, Any]]:
     """
     Fetch documents from a Couchbase collection using N1QL queries.
@@ -66,30 +65,32 @@ def fetch_documents(
         incremental: Incremental loading configuration
         limit: Maximum number of documents to fetch
         chunk_size: Number of documents to fetch per batch
-        query: Optional N1QL query to filter documents
 
     Yields:
         Dict[str, Any]: Document data
     """
-    # Build N1QL query
-    if query:
-            # Use full path for non-default scopes/collections
-            full_collection_path = f"`{bucket_name}`.`{scope_name}`.`{collection_name}`"
-            n1ql_query = f"SELECT META().id as id, {full_collection_path}.* FROM {full_collection_path}"
+    # Build N1QL query with full path
+    full_collection_path = f"`{bucket_name}`.`{scope_name}`.`{collection_name}`"
+    n1ql_query = f"SELECT META().id as id, {full_collection_path}.* FROM {full_collection_path}"
 
-        # Add incremental filter if provided
-        if incremental and incremental.cursor_path:
-            start_value = incremental.last_value
-            where_clause = f" WHERE {incremental.cursor_path} >= $start_value"
-            if incremental.end_value is not None:
-                where_clause += f" AND {incremental.cursor_path} < $end_value"
-            n1ql_query += where_clause
-        # Add limit if provided
-        if limit:
-            n1ql_query += f" LIMIT {limit}"
+    # Add incremental filter if provided
+    if incremental and incremental.cursor_path:
+        start_value = incremental.last_value
+        where_clause = f" WHERE {incremental.cursor_path} >= $start_value"
+        if incremental.end_value is not None:
+            where_clause += f" AND {incremental.cursor_path} < $end_value"
+        n1ql_query += where_clause
+
+    # Add limit if provided
+    if limit:
+        n1ql_query += f" LIMIT {limit}"
+
+    # Execute query
+    try:
+        query_options = QueryOptions()
 
         # Add parameters if incremental
-        if incremental and incremental.cursor_path and not query:
+        if incremental and incremental.cursor_path:
             named_parameters = {"start_value": incremental.last_value}
             if incremental.end_value is not None:
                 named_parameters["end_value"] = incremental.end_value
@@ -116,6 +117,3 @@ def fetch_documents(
 
     except Exception as e:
         raise Exception(f"Error executing Couchbase N1QL query: {str(e)}")
-
-
-
