@@ -4066,3 +4066,41 @@ class AlliumSource:
             limit=limit,
             compute_profile=compute_profile,
         )
+
+
+class CouchbaseSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    # couchbase://host:port?username=<username>&password=<password>
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError("Incremental loads are not supported for Couchbase")
+
+        if not table:
+            raise ValueError("Source table is required to connect to Couchbase")
+
+        source_parts = urlparse(uri)
+        source_fields = parse_qs(source_parts.query)
+
+        username = source_fields.get("username")
+        password = source_fields.get("password")
+
+        if not username:
+            raise ValueError("username in the URI is required to connect to Couchbase")
+
+        if not password:
+            raise ValueError("password in the URI is required to connect to Couchbase")
+
+        host = source_parts.hostname or "localhost"
+        port = source_parts.port or 8091
+
+        from ingestr.src.couchbase_source import couchbase_source
+
+        return couchbase_source(
+            host=host,
+            username=username[0],
+            password=password[0],
+            port=port,
+        )
