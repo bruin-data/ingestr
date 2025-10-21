@@ -4154,6 +4154,7 @@ class CouchbaseSource:
 
         # Parse query parameters from URI
         from urllib.parse import parse_qs
+
         query_params = parse_qs(parsed.query)
 
         # Check if SSL is requested via URI query parameter (?ssl=true)
@@ -4164,7 +4165,6 @@ class CouchbaseSource:
             # Apply SSL scheme based on parameter
             if use_ssl and scheme == "couchbase":
                 scheme = "couchbases"
-            
 
         connection_string = f"{scheme}://{netloc}"
 

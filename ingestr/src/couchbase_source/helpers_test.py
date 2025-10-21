@@ -32,19 +32,21 @@ class TestFetchDocuments(unittest.TestCase):
                 "code": "LAX",
                 "city": "Los Angeles",
                 "country": "USA",
-            }
+            },
         ]
         mock_cluster.query.return_value = iter(mock_result)
 
         # Fetch documents
-        docs = list(fetch_documents(
-            cluster=mock_cluster,
-            bucket_name="test",
-            scope_name="scope",
-            collection_name="collection",
-            incremental=None,
-            limit=None,
-        ))
+        docs = list(
+            fetch_documents(
+                cluster=mock_cluster,
+                bucket_name="test",
+                scope_name="scope",
+                collection_name="collection",
+                incremental=None,
+                limit=None,
+            )
+        )
 
         # CRITICAL: Verify we got ALL fields, not just id
         self.assertEqual(len(docs), 2)
@@ -67,14 +69,16 @@ class TestFetchDocuments(unittest.TestCase):
         mock_cluster = MagicMock()
         mock_cluster.query.return_value = iter([])
 
-        list(fetch_documents(
-            cluster=mock_cluster,
-            bucket_name="bucket",
-            scope_name="scope",
-            collection_name="collection",
-            incremental=None,
-            limit=None,
-        ))
+        list(
+            fetch_documents(
+                cluster=mock_cluster,
+                bucket_name="bucket",
+                scope_name="scope",
+                collection_name="collection",
+                incremental=None,
+                limit=None,
+            )
+        )
 
         # Get the query that was called
         query = mock_cluster.query.call_args[0][0]
@@ -91,14 +95,16 @@ class TestFetchDocuments(unittest.TestCase):
         mock_cluster = MagicMock()
         mock_cluster.query.return_value = iter([])
 
-        list(fetch_documents(
-            cluster=mock_cluster,
-            bucket_name="bucket",
-            scope_name="scope",
-            collection_name="collection",
-            incremental=None,
-            limit=10,
-        ))
+        list(
+            fetch_documents(
+                cluster=mock_cluster,
+                bucket_name="bucket",
+                scope_name="scope",
+                collection_name="collection",
+                incremental=None,
+                limit=10,
+            )
+        )
 
         query = mock_cluster.query.call_args[0][0]
         self.assertIn("LIMIT 10", query)
@@ -108,14 +114,16 @@ class TestFetchDocuments(unittest.TestCase):
         mock_cluster = MagicMock()
         mock_cluster.query.return_value = iter([])
 
-        list(fetch_documents(
-            cluster=mock_cluster,
-            bucket_name="bucket",
-            scope_name="scope",
-            collection_name="collection",
-            incremental=None,
-            limit=None,
-        ))
+        list(
+            fetch_documents(
+                cluster=mock_cluster,
+                bucket_name="bucket",
+                scope_name="scope",
+                collection_name="collection",
+                incremental=None,
+                limit=None,
+            )
+        )
 
         query = mock_cluster.query.call_args[0][0]
         self.assertNotIn("LIMIT", query)
@@ -125,14 +133,16 @@ class TestFetchDocuments(unittest.TestCase):
         mock_cluster = MagicMock()
         mock_cluster.query.return_value = iter([])
 
-        list(fetch_documents(
-            cluster=mock_cluster,
-            bucket_name="bucket",
-            scope_name="scope",
-            collection_name="collection",
-            incremental=None,
-            limit=None,
-        ))
+        list(
+            fetch_documents(
+                cluster=mock_cluster,
+                bucket_name="bucket",
+                scope_name="scope",
+                collection_name="collection",
+                incremental=None,
+                limit=None,
+            )
+        )
 
         query = mock_cluster.query.call_args[0][0]
         self.assertIn("META().id as id", query)
@@ -142,14 +152,16 @@ class TestFetchDocuments(unittest.TestCase):
         mock_cluster = MagicMock()
         mock_cluster.query.return_value = iter([])
 
-        docs = list(fetch_documents(
-            cluster=mock_cluster,
-            bucket_name="bucket",
-            scope_name="scope",
-            collection_name="collection",
-            incremental=None,
-            limit=None,
-        ))
+        docs = list(
+            fetch_documents(
+                cluster=mock_cluster,
+                bucket_name="bucket",
+                scope_name="scope",
+                collection_name="collection",
+                incremental=None,
+                limit=None,
+            )
+        )
 
         self.assertEqual(len(docs), 0)
 
