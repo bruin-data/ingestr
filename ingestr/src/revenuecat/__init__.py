@@ -1,4 +1,3 @@
-import asyncio
 from typing import Any, Dict, Iterable, Iterator
 
 import aiohttp
@@ -40,51 +39,26 @@ def revenuecat_source(
                 yield project
 
     @dlt.resource(
-        name="customers", primary_key="id", write_disposition="merge", parallelized=True
+        name="customer_ids",
+        write_disposition="replace",
+        selected=False,
+        parallelized=True,
     )
-    def customers() -> Iterator[Dict[str, Any]]:
-        """Get list of customers with nested purchases and subscriptions."""
+    def customer_ids():
         if project_id is None:
             raise ValueError("project_id is required for customers resource")
-        endpoint = f"/projects/{project_id}/customers"
 
-        async def process_customer_batch(customer_batch):
-            """Process a batch of customers with async operations."""
-            async with aiohttp.ClientSession() as session:
-                tasks = []
-                for customer in customer_batch:
-                    task = process_customer_with_nested_resources_async(
-                        session, api_key, project_id, customer
-                    )
-                    tasks.append(task)
+        yield _paginate(api_key, f"/projects/{project_id}/customers")
 
-                return await asyncio.gather(*tasks)
-
-        def process_customers_sync():
-            """Process customers in batches using asyncio."""
-            batch_size = 50  # Conservative batch size due to 60 req/min rate limit
-            current_batch = []
-
-            for customer in _paginate(api_key, endpoint):
-                current_batch.append(customer)
-
-                if len(current_batch) >= batch_size:
-                    # Process the batch asynchronously
-                    processed_customers = asyncio.run(
-                        process_customer_batch(current_batch)
-                    )
-                    for processed_customer in processed_customers:
-                        yield processed_customer
-                    current_batch = []
-
-            # Process any remaining customers in the final batch
-            if current_batch:
-                processed_customers = asyncio.run(process_customer_batch(current_batch))
-                for processed_customer in processed_customers:
-                    yield processed_customer
-
-        # Yield each processed customer
-        yield from process_customers_sync()
+    @dlt.transformer(
+        data_from=customer_ids, write_disposition="replace", parallelized=True
+    )
+    async def customers(customers) -> Iterator[Dict[str, Any]]:
+        async with aiohttp.ClientSession() as session:
+            for customer in customers:
+                yield await process_customer_with_nested_resources_async(
+                    session, api_key, project_id, customer
+                )
 
     # Create project-dependent resources dynamically
     project_resources = []
@@ -103,6 +77,7 @@ def revenuecat_source(
 
     return [
         projects,
+        customer_ids,
         customers,
         *project_resources,
     ]
