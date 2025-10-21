@@ -83,7 +83,7 @@ def fetch_documents(
     # Build N1QL query with full path
     full_collection_path = f"`{bucket_name}`.`{scope_name}`.`{collection_name}`"
     n1ql_query = (
-        f"SELECT META().id as id, {full_collection_path}.* FROM {full_collection_path}"
+        f"SELECT META().id as id, c.* FROM {full_collection_path} c"
     )
 
     # Add incremental filter if provided
