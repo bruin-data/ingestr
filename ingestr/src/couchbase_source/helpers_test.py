@@ -6,7 +6,7 @@ Test helpers.py - verifies fetch_documents returns all fields, not just id.
 import unittest
 from unittest.mock import MagicMock
 
-from helpers import fetch_documents
+from ingestr.src.couchbase_source.helpers import fetch_documents
 
 
 class TestFetchDocuments(unittest.TestCase):
