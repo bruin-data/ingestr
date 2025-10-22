@@ -5089,3 +5089,156 @@ def mongodb_test_cases():
 @pytest.mark.parametrize("testcase", mongodb_test_cases())
 def test_mongodb_dest(testcase, mongodb_server):
     testcase(mongodb_server)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("COUCHBASE_CAPELLA_USERNAME")
+    or not os.environ.get("COUCHBASE_CAPELLA_PASSWORD"),
+    reason="Couchbase Capella credentials not set",
+)
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_couchbase_capella_source(dest):
+    """
+    Test Couchbase Capella (cloud) as a source with bucket in URI.
+    Uses SSL connection with bucket specified in URI path.
+
+    Required environment variables:
+    - COUCHBASE_CAPELLA_USERNAME
+    - COUCHBASE_CAPELLA_PASSWORD
+    - COUCHBASE_CAPELLA_HOST
+    - COUCHBASE_CAPELLA_BUCKET
+    - COUCHBASE_CAPELLA_SCOPE
+    - COUCHBASE_CAPELLA_COLLECTION
+    """
+    username = os.environ.get("COUCHBASE_CAPELLA_USERNAME")
+    password = os.environ.get("COUCHBASE_CAPELLA_PASSWORD")
+    host = os.environ.get("COUCHBASE_CAPELLA_HOST", "cb.8vm1qjx5nowztp08.cloud.couchbase.com")
+    bucket = os.environ.get("COUCHBASE_CAPELLA_BUCKET", "travel-sample")
+    scope = os.environ.get("COUCHBASE_CAPELLA_SCOPE", "inventory")
+    collection = os.environ.get("COUCHBASE_CAPELLA_COLLECTION", "airline")
+
+    # Test with bucket in URI and ssl=true parameter
+    source_uri = f"couchbase://{username}:{password}@{host}/{bucket}?ssl=true"
+    source_table = f"{scope}.{collection}"
+
+    dest_uri = dest.start()
+    dest_table = "raw.couchbase_capella_test"
+
+    try:
+        result = invoke_ingest_command(
+            source_uri,
+            source_table,
+            dest_uri,
+            dest_table,
+        )
+
+        assert result.exit_code == 0, f"Command failed with: {result.output}"
+
+        # Verify data was ingested
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(f"select * from {dest_table}").fetchall()
+            assert len(res) > 0, "No data was ingested from Couchbase Capella"
+            print(f"Successfully ingested {len(res)} documents from Couchbase Capella (bucket in URI)")
+    finally:
+        dest.stop()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("COUCHBASE_CAPELLA_USERNAME")
+    or not os.environ.get("COUCHBASE_CAPELLA_PASSWORD"),
+    reason="Couchbase Capella credentials not set",
+)
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_couchbase_capella_source_without_bucket_in_uri(dest):
+    """
+    Test Couchbase Capella with bucket specified in table name instead of URI.
+    Uses SSL connection with bucket as part of the table identifier.
+    """
+    username = os.environ.get("COUCHBASE_CAPELLA_USERNAME")
+    password = os.environ.get("COUCHBASE_CAPELLA_PASSWORD")
+    host = os.environ.get("COUCHBASE_CAPELLA_HOST", "cb.8vm1qjx5nowztp08.cloud.couchbase.com")
+    bucket = os.environ.get("COUCHBASE_CAPELLA_BUCKET", "travel-sample")
+    scope = os.environ.get("COUCHBASE_CAPELLA_SCOPE", "inventory")
+    collection = os.environ.get("COUCHBASE_CAPELLA_COLLECTION", "airline")
+
+    # Test without bucket in URI - bucket is part of table name
+    source_uri = f"couchbase://{username}:{password}@{host}?ssl=true"
+    source_table = f"{bucket}.{scope}.{collection}"
+
+    dest_uri = dest.start()
+    dest_table = "raw.couchbase_capella_test2"
+
+    try:
+        result = invoke_ingest_command(
+            source_uri,
+            source_table,
+            dest_uri,
+            dest_table,
+        )
+
+        assert result.exit_code == 0, f"Command failed with: {result.output}"
+
+        # Verify data was ingested
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(f"select * from {dest_table}").fetchall()
+            assert len(res) > 0, "No data was ingested from Couchbase Capella"
+            print(f"Successfully ingested {len(res)} documents from Couchbase Capella (bucket in table name)")
+    finally:
+        dest.stop()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("COUCHBASE_SERVER_USERNAME")
+    or not os.environ.get("COUCHBASE_SERVER_PASSWORD"),
+    reason="Couchbase Server credentials not set",
+)
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_couchbase_server_source(dest):
+    """
+    Test Couchbase Server (self-hosted) as a source.
+
+    Required environment variables:
+    - COUCHBASE_SERVER_USERNAME
+    - COUCHBASE_SERVER_PASSWORD
+    - COUCHBASE_SERVER_HOST (optional, defaults to localhost)
+    - COUCHBASE_SERVER_BUCKET (optional, defaults to default)
+    - COUCHBASE_SERVER_SCOPE (optional, defaults to _default)
+    - COUCHBASE_SERVER_COLLECTION (optional, defaults to _default)
+    """
+    username = os.environ.get("COUCHBASE_SERVER_USERNAME")
+    password = os.environ.get("COUCHBASE_SERVER_PASSWORD")
+    host = os.environ.get("COUCHBASE_SERVER_HOST", "localhost")
+    bucket = os.environ.get("COUCHBASE_SERVER_BUCKET", "default")
+    scope = os.environ.get("COUCHBASE_SERVER_SCOPE", "_default")
+    collection = os.environ.get("COUCHBASE_SERVER_COLLECTION", "_default")
+
+    # Couchbase Server typically doesn't require SSL for local connections
+    source_uri = f"couchbase://{username}:{password}@{host}/{bucket}"
+    source_table = f"{scope}.{collection}"
+
+    dest_uri = dest.start()
+    dest_table = "raw.couchbase_server_test"
+
+    try:
+        result = invoke_ingest_command(
+            source_uri,
+            source_table,
+            dest_uri,
+            dest_table,
+        )
+
+        assert result.exit_code == 0, f"Command failed with: {result.output}"
+
+        # Verify data was ingested
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(f"select * from {dest_table}").fetchall()
+            assert len(res) > 0, "No data was ingested from Couchbase Server"
+            print(f"Successfully ingested {len(res)} documents from Couchbase Server")
+    finally:
+        dest.stop()
