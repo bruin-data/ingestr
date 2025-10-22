@@ -621,6 +621,9 @@ def ingest(
             if primary_key:
                 write_disposition = "merge"
 
+        if factory.source_scheme.startswith("mysql"):
+           dest_table = dest_table.rsplit(".", 1)[1]
+
         start_time = datetime.now()
 
         run_info: LoadInfo = pipeline.run(
