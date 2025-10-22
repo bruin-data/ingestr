@@ -4135,6 +4135,7 @@ class CouchbaseSource:
         # Extract username and password from URI
         # Note: urlparse automatically decodes URL-encoded characters in username/password
         from urllib.parse import unquote
+
         username = parsed.username
         password = unquote(parsed.password) if parsed.password else None
 
