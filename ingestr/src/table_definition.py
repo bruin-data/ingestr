@@ -8,7 +8,7 @@ class TableDefinition:
 
 
 def table_string_to_dataclass(table: str) -> TableDefinition:
-    table_fields = table.split(".", 1)
+    table_fields = table.rsplit(".", 1)
     if len(table_fields) != 2:
         raise ValueError("Table name must be in the format <schema>.<table>")
 
