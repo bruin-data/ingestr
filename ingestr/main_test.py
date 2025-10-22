@@ -34,6 +34,7 @@ from dlt.sources.filesystem import glob_files
 from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
 from sqlalchemy.pool import NullPool
 from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
+from testcontainers.core.container import DockerContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
@@ -560,11 +561,215 @@ class EphemeralDuckDb:
                     pass
 
 
+class CouchbaseContainer(DockerContainer):
+    """Custom Couchbase container for testing."""
+
+    def __init__(self, image: str = "couchbase:community", **kwargs):
+        super().__init__(image, **kwargs)
+        # Use 1:1 port mapping (requires local Couchbase to be stopped)
+        # This allows SDK to connect without alternate addresses
+        self.with_bind_ports(8091, 8091)
+        self.with_bind_ports(8092, 8092)
+        self.with_bind_ports(8093, 8093)
+        self.with_bind_ports(8094, 8094)
+        self.with_bind_ports(8095, 8095)
+        self.with_bind_ports(8096, 8096)
+        self.with_bind_ports(11210, 11210)
+        self.username = "Administrator"
+        self.password = "password"
+        self.bucket_name = "test_bucket"
+        self.scope_name = "_default"
+        self.collection_name = "_default"
+
+    def start(self):
+        """Start container and initialize Couchbase."""
+        super().start()
+
+        # Wait for Couchbase web console to be ready
+        self._wait_for_couchbase()
+
+        # Initialize cluster
+        self._initialize_cluster()
+
+        # Create bucket
+        self._create_bucket()
+
+        # Wait for bucket to be ready
+        time.sleep(10)
+
+        # Create primary index for N1QL queries
+        self._create_primary_index()
+
+        return self
+
+    def _wait_for_couchbase(self):
+        """Wait for Couchbase to be ready."""
+        import requests
+
+        port = self.get_exposed_port(8091)
+        base_url = f"http://{self.get_container_host_ip()}:{port}"
+
+        max_attempts = 30
+        for i in range(max_attempts):
+            try:
+                response = requests.get(f"{base_url}/pools", timeout=2)
+                if response.status_code == 200:
+                    return
+            except Exception:
+                pass
+            time.sleep(2)
+
+        raise Exception(f"Couchbase did not become ready after {max_attempts} attempts")
+
+    def _initialize_cluster(self):
+        """Initialize Couchbase cluster using couchbase-cli."""
+        # Use couchbase-cli inside the container for proper setup
+        self.exec(
+            f"couchbase-cli cluster-init -c 127.0.0.1 "
+            f"--cluster-username {self.username} "
+            f"--cluster-password {self.password} "
+            f"--services data,index,query "
+            f"--cluster-ramsize 256 "
+            f"--cluster-index-ramsize 256"
+        )
+
+        # Wait for cluster to be initialized
+        time.sleep(5)
+
+    def _setup_alternate_addresses(self):
+        """Setup alternate addresses for SDK bootstrap."""
+        import requests
+
+        host = self.get_container_host_ip()
+        port = self.get_exposed_port(8091)
+
+        # Configure alternate addresses so SDK can connect from outside container
+        requests.post(
+            f"http://{host}:{port}/node/controller/setupAlternateAddresses/external",
+            auth=(self.username, self.password),
+            json={
+                "hostname": host,
+                "mgmt": int(self.get_exposed_port(8091)),
+                "kv": int(self.get_exposed_port(11210)),
+                "n1ql": int(self.get_exposed_port(8093)),
+                "capi": int(self.get_exposed_port(8092)),
+                "fts": int(self.get_exposed_port(8094)),
+                "cbas": int(self.get_exposed_port(8095)),
+                "eventingAdminPort": int(self.get_exposed_port(8096)),
+            }
+        )
+        time.sleep(2)
+
+    def _create_bucket(self):
+        """Create a test bucket using couchbase-cli."""
+        self.exec(
+            f"couchbase-cli bucket-create -c 127.0.0.1 "
+            f"-u {self.username} -p {self.password} "
+            f"--bucket {self.bucket_name} "
+            f"--bucket-type couchbase "
+            f"--bucket-ramsize 100 "
+            f"--storage-backend couchstore "  # Use couchstore for community edition
+            f"--bucket-replica 0"  # No replicas for single node
+        )
+
+        # Wait for bucket to be ready and healthy
+        self._wait_for_bucket_ready()
+
+    def _wait_for_bucket_ready(self):
+        """Wait for bucket to be healthy and ready."""
+        import requests
+
+        host = self.get_container_host_ip()
+        port = self.get_exposed_port(8091)
+
+        for i in range(30):
+            try:
+                response = requests.get(
+                    f"http://{host}:{port}/pools/default/buckets/{self.bucket_name}",
+                    auth=(self.username, self.password),
+                    timeout=2
+                )
+                if response.status_code == 200:
+                    bucket_info = response.json()
+                    # Check if bucket is healthy and all nodes are ready
+                    if bucket_info.get("nodes") and all(
+                        node.get("status") == "healthy" for node in bucket_info["nodes"]
+                    ):
+                        time.sleep(5)  # Extra wait for full readiness
+                        return
+            except Exception:
+                pass
+            time.sleep(2)
+
+        raise Exception(f"Bucket '{self.bucket_name}' did not become ready after waiting")
+
+    def _create_primary_index(self):
+        """Create primary index for N1QL queries using Python script inside container."""
+        python_script = f"""
+from datetime import timedelta
+from couchbase.auth import PasswordAuthenticator
+from couchbase.cluster import Cluster
+from couchbase.options import ClusterOptions
+
+auth = PasswordAuthenticator('{self.username}', '{self.password}')
+cluster = Cluster('couchbase://127.0.0.1', ClusterOptions(auth))
+cluster.wait_until_ready(timedelta(seconds=30))
+
+query = 'CREATE PRIMARY INDEX ON `{self.bucket_name}`.`{self.scope_name}`.`{self.collection_name}`'
+try:
+    cluster.query(query)
+    print('Primary index created')
+except Exception as e:
+    print('Index may already exist:', str(e))
+"""
+
+        try:
+            self.exec(f"python3 -c \"{python_script}\"")
+            time.sleep(3)
+        except Exception:
+            # Index may already exist, ignore error
+            pass
+
+    def get_connection_string(self) -> str:
+        """Get Couchbase connection string."""
+        # With 1:1 port mapping, use localhost
+        return "couchbase://localhost"
+
+    def get_connection_url(self) -> str:
+        """Get connection URL with credentials."""
+        # With 1:1 port mapping, use localhost
+        return f"couchbase://{self.username}:{self.password}@localhost"
+
+    def insert_documents(self, documents: list):
+        """Insert documents using Couchbase Python SDK from test machine."""
+        from couchbase.auth import PasswordAuthenticator
+        from couchbase.cluster import Cluster
+        from couchbase.options import ClusterOptions
+        from datetime import timedelta
+
+        # Connect using SDK (from test machine to container)
+        auth = PasswordAuthenticator(self.username, self.password)
+        cluster = Cluster(self.get_connection_string(), ClusterOptions(auth))
+        cluster.wait_until_ready(timedelta(seconds=30))
+
+        # Get bucket and collection
+        bucket = cluster.bucket(self.bucket_name)
+        collection = bucket.scope(self.scope_name).collection(self.collection_name)
+
+        # Insert documents
+        for doc in documents:
+            doc_id = str(doc.get('id', doc.get('_id', f"doc_{hash(str(doc))}")))
+            collection.upsert(doc_id, doc)
+
+        time.sleep(2)
+
+
 POSTGRES_IMAGE = "postgres:16.3-alpine3.20"
 MYSQL8_IMAGE = "mysql:8.4.1"
 MSSQL22_IMAGE = "mcr.microsoft.com/mssql/server:2022-CU13-ubuntu-22.04"
 CLICKHOUSE_IMAGE = "clickhouse/clickhouse-server:24.12"
 MONGODB_IMAGE = "mongo:8.0.13"
+COUCHBASE_IMAGE = "couchbase:community"
 
 pgDocker = DockerImage(
     "postgres", lambda: PostgresContainer(POSTGRES_IMAGE, driver=None).start()
@@ -3943,6 +4148,99 @@ def pp(x):
     import sys
 
     print(x, file=sys.stderr)
+
+
+@pytest.mark.parametrize(
+    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+)
+def test_couchbase_source_local(dest):
+    """
+    Test Couchbase source with local containerized Couchbase instance.
+
+    NOTE: This test requires local Couchbase Server to be stopped first,
+    as it uses 1:1 port mapping (8091, 11210, etc.) to avoid SDK connection issues.
+    """
+    couchbase = CouchbaseContainer(COUCHBASE_IMAGE)
+    couchbase.start()
+
+    # Insert test documents
+    test_documents = [
+        {
+            "id": 1,
+            "name": "Document 1",
+            "nested_parent": {
+                "key1": "value1",
+                "key2": {"nested1": "value1"},
+                "key3": [{"nested3": "value1"}],
+            },
+            "key4": ["value1", "value2", "value3"],
+            "value": 100,
+        },
+        {
+            "id": 2,
+            "name": "Document 2",
+            "nested_parent": {
+                "key1": "value2",
+                "key2": {"nested1": "value2"},
+                "key3": [{"nested3": "value2"}],
+            },
+            "key4": ["value1", "value2", "value3"],
+            "value": 200,
+        },
+        {
+            "id": 3,
+            "name": "Document 3",
+            "nested_parent": {
+                "key1": "value3",
+                "key2": {"nested1": "value3"},
+                "key3": [{"nested3": "value3"}],
+            },
+            "key4": ["value1", "value2", "value3"],
+            "value": 300,
+        },
+    ]
+
+    couchbase.insert_documents(test_documents)
+
+    dest_uri = dest.start()
+
+    try:
+        # Build source URI without bucket (bucket will be in table name)
+        source_uri = couchbase.get_connection_url()
+        source_table = f"{couchbase.bucket_name}.{couchbase.scope_name}.{couchbase.collection_name}"
+
+        result = invoke_ingest_command(
+            source_uri,
+            source_table,
+            dest_uri,
+            "raw.test_couchbase_collection",
+        )
+
+        assert result.exit_code == 0, f"Command failed with exit code {result.exit_code}"
+
+        with sqlalchemy.create_engine(dest_uri).connect() as conn:
+            res = conn.execute(
+                "select * from raw.test_couchbase_collection order by id"
+            ).fetchall()
+
+            assert len(res) == 3, f"Expected 3 documents, got {len(res)}"
+
+            # Verify documents were ingested correctly
+            # Check essential fields (id, name, value, and at least one nested field)
+            ids = [row[0] for row in res]
+            names = [row[1] for row in res]
+            values = [row[5] for row in res]  # value column
+
+            assert ids == [1, 2, 3], f"Expected ids [1, 2, 3], got {ids}"
+            assert names == ["Document 1", "Document 2", "Document 3"], f"Expected names, got {names}"
+            assert values == [100, 200, 300], f"Expected values [100, 200, 300], got {values}"
+
+            # Check that nested_parent__key1 was flattened correctly
+            nested_values = [row[2] for row in res]
+            assert nested_values == ["value1", "value2", "value3"], f"Expected nested values, got {nested_values}"
+    finally:
+        dest.stop()
+        couchbase.stop()
 
 
 @pytest.mark.parametrize(
