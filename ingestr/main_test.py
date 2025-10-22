@@ -5114,7 +5114,9 @@ def test_couchbase_capella_source(dest):
     """
     username = os.environ.get("COUCHBASE_CAPELLA_USERNAME")
     password = os.environ.get("COUCHBASE_CAPELLA_PASSWORD")
-    host = os.environ.get("COUCHBASE_CAPELLA_HOST", "cb.8vm1qjx5nowztp08.cloud.couchbase.com")
+    host = os.environ.get(
+        "COUCHBASE_CAPELLA_HOST", "cb.8vm1qjx5nowztp08.cloud.couchbase.com"
+    )
     bucket = os.environ.get("COUCHBASE_CAPELLA_BUCKET", "travel-sample")
     scope = os.environ.get("COUCHBASE_CAPELLA_SCOPE", "inventory")
     collection = os.environ.get("COUCHBASE_CAPELLA_COLLECTION", "airline")
@@ -5140,7 +5142,9 @@ def test_couchbase_capella_source(dest):
         with sqlalchemy.create_engine(dest_uri).connect() as conn:
             res = conn.execute(f"select * from {dest_table}").fetchall()
             assert len(res) > 0, "No data was ingested from Couchbase Capella"
-            print(f"Successfully ingested {len(res)} documents from Couchbase Capella (bucket in URI)")
+            print(
+                f"Successfully ingested {len(res)} documents from Couchbase Capella (bucket in URI)"
+            )
     finally:
         dest.stop()
 
@@ -5160,7 +5164,9 @@ def test_couchbase_capella_source_without_bucket_in_uri(dest):
     """
     username = os.environ.get("COUCHBASE_CAPELLA_USERNAME")
     password = os.environ.get("COUCHBASE_CAPELLA_PASSWORD")
-    host = os.environ.get("COUCHBASE_CAPELLA_HOST", "cb.8vm1qjx5nowztp08.cloud.couchbase.com")
+    host = os.environ.get(
+        "COUCHBASE_CAPELLA_HOST", "cb.8vm1qjx5nowztp08.cloud.couchbase.com"
+    )
     bucket = os.environ.get("COUCHBASE_CAPELLA_BUCKET", "travel-sample")
     scope = os.environ.get("COUCHBASE_CAPELLA_SCOPE", "inventory")
     collection = os.environ.get("COUCHBASE_CAPELLA_COLLECTION", "airline")
@@ -5186,7 +5192,9 @@ def test_couchbase_capella_source_without_bucket_in_uri(dest):
         with sqlalchemy.create_engine(dest_uri).connect() as conn:
             res = conn.execute(f"select * from {dest_table}").fetchall()
             assert len(res) > 0, "No data was ingested from Couchbase Capella"
-            print(f"Successfully ingested {len(res)} documents from Couchbase Capella (bucket in table name)")
+            print(
+                f"Successfully ingested {len(res)} documents from Couchbase Capella (bucket in table name)"
+            )
     finally:
         dest.stop()
 
