@@ -704,28 +704,16 @@ class CouchbaseContainer(DockerContainer):
         raise Exception(f"Bucket '{self.bucket_name}' did not become ready after waiting")
 
     def _create_primary_index(self):
-        """Create primary index for N1QL queries using Python script inside container."""
-        python_script = f"""
-from datetime import timedelta
-from couchbase.auth import PasswordAuthenticator
-from couchbase.cluster import Cluster
-from couchbase.options import ClusterOptions
-
-auth = PasswordAuthenticator('{self.username}', '{self.password}')
-cluster = Cluster('couchbase://127.0.0.1', ClusterOptions(auth))
-cluster.wait_until_ready(timedelta(seconds=30))
-
-query = 'CREATE PRIMARY INDEX ON `{self.bucket_name}`.`{self.scope_name}`.`{self.collection_name}`'
-try:
-    cluster.query(query)
-    print('Primary index created')
-except Exception as e:
-    print('Index may already exist:', str(e))
-"""
-
+        """Create primary index for N1QL queries using cbq CLI."""
+        # Use cbq command-line tool to create the primary index
+        # Note: We ignore errors if the index already exists
+        query = f"CREATE PRIMARY INDEX ON `{self.bucket_name}`.`{self.scope_name}`.`{self.collection_name}`"
         try:
-            self.exec(f"python3 -c \"{python_script}\"")
-            time.sleep(3)
+            self.exec(
+                f'cbq -u {self.username} -p {self.password} -engine=http://127.0.0.1:8091/ '
+                f'-script="{query}"'
+            )
+            time.sleep(2)
         except Exception:
             # Index may already exist, ignore error
             pass
