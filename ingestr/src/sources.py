@@ -4233,3 +4233,71 @@ class CouchbaseSource:
         table_instance.max_table_nesting = 1
 
         return table_instance
+
+
+class SocrataSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        """
+        Creates a DLT source for Socrata open data platform.
+
+        URI format: socrata://domain?app_token=TOKEN
+        Table: dataset_id (e.g., "6udu-fhnu")
+
+        Examples:
+            URI: socrata://evergreen.data.socrata.com?app_token=mytoken
+            Table: 6udu-fhnu
+
+            URI: socrata://data.seattle.gov?app_token=token&username=user&password=pass
+            Table: dataset-id
+
+        Args:
+            uri: Socrata connection URI with domain and optional auth params
+            table: Dataset ID (e.g., "6udu-fhnu")
+            **kwargs: Additional arguments:
+                - limit: Maximum number of records to fetch
+
+        Returns:
+            DltResource for the Socrata dataset
+        """
+        from urllib.parse import parse_qs, urlparse
+
+        parsed = urlparse(uri)
+
+        # Extract domain from netloc
+        domain = parsed.netloc
+        if not domain:
+            raise ValueError(
+                "Domain must be provided in the URI.\n"
+                "Format: socrata://domain?app_token=TOKEN\n"
+                "Example: socrata://evergreen.data.socrata.com?app_token=mytoken"
+            )
+
+        # Parse query parameters
+        query_params = parse_qs(parsed.query)
+
+        # Dataset ID comes from the table parameter
+        dataset_id = table
+        if not dataset_id:
+            raise ValueError(
+                "Dataset ID must be provided as the table parameter.\n"
+                "Example: --source-table 6udu-fhnu"
+            )
+
+        # Extract optional parameters
+        app_token = query_params.get("app_token", [None])[0]
+        username = query_params.get("username", [None])[0]
+        password = query_params.get("password", [None])[0]
+
+        # Import and create source
+        from ingestr.src.socrata_source import source
+
+        return source(
+            domain=domain,
+            dataset_id=dataset_id,
+            app_token=app_token,
+            username=username,
+            password=password,
+        ).with_resources("dataset")
