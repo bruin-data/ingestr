@@ -656,7 +656,7 @@ class CouchbaseContainer(DockerContainer):
                 "fts": int(self.get_exposed_port(8094)),
                 "cbas": int(self.get_exposed_port(8095)),
                 "eventingAdminPort": int(self.get_exposed_port(8096)),
-            }
+            },
         )
         time.sleep(2)
 
@@ -687,7 +687,7 @@ class CouchbaseContainer(DockerContainer):
                 response = requests.get(
                     f"http://{host}:{port}/pools/default/buckets/{self.bucket_name}",
                     auth=(self.username, self.password),
-                    timeout=2
+                    timeout=2,
                 )
                 if response.status_code == 200:
                     bucket_info = response.json()
@@ -701,7 +701,9 @@ class CouchbaseContainer(DockerContainer):
                 pass
             time.sleep(2)
 
-        raise Exception(f"Bucket '{self.bucket_name}' did not become ready after waiting")
+        raise Exception(
+            f"Bucket '{self.bucket_name}' did not become ready after waiting"
+        )
 
     def _create_primary_index(self):
         """Create primary index for N1QL queries using cbq CLI."""
@@ -710,7 +712,7 @@ class CouchbaseContainer(DockerContainer):
         query = f"CREATE PRIMARY INDEX ON `{self.bucket_name}`.`{self.scope_name}`.`{self.collection_name}`"
         try:
             self.exec(
-                f'cbq -u {self.username} -p {self.password} -engine=http://127.0.0.1:8091/ '
+                f"cbq -u {self.username} -p {self.password} -engine=http://127.0.0.1:8091/ "
                 f'-script="{query}"'
             )
             time.sleep(2)
@@ -730,10 +732,11 @@ class CouchbaseContainer(DockerContainer):
 
     def insert_documents(self, documents: list):
         """Insert documents using Couchbase Python SDK from test machine."""
-        from couchbase.auth import PasswordAuthenticator
-        from couchbase.cluster import Cluster
-        from couchbase.options import ClusterOptions
         from datetime import timedelta
+
+        from couchbase.auth import PasswordAuthenticator  # type: ignore
+        from couchbase.cluster import Cluster  # type: ignore
+        from couchbase.options import ClusterOptions  # type: ignore
 
         # Connect using SDK (from test machine to container)
         auth = PasswordAuthenticator(self.username, self.password)
@@ -746,7 +749,7 @@ class CouchbaseContainer(DockerContainer):
 
         # Insert documents
         for doc in documents:
-            doc_id = str(doc.get('id', doc.get('_id', f"doc_{hash(str(doc))}")))
+            doc_id = str(doc.get("id", doc.get("_id", f"doc_{hash(str(doc))}")))
             collection.upsert(doc_id, doc)
 
         time.sleep(2)
@@ -4204,7 +4207,9 @@ def test_couchbase_source_local(dest):
             "raw.test_couchbase_collection",
         )
 
-        assert result.exit_code == 0, f"Command failed with exit code {result.exit_code}"
+        assert result.exit_code == 0, (
+            f"Command failed with exit code {result.exit_code}"
+        )
 
         with sqlalchemy.create_engine(dest_uri).connect() as conn:
             res = conn.execute(
@@ -4220,12 +4225,18 @@ def test_couchbase_source_local(dest):
             values = [row[5] for row in res]  # value column
 
             assert ids == [1, 2, 3], f"Expected ids [1, 2, 3], got {ids}"
-            assert names == ["Document 1", "Document 2", "Document 3"], f"Expected names, got {names}"
-            assert values == [100, 200, 300], f"Expected values [100, 200, 300], got {values}"
+            assert names == ["Document 1", "Document 2", "Document 3"], (
+                f"Expected names, got {names}"
+            )
+            assert values == [100, 200, 300], (
+                f"Expected values [100, 200, 300], got {values}"
+            )
 
             # Check that nested_parent__key1 was flattened correctly
             nested_values = [row[2] for row in res]
-            assert nested_values == ["value1", "value2", "value3"], f"Expected nested values, got {nested_values}"
+            assert nested_values == ["value1", "value2", "value3"], (
+                f"Expected nested values, got {nested_values}"
+            )
     finally:
         dest.stop()
         couchbase.stop()
