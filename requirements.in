@@ -1,5 +1,6 @@
 asana==3.2.3
 confluent-kafka==2.8.0
+couchbase==4.3.6
 databricks-sql-connector==4.0.5
 databricks-sqlalchemy==1.0.2
 dataclasses-json==0.6.7

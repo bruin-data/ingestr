@@ -82,6 +82,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "AWS Athena", link: "/supported-sources/athena.md" },
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
               { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
+              { text: "Couchbase", link: "/supported-sources/couchbase.md" },
               { text: "CrateDB", link: "/supported-sources/cratedb.md" },
               { text: "Databricks", link: "/supported-sources/databricks.md" },
               { text: "DuckDB", link: "/supported-sources/duckdb.md" },
