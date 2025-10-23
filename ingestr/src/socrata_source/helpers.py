@@ -4,7 +4,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from dlt.sources.helpers import requests
 
-REQUEST_TIMEOUT = 30  # seconds
+from .settings import DEFAULT_PAGE_SIZE, REQUEST_TIMEOUT
 
 
 def fetch_data(
@@ -13,11 +13,15 @@ def fetch_data(
     app_token: Optional[str] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
+    incremental_key: Optional[str] = None,
+    start_value: Optional[str] = None,
+    end_value: Optional[str] = None,
 ) -> Iterator[Dict[str, Any]]:
     """
-    Fetch all records from Socrata dataset with pagination.
+    Fetch records from Socrata dataset with pagination and optional filtering.
 
     Uses offset-based pagination to get all records, not just first 50000.
+    Supports incremental loading via SoQL WHERE clause for server-side filtering.
 
     Args:
         domain: Socrata domain (e.g., "data.seattle.gov")
@@ -25,6 +29,9 @@ def fetch_data(
         app_token: Socrata app token for higher rate limits
         username: Username for authentication
         password: Password for authentication
+        incremental_key: Field to filter on (e.g., ":updated_at")
+        start_value: Minimum value for incremental_key (inclusive)
+        end_value: Maximum value for incremental_key (exclusive)
 
     Yields:
         Lists of records (one list per page)
@@ -41,11 +48,26 @@ def fetch_data(
     auth = (username, password) if username and password else None
 
     # Pagination settings
-    limit = 50000  # Max per page
+    limit = DEFAULT_PAGE_SIZE
     offset = 0
 
     while True:
-        params = {"$limit": limit, "$offset": offset}
+        params: Dict[str, Any] = {"$limit": limit, "$offset": offset}
+
+        # Add SoQL WHERE clause for incremental loading
+        if incremental_key and start_value:
+            # Convert datetime format to ISO 8601 (SoQL requires 'T' separator)
+            start_value_iso = str(start_value).replace(" ", "T")
+            where_conditions = [f"{incremental_key} >= '{start_value_iso}'"]
+
+            if end_value:
+                end_value_iso = str(end_value).replace(" ", "T")
+                where_conditions.append(f"{incremental_key} < '{end_value_iso}'")
+
+            params["$where"] = " AND ".join(where_conditions)
+
+            # Order by incremental key for consistent results
+            params["$order"] = f"{incremental_key} ASC"
 
         response = requests.get(
             url,
