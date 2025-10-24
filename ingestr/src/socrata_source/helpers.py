@@ -46,16 +46,13 @@ def fetch_data(
 
     auth = (username, password) if username and password else None
 
-    # Pagination settings
     limit = DEFAULT_PAGE_SIZE
     offset = 0
 
     while True:
         params: Dict[str, Any] = {"$limit": limit, "$offset": offset}
 
-        # Add SoQL WHERE clause for incremental loading
         if incremental_key and start_value:
-            # Convert datetime format to ISO 8601 (SoQL requires 'T' separator)
             start_value_iso = str(start_value).replace(" ", "T")
             where_conditions = [f"{incremental_key} >= '{start_value_iso}'"]
 
@@ -64,8 +61,6 @@ def fetch_data(
                 where_conditions.append(f"{incremental_key} < '{end_value_iso}'")
 
             params["$where"] = " AND ".join(where_conditions)
-
-            # Order by incremental key for consistent results
             params["$order"] = f"{incremental_key} ASC"
 
         response = requests.get(
@@ -79,16 +74,12 @@ def fetch_data(
 
         data = response.json()
 
-        # If no data, we're done
         if not data:
             break
 
-        # Yield this page of data
         yield data
 
-        # If we got less than limit, this was the last page
         if len(data) < limit:
             break
 
-        # Move to next page
         offset += limit

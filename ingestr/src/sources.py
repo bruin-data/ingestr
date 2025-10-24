@@ -4237,11 +4237,6 @@ class CouchbaseSource:
 
 class SocrataSource:
     def handles_incrementality(self) -> bool:
-        """
-        Returns False - Socrata requires user to provide incremental_key.
-        Unlike QuickBooks, Socrata does not manage incrementality on its own.
-        User must explicitly provide --incremental-key parameter.
-        """
         return False
 
     def dlt_source(self, uri: str, table: str, **kwargs):
@@ -4251,22 +4246,14 @@ class SocrataSource:
         URI format: socrata://domain?app_token=TOKEN
         Table: dataset_id (e.g., "6udu-fhnu")
 
-        Examples:
-            URI: socrata://evergreen.data.socrata.com?app_token=mytoken
-            Table: 6udu-fhnu
-
-            URI: socrata://data.seattle.gov?app_token=token&username=user&password=pass
-            Table: dataset-id
-
         Args:
             uri: Socrata connection URI with domain and optional auth params
             table: Dataset ID (e.g., "6udu-fhnu")
             **kwargs: Additional arguments:
                 - incremental_key: Field to use for incremental loading (e.g., ":updated_at")
-                - interval_start: Start date for initial load (ISO format)
-                - interval_end: End date for load (ISO format)
-                - primary_key: Primary key field (default: ":id")
-                - merge_key: Merge key field(s) for deduplication. If not provided, uses primary_key.
+                - interval_start: Start date for initial load 
+                - interval_end: End date for load 
+                - primary_key: Primary key field for merge operations
 
         Returns:
             DltResource for the Socrata dataset
@@ -4275,7 +4262,6 @@ class SocrataSource:
 
         parsed = urlparse(uri)
 
-        # Extract domain from netloc
         domain = parsed.netloc
         if not domain:
             raise ValueError(
@@ -4284,10 +4270,8 @@ class SocrataSource:
                 "Example: socrata://evergreen.data.socrata.com?app_token=mytoken"
             )
 
-        # Parse query parameters
         query_params = parse_qs(parsed.query)
 
-        # Dataset ID comes from the table parameter
         dataset_id = table
         if not dataset_id:
             raise ValueError(
@@ -4295,18 +4279,15 @@ class SocrataSource:
                 "Example: --source-table 6udu-fhnu"
             )
 
-        # Extract optional parameters
         app_token = query_params.get("app_token", [None])[0]
         username = query_params.get("username", [None])[0]
         password = query_params.get("password", [None])[0]
 
-        # Set up incremental loading if incremental_key is provided
         incremental = None
         if kwargs.get("incremental_key"):
             start_value = kwargs.get("interval_start")
             end_value = kwargs.get("interval_end")
 
-            # Socrata API returns strings, so convert datetime to ISO format string
             if start_value:
                 start_value = (
                     start_value.isoformat()
@@ -4331,7 +4312,6 @@ class SocrataSource:
 
         primary_key = kwargs.get("primary_key")
 
-        # Import and create source
         from ingestr.src.socrata_source import source
 
         return source(

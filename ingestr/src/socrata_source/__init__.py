@@ -54,7 +54,6 @@ def source(
         Yields:
             Dict[str, Any]: Individual records from the dataset
         """
-        # Prepare common fetch arguments
         fetch_kwargs: Dict[str, Any] = {
             "domain": domain,
             "dataset_id": dataset_id,
@@ -63,10 +62,8 @@ def source(
             "password": password,
         }
 
-        # Add incremental filtering if enabled (Couchbase-style passthrough)
         if incremental and incremental.cursor_path:
             fetch_kwargs["incremental_key"] = incremental.cursor_path
-            # start_value and end_value are passed as strings; helpers will format as needed
             fetch_kwargs["start_value"] = (
                 str(incremental.last_value)
                 if incremental.last_value is not None
