@@ -29,7 +29,6 @@ def fetch_data(
         app_token: Socrata app token for higher rate limits
         username: Username for authentication
         password: Password for authentication
-        incremental_key: Field to filter on (e.g., ":updated_at")
         start_value: Minimum value for incremental_key (inclusive)
         end_value: Maximum value for incremental_key (exclusive)
 

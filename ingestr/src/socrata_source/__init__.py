@@ -1,6 +1,6 @@
 """A source loading data from Socrata open data platform"""
 
-from typing import Any, Dict, Iterator, Literal, Optional, cast
+from typing import Any, Dict, Iterator, Optional
 
 import dlt
 
@@ -37,9 +37,10 @@ def source(
     Returns:
         A dlt source with a single "dataset" resource
     """
+
     @dlt.resource(
         write_disposition=write_disposition or "replace",
-        primary_key=primary_key,  # type: ignore[arg-type]
+        primary_key=primary_key,  # type: ignore[call-overload]
     )
     def dataset(
         incremental: Optional[dlt.sources.incremental] = incremental,  # type: ignore[type-arg]
@@ -67,11 +68,17 @@ def source(
             fetch_kwargs["incremental_key"] = incremental.cursor_path
             # start_value and end_value are passed as strings; helpers will format as needed
             fetch_kwargs["start_value"] = (
-                str(incremental.last_value) if incremental.last_value is not None else None
+                str(incremental.last_value)
+                if incremental.last_value is not None
+                else None
             )
             if getattr(incremental, "end_value", None) is not None:
                 ev = incremental.end_value  # type: ignore[attr-defined]
-                fetch_kwargs["end_value"] = ev.isoformat() if hasattr(ev, "isoformat") else str(ev)
+                fetch_kwargs["end_value"] = (
+                    ev.isoformat()  # type: ignore[union-attr]
+                    if hasattr(ev, "isoformat")
+                    else str(ev)
+                )
 
         # Fetch and yield records
         yield from fetch_data(**fetch_kwargs)
