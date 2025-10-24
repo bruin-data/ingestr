@@ -4251,8 +4251,8 @@ class SocrataSource:
             table: Dataset ID (e.g., "6udu-fhnu")
             **kwargs: Additional arguments:
                 - incremental_key: Field to use for incremental loading (e.g., ":updated_at")
-                - interval_start: Start date for initial load 
-                - interval_end: End date for load 
+                - interval_start: Start date for initial load
+                - interval_end: End date for load
                 - primary_key: Primary key field for merge operations
 
         Returns:
