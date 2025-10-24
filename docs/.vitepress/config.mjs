@@ -108,6 +108,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Postgres", link: "/supported-sources/postgres.md" },
               { text: "SAP Hana", link: "/supported-sources/sap-hana.md" },
               { text: "Snowflake", link: "/supported-sources/snowflake.md" },
+              { text: "Socrata", link: "/supported-sources/socrata.md" },
               { text: "SQLite", link: "/supported-sources/sqlite.md" },
               {
                 text: "Experimental",
