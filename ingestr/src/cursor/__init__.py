@@ -35,21 +35,10 @@ def cursor_source() -> Any:
 def team_members(
     api_key: str = dlt.secrets.value,
 ) -> Iterable[TDataItem]:
-    """
-    Fetches team members from Cursor API.
-
-    Args:
-        api_key (str): API key for authentication
-
-    Yields:
-        dict: The team member data.
-    """
     client = get_client(api_key)
 
     members = client.get_team_members()
-
-    for member in members:
-        yield member
+    yield from members
 
 
 @dlt.resource(
@@ -61,24 +50,9 @@ def daily_usage_data(
     start_date: Optional[int] = dlt.config.value,
     end_date: Optional[int] = dlt.config.value,
 ) -> Iterable[TDataItem]:
-    """
-    Fetches daily usage data from Cursor API.
-
-    Args:
-        api_key (str): API key for authentication
-        start_date (int): Start date in epoch milliseconds (from interval_start, optional)
-        end_date (int): End date in epoch milliseconds (from interval_end, optional)
-
-    Yields:
-        dict: The daily usage data.
-
-    Note:
-        Date range cannot exceed 30 days when specified.
-    """
     client = get_client(api_key)
 
-    for record in client.get_daily_usage_data(start_date=start_date, end_date=end_date):
-        yield record
+    yield from client.get_daily_usage_data(start_date=start_date, end_date=end_date)
 
 
 @dlt.resource(
@@ -88,19 +62,9 @@ def daily_usage_data(
 def team_spend(
     api_key: str = dlt.secrets.value,
 ) -> Iterable[TDataItem]:
-    """
-    Fetches team spending data from Cursor API.
-
-    Args:
-        api_key (str): API key for authentication
-
-    Yields:
-        dict: The team spending data.
-    """
     client = get_client(api_key)
 
-    for record in client.get_team_spend():
-        yield record
+    yield from client.get_team_spend()
 
 
 @dlt.resource(
@@ -112,18 +76,8 @@ def filtered_usage_events(
     start_date: Optional[int] = dlt.config.value,
     end_date: Optional[int] = dlt.config.value,
 ) -> Iterable[TDataItem]:
-    """
-    Fetches filtered usage events from Cursor API.
-
-    Args:
-        api_key (str): API key for authentication
-        start_date (int): Start date in epoch milliseconds (from interval_start, optional)
-        end_date (int): End date in epoch milliseconds (from interval_end, optional)
-
-    Yields:
-        dict: The usage event data.
-    """
     client = get_client(api_key)
 
-    for record in client.get_filtered_usage_events(start_date=start_date, end_date=end_date):
-        yield record
+    yield from client.get_filtered_usage_events(
+        start_date=start_date, end_date=end_date
+    )

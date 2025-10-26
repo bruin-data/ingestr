@@ -1,7 +1,7 @@
 """Cursor source helpers"""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import requests
 
@@ -75,20 +75,24 @@ class CursorClient:
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
 
         try:
-            kwargs = {
-                "method": method,
-                "url": url,
-                "auth": (self.api_key, ""),
-                "timeout": self.timeout,
-                "headers": {"Content-Type": "application/json"},
-            }
-
             if json_data is not None:
-                kwargs["json"] = json_data
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    auth=(self.api_key, ""),
+                    timeout=self.timeout,
+                    headers={"Content-Type": "application/json"},
+                    json=json_data,
+                )
             else:
-                kwargs["json"] = {}
-
-            response = requests.request(**kwargs)
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    auth=(self.api_key, ""),
+                    timeout=self.timeout,
+                    headers={"Content-Type": "application/json"},
+                    json={},
+                )
 
             if response.status_code == 401:
                 raise CursorAuthenticationError(
@@ -105,12 +109,17 @@ class CursorClient:
                     error_data = response.json()
                     if "message" in error_data:
                         error_message = f"{error_message}: {error_data['message']}"
-                except:
+                except Exception:
                     pass
 
                 # Add specific hint for 400 errors on date-related endpoints
-                if response.status_code == 400 and endpoint in ["teams/daily-usage-data", "teams/filtered-usage-events"]:
-                    error_message += "\nNote: Date range cannot exceed 30 days for this endpoint."
+                if response.status_code == 400 and endpoint in [
+                    "teams/daily-usage-data",
+                    "teams/filtered-usage-events",
+                ]:
+                    error_message += (
+                        "\nNote: Date range cannot exceed 30 days for this endpoint."
+                    )
 
                 raise CursorAPIError(
                     error_message,
@@ -124,68 +133,39 @@ class CursorClient:
             logger.error(f"Request failed: {str(e)}")
             raise CursorAPIError(f"Request failed: {str(e)}")
 
-    def get_team_members(self) -> List[Dict[str, Any]]:
-        """
-        Fetch team members from Cursor API.
-
-        Returns:
-            List of team member dictionaries
-
-        Example response:
-            {
-                "teamMembers": [
-                    {
-                        "name": "Alex",
-                        "email": "developer@company.com",
-                        "role": "member"
-                    },
-                    {
-                        "name": "Sam",
-                        "email": "admin@company.com",
-                        "role": "owner"
-                    }
-                ]
-            }
-        """
-        response = self._make_request("teams/members", method="GET")
-        return response.get("teamMembers", [])
-
-    def get_daily_usage_data(
+    def _paginate(
         self,
-        start_date: Optional[int] = None,
-        end_date: Optional[int] = None,
+        endpoint: str,
+        data_key: str,
+        base_payload: Optional[Dict[str, Any]] = None,
         page_size: Optional[int] = 100,
-    ) -> List[Dict[str, Any]]:
+        has_next_page_check: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    ) -> Iterator[Dict[str, Any]]:
         """
-        Fetch daily usage data from Cursor API with pagination support.
+        Generic pagination helper for API endpoints.
 
         Args:
-            start_date: Start date in epoch milliseconds (optional)
-            end_date: End date in epoch milliseconds (optional)
+            endpoint: API endpoint to call
+            data_key: Key in response containing the data array
+            base_payload: Base payload to include in each request
             page_size: Number of results per page (default: 100)
+            has_next_page_check: Optional function to check if there's a next page from response
 
         Yields:
-            Daily usage data dictionaries
-
-        Note:
-            Date range cannot exceed 30 days when specified.
+            Individual records from the paginated response
         """
         page = 1
+        base_payload = base_payload or {}
 
         while True:
-            payload = {}
-
-            if start_date is not None:
-                payload["startDate"] = start_date
-            if end_date is not None:
-                payload["endDate"] = end_date
+            payload = base_payload.copy()
 
             if page_size:
                 payload["pageSize"] = page_size
                 payload["page"] = page
 
-            result = self._make_request("teams/daily-usage-data", json_data=payload)
-            data = result.get("data", [])
+            result = self._make_request(endpoint, json_data=payload)
+            data = result.get(data_key, [])
 
             if not data:
                 break
@@ -197,107 +177,80 @@ class CursorClient:
             if not page_size:
                 break
 
-            # If we got less data than page_size, we've reached the end
-            if len(data) < page_size:
+            # Custom check for next page if provided
+            if has_next_page_check:
+                if not has_next_page_check(result):
+                    break
+            # Default: if we got less data than page_size, we've reached the end
+            elif len(data) < page_size:
                 break
 
             page += 1
+
+    def get_team_members(self) -> List[Dict[str, Any]]:
+        response = self._make_request("teams/members", method="GET")
+        return response.get("teamMembers", [])
+
+    def get_daily_usage_data(
+        self,
+        start_date: Optional[int] = None,
+        end_date: Optional[int] = None,
+        page_size: Optional[int] = 100,
+    ) -> Iterator[Dict[str, Any]]:
+        base_payload = {}
+        if start_date is not None:
+            base_payload["startDate"] = start_date
+        if end_date is not None:
+            base_payload["endDate"] = end_date
+
+        yield from self._paginate(
+            endpoint="teams/daily-usage-data",
+            data_key="data",
+            base_payload=base_payload,
+            page_size=page_size,
+        )
 
     def get_team_spend(
         self,
         page_size: Optional[int] = 100,
-    ) -> List[Dict[str, Any]]:
-        """
-        Fetch team spending data from Cursor API with pagination support.
+    ) -> Iterator[Dict[str, Any]]:
+        def check_has_next_page(response: Dict[str, Any]) -> bool:
+            current_page = response.get("currentPage", 1)
+            total_pages = response.get("totalPages", 1)
+            return current_page < total_pages
 
-        Args:
-            page_size: Number of results per page (default: 100)
-
-        Yields:
-            Team spending data dictionaries
-        """
-        page = 1
-
-        while True:
-            payload = {}
-
-            if page_size:
-                payload["pageSize"] = page_size
-                payload["page"] = page
-
-            result = self._make_request("teams/spend", json_data=payload)
-            data = result.get("teamMemberSpend", [])
-            total_pages = result.get("totalPages", 1)
-
-            if not data:
-                break
-
-            for record in data:
-                yield record
-
-            # If we've reached the last page, stop
-            if page >= total_pages:
-                break
-
-            page += 1
+        yield from self._paginate(
+            endpoint="teams/spend",
+            data_key="teamMemberSpend",
+            page_size=page_size,
+            has_next_page_check=check_has_next_page,
+        )
 
     def get_filtered_usage_events(
         self,
         start_date: Optional[int] = None,
         end_date: Optional[int] = None,
         page_size: Optional[int] = 100,
-    ) -> List[Dict[str, Any]]:
-        """
-        Fetch filtered usage events from Cursor API with pagination support.
+    ) -> Iterator[Dict[str, Any]]:
+        base_payload = {}
+        if start_date is not None:
+            base_payload["startDate"] = start_date
+        if end_date is not None:
+            base_payload["endDate"] = end_date
 
-        Args:
-            start_date: Start date in epoch milliseconds (optional)
-            end_date: End date in epoch milliseconds (optional)
-            page_size: Number of results per page (default: 100)
+        # Custom check for hasNextPage
+        def check_has_next_page(response: Dict[str, Any]) -> bool:
+            pagination = response.get("pagination", {})
+            return pagination.get("hasNextPage", False)
 
-        Yields:
-            Usage event dictionaries
-        """
-        page = 1
-
-        while True:
-            payload = {}
-
-            if start_date is not None:
-                payload["startDate"] = start_date
-            if end_date is not None:
-                payload["endDate"] = end_date
-
-            if page_size:
-                payload["pageSize"] = page_size
-                payload["page"] = page
-
-            result = self._make_request("teams/filtered-usage-events", json_data=payload)
-            data = result.get("usageEvents", [])
-            pagination = result.get("pagination", {})
-            has_next_page = pagination.get("hasNextPage", False)
-
-            if not data:
-                break
-
-            for record in data:
-                yield record
-
-            # If there's no next page, stop
-            if not has_next_page:
-                break
-
-            page += 1
+        yield from self._paginate(
+            endpoint="teams/filtered-usage-events",
+            data_key="usageEvents",
+            base_payload=base_payload,
+            page_size=page_size,
+            has_next_page_check=check_has_next_page,
+        )
 
 
 def get_client(api_key: str) -> CursorClient:
-    """
-    Get a CursorClient instance.
-
-    Args:
-        api_key: API key for authentication
-
-    Returns:
-        CursorClient instance
-    """
     return CursorClient(api_key=api_key)
