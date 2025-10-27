@@ -251,20 +251,45 @@ class HostawayClient:
 
     def fetch_message_templates(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/messageTemplates"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
 
     def fetch_bed_types(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/bedTypes"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
 
     def fetch_property_types(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/propertyTypes"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
 
     def fetch_countries(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/countries"
-        yield from self._paginate(url)
+        for item in self._fetch_single(url):
+            if isinstance(item, dict) and "code" not in item:
+                for code, name in item.items():
+                    yield {"code": code, "name": name}
+            else:
+                yield item
 
     def fetch_account_tax_settings(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/accountTaxSettings"
         yield from self._fetch_single(url)
+
+    def fetch_user_groups(self) -> Iterable[dict]:
+        url = f"{self.BASE_URL}/v1/userGroups"
+        yield from self._fetch_single(url)
+
+    def fetch_guest_payment_charges(self) -> Iterable[dict]:
+        url = f"{self.BASE_URL}/v1/guestPayments/charges"
+        yield from self._paginate(url)
+
+    def fetch_coupons(self) -> Iterable[dict]:
+        url = f"{self.BASE_URL}/v1/coupons"
+        yield from self._paginate(url)
+
+    def fetch_webhook_reservations(self) -> Iterable[dict]:
+        url = f"{self.BASE_URL}/v1/webhooks/reservations"
+        yield from self._fetch_single(url)
+
+    def fetch_tasks(self) -> Iterable[dict]:
+        url = f"{self.BASE_URL}/v1/tasks"
+        yield from self._paginate(url)

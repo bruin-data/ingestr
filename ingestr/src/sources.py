@@ -4394,6 +4394,16 @@ class HostawaySource:
                 resource_name = "countries"
             case "account_tax_settings":
                 resource_name = "account_tax_settings"
+            case "user_groups":
+                resource_name = "user_groups"
+            case "guest_payment_charges":
+                resource_name = "guest_payment_charges"
+            case "coupons":
+                resource_name = "coupons"
+            case "webhook_reservations":
+                resource_name = "webhook_reservations"
+            case "tasks":
+                resource_name = "tasks"
             case _:
                 raise ValueError(
                     f"Resource '{table}' is not supported for Hostaway source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"

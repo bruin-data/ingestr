@@ -282,4 +282,44 @@ def hostaway_source(
     def account_tax_settings() -> Iterable[TDataItem]:
         yield from client.fetch_account_tax_settings()
 
-    return listings, listing_fee_settings, listing_agreements, listing_pricing_settings, cancellation_policies, cancellation_policies_airbnb, cancellation_policies_marriott, cancellation_policies_vrbo, reservations, finance_fields, reservation_payment_methods, reservation_rental_agreements, listing_calendars, conversations, message_templates, bed_types, property_types, countries, account_tax_settings
+    @dlt.resource(
+        write_disposition="replace",
+        name="user_groups",
+        table_name="user_groups",
+    )
+    def user_groups() -> Iterable[TDataItem]:
+        yield from client.fetch_user_groups()
+
+    @dlt.resource(
+        write_disposition="replace",
+        name="guest_payment_charges",
+        table_name="guest_payment_charges",
+    )
+    def guest_payment_charges() -> Iterable[TDataItem]:
+        yield from client.fetch_guest_payment_charges()
+
+    @dlt.resource(
+        write_disposition="replace",
+        name="coupons",
+        table_name="coupons",
+    )
+    def coupons() -> Iterable[TDataItem]:
+        yield from client.fetch_coupons()
+
+    @dlt.resource(
+        write_disposition="replace",
+        name="webhook_reservations",
+        table_name="webhook_reservations",
+    )
+    def webhook_reservations() -> Iterable[TDataItem]:
+        yield from client.fetch_webhook_reservations()
+
+    @dlt.resource(
+        write_disposition="replace",
+        name="tasks",
+        table_name="tasks",
+    )
+    def tasks() -> Iterable[TDataItem]:
+        yield from client.fetch_tasks()
+
+    return listings, listing_fee_settings, listing_agreements, listing_pricing_settings, cancellation_policies, cancellation_policies_airbnb, cancellation_policies_marriott, cancellation_policies_vrbo, reservations, finance_fields, reservation_payment_methods, reservation_rental_agreements, listing_calendars, conversations, message_templates, bed_types, property_types, countries, account_tax_settings, user_groups, guest_payment_charges, coupons, webhook_reservations, tasks
