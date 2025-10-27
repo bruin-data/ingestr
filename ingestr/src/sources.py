@@ -4418,8 +4418,7 @@ class HostawaySource:
         end_date = kwargs.get("interval_end")
         if end_date:
             end_date = ensure_pendulum_datetime(end_date).in_timezone("UTC")
-        else:
-            end_date = pendulum.now().in_timezone("UTC")
+       
 
         from ingestr.src.hostaway import hostaway_source
 

@@ -13,10 +13,6 @@ class HostawayClient:
 
     def _fetch_single(self, url: str, params: Optional[dict] = None) -> Iterable[dict]:
         response = self.session.get(url, params=params, timeout=30)
-
-        if response.status_code == 403:
-            return
-
         response.raise_for_status()
         response_data = response.json()
 
@@ -47,10 +43,6 @@ class HostawayClient:
         while True:
             page_params = {**params, "limit": limit, "offset": offset}
             response = self.session.get(url, params=page_params, timeout=30)
-
-            if response.status_code == 403:
-                break
-
             response.raise_for_status()
             response_data = response.json()
 
