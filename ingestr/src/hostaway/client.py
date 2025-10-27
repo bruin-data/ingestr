@@ -1,4 +1,4 @@
-from typing import Iterable, Callable, Optional
+from typing import Callable, Iterable, Optional
 
 import pendulum
 from dlt.sources.helpers.requests import Client
@@ -89,9 +89,13 @@ class HostawayClient:
         def process_listing(listing: dict) -> dict:
             if "latestActivityOn" in listing and listing["latestActivityOn"]:
                 try:
-                    listing["latestActivityOn"] = pendulum.parse(listing["latestActivityOn"])
+                    listing["latestActivityOn"] = pendulum.parse(
+                        listing["latestActivityOn"]
+                    )
                 except Exception:
-                    listing["latestActivityOn"] = pendulum.datetime(1970, 1, 1, tz="UTC")
+                    listing["latestActivityOn"] = pendulum.datetime(
+                        1970, 1, 1, tz="UTC"
+                    )
             else:
                 listing["latestActivityOn"] = pendulum.datetime(1970, 1, 1, tz="UTC")
             return listing
@@ -131,7 +135,9 @@ class HostawayClient:
             listing_id = listing.get("id")
             if listing_id:
                 try:
-                    yield from self.fetch_listing_fee_settings(listing_id, start_time, end_time)
+                    yield from self.fetch_listing_fee_settings(
+                        listing_id, start_time, end_time
+                    )
                 except Exception:
                     continue
 

@@ -4429,4 +4429,3 @@ class HostawaySource:
             end_date=end_date,
             listing_id=listing_id,
         ).with_resources(resource_name)
-

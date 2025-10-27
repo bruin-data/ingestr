@@ -210,7 +210,9 @@ def hostaway_source(
         name="reservation_rental_agreements",
         table_name="reservation_rental_agreements",
     )
-    def reservation_rental_agreements(reservation_item: TDataItem) -> Iterable[TDataItem]:
+    def reservation_rental_agreements(
+        reservation_item: TDataItem,
+    ) -> Iterable[TDataItem]:
         @dlt.defer
         def _get_rental_agreement(res_id):
             return list(client.fetch_reservation_rental_agreement(res_id))
@@ -322,4 +324,29 @@ def hostaway_source(
     def tasks() -> Iterable[TDataItem]:
         yield from client.fetch_tasks()
 
-    return listings, listing_fee_settings, listing_agreements, listing_pricing_settings, cancellation_policies, cancellation_policies_airbnb, cancellation_policies_marriott, cancellation_policies_vrbo, reservations, finance_fields, reservation_payment_methods, reservation_rental_agreements, listing_calendars, conversations, message_templates, bed_types, property_types, countries, account_tax_settings, user_groups, guest_payment_charges, coupons, webhook_reservations, tasks
+    return (
+        listings,
+        listing_fee_settings,
+        listing_agreements,
+        listing_pricing_settings,
+        cancellation_policies,
+        cancellation_policies_airbnb,
+        cancellation_policies_marriott,
+        cancellation_policies_vrbo,
+        reservations,
+        finance_fields,
+        reservation_payment_methods,
+        reservation_rental_agreements,
+        listing_calendars,
+        conversations,
+        message_templates,
+        bed_types,
+        property_types,
+        countries,
+        account_tax_settings,
+        user_groups,
+        guest_payment_charges,
+        coupons,
+        webhook_reservations,
+        tasks,
+    )
