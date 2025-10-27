@@ -4342,10 +4342,28 @@ class HostawaySource:
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Hostaway")
 
-        if table != "listings":
-            raise ValueError(
-                f"Resource '{table}' is not supported for Hostaway source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
-            )
+        listing_id = None
+        base_table = table.split(":", 1)[0] if ":" in table else table
+
+        match base_table:
+            case "listings":
+                resource_name = "listings"
+            case "listing_fee_settings":
+                resource_name = "listing_fee_settings"
+                if ":" in table:
+                    listing_id = table.split(":", 1)[1]
+            case "listing_agreements":
+                resource_name = "listing_agreements"
+                if ":" in table:
+                    listing_id = table.split(":", 1)[1]
+            case "listing_pricing_settings":
+                resource_name = "listing_pricing_settings"
+                if ":" in table:
+                    listing_id = table.split(":", 1)[1]
+            case _:
+                raise ValueError(
+                    f"Resource '{table}' is not supported for Hostaway source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+                )
 
         start_date = kwargs.get("interval_start")
         if start_date:
@@ -4365,5 +4383,6 @@ class HostawaySource:
             api_key=api_key[0],
             start_date=start_date,
             end_date=end_date,
-        ).with_resources("listings")
+            listing_id=listing_id,
+        ).with_resources(resource_name)
 
