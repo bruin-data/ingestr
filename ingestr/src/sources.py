@@ -4323,3 +4323,47 @@ class SocrataSource:
             incremental=incremental,
             primary_key=primary_key,
         ).with_resources("dataset")
+
+
+class HostawaySource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Hostaway takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        source_parts = urlparse(uri)
+        source_params = parse_qs(source_parts.query)
+        api_key = source_params.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Hostaway")
+
+        if table != "listings":
+            raise ValueError(
+                f"Resource '{table}' is not supported for Hostaway source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+            )
+
+        start_date = kwargs.get("interval_start")
+        if start_date:
+            start_date = ensure_pendulum_datetime(start_date).in_timezone("UTC")
+        else:
+            start_date = pendulum.datetime(1970, 1, 1).in_timezone("UTC")
+
+        end_date = kwargs.get("interval_end")
+        if end_date:
+            end_date = ensure_pendulum_datetime(end_date).in_timezone("UTC")
+        else:
+            end_date = pendulum.now().in_timezone("UTC")
+
+        from ingestr.src.hostaway import hostaway_source
+
+        return hostaway_source(
+            api_key=api_key[0],
+            start_date=start_date,
+            end_date=end_date,
+        ).with_resources("listings")
+
