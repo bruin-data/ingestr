@@ -177,19 +177,19 @@ class HostawayClient:
 
     def fetch_cancellation_policies(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/cancellationPolicies"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
 
     def fetch_cancellation_policies_airbnb(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/cancellationPolicies/airbnb"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
 
     def fetch_cancellation_policies_marriott(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/cancellationPolicies/marriott"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
 
     def fetch_cancellation_policies_vrbo(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/cancellationPolicies/vrbo"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
 
     def fetch_reservations(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/reservations"
@@ -197,7 +197,7 @@ class HostawayClient:
 
     def fetch_finance_field(self, reservation_id) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/financeField/{str(reservation_id)}"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
 
     def fetch_all_finance_fields(self) -> Iterable[dict]:
         for reservation in self.fetch_reservations():
@@ -210,7 +210,7 @@ class HostawayClient:
 
     def fetch_reservation_payment_methods(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/reservations/paymentMethods"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
 
     def fetch_reservation_rental_agreement(self, reservation_id) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/reservations/{str(reservation_id)}/rentalAgreement"
@@ -284,7 +284,7 @@ class HostawayClient:
 
     def fetch_coupons(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/coupons"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
 
     def fetch_webhook_reservations(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/webhooks/reservations"
@@ -292,4 +292,4 @@ class HostawayClient:
 
     def fetch_tasks(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/tasks"
-        yield from self._paginate(url)
+        yield from self._fetch_single(url)
