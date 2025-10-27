@@ -4360,6 +4360,40 @@ class HostawaySource:
                 resource_name = "listing_pricing_settings"
                 if ":" in table:
                     listing_id = table.split(":", 1)[1]
+            case "cancellation_policies":
+                resource_name = "cancellation_policies"
+            case "cancellation_policies_airbnb":
+                resource_name = "cancellation_policies_airbnb"
+            case "cancellation_policies_marriott":
+                resource_name = "cancellation_policies_marriott"
+            case "cancellation_policies_vrbo":
+                resource_name = "cancellation_policies_vrbo"
+            case "reservations":
+                resource_name = "reservations"
+            case "finance_fields":
+                resource_name = "finance_fields"
+                if ":" in table:
+                    listing_id = table.split(":", 1)[1]
+            case "reservation_payment_methods":
+                resource_name = "reservation_payment_methods"
+            case "reservation_rental_agreements":
+                resource_name = "reservation_rental_agreements"
+                if ":" in table:
+                    listing_id = table.split(":", 1)[1]
+            case "listing_calendars":
+                resource_name = "listing_calendars"
+            case "conversations":
+                resource_name = "conversations"
+            case "message_templates":
+                resource_name = "message_templates"
+            case "bed_types":
+                resource_name = "bed_types"
+            case "property_types":
+                resource_name = "property_types"
+            case "countries":
+                resource_name = "countries"
+            case "account_tax_settings":
+                resource_name = "account_tax_settings"
             case _:
                 raise ValueError(
                     f"Resource '{table}' is not supported for Hostaway source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
