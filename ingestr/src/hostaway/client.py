@@ -261,12 +261,7 @@ class HostawayClient:
 
     def fetch_countries(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/countries"
-        for item in self._fetch_single(url):
-            if isinstance(item, dict) and "code" not in item:
-                for code, name in item.items():
-                    yield {"code": code, "name": name}
-            else:
-                yield item
+        yield from self._fetch_single(url)
 
     def fetch_account_tax_settings(self) -> Iterable[dict]:
         url = f"{self.BASE_URL}/v1/accountTaxSettings"

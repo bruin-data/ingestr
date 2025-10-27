@@ -14,6 +14,7 @@ def hostaway_source(
     start_date: pendulum.DateTime,
     end_date: pendulum.DateTime | None = None,
     listing_id: str | None = None,
+    reservation_id: str | None = None,
 ) -> Iterable[DltResource]:
     """
     Hostaway API source for fetching listings and fee settings data.
@@ -192,9 +193,22 @@ def hostaway_source(
         def _get_finance_field(res_id):
             return list(client.fetch_finance_field(res_id))
 
-        reservation_id = reservation_item.get("id")
+        reservation_id_val = reservation_item.get("id")
+        if reservation_id_val:
+            yield _get_finance_field(reservation_id_val)
+
+    @dlt.resource(
+        write_disposition="replace",
+        name="finance_fields_single",
+        table_name="finance_fields",
+    )
+    def finance_fields_single() -> Iterable[TDataItem]:
+        """
+        Fetch finance field for a specific reservation.
+        Used when reservation_id parameter is provided.
+        """
         if reservation_id:
-            yield _get_finance_field(reservation_id)
+            yield from client.fetch_finance_field(reservation_id)
 
     @dlt.resource(
         write_disposition="replace",
@@ -235,6 +249,19 @@ def hostaway_source(
         listing_id_val = listing_item.get("id")
         if listing_id_val:
             yield _get_calendar(listing_id_val)
+
+    @dlt.resource(
+        write_disposition="replace",
+        name="listing_calendars_single",
+        table_name="listing_calendars",
+    )
+    def listing_calendars_single() -> Iterable[TDataItem]:
+        """
+        Fetch calendar for a specific listing.
+        Used when listing_id parameter is provided.
+        """
+        if listing_id:
+            yield from client.fetch_listing_calendar(listing_id)
 
     @dlt.resource(
         write_disposition="replace",
@@ -335,9 +362,11 @@ def hostaway_source(
         cancellation_policies_vrbo,
         reservations,
         finance_fields,
+        finance_fields_single,
         reservation_payment_methods,
         reservation_rental_agreements,
         listing_calendars,
+        listing_calendars_single,
         conversations,
         message_templates,
         bed_types,

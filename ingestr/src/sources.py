@@ -4343,6 +4343,7 @@ class HostawaySource:
             raise ValueError("api_key in the URI is required to connect to Hostaway")
 
         listing_id = None
+        reservation_id = None
         base_table = table.split(":", 1)[0] if ":" in table else table
 
         match base_table:
@@ -4371,17 +4372,21 @@ class HostawaySource:
             case "reservations":
                 resource_name = "reservations"
             case "finance_fields":
-                resource_name = "finance_fields"
                 if ":" in table:
-                    listing_id = table.split(":", 1)[1]
+                    reservation_id = table.split(":", 1)[1]
+                    resource_name = "finance_fields_single"
+                else:
+                    resource_name = "finance_fields"
             case "reservation_payment_methods":
                 resource_name = "reservation_payment_methods"
             case "reservation_rental_agreements":
                 resource_name = "reservation_rental_agreements"
+            case "listing_calendars":
                 if ":" in table:
                     listing_id = table.split(":", 1)[1]
-            case "listing_calendars":
-                resource_name = "listing_calendars"
+                    resource_name = "listing_calendars_single"
+                else:
+                    resource_name = "listing_calendars"
             case "conversations":
                 resource_name = "conversations"
             case "message_templates":
@@ -4418,7 +4423,6 @@ class HostawaySource:
         end_date = kwargs.get("interval_end")
         if end_date:
             end_date = ensure_pendulum_datetime(end_date).in_timezone("UTC")
-       
 
         from ingestr.src.hostaway import hostaway_source
 
@@ -4427,4 +4431,5 @@ class HostawaySource:
             start_date=start_date,
             end_date=end_date,
             listing_id=listing_id,
+            reservation_id=reservation_id,
         ).with_resources(resource_name)
