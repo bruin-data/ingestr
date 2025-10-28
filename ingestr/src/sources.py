@@ -4342,25 +4342,15 @@ class HostawaySource:
         if not api_key:
             raise ValueError("api_key in the URI is required to connect to Hostaway")
 
-        listing_id = None
-        reservation_id = None
-        base_table = table.split(":", 1)[0] if ":" in table else table
-
-        match base_table:
+        match table:
             case "listings":
                 resource_name = "listings"
             case "listing_fee_settings":
                 resource_name = "listing_fee_settings"
-                if ":" in table:
-                    listing_id = table.split(":", 1)[1]
             case "listing_agreements":
                 resource_name = "listing_agreements"
-                if ":" in table:
-                    listing_id = table.split(":", 1)[1]
             case "listing_pricing_settings":
                 resource_name = "listing_pricing_settings"
-                if ":" in table:
-                    listing_id = table.split(":", 1)[1]
             case "cancellation_policies":
                 resource_name = "cancellation_policies"
             case "cancellation_policies_airbnb":
@@ -4372,21 +4362,13 @@ class HostawaySource:
             case "reservations":
                 resource_name = "reservations"
             case "finance_fields":
-                if ":" in table:
-                    reservation_id = table.split(":", 1)[1]
-                    resource_name = "finance_fields_single"
-                else:
-                    resource_name = "finance_fields"
+                resource_name = "finance_fields"
             case "reservation_payment_methods":
                 resource_name = "reservation_payment_methods"
             case "reservation_rental_agreements":
                 resource_name = "reservation_rental_agreements"
             case "listing_calendars":
-                if ":" in table:
-                    listing_id = table.split(":", 1)[1]
-                    resource_name = "listing_calendars_single"
-                else:
-                    resource_name = "listing_calendars"
+                resource_name = "listing_calendars"
             case "conversations":
                 resource_name = "conversations"
             case "message_templates":
@@ -4430,6 +4412,4 @@ class HostawaySource:
             api_key=api_key[0],
             start_date=start_date,
             end_date=end_date,
-            listing_id=listing_id,
-            reservation_id=reservation_id,
         ).with_resources(resource_name)
