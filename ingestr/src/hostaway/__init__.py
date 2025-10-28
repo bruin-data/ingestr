@@ -29,7 +29,6 @@ def hostaway_source(
         Iterable[DltResource]: DLT resources for listings and/or fee settings
     """
 
-
     client = HostawayClient(api_key)
 
     @dlt.resource(
@@ -51,7 +50,11 @@ def hostaway_source(
         Uses latestActivityOn field as the incremental cursor.
         """
         start_dt = datetime.last_value
-        end_dt = datetime.end_value if datetime.end_value is not None else pendulum.now(tz="UTC")
+        end_dt = (
+            datetime.end_value
+            if datetime.end_value is not None
+            else pendulum.now(tz="UTC")
+        )
 
         yield from client.fetch_listings(start_dt, end_dt)
 
@@ -78,7 +81,11 @@ def hostaway_source(
         Otherwise, fetches fee settings for all listings.
         """
         start_dt = datetime.last_value
-        end_dt = datetime.end_value if datetime.end_value is not None else pendulum.now(tz="UTC")
+        end_dt = (
+            datetime.end_value
+            if datetime.end_value is not None
+            else pendulum.now(tz="UTC")
+        )
 
         if listing_id:
             yield from client.fetch_listing_fee_settings(listing_id, start_dt, end_dt)
