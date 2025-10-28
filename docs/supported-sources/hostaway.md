@@ -64,49 +64,6 @@ curl -X DELETE 'https://api.hostaway.com/v1/accessTokens?token=YOUR_ACCESS_TOKEN
   -H 'Content-type: application/x-www-form-urlencoded'
 ```
 
-## Table Name Structure
-
-Some Hostaway tables support parametrized table names for filtering data:
-
-- `<table_name>` - Fetches all data for the endpoint
-- `<table_name>:<listing_id>` - Fetches data for a specific listing ID
-- `<table_name>:<reservation_id>` - Fetches data for a specific reservation ID
-
-### Parametrized Table Examples
-
-**Fetch all listing fee settings:**
-```sh
-ingestr ingest \
-  --source-uri 'hostaway://?api_key=YOUR_ACCESS_TOKEN' \
-  --source-table 'listing_fee_settings' \
-  --dest-uri 'duckdb:///hostaway.duckdb' \
-  --dest-table 'main.listing_fee_settings' \
-  --interval-start '2020-01-01' \
-  --interval-end '2025-12-31'
-```
-
-**Fetch fee settings for a specific listing (listing_id=12345):**
-```sh
-ingestr ingest \
-  --source-uri 'hostaway://?api_key=YOUR_ACCESS_TOKEN' \
-  --source-table 'listing_fee_settings:12345' \
-  --dest-uri 'duckdb:///hostaway.duckdb' \
-  --dest-table 'main.listing_fee_settings' \
-  --interval-start '2020-01-01' \
-  --interval-end '2025-12-31'
-```
-
-### Tables Supporting Parametrized Queries
-
-**Tables supporting `:<listing_id>` parameter:**
-- `listing_fee_settings:<listing_id>`
-- `listing_agreements:<listing_id>`
-- `listing_pricing_settings:<listing_id>`
-- `listing_calendars:<listing_id>`
-
-**Tables supporting `:<reservation_id>` parameter:**
-- `finance_fields:<reservation_id>`
-
 ## Tables
 
 Hostaway source allows ingesting the following resources into separate tables:
@@ -114,16 +71,16 @@ Hostaway source allows ingesting the following resources into separate tables:
 | Table | PK | Inc Key | Inc Strategy | Description |
 | ----- | -- | ------- | ------------ | ----------- |
 | `listings` | id | latestActivityOn | merge | Property listings managed in Hostaway |
-| `listing_fee_settings` | id | updatedOn | merge | Fee settings configured for each listing. Supports `:<listing_id>` parameter |
-| `listing_pricing_settings` | - | - | replace | Pricing rules and settings for listings. Supports `:<listing_id>` parameter |
-| `listing_agreements` | - | - | replace | Rental agreements associated with listings. Supports `:<listing_id>` parameter |
-| `listing_calendars` | - | - | replace | Calendar availability data for each listing. Uses parallelization for performance. Supports `:<listing_id>` parameter |
+| `listing_fee_settings` | id | updatedOn | merge | Fee settings configured for each listing |
+| `listing_pricing_settings` | - | - | replace | Pricing rules and settings for listings |
+| `listing_agreements` | - | - | replace | Rental agreements associated with listings |
+| `listing_calendars` | - | - | replace | Calendar availability data for each listing. Uses parallelization for performance |
 | `cancellation_policies` | - | - | replace | General cancellation policies |
 | `cancellation_policies_airbnb` | - | - | replace | Airbnb-specific cancellation policies |
 | `cancellation_policies_marriott` | - | - | replace | Marriott-specific cancellation policies |
 | `cancellation_policies_vrbo` | - | - | replace | VRBO-specific cancellation policies |
 | `reservations` | - | - | replace | Booking reservations across all channels |
-| `finance_fields` | - | - | replace | Financial data for each reservation. Uses parallelization for performance. Supports `:<reservation_id>` parameter |
+| `finance_fields` | - | - | replace | Financial data for each reservation. Uses parallelization for performance |
 | `reservation_payment_methods` | - | - | replace | Available payment methods for reservations |
 | `reservation_rental_agreements` | - | - | replace | Rental agreements for specific reservations. Uses parallelization for performance |
 | `conversations` | - | - | replace | Guest communication threads |
