@@ -4281,6 +4281,8 @@ class CursorSource:
 
         src = cursor_source()
         return src.with_resources(table)
+
+
 class SocrataSource:
     def handles_incrementality(self) -> bool:
         return False
