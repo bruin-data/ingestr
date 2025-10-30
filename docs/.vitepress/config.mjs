@@ -108,6 +108,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Postgres", link: "/supported-sources/postgres.md" },
               { text: "SAP Hana", link: "/supported-sources/sap-hana.md" },
               { text: "Snowflake", link: "/supported-sources/snowflake.md" },
+              { text: "Socrata", link: "/supported-sources/socrata.md" },
               { text: "SQLite", link: "/supported-sources/sqlite.md" },
               {
                 text: "Experimental",
@@ -150,6 +151,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Google Ads", link: "/supported-sources/google-ads.md" },
               { text: "GitHub", link: "/supported-sources/github.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
+              { text: "Hostaway", link: "/supported-sources/hostaway.md" },
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "HubSpot", link: "/supported-sources/hubspot.md" },
               { text: "Internet Society Pulse", link: "/supported-sources/isoc-pulse.md" },
