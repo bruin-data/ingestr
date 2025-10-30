@@ -1,33 +1,10 @@
 """Cursor source helpers"""
 
-import logging
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import requests
 
-logger = logging.getLogger(__name__)
-
 REQUEST_TIMEOUT = 30
-
-
-class CursorAPIError(Exception):
-    """Custom exception for Cursor API errors."""
-
-    def __init__(
-        self,
-        message: str,
-        status_code: Optional[int] = None,
-        response_text: Optional[str] = None,
-    ):
-        super().__init__(message)
-        self.status_code = status_code
-        self.response_text = response_text
-
-
-class CursorAuthenticationError(CursorAPIError):
-    """Exception raised for authentication failures."""
-
-    pass
 
 
 class CursorClient:
@@ -67,71 +44,30 @@ class CursorClient:
 
         Returns:
             JSON response data
-
-        Raises:
-            CursorAPIError: If request fails
-            CursorAuthenticationError: If authentication fails
         """
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
 
-        try:
-            if json_data is not None:
-                response = requests.request(
-                    method=method,
-                    url=url,
-                    auth=(self.api_key, ""),
-                    timeout=self.timeout,
-                    headers={"Content-Type": "application/json"},
-                    json=json_data,
-                )
-            else:
-                response = requests.request(
-                    method=method,
-                    url=url,
-                    auth=(self.api_key, ""),
-                    timeout=self.timeout,
-                    headers={"Content-Type": "application/json"},
-                    json={},
-                )
+        if json_data is not None:
+            response = requests.request(
+                method=method,
+                url=url,
+                auth=(self.api_key, ""),
+                timeout=self.timeout,
+                headers={"Content-Type": "application/json"},
+                json=json_data,
+            )
+        else:
+            response = requests.request(
+                method=method,
+                url=url,
+                auth=(self.api_key, ""),
+                timeout=self.timeout,
+                headers={"Content-Type": "application/json"},
+                json={},
+            )
 
-            if response.status_code == 401:
-                raise CursorAuthenticationError(
-                    "Authentication failed. Please check your API key.",
-                    status_code=401,
-                    response_text=response.text,
-                )
-
-            if response.status_code != 200:
-                error_message = f"API request failed with status {response.status_code}"
-
-                # Try to parse error response for more details
-                try:
-                    error_data = response.json()
-                    if "message" in error_data:
-                        error_message = f"{error_message}: {error_data['message']}"
-                except Exception:
-                    pass
-
-                # Add specific hint for 400 errors on date-related endpoints
-                if response.status_code == 400 and endpoint in [
-                    "teams/daily-usage-data",
-                    "teams/filtered-usage-events",
-                ]:
-                    error_message += (
-                        "\nNote: Date range cannot exceed 30 days for this endpoint."
-                    )
-
-                raise CursorAPIError(
-                    error_message,
-                    status_code=response.status_code,
-                    response_text=response.text,
-                )
-
-            return response.json()
-
-        except requests.RequestException as e:
-            logger.error(f"Request failed: {str(e)}")
-            raise CursorAPIError(f"Request failed: {str(e)}")
+        response.raise_for_status()
+        return response.json()
 
     def _paginate(
         self,
@@ -250,7 +186,3 @@ class CursorClient:
             page_size=page_size,
             has_next_page_check=check_has_next_page,
         )
-
-
-def get_client(api_key: str) -> CursorClient:
-    return CursorClient(api_key=api_key)

@@ -9,7 +9,7 @@ from typing import Any, Iterable, Optional
 import dlt
 from dlt.common.typing import TDataItem
 
-from .helpers import get_client
+from .helpers import CursorClient
 
 
 @dlt.source
@@ -35,7 +35,7 @@ def cursor_source() -> Any:
 def team_members(
     api_key: str = dlt.secrets.value,
 ) -> Iterable[TDataItem]:
-    client = get_client(api_key)
+    client = CursorClient(api_key=api_key)
 
     members = client.get_team_members()
     yield from members
@@ -50,7 +50,7 @@ def daily_usage_data(
     start_date: Optional[int] = dlt.config.value,
     end_date: Optional[int] = dlt.config.value,
 ) -> Iterable[TDataItem]:
-    client = get_client(api_key)
+    client = CursorClient(api_key=api_key)
 
     yield from client.get_daily_usage_data(start_date=start_date, end_date=end_date)
 
@@ -62,7 +62,7 @@ def daily_usage_data(
 def team_spend(
     api_key: str = dlt.secrets.value,
 ) -> Iterable[TDataItem]:
-    client = get_client(api_key)
+    client = CursorClient(api_key=api_key)
 
     yield from client.get_team_spend()
 
@@ -76,7 +76,7 @@ def filtered_usage_events(
     start_date: Optional[int] = dlt.config.value,
     end_date: Optional[int] = dlt.config.value,
 ) -> Iterable[TDataItem]:
-    client = get_client(api_key)
+    client = CursorClient(api_key=api_key)
 
     yield from client.get_filtered_usage_events(
         start_date=start_date, end_date=end_date
