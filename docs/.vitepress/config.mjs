@@ -135,6 +135,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Attio", link: "/supported-sources/attio.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               { text: "ClickUp", link: "/supported-sources/clickup.md" },
+              { text: "Cursor", link: "/supported-sources/cursor.md" },
               { text: "Docebo", link: "/supported-sources/docebo.md" },
               {
                 text: "Facebook Ads",
