@@ -29,6 +29,7 @@ ingestr ingest \
 - `--primary-key TEXT`: Specifies the primary key for the merge operation. Defaults to `None`.
 - `--columns <column_name>:<column_type>`: Specifies the columns to be ingested. Defaults to `None`.
 - `--mask <column_name>:<algorithm>[:param]`: Applies data masking to specified columns. Can be used multiple times for different columns. See the [Data Masking](../getting-started/data-masking.md) documentation for available algorithms and usage examples. Defaults to `None`.
+- `--schema-naming` Specifies what naming convention to use for table and column names on the destination. Can be `default` or `direct`.default is snake_case. `direct is case sensitive and doesn't contract underscores.
 
 The `interval-start` and `interval-end` options support various datetime formats, here are some examples:
 - `%Y-%m-%d`: `2023-01-31`
