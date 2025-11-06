@@ -4066,3 +4066,398 @@ class AlliumSource:
             limit=limit,
             compute_profile=compute_profile,
         )
+
+
+class CouchbaseSource:
+    table_builder: Callable
+
+    def __init__(self, table_builder=None) -> None:
+        if table_builder is None:
+            from ingestr.src.couchbase_source import couchbase_collection
+
+            table_builder = couchbase_collection
+
+        self.table_builder = table_builder
+
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        """
+        Create a dlt source for reading data from Couchbase.
+
+        URI formats:
+            - couchbase://username:password@host
+            - couchbase://username:password@host/bucket
+            - couchbase://username:password@host?ssl=true
+            - couchbases://username:password@host (SSL enabled)
+
+        Table formats:
+            - bucket.scope.collection (when bucket not in URI)
+            - scope.collection (when bucket specified in URI path)
+
+        Note: If password contains special characters (@, :, /, etc.), they must be URL-encoded.
+
+        Examples:
+            Local/Self-hosted:
+            - couchbase://admin:password123@localhost with table "mybucket.myscope.mycollection"
+            - couchbase://admin:password123@localhost/mybucket with table "myscope.mycollection"
+            - couchbase://admin:password123@localhost?ssl=true with table "mybucket._default._default"
+
+            Capella (Cloud):
+            - couchbases://user:pass@cb.xxx.cloud.couchbase.com with table "travel-sample.inventory.airport"
+            - couchbase://user:pass@cb.xxx.cloud.couchbase.com/travel-sample?ssl=true with table "inventory.airport"
+
+        To encode password in Python:
+            from urllib.parse import quote
+            encoded_pwd = quote("MyPass@123!", safe='')
+            uri = f"couchbase://admin:{encoded_pwd}@localhost?ssl=true"
+
+        Args:
+            uri: Couchbase connection URI (can include /bucket path and ?ssl=true query parameter)
+            table: Format depends on URI:
+                - bucket.scope.collection (if bucket not in URI)
+                - scope.collection (if bucket in URI path)
+            **kwargs: Additional arguments:
+                - limit: Maximum number of documents to fetch
+                - incremental_key: Field to use for incremental loading
+                - interval_start: Start value for incremental loading
+                - interval_end: End value for incremental loading
+
+        Returns:
+            DltResource for the Couchbase collection
+        """
+        # Parse the URI to extract connection details
+        # urlparse automatically decodes URL-encoded credentials
+
+        parsed = urlparse(uri)
+
+        # Extract username and password from URI
+        # Note: urlparse automatically decodes URL-encoded characters in username/password
+        from urllib.parse import unquote
+
+        username = parsed.username
+        password = unquote(parsed.password) if parsed.password else None
+
+        if not username or not password:
+            raise ValueError(
+                "Username and password must be provided in the URI.\n"
+                "Format: couchbase://username:password@host\n"
+                "If password has special characters (@, :, /), URL-encode them.\n"
+                "Example: couchbase://admin:MyPass%40123@localhost for password 'MyPass@123'"
+            )
+
+        # Reconstruct connection string without credentials
+        scheme = parsed.scheme
+        netloc = parsed.netloc
+
+        # Remove username:password@ from netloc if present
+        if "@" in netloc:
+            netloc = netloc.split("@", 1)[1]
+
+        # Parse query parameters from URI
+        from urllib.parse import parse_qs
+
+        query_params = parse_qs(parsed.query)
+
+        # Check if SSL is requested via URI query parameter (?ssl=true)
+        if "ssl" in query_params:
+            ssl_value = query_params["ssl"][0].lower()
+            use_ssl = ssl_value in ("true", "1", "yes")
+
+            # Apply SSL scheme based on parameter
+            if use_ssl and scheme == "couchbase":
+                scheme = "couchbases"
+
+        connection_string = f"{scheme}://{netloc}"
+
+        # Extract bucket from URI path if present (e.g., couchbase://host/bucket)
+        bucket_from_uri = None
+        if parsed.path and parsed.path.strip("/"):
+            bucket_from_uri = parsed.path.strip("/").split("/")[0]
+
+        # Parse table format: can be "scope.collection" or "bucket.scope.collection"
+        table_parts = table.split(".")
+
+        if len(table_parts) == 3:
+            # Format: bucket.scope.collection
+            bucket, scope, collection = table_parts
+        elif len(table_parts) == 2:
+            # Format: scope.collection (bucket from URI)
+            if bucket_from_uri:
+                bucket = bucket_from_uri
+                scope, collection = table_parts
+            else:
+                raise ValueError(
+                    "Table format is 'scope.collection' but no bucket specified in URI.\n"
+                    f"Either use URI format: couchbase://user:pass@host/bucket\n"
+                    f"Or use table format: bucket.scope.collection\n"
+                    f"Got table: {table}"
+                )
+        else:
+            raise ValueError(
+                "Table format must be 'bucket.scope.collection' or 'scope.collection' (with bucket in URI). "
+                f"Got: {table}\n"
+                "Examples:\n"
+                "  - URI: couchbase://user:pass@host, Table: travel-sample.inventory.airport\n"
+                "  - URI: couchbase://user:pass@host/travel-sample, Table: inventory.airport"
+            )
+
+        # Handle incremental loading
+        incremental = None
+        if kwargs.get("incremental_key"):
+            start_value = kwargs.get("interval_start")
+            end_value = kwargs.get("interval_end")
+
+            incremental = dlt_incremental(
+                kwargs.get("incremental_key", ""),
+                initial_value=start_value,
+                end_value=end_value,
+                range_end="closed",
+                range_start="closed",
+            )
+
+        # Get optional parameters
+        limit = kwargs.get("limit")
+
+        table_instance = self.table_builder(
+            connection_string=connection_string,
+            username=username,
+            password=password,
+            bucket=bucket,
+            scope=scope,
+            collection=collection,
+            incremental=incremental,
+            limit=limit,
+        )
+        table_instance.max_table_nesting = 1
+
+        return table_instance
+
+
+class CursorSource:
+    resources = [
+        "team_members",
+        "daily_usage_data",
+        "team_spend",
+        "filtered_usage_events",
+    ]
+
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        # cursor://?api_key=<api_key>
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        api_key = params.get("api_key")
+
+        if not api_key:
+            raise MissingValueError("api_key", "Cursor")
+
+        if table not in self.resources:
+            raise UnsupportedResourceError(table, "Cursor")
+
+        import dlt
+
+        from ingestr.src.cursor import cursor_source
+
+        dlt.secrets["sources.cursor.api_key"] = api_key[0]
+
+        # Handle interval_start and interval_end for daily_usage_data and filtered_usage_events (optional)
+        if table in ["daily_usage_data", "filtered_usage_events"]:
+            interval_start = kwargs.get("interval_start")
+            interval_end = kwargs.get("interval_end")
+
+            # Both are optional, but if one is provided, both should be provided
+            if interval_start is not None and interval_end is not None:
+                # Convert datetime to epoch milliseconds
+                start_ms = int(interval_start.timestamp() * 1000)
+                end_ms = int(interval_end.timestamp() * 1000)
+
+                dlt.config["sources.cursor.start_date"] = start_ms
+                dlt.config["sources.cursor.end_date"] = end_ms
+
+        src = cursor_source()
+        return src.with_resources(table)
+
+
+class SocrataSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        """
+        Creates a DLT source for Socrata open data platform.
+
+        URI format: socrata://domain?app_token=TOKEN
+        Table: dataset_id (e.g., "6udu-fhnu")
+
+        Args:
+            uri: Socrata connection URI with domain and optional auth params
+            table: Dataset ID (e.g., "6udu-fhnu")
+            **kwargs: Additional arguments:
+                - incremental_key: Field to use for incremental loading (e.g., ":updated_at")
+                - interval_start: Start date for initial load
+                - interval_end: End date for load
+                - primary_key: Primary key field for merge operations
+
+        Returns:
+            DltResource for the Socrata dataset
+        """
+        from urllib.parse import parse_qs, urlparse
+
+        parsed = urlparse(uri)
+
+        domain = parsed.netloc
+        if not domain:
+            raise ValueError(
+                "Domain must be provided in the URI.\n"
+                "Format: socrata://domain?app_token=TOKEN\n"
+                "Example: socrata://evergreen.data.socrata.com?app_token=mytoken"
+            )
+
+        query_params = parse_qs(parsed.query)
+
+        dataset_id = table
+        if not dataset_id:
+            raise ValueError(
+                "Dataset ID must be provided as the table parameter.\n"
+                "Example: --source-table 6udu-fhnu"
+            )
+
+        app_token = query_params.get("app_token", [None])[0]
+        username = query_params.get("username", [None])[0]
+        password = query_params.get("password", [None])[0]
+
+        incremental = None
+        if kwargs.get("incremental_key"):
+            start_value = kwargs.get("interval_start")
+            end_value = kwargs.get("interval_end")
+
+            if start_value:
+                start_value = (
+                    start_value.isoformat()
+                    if hasattr(start_value, "isoformat")
+                    else str(start_value)
+                )
+
+            if end_value:
+                end_value = (
+                    end_value.isoformat()
+                    if hasattr(end_value, "isoformat")
+                    else str(end_value)
+                )
+
+            incremental = dlt_incremental(
+                kwargs.get("incremental_key", ""),
+                initial_value=start_value,
+                end_value=end_value,
+                range_end="open",
+                range_start="closed",
+            )
+
+        primary_key = kwargs.get("primary_key")
+
+        from ingestr.src.socrata_source import source
+
+        return source(
+            domain=domain,
+            dataset_id=dataset_id,
+            app_token=app_token,
+            username=username,
+            password=password,
+            incremental=incremental,
+            primary_key=primary_key,
+        ).with_resources("dataset")
+
+
+class HostawaySource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Hostaway takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        source_parts = urlparse(uri)
+        source_params = parse_qs(source_parts.query)
+        api_key = source_params.get("api_key")
+
+        if not api_key:
+            raise ValueError("api_key in the URI is required to connect to Hostaway")
+
+        match table:
+            case "listings":
+                resource_name = "listings"
+            case "listing_fee_settings":
+                resource_name = "listing_fee_settings"
+            case "listing_agreements":
+                resource_name = "listing_agreements"
+            case "listing_pricing_settings":
+                resource_name = "listing_pricing_settings"
+            case "cancellation_policies":
+                resource_name = "cancellation_policies"
+            case "cancellation_policies_airbnb":
+                resource_name = "cancellation_policies_airbnb"
+            case "cancellation_policies_marriott":
+                resource_name = "cancellation_policies_marriott"
+            case "cancellation_policies_vrbo":
+                resource_name = "cancellation_policies_vrbo"
+            case "reservations":
+                resource_name = "reservations"
+            case "finance_fields":
+                resource_name = "finance_fields"
+            case "reservation_payment_methods":
+                resource_name = "reservation_payment_methods"
+            case "reservation_rental_agreements":
+                resource_name = "reservation_rental_agreements"
+            case "listing_calendars":
+                resource_name = "listing_calendars"
+            case "conversations":
+                resource_name = "conversations"
+            case "message_templates":
+                resource_name = "message_templates"
+            case "bed_types":
+                resource_name = "bed_types"
+            case "property_types":
+                resource_name = "property_types"
+            case "countries":
+                resource_name = "countries"
+            case "account_tax_settings":
+                resource_name = "account_tax_settings"
+            case "user_groups":
+                resource_name = "user_groups"
+            case "guest_payment_charges":
+                resource_name = "guest_payment_charges"
+            case "coupons":
+                resource_name = "coupons"
+            case "webhook_reservations":
+                resource_name = "webhook_reservations"
+            case "tasks":
+                resource_name = "tasks"
+            case _:
+                raise ValueError(
+                    f"Resource '{table}' is not supported for Hostaway source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
+                )
+
+        start_date = kwargs.get("interval_start")
+        if start_date:
+            start_date = ensure_pendulum_datetime(start_date).in_timezone("UTC")
+        else:
+            start_date = pendulum.datetime(1970, 1, 1).in_timezone("UTC")
+
+        end_date = kwargs.get("interval_end")
+        if end_date:
+            end_date = ensure_pendulum_datetime(end_date).in_timezone("UTC")
+
+        from ingestr.src.hostaway import hostaway_source
+
+        return hostaway_source(
+            api_key=api_key[0],
+            start_date=start_date,
+            end_date=end_date,
+        ).with_resources(resource_name)

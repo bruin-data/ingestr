@@ -82,6 +82,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "AWS Athena", link: "/supported-sources/athena.md" },
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
               { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
+              { text: "Couchbase", link: "/supported-sources/couchbase.md" },
               { text: "CrateDB", link: "/supported-sources/cratedb.md" },
               { text: "Databricks", link: "/supported-sources/databricks.md" },
               { text: "DuckDB", link: "/supported-sources/duckdb.md" },
@@ -107,6 +108,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Postgres", link: "/supported-sources/postgres.md" },
               { text: "SAP Hana", link: "/supported-sources/sap-hana.md" },
               { text: "Snowflake", link: "/supported-sources/snowflake.md" },
+              { text: "Socrata", link: "/supported-sources/socrata.md" },
               { text: "SQLite", link: "/supported-sources/sqlite.md" },
               {
                 text: "Experimental",
@@ -133,6 +135,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Attio", link: "/supported-sources/attio.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               { text: "ClickUp", link: "/supported-sources/clickup.md" },
+              { text: "Cursor", link: "/supported-sources/cursor.md" },
               { text: "Docebo", link: "/supported-sources/docebo.md" },
               {
                 text: "Facebook Ads",
@@ -148,6 +151,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Google Ads", link: "/supported-sources/google-ads.md" },
               { text: "GitHub", link: "/supported-sources/github.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
+              { text: "Hostaway", link: "/supported-sources/hostaway.md" },
               { text: "Gorgias", link: "/supported-sources/gorgias.md" },
               { text: "HubSpot", link: "/supported-sources/hubspot.md" },
               { text: "Internet Society Pulse", link: "/supported-sources/isoc-pulse.md" },
