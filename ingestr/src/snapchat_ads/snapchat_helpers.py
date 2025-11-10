@@ -63,7 +63,7 @@ def fetch_snapchat_data_with_params(
     url: str,
     resource_key: str,
     item_key: str,
-    params: dict = None,
+    params: dict | None = None,
 ) -> Iterator[dict]:
     """
     Generic helper to fetch data from Snapchat API with query parameters.
@@ -126,30 +126,37 @@ def client_side_date_filter(data: dict, start_date, end_date) -> bool:
 
 def get_account_ids(
     api: "SnapchatAdsAPI",
-    ad_account_id: str,
+    ad_account_id: str | None,
     organization_id: str,
     base_url: str,
     resource_name: str,
     start_date=None,
     end_date=None,
 ) -> list[str]:
-
     if ad_account_id:
         return [ad_account_id]
 
     if not organization_id:
-        raise ValueError(f"organization_id is required to fetch {resource_name} for all ad accounts")
+        raise ValueError(
+            f"organization_id is required to fetch {resource_name} for all ad accounts"
+        )
 
     accounts_url = f"{base_url}/organizations/{organization_id}/adaccounts"
-    accounts_data = list(fetch_snapchat_data(
-        api, accounts_url, "adaccounts", "adaccount", start_date, end_date
-    ))
-    return [account.get("id") for account in accounts_data if account.get("id")]
+    accounts_data = list(
+        fetch_snapchat_data(
+            api, accounts_url, "adaccounts", "adaccount", start_date, end_date
+        )
+    )
+    return [
+        account_id
+        for account in accounts_data
+        if (account_id := account.get("id")) is not None
+    ]
 
 
 def fetch_with_paginate_account_id(
     api: "SnapchatAdsAPI",
-    ad_account_id: str,
+    ad_account_id: str | None,
     organization_id: str,
     base_url: str,
     resource_name: str,
@@ -165,7 +172,13 @@ def fetch_with_paginate_account_id(
     """
     # Get list of account IDs to fetch data for
     account_ids = get_account_ids(
-        api, ad_account_id, organization_id, base_url, resource_name, start_date, end_date
+        api,
+        ad_account_id,
+        organization_id,
+        base_url,
+        resource_name,
+        start_date,
+        end_date,
     )
 
     # Fetch data for each account with pagination
@@ -189,7 +202,7 @@ def fetch_with_paginate_account_id(
 
 def fetch_account_id_resource(
     api: "SnapchatAdsAPI",
-    ad_account_id: str,
+    ad_account_id: str | None,
     organization_id: str,
     base_url: str,
     resource_name: str,
@@ -199,7 +212,13 @@ def fetch_account_id_resource(
 ) -> Iterator[dict]:
     # Get list of account IDs to fetch data for
     account_ids = get_account_ids(
-        api, ad_account_id, organization_id, base_url, resource_name, start_date, end_date
+        api,
+        ad_account_id,
+        organization_id,
+        base_url,
+        resource_name,
+        start_date,
+        end_date,
     )
 
     # Fetch data for each account
@@ -225,18 +244,22 @@ def paginate(client: requests.Session, headers: dict, url: str, page_size: int =
     """
     from urllib.parse import parse_qs, urlparse
 
-    params = {"limit": page_size}
+    params: dict[str, int | str] = {"limit": page_size}
 
     while url:
         response = client.get(url, headers=headers, params=params)
 
         if response.status_code != 200:
-            raise ValueError(f"Failed to fetch page: {response.status_code} - {response.text}")
+            raise ValueError(
+                f"Failed to fetch page: {response.status_code} - {response.text}"
+            )
 
         result = response.json()
 
         if result.get("request_status", "").upper() != "SUCCESS":
-            raise ValueError(f"Request failed: {result.get('request_status')} - {result}")
+            raise ValueError(
+                f"Request failed: {result.get('request_status')} - {result}"
+            )
 
         yield result
 
@@ -248,7 +271,8 @@ def paginate(client: requests.Session, headers: dict, url: str, page_size: int =
             # Extract cursor from next_link
             parsed = urlparse(next_link)
             query_params = parse_qs(parsed.query)
-            cursor = query_params.get("cursor", [None])[0]
+            cursor_list = query_params.get("cursor", [None])
+            cursor = cursor_list[0] if cursor_list else None
 
             if cursor:
                 params["cursor"] = cursor

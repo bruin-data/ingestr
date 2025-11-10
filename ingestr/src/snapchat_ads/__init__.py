@@ -25,8 +25,8 @@ def snapchat_ads_source(
     client_id: str = dlt.secrets.value,
     client_secret: str = dlt.secrets.value,
     organization_id: str = dlt.config.value,
-    start_date: str = None,
-    end_date: str = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ):
     """Returns a list of resources to load data from Snapchat Marketing API.
 
@@ -47,7 +47,7 @@ def snapchat_ads_source(
 
     @dlt.resource(primary_key="id", write_disposition="merge")
     def organizations(
-        updated_at=dlt.sources.incremental("updated_at")
+        updated_at=dlt.sources.incremental("updated_at"),
     ) -> Iterator[TDataItems]:
         """Fetch all organizations for the authenticated user."""
         url = f"{BASE_URL}/me/organizations"
@@ -57,7 +57,7 @@ def snapchat_ads_source(
 
     @dlt.resource(primary_key="id", write_disposition="merge")
     def fundingsources(
-        updated_at=dlt.sources.incremental("updated_at")
+        updated_at=dlt.sources.incremental("updated_at"),
     ) -> Iterator[TDataItems]:
         """Fetch all funding sources for the organization."""
         if not organization_id:
@@ -70,7 +70,7 @@ def snapchat_ads_source(
 
     @dlt.resource(primary_key="id", write_disposition="merge")
     def billingcenters(
-        updated_at=dlt.sources.incremental("updated_at")
+        updated_at=dlt.sources.incremental("updated_at"),
     ) -> Iterator[TDataItems]:
         """Fetch all billing centers for the organization."""
         if not organization_id:
@@ -83,7 +83,7 @@ def snapchat_ads_source(
 
     @dlt.resource(primary_key="id", write_disposition="merge")
     def adaccounts(
-        updated_at=dlt.sources.incremental("updated_at")
+        updated_at=dlt.sources.incremental("updated_at"),
     ) -> Iterator[TDataItems]:
         """Fetch all ad accounts for the organization."""
         if not organization_id:
@@ -94,15 +94,16 @@ def snapchat_ads_source(
             api, url, "adaccounts", "adaccount", start_date, end_date
         )
 
-    def invoices(ad_account_id: str = None) -> DltResource:
+    def invoices(ad_account_id: str | None = None) -> DltResource:
         """Fetch all invoices for a specific ad account or all ad accounts.
 
         If ad_account_id is provided, fetch invoices only for that account.
         If ad_account_id is None, fetch all ad accounts first and then get invoices for each.
         """
+
         @dlt.resource(primary_key="id", write_disposition="merge")
         def _invoices(
-            updated_at=dlt.sources.incremental("updated_at")
+            updated_at=dlt.sources.incremental("updated_at"),
         ) -> Iterator[TDataItems]:
             # If specific ad_account_id provided, fetch only that account's invoices
             if ad_account_id:
@@ -113,12 +114,21 @@ def snapchat_ads_source(
             else:
                 # Otherwise, fetch all ad accounts first
                 if not organization_id:
-                    raise ValueError("organization_id is required to fetch invoices for all ad accounts")
+                    raise ValueError(
+                        "organization_id is required to fetch invoices for all ad accounts"
+                    )
 
                 accounts_url = f"{BASE_URL}/organizations/{organization_id}/adaccounts"
-                accounts_data = list(fetch_snapchat_data(
-                    api, accounts_url, "adaccounts", "adaccount", start_date, end_date
-                ))
+                accounts_data = list(
+                    fetch_snapchat_data(
+                        api,
+                        accounts_url,
+                        "adaccounts",
+                        "adaccount",
+                        start_date,
+                        end_date,
+                    )
+                )
 
                 # Then fetch invoices for each ad account
                 for account in accounts_data:
@@ -126,7 +136,12 @@ def snapchat_ads_source(
                     if account_id:
                         invoices_url = f"{BASE_URL}/adaccounts/{account_id}/invoices"
                         yield from fetch_snapchat_data(
-                            api, invoices_url, "invoices", "invoice", start_date, end_date
+                            api,
+                            invoices_url,
+                            "invoices",
+                            "invoice",
+                            start_date,
+                            end_date,
                         )
 
         return _invoices
@@ -143,11 +158,17 @@ def snapchat_ads_source(
         params = {}
         if start_date:
             from dlt.common.time import ensure_pendulum_datetime
-            params["start_time"] = ensure_pendulum_datetime(start_date).format("YYYY-MM-DDTHH:mm:ss")
+
+            params["start_time"] = ensure_pendulum_datetime(start_date).format(
+                "YYYY-MM-DDTHH:mm:ss"
+            )
 
         if end_date:
             from dlt.common.time import ensure_pendulum_datetime
-            params["end_time"] = ensure_pendulum_datetime(end_date).format("YYYY-MM-DDTHH:mm:ss")
+
+            params["end_time"] = ensure_pendulum_datetime(end_date).format(
+                "YYYY-MM-DDTHH:mm:ss"
+            )
 
         yield from fetch_snapchat_data_with_params(
             api, url, "transactions", "transaction", params
@@ -161,9 +182,7 @@ def snapchat_ads_source(
 
         url = f"{BASE_URL}/organizations/{organization_id}/members"
         # Members API doesn't return updated_at in response, so we can't filter by date
-        yield from fetch_snapchat_data(
-            api, url, "members", "member", None, None
-        )
+        yield from fetch_snapchat_data(api, url, "members", "member", None, None)
 
     @dlt.resource(write_disposition="replace")
     def roles() -> Iterator[TDataItems]:
@@ -184,15 +203,16 @@ def snapchat_ads_source(
                     if data:
                         yield data
 
-    def campaigns(ad_account_id: str = None) -> DltResource:
+    def campaigns(ad_account_id: str | None = None) -> DltResource:
         """Fetch all campaigns for a specific ad account or all ad accounts.
 
         If ad_account_id is provided, fetch campaigns only for that account.
         If ad_account_id is None, fetch all ad accounts first and then get campaigns for each.
         """
+
         @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
         def _campaigns(
-            updated_at=dlt.sources.incremental("updated_at")
+            updated_at=dlt.sources.incremental("updated_at"),
         ) -> Iterator[TDataItems]:
             yield from fetch_with_paginate_account_id(
                 api=api,
@@ -207,15 +227,16 @@ def snapchat_ads_source(
 
         return _campaigns
 
-    def adsquads(ad_account_id: str = None) -> DltResource:
+    def adsquads(ad_account_id: str | None = None) -> DltResource:
         """Fetch all ad squads for a specific ad account or all ad accounts.
 
         If ad_account_id is provided, fetch ad squads only for that account.
         If ad_account_id is None, fetch all ad accounts first and then get ad squads for each.
         """
+
         @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
         def _adsquads(
-            updated_at=dlt.sources.incremental("updated_at")
+            updated_at=dlt.sources.incremental("updated_at"),
         ) -> Iterator[TDataItems]:
             yield from fetch_with_paginate_account_id(
                 api=api,
@@ -230,15 +251,16 @@ def snapchat_ads_source(
 
         return _adsquads
 
-    def ads(ad_account_id: str = None) -> DltResource:
+    def ads(ad_account_id: str | None = None) -> DltResource:
         """Fetch all ads for a specific ad account or all ad accounts.
 
         If ad_account_id is provided, fetch ads only for that account.
         If ad_account_id is None, fetch all ad accounts first and then get ads for each.
         """
+
         @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
         def _ads(
-            updated_at=dlt.sources.incremental("updated_at")
+            updated_at=dlt.sources.incremental("updated_at"),
         ) -> Iterator[TDataItems]:
             yield from fetch_with_paginate_account_id(
                 api=api,
@@ -253,15 +275,16 @@ def snapchat_ads_source(
 
         return _ads
 
-    def event_details(ad_account_id: str = None) -> DltResource:
+    def event_details(ad_account_id: str | None = None) -> DltResource:
         """Fetch all event details for a specific ad account or all ad accounts.
 
         If ad_account_id is provided, fetch event details only for that account.
         If ad_account_id is None, fetch all ad accounts first and then get event details for each.
         """
+
         @dlt.resource(primary_key="id", write_disposition="merge")
         def _event_details(
-            updated_at=dlt.sources.incremental("updated_at")
+            updated_at=dlt.sources.incremental("updated_at"),
         ) -> Iterator[TDataItems]:
             yield from fetch_account_id_resource(
                 api=api,
@@ -276,15 +299,16 @@ def snapchat_ads_source(
 
         return _event_details
 
-    def creatives(ad_account_id: str = None) -> DltResource:
+    def creatives(ad_account_id: str | None = None) -> DltResource:
         """Fetch all creatives for a specific ad account or all ad accounts.
 
         If ad_account_id is provided, fetch creatives only for that account.
         If ad_account_id is None, fetch all ad accounts first and then get creatives for each.
         """
+
         @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
         def _creatives(
-            updated_at=dlt.sources.incremental("updated_at")
+            updated_at=dlt.sources.incremental("updated_at"),
         ) -> Iterator[TDataItems]:
             yield from fetch_with_paginate_account_id(
                 api=api,
@@ -299,15 +323,16 @@ def snapchat_ads_source(
 
         return _creatives
 
-    def segments(ad_account_id: str = None) -> DltResource:
+    def segments(ad_account_id: str | None = None) -> DltResource:
         """Fetch all audience segments for a specific ad account or all ad accounts.
 
         If ad_account_id is provided, fetch segments only for that account.
         If ad_account_id is None, fetch all ad accounts first and then get segments for each.
         """
+
         @dlt.resource(primary_key="id", write_disposition="merge")
         def _segments(
-            updated_at=dlt.sources.incremental("updated_at")
+            updated_at=dlt.sources.incremental("updated_at"),
         ) -> Iterator[TDataItems]:
             yield from fetch_account_id_resource(
                 api=api,
@@ -322,4 +347,19 @@ def snapchat_ads_source(
 
         return _segments
 
-    return organizations, fundingsources, billingcenters, adaccounts, invoices, transactions, members, roles, campaigns, adsquads, ads, event_details, creatives, segments
+    return (
+        organizations,
+        fundingsources,
+        billingcenters,
+        adaccounts,
+        invoices,
+        transactions,
+        members,
+        roles,
+        campaigns,
+        adsquads,
+        ads,
+        event_details,
+        creatives,
+        segments,
+    )
