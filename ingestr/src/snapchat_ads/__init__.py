@@ -6,7 +6,7 @@ import dlt
 from dlt.common.typing import TDataItems
 from dlt.sources import DltResource
 
-from .snapchat_helpers import SnapchatAdsAPI, create_client
+from .snapchat_helpers import SnapchatAdsAPI, fetch_snapchat_data
 
 BASE_URL = "https://adsapi.snapchat.com/v1"
 
@@ -38,31 +38,8 @@ def snapchat_ads_source(
         updated_at=dlt.sources.incremental("updated_at")
     ) -> Iterator[TDataItems]:
         """Fetch all organizations for the authenticated user."""
-        client = create_client()
-        headers = api.get_headers()
-
         url = f"{BASE_URL}/me/organizations"
-        response = client.get(url, headers=headers)
-
-        if response.status_code != 200:
-            raise ValueError(
-                f"Failed to fetch organizations: {response.status_code} - {response.text}"
-            )
-
-        result = response.json()
-
-        if result.get("request_status", "").upper() != "SUCCESS":
-            raise ValueError(
-                f"Request failed: {result.get('request_status')} - {result}"
-            )
-
-        organizations_data = result.get("organizations", [])
-
-        for org_item in organizations_data:
-            if org_item.get("sub_request_status", "").upper() == "SUCCESS":
-                org = org_item.get("organization", {})
-                if org:
-                    yield org
+        yield from fetch_snapchat_data(api, url, "organizations", "organization")
 
     @dlt.resource(primary_key="id", write_disposition="merge")
     def fundingsources(
@@ -72,30 +49,18 @@ def snapchat_ads_source(
         if not organization_id:
             raise ValueError("organization_id is required for fundingsources")
 
-        client = create_client()
-        headers = api.get_headers()
-
         url = f"{BASE_URL}/organizations/{organization_id}/fundingsources"
-        response = client.get(url, headers=headers)
+        yield from fetch_snapchat_data(api, url, "fundingsources", "fundingsource")
 
-        if response.status_code != 200:
-            raise ValueError(
-                f"Failed to fetch funding sources: {response.status_code} - {response.text}"
-            )
+    @dlt.resource(primary_key="id", write_disposition="merge")
+    def billingcenters(
+        updated_at=dlt.sources.incremental("updated_at")
+    ) -> Iterator[TDataItems]:
+        """Fetch all billing centers for the organization."""
+        if not organization_id:
+            raise ValueError("organization_id is required for billingcenters")
 
-        result = response.json()
+        url = f"{BASE_URL}/organizations/{organization_id}/billingcenters"
+        yield from fetch_snapchat_data(api, url, "billingcenters", "billingcenter")
 
-        if result.get("request_status", "").upper() != "SUCCESS":
-            raise ValueError(
-                f"Request failed: {result.get('request_status')} - {result}"
-            )
-
-        fundingsources_data = result.get("fundingsources", [])
-
-        for fs_item in fundingsources_data:
-            if fs_item.get("sub_request_status", "").upper() == "SUCCESS":
-                fs = fs_item.get("fundingsource", {})
-                if fs:
-                    yield fs
-
-    return organizations, fundingsources
+    return organizations, fundingsources, billingcenters

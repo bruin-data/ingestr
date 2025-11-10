@@ -4464,7 +4464,7 @@ class HostawaySource:
 
 
 class SnapchatAdsSource:
-    resources = ["organizations", "fundingsources"]
+    resources = ["organizations", "fundingsources", "billingcenters"]
 
     def handles_incrementality(self) -> bool:
         return True

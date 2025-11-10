@@ -1,3 +1,5 @@
+from typing import Iterator
+
 import requests
 from dlt.sources.helpers.requests import Client
 
@@ -17,6 +19,45 @@ def create_client() -> requests.Session:
         request_max_attempts=12,
         request_backoff_factor=2,
     ).session
+
+
+def fetch_snapchat_data(
+    api: "SnapchatAdsAPI", url: str, resource_key: str, item_key: str
+) -> Iterator[dict]:
+    """
+    Generic helper to fetch data from Snapchat API.
+
+    Args:
+        api: SnapchatAdsAPI instance
+        url: API endpoint URL
+        resource_key: Key in response JSON for the list of items (e.g., "organizations")
+        item_key: Key in each item for the actual data (e.g., "organization")
+
+    Yields:
+        dict: Individual items from the API response
+    """
+    client = create_client()
+    headers = api.get_headers()
+
+    response = client.get(url, headers=headers)
+
+    if response.status_code != 200:
+        raise ValueError(
+            f"Failed to fetch {resource_key}: {response.status_code} - {response.text}"
+        )
+
+    result = response.json()
+
+    if result.get("request_status", "").upper() != "SUCCESS":
+        raise ValueError(f"Request failed: {result.get('request_status')} - {result}")
+
+    items_data = result.get(resource_key, [])
+
+    for item in items_data:
+        if item.get("sub_request_status", "").upper() == "SUCCESS":
+            data = item.get(item_key, {})
+            if data:
+                yield data
 
 
 class SnapchatAdsAPI:
