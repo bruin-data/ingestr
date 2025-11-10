@@ -4464,7 +4464,7 @@ class HostawaySource:
 
 
 class SnapchatAdsSource:
-    resources = ["organizations", "fundingsources", "billingcenters", "adaccounts", "invoices", "transactions"]
+    resources = ["organizations", "fundingsources", "billingcenters", "adaccounts", "invoices", "transactions", "members", "roles", "campaigns"]
 
     def handles_incrementality(self) -> bool:
         return True
@@ -4487,7 +4487,7 @@ class SnapchatAdsSource:
 
         organization_id = source_fields.get("organization_id")
 
-        # Parse table name for special cases like "invoices:ad_account_id"
+        # Parse table name for special cases like "invoices:ad_account_id" and "campaigns:ad_account_id"
         resource_name = table
         ad_account_id = None
         if table.startswith("invoices:"):
@@ -4501,6 +4501,17 @@ class SnapchatAdsSource:
             ad_account_id = None
             if not organization_id:
                 raise ValueError("organization_id is required for 'invoices' table when no specific ad_account_id is provided")
+        elif table.startswith("campaigns:"):
+            resource_name = "campaigns"
+            ad_account_id = table.split(":", 1)[1]
+            if not ad_account_id:
+                raise ValueError("ad_account_id must be provided in format 'campaigns:ad_account_id'")
+        elif table == "campaigns":
+            # If just "campaigns" without specific ID, will fetch all ad accounts and their campaigns
+            resource_name = "campaigns"
+            ad_account_id = None
+            if not organization_id:
+                raise ValueError("organization_id is required for 'campaigns' table when no specific ad_account_id is provided")
         elif not organization_id and table != "organizations":
             raise ValueError(
                 f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
@@ -4534,5 +4545,9 @@ class SnapchatAdsSource:
         # Handle invoices specially - it needs ad_account_id parameter
         if resource_name == "invoices":
             return source.invoices(ad_account_id)
+
+        # Handle campaigns specially - it needs ad_account_id parameter
+        if resource_name == "campaigns":
+            return source.campaigns(ad_account_id)
 
         return source.with_resources(resource_name)

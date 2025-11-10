@@ -43,8 +43,6 @@ def fetch_snapchat_data(
     Yields:
         dict: Individual items from the API response
     """
-    from dlt.common.time import ensure_pendulum_datetime
-
     client = create_client()
     headers = api.get_headers()
 
@@ -67,20 +65,8 @@ def fetch_snapchat_data(
             data = item.get(item_key, {})
             if data:
                 # Client-side filtering by updated_at
-                if start_date or end_date:
-                    updated_at_str = data.get("updated_at")
-                    if updated_at_str:
-                        updated_at = ensure_pendulum_datetime(updated_at_str)
-
-                        if start_date and updated_at < ensure_pendulum_datetime(
-                            start_date
-                        ):
-                            continue
-
-                        if end_date and updated_at > ensure_pendulum_datetime(end_date):
-                            continue
-
-                yield data
+                if client_side_date_filter(data, start_date, end_date):
+                    yield data
 
 
 def fetch_snapchat_data_with_params(
@@ -125,6 +111,86 @@ def fetch_snapchat_data_with_params(
             data = item.get(item_key, {})
             if data:
                 yield data
+
+
+def client_side_date_filter(data: dict, start_date, end_date) -> bool:
+    """
+    Check if data item falls within the specified date range based on updated_at.
+
+    Args:
+        data: Data item to check
+        start_date: Optional start date
+        end_date: Optional end date
+
+    Returns:
+        bool: True if data should be included, False if filtered out
+    """
+    if not start_date and not end_date:
+        return True
+
+    from dlt.common.time import ensure_pendulum_datetime
+
+    updated_at_str = data.get("updated_at")
+    if not updated_at_str:
+        return True
+
+    updated_at = ensure_pendulum_datetime(updated_at_str)
+
+    if start_date and updated_at < ensure_pendulum_datetime(start_date):
+        return False
+
+    if end_date and updated_at > ensure_pendulum_datetime(end_date):
+        return False
+
+    return True
+
+
+def paginate(client: requests.Session, headers: dict, url: str, page_size: int = 1000):
+    """
+    Helper to paginate through Snapchat API responses.
+
+    Args:
+        client: Requests session
+        headers: Headers for API requests
+        url: API endpoint URL
+        page_size: Number of items per page (default 1000, max 1000)
+
+    Yields:
+        dict: API response JSON for each page
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    params = {"limit": page_size}
+
+    while url:
+        response = client.get(url, headers=headers, params=params)
+
+        if response.status_code != 200:
+            raise ValueError(f"Failed to fetch page: {response.status_code} - {response.text}")
+
+        result = response.json()
+
+        if result.get("request_status", "").upper() != "SUCCESS":
+            raise ValueError(f"Request failed: {result.get('request_status')} - {result}")
+
+        yield result
+
+        # Check for next page
+        paging = result.get("paging", {})
+        next_link = paging.get("next_link")
+
+        if next_link:
+            # Extract cursor from next_link
+            parsed = urlparse(next_link)
+            query_params = parse_qs(parsed.query)
+            cursor = query_params.get("cursor", [None])[0]
+
+            if cursor:
+                params["cursor"] = cursor
+            else:
+                break
+        else:
+            break
 
 
 class SnapchatAdsAPI:

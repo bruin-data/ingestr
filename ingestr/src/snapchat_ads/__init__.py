@@ -8,8 +8,11 @@ from dlt.sources import DltResource
 
 from .snapchat_helpers import (
     SnapchatAdsAPI,
+    client_side_date_filter,
+    create_client,
     fetch_snapchat_data,
     fetch_snapchat_data_with_params,
+    paginate,
 )
 
 BASE_URL = "https://adsapi.snapchat.com/v1"
@@ -149,4 +152,92 @@ def snapchat_ads_source(
             api, url, "transactions", "transaction", params
         )
 
-    return organizations, fundingsources, billingcenters, adaccounts, invoices, transactions
+    @dlt.resource(write_disposition="replace")
+    def members() -> Iterator[TDataItems]:
+        """Fetch all members of the organization."""
+        if not organization_id:
+            raise ValueError("organization_id is required for members")
+
+        url = f"{BASE_URL}/organizations/{organization_id}/members"
+        # Members API doesn't return updated_at in response, so we can't filter by date
+        yield from fetch_snapchat_data(
+            api, url, "members", "member", None, None
+        )
+
+    @dlt.resource(write_disposition="replace")
+    def roles() -> Iterator[TDataItems]:
+        """Fetch all roles for the organization with pagination."""
+        if not organization_id:
+            raise ValueError("organization_id is required for roles")
+
+        url = f"{BASE_URL}/organizations/{organization_id}/roles"
+        client = create_client()
+        headers = api.get_headers()
+
+        for result in paginate(client, headers, url, page_size=1000):
+            items_data = result.get("roles", [])
+
+            for item in items_data:
+                if item.get("sub_request_status", "").upper() == "SUCCESS":
+                    data = item.get("role", {})
+                    if data:
+                        yield data
+
+    def campaigns(ad_account_id: str = None) -> DltResource:
+        """Fetch all campaigns for a specific ad account or all ad accounts.
+
+        If ad_account_id is provided, fetch campaigns only for that account.
+        If ad_account_id is None, fetch all ad accounts first and then get campaigns for each.
+        """
+        @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
+        def _campaigns(
+            updated_at=dlt.sources.incremental("updated_at")
+        ) -> Iterator[TDataItems]:
+            # If specific ad_account_id provided, fetch only that account's campaigns
+            if ad_account_id:
+                url = f"{BASE_URL}/adaccounts/{ad_account_id}/campaigns"
+                client = create_client()
+                headers = api.get_headers()
+
+                for result in paginate(client, headers, url, page_size=1000):
+                    items_data = result.get("campaigns", [])
+
+                    for item in items_data:
+                        if item.get("sub_request_status", "").upper() == "SUCCESS":
+                            data = item.get("campaign", {})
+                            if data:
+                                # Client-side filtering by updated_at
+                                if client_side_date_filter(data, start_date, end_date):
+                                    yield data
+            else:
+                # Otherwise, fetch all ad accounts first
+                if not organization_id:
+                    raise ValueError("organization_id is required to fetch campaigns for all ad accounts")
+
+                accounts_url = f"{BASE_URL}/organizations/{organization_id}/adaccounts"
+                accounts_data = list(fetch_snapchat_data(
+                    api, accounts_url, "adaccounts", "adaccount", start_date, end_date
+                ))
+
+                # Then fetch campaigns for each ad account
+                for account in accounts_data:
+                    account_id = account.get("id")
+                    if account_id:
+                        campaigns_url = f"{BASE_URL}/adaccounts/{account_id}/campaigns"
+                        client = create_client()
+                        headers = api.get_headers()
+
+                        for result in paginate(client, headers, campaigns_url, page_size=1000):
+                            items_data = result.get("campaigns", [])
+
+                            for item in items_data:
+                                if item.get("sub_request_status", "").upper() == "SUCCESS":
+                                    data = item.get("campaign", {})
+                                    if data:
+                                        # Client-side filtering by updated_at
+                                        if client_side_date_filter(data, start_date, end_date):
+                                            yield data
+
+        return _campaigns
+
+    return organizations, fundingsources, billingcenters, adaccounts, invoices, transactions, members, roles, campaigns
