@@ -33,6 +33,9 @@ jobs:
     # if: needs.check-changes.outputs.code-changes == 'true'
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: 3.12
       - name: Install pip dependencies
         run: pip install ruff mypy
       - name: check the formatting
