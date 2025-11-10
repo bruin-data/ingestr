@@ -21,7 +21,6 @@ def memory_mapped_arrow(
     def arrow_mmap(
         incremental: Optional[dlt.sources.incremental[Any]] = incremental,
     ):
-        import pyarrow as pa  # type: ignore
         import pyarrow.ipc as ipc  # type: ignore
 
         with pa.memory_map(path, "rb") as mmap:
