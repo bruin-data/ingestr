@@ -4461,3 +4461,50 @@ class HostawaySource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(resource_name)
+
+
+class SnapchatAdsSource:
+    resources = ["organizations", "fundingsources"]
+
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        refresh_token = source_fields.get("refresh_token")
+        if not refresh_token:
+            raise ValueError("refresh_token is required to connect to Snapchat Ads")
+
+        client_id = source_fields.get("client_id")
+        if not client_id:
+            raise ValueError("client_id is required to connect to Snapchat Ads")
+
+        client_secret = source_fields.get("client_secret")
+        if not client_secret:
+            raise ValueError("client_secret is required to connect to Snapchat Ads")
+
+        organization_id = source_fields.get("organization_id")
+        if not organization_id and table != "organizations":
+            raise ValueError(
+                f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
+            )
+
+        if table not in self.resources:
+            raise UnsupportedResourceError(
+                table, "snapchat_ads", ", ".join(self.resources)
+            )
+
+        from ingestr.src.snapchat_ads import snapchat_ads_source
+
+        source_kwargs = {
+            "refresh_token": refresh_token[0],
+            "client_id": client_id[0],
+            "client_secret": client_secret[0],
+        }
+
+        if organization_id:
+            source_kwargs["organization_id"] = organization_id[0]
+
+        return snapchat_ads_source(**source_kwargs).with_resources(table)
