@@ -27,6 +27,18 @@ jobs:
               - '**'
               - '!**/*.md'
               - '!docs/**'
+  lint:
+    runs-on: ubuntu-latest
+    # needs: check-changes
+    # if: needs.check-changes.outputs.code-changes == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Install pip dependencies
+        run: make deps-ci
+      - name: check the formatting
+        run: make lint-ci
 
   tests:
     needs: check-changes
@@ -85,5 +97,3 @@ jobs:
       - name: run tests (other OS)
         if: matrix.os != 'macos-13'
         run: make test-ci
-      - name: check the formatting
-        run: make lint-ci
