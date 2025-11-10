@@ -83,6 +83,50 @@ def fetch_snapchat_data(
                 yield data
 
 
+def fetch_snapchat_data_with_params(
+    api: "SnapchatAdsAPI",
+    url: str,
+    resource_key: str,
+    item_key: str,
+    params: dict = None,
+) -> Iterator[dict]:
+    """
+    Generic helper to fetch data from Snapchat API with query parameters.
+
+    Args:
+        api: SnapchatAdsAPI instance
+        url: API endpoint URL
+        resource_key: Key in response JSON for the list of items (e.g., "transactions")
+        item_key: Key in each item for the actual data (e.g., "transaction")
+        params: Optional query parameters to pass to the API
+
+    Yields:
+        dict: Individual items from the API response
+    """
+    client = create_client()
+    headers = api.get_headers()
+
+    response = client.get(url, headers=headers, params=params or {})
+
+    if response.status_code != 200:
+        raise ValueError(
+            f"Failed to fetch {resource_key}: {response.status_code} - {response.text}"
+        )
+
+    result = response.json()
+
+    if result.get("request_status", "").upper() != "SUCCESS":
+        raise ValueError(f"Request failed: {result.get('request_status')} - {result}")
+
+    items_data = result.get(resource_key, [])
+
+    for item in items_data:
+        if item.get("sub_request_status", "").upper() == "SUCCESS":
+            data = item.get(item_key, {})
+            if data:
+                yield data
+
+
 class SnapchatAdsAPI:
     """Helper class for Snapchat Ads API authentication and requests."""
 

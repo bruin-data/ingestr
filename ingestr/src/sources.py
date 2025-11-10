@@ -4464,7 +4464,7 @@ class HostawaySource:
 
 
 class SnapchatAdsSource:
-    resources = ["organizations", "fundingsources", "billingcenters", "adaccounts"]
+    resources = ["organizations", "fundingsources", "billingcenters", "adaccounts", "invoices", "transactions"]
 
     def handles_incrementality(self) -> bool:
         return True
@@ -4486,12 +4486,27 @@ class SnapchatAdsSource:
             raise ValueError("client_secret is required to connect to Snapchat Ads")
 
         organization_id = source_fields.get("organization_id")
-        if not organization_id and table != "organizations":
+
+        # Parse table name for special cases like "invoices:ad_account_id"
+        resource_name = table
+        ad_account_id = None
+        if table.startswith("invoices:"):
+            resource_name = "invoices"
+            ad_account_id = table.split(":", 1)[1]
+            if not ad_account_id:
+                raise ValueError("ad_account_id must be provided in format 'invoices:ad_account_id'")
+        elif table == "invoices":
+            # If just "invoices" without specific ID, will fetch all ad accounts and their invoices
+            resource_name = "invoices"
+            ad_account_id = None
+            if not organization_id:
+                raise ValueError("organization_id is required for 'invoices' table when no specific ad_account_id is provided")
+        elif not organization_id and table != "organizations":
             raise ValueError(
                 f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
             )
 
-        if table not in self.resources:
+        if resource_name not in self.resources:
             raise UnsupportedResourceError(table, "Snapchat Ads")
 
         from ingestr.src.snapchat_ads import snapchat_ads_source
@@ -4514,4 +4529,10 @@ class SnapchatAdsSource:
         if interval_end:
             source_kwargs["end_date"] = interval_end
 
-        return snapchat_ads_source(**source_kwargs).with_resources(table)
+        source = snapchat_ads_source(**source_kwargs)
+
+        # Handle invoices specially - it needs ad_account_id parameter
+        if resource_name == "invoices":
+            return source.invoices(ad_account_id)
+
+        return source.with_resources(resource_name)

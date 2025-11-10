@@ -4,8 +4,13 @@ from typing import Iterator
 
 import dlt
 from dlt.common.typing import TDataItems
+from dlt.sources import DltResource
 
-from .snapchat_helpers import SnapchatAdsAPI, fetch_snapchat_data
+from .snapchat_helpers import (
+    SnapchatAdsAPI,
+    fetch_snapchat_data,
+    fetch_snapchat_data_with_params,
+)
 
 BASE_URL = "https://adsapi.snapchat.com/v1"
 
@@ -85,4 +90,63 @@ def snapchat_ads_source(
             api, url, "adaccounts", "adaccount", start_date, end_date
         )
 
-    return organizations, fundingsources, billingcenters, adaccounts
+    def invoices(ad_account_id: str = None) -> DltResource:
+        """Fetch all invoices for a specific ad account or all ad accounts.
+
+        If ad_account_id is provided, fetch invoices only for that account.
+        If ad_account_id is None, fetch all ad accounts first and then get invoices for each.
+        """
+        @dlt.resource(primary_key="id", write_disposition="merge")
+        def _invoices(
+            updated_at=dlt.sources.incremental("updated_at")
+        ) -> Iterator[TDataItems]:
+            # If specific ad_account_id provided, fetch only that account's invoices
+            if ad_account_id:
+                url = f"{BASE_URL}/adaccounts/{ad_account_id}/invoices"
+                yield from fetch_snapchat_data(
+                    api, url, "invoices", "invoice", start_date, end_date
+                )
+            else:
+                # Otherwise, fetch all ad accounts first
+                if not organization_id:
+                    raise ValueError("organization_id is required to fetch invoices for all ad accounts")
+
+                accounts_url = f"{BASE_URL}/organizations/{organization_id}/adaccounts"
+                accounts_data = list(fetch_snapchat_data(
+                    api, accounts_url, "adaccounts", "adaccount", start_date, end_date
+                ))
+
+                # Then fetch invoices for each ad account
+                for account in accounts_data:
+                    account_id = account.get("id")
+                    if account_id:
+                        invoices_url = f"{BASE_URL}/adaccounts/{account_id}/invoices"
+                        yield from fetch_snapchat_data(
+                            api, invoices_url, "invoices", "invoice", start_date, end_date
+                        )
+
+        return _invoices
+
+    @dlt.resource(write_disposition="replace")
+    def transactions() -> Iterator[TDataItems]:
+        """Fetch all transactions for the organization."""
+        if not organization_id:
+            raise ValueError("organization_id is required for transactions")
+
+        url = f"{BASE_URL}/organizations/{organization_id}/transactions"
+
+        # Build query parameters for API-side filtering
+        params = {}
+        if start_date:
+            from dlt.common.time import ensure_pendulum_datetime
+            params["start_time"] = ensure_pendulum_datetime(start_date).format("YYYY-MM-DDTHH:mm:ss")
+
+        if end_date:
+            from dlt.common.time import ensure_pendulum_datetime
+            params["end_time"] = ensure_pendulum_datetime(end_date).format("YYYY-MM-DDTHH:mm:ss")
+
+        yield from fetch_snapchat_data_with_params(
+            api, url, "transactions", "transaction", params
+        )
+
+    return organizations, fundingsources, billingcenters, adaccounts, invoices, transactions
