@@ -4464,7 +4464,7 @@ class HostawaySource:
 
 
 class SnapchatAdsSource:
-    resources = ["organizations", "fundingsources", "billingcenters", "adaccounts", "invoices", "transactions", "members", "roles", "campaigns"]
+    resources = ["organizations", "fundingsources", "billingcenters", "adaccounts", "invoices", "transactions", "members", "roles", "campaigns", "adsquads", "ads", "event_details", "creatives"]
 
     def handles_incrementality(self) -> bool:
         return True
@@ -4512,6 +4512,50 @@ class SnapchatAdsSource:
             ad_account_id = None
             if not organization_id:
                 raise ValueError("organization_id is required for 'campaigns' table when no specific ad_account_id is provided")
+        elif table.startswith("adsquads:"):
+            resource_name = "adsquads"
+            ad_account_id = table.split(":", 1)[1]
+            if not ad_account_id:
+                raise ValueError("ad_account_id must be provided in format 'adsquads:ad_account_id'")
+        elif table == "adsquads":
+            # If just "adsquads" without specific ID, will fetch all ad accounts and their ad squads
+            resource_name = "adsquads"
+            ad_account_id = None
+            if not organization_id:
+                raise ValueError("organization_id is required for 'adsquads' table when no specific ad_account_id is provided")
+        elif table.startswith("ads:"):
+            resource_name = "ads"
+            ad_account_id = table.split(":", 1)[1]
+            if not ad_account_id:
+                raise ValueError("ad_account_id must be provided in format 'ads:ad_account_id'")
+        elif table == "ads":
+            # If just "ads" without specific ID, will fetch all ad accounts and their ads
+            resource_name = "ads"
+            ad_account_id = None
+            if not organization_id:
+                raise ValueError("organization_id is required for 'ads' table when no specific ad_account_id is provided")
+        elif table.startswith("event_details:"):
+            resource_name = "event_details"
+            ad_account_id = table.split(":", 1)[1]
+            if not ad_account_id:
+                raise ValueError("ad_account_id must be provided in format 'event_details:ad_account_id'")
+        elif table == "event_details":
+            # If just "event_details" without specific ID, will fetch all ad accounts and their event details
+            resource_name = "event_details"
+            ad_account_id = None
+            if not organization_id:
+                raise ValueError("organization_id is required for 'event_details' table when no specific ad_account_id is provided")
+        elif table.startswith("creatives:"):
+            resource_name = "creatives"
+            ad_account_id = table.split(":", 1)[1]
+            if not ad_account_id:
+                raise ValueError("ad_account_id must be provided in format 'creatives:ad_account_id'")
+        elif table == "creatives":
+            # If just "creatives" without specific ID, will fetch all ad accounts and their creatives
+            resource_name = "creatives"
+            ad_account_id = None
+            if not organization_id:
+                raise ValueError("organization_id is required for 'creatives' table when no specific ad_account_id is provided")
         elif not organization_id and table != "organizations":
             raise ValueError(
                 f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
@@ -4549,5 +4593,21 @@ class SnapchatAdsSource:
         # Handle campaigns specially - it needs ad_account_id parameter
         if resource_name == "campaigns":
             return source.campaigns(ad_account_id)
+
+        # Handle adsquads specially - it needs ad_account_id parameter
+        if resource_name == "adsquads":
+            return source.adsquads(ad_account_id)
+
+        # Handle ads specially - it needs ad_account_id parameter
+        if resource_name == "ads":
+            return source.ads(ad_account_id)
+
+        # Handle event_details specially - it needs ad_account_id parameter
+        if resource_name == "event_details":
+            return source.event_details(ad_account_id)
+
+        # Handle creatives specially - it needs ad_account_id parameter
+        if resource_name == "creatives":
+            return source.creatives(ad_account_id)
 
         return source.with_resources(resource_name)

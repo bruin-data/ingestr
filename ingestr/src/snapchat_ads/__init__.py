@@ -12,6 +12,7 @@ from .snapchat_helpers import (
     create_client,
     fetch_snapchat_data,
     fetch_snapchat_data_with_params,
+    fetch_with_paginate_account_id,
     paginate,
 )
 
@@ -193,51 +194,118 @@ def snapchat_ads_source(
         def _campaigns(
             updated_at=dlt.sources.incremental("updated_at")
         ) -> Iterator[TDataItems]:
-            # If specific ad_account_id provided, fetch only that account's campaigns
+            yield from fetch_with_paginate_account_id(
+                api=api,
+                ad_account_id=ad_account_id,
+                organization_id=organization_id,
+                base_url=BASE_URL,
+                resource_name="campaigns",
+                item_key="campaign",
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+        return _campaigns
+
+    def adsquads(ad_account_id: str = None) -> DltResource:
+        """Fetch all ad squads for a specific ad account or all ad accounts.
+
+        If ad_account_id is provided, fetch ad squads only for that account.
+        If ad_account_id is None, fetch all ad accounts first and then get ad squads for each.
+        """
+        @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
+        def _adsquads(
+            updated_at=dlt.sources.incremental("updated_at")
+        ) -> Iterator[TDataItems]:
+            yield from fetch_with_paginate_account_id(
+                api=api,
+                ad_account_id=ad_account_id,
+                organization_id=organization_id,
+                base_url=BASE_URL,
+                resource_name="adsquads",
+                item_key="adsquad",
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+        return _adsquads
+
+    def ads(ad_account_id: str = None) -> DltResource:
+        """Fetch all ads for a specific ad account or all ad accounts.
+
+        If ad_account_id is provided, fetch ads only for that account.
+        If ad_account_id is None, fetch all ad accounts first and then get ads for each.
+        """
+        @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
+        def _ads(
+            updated_at=dlt.sources.incremental("updated_at")
+        ) -> Iterator[TDataItems]:
+            yield from fetch_with_paginate_account_id(
+                api=api,
+                ad_account_id=ad_account_id,
+                organization_id=organization_id,
+                base_url=BASE_URL,
+                resource_name="ads",
+                item_key="ad",
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+        return _ads
+
+    def event_details(ad_account_id: str = None) -> DltResource:
+        """Fetch all event details for a specific ad account or all ad accounts.
+
+        If ad_account_id is provided, fetch event details only for that account.
+        If ad_account_id is None, fetch all ad accounts first and then get event details for each.
+        """
+        @dlt.resource(primary_key="id", write_disposition="merge")
+        def _event_details(
+            updated_at=dlt.sources.incremental("updated_at")
+        ) -> Iterator[TDataItems]:
+            # Determine which accounts to fetch data for
             if ad_account_id:
-                url = f"{BASE_URL}/adaccounts/{ad_account_id}/campaigns"
-                client = create_client()
-                headers = api.get_headers()
-
-                for result in paginate(client, headers, url, page_size=1000):
-                    items_data = result.get("campaigns", [])
-
-                    for item in items_data:
-                        if item.get("sub_request_status", "").upper() == "SUCCESS":
-                            data = item.get("campaign", {})
-                            if data:
-                                # Client-side filtering by updated_at
-                                if client_side_date_filter(data, start_date, end_date):
-                                    yield data
+                account_ids = [ad_account_id]
             else:
-                # Otherwise, fetch all ad accounts first
                 if not organization_id:
-                    raise ValueError("organization_id is required to fetch campaigns for all ad accounts")
+                    raise ValueError("organization_id is required to fetch event_details for all ad accounts")
 
                 accounts_url = f"{BASE_URL}/organizations/{organization_id}/adaccounts"
                 accounts_data = list(fetch_snapchat_data(
                     api, accounts_url, "adaccounts", "adaccount", start_date, end_date
                 ))
+                account_ids = [account.get("id") for account in accounts_data if account.get("id")]
 
-                # Then fetch campaigns for each ad account
-                for account in accounts_data:
-                    account_id = account.get("id")
-                    if account_id:
-                        campaigns_url = f"{BASE_URL}/adaccounts/{account_id}/campaigns"
-                        client = create_client()
-                        headers = api.get_headers()
+            # Fetch event details for each account
+            for account_id in account_ids:
+                url = f"{BASE_URL}/adaccounts/{account_id}/event_details"
+                yield from fetch_snapchat_data(
+                    api, url, "event_details", "event_detail", start_date, end_date
+                )
 
-                        for result in paginate(client, headers, campaigns_url, page_size=1000):
-                            items_data = result.get("campaigns", [])
+        return _event_details
 
-                            for item in items_data:
-                                if item.get("sub_request_status", "").upper() == "SUCCESS":
-                                    data = item.get("campaign", {})
-                                    if data:
-                                        # Client-side filtering by updated_at
-                                        if client_side_date_filter(data, start_date, end_date):
-                                            yield data
+    def creatives(ad_account_id: str = None) -> DltResource:
+        """Fetch all creatives for a specific ad account or all ad accounts.
 
-        return _campaigns
+        If ad_account_id is provided, fetch creatives only for that account.
+        If ad_account_id is None, fetch all ad accounts first and then get creatives for each.
+        """
+        @dlt.resource(primary_key="id", write_disposition="merge", max_table_nesting=0)
+        def _creatives(
+            updated_at=dlt.sources.incremental("updated_at")
+        ) -> Iterator[TDataItems]:
+            yield from fetch_with_paginate_account_id(
+                api=api,
+                ad_account_id=ad_account_id,
+                organization_id=organization_id,
+                base_url=BASE_URL,
+                resource_name="creatives",
+                item_key="creative",
+                start_date=start_date,
+                end_date=end_date,
+            )
 
-    return organizations, fundingsources, billingcenters, adaccounts, invoices, transactions, members, roles, campaigns
+        return _creatives
+
+    return organizations, fundingsources, billingcenters, adaccounts, invoices, transactions, members, roles, campaigns, adsquads, ads, event_details, creatives

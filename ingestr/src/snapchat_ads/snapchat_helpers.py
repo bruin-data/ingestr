@@ -145,6 +145,67 @@ def client_side_date_filter(data: dict, start_date, end_date) -> bool:
     return True
 
 
+def fetch_with_paginate_account_id(
+    api: "SnapchatAdsAPI",
+    ad_account_id: str,
+    organization_id: str,
+    base_url: str,
+    resource_name: str,
+    item_key: str,
+    start_date=None,
+    end_date=None,
+) -> Iterator[dict]:
+    """
+    Helper to fetch paginated data for ad accounts.
+
+    If ad_account_id is provided, fetches data for that specific account.
+    Otherwise, fetches all ad accounts and then fetches data for each account.
+
+    Args:
+        api: SnapchatAdsAPI instance
+        ad_account_id: Specific ad account ID (optional)
+        organization_id: Organization ID (required if ad_account_id is None)
+        base_url: Base URL for API
+        resource_name: Resource name in URL and response (e.g., "campaigns", "adsquads")
+        item_key: Key for individual items in response (e.g., "campaign", "adsquad")
+        start_date: Optional start date for client-side filtering
+        end_date: Optional end date for client-side filtering
+
+    Yields:
+        dict: Individual items from the API response
+    """
+    # Determine which accounts to fetch data for
+    if ad_account_id:
+        account_ids = [ad_account_id]
+    else:
+        if not organization_id:
+            raise ValueError(f"organization_id is required to fetch {resource_name} for all ad accounts")
+
+        accounts_url = f"{base_url}/organizations/{organization_id}/adaccounts"
+        accounts_data = list(fetch_snapchat_data(
+            api, accounts_url, "adaccounts", "adaccount", start_date, end_date
+        ))
+        account_ids = [account.get("id") for account in accounts_data if account.get("id")]
+
+    # Fetch data for each account with pagination
+    client = create_client()
+    headers = api.get_headers()
+
+    for account_id in account_ids:
+        url = f"{base_url}/adaccounts/{account_id}/{resource_name}"
+
+        for result in paginate(client, headers, url, page_size=1000):
+            items_data = result.get(resource_name, [])
+
+            for item in items_data:
+                if item.get("sub_request_status", "").upper() == "SUCCESS":
+                    data = item.get(item_key, {})
+                    if data:
+                        # Client-side filtering by updated_at
+                        if client_side_date_filter(data, start_date, end_date):
+                            yield data
+
+
 def paginate(client: requests.Session, headers: dict, url: str, page_size: int = 1000):
     """
     Helper to paginate through Snapchat API responses.
