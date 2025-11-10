@@ -1,6 +1,7 @@
 from typing import Any, Optional
 
 import dlt
+import pyarrow as pa  # type: ignore
 from dlt.common.schema.typing import TColumnNames, TTableSchemaColumns
 from dlt.extract.items import TTableHintTemplate
 
@@ -21,7 +22,6 @@ def memory_mapped_arrow(
     def arrow_mmap(
         incremental: Optional[dlt.sources.incremental[Any]] = incremental,
     ):
-        import pyarrow as pa  # type: ignore
         import pyarrow.ipc as ipc  # type: ignore
 
         with pa.memory_map(path, "rb") as mmap:
@@ -71,3 +71,11 @@ def memory_mapped_arrow(
         yield table
 
     return arrow_mmap
+
+
+BATCH_SIZE = 1000
+
+
+def as_list(table: pa.Table):
+    for batch in table.to_batches(BATCH_SIZE):
+        yield from batch.to_pylist()
