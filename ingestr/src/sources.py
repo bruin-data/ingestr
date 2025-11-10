@@ -4464,7 +4464,7 @@ class HostawaySource:
 
 
 class SnapchatAdsSource:
-    resources = ["organizations", "fundingsources", "billingcenters"]
+    resources = ["organizations", "fundingsources", "billingcenters", "adaccounts"]
 
     def handles_incrementality(self) -> bool:
         return True
@@ -4492,9 +4492,7 @@ class SnapchatAdsSource:
             )
 
         if table not in self.resources:
-            raise UnsupportedResourceError(
-                table, "snapchat_ads", ", ".join(self.resources)
-            )
+            raise UnsupportedResourceError(table, "Snapchat Ads")
 
         from ingestr.src.snapchat_ads import snapchat_ads_source
 

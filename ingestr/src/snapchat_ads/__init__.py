@@ -4,7 +4,6 @@ from typing import Iterator
 
 import dlt
 from dlt.common.typing import TDataItems
-from dlt.sources import DltResource
 
 from .snapchat_helpers import SnapchatAdsAPI, fetch_snapchat_data
 
@@ -17,9 +16,9 @@ def snapchat_ads_source(
     client_id: str = dlt.secrets.value,
     client_secret: str = dlt.secrets.value,
     organization_id: str = dlt.config.value,
-    start_date=None,
-    end_date=None,
-) -> DltResource:
+    start_date: str = None,
+    end_date: str = None,
+):
     """Returns a list of resources to load data from Snapchat Marketing API.
 
     Args:
@@ -27,9 +26,11 @@ def snapchat_ads_source(
         client_id (str): OAuth client ID
         client_secret (str): OAuth client secret
         organization_id (str): Organization ID (optional for organizations table, required for others)
+        start_date (str): Optional start date for filtering data
+        end_date (str): Optional end date for filtering data
 
     Returns:
-        DltResource: organizations
+        tuple: A tuple of three DltResource objects (organizations, fundingsources, billingcenters)
     """
     api = SnapchatAdsAPI(
         refresh_token=refresh_token, client_id=client_id, client_secret=client_secret
@@ -71,4 +72,17 @@ def snapchat_ads_source(
             api, url, "billingcenters", "billingcenter", start_date, end_date
         )
 
-    return organizations, fundingsources, billingcenters
+    @dlt.resource(primary_key="id", write_disposition="merge")
+    def adaccounts(
+        updated_at=dlt.sources.incremental("updated_at")
+    ) -> Iterator[TDataItems]:
+        """Fetch all ad accounts for the organization."""
+        if not organization_id:
+            raise ValueError("organization_id is required for adaccounts")
+
+        url = f"{BASE_URL}/organizations/{organization_id}/adaccounts"
+        yield from fetch_snapchat_data(
+            api, url, "adaccounts", "adaccount", start_date, end_date
+        )
+
+    return organizations, fundingsources, billingcenters, adaccounts
