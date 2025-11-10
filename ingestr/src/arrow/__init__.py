@@ -1,9 +1,10 @@
 from typing import Any, Optional
 
 import dlt
+import pyarrow as pa  # type: ignore
 from dlt.common.schema.typing import TColumnNames, TTableSchemaColumns
 from dlt.extract.items import TTableHintTemplate
-import pyarrow as pa  # type: ignore
+
 
 def memory_mapped_arrow(
     path: str,
@@ -73,6 +74,7 @@ def memory_mapped_arrow(
 
 
 BATCH_SIZE = 1000
+
 
 def as_list(table: pa.Table):
     for batch in table.to_batches(BATCH_SIZE):
