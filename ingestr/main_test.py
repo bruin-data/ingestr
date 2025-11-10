@@ -1690,9 +1690,6 @@ def test_arrow_mmap_to_db_delete_insert(dest):
             return res
 
     dest_uri = dest.start()
-    if "clickhouse" in dest_uri:
-        pytest.skip("clickhouse is not supported for this test")
-
     dest_engine = sqlalchemy.create_engine(dest_uri)
 
     # let's start with a basic dataframe
