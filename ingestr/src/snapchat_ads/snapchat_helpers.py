@@ -22,7 +22,12 @@ def create_client() -> requests.Session:
 
 
 def fetch_snapchat_data(
-    api: "SnapchatAdsAPI", url: str, resource_key: str, item_key: str
+    api: "SnapchatAdsAPI",
+    url: str,
+    resource_key: str,
+    item_key: str,
+    start_date=None,
+    end_date=None,
 ) -> Iterator[dict]:
     """
     Generic helper to fetch data from Snapchat API.
@@ -32,10 +37,14 @@ def fetch_snapchat_data(
         url: API endpoint URL
         resource_key: Key in response JSON for the list of items (e.g., "organizations")
         item_key: Key in each item for the actual data (e.g., "organization")
+        start_date: Optional start date for filtering by updated_at (client-side)
+        end_date: Optional end date for filtering by updated_at (client-side)
 
     Yields:
         dict: Individual items from the API response
     """
+    from dlt.common.time import ensure_pendulum_datetime
+
     client = create_client()
     headers = api.get_headers()
 
@@ -57,6 +66,20 @@ def fetch_snapchat_data(
         if item.get("sub_request_status", "").upper() == "SUCCESS":
             data = item.get(item_key, {})
             if data:
+                # Client-side filtering by updated_at
+                if start_date or end_date:
+                    updated_at_str = data.get("updated_at")
+                    if updated_at_str:
+                        updated_at = ensure_pendulum_datetime(updated_at_str)
+
+                        if start_date and updated_at < ensure_pendulum_datetime(
+                            start_date
+                        ):
+                            continue
+
+                        if end_date and updated_at > ensure_pendulum_datetime(end_date):
+                            continue
+
                 yield data
 
 

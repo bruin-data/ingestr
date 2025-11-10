@@ -17,6 +17,8 @@ def snapchat_ads_source(
     client_id: str = dlt.secrets.value,
     client_secret: str = dlt.secrets.value,
     organization_id: str = dlt.config.value,
+    start_date=None,
+    end_date=None,
 ) -> DltResource:
     """Returns a list of resources to load data from Snapchat Marketing API.
 
@@ -39,7 +41,9 @@ def snapchat_ads_source(
     ) -> Iterator[TDataItems]:
         """Fetch all organizations for the authenticated user."""
         url = f"{BASE_URL}/me/organizations"
-        yield from fetch_snapchat_data(api, url, "organizations", "organization")
+        yield from fetch_snapchat_data(
+            api, url, "organizations", "organization", start_date, end_date
+        )
 
     @dlt.resource(primary_key="id", write_disposition="merge")
     def fundingsources(
@@ -50,7 +54,9 @@ def snapchat_ads_source(
             raise ValueError("organization_id is required for fundingsources")
 
         url = f"{BASE_URL}/organizations/{organization_id}/fundingsources"
-        yield from fetch_snapchat_data(api, url, "fundingsources", "fundingsource")
+        yield from fetch_snapchat_data(
+            api, url, "fundingsources", "fundingsource", start_date, end_date
+        )
 
     @dlt.resource(primary_key="id", write_disposition="merge")
     def billingcenters(
@@ -61,6 +67,8 @@ def snapchat_ads_source(
             raise ValueError("organization_id is required for billingcenters")
 
         url = f"{BASE_URL}/organizations/{organization_id}/billingcenters"
-        yield from fetch_snapchat_data(api, url, "billingcenters", "billingcenter")
+        yield from fetch_snapchat_data(
+            api, url, "billingcenters", "billingcenter", start_date, end_date
+        )
 
     return organizations, fundingsources, billingcenters

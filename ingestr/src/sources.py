@@ -4507,4 +4507,13 @@ class SnapchatAdsSource:
         if organization_id:
             source_kwargs["organization_id"] = organization_id[0]
 
+        # Add interval_start and interval_end for client-side filtering
+        interval_start = kwargs.get("interval_start")
+        if interval_start:
+            source_kwargs["start_date"] = interval_start
+
+        interval_end = kwargs.get("interval_end")
+        if interval_end:
+            source_kwargs["end_date"] = interval_end
+
         return snapchat_ads_source(**source_kwargs).with_resources(table)
