@@ -10,6 +10,7 @@ from .snapchat_helpers import (
     SnapchatAdsAPI,
     client_side_date_filter,
     create_client,
+    fetch_account_id_resource,
     fetch_snapchat_data,
     fetch_snapchat_data_with_params,
     fetch_with_paginate_account_id,
@@ -263,25 +264,16 @@ def snapchat_ads_source(
         def _event_details(
             updated_at=dlt.sources.incremental("updated_at")
         ) -> Iterator[TDataItems]:
-            # Determine which accounts to fetch data for
-            if ad_account_id:
-                account_ids = [ad_account_id]
-            else:
-                if not organization_id:
-                    raise ValueError("organization_id is required to fetch event_details for all ad accounts")
-
-                accounts_url = f"{BASE_URL}/organizations/{organization_id}/adaccounts"
-                accounts_data = list(fetch_snapchat_data(
-                    api, accounts_url, "adaccounts", "adaccount", start_date, end_date
-                ))
-                account_ids = [account.get("id") for account in accounts_data if account.get("id")]
-
-            # Fetch event details for each account
-            for account_id in account_ids:
-                url = f"{BASE_URL}/adaccounts/{account_id}/event_details"
-                yield from fetch_snapchat_data(
-                    api, url, "event_details", "event_detail", start_date, end_date
-                )
+            yield from fetch_account_id_resource(
+                api=api,
+                ad_account_id=ad_account_id,
+                organization_id=organization_id,
+                base_url=BASE_URL,
+                resource_name="event_details",
+                item_key="event_detail",
+                start_date=start_date,
+                end_date=end_date,
+            )
 
         return _event_details
 
@@ -308,4 +300,27 @@ def snapchat_ads_source(
 
         return _creatives
 
-    return organizations, fundingsources, billingcenters, adaccounts, invoices, transactions, members, roles, campaigns, adsquads, ads, event_details, creatives
+    def segments(ad_account_id: str = None) -> DltResource:
+        """Fetch all audience segments for a specific ad account or all ad accounts.
+
+        If ad_account_id is provided, fetch segments only for that account.
+        If ad_account_id is None, fetch all ad accounts first and then get segments for each.
+        """
+        @dlt.resource(primary_key="id", write_disposition="merge")
+        def _segments(
+            updated_at=dlt.sources.incremental("updated_at")
+        ) -> Iterator[TDataItems]:
+            yield from fetch_account_id_resource(
+                api=api,
+                ad_account_id=ad_account_id,
+                organization_id=organization_id,
+                base_url=BASE_URL,
+                resource_name="segments",
+                item_key="segment",
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+        return _segments
+
+    return organizations, fundingsources, billingcenters, adaccounts, invoices, transactions, members, roles, campaigns, adsquads, ads, event_details, creatives, segments

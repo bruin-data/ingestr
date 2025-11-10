@@ -145,6 +145,29 @@ def client_side_date_filter(data: dict, start_date, end_date) -> bool:
     return True
 
 
+def get_account_ids(
+    api: "SnapchatAdsAPI",
+    ad_account_id: str,
+    organization_id: str,
+    base_url: str,
+    resource_name: str,
+    start_date=None,
+    end_date=None,
+) -> list[str]:
+
+    if ad_account_id:
+        return [ad_account_id]
+
+    if not organization_id:
+        raise ValueError(f"organization_id is required to fetch {resource_name} for all ad accounts")
+
+    accounts_url = f"{base_url}/organizations/{organization_id}/adaccounts"
+    accounts_data = list(fetch_snapchat_data(
+        api, accounts_url, "adaccounts", "adaccount", start_date, end_date
+    ))
+    return [account.get("id") for account in accounts_data if account.get("id")]
+
+
 def fetch_with_paginate_account_id(
     api: "SnapchatAdsAPI",
     ad_account_id: str,
@@ -174,18 +197,10 @@ def fetch_with_paginate_account_id(
     Yields:
         dict: Individual items from the API response
     """
-    # Determine which accounts to fetch data for
-    if ad_account_id:
-        account_ids = [ad_account_id]
-    else:
-        if not organization_id:
-            raise ValueError(f"organization_id is required to fetch {resource_name} for all ad accounts")
-
-        accounts_url = f"{base_url}/organizations/{organization_id}/adaccounts"
-        accounts_data = list(fetch_snapchat_data(
-            api, accounts_url, "adaccounts", "adaccount", start_date, end_date
-        ))
-        account_ids = [account.get("id") for account in accounts_data if account.get("id")]
+    # Get list of account IDs to fetch data for
+    account_ids = get_account_ids(
+        api, ad_account_id, organization_id, base_url, resource_name, start_date, end_date
+    )
 
     # Fetch data for each account with pagination
     client = create_client()
@@ -204,6 +219,29 @@ def fetch_with_paginate_account_id(
                         # Client-side filtering by updated_at
                         if client_side_date_filter(data, start_date, end_date):
                             yield data
+
+
+def fetch_account_id_resource(
+    api: "SnapchatAdsAPI",
+    ad_account_id: str,
+    organization_id: str,
+    base_url: str,
+    resource_name: str,
+    item_key: str,
+    start_date=None,
+    end_date=None,
+) -> Iterator[dict]:
+    # Get list of account IDs to fetch data for
+    account_ids = get_account_ids(
+        api, ad_account_id, organization_id, base_url, resource_name, start_date, end_date
+    )
+
+    # Fetch data for each account
+    for account_id in account_ids:
+        url = f"{base_url}/adaccounts/{account_id}/{resource_name}"
+        yield from fetch_snapchat_data(
+            api, url, resource_name, item_key, start_date, end_date
+        )
 
 
 def paginate(client: requests.Session, headers: dict, url: str, page_size: int = 1000):

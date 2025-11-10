@@ -4464,7 +4464,7 @@ class HostawaySource:
 
 
 class SnapchatAdsSource:
-    resources = ["organizations", "fundingsources", "billingcenters", "adaccounts", "invoices", "transactions", "members", "roles", "campaigns", "adsquads", "ads", "event_details", "creatives"]
+    resources = ["organizations", "fundingsources", "billingcenters", "adaccounts", "invoices", "transactions", "members", "roles", "campaigns", "adsquads", "ads", "event_details", "creatives", "segments"]
 
     def handles_incrementality(self) -> bool:
         return True
@@ -4556,6 +4556,17 @@ class SnapchatAdsSource:
             ad_account_id = None
             if not organization_id:
                 raise ValueError("organization_id is required for 'creatives' table when no specific ad_account_id is provided")
+        elif table.startswith("segments:"):
+            resource_name = "segments"
+            ad_account_id = table.split(":", 1)[1]
+            if not ad_account_id:
+                raise ValueError("ad_account_id must be provided in format 'segments:ad_account_id'")
+        elif table == "segments":
+            # If just "segments" without specific ID, will fetch all ad accounts and their segments
+            resource_name = "segments"
+            ad_account_id = None
+            if not organization_id:
+                raise ValueError("organization_id is required for 'segments' table when no specific ad_account_id is provided")
         elif not organization_id and table != "organizations":
             raise ValueError(
                 f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
@@ -4609,5 +4620,9 @@ class SnapchatAdsSource:
         # Handle creatives specially - it needs ad_account_id parameter
         if resource_name == "creatives":
             return source.creatives(ad_account_id)
+
+        # Handle segments specially - it needs ad_account_id parameter
+        if resource_name == "segments":
+            return source.segments(ad_account_id)
 
         return source.with_resources(resource_name)
