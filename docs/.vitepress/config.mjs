@@ -176,6 +176,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Shopify", link: "/supported-sources/shopify.md" },
               { text: "Slack", link: "/supported-sources/slack.md" },
               { text: "Smartsheet", link: "/supported-sources/smartsheets.md" },
+              { text: "Snapchat Ads", link: "/supported-sources/snapchat-ads.md" },
               { text: "Solidgate", link: "/supported-sources/solidgate.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
               { text: "TikTok Ads", link: "/supported-sources/tiktok-ads.md" },

@@ -8,7 +8,6 @@ from dlt.sources import DltResource
 
 from .snapchat_helpers import (
     SnapchatAdsAPI,
-    client_side_date_filter,
     create_client,
     fetch_account_id_resource,
     fetch_snapchat_data,

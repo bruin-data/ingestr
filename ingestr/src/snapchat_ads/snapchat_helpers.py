@@ -31,17 +31,6 @@ def fetch_snapchat_data(
 ) -> Iterator[dict]:
     """
     Generic helper to fetch data from Snapchat API.
-
-    Args:
-        api: SnapchatAdsAPI instance
-        url: API endpoint URL
-        resource_key: Key in response JSON for the list of items (e.g., "organizations")
-        item_key: Key in each item for the actual data (e.g., "organization")
-        start_date: Optional start date for filtering by updated_at (client-side)
-        end_date: Optional end date for filtering by updated_at (client-side)
-
-    Yields:
-        dict: Individual items from the API response
     """
     client = create_client()
     headers = api.get_headers()
@@ -78,16 +67,6 @@ def fetch_snapchat_data_with_params(
 ) -> Iterator[dict]:
     """
     Generic helper to fetch data from Snapchat API with query parameters.
-
-    Args:
-        api: SnapchatAdsAPI instance
-        url: API endpoint URL
-        resource_key: Key in response JSON for the list of items (e.g., "transactions")
-        item_key: Key in each item for the actual data (e.g., "transaction")
-        params: Optional query parameters to pass to the API
-
-    Yields:
-        dict: Individual items from the API response
     """
     client = create_client()
     headers = api.get_headers()
@@ -183,19 +162,6 @@ def fetch_with_paginate_account_id(
 
     If ad_account_id is provided, fetches data for that specific account.
     Otherwise, fetches all ad accounts and then fetches data for each account.
-
-    Args:
-        api: SnapchatAdsAPI instance
-        ad_account_id: Specific ad account ID (optional)
-        organization_id: Organization ID (required if ad_account_id is None)
-        base_url: Base URL for API
-        resource_name: Resource name in URL and response (e.g., "campaigns", "adsquads")
-        item_key: Key for individual items in response (e.g., "campaign", "adsquad")
-        start_date: Optional start date for client-side filtering
-        end_date: Optional end date for client-side filtering
-
-    Yields:
-        dict: Individual items from the API response
     """
     # Get list of account IDs to fetch data for
     account_ids = get_account_ids(
@@ -338,12 +304,6 @@ class SnapchatAdsAPI:
         return self._access_token
 
     def get_headers(self) -> dict:
-        """
-        Get the headers with the access token for API requests.
-
-        Returns:
-            dict: Headers with Authorization Bearer token
-        """
         access_token = self.get_access_token()
         return {
             "Authorization": f"Bearer {access_token}",
