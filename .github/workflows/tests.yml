@@ -33,10 +33,8 @@ jobs:
     # if: needs.check-changes.outputs.code-changes == 'true'
     steps:
       - uses: actions/checkout@v4
-      - name: install uv
-        uses: astral-sh/setup-uv@v3
       - name: Install pip dependencies
-        run: make deps-ci
+        run: pip install ruff mypy
       - name: check the formatting
         run: make lint-ci
 
