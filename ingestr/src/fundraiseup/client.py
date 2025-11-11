@@ -70,7 +70,7 @@ class FundraiseupClient:
             if not items:
                 break
 
-            yield from items
+            yield items
 
             # Set cursor for next page
             if has_more and items:
