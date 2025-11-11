@@ -40,11 +40,7 @@ def paginate(client: requests.Session, headers: dict, url: str, page_size: int =
 
     while url:
         response = client.get(url, headers=headers, params=params)
-
-        if response.status_code != 200:
-            raise ValueError(
-                f"Failed to fetch page: {response.status_code} - {response.text}"
-            )
+        response.raise_for_status()
 
         result = response.json()
 
@@ -125,11 +121,7 @@ def fetch_snapchat_data(
     headers = api.get_headers()
 
     response = client.get(url, headers=headers)
-
-    if response.status_code != 200:
-        raise ValueError(
-            f"Failed to fetch {resource_key}: {response.status_code} - {response.text}"
-        )
+    response.raise_for_status()
 
     result = response.json()
 
@@ -161,11 +153,7 @@ def fetch_snapchat_data_with_params(
     headers = api.get_headers()
 
     response = client.get(url, headers=headers, params=params or {})
-
-    if response.status_code != 200:
-        raise ValueError(
-            f"Failed to fetch {resource_key}: {response.status_code} - {response.text}"
-        )
+    response.raise_for_status()
 
     result = response.json()
 
