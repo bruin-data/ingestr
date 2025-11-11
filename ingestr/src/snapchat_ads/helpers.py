@@ -5,7 +5,6 @@ import requests
 from .client import SnapchatAdsAPI, create_client
 
 
-
 def client_side_date_filter(data: dict, start_date, end_date) -> bool:
     """
     Check if data item falls within the specified date range based on updated_at.
@@ -109,7 +108,6 @@ def get_account_ids(
         for account in accounts_data
         if (account_id := account.get("id")) is not None
     ]
-
 
 
 def fetch_snapchat_data(
@@ -242,7 +240,6 @@ def fetch_with_paginate_account_id(
         end_date,
     )
 
-    
     client = create_client()
     headers = api.get_headers()
 
