@@ -4,7 +4,6 @@ from typing import Iterator
 
 import dlt
 from dlt.common.typing import TDataItems
-from dlt.sources import DltResource
 
 from .client import SnapchatAdsAPI, create_client
 from .helpers import (
