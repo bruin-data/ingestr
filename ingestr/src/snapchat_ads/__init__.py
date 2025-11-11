@@ -6,9 +6,8 @@ import dlt
 from dlt.common.typing import TDataItems
 from dlt.sources import DltResource
 
-from .snapchat_helpers import (
-    SnapchatAdsAPI,
-    create_client,
+from .client import SnapchatAdsAPI, create_client
+from .helpers import (
     fetch_account_id_resource,
     fetch_snapchat_data,
     fetch_snapchat_data_with_params,
