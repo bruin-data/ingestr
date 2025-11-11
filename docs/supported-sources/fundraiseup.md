@@ -34,6 +34,7 @@ The FundraiseUp source supports the following tables:
 | Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `donations`       | id | - | replace               | All donation records including amounts, supporters, and payment details |
+| `donations:incremental`       | id | - | merge               | All donation records including amounts, supporters, and payment details. Loads records incrementally. |
 | `events`       | id | - | replace               | Audit log events for tracking changes and activities |
 | `fundraisers`       | id | - | replace               | Fundraiser campaigns (requires appropriate API permissions) |
 | `recurring_plans`       | id | - | replace               | Recurring donation plans and subscription details |
@@ -44,7 +45,6 @@ Use one of these as the `--source-table` parameter in the `ingestr ingest` comma
 ## Notes
 
 - **Authentication**: The FundraiseUp API uses Bearer token authentication. Make sure your API key has the necessary permissions for the resources you want to access.
-- **Incremental Loading**: The FundraiseUp source does not support incremental loading. All data is fetched with a full refresh (replace strategy).
 - **Date Filtering**: The API does not support date filtering for any of the endpoints.
 - **Permissions**: The `fundraisers` endpoint may return a 403 Forbidden error if your API key doesn't have the required permissions. Contact FundraiseUp support to enable access if needed.
 
