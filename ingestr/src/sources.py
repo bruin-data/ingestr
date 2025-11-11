@@ -4453,3 +4453,110 @@ class HostawaySource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(resource_name)
+
+
+class SnapchatAdsSource:
+    resources = [
+        "organizations",
+        "fundingsources",
+        "billingcenters",
+        "adaccounts",
+        "invoices",
+        "transactions",
+        "members",
+        "roles",
+        "campaigns",
+        "adsquads",
+        "ads",
+        "event_details",
+        "creatives",
+        "segments",
+    ]
+
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        refresh_token = source_fields.get("refresh_token")
+        if not refresh_token:
+            raise ValueError("refresh_token is required to connect to Snapchat Ads")
+
+        client_id = source_fields.get("client_id")
+        if not client_id:
+            raise ValueError("client_id is required to connect to Snapchat Ads")
+
+        client_secret = source_fields.get("client_secret")
+        if not client_secret:
+            raise ValueError("client_secret is required to connect to Snapchat Ads")
+
+        organization_id = source_fields.get("organization_id")
+
+        # Resources that support ad_account_id filtering
+        ad_account_resources = [
+            "invoices",
+            "campaigns",
+            "adsquads",
+            "ads",
+            "event_details",
+            "creatives",
+            "segments",
+        ]
+
+        # Parse table name for special cases like "campaigns:ad_account_id"
+        ad_account_id = None
+        if ":" in table:
+            resource_name, ad_account_id = table.split(":", maxsplit=1)
+            if not ad_account_id:
+                raise ValueError(
+                    f"ad_account_id must be provided in format '{resource_name}:ad_account_id'"
+                )
+        else:
+            resource_name = table
+
+        account_id_required = (
+            resource_name in ad_account_resources
+            and ad_account_id is None
+            and not organization_id
+        )
+        if account_id_required:
+            raise ValueError(
+                f"organization_id is required for '{resource_name}' table when no specific ad_account_id is provided"
+            )
+
+        if not organization_id and table != "organizations":
+            raise ValueError(
+                f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
+            )
+
+        if resource_name not in self.resources:
+            raise UnsupportedResourceError(table, "Snapchat Ads")
+
+        from ingestr.src.snapchat_ads import snapchat_ads_source
+
+        source_kwargs = {
+            "refresh_token": refresh_token[0],
+            "client_id": client_id[0],
+            "client_secret": client_secret[0],
+        }
+
+        if organization_id:
+            source_kwargs["organization_id"] = organization_id[0]
+
+        if ad_account_id:
+            source_kwargs["ad_account_id"] = ad_account_id
+
+        # Add interval_start and interval_end for client-side filtering
+        interval_start = kwargs.get("interval_start")
+        if interval_start:
+            source_kwargs["start_date"] = interval_start
+
+        interval_end = kwargs.get("interval_end")
+        if interval_end:
+            source_kwargs["end_date"] = interval_end
+
+        source = snapchat_ads_source(**source_kwargs)
+
+        return source.with_resources(resource_name)
