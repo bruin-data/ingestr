@@ -77,7 +77,7 @@ def paginate(client: requests.Session, headers: dict, url: str, page_size: int =
 def get_account_ids(
     api: "SnapchatAdsAPI",
     ad_account_id: str | None,
-    organization_id: str,
+    organization_id: str | None,
     base_url: str,
     resource_name: str,
     start_date=None,
@@ -184,7 +184,7 @@ def fetch_snapchat_data_with_params(
 def fetch_account_id_resource(
     api: "SnapchatAdsAPI",
     ad_account_id: str | None,
-    organization_id: str,
+    organization_id: str | None,
     base_url: str,
     resource_name: str,
     item_key: str,
@@ -217,7 +217,7 @@ def fetch_account_id_resource(
 def fetch_with_paginate_account_id(
     api: "SnapchatAdsAPI",
     ad_account_id: str | None,
-    organization_id: str,
+    organization_id: str | None,
     base_url: str,
     resource_name: str,
     item_key: str,
