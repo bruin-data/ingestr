@@ -1,7 +1,7 @@
 # Oracle
 Oracle is a powerful, fully integrated stack of cloud applications and platform services, known for its comprehensive capabilities in database management.
 
-ingestr supports Oracle as an experimental source through `oracle+cx_oracle` driver.
+ingestr supports Oracle as a source through `oracle+cx_oracle` driver. Under the hood, ingestr uses the modern `oracledb` package in thin mode, which means **no Oracle Client libraries are required** to be installed on your system.
 
 ## URI format
 The URI format for Oracle is as follows:

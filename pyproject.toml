@@ -161,7 +161,7 @@ classifiers = [
 
 [project.optional-dependencies]
 oracle = [
-    "cx_Oracle==8.3.0",
+    "oracledb>=2.0.0",
 ]
 odbc = [
     "pyodbc==5.1.0",

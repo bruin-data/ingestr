@@ -90,6 +90,20 @@ class SqlSource:
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
+        # Monkey patch cx_Oracle to use oracledb (thin mode, no client libraries required)
+        if uri.startswith("oracle+") or uri.startswith("oracle://"):
+            try:
+                import sys
+                import oracledb
+
+                # SQLAlchemy's cx_oracle dialect checks for version >= 5.2
+                # oracledb has a different versioning scheme, so we need to patch it
+                oracledb.version = "8.3.0"
+                sys.modules["cx_Oracle"] = oracledb
+            except ImportError:
+                # oracledb not installed, will fail later with a clear error
+                pass
+
         # Process Snowflake private key authentication
         if uri.startswith("snowflake://"):
             parsed_uri = urlparse(uri)
