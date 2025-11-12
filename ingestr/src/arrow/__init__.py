@@ -27,6 +27,9 @@ def memory_mapped_arrow(
         with pa.memory_map(path, "rb") as mmap:
             reader: ipc.RecordBatchFileReader = ipc.open_file(mmap)
             table = reader.read_all()
+        
+        if len(table) == 0:
+            return []
 
         last_value = None
         end_value = None
