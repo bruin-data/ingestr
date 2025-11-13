@@ -59,21 +59,15 @@ def elasticsearch_insert(
     # Build Elasticsearch client configuration
     actual_url = connection_string
     secure = True  # Default to HTTPS (secure by default)
-    username = None
-    password = None
 
     if connection_string.startswith("elasticsearch://"):
         actual_url = connection_string.replace("elasticsearch://", "")
 
-        # Parse to check for query parameters and extract auth
+        # Parse to check for query parameters
         temp_parsed = urlparse("http://" + actual_url)
         from urllib.parse import parse_qs
 
         query_params = parse_qs(temp_parsed.query)
-
-        # Extract username and password before removing query params
-        username = temp_parsed.username
-        password = temp_parsed.password
 
         # Check ?secure parameter (defaults to true)
         if "secure" in query_params:
@@ -82,15 +76,9 @@ def elasticsearch_insert(
         # Remove query params from URL for ES client
         actual_url = actual_url.split("?")[0]
 
-        # Build URL without auth (ES client uses http_auth separately)
-        # Extract just hostname and port
-        host_port = temp_parsed.hostname
-        if temp_parsed.port:
-            host_port = f"{temp_parsed.hostname}:{temp_parsed.port}"
-
         # Add scheme
         scheme = "https" if secure else "http"
-        actual_url = f"{scheme}://{host_port}"
+        actual_url = f"{scheme}://{actual_url}"
 
         parsed = urlparse(actual_url)
 
@@ -100,12 +88,9 @@ def elasticsearch_insert(
         "ssl_show_warn": False,
     }
 
-    # Add authentication if present (use extracted values for elasticsearch:// URLs)
-    auth_user = username if username else parsed.username
-    auth_pass = password if password else parsed.password
-
-    if auth_user and auth_pass:
-        es_config["http_auth"] = (auth_user, auth_pass)
+    # Add authentication if present
+    if parsed.username and parsed.password:
+        es_config["http_auth"] = (parsed.username, parsed.password)
 
     # Get index name from table metadata
     index_name = table["name"]
