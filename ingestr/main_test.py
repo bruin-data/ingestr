@@ -29,9 +29,9 @@ import pyarrow.parquet as pya_parquet  # type: ignore
 import pytest
 import requests
 import sqlalchemy
-from elasticsearch import Elasticsearch
 from confluent_kafka import Producer  # type: ignore
 from dlt.sources.filesystem import glob_files
+from elasticsearch import Elasticsearch
 from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
 from sqlalchemy.pool import NullPool
 from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
@@ -5609,18 +5609,21 @@ def test_hostaway_source_full_refresh(hostaway_table):
         pass
 
 
-
 @pytest.fixture(scope="module")
 def elasticsearch_container():
     """Fixture that provides an Elasticsearch container for tests."""
-    with ElasticSearchContainer("docker.elastic.co/elasticsearch/elasticsearch:8.11.0") as es:
+    with ElasticSearchContainer(
+        "docker.elastic.co/elasticsearch/elasticsearch:8.11.0"
+    ) as es:
         yield es
 
 
 @pytest.fixture(scope="module")
 def elasticsearch_container_with_auth():
     """Fixture that provides an Elasticsearch container with authentication."""
-    container = ElasticSearchContainer("docker.elastic.co/elasticsearch/elasticsearch:8.11.0")
+    container = ElasticSearchContainer(
+        "docker.elastic.co/elasticsearch/elasticsearch:8.11.0"
+    )
     container.with_env("xpack.security.enabled", "true")
     container.with_env("ELASTIC_PASSWORD", "testpass123")
 
@@ -5641,7 +5644,7 @@ def test_csv_to_elasticsearch(elasticsearch_container):
 2,Bob,25,San Francisco
 3,Charlie,35,Boston
 """
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
         f.write(csv_content)
         csv_path = f.name
 
@@ -5670,7 +5673,9 @@ def test_csv_to_elasticsearch(elasticsearch_container):
         assert count_result["count"] == 3
 
         # Get all documents
-        search_result = es_client.search(index="test_index", body={"query": {"match_all": {}}})
+        search_result = es_client.search(
+            index="test_index", body={"query": {"match_all": {}}}
+        )
         docs = search_result["hits"]["hits"]
 
         assert len(docs) == 3
@@ -5738,7 +5743,9 @@ def test_elasticsearch_to_elasticsearch(elasticsearch_container):
         assert count_result["count"] == 3
 
         # Get all documents
-        search_result = es_client.search(index=dest_index, body={"query": {"match_all": {}}})
+        search_result = es_client.search(
+            index=dest_index, body={"query": {"match_all": {}}}
+        )
         docs = search_result["hits"]["hits"]
 
         assert len(docs) == 3
@@ -5776,14 +5783,14 @@ def test_csv_to_elasticsearch_with_auth(elasticsearch_container_with_auth):
 2,Bob,Sales
 3,Charlie,Marketing
 """
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
         f.write(csv_content)
         csv_path = f.name
 
     try:
         # Get Elasticsearch connection details
         es_url = elasticsearch_container_with_auth.get_url()
-        host_port = es_url.replace('http://', '')
+        host_port = es_url.replace("http://", "")
 
         # Invoke ingest command with auth
         result = invoke_ingest_command(
@@ -5806,7 +5813,9 @@ def test_csv_to_elasticsearch_with_auth(elasticsearch_container_with_auth):
         assert count_result["count"] == 3
 
         # Get all documents
-        search_result = es_client.search(index="test_auth_index", body={"query": {"match_all": {}}})
+        search_result = es_client.search(
+            index="test_auth_index", body={"query": {"match_all": {}}}
+        )
         docs = search_result["hits"]["hits"]
 
         assert len(docs) == 3
@@ -5841,7 +5850,9 @@ def test_elasticsearch_replace_strategy(elasticsearch_container):
     if es_client.indices.exists(index=index_name):
         es_client.indices.delete(index=index_name)
 
-    es_client.index(index=index_name, id="1", document={"name": "OldData", "value": 100})
+    es_client.index(
+        index=index_name, id="1", document={"name": "OldData", "value": 100}
+    )
     es_client.indices.refresh(index=index_name)
 
     # Create CSV with new data
@@ -5849,7 +5860,7 @@ def test_elasticsearch_replace_strategy(elasticsearch_container):
 NewData1,200
 NewData2,300
 """
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
         f.write(csv_content)
         csv_path = f.name
 
@@ -5871,7 +5882,9 @@ NewData2,300
         count_result = es_client.count(index=index_name)
         assert count_result["count"] == 2  # Only new data
 
-        search_result = es_client.search(index=index_name, body={"query": {"match_all": {}}})
+        search_result = es_client.search(
+            index=index_name, body={"query": {"match_all": {}}}
+        )
         docs = search_result["hits"]["hits"]
 
         names = sorted([doc["_source"]["name"] for doc in docs])
