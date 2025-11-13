@@ -29,6 +29,7 @@ import pyarrow.parquet as pya_parquet  # type: ignore
 import pytest
 import requests
 import sqlalchemy
+from elasticsearch import Elasticsearch
 from confluent_kafka import Producer  # type: ignore
 from dlt.sources.filesystem import glob_files
 from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
@@ -36,6 +37,7 @@ from sqlalchemy.pool import NullPool
 from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.container import DockerContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
+from testcontainers.elasticsearch import ElasticSearchContainer  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.mongodb import MongoDbContainer  # type: ignore
