@@ -5659,7 +5659,9 @@ def elasticsearch_container_with_auth():
         except Exception as e:
             last_error = e
             if i == max_retries - 1:
-                print(f"Failed to connect to Elasticsearch after {max_retries} retries. Last error: {last_error}")
+                print(
+                    f"Failed to connect to Elasticsearch after {max_retries} retries. Last error: {last_error}"
+                )
                 container.stop()
                 raise
             time.sleep(2)
