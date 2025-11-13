@@ -94,7 +94,7 @@ class SqlSource:
         # Monkey patch cx_Oracle to use oracledb (thin mode, no client libraries required)
         if uri.startswith("oracle+") or uri.startswith("oracle://"):
             try:
-                import oracledb
+                import oracledb  # type: ignore[import-not-found]
 
                 # SQLAlchemy's cx_oracle dialect checks for version >= 5.2
                 # oracledb has a different versioning scheme, so we need to patch it
