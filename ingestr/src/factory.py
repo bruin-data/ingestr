@@ -119,7 +119,6 @@ SQL_SOURCE_SCHEMES = [
     "oracle",
     "oracle+cx_oracle",
     "oracle+oracledb",
-    "oracle+oracledb",
     "hana",
     "clickhouse",
     "databricks",
