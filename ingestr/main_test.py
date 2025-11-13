@@ -11,13 +11,13 @@ import string
 import tempfile
 import time
 import traceback
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
-import urllib.request
 
 import duckdb
 import numpy as np
@@ -5644,8 +5644,10 @@ def elasticsearch_container_with_auth():
     for i in range(max_retries):
         try:
             req = urllib.request.Request(url)
-            req.add_header('Authorization', 'Basic ' +
-                          base64.b64encode(b'elastic:testpass123').decode('ascii'))
+            req.add_header(
+                "Authorization",
+                "Basic " + base64.b64encode(b"elastic:testpass123").decode("ascii"),
+            )
             response = urllib.request.urlopen(req, timeout=5)
             if response.status == 200:
                 break
@@ -5660,8 +5662,10 @@ def elasticsearch_container_with_auth():
         def __init__(self, container, url):
             self._container = container
             self._url = url
+
         def get_url(self):
             return self._url
+
         def stop(self):
             return self._container.stop()
 
@@ -5736,6 +5740,7 @@ def test_csv_to_elasticsearch(elasticsearch_container):
             shutil.rmtree(get_abs_path("../pipeline_data"))
         except Exception:
             pass
+
 
 def test_csv_to_elasticsearch_with_auth(elasticsearch_container_with_auth):
     """Test loading CSV data into Elasticsearch with authentication."""
@@ -5838,7 +5843,7 @@ NewData2,300
         parsed = urlparse(es_url)
         netloc = parsed.netloc
         secure = "true" if parsed.scheme == "https" else "false"
-        
+
         result = invoke_ingest_command(
             f"csv://{csv_path}",
             "test_data",
