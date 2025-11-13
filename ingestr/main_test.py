@@ -5631,6 +5631,9 @@ def elasticsearch_container_with_auth():
     container.with_env("ELASTIC_PASSWORD", "testpass123")
     container.with_env("transport.host", "127.0.0.1")
     container.with_env("http.host", "0.0.0.0")
+    # Memory settings for CI environments
+    container.with_env("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
+    container.with_env("bootstrap.memory_lock", "false")
 
     container.start()
 
@@ -5640,7 +5643,9 @@ def elasticsearch_container_with_auth():
     url = f"http://{host}:{port}"
 
     # Wait for Elasticsearch to be ready (with auth)
-    max_retries = 30
+    # Increased timeout for CI environments where containers start slower
+    max_retries = 60
+    last_error = None
     for i in range(max_retries):
         try:
             req = urllib.request.Request(url)
@@ -5651,8 +5656,10 @@ def elasticsearch_container_with_auth():
             response = urllib.request.urlopen(req, timeout=5)
             if response.status == 200:
                 break
-        except Exception:
+        except Exception as e:
+            last_error = e
             if i == max_retries - 1:
+                print(f"Failed to connect to Elasticsearch after {max_retries} retries. Last error: {last_error}")
                 container.stop()
                 raise
             time.sleep(2)
