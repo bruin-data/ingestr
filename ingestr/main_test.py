@@ -11,6 +11,7 @@ import string
 import tempfile
 import time
 import traceback
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -31,11 +32,13 @@ import requests
 import sqlalchemy
 from confluent_kafka import Producer  # type: ignore
 from dlt.sources.filesystem import glob_files
+from elasticsearch import Elasticsearch
 from fsspec.implementations.memory import MemoryFileSystem  # type: ignore
 from sqlalchemy.pool import NullPool
 from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.container import DockerContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
+from testcontainers.elasticsearch import ElasticSearchContainer  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.mongodb import MongoDbContainer  # type: ignore
@@ -5605,3 +5608,284 @@ def test_hostaway_source_full_refresh(hostaway_table):
         os.remove(abs_db_path)
     except Exception:
         pass
+
+
+@pytest.fixture(scope="module")
+def elasticsearch_container():
+    """Fixture that provides an Elasticsearch container for tests."""
+    with ElasticSearchContainer(
+        "docker.elastic.co/elasticsearch/elasticsearch:8.11.0"
+    ) as es:
+        yield es
+
+
+@pytest.fixture(scope="module")
+def elasticsearch_container_with_auth():
+    """Fixture that provides an Elasticsearch container with authentication."""
+    # Use DockerContainer instead of ElasticSearchContainer to avoid auth issues in readiness check
+    container = DockerContainer("docker.elastic.co/elasticsearch/elasticsearch:8.11.0")
+    container.with_exposed_ports(9200)
+    container.with_env("discovery.type", "single-node")
+    container.with_env("xpack.security.enabled", "true")
+    container.with_env("xpack.security.http.ssl.enabled", "false")
+    container.with_env("ELASTIC_PASSWORD", "testpass123")
+    container.with_env("transport.host", "127.0.0.1")
+    container.with_env("http.host", "0.0.0.0")
+    # Memory settings for CI environments
+    container.with_env("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
+    container.with_env("bootstrap.memory_lock", "false")
+
+    container.start()
+
+    # Manual readiness check with auth
+    host = container.get_container_host_ip()
+    port = container.get_exposed_port(9200)
+    url = f"http://{host}:{port}"
+
+    # Wait for Elasticsearch to be ready (with auth)
+    # Increased timeout for CI environments where containers start slower
+    max_retries = 60
+    last_error = None
+    for i in range(max_retries):
+        try:
+            req = urllib.request.Request(url)
+            req.add_header(
+                "Authorization",
+                "Basic " + base64.b64encode(b"elastic:testpass123").decode("ascii"),
+            )
+            response = urllib.request.urlopen(req, timeout=5)
+            if response.status == 200:
+                break
+        except Exception as e:
+            last_error = e
+            if i == max_retries - 1:
+                print(
+                    f"Failed to connect to Elasticsearch after {max_retries} retries. Last error: {last_error}"
+                )
+                container.stop()
+                raise
+            time.sleep(2)
+
+    # Create a simple object with get_url method for compatibility
+    class ESContainer:
+        def __init__(self, container, url):
+            self._container = container
+            self._url = url
+
+        def get_url(self):
+            return self._url
+
+        def stop(self):
+            return self._container.stop()
+
+    es_container = ESContainer(container, url)
+
+    try:
+        yield es_container
+    finally:
+        container.stop()
+
+
+def test_csv_to_elasticsearch(elasticsearch_container):
+    """Test loading CSV data into Elasticsearch."""
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    # Create a temporary CSV file
+    csv_content = """id,name,age,city
+1,Alice,30,New York
+2,Bob,25,San Francisco
+3,Charlie,35,Boston
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+        f.write(csv_content)
+        csv_path = f.name
+
+    try:
+        # Get Elasticsearch connection details
+        es_url = elasticsearch_container.get_url()
+        parsed = urlparse(es_url)
+        netloc = parsed.netloc
+        secure = "true" if parsed.scheme == "https" else "false"
+
+        # Invoke ingest command
+        result = invoke_ingest_command(
+            f"csv://{csv_path}",
+            "test_data",
+            f"elasticsearch://{netloc}?secure={secure}",
+            "test_index",
+        )
+
+        assert result.exit_code == 0, f"Command failed with output: {result.stdout}"
+
+        # Verify data in Elasticsearch
+        es_client = Elasticsearch([es_url])
+
+        # Wait a bit for indexing
+        es_client.indices.refresh(index="test_index")
+
+        # Get document count
+        count_result = es_client.count(index="test_index")
+        assert count_result["count"] == 3
+
+        # Get all documents
+        search_result = es_client.search(
+            index="test_index", body={"query": {"match_all": {}}}
+        )
+        docs = search_result["hits"]["hits"]
+
+        assert len(docs) == 3
+
+        # Verify document content
+        names = sorted([doc["_source"]["name"] for doc in docs])
+        assert names == ["Alice", "Bob", "Charlie"]
+
+    finally:
+        # Clean up
+        os.remove(csv_path)
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
+
+
+def test_csv_to_elasticsearch_with_auth(elasticsearch_container_with_auth):
+    """Test loading CSV data into Elasticsearch with authentication."""
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    # Create a temporary CSV file
+    csv_content = """id,name,department
+1,Alice,Engineering
+2,Bob,Sales
+3,Charlie,Marketing
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+        f.write(csv_content)
+        csv_path = f.name
+
+    try:
+        # Get Elasticsearch connection details
+        es_url = elasticsearch_container_with_auth.get_url()
+        parsed = urlparse(es_url)
+        netloc = parsed.netloc
+        secure = "true" if parsed.scheme == "https" else "false"
+
+        # Invoke ingest command with auth
+        result = invoke_ingest_command(
+            f"csv://{csv_path}",
+            "test_data",
+            f"elasticsearch://elastic:testpass123@{netloc}?secure={secure}",
+            "test_auth_index",
+        )
+
+        assert result.exit_code == 0, f"Command failed with output: {result.stdout}"
+
+        # Verify data in Elasticsearch with auth
+        es_client = Elasticsearch([es_url], http_auth=("elastic", "testpass123"))
+
+        # Wait for indexing
+        es_client.indices.refresh(index="test_auth_index")
+
+        # Get document count
+        count_result = es_client.count(index="test_auth_index")
+        assert count_result["count"] == 3
+
+        # Get all documents
+        search_result = es_client.search(
+            index="test_auth_index", body={"query": {"match_all": {}}}
+        )
+        docs = search_result["hits"]["hits"]
+
+        assert len(docs) == 3
+
+        # Verify departments
+        departments = sorted([doc["_source"]["department"] for doc in docs])
+        assert departments == ["Engineering", "Marketing", "Sales"]
+
+    finally:
+        # Clean up
+        os.remove(csv_path)
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
+
+
+def test_elasticsearch_replace_strategy(elasticsearch_container):
+    """Test that replace strategy deletes existing data and replaces it."""
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    # Get Elasticsearch connection
+    es_url = elasticsearch_container.get_url()
+    es_client = Elasticsearch([es_url])
+
+    # Create index with initial data
+    index_name = "replace_test_index"
+
+    if es_client.indices.exists(index=index_name):
+        es_client.indices.delete(index=index_name)
+
+    es_client.index(
+        index=index_name, id="1", document={"name": "OldData", "value": 100}
+    )
+    es_client.indices.refresh(index=index_name)
+
+    # Create CSV with new data
+    csv_content = """name,value
+NewData1,200
+NewData2,300
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+        f.write(csv_content)
+        csv_path = f.name
+
+    try:
+        # Load new data with replace strategy
+        parsed = urlparse(es_url)
+        netloc = parsed.netloc
+        secure = "true" if parsed.scheme == "https" else "false"
+
+        result = invoke_ingest_command(
+            f"csv://{csv_path}",
+            "test_data",
+            f"elasticsearch://{netloc}?secure={secure}",
+            index_name,
+            inc_strategy="replace",
+        )
+
+        assert result.exit_code == 0
+
+        # Verify old data is gone and new data is present
+        es_client.indices.refresh(index=index_name)
+
+        count_result = es_client.count(index=index_name)
+        assert count_result["count"] == 2  # Only new data
+
+        search_result = es_client.search(
+            index=index_name, body={"query": {"match_all": {}}}
+        )
+        docs = search_result["hits"]["hits"]
+
+        names = sorted([doc["_source"]["name"] for doc in docs])
+        assert names == ["NewData1", "NewData2"]
+        assert "OldData" not in names
+
+    finally:
+        os.remove(csv_path)
+        try:
+            if es_client.indices.exists(index=index_name):
+                es_client.indices.delete(index=index_name)
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
