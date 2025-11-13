@@ -5621,14 +5621,56 @@ def elasticsearch_container():
 @pytest.fixture(scope="module")
 def elasticsearch_container_with_auth():
     """Fixture that provides an Elasticsearch container with authentication."""
-    container = ElasticSearchContainer(
-        "docker.elastic.co/elasticsearch/elasticsearch:8.11.0"
-    )
+    # Use DockerContainer instead of ElasticSearchContainer to avoid auth issues in readiness check
+    container = DockerContainer("docker.elastic.co/elasticsearch/elasticsearch:8.11.0")
+    container.with_exposed_ports(9200)
+    container.with_env("discovery.type", "single-node")
     container.with_env("xpack.security.enabled", "true")
+    container.with_env("xpack.security.http.ssl.enabled", "false")
     container.with_env("ELASTIC_PASSWORD", "testpass123")
+    container.with_env("transport.host", "127.0.0.1")
+    container.with_env("http.host", "0.0.0.0")
 
-    with container as es:
-        yield es
+    container.start()
+
+    # Manual readiness check with auth
+    host = container.get_container_host_ip()
+    port = container.get_exposed_port(9200)
+    url = f"http://{host}:{port}"
+
+    # Wait for Elasticsearch to be ready (with auth)
+    import urllib.request
+    max_retries = 30
+    for i in range(max_retries):
+        try:
+            req = urllib.request.Request(url)
+            req.add_header('Authorization', 'Basic ' +
+                          base64.b64encode(b'elastic:testpass123').decode('ascii'))
+            response = urllib.request.urlopen(req, timeout=5)
+            if response.status == 200:
+                break
+        except Exception:
+            if i == max_retries - 1:
+                container.stop()
+                raise
+            time.sleep(2)
+
+    # Create a simple object with get_url method for compatibility
+    class ESContainer:
+        def __init__(self, container, url):
+            self._container = container
+            self._url = url
+        def get_url(self):
+            return self._url
+        def stop(self):
+            return self._container.stop()
+
+    es_container = ESContainer(container, url)
+
+    try:
+        yield es_container
+    finally:
+        container.stop()
 
 
 def test_csv_to_elasticsearch(elasticsearch_container):
@@ -5871,7 +5913,7 @@ NewData2,300
             "test_data",
             f"elasticsearch://{es_url.replace('http://', '')}?secure=false",
             index_name,
-            incremental_strategy="replace",
+            inc_strategy="replace",
         )
 
         assert result.exit_code == 0
