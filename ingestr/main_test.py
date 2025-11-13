@@ -5889,3 +5889,93 @@ NewData2,300
             shutil.rmtree(get_abs_path("../pipeline_data"))
         except Exception:
             pass
+
+
+@pytest.mark.skipif(
+    not os.getenv("ELASTICSEARCH_CLOUD_URL"),
+    reason="ELASTICSEARCH_CLOUD_URL not set in environment",
+)
+def test_csv_to_elasticsearch_cloud():
+    """Test loading CSV data into Elasticsearch Cloud."""
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    # Get Elasticsearch Cloud URL from environment
+    es_cloud_url = os.getenv("ELASTICSEARCH_CLOUD_URL")
+    if not es_cloud_url:
+        pytest.skip("ELASTICSEARCH_CLOUD_URL not configured")
+
+    # Create a temporary CSV file
+    csv_content = """id,name,department,salary
+1,Alice,Engineering,95000
+2,Bob,Sales,75000
+3,Charlie,Marketing,80000
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+        f.write(csv_content)
+        csv_path = f.name
+
+    try:
+        # Invoke ingest command with Elasticsearch Cloud
+        result = invoke_ingest_command(
+            f"csv://{csv_path}",
+            "test_data",
+            es_cloud_url,
+            "ingestr_test_cloud_index",
+        )
+
+        assert result.exit_code == 0, f"Command failed with output: {result.stdout}"
+
+        # Verify data in Elasticsearch Cloud
+        # Parse the URL to extract credentials
+        parsed = urlparse(es_cloud_url.replace("elasticsearch://", "https://"))
+        username = parsed.username
+        password = parsed.password
+        host = parsed.hostname
+        port = parsed.port if parsed.port else 443
+
+        es_url = f"https://{host}:{port}"
+        es_client = Elasticsearch([es_url], basic_auth=(username, password))
+
+        # Wait for indexing
+        es_client.indices.refresh(index="ingestr_test_cloud_index")
+
+        # Get document count
+        count_result = es_client.count(index="ingestr_test_cloud_index")
+        assert count_result["count"] == 3
+
+        # Get all documents
+        search_result = es_client.search(
+            index="ingestr_test_cloud_index", body={"query": {"match_all": {}}}
+        )
+        docs = search_result["hits"]["hits"]
+
+        assert len(docs) == 3
+
+        # Verify document content
+        names = sorted([doc["_source"]["name"] for doc in docs])
+        assert names == ["Alice", "Bob", "Charlie"]
+
+    finally:
+        # Clean up
+        os.remove(csv_path)
+        try:
+            # Clean up the test index from cloud
+            parsed = urlparse(es_cloud_url.replace("elasticsearch://", "https://"))
+            username = parsed.username
+            password = parsed.password
+            host = parsed.hostname
+            port = parsed.port if parsed.port else 443
+
+            es_url = f"https://{host}:{port}"
+            es_client = Elasticsearch([es_url], basic_auth=(username, password))
+            if es_client.indices.exists(index="ingestr_test_cloud_index"):
+                es_client.indices.delete(index="ingestr_test_cloud_index")
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
