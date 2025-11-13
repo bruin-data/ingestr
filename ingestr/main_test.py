@@ -5607,3 +5607,285 @@ def test_hostaway_source_full_refresh(hostaway_table):
         os.remove(abs_db_path)
     except Exception:
         pass
+
+
+
+@pytest.fixture(scope="module")
+def elasticsearch_container():
+    """Fixture that provides an Elasticsearch container for tests."""
+    with ElasticSearchContainer("docker.elastic.co/elasticsearch/elasticsearch:8.11.0") as es:
+        yield es
+
+
+@pytest.fixture(scope="module")
+def elasticsearch_container_with_auth():
+    """Fixture that provides an Elasticsearch container with authentication."""
+    container = ElasticSearchContainer("docker.elastic.co/elasticsearch/elasticsearch:8.11.0")
+    container.with_env("xpack.security.enabled", "true")
+    container.with_env("ELASTIC_PASSWORD", "testpass123")
+
+    with container as es:
+        yield es
+
+
+def test_csv_to_elasticsearch(elasticsearch_container):
+    """Test loading CSV data into Elasticsearch."""
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    # Create a temporary CSV file
+    csv_content = """id,name,age,city
+1,Alice,30,New York
+2,Bob,25,San Francisco
+3,Charlie,35,Boston
+"""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+        f.write(csv_content)
+        csv_path = f.name
+
+    try:
+        # Get Elasticsearch connection details
+        es_url = elasticsearch_container.get_url()
+
+        # Invoke ingest command
+        result = invoke_ingest_command(
+            f"csv://{csv_path}",
+            "test_data",
+            f"elasticsearch://{es_url.replace('http://', '')}?secure=false",
+            "test_index",
+        )
+
+        assert result.exit_code == 0, f"Command failed with output: {result.stdout}"
+
+        # Verify data in Elasticsearch
+        es_client = Elasticsearch([es_url])
+
+        # Wait a bit for indexing
+        es_client.indices.refresh(index="test_index")
+
+        # Get document count
+        count_result = es_client.count(index="test_index")
+        assert count_result["count"] == 3
+
+        # Get all documents
+        search_result = es_client.search(index="test_index", body={"query": {"match_all": {}}})
+        docs = search_result["hits"]["hits"]
+
+        assert len(docs) == 3
+
+        # Verify document content
+        names = sorted([doc["_source"]["name"] for doc in docs])
+        assert names == ["Alice", "Bob", "Charlie"]
+
+    finally:
+        # Clean up
+        os.remove(csv_path)
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
+
+
+def test_elasticsearch_to_elasticsearch(elasticsearch_container):
+    """Test copying data from one Elasticsearch index to another."""
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    # Get Elasticsearch connection
+    es_url = elasticsearch_container.get_url()
+    es_client = Elasticsearch([es_url])
+
+    # Create source index with test data
+    source_index = "source_test_index"
+
+    # Delete if exists
+    if es_client.indices.exists(index=source_index):
+        es_client.indices.delete(index=source_index)
+
+    # Index some documents
+    test_docs = [
+        {"id": "1", "name": "Alice", "age": 30, "city": "New York"},
+        {"id": "2", "name": "Bob", "age": 25, "city": "San Francisco"},
+        {"id": "3", "name": "Charlie", "age": 35, "city": "Boston"},
+    ]
+
+    for doc in test_docs:
+        es_client.index(index=source_index, id=doc["id"], document=doc)
+
+    es_client.indices.refresh(index=source_index)
+
+    try:
+        # Copy from source to destination
+        dest_index = "dest_test_index"
+
+        result = invoke_ingest_command(
+            f"elasticsearch://{es_url.replace('http://', '')}?secure=false&verify_certs=false",
+            source_index,
+            f"elasticsearch://{es_url.replace('http://', '')}?secure=false",
+            dest_index,
+        )
+
+        assert result.exit_code == 0, f"Command failed with output: {result.stdout}"
+
+        # Verify data in destination
+        es_client.indices.refresh(index=dest_index)
+
+        count_result = es_client.count(index=dest_index)
+        assert count_result["count"] == 3
+
+        # Get all documents
+        search_result = es_client.search(index=dest_index, body={"query": {"match_all": {}}})
+        docs = search_result["hits"]["hits"]
+
+        assert len(docs) == 3
+
+        # Verify document content
+        names = sorted([doc["_source"]["name"] for doc in docs])
+        assert names == ["Alice", "Bob", "Charlie"]
+
+    finally:
+        # Clean up indices
+        try:
+            if es_client.indices.exists(index=source_index):
+                es_client.indices.delete(index=source_index)
+            if es_client.indices.exists(index=dest_index):
+                es_client.indices.delete(index=dest_index)
+        except Exception:
+            pass
+
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
+
+
+def test_csv_to_elasticsearch_with_auth(elasticsearch_container_with_auth):
+    """Test loading CSV data into Elasticsearch with authentication."""
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    # Create a temporary CSV file
+    csv_content = """id,name,department
+1,Alice,Engineering
+2,Bob,Sales
+3,Charlie,Marketing
+"""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+        f.write(csv_content)
+        csv_path = f.name
+
+    try:
+        # Get Elasticsearch connection details
+        es_url = elasticsearch_container_with_auth.get_url()
+        host_port = es_url.replace('http://', '')
+
+        # Invoke ingest command with auth
+        result = invoke_ingest_command(
+            f"csv://{csv_path}",
+            "test_data",
+            f"elasticsearch://elastic:testpass123@{host_port}?secure=false",
+            "test_auth_index",
+        )
+
+        assert result.exit_code == 0, f"Command failed with output: {result.stdout}"
+
+        # Verify data in Elasticsearch with auth
+        es_client = Elasticsearch([es_url], http_auth=("elastic", "testpass123"))
+
+        # Wait for indexing
+        es_client.indices.refresh(index="test_auth_index")
+
+        # Get document count
+        count_result = es_client.count(index="test_auth_index")
+        assert count_result["count"] == 3
+
+        # Get all documents
+        search_result = es_client.search(index="test_auth_index", body={"query": {"match_all": {}}})
+        docs = search_result["hits"]["hits"]
+
+        assert len(docs) == 3
+
+        # Verify departments
+        departments = sorted([doc["_source"]["department"] for doc in docs])
+        assert departments == ["Engineering", "Marketing", "Sales"]
+
+    finally:
+        # Clean up
+        os.remove(csv_path)
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
+
+
+def test_elasticsearch_replace_strategy(elasticsearch_container):
+    """Test that replace strategy deletes existing data and replaces it."""
+    try:
+        shutil.rmtree(get_abs_path("../pipeline_data"))
+    except Exception:
+        pass
+
+    # Get Elasticsearch connection
+    es_url = elasticsearch_container.get_url()
+    es_client = Elasticsearch([es_url])
+
+    # Create index with initial data
+    index_name = "replace_test_index"
+
+    if es_client.indices.exists(index=index_name):
+        es_client.indices.delete(index=index_name)
+
+    es_client.index(index=index_name, id="1", document={"name": "OldData", "value": 100})
+    es_client.indices.refresh(index=index_name)
+
+    # Create CSV with new data
+    csv_content = """name,value
+NewData1,200
+NewData2,300
+"""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+        f.write(csv_content)
+        csv_path = f.name
+
+    try:
+        # Load new data with replace strategy
+        result = invoke_ingest_command(
+            f"csv://{csv_path}",
+            "test_data",
+            f"elasticsearch://{es_url.replace('http://', '')}?secure=false",
+            index_name,
+            incremental_strategy="replace",
+        )
+
+        assert result.exit_code == 0
+
+        # Verify old data is gone and new data is present
+        es_client.indices.refresh(index=index_name)
+
+        count_result = es_client.count(index=index_name)
+        assert count_result["count"] == 2  # Only new data
+
+        search_result = es_client.search(index=index_name, body={"query": {"match_all": {}}})
+        docs = search_result["hits"]["hits"]
+
+        names = sorted([doc["_source"]["name"] for doc in docs])
+        assert names == ["NewData1", "NewData2"]
+        assert "OldData" not in names
+
+    finally:
+        os.remove(csv_path)
+        try:
+            if es_client.indices.exists(index=index_name):
+                es_client.indices.delete(index=index_name)
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(get_abs_path("../pipeline_data"))
+        except Exception:
+            pass
