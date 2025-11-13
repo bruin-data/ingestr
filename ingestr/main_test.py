@@ -4225,18 +4225,24 @@ def test_couchbase_source_local(dest):
             values = [row[5] for row in res]  # value column
 
             assert ids == [1, 2, 3], f"Expected ids [1, 2, 3], got {ids}"
-            assert names == ["Document 1", "Document 2", "Document 3"], (
-                f"Expected names, got {names}"
-            )
-            assert values == [100, 200, 300], (
-                f"Expected values [100, 200, 300], got {values}"
-            )
+            assert names == [
+                "Document 1",
+                "Document 2",
+                "Document 3",
+            ], f"Expected names, got {names}"
+            assert values == [
+                100,
+                200,
+                300,
+            ], f"Expected values [100, 200, 300], got {values}"
 
             # Check that nested_parent__key1 was flattened correctly
             nested_values = [row[2] for row in res]
-            assert nested_values == ["value1", "value2", "value3"], (
-                f"Expected nested values, got {nested_values}"
-            )
+            assert nested_values == [
+                "value1",
+                "value2",
+                "value3",
+            ], f"Expected nested values, got {nested_values}"
     finally:
         dest.stop()
         couchbase.stop()

@@ -118,6 +118,7 @@ SQL_SOURCE_SCHEMES = [
     "sqlite",
     "oracle",
     "oracle+cx_oracle",
+    "oracle+oracledb",
     "hana",
     "clickhouse",
     "databricks",
@@ -267,8 +268,7 @@ class SourceDestinationFactory:
 
     def __init__(self, source_uri: str, destination_uri: str):
         self.source_uri = source_uri
-        source_fields = urlparse(source_uri)
-        self.source_scheme = source_fields.scheme
+        self.source_scheme = parse_scheme_from_uri(source_uri)
 
         self.destination_uri = destination_uri
         self.destination_scheme = parse_scheme_from_uri(destination_uri)

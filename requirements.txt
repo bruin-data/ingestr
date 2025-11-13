@@ -82,6 +82,7 @@ crate==2.0.0
     # via sqlalchemy-cratedb
 cryptography==44.0.2
     # via
+    #   oracledb
     #   paramiko
     #   pyjwt
     #   pyopenssl
@@ -301,6 +302,8 @@ oauthlib==3.2.2
     #   requests-oauthlib
 openpyxl==3.1.5
     # via databricks-sql-connector
+oracledb==3.4.1
+    # via -r requirements.in
 orjson==3.11.3
     # via
     #   crate
@@ -589,10 +592,11 @@ types-requests==2.32.0.20240907
     # via -r requirements.in
 types-setuptools==75.8.2.20250305
     # via requirements-parser
-typing-extensions==4.12.2
+typing-extensions==4.15.0
     # via
     #   alembic
     #   dlt
+    #   oracledb
     #   pyairtable
     #   pydantic
     #   pydantic-core

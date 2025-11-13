@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import re
+import sys
 import tempfile
 from datetime import date, datetime, timedelta, timezone
 from typing import (
@@ -89,6 +90,19 @@ class SqlSource:
 
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
+
+        # Monkey patch cx_Oracle to use oracledb (thin mode, no client libraries required)
+        if uri.startswith("oracle+") or uri.startswith("oracle://"):
+            try:
+                import oracledb  # type: ignore[import-not-found]
+
+                # SQLAlchemy's cx_oracle dialect checks for version >= 5.2
+                # oracledb has a different versioning scheme, so we need to patch it
+                oracledb.version = "8.3.0"  # type: ignore[assignment]
+                sys.modules["cx_Oracle"] = oracledb  # type: ignore[assignment]
+            except ImportError:
+                # oracledb not installed, will fail later with a clear error
+                pass
 
         # Process Snowflake private key authentication
         if uri.startswith("snowflake://"):
