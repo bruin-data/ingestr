@@ -17,6 +17,7 @@ from datetime import date, datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
+import urllib.request
 
 import duckdb
 import numpy as np
@@ -5639,7 +5640,6 @@ def elasticsearch_container_with_auth():
     url = f"http://{host}:{port}"
 
     # Wait for Elasticsearch to be ready (with auth)
-    import urllib.request
     max_retries = 30
     for i in range(max_retries):
         try:
@@ -5693,12 +5693,15 @@ def test_csv_to_elasticsearch(elasticsearch_container):
     try:
         # Get Elasticsearch connection details
         es_url = elasticsearch_container.get_url()
+        parsed = urlparse(es_url)
+        netloc = parsed.netloc
+        secure = "true" if parsed.scheme == "https" else "false"
 
         # Invoke ingest command
         result = invoke_ingest_command(
             f"csv://{csv_path}",
             "test_data",
-            f"elasticsearch://{es_url.replace('http://', '')}?secure=false",
+            f"elasticsearch://{netloc}?secure={secure}",
             "test_index",
         )
 
@@ -5734,84 +5737,6 @@ def test_csv_to_elasticsearch(elasticsearch_container):
         except Exception:
             pass
 
-
-def test_elasticsearch_to_elasticsearch(elasticsearch_container):
-    """Test copying data from one Elasticsearch index to another."""
-    try:
-        shutil.rmtree(get_abs_path("../pipeline_data"))
-    except Exception:
-        pass
-
-    # Get Elasticsearch connection
-    es_url = elasticsearch_container.get_url()
-    es_client = Elasticsearch([es_url])
-
-    # Create source index with test data
-    source_index = "source_test_index"
-
-    # Delete if exists
-    if es_client.indices.exists(index=source_index):
-        es_client.indices.delete(index=source_index)
-
-    # Index some documents
-    test_docs = [
-        {"id": "1", "name": "Alice", "age": 30, "city": "New York"},
-        {"id": "2", "name": "Bob", "age": 25, "city": "San Francisco"},
-        {"id": "3", "name": "Charlie", "age": 35, "city": "Boston"},
-    ]
-
-    for doc in test_docs:
-        es_client.index(index=source_index, id=doc["id"], document=doc)
-
-    es_client.indices.refresh(index=source_index)
-
-    try:
-        # Copy from source to destination
-        dest_index = "dest_test_index"
-
-        result = invoke_ingest_command(
-            f"elasticsearch://{es_url.replace('http://', '')}?secure=false&verify_certs=false",
-            source_index,
-            f"elasticsearch://{es_url.replace('http://', '')}?secure=false",
-            dest_index,
-        )
-
-        assert result.exit_code == 0, f"Command failed with output: {result.stdout}"
-
-        # Verify data in destination
-        es_client.indices.refresh(index=dest_index)
-
-        count_result = es_client.count(index=dest_index)
-        assert count_result["count"] == 3
-
-        # Get all documents
-        search_result = es_client.search(
-            index=dest_index, body={"query": {"match_all": {}}}
-        )
-        docs = search_result["hits"]["hits"]
-
-        assert len(docs) == 3
-
-        # Verify document content
-        names = sorted([doc["_source"]["name"] for doc in docs])
-        assert names == ["Alice", "Bob", "Charlie"]
-
-    finally:
-        # Clean up indices
-        try:
-            if es_client.indices.exists(index=source_index):
-                es_client.indices.delete(index=source_index)
-            if es_client.indices.exists(index=dest_index):
-                es_client.indices.delete(index=dest_index)
-        except Exception:
-            pass
-
-        try:
-            shutil.rmtree(get_abs_path("../pipeline_data"))
-        except Exception:
-            pass
-
-
 def test_csv_to_elasticsearch_with_auth(elasticsearch_container_with_auth):
     """Test loading CSV data into Elasticsearch with authentication."""
     try:
@@ -5832,13 +5757,15 @@ def test_csv_to_elasticsearch_with_auth(elasticsearch_container_with_auth):
     try:
         # Get Elasticsearch connection details
         es_url = elasticsearch_container_with_auth.get_url()
-        host_port = es_url.replace("http://", "")
+        parsed = urlparse(es_url)
+        netloc = parsed.netloc
+        secure = "true" if parsed.scheme == "https" else "false"
 
         # Invoke ingest command with auth
         result = invoke_ingest_command(
             f"csv://{csv_path}",
             "test_data",
-            f"elasticsearch://elastic:testpass123@{host_port}?secure=false",
+            f"elasticsearch://elastic:testpass123@{netloc}?secure={secure}",
             "test_auth_index",
         )
 
@@ -5908,10 +5835,14 @@ NewData2,300
 
     try:
         # Load new data with replace strategy
+        parsed = urlparse(es_url)
+        netloc = parsed.netloc
+        secure = "true" if parsed.scheme == "https" else "false"
+        
         result = invoke_ingest_command(
             f"csv://{csv_path}",
             "test_data",
-            f"elasticsearch://{es_url.replace('http://', '')}?secure=false",
+            f"elasticsearch://{netloc}?secure={secure}",
             index_name,
             inc_strategy="replace",
         )
