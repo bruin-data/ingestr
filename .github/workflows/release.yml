@@ -15,7 +15,7 @@ jobs:
   tests:
     uses: ./.github/workflows/tests.yml
   pip-release:
-    runs-on: depot-ubuntu-24.04
+    runs-on: depot-ubuntu-24.04-4
     needs: tests
     env:
       TWINE_PASSWORD: ${{ secrets.PYPI_INGESTR_TOKEN }}
@@ -44,7 +44,7 @@ jobs:
 
   docker-build:
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
-    runs-on: depot-ubuntu-24.04-arm
+    runs-on: depot-ubuntu-24.04-arm-4
     strategy:
       fail-fast: false
       matrix:
@@ -111,7 +111,7 @@ jobs:
       contents: read
       packages: write
 
-    runs-on: depot-ubuntu-24.04
+    runs-on: depot-ubuntu-24.04-4
     needs:
       - docker-build
       - tests
