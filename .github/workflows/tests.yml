@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   check-changes:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-default
     outputs:
       code-changes: ${{ steps.filter.outputs.code-changes }}
     steps:
@@ -35,7 +35,7 @@ jobs:
       matrix:
         # I tried running stuff on macOS but it was too slow and unreliable.
         # I also tried windows runners but couldn't get Docker to work there, so I gave up.
-        os: [ubuntu-latest]
+        os: [namespace-profile-default]
         python-version: [
           '3.10',
           '3.11',
@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install Microsoft ODBC
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'namespace-profile-default'
         run: sudo ACCEPT_EULA=Y apt-get install msodbcsql18 -y
       - name: install Microsoft ODBC
         if: matrix.os == 'macos-13'

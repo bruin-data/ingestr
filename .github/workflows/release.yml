@@ -15,7 +15,7 @@ jobs:
   tests:
     uses: ./.github/workflows/tests.yml
   pip-release:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-default
     needs: tests
     env:
       TWINE_PASSWORD: ${{ secrets.PYPI_INGESTR_TOKEN }}
@@ -111,7 +111,7 @@ jobs:
       contents: read
       packages: write
 
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-default
     needs:
       - docker-build
       - tests
