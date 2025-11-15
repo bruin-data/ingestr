@@ -47,7 +47,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: install Microsoft ODBC
         if: matrix.os == 'namespace-profile-ubuntu-latest'
-        run: sudo ACCEPT_EULA=Y apt-get install msodbcsql18 -y
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unixodbc unixodbc-dev
+          sudo ACCEPT_EULA=Y apt-get install msodbcsql18 -y
       - name: install Microsoft ODBC
         if: matrix.os == 'macos-13'
         run: |
