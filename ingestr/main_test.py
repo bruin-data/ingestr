@@ -5383,9 +5383,81 @@ def mongodb_test_cases():
             client = mongo.get_connection_client()
             assert client["ingestr_db"][collection].count_documents({}) == DOC_COUNT
 
+    def merge_with_primary_key(mongo):
+        """
+        Test merge disposition with primary key.
+        """
+        collection = f"merge_test_{get_random_string(5)}"
+
+        initial_data = pa.Table.from_pandas(
+            pd.DataFrame({
+                "user_id": [1, 2, 3],
+                "name": ["Alice", "Bob", "Charlie"],
+                "age": [25, 30, 35],
+            })
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".arrow") as fd:
+            with pa.OSFile(fd.name, "wb") as f:
+                writer = ipc.new_file(f, initial_data.schema)
+                writer.write_table(initial_data)
+                writer.close()
+
+            result = invoke_ingest_command(
+                f"mmap://{fd.name}",
+                "raw.input",
+                mongo.get_connection_url(),
+                collection,
+                primary_key="user_id",
+                inc_strategy="merge",
+            )
+            assert result.exit_code == 0
+
+        client = mongo.get_connection_client()
+        assert client["ingestr_db"][collection].count_documents({}) == 3
+
+        updated_data = pa.Table.from_pandas(
+            pd.DataFrame({
+                "user_id": [2, 3, 4],
+                "name": ["Bob Updated", "Charlie Updated", "Diana"],
+                "age": [31, 36, 28],
+            })
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".arrow") as fd:
+            with pa.OSFile(fd.name, "wb") as f:
+                writer = ipc.new_file(f, updated_data.schema)
+                writer.write_table(updated_data)
+                writer.close()
+
+            result = invoke_ingest_command(
+                f"mmap://{fd.name}",
+                "raw.input",
+                mongo.get_connection_url(),
+                collection,
+                primary_key="user_id",
+                inc_strategy="merge",
+            )
+            assert result.exit_code == 0
+
+        assert client["ingestr_db"][collection].count_documents({}) == 4
+
+        bob = client["ingestr_db"][collection].find_one({"user_id": 2})
+        assert bob["name"] == "Bob Updated"
+        assert bob["age"] == 31
+
+        charlie = client["ingestr_db"][collection].find_one({"user_id": 3})
+        assert charlie["name"] == "Charlie Updated"
+        assert charlie["age"] == 36
+
+        diana = client["ingestr_db"][collection].find_one({"user_id": 4})
+        assert diana is not None
+        assert diana["name"] == "Diana"
+
     return [
         smoke_test,
         large_insert,
+        merge_with_primary_key,
     ]
 
 
