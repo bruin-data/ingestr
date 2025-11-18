@@ -5390,11 +5390,13 @@ def mongodb_test_cases():
         collection = f"merge_test_{get_random_string(5)}"
 
         initial_data = pa.Table.from_pandas(
-            pd.DataFrame({
-                "user_id": [1, 2, 3],
-                "name": ["Alice", "Bob", "Charlie"],
-                "age": [25, 30, 35],
-            })
+            pd.DataFrame(
+                {
+                    "user_id": [1, 2, 3],
+                    "name": ["Alice", "Bob", "Charlie"],
+                    "age": [25, 30, 35],
+                }
+            )
         )
 
         with tempfile.NamedTemporaryFile(suffix=".arrow") as fd:
@@ -5417,11 +5419,13 @@ def mongodb_test_cases():
         assert client["ingestr_db"][collection].count_documents({}) == 3
 
         updated_data = pa.Table.from_pandas(
-            pd.DataFrame({
-                "user_id": [2, 3, 4],
-                "name": ["Bob Updated", "Charlie Updated", "Diana"],
-                "age": [31, 36, 28],
-            })
+            pd.DataFrame(
+                {
+                    "user_id": [2, 3, 4],
+                    "name": ["Bob Updated", "Charlie Updated", "Diana"],
+                    "age": [31, 36, 28],
+                }
+            )
         )
 
         with tempfile.NamedTemporaryFile(suffix=".arrow") as fd:
