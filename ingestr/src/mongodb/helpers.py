@@ -1026,12 +1026,31 @@ def mongodb_insert(uri: str):
             else:
                 documents = [item for item in items if isinstance(item, dict)]
 
-            if state["first_batch"] and documents:
-                collection.delete_many({})
-                state["first_batch"] = False
+            if table.get("write_disposition") == "merge":
+                from pymongo import ReplaceOne
 
-            if documents:
-                collection.insert_many(documents)  # Insert all new data
+                primary_keys = [
+                    col_name
+                    for col_name, col_def in table.get("columns", {}).items()
+                    if isinstance(col_def, dict) and col_def.get("primary_key")
+                ]
+                merge_keys = primary_keys
+
+                operations = []
+                for doc in documents:
+                    filter_dict = {key: doc[key] for key in merge_keys if key in doc}
+                    if filter_dict:
+                        operations.append(ReplaceOne(filter_dict, doc, upsert=True))
+
+                if operations:
+                    collection.bulk_write(operations, ordered=False)
+            else:
+                if state["first_batch"] and documents:
+                    collection.delete_many({})
+                    state["first_batch"] = False
+
+                if documents:
+                    collection.insert_many(documents)
 
     return dlt.destination(
         destination,
