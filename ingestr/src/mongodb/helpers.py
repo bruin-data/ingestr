@@ -1038,7 +1038,9 @@ def mongodb_insert(uri: str):
                 if primary_keys:
                     operations = []
                     for doc in documents:
-                        filter_dict = {key: doc[key] for key in primary_keys if key in doc}
+                        filter_dict = {
+                            key: doc[key] for key in primary_keys if key in doc
+                        }
                         if filter_dict:
                             operations.append(ReplaceOne(filter_dict, doc, upsert=True))
 
