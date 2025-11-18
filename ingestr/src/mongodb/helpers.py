@@ -1034,16 +1034,23 @@ def mongodb_insert(uri: str):
                     for col_name, col_def in table.get("columns", {}).items()
                     if isinstance(col_def, dict) and col_def.get("primary_key")
                 ]
-                merge_keys = primary_keys
 
-                operations = []
-                for doc in documents:
-                    filter_dict = {key: doc[key] for key in merge_keys if key in doc}
-                    if filter_dict:
-                        operations.append(ReplaceOne(filter_dict, doc, upsert=True))
+                if primary_keys:
+                    operations = []
+                    for doc in documents:
+                        filter_dict = {key: doc[key] for key in primary_keys if key in doc}
+                        if filter_dict:
+                            operations.append(ReplaceOne(filter_dict, doc, upsert=True))
 
-                if operations:
-                    collection.bulk_write(operations, ordered=False)
+                    if operations:
+                        collection.bulk_write(operations, ordered=False)
+                else:
+                    if state["first_batch"] and documents:
+                        collection.delete_many({})
+                        state["first_batch"] = False
+
+                    if documents:
+                        collection.insert_many(documents)
             else:
                 if state["first_batch"] and documents:
                     collection.delete_many({})
