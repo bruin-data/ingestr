@@ -27,9 +27,21 @@ class BigQueryDestinationTest(unittest.TestCase):
         with open(self.abs_path_to_credentials, "r") as f:
             self.actual_credentials = json.load(f)
 
-    def test_bq_destination_cred_path_required(self):
-        with pytest.raises(ValueError):
+    def test_bq_destination_requires_credentials_or_adc(self):
+        # When no credentials are provided and use_adc is not set, should raise error
+        with pytest.raises(ValueError, match="credentials_path or credentials_base64 is required"):
             uri = "bigquery://my-project"
+            self.destination.dlt_dest(uri)
+    
+    def test_bq_destination_uses_adc_with_explicit_flag(self):
+        # Test explicit use_adc=true flag - should use ADC
+        uri = "bigquery://bruin-playground-johannes?use_adc=true"
+        result = self.destination.dlt_dest(uri)
+        
+        self.assertTrue(isinstance(result, dlt.destinations.bigquery))
+        # When using ADC, credentials should be None
+        with pytest.raises(ValueError, match="credentials_path or credentials_base64 is required"):
+            uri = "bigquery://my-project?use_adc=false&location=US"
             self.destination.dlt_dest(uri)
 
     def test_bq_destination_simple_uri(self):

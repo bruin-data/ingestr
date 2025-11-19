@@ -633,19 +633,50 @@ def ingest(
 
         start_time = datetime.now()
 
-        run_info: LoadInfo = pipeline.run(
-            dlt_source,
-            **destination.dlt_run_params(
-                uri=dest_uri,
-                table=dest_table,
-                staging_bucket=staging_bucket,
-            ),
-            write_disposition=write_disposition,  # type: ignore
-            primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
-            loader_file_format=(
-                loader_file_format.value if loader_file_format is not None else None  # type: ignore
-            ),  # type: ignore
-        )
+        try:
+            run_info: LoadInfo = pipeline.run(
+                dlt_source,
+                **destination.dlt_run_params(
+                    uri=dest_uri,
+                    table=dest_table,
+                    staging_bucket=staging_bucket,
+                ),
+                write_disposition=write_disposition,  # type: ignore
+                primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
+                loader_file_format=(
+                    loader_file_format.value if loader_file_format is not None else None  # type: ignore
+                ),  # type: ignore
+            )
+        except Exception as pipeline_error:
+            # Check if this is an ADC-related error when use_adc=true is set
+            error_str = str(pipeline_error).lower()
+            error_type = type(pipeline_error).__name__
+            
+            # Check if use_adc is set in the destination URI
+            from urllib.parse import urlparse, parse_qs
+            parsed_dest_uri = urlparse(dest_uri)
+            dest_params = parse_qs(parsed_dest_uri.query)
+            use_adc = dest_params.get("use_adc", [None])[0]
+            
+            # If use_adc=true and we get a credentials/config error, provide better messaging
+            if (use_adc and use_adc.lower() == "true" and 
+                factory.destination_scheme == "bigquery" and
+                (any(keyword in error_str for keyword in [
+                    "missing fields", "project_id", "private_key", "client_email",
+                    "gcpserviceaccountcredentials", "configfieldmissing", 
+                    "credentials", "authentication", "refresh"
+                ]) or "ConfigFieldMissing" in error_type)):
+                raise ValueError(
+                    f"Failed to use Application Default Credentials (ADC) with use_adc=true. "
+                    f"\n\nADC credentials are not properly configured or available. "
+                    f"To fix this:\n"
+                    f"  1. Run: gcloud auth application-default login\n"
+                    f"  2. If GOOGLE_APPLICATION_CREDENTIALS is set, ensure it points to valid credentials\n"
+                    f"  3. Alternatively, use credentials_path or credentials_base64 instead of use_adc=true\n"
+                    f"\nOriginal error: {str(pipeline_error)}"
+                ) from pipeline_error
+            # Re-raise other errors as-is
+            raise
 
         report_errors(run_info)
 
@@ -706,6 +737,9 @@ def example_uris():
     print()
     print(
         "[bold green]BigQuery:[/bold green] [white]bigquery://project-id?credentials_path=/path/to/credentials.json&location=US [/white]"
+    )
+    print(
+        "[white dim]   or use ADC: bigquery://project-id?use_adc=true&location=US[/white dim]"
     )
     print(
         "[white dim]└── https://github.com/googleapis/python-bigquery-sqlalchemy?tab=readme-ov-file#connection-string-parameters[/white dim]"
