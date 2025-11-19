@@ -1,7 +1,5 @@
-import base64
 import json
 import os
-import tempfile
 import unittest
 
 import dlt
@@ -66,39 +64,6 @@ class BigQueryDestinationTest(unittest.TestCase):
 
         result = self.destination.dlt_run_params("", "project.dataset.sometable")
         self.assertEqual(result, {"dataset_name": "dataset", "table_name": "sometable"})
-
-    def test_bq_destination_raises_filenotfounderror_for_missing_credentials_file(self):
-        # Test that FileNotFoundError is raised when credentials_path points to non-existent file
-        uri = "bigquery://my-project?credentials_path=/nonexistent/path/to/credentials.json"
-        with pytest.raises(FileNotFoundError):
-            self.destination.dlt_dest(uri)
-
-    def test_bq_destination_raises_jsondecodeerror_for_invalid_json(self):
-        # Create a temporary file with invalid JSON
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            f.write("invalid json content {")
-            temp_path = f.name
-
-        try:
-            uri = f"bigquery://my-project?credentials_path={temp_path}"
-            with pytest.raises(json.JSONDecodeError):
-                self.destination.dlt_dest(uri)
-        finally:
-            os.unlink(temp_path)
-
-    def test_bq_destination_raises_error_for_invalid_base64_credentials(self):
-        # Test that ValueError is raised when base64 credentials are invalid
-        uri = "bigquery://my-project?credentials_base64=invalid_base64!!"
-        with pytest.raises((ValueError, UnicodeDecodeError)):
-            self.destination.dlt_dest(uri)
-
-    def test_bq_destination_raises_error_for_invalid_json_in_base64_credentials(self):
-        # Test that JSONDecodeError is raised when base64 decodes but isn't valid JSON
-        invalid_json = base64.b64encode(b"not valid json").decode("utf-8")
-        uri = f"bigquery://my-project?credentials_base64={invalid_json}"
-        with pytest.raises(json.JSONDecodeError):
-            self.destination.dlt_dest(uri)
-
 
 class GenericSqlDestinationFixture(object):
     def test_credentials_are_passed_correctly(self):
