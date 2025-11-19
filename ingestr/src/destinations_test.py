@@ -65,6 +65,7 @@ class BigQueryDestinationTest(unittest.TestCase):
         result = self.destination.dlt_run_params("", "project.dataset.sometable")
         self.assertEqual(result, {"dataset_name": "dataset", "table_name": "sometable"})
 
+
 class GenericSqlDestinationFixture(object):
     def test_credentials_are_passed_correctly(self):
         uri = "some-uri"
