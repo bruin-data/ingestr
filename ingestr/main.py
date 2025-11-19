@@ -642,7 +642,9 @@ def ingest(
                     staging_bucket=staging_bucket,
                 ),
                 write_disposition=write_disposition,  # type: ignore
-                primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
+                primary_key=(
+                    primary_key if primary_key and len(primary_key) > 0 else None
+                ),  # type: ignore
                 loader_file_format=(
                     loader_file_format.value if loader_file_format is not None else None  # type: ignore
                 ),  # type: ignore
@@ -651,21 +653,37 @@ def ingest(
             # Check if this is an ADC-related error when use_adc=true is set
             error_str = str(pipeline_error).lower()
             error_type = type(pipeline_error).__name__
-            
+
             # Check if use_adc is set in the destination URI
-            from urllib.parse import urlparse, parse_qs
+            from urllib.parse import parse_qs, urlparse
+
             parsed_dest_uri = urlparse(dest_uri)
             dest_params = parse_qs(parsed_dest_uri.query)
             use_adc = dest_params.get("use_adc", [None])[0]
-            
+
             # If use_adc=true and we get a credentials/config error, provide better messaging
-            if (use_adc and use_adc.lower() == "true" and 
-                factory.destination_scheme == "bigquery" and
-                (any(keyword in error_str for keyword in [
-                    "missing fields", "project_id", "private_key", "client_email",
-                    "gcpserviceaccountcredentials", "configfieldmissing", 
-                    "credentials", "authentication", "refresh"
-                ]) or "ConfigFieldMissing" in error_type)):
+            if (
+                use_adc
+                and use_adc.lower() == "true"
+                and factory.destination_scheme == "bigquery"
+                and (
+                    any(
+                        keyword in error_str
+                        for keyword in [
+                            "missing fields",
+                            "project_id",
+                            "private_key",
+                            "client_email",
+                            "gcpserviceaccountcredentials",
+                            "configfieldmissing",
+                            "credentials",
+                            "authentication",
+                            "refresh",
+                        ]
+                    )
+                    or "ConfigFieldMissing" in error_type
+                )
+            ):
                 raise ValueError(
                     f"Failed to use Application Default Credentials (ADC) with use_adc=true. "
                     f"\n\nADC credentials are not properly configured or available. "
