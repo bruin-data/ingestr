@@ -4559,9 +4559,7 @@ class SnapchatAdsSource:
                 raise ValueError(
                     f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
                 )
-        else:
-            # Stats resource - entity_id is always required in the format
-            pass
+        # Stats resource - entity_id is always required in the format, no organization_id needed
 
         if resource_name not in self.resources:
             raise UnsupportedResourceError(table, "Snapchat Ads")
