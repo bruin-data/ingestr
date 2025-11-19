@@ -8,6 +8,7 @@ from dlt.common.typing import TDataItems
 from .client import SnapchatAdsAPI, create_client
 from .helpers import (
     fetch_account_id_resource,
+    fetch_entity_stats,
     fetch_snapchat_data,
     fetch_snapchat_data_with_params,
     fetch_with_paginate_account_id,
@@ -26,6 +27,7 @@ def snapchat_ads_source(
     ad_account_id: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    stats_config: dict | None = None,
 ):
     """Returns a list of resources to load data from Snapchat Marketing API.
 
@@ -319,6 +321,149 @@ def snapchat_ads_source(
             end_date=end_date,
         )
 
+    def _build_stats_params(granularity: str, fields: str) -> dict:
+        """Build common stats parameters."""
+        params = {
+            "granularity": granularity,
+            "fields": fields,
+        }
+
+        # Add date range for DAY/HOUR granularity
+        if granularity in ["DAY", "HOUR"] and (start_date or end_date):
+            from dlt.common.time import ensure_pendulum_datetime
+
+            if start_date:
+                start_dt = ensure_pendulum_datetime(start_date)
+                params["start_time"] = start_dt.format("YYYY-MM-DDTHH:mm:ss.000")
+            if end_date:
+                end_dt = ensure_pendulum_datetime(end_date)
+                params["end_time"] = end_dt.format("YYYY-MM-DDTHH:mm:ss.000")
+
+        # Add optional parameters from stats_config
+        if stats_config:
+            optional_params = [
+                "breakdown",
+                "dimension",
+                "pivot",
+                "swipe_up_attribution_window",
+                "view_attribution_window",
+                "action_report_time",
+                "conversion_source_types",
+                "omit_empty",
+                "position_stats",
+                "test",
+            ]
+
+            for param in optional_params:
+                if param in stats_config:
+                    params[param] = stats_config[param]
+
+        return params
+
+    @dlt.resource(write_disposition="replace", max_table_nesting=0)
+    def campaigns_stats() -> Iterator[TDataItems]:
+        """Fetch stats for all campaigns.
+
+        First fetches all campaigns, then fetches stats for each campaign.
+        """
+        if not stats_config:
+            raise ValueError("stats_config is required for campaigns_stats resource")
+
+        granularity = stats_config.get("granularity", "DAY")
+        fields = stats_config.get("fields", "impressions,spend")
+
+        params = _build_stats_params(granularity, fields)
+
+        yield from fetch_entity_stats(
+            api=api,
+            entity_type="campaign",
+            ad_account_id=ad_account_id,
+            organization_id=organization_id,
+            base_url=BASE_URL,
+            params=params,
+            granularity=granularity,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    @dlt.resource(write_disposition="replace", max_table_nesting=0)
+    def ad_accounts_stats() -> Iterator[TDataItems]:
+        """Fetch stats for all ad accounts.
+
+        Fetches stats for each ad account directly.
+        """
+        if not stats_config:
+            raise ValueError("stats_config is required for ad_accounts_stats resource")
+
+        granularity = stats_config.get("granularity", "DAY")
+        fields = stats_config.get("fields", "impressions,spend")
+
+        params = _build_stats_params(granularity, fields)
+
+        yield from fetch_entity_stats(
+            api=api,
+            entity_type="adaccount",
+            ad_account_id=ad_account_id,
+            organization_id=organization_id,
+            base_url=BASE_URL,
+            params=params,
+            granularity=granularity,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    @dlt.resource(write_disposition="replace", max_table_nesting=0)
+    def ads_stats() -> Iterator[TDataItems]:
+        """Fetch stats for all ads.
+
+        First fetches all ads, then fetches stats for each ad.
+        """
+        if not stats_config:
+            raise ValueError("stats_config is required for ads_stats resource")
+
+        granularity = stats_config.get("granularity", "DAY")
+        fields = stats_config.get("fields", "impressions,spend")
+
+        params = _build_stats_params(granularity, fields)
+
+        yield from fetch_entity_stats(
+            api=api,
+            entity_type="ad",
+            ad_account_id=ad_account_id,
+            organization_id=organization_id,
+            base_url=BASE_URL,
+            params=params,
+            granularity=granularity,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    @dlt.resource(write_disposition="replace", max_table_nesting=0)
+    def ad_squads_stats() -> Iterator[TDataItems]:
+        """Fetch stats for all ad squads.
+
+        First fetches all ad squads, then fetches stats for each ad squad.
+        """
+        if not stats_config:
+            raise ValueError("stats_config is required for ad_squads_stats resource")
+
+        granularity = stats_config.get("granularity", "DAY")
+        fields = stats_config.get("fields", "impressions,spend")
+
+        params = _build_stats_params(granularity, fields)
+
+        yield from fetch_entity_stats(
+            api=api,
+            entity_type="adsquad",
+            ad_account_id=ad_account_id,
+            organization_id=organization_id,
+            base_url=BASE_URL,
+            params=params,
+            granularity=granularity,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
     return (
         organizations,
         fundingsources,
@@ -334,4 +479,8 @@ def snapchat_ads_source(
         event_details,
         creatives,
         segments,
+        campaigns_stats,
+        ad_accounts_stats,
+        ads_stats,
+        ad_squads_stats,
     )
