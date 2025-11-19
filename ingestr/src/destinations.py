@@ -62,7 +62,7 @@ class BigQueryDestination:
         cred_path = source_params.get("credentials_path")
         credentials_base64 = source_params.get("credentials_base64")
         use_adc = source_params.get("use_adc", [None])[0]
-        
+
         # Determine if we should use Application Default Credentials (ADC)
         # ADC is only used when explicitly set to "true" via use_adc parameter
         use_application_default_credentials = (
@@ -83,7 +83,7 @@ class BigQueryDestination:
                     "credentials_path or credentials_base64 is required to connect BigQuery, "
                     "or set use_adc=true to use Application Default Credentials"
                 )
-            
+
             credentials = {}
             if cred_path:
                 with open(cred_path[0], "r") as f:
@@ -99,7 +99,7 @@ class BigQueryDestination:
                 raise ValueError("Staging bucket must start with gs://")
 
             os.environ["DESTINATION__FILESYSTEM__BUCKET_URL"] = staging_bucket
-            
+
             # Only set explicit credentials for staging if we have them
             # Otherwise, rely on ADC for GCS as well
             if credentials:
@@ -127,7 +127,7 @@ class BigQueryDestination:
             try:
                 from google.auth import default
                 from google.auth.exceptions import DefaultCredentialsError
-                
+
                 # Try to get default credentials to verify they're available
                 try:
                     default_creds, _ = default()
@@ -143,37 +143,15 @@ class BigQueryDestination:
             except ImportError:
                 # google.auth not available, but we'll let dlt handle the error
                 pass
-            
-            # Wrap the dlt call to catch configuration errors and provide better messaging
-            try:
-                return dlt.destinations.bigquery(
-                    credentials=None,  # type: ignore
-                    location=location,  # type: ignore
-                    project_id=project_id,
-                    **kwargs,
-                )
-            except Exception as e:
-                # Check if the error is related to missing credentials configuration
-                # This can happen when dlt tries to resolve credentials but ADC isn't available
-                error_str = str(e).lower()
-                error_type = type(e).__name__
-                
-                # Check for dlt configuration errors related to credentials
-                if any(keyword in error_str for keyword in [
-                    "missing fields", "project_id", "private_key", "client_email",
-                    "gcpserviceaccountcredentials", "configfieldmissing", "credentials"
-                ]) or "ConfigFieldMissing" in error_type:
-                    raise ValueError(
-                        f"Failed to use Application Default Credentials (ADC) with use_adc=true. "
-                        f"\n\nADC credentials are not properly configured or available. "
-                        f"To fix this:\n"
-                        f"  1. Run: gcloud auth application-default login\n"
-                        f"  2. If GOOGLE_APPLICATION_CREDENTIALS is set, ensure it points to valid credentials\n"
-                        f"  3. Alternatively, use credentials_path or credentials_base64 instead of use_adc=true\n"
-                        f"\nOriginal error: {str(e)}"
-                    ) from e
-                # Re-raise other errors as-is
-                raise
+
+            # Since we've already validated ADC availability with google.auth.default(),
+            # we can rely on dlt to use ADC automatically. Let dlt handle any errors.
+            return dlt.destinations.bigquery(
+                credentials=None,  # type: ignore
+                location=location,  # type: ignore
+                project_id=project_id,
+                **kwargs,
+            )
         else:
             return dlt.destinations.bigquery(
                 credentials=credentials,  # type: ignore

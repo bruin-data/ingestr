@@ -145,6 +145,87 @@ class SqlSource:
         if uri.startswith("db2://"):
             uri = uri.replace("db2://", "db2+ibm_db://")
 
+        if uri.startswith("bigquery://"):
+            parsed_uri = urlparse(uri)
+            query_params = parse_qs(parsed_uri.query)
+
+            project_id = parsed_uri.hostname
+            cred_path = query_params.get("credentials_path")
+            cred_base64 = query_params.get("credentials_base64")
+            use_adc = query_params.get("use_adc", [None])[0]
+
+            # Determine if we should use Application Default Credentials (ADC)
+            # ADC is only used when explicitly set to "true" via use_adc parameter
+            use_application_default_credentials = (
+                use_adc is not None and use_adc.lower() == "true"
+            )
+
+            # Per Google Cloud client libraries docs:
+            # "When you use the client library to create a client, the client library automatically
+            # checks for and uses the credentials you have provided to ADC to authenticate to the APIs.
+            # Your application does not need to explicitly authenticate or manage tokens."
+            # We completely rely on Google's client libraries to handle authentication automatically.
+
+            if use_application_default_credentials:
+                # Validate that ADC credentials are available (Python equivalent of Go's FindDefaultCredentials)
+                # This provides early feedback if ADC is not properly configured
+                try:
+                    from google.auth import default
+                    from google.auth.exceptions import DefaultCredentialsError
+
+                    try:
+                        default_creds, _ = default()
+                        if default_creds is None:
+                            raise DefaultCredentialsError("No credentials found")
+                    except DefaultCredentialsError as e:
+                        raise ValueError(
+                            f"Application Default Credentials (ADC) are not available. "
+                            f"Please run 'gcloud auth application-default login' to authenticate, "
+                            f"or provide credentials_path/credentials_base64 instead of use_adc=true. "
+                            f"Original error: {str(e)}"
+                        ) from e
+                except ImportError:
+                    # google.auth not available, but we'll let SQLAlchemy handle the error
+                    pass
+            elif not cred_path and not cred_base64:
+                # If use_adc is not explicitly set to true and no credentials provided,
+                # require explicit credentials or use_adc=true
+                raise ValueError(
+                    "credentials_path or credentials_base64 is required to connect BigQuery, "
+                    "or set use_adc=true to use Application Default Credentials"
+                )
+
+            # Build BigQuery connection string
+            # Let Google's client libraries handle all authentication automatically
+            location = query_params.get("location", [None])[0]
+            connection_params = []
+
+            if location:
+                connection_params.append(f"location={location}")
+
+            # Only pass credentials_path if explicitly provided
+            # If not provided, Google's client libraries will automatically use ADC
+            if cred_path:
+                connection_params.append(f"credentials_path={cred_path[0]}")
+            elif cred_base64:
+                # For base64 credentials, create a temp file and pass it via credentials_path
+                credentials = json.loads(
+                    base64.b64decode(cred_base64[0]).decode("utf-8")
+                )
+                temp = tempfile.NamedTemporaryFile(
+                    mode="w", delete=False, suffix=".json"
+                )
+                json.dump(credentials, temp)
+                temp.close()
+                connection_params.append(f"credentials_path={temp.name}")
+            # If neither cred_path nor cred_base64, Google's client libraries will automatically
+            # use ADC (GOOGLE_APPLICATION_CREDENTIALS or default search order) - no action needed
+
+            if connection_params:
+                uri = f"bigquery://{project_id}?{'&'.join(connection_params)}"
+            else:
+                uri = f"bigquery://{project_id}"
+
         if uri.startswith("spanner://"):
             parsed_uri = urlparse(uri)
             query_params = parse_qs(parsed_uri.query)
@@ -169,8 +250,6 @@ class SqlSource:
                 raise ValueError(
                     "credentials_path or credentials_base64 is required in the URI to get data from Google Sheets"
                 )
-            if cred_path:
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path[0]
             elif cred_base64:
                 credentials = json.loads(
                     base64.b64decode(cred_base64[0]).decode("utf-8")
