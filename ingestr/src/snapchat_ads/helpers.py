@@ -1,5 +1,4 @@
 from typing import Iterator
-from urllib.parse import urlencode
 
 import requests
 
@@ -271,7 +270,9 @@ def build_stats_url(
 
     plural_entity = entity_type_map.get(entity_type)
     if not plural_entity:
-        raise ValueError(f"Invalid entity_type: {entity_type}. Must be one of: {list(entity_type_map.keys())}")
+        raise ValueError(
+            f"Invalid entity_type: {entity_type}. Must be one of: {list(entity_type_map.keys())}"
+        )
 
     return f"{base_url}/{plural_entity}/{entity_id}/stats"
 
@@ -280,11 +281,12 @@ def parse_stats_table_format(table: str) -> dict:
     """
     Parse the stats table format string.
 
-    Format: snapchat_ads_stats:<entity_type>:<granularity>:<fields>[:<options>]
+    Format: snapchat_ads_stats:<entity_type>:<entity_id>:<granularity>[:<fields>][:<options>]
 
     Examples:
-        snapchat_ads_stats:campaign:DAY:impressions,spend,swipes
-        snapchat_ads_stats:ad:TOTAL:impressions,spend:breakdown=ad,swipe_up_attribution_window=28_DAY
+        snapchat_ads_stats:campaign:abc123:DAY
+        snapchat_ads_stats:campaign:abc123:DAY:impressions,spend,swipes
+        snapchat_ads_stats:ad:abc123:TOTAL:impressions,spend:breakdown=ad,swipe_up_attribution_window=28_DAY
 
     Returns:
         Dictionary with parsed parameters
@@ -294,36 +296,54 @@ def parse_stats_table_format(table: str) -> dict:
     if len(parts) < 4:
         raise ValueError(
             f"Invalid stats table format: {table}. "
-            "Expected: snapchat_ads_stats:<entity_type>:<granularity>:<fields>[:<options>]"
+            "Expected: snapchat_ads_stats:<entity_type>:<entity_id>:<granularity>[:<fields>][:<options>]"
         )
 
     entity_type = parts[1]
-    granularity = parts[2].upper()
-    fields = parts[3]
+    entity_id = parts[2]
+    granularity = parts[3].upper()
 
     # Validate entity_type
     valid_entity_types = ["campaign", "adsquad", "ad", "adaccount"]
     if entity_type not in valid_entity_types:
-        raise ValueError(f"Invalid entity_type: {entity_type}. Must be one of: {valid_entity_types}")
+        raise ValueError(
+            f"Invalid entity_type: {entity_type}. Must be one of: {valid_entity_types}"
+        )
 
     # Validate granularity
     valid_granularities = ["TOTAL", "DAY", "HOUR", "LIFETIME"]
     if granularity not in valid_granularities:
-        raise ValueError(f"Invalid granularity: {granularity}. Must be one of: {valid_granularities}")
+        raise ValueError(
+            f"Invalid granularity: {granularity}. Must be one of: {valid_granularities}"
+        )
 
     result = {
         "entity_type": entity_type,
+        "entity_id": entity_id,
         "granularity": granularity,
-        "fields": fields,
     }
 
-    # Parse options if provided
-    if len(parts) > 4:
-        options_str = parts[4]
-        for option in options_str.split(","):
-            if "=" in option:
-                key, value = option.split("=", 1)
-                result[key.strip()] = value.strip()
+    # Parse fields if provided (part 4)
+    if len(parts) > 4 and parts[4]:
+        # Check if this looks like options (contains =) or fields
+        if "=" in parts[4]:
+            # This is options, not fields
+            options_str = parts[4]
+            for option in options_str.split(","):
+                if "=" in option:
+                    key, value = option.split("=", 1)
+                    result[key.strip()] = value.strip()
+        else:
+            # This is fields
+            result["fields"] = parts[4]
+
+            # Parse options if provided (part 5)
+            if len(parts) > 5:
+                options_str = parts[5]
+                for option in options_str.split(","):
+                    if "=" in option:
+                        key, value = option.split("=", 1)
+                        result[key.strip()] = value.strip()
 
     return result
 
@@ -387,10 +407,18 @@ def parse_total_stats(result: dict) -> Iterator[dict]:
                     "granularity": total_stat.get("granularity"),
                     "start_time": total_stat.get("start_time"),
                     "end_time": total_stat.get("end_time"),
-                    "finalized_data_end_time": total_stat.get("finalized_data_end_time"),
-                    "conversion_data_processed_end_time": total_stat.get("conversion_data_processed_end_time"),
-                    "swipe_up_attribution_window": total_stat.get("swipe_up_attribution_window"),
-                    "view_attribution_window": total_stat.get("view_attribution_window"),
+                    "finalized_data_end_time": total_stat.get(
+                        "finalized_data_end_time"
+                    ),
+                    "conversion_data_processed_end_time": total_stat.get(
+                        "conversion_data_processed_end_time"
+                    ),
+                    "swipe_up_attribution_window": total_stat.get(
+                        "swipe_up_attribution_window"
+                    ),
+                    "view_attribution_window": total_stat.get(
+                        "view_attribution_window"
+                    ),
                 }
 
                 # Flatten nested stats
@@ -437,8 +465,12 @@ def parse_timeseries_stats(result: dict) -> Iterator[dict]:
                 entity_type = timeseries_stat.get("type")
                 granularity = timeseries_stat.get("granularity")
                 finalized_data_end_time = timeseries_stat.get("finalized_data_end_time")
-                conversion_data_processed_end_time = timeseries_stat.get("conversion_data_processed_end_time")
-                swipe_up_attribution_window = timeseries_stat.get("swipe_up_attribution_window")
+                conversion_data_processed_end_time = timeseries_stat.get(
+                    "conversion_data_processed_end_time"
+                )
+                swipe_up_attribution_window = timeseries_stat.get(
+                    "swipe_up_attribution_window"
+                )
                 view_attribution_window = timeseries_stat.get("view_attribution_window")
 
                 # Iterate through each time period
@@ -495,9 +527,9 @@ def parse_timeseries_stats(result: dict) -> Iterator[dict]:
 def get_entity_ids_for_stats(
     api: "SnapchatAdsAPI",
     entity_type: str,
-    ad_account_id: str | None,
     organization_id: str | None,
     base_url: str,
+    entity_id: str | None = None,
 ) -> list[str]:
     """
     Get list of entity IDs to fetch stats for.
@@ -505,19 +537,27 @@ def get_entity_ids_for_stats(
     Args:
         api: SnapchatAdsAPI instance
         entity_type: Type of entity (campaign, adsquad, ad, adaccount)
-        ad_account_id: Specific ad account ID (optional)
-        organization_id: Organization ID (required if ad_account_id not provided)
+        organization_id: Organization ID (required if entity_id not provided)
         base_url: Base API URL
+        entity_id: Specific entity ID to fetch stats for (optional)
 
     Returns:
         List of entity IDs
     """
+    # If specific entity_id is provided, use it directly
+    if entity_id:
+        return [entity_id]
+
     if entity_type == "adaccount":
         # For ad account stats, return the account IDs
-        return get_account_ids(api, ad_account_id, organization_id, base_url, "stats", None, None)
+        return get_account_ids(
+            api, None, organization_id, base_url, "stats", None, None
+        )
 
     # For campaign, adsquad, ad - need to fetch from ad accounts
-    account_ids = get_account_ids(api, ad_account_id, organization_id, base_url, "stats", None, None)
+    account_ids = get_account_ids(
+        api, None, organization_id, base_url, "stats", None, None
+    )
 
     entity_ids = []
     client = create_client()

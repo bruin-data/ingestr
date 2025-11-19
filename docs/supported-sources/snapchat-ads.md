@@ -94,6 +94,101 @@ ingestr ingest \
   --dest-table 'dest.campaigns'
 ```
 
+## Stats / Measurement Data
+
+Snapchat Ads source supports fetching stats/measurement data for campaigns, ad squads, ads, and ad accounts.
+
+### Stats Table Format
+
+```plaintext
+snapchat_ads_stats:<entity_type>:<entity_id>:<granularity>[:<fields>][:<options>]
+```
+
+**Required Parameters:**
+
+- `entity_type`: Type of entity - `campaign`, `adsquad`, `ad`, or `adaccount`
+- `entity_id`: The ID of the entity to fetch stats for
+- `granularity`: Time granularity - `TOTAL`, `DAY`, `HOUR`, or `LIFETIME`
+
+**Optional Parameters:**
+
+| Parameter | Description | Values |
+|-----------|-------------|--------|
+| `fields` | Metrics requested (comma-separated) | Default: `impressions,spend` |
+| `breakdown` | Object-level breakdown | `ad`, `adsquad` (Campaign only), `campaign` (Ad Account only) |
+| `dimension` | Insight-level breakdown | `GEO`, `DEMO`, `INTEREST`, `DEVICE` |
+| `pivot` | Pivot for insights breakdown | `country`, `region`, `dma`, `gender`, `age_bucket`, `interest_category_id`, `interest_category_name`, `operating_system`, `make`, `model` |
+| `swipe_up_attribution_window` | Attribution window for swipe ups | `1_DAY`, `7_DAY`, `28_DAY` (default) |
+| `view_attribution_window` | Attribution window for views | `none`, `1_HOUR`, `3_HOUR`, `6_HOUR`, `1_DAY` (default), `7_DAY`, `28_DAY` |
+| `action_report_time` | Principle for conversion reporting | `conversion` (default), `impression` |
+| `conversion_source_types` | Conversion source breakout by platform | `web`, `app`, `offline`, `total`, `total_off_platform`, `total_on_platform` |
+| `omit_empty` | Omit records with zero data | `false` (default), `true` |
+| `position_stats` | Position metric breakdown for Snap Ads | `true` |
+| `test` | Return sample (fake) stats | `false` (default), `true` |
+
+### Stats Examples
+
+#### Fetch stats for a specific campaign
+
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
+  --source-table 'snapchat_ads_stats:campaign:your-campaign-id:DAY:impressions,spend,swipes' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.campaign_stats' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-01-31'
+```
+
+#### Fetch stats with attribution windows
+
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
+  --source-table 'snapchat_ads_stats:ad:your-ad-id:DAY:impressions,spend:swipe_up_attribution_window=28_DAY,view_attribution_window=7_DAY' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.ad_stats' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-01-31'
+```
+
+#### Fetch stats with breakdown
+
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
+  --source-table 'snapchat_ads_stats:campaign:your-campaign-id:DAY:impressions,spend:breakdown=ad' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.campaign_breakdown_stats' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-01-31'
+```
+
+#### Fetch stats with dimension breakdown
+
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
+  --source-table 'snapchat_ads_stats:campaign:your-campaign-id:DAY:impressions,spend:dimension=GEO,pivot=country' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.campaign_geo_stats' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-01-31'
+```
+
+
+#### Fetch stats with test data
+
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
+  --source-table 'snapchat_ads_stats:campaign:your-campaign-id:DAY::test=true' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.campaign_stats' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-01-31'
+```
+
 ## Date Filtering
 
 You can filter data by date range using the `interval_start` and `interval_end` parameters:

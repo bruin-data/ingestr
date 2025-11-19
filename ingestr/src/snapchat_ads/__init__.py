@@ -7,10 +7,13 @@ from dlt.common.typing import TDataItems
 
 from .client import SnapchatAdsAPI, create_client
 from .helpers import (
+    build_stats_url,
     fetch_account_id_resource,
     fetch_snapchat_data,
     fetch_snapchat_data_with_params,
+    fetch_stats_data,
     fetch_with_paginate_account_id,
+    get_entity_ids_for_stats,
     paginate,
 )
 
@@ -26,6 +29,7 @@ def snapchat_ads_source(
     ad_account_id: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    stats_config: dict | None = None,
 ):
     """Returns a list of resources to load data from Snapchat Marketing API.
 
@@ -319,6 +323,83 @@ def snapchat_ads_source(
             end_date=end_date,
         )
 
+    @dlt.resource(write_disposition="replace", max_table_nesting=0)
+    def snapchat_ads_stats() -> Iterator[TDataItems]:
+        """Fetch stats/measurement data for Snapchat Ads entities.
+
+        Stats configuration is passed via stats_config parameter which contains:
+        - entity_type: campaign, adsquad, ad, or adaccount
+        - granularity: TOTAL, DAY, HOUR, or LIFETIME
+        - fields: comma-separated list of metrics
+        - Optional: breakdown, dimension, attribution windows, etc.
+        """
+        if not stats_config:
+            raise ValueError("stats_config is required for snapchat_ads_stats resource")
+
+        entity_type = stats_config.get("entity_type")
+        granularity = stats_config.get("granularity")
+        # Default fields per Snapchat API docs
+        fields = stats_config.get("fields", "impressions,spend")
+
+        if not entity_type or not granularity:
+            raise ValueError("entity_type and granularity are required in stats_config")
+
+        # Get entity_id from stats_config if provided
+        provided_entity_id = stats_config.get("entity_id")
+
+        # Get entity IDs to fetch stats for
+        entity_ids = get_entity_ids_for_stats(
+            api=api,
+            entity_type=entity_type,
+            organization_id=organization_id,
+            base_url=BASE_URL,
+            entity_id=provided_entity_id,
+        )
+
+        if not entity_ids:
+            return
+
+        # Build query parameters
+        params = {
+            "granularity": granularity,
+            "fields": fields,
+        }
+
+        # Add date range for DAY/HOUR granularity
+        if granularity in ["DAY", "HOUR"] and (start_date or end_date):
+            from dlt.common.time import ensure_pendulum_datetime
+
+            if start_date:
+                start_dt = ensure_pendulum_datetime(start_date)
+                # Format without timezone - API will use account's timezone
+                params["start_time"] = start_dt.format("YYYY-MM-DDTHH:mm:ss.000")
+            if end_date:
+                end_dt = ensure_pendulum_datetime(end_date)
+                params["end_time"] = end_dt.format("YYYY-MM-DDTHH:mm:ss.000")
+
+        # Add optional parameters from stats_config
+        optional_params = [
+            "breakdown",
+            "dimension",
+            "pivot",
+            "swipe_up_attribution_window",
+            "view_attribution_window",
+            "action_report_time",
+            "conversion_source_types",
+            "omit_empty",
+            "position_stats",
+            "test",
+        ]
+
+        for param in optional_params:
+            if param in stats_config:
+                params[param] = stats_config[param]
+
+        # Fetch stats for each entity
+        for entity_id in entity_ids:
+            url = build_stats_url(BASE_URL, entity_type, entity_id)
+            yield from fetch_stats_data(api, url, params, granularity)
+
     return (
         organizations,
         fundingsources,
@@ -334,4 +415,5 @@ def snapchat_ads_source(
         event_details,
         creatives,
         segments,
+        snapchat_ads_stats,
     )

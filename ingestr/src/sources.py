@@ -4485,6 +4485,7 @@ class SnapchatAdsSource:
         "event_details",
         "creatives",
         "segments",
+        "snapchat_ads_stats",
     ]
 
     def handles_incrementality(self) -> bool:
@@ -4507,6 +4508,7 @@ class SnapchatAdsSource:
             raise ValueError("client_secret is required to connect to Snapchat Ads")
 
         organization_id = source_fields.get("organization_id")
+        ad_account_id_from_uri = source_fields.get("ad_account_id")
 
         # Resources that support ad_account_id filtering
         ad_account_resources = [
@@ -4519,38 +4521,54 @@ class SnapchatAdsSource:
             "segments",
         ]
 
-        # Parse table name for special cases like "campaigns:ad_account_id"
-        ad_account_id = None
-        if ":" in table:
-            resource_name, ad_account_id = table.split(":", maxsplit=1)
-            if not ad_account_id:
+        # Check if this is a stats table
+        stats_config = None
+        if table.startswith("snapchat_ads_stats:"):
+            from ingestr.src.snapchat_ads.helpers import parse_stats_table_format
+
+            stats_config = parse_stats_table_format(table)
+            resource_name = "snapchat_ads_stats"
+            ad_account_id = (
+                ad_account_id_from_uri[0] if ad_account_id_from_uri else None
+            )
+        else:
+            # Parse table name for special cases like "campaigns:ad_account_id"
+            ad_account_id = None
+            if ":" in table:
+                resource_name, ad_account_id = table.split(":", maxsplit=1)
+                if not ad_account_id:
+                    raise ValueError(
+                        f"ad_account_id must be provided in format '{resource_name}:ad_account_id'"
+                    )
+            else:
+                resource_name = table
+
+        # Validation for non-stats resources
+        if resource_name != "snapchat_ads_stats":
+            account_id_required = (
+                resource_name in ad_account_resources
+                and ad_account_id is None
+                and not organization_id
+            )
+            if account_id_required:
                 raise ValueError(
-                    f"ad_account_id must be provided in format '{resource_name}:ad_account_id'"
+                    f"organization_id is required for '{resource_name}' table when no specific ad_account_id is provided"
+                )
+
+            if not organization_id and table != "organizations":
+                raise ValueError(
+                    f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
                 )
         else:
-            resource_name = table
-
-        account_id_required = (
-            resource_name in ad_account_resources
-            and ad_account_id is None
-            and not organization_id
-        )
-        if account_id_required:
-            raise ValueError(
-                f"organization_id is required for '{resource_name}' table when no specific ad_account_id is provided"
-            )
-
-        if not organization_id and table != "organizations":
-            raise ValueError(
-                f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
-            )
+            # Stats resource - entity_id is always required in the format
+            pass
 
         if resource_name not in self.resources:
             raise UnsupportedResourceError(table, "Snapchat Ads")
 
         from ingestr.src.snapchat_ads import snapchat_ads_source
 
-        source_kwargs = {
+        source_kwargs: dict[str, Any] = {
             "refresh_token": refresh_token[0],
             "client_id": client_id[0],
             "client_secret": client_secret[0],
@@ -4570,6 +4588,10 @@ class SnapchatAdsSource:
         interval_end = kwargs.get("interval_end")
         if interval_end:
             source_kwargs["end_date"] = interval_end
+
+        # Add stats_config for stats resource
+        if stats_config:
+            source_kwargs["stats_config"] = stats_config
 
         source = snapchat_ads_source(**source_kwargs)
 
