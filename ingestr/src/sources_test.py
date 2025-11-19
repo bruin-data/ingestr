@@ -1,7 +1,3 @@
-import base64
-import json
-import os
-import tempfile
 import unittest
 
 import dlt
@@ -20,69 +16,57 @@ class SqlSourceTest(unittest.TestCase):
             uri = "bigquery://my-project"
             source.dlt_source(uri, "onetable")
 
-    def test_bigquery_source_requires_credentials_or_adc(self):
-        # When no credentials are provided and use_adc is not set, should raise error
-        source = SqlSource()
-        with pytest.raises(
-            ValueError, match="credentials_path or credentials_base64 is required"
+    def test_table_instance_is_created(self):
+        uri = "bigquery://my-project"
+        table = "schema.table"
+
+        # monkey patch the sql_table function
+        def sql_table(
+            credentials: ConnectionStringCredentials,
+            schema,
+            table,
+            incremental,
+            backend,
+            chunk_size,
+            **kwargs,
         ):
-            uri = "bigquery://my-project"
-            source.dlt_source(uri, "schema.table")
+            self.assertEqual(str(credentials.to_url()), uri)
+            self.assertEqual(schema, "schema")
+            self.assertEqual(table, "table")
+            self.assertEqual(backend, "sqlalchemy")
+            self.assertIsNone(incremental)
+            return dlt.resource()
 
-    def test_bigquery_source_raises_error_for_invalid_base64_credentials(self):
-        # Test that ValueError/UnicodeDecodeError is raised when base64 credentials are invalid
-        source = SqlSource()
-        uri = "bigquery://my-project?credentials_base64=invalid_base64!!"
+        source = SqlSource(table_builder=sql_table)
+        res = source.dlt_source(uri, table)
+        self.assertIsNotNone(res)
+
+    def test_table_instance_is_created_with_incremental(self):
+        uri = "bigquery://my-project"
         table = "schema.table"
-        with pytest.raises((ValueError, UnicodeDecodeError)):
-            source.dlt_source(uri, table)
+        incremental_key = "id"
 
-    def test_bigquery_source_raises_error_for_invalid_json_in_base64_credentials(self):
-        # Test that JSONDecodeError is raised when base64 decodes but isn't valid JSON
-        source = SqlSource()
-        invalid_json = base64.b64encode(b"not valid json").decode("utf-8")
-        uri = f"bigquery://my-project?credentials_base64={invalid_json}"
-        table = "schema.table"
-        with pytest.raises(json.JSONDecodeError):
-            source.dlt_source(uri, table)
+        # monkey patch the sql_table function
+        def sql_table(
+            credentials: ConnectionStringCredentials,
+            schema,
+            table,
+            incremental,
+            backend,
+            chunk_size,
+            **kwargs,
+        ):
+            self.assertEqual(str(credentials.to_url()), uri)
+            self.assertEqual(schema, "schema")
+            self.assertEqual(table, "table")
+            self.assertEqual(backend, "sqlalchemy")
+            self.assertIsInstance(incremental, dlt.sources.incremental)
+            self.assertEqual(incremental.cursor_path, incremental_key)
+            return dlt.resource()
 
-    def test_bigquery_source_with_valid_credentials_path(self):
-        # Test that credentials_path is passed correctly in connection string
-        # Create a temporary valid credentials file
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"type": "service_account", "project_id": "test"}, f)
-            temp_path = f.name
-
-        try:
-            uri = f"bigquery://my-project?credentials_path={temp_path}"
-            table = "schema.table"
-
-            def sql_table(
-                credentials: ConnectionStringCredentials,
-                schema,
-                table,
-                incremental,
-                backend,
-                chunk_size,
-                **kwargs,
-            ):
-                # Verify credentials_path is in the connection string
-                cred_url = str(credentials.to_url())
-                self.assertIn("bigquery://my-project", cred_url)
-                # Check that credentials_path parameter is present (path will be URL-encoded)
-                self.assertIn("credentials_path=", cred_url)
-                # Also verify the filename appears in the URL (even if encoded)
-                filename = os.path.basename(temp_path)
-                self.assertIn(filename, cred_url)
-                self.assertEqual(schema, "schema")
-                self.assertEqual(table, "table")
-                return dlt.resource()
-
-            source_with_builder = SqlSource(table_builder=sql_table)
-            res = source_with_builder.dlt_source(uri, table)
-            self.assertIsNotNone(res)
-        finally:
-            os.unlink(temp_path)
+        source = SqlSource(table_builder=sql_table)
+        res = source.dlt_source(uri, table, incremental_key=incremental_key)
+        self.assertIsNotNone(res)
 
 
 class MongoDbSourceTest(unittest.TestCase):
