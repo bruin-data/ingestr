@@ -641,9 +641,7 @@ def ingest(
                 staging_bucket=staging_bucket,
             ),
             write_disposition=write_disposition,  # type: ignore
-            primary_key=(
-                primary_key if primary_key and len(primary_key) > 0 else None
-            ),  # type: ignore
+            primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
             loader_file_format=(
                 loader_file_format.value if loader_file_format is not None else None  # type: ignore
             ),  # type: ignore
