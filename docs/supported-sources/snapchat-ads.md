@@ -133,15 +133,6 @@ ingestr ingest \
   --dest-table 'dest.campaigns'
 ```
 
-### Fetch campaigns for a specific ad account
-```sh
-ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
-  --source-table 'campaigns:22225ba982815' \
-  --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaigns'
-```
-
 ### Fetch stats for all campaigns (DAY granularity)
 
 ```sh
@@ -154,58 +145,12 @@ ingestr ingest \
   --interval-end '2024-01-31'
 ```
 
-### Fetch stats for campaigns in a specific ad account
+### Fetch stats with options
 
 ```sh
 ingestr ingest \
   --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'campaigns_stats:22225ba982815:DAY:impressions,spend' \
-  --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaigns_stats' \
-  --interval-start '2024-01-01' \
-  --interval-end '2024-01-31'
-```
-
-### Fetch stats with TOTAL granularity
-
-```sh
-ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'ads_stats:TOTAL:impressions,spend' \
-  --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.ads_stats'
-```
-
-### Fetch stats with attribution windows
-
-```sh
-ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'ads_stats:DAY:impressions,spend:swipe_up_attribution_window=28_DAY,view_attribution_window=7_DAY' \
-  --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.ads_stats' \
-  --interval-start '2024-01-01' \
-  --interval-end '2024-01-31'
-```
-
-### Fetch stats with breakdown
-
-```sh
-ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'campaigns_stats:DAY:impressions,spend:breakdown=ad' \
-  --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaigns_stats' \
-  --interval-start '2024-01-01' \
-  --interval-end '2024-01-31'
-```
-
-### Fetch stats with dimension breakdown
-
-```sh
-ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'campaigns_stats:DAY:impressions,spend:dimension=GEO,pivot=country' \
+  --source-table 'campaigns_stats:DAY:impressions,spend:breakdown=ad,swipe_up_attribution_window=28_DAY' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
   --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
@@ -220,30 +165,4 @@ ingestr ingest \
   --source-table 'ad_accounts_stats:LIFETIME:spend' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
   --dest-table 'dest.ad_accounts_stats'
-```
-
-### Fetch stats with test data
-
-```sh
-ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'campaigns_stats:DAY:impressions,spend:test=true' \
-  --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaigns_stats' \
-  --interval-start '2024-01-01' \
-  --interval-end '2024-01-31'
-```
-
-## Date Filtering
-
-You can filter data by date range using the `interval_start` and `interval_end` parameters:
-
-```sh
-ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'campaigns' \
-  --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaigns' \
-  --interval-start '2024-01-01' \
-  --interval-end '2024-01-31'
 ```
