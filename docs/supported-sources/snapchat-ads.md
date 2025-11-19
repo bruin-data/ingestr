@@ -74,31 +74,11 @@ These resources can fetch data for a specific ad account or all ad accounts in t
 | `creatives` | id | updated_at | merge | Retrieves all creatives for ad account(s). Supports `creatives:ad_account_id` |
 | `segments` | id | updated_at | merge | Retrieves all audience segments for ad account(s). Supports `segments:ad_account_id` |
 
-
-
-### Fetch campaigns for all ad accounts
-```sh
-ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'campaigns' \
-  --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaigns'
-```
-
-### Fetch campaigns for a specific ad account
-```sh
-ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
-  --source-table 'campaigns:22225ba982815' \
-  --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaigns'
-```
-
-## Stats / Measurement Data
+### Stats / Measurement Data
 
 Snapchat Ads source supports fetching stats/measurement data for campaigns, ad squads, ads, and ad accounts.
 
-### Stats Table Format
+#### Stats Table Format
 
 ```plaintext
 snapchat_ads_stats:<entity_type>:<entity_id>:<granularity>[:<fields>][:<options>]
@@ -126,9 +106,27 @@ snapchat_ads_stats:<entity_type>:<entity_id>:<granularity>[:<fields>][:<options>
 | `position_stats` | Position metric breakdown for Snap Ads | `true` |
 | `test` | Return sample (fake) stats | `false` (default), `true` |
 
-### Stats Examples
+## Examples
 
-#### Fetch stats for a specific campaign
+### Fetch campaigns for all ad accounts
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
+  --source-table 'campaigns' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.campaigns'
+```
+
+### Fetch campaigns for a specific ad account
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
+  --source-table 'campaigns:22225ba982815' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.campaigns'
+```
+
+### Fetch stats for a specific campaign
 
 ```sh
 ingestr ingest \
@@ -140,7 +138,7 @@ ingestr ingest \
   --interval-end '2024-01-31'
 ```
 
-#### Fetch stats with attribution windows
+### Fetch stats with attribution windows
 
 ```sh
 ingestr ingest \
@@ -152,7 +150,7 @@ ingestr ingest \
   --interval-end '2024-01-31'
 ```
 
-#### Fetch stats with breakdown
+### Fetch stats with breakdown
 
 ```sh
 ingestr ingest \
@@ -164,7 +162,7 @@ ingestr ingest \
   --interval-end '2024-01-31'
 ```
 
-#### Fetch stats with dimension breakdown
+### Fetch stats with dimension breakdown
 
 ```sh
 ingestr ingest \
@@ -176,8 +174,7 @@ ingestr ingest \
   --interval-end '2024-01-31'
 ```
 
-
-#### Fetch stats with test data
+### Fetch stats with test data
 
 ```sh
 ingestr ingest \
