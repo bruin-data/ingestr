@@ -94,10 +94,9 @@ def get_account_ids(
         )
 
     accounts_url = f"{base_url}/organizations/{organization_id}/adaccounts"
+    # Don't filter accounts by date - we want all accounts, then filter stats by date
     accounts_data = list(
-        fetch_snapchat_data(
-            api, accounts_url, "adaccounts", "adaccount", start_date, end_date
-        )
+        fetch_snapchat_data(api, accounts_url, "adaccounts", "adaccount", None, None)
     )
     return [
         account_id
@@ -277,77 +276,6 @@ def build_stats_url(
     return f"{base_url}/{plural_entity}/{entity_id}/stats"
 
 
-def parse_stats_table_format(table: str) -> dict:
-    """
-    Parse the stats table format string.
-
-    Format: snapchat_ads_stats:<entity_type>:<entity_id>:<granularity>[:<fields>][:<options>]
-
-    Examples:
-        snapchat_ads_stats:campaign:abc123:DAY
-        snapchat_ads_stats:campaign:abc123:DAY:impressions,spend,swipes
-        snapchat_ads_stats:ad:abc123:TOTAL:impressions,spend:breakdown=ad,swipe_up_attribution_window=28_DAY
-
-    Returns:
-        Dictionary with parsed parameters
-    """
-    parts = table.split(":")
-
-    if len(parts) < 4:
-        raise ValueError(
-            f"Invalid stats table format: {table}. "
-            "Expected: snapchat_ads_stats:<entity_type>:<entity_id>:<granularity>[:<fields>][:<options>]"
-        )
-
-    entity_type = parts[1]
-    entity_id = parts[2]
-    granularity = parts[3].upper()
-
-    # Validate entity_type
-    valid_entity_types = ["campaign", "adsquad", "ad", "adaccount"]
-    if entity_type not in valid_entity_types:
-        raise ValueError(
-            f"Invalid entity_type: {entity_type}. Must be one of: {valid_entity_types}"
-        )
-
-    # Validate granularity
-    valid_granularities = ["TOTAL", "DAY", "HOUR", "LIFETIME"]
-    if granularity not in valid_granularities:
-        raise ValueError(
-            f"Invalid granularity: {granularity}. Must be one of: {valid_granularities}"
-        )
-
-    result = {
-        "entity_type": entity_type,
-        "entity_id": entity_id,
-        "granularity": granularity,
-    }
-
-    # Parse fields if provided (part 4)
-    if len(parts) > 4 and parts[4]:
-        # Check if this looks like options (contains =) or fields
-        if "=" in parts[4]:
-            # This is options, not fields
-            options_str = parts[4]
-            for option in options_str.split(","):
-                if "=" in option:
-                    key, value = option.split("=", 1)
-                    result[key.strip()] = value.strip()
-        else:
-            # This is fields
-            result["fields"] = parts[4]
-
-            # Parse options if provided (part 5)
-            if len(parts) > 5:
-                options_str = parts[5]
-                for option in options_str.split(","):
-                    if "=" in option:
-                        key, value = option.split("=", 1)
-                        result[key.strip()] = value.strip()
-
-    return result
-
-
 def fetch_stats_data(
     api: "SnapchatAdsAPI",
     url: str,
@@ -370,6 +298,10 @@ def fetch_stats_data(
     headers = api.get_headers()
 
     response = client.get(url, headers=headers, params=params)
+    if not response.ok:
+        raise ValueError(
+            f"Stats request failed: {response.status_code} - {response.text}"
+        )
     response.raise_for_status()
 
     result = response.json()
@@ -394,11 +326,15 @@ def parse_total_stats(result: dict) -> Iterator[dict]:
     Yields:
         Flattened stats records
     """
-    total_stats = result.get("total_stats", [])
+    # Handle both total_stats and lifetime_stats response formats
+    total_stats = result.get("total_stats", []) or result.get("lifetime_stats", [])
 
     for stat_item in total_stats:
         if stat_item.get("sub_request_status", "").upper() == "SUCCESS":
-            total_stat = stat_item.get("total_stat", {})
+            # Handle both total_stat and lifetime_stat keys
+            total_stat = stat_item.get("total_stat", {}) or stat_item.get(
+                "lifetime_stat", {}
+            )
             if total_stat:
                 # Flatten the stats object
                 record = {
@@ -524,63 +460,76 @@ def parse_timeseries_stats(result: dict) -> Iterator[dict]:
                                 yield breakdown_record
 
 
-def get_entity_ids_for_stats(
+def fetch_entity_stats(
     api: "SnapchatAdsAPI",
     entity_type: str,
+    ad_account_id: str | None,
     organization_id: str | None,
     base_url: str,
-    entity_id: str | None = None,
-) -> list[str]:
+    params: dict,
+    granularity: str,
+    start_date=None,
+    end_date=None,
+) -> Iterator[dict]:
     """
-    Get list of entity IDs to fetch stats for.
+    Fetch stats for all entities of a given type.
+
+    First fetches all entities (campaigns, ads, adsquads, or adaccounts),
+    then fetches stats for each entity.
 
     Args:
         api: SnapchatAdsAPI instance
         entity_type: Type of entity (campaign, adsquad, ad, adaccount)
-        organization_id: Organization ID (required if entity_id not provided)
+        ad_account_id: Specific ad account ID (optional)
+        organization_id: Organization ID (required if ad_account_id not provided)
         base_url: Base API URL
-        entity_id: Specific entity ID to fetch stats for (optional)
+        params: Query parameters for stats request
+        granularity: Granularity of stats (TOTAL, DAY, HOUR, LIFETIME)
+        start_date: Start date for filtering entities
+        end_date: End date for filtering entities
 
-    Returns:
-        List of entity IDs
+    Yields:
+        Flattened stats records
     """
-    # If specific entity_id is provided, use it directly
-    if entity_id:
-        return [entity_id]
-
-    if entity_type == "adaccount":
-        # For ad account stats, return the account IDs
-        return get_account_ids(
-            api, None, organization_id, base_url, "stats", None, None
-        )
-
-    # For campaign, adsquad, ad - need to fetch from ad accounts
+    # Get account IDs
     account_ids = get_account_ids(
-        api, None, organization_id, base_url, "stats", None, None
+        api, ad_account_id, organization_id, base_url, "stats", start_date, end_date
     )
 
-    entity_ids = []
-    client = create_client()
-    headers = api.get_headers()
+    if not account_ids:
+        return
 
-    entity_type_map = {
-        "campaign": ("campaigns", "campaign"),
-        "adsquad": ("adsquads", "adsquad"),
-        "ad": ("ads", "ad"),
-    }
+    if entity_type == "adaccount":
+        # For ad accounts, fetch stats directly for each account
+        for account_id in account_ids:
+            url = f"{base_url}/adaccounts/{account_id}/stats"
+            yield from fetch_stats_data(api, url, params, granularity)
+    else:
+        # For campaign, adsquad, ad - first fetch entities, then stats
+        entity_type_map = {
+            "campaign": ("campaigns", "campaign"),
+            "adsquad": ("adsquads", "adsquad"),
+            "ad": ("ads", "ad"),
+        }
 
-    resource_name, item_key = entity_type_map[entity_type]
+        resource_name, item_key = entity_type_map[entity_type]
+        client = create_client()
+        headers = api.get_headers()
 
-    for account_id in account_ids:
-        url = f"{base_url}/adaccounts/{account_id}/{resource_name}"
+        for account_id in account_ids:
+            url = f"{base_url}/adaccounts/{account_id}/{resource_name}"
 
-        for result in paginate(client, headers, url, page_size=1000):
-            items_data = result.get(resource_name, [])
+            for result in paginate(client, headers, url, page_size=1000):
+                items_data = result.get(resource_name, [])
 
-            for item in items_data:
-                if item.get("sub_request_status", "").upper() == "SUCCESS":
-                    data = item.get(item_key, {})
-                    if data and data.get("id"):
-                        entity_ids.append(data["id"])
-
-    return entity_ids
+                for item in items_data:
+                    if item.get("sub_request_status", "").upper() == "SUCCESS":
+                        data = item.get(item_key, {})
+                        if data and data.get("id"):
+                            entity_id = data["id"]
+                            stats_url = build_stats_url(
+                                base_url, entity_type, entity_id
+                            )
+                            yield from fetch_stats_data(
+                                api, stats_url, params, granularity
+                            )

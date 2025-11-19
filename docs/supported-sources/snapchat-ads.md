@@ -76,25 +76,41 @@ These resources can fetch data for a specific ad account or all ad accounts in t
 
 ### Stats / Measurement Data
 
-Snapchat Ads source supports fetching stats/measurement data for campaigns, ad squads, ads, and ad accounts.
+Snapchat Ads source supports fetching stats/measurement data for campaigns, ad squads, ads, and ad accounts through dedicated stats resources.
+
+#### Stats Resources
+
+| Table           | Inc Strategy | Details                                                                                                                                        |
+| --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `campaigns_stats` | replace | Retrieves stats for all campaigns in the organization or specific ad account |
+| `ads_stats` | replace | Retrieves stats for all ads in the organization or specific ad account |
+| `ad_squads_stats` | replace | Retrieves stats for all ad squads in the organization or specific ad account |
+| `ad_accounts_stats` | replace | Retrieves stats for all ad accounts in the organization (Note: only `spend` field is supported) |
 
 #### Stats Table Format
 
 ```plaintext
-snapchat_ads_stats:<entity_type>:<entity_id>:<granularity>[:<fields>][:<options>]
+<resource_name>:<granularity>[:<fields>][:<options>]
 ```
 
-**Required Parameters:**
+Or with specific ad account:
 
-- `entity_type`: Type of entity - `campaign`, `adsquad`, `ad`, or `adaccount`
-- `entity_id`: The ID of the entity to fetch stats for
+```plaintext
+<resource_name>:<ad_account_id>:<granularity>[:<fields>][:<options>]
+```
+
+**Parameters:**
+
+- `resource_name`: One of `campaigns_stats`, `ads_stats`, `ad_squads_stats`, `ad_accounts_stats`
+- `ad_account_id` (optional): Specific ad account ID to fetch stats for
 - `granularity`: Time granularity - `TOTAL`, `DAY`, `HOUR`, or `LIFETIME`
+- `fields` (optional): Metrics requested (comma-separated). Default: `impressions,spend`
+- `options` (optional): Additional parameters in `key=value,key=value` format
 
-**Optional Parameters:**
+**Available Options:**
 
 | Parameter | Description | Values |
 |-----------|-------------|--------|
-| `fields` | Metrics requested (comma-separated) | Default: `impressions,spend` |
 | `breakdown` | Object-level breakdown | `ad`, `adsquad` (Campaign only), `campaign` (Ad Account only) |
 | `dimension` | Insight-level breakdown | `GEO`, `DEMO`, `INTEREST`, `DEVICE` |
 | `pivot` | Pivot for insights breakdown | `country`, `region`, `dma`, `gender`, `age_bucket`, `interest_category_id`, `interest_category_name`, `operating_system`, `make`, `model` |
@@ -126,26 +142,48 @@ ingestr ingest \
   --dest-table 'dest.campaigns'
 ```
 
-### Fetch stats for a specific campaign
+### Fetch stats for all campaigns (DAY granularity)
 
 ```sh
 ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
-  --source-table 'snapchat_ads_stats:campaign:your-campaign-id:DAY:impressions,spend,swipes' \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
+  --source-table 'campaigns_stats:DAY:impressions,spend,swipes' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaign_stats' \
+  --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
   --interval-end '2024-01-31'
+```
+
+### Fetch stats for campaigns in a specific ad account
+
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
+  --source-table 'campaigns_stats:22225ba982815:DAY:impressions,spend' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.campaigns_stats' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-01-31'
+```
+
+### Fetch stats with TOTAL granularity
+
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
+  --source-table 'ads_stats:TOTAL:impressions,spend' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.ads_stats'
 ```
 
 ### Fetch stats with attribution windows
 
 ```sh
 ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
-  --source-table 'snapchat_ads_stats:ad:your-ad-id:DAY:impressions,spend:swipe_up_attribution_window=28_DAY,view_attribution_window=7_DAY' \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
+  --source-table 'ads_stats:DAY:impressions,spend:swipe_up_attribution_window=28_DAY,view_attribution_window=7_DAY' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.ad_stats' \
+  --dest-table 'dest.ads_stats' \
   --interval-start '2024-01-01' \
   --interval-end '2024-01-31'
 ```
@@ -154,10 +192,10 @@ ingestr ingest \
 
 ```sh
 ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
-  --source-table 'snapchat_ads_stats:campaign:your-campaign-id:DAY:impressions,spend:breakdown=ad' \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
+  --source-table 'campaigns_stats:DAY:impressions,spend:breakdown=ad' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaign_breakdown_stats' \
+  --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
   --interval-end '2024-01-31'
 ```
@@ -166,22 +204,32 @@ ingestr ingest \
 
 ```sh
 ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
-  --source-table 'snapchat_ads_stats:campaign:your-campaign-id:DAY:impressions,spend:dimension=GEO,pivot=country' \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
+  --source-table 'campaigns_stats:DAY:impressions,spend:dimension=GEO,pivot=country' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaign_geo_stats' \
+  --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
   --interval-end '2024-01-31'
+```
+
+### Fetch ad account stats (LIFETIME with spend only)
+
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
+  --source-table 'ad_accounts_stats:LIFETIME:spend' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.ad_accounts_stats'
 ```
 
 ### Fetch stats with test data
 
 ```sh
 ingestr ingest \
-  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret' \
-  --source-table 'snapchat_ads_stats:campaign:your-campaign-id:DAY::test=true' \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
+  --source-table 'campaigns_stats:DAY:impressions,spend:test=true' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.campaign_stats' \
+  --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
   --interval-end '2024-01-31'
 ```

@@ -4485,7 +4485,10 @@ class SnapchatAdsSource:
         "event_details",
         "creatives",
         "segments",
-        "snapchat_ads_stats",
+        "campaigns_stats",
+        "ad_accounts_stats",
+        "ads_stats",
+        "ad_squads_stats",
     ]
 
     def handles_incrementality(self) -> bool:
@@ -4508,7 +4511,6 @@ class SnapchatAdsSource:
             raise ValueError("client_secret is required to connect to Snapchat Ads")
 
         organization_id = source_fields.get("organization_id")
-        ad_account_id_from_uri = source_fields.get("ad_account_id")
 
         # Resources that support ad_account_id filtering
         ad_account_resources = [
@@ -4521,30 +4523,86 @@ class SnapchatAdsSource:
             "segments",
         ]
 
-        # Check if this is a stats table
-        stats_config = None
-        if table.startswith("snapchat_ads_stats:"):
-            from ingestr.src.snapchat_ads.helpers import parse_stats_table_format
+        # Stats resources
+        stats_resources = [
+            "campaigns_stats",
+            "ad_accounts_stats",
+            "ads_stats",
+            "ad_squads_stats",
+        ]
 
-            stats_config = parse_stats_table_format(table)
-            resource_name = "snapchat_ads_stats"
-            ad_account_id = (
-                ad_account_id_from_uri[0] if ad_account_id_from_uri else None
-            )
-        else:
-            # Parse table name for special cases like "campaigns:ad_account_id"
-            ad_account_id = None
-            if ":" in table:
-                resource_name, ad_account_id = table.split(":", maxsplit=1)
+        # Parse table name
+        stats_config = None
+        ad_account_id = None
+
+        if ":" in table:
+            parts = table.split(":")
+            resource_name = parts[0]
+
+            if resource_name in stats_resources:
+                # Stats table format:
+                # resource_name:granularity:fields:options (all accounts)
+                # resource_name:ad_account_id:granularity:fields:options (specific account)
+
+                def parse_options(options_str: str) -> dict:
+                    """Parse key=value,key=value options string."""
+                    result = {}
+                    for option in options_str.split(","):
+                        if "=" in option:
+                            key, value = option.split("=", 1)
+                            result[key] = value
+                    return result
+
+                if len(parts) >= 2:
+                    valid_granularities = ["TOTAL", "DAY", "HOUR", "LIFETIME"]
+
+                    if parts[1].upper() in valid_granularities:
+                        # Format: resource_name:granularity:fields:options
+                        stats_config = {
+                            "granularity": parts[1].upper(),
+                            "fields": parts[2]
+                            if len(parts) > 2
+                            else "impressions,spend",
+                        }
+                        if len(parts) > 3:
+                            stats_config.update(parse_options(parts[3]))
+                    else:
+                        # Format: resource_name:ad_account_id:granularity:fields:options
+                        ad_account_id = parts[1]
+                        stats_config = {
+                            "granularity": parts[2].upper()
+                            if len(parts) > 2
+                            else "DAY",
+                            "fields": parts[3]
+                            if len(parts) > 3
+                            else "impressions,spend",
+                        }
+                        if len(parts) > 4:
+                            stats_config.update(parse_options(parts[4]))
+                else:
+                    # Just resource_name, use defaults
+                    stats_config = {
+                        "granularity": "DAY",
+                        "fields": "impressions,spend",
+                    }
+            else:
+                # Non-stats table with ad_account_id: resource_name:ad_account_id
+                ad_account_id = parts[1] if len(parts) > 1 else None
                 if not ad_account_id:
                     raise ValueError(
                         f"ad_account_id must be provided in format '{resource_name}:ad_account_id'"
                     )
-            else:
-                resource_name = table
+        else:
+            resource_name = table
+            if resource_name in stats_resources:
+                # Stats resource with default config
+                stats_config = {
+                    "granularity": "DAY",
+                    "fields": "impressions,spend",
+                }
 
         # Validation for non-stats resources
-        if resource_name != "snapchat_ads_stats":
+        if resource_name not in stats_resources:
             account_id_required = (
                 resource_name in ad_account_resources
                 and ad_account_id is None
@@ -4559,7 +4617,12 @@ class SnapchatAdsSource:
                 raise ValueError(
                     f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
                 )
-        # Stats resource - entity_id is always required in the format, no organization_id needed
+        else:
+            # Stats resources need either ad_account_id or organization_id
+            if not ad_account_id and not organization_id:
+                raise ValueError(
+                    f"organization_id is required for '{resource_name}' when ad_account_id is not provided"
+                )
 
         if resource_name not in self.resources:
             raise UnsupportedResourceError(table, "Snapchat Ads")
