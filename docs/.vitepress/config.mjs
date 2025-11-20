@@ -193,4 +193,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
       { icon: "github", link: "https://github.com/bruin-data/ingestr" },
     ],
   },
+  sitemap: {
+    hostname: 'https://getbruin.com'
+  }
 });
