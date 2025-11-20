@@ -138,8 +138,13 @@ def invoke_ingest_command(
         args.append(inc_key)
 
     if primary_key:
-        args.append("--primary-key")
-        args.append(primary_key)
+        if isinstance(primary_key, list):
+            for key in primary_key:
+                args.append("--primary-key")
+                args.append(key)
+        else:
+            args.append("--primary-key")
+            args.append(primary_key)
 
     if merge_key:
         args.append("--merge-key")
@@ -5383,9 +5388,218 @@ def mongodb_test_cases():
             client = mongo.get_connection_client()
             assert client["ingestr_db"][collection].count_documents({}) == DOC_COUNT
 
+    def merge_with_primary_key(mongo):
+        """
+        Test merge disposition with primary key.
+        """
+        collection = f"merge_test_{get_random_string(5)}"
+
+        initial_data = pa.Table.from_pandas(
+            pd.DataFrame(
+                {
+                    "user_id": [1, 2, 3],
+                    "name": ["Alice", "Bob", "Charlie"],
+                    "age": [25, 30, 35],
+                }
+            )
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".arrow") as fd:
+            with pa.OSFile(fd.name, "wb") as f:
+                writer = ipc.new_file(f, initial_data.schema)
+                writer.write_table(initial_data)
+                writer.close()
+
+            result = invoke_ingest_command(
+                f"mmap://{fd.name}",
+                "raw.input",
+                mongo.get_connection_url(),
+                collection,
+                primary_key="user_id",
+                inc_strategy="merge",
+            )
+            assert result.exit_code == 0
+
+        client = mongo.get_connection_client()
+        assert client["ingestr_db"][collection].count_documents({}) == 3
+
+        updated_data = pa.Table.from_pandas(
+            pd.DataFrame(
+                {
+                    "user_id": [2, 3, 4],
+                    "name": ["Bob Updated", "Charlie Updated", "Diana"],
+                    "age": [31, 36, 28],
+                }
+            )
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".arrow") as fd:
+            with pa.OSFile(fd.name, "wb") as f:
+                writer = ipc.new_file(f, updated_data.schema)
+                writer.write_table(updated_data)
+                writer.close()
+
+            result = invoke_ingest_command(
+                f"mmap://{fd.name}",
+                "raw.input",
+                mongo.get_connection_url(),
+                collection,
+                primary_key="user_id",
+                inc_strategy="merge",
+            )
+            assert result.exit_code == 0
+
+        assert client["ingestr_db"][collection].count_documents({}) == 4
+
+        alice = client["ingestr_db"][collection].find_one({"user_id": 1})
+        assert alice is not None
+        assert alice["name"] == "Alice"
+        assert alice["age"] == 25
+
+        bob = client["ingestr_db"][collection].find_one({"user_id": 2})
+        assert bob["name"] == "Bob Updated"
+        assert bob["age"] == 31
+
+        charlie = client["ingestr_db"][collection].find_one({"user_id": 3})
+        assert charlie["name"] == "Charlie Updated"
+        assert charlie["age"] == 36
+
+        diana = client["ingestr_db"][collection].find_one({"user_id": 4})
+        assert diana is not None
+        assert diana["name"] == "Diana"
+        assert diana["age"] == 28
+
+    def merge_without_primary_key(mongo):
+        """
+        Test that merge disposition fails when no primary key is specified.
+        """
+        collection = f"merge_no_pk_{get_random_string(5)}"
+
+        initial_data = pa.Table.from_pandas(
+            pd.DataFrame(
+                {
+                    "user_id": [1, 2, 3],
+                    "name": ["Alice", "Bob", "Charlie"],
+                }
+            )
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".arrow") as fd:
+            with pa.OSFile(fd.name, "wb") as f:
+                writer = ipc.new_file(f, initial_data.schema)
+                writer.write_table(initial_data)
+                writer.close()
+
+            result = invoke_ingest_command(
+                f"mmap://{fd.name}",
+                "raw.input",
+                mongo.get_connection_url(),
+                collection,
+                inc_strategy="merge",
+            )
+            # Should fail because no primary key is specified
+            assert result.exit_code != 0
+            assert (
+                "merge operation requires primary keys" in result.output.lower()
+                or "primary key" in result.output.lower()
+            )
+
+    def merge_with_multiple_primary_keys(mongo):
+        """
+        Test merge disposition with multiple primary keys.
+        Uses user_id and category as composite primary key.
+        """
+        collection = f"merge_multi_pk_{get_random_string(5)}"
+
+        initial_data = pa.Table.from_pandas(
+            pd.DataFrame(
+                {
+                    "user_id": [1, 1, 2, 2],
+                    "category": ["A", "B", "A", "B"],
+                    "value": [100, 200, 300, 400],
+                }
+            )
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".arrow") as fd:
+            with pa.OSFile(fd.name, "wb") as f:
+                writer = ipc.new_file(f, initial_data.schema)
+                writer.write_table(initial_data)
+                writer.close()
+
+            result = invoke_ingest_command(
+                f"mmap://{fd.name}",
+                "raw.input",
+                mongo.get_connection_url(),
+                collection,
+                primary_key=["user_id", "category"],
+                inc_strategy="merge",
+            )
+            assert result.exit_code == 0
+
+        client = mongo.get_connection_client()
+        assert client["ingestr_db"][collection].count_documents({}) == 4
+
+        # Now update some records and add a new one
+        updated_data = pa.Table.from_pandas(
+            pd.DataFrame(
+                {
+                    "user_id": [1, 2, 3],
+                    "category": ["A", "B", "A"],
+                    "value": [150, 450, 500],
+                }
+            )
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".arrow") as fd:
+            with pa.OSFile(fd.name, "wb") as f:
+                writer = ipc.new_file(f, updated_data.schema)
+                writer.write_table(updated_data)
+                writer.close()
+
+            result = invoke_ingest_command(
+                f"mmap://{fd.name}",
+                "raw.input",
+                mongo.get_connection_url(),
+                collection,
+                primary_key=["user_id", "category"],
+                inc_strategy="merge",
+            )
+            assert result.exit_code == 0
+
+        # Should have 5 documents now: (1,B), (2,A), (1,A updated), (2,B updated), (3,A new)
+        assert client["ingestr_db"][collection].count_documents({}) == 5
+
+        # Check updated records
+        user1_cat_a = client["ingestr_db"][collection].find_one(
+            {"user_id": 1, "category": "A"}
+        )
+        assert user1_cat_a["value"] == 150
+
+        user2_cat_b = client["ingestr_db"][collection].find_one(
+            {"user_id": 2, "category": "B"}
+        )
+        assert user2_cat_b["value"] == 450
+
+        # Check non-updated record
+        user1_cat_b = client["ingestr_db"][collection].find_one(
+            {"user_id": 1, "category": "B"}
+        )
+        assert user1_cat_b["value"] == 200
+
+        # Check new record
+        user3_cat_a = client["ingestr_db"][collection].find_one(
+            {"user_id": 3, "category": "A"}
+        )
+        assert user3_cat_a is not None
+        assert user3_cat_a["value"] == 500
+
     return [
         smoke_test,
         large_insert,
+        merge_with_primary_key,
+        merge_without_primary_key,
+        merge_with_multiple_primary_keys,
     ]
 
 

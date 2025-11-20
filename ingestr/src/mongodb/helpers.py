@@ -1004,6 +1004,7 @@ def mongodb_insert(uri: str):
             connection_string += f"?{parsed_uri.query}"
 
     state = {"first_batch": True}
+    BATCH_SIZE = 10009
 
     def destination(items: TDataItem, table: TTableSchema) -> None:
         import pyarrow
@@ -1026,12 +1027,40 @@ def mongodb_insert(uri: str):
             else:
                 documents = [item for item in items if isinstance(item, dict)]
 
-            if state["first_batch"] and documents:
-                collection.delete_many({})
-                state["first_batch"] = False
+            if table.get("write_disposition") == "merge":
+                from pymongo import ReplaceOne
 
-            if documents:
-                collection.insert_many(documents)  # Insert all new data
+                primary_keys = [
+                    col_name
+                    for col_name, col_def in table.get("columns", {}).items()
+                    if isinstance(col_def, dict) and col_def.get("primary_key")
+                ]
+
+                if not primary_keys:
+                    raise ValueError(
+                        f"Merge operation requires primary keys for table '{collection_name}'. "
+                        f"Please define primary keys in the table schema or use 'replace' write disposition."
+                    )
+
+                operations = []
+                for doc in documents:
+                    filter_dict = {key: doc[key] for key in primary_keys if key in doc}
+                    if filter_dict:
+                        operations.append(ReplaceOne(filter_dict, doc, upsert=True))
+
+                for i in range(0, len(operations), BATCH_SIZE):
+                    batch = operations[i : i + BATCH_SIZE]
+                    if batch:
+                        collection.bulk_write(batch, ordered=False)
+            elif table.get("write_disposition") == "replace":
+                if state["first_batch"] and documents:
+                    collection.delete_many({})
+                    state["first_batch"] = False
+
+                for i in range(0, len(documents), BATCH_SIZE):
+                    batch = documents[i : i + BATCH_SIZE]
+                    if batch:
+                        collection.insert_many(batch)
 
     return dlt.destination(
         destination,
