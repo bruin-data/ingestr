@@ -337,6 +337,9 @@ def snapchat_ads_source(
                 params["start_time"] = start_dt.format("YYYY-MM-DDTHH:mm:ss.000")
             if end_date:
                 end_dt = ensure_pendulum_datetime(end_date)
+                # For both HOUR and DAY granularity, use ceiling to round up to next hour if needed
+                if end_dt != end_dt.start_of("hour"):
+                    end_dt = end_dt.add(hours=1).start_of("hour")
                 params["end_time"] = end_dt.format("YYYY-MM-DDTHH:mm:ss.000")
 
         # Add optional parameters from stats_config
