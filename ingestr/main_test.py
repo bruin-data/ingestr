@@ -6077,9 +6077,9 @@ def test_snapchat_ads_merge_strategy():
             print(
                 f"✓ First ingest: {first_ingest_total} records with NULL ad_id and adsquad_id"
             )
-            assert (
-                first_ingest_null_ad_ids == first_ingest_total
-            ), f"All ad_id values should be NULL in first ingest, got {first_ingest_null_ad_ids}/{first_ingest_total}"
+            assert first_ingest_null_ad_ids == first_ingest_total, (
+                f"All ad_id values should be NULL in first ingest, got {first_ingest_null_ad_ids}/{first_ingest_total}"
+            )
         else:
             print(
                 f"⚠ First ingest: {first_ingest_total} records but missing columns - "
@@ -6116,17 +6116,19 @@ def test_snapchat_ads_merge_strategy():
         )
 
         # Verify merge strategy worked correctly
-        assert (
-            total_records > first_ingest_total
-        ), f"Second ingest should have appended data, not replaced. Got {total_records} total vs {first_ingest_total} first"
+        assert total_records > first_ingest_total, (
+            f"Second ingest should have appended data, not replaced. Got {total_records} total vs {first_ingest_total} first"
+        )
 
         # If ad_id column existed in first ingest, verify NULL records remain
         if has_ad_id:
-            assert (
-                null_ad_ids == first_ingest_total
-            ), f"NULL ad_id records should remain from first ingest. Got {null_ad_ids} NULL vs {first_ingest_total} first ingest"
+            assert null_ad_ids == first_ingest_total, (
+                f"NULL ad_id records should remain from first ingest. Got {null_ad_ids} NULL vs {first_ingest_total} first ingest"
+            )
 
-        assert non_null_ad_ids > 0, "Should have records with populated ad_id from second ingest"
+        assert non_null_ad_ids > 0, (
+            "Should have records with populated ad_id from second ingest"
+        )
 
         # Verify primary key structure - get all columns first
         all_columns = conn.execute(
@@ -6143,12 +6145,10 @@ def test_snapchat_ads_merge_strategy():
                 select_cols.append(col)
 
         result = conn.execute(
-            f"SELECT {', '.join(select_cols)} "
-            "FROM snapchat_ads.campaigns_stats "
-            "LIMIT 5"
+            f"SELECT {', '.join(select_cols)} FROM snapchat_ads.campaigns_stats LIMIT 5"
         ).fetchall()
 
-        print(f"✓ Sample records (showing PK columns):")
+        print("✓ Sample records (showing PK columns):")
         for row in result:
             row_str = ", ".join(f"{col}={val}" for col, val in zip(select_cols, row))
             print(f"  {row_str}")
