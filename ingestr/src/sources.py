@@ -4491,6 +4491,25 @@ class SnapchatAdsSource:
         "ad_squads_stats",
     ]
 
+    # Resources that support ad_account_id filtering
+    AD_ACCOUNT_RESOURCES = {
+        "invoices",
+        "campaigns",
+        "adsquads",
+        "ads",
+        "event_details",
+        "creatives",
+        "segments",
+    }
+
+    # Stats resources
+    STATS_RESOURCES = {
+        "campaigns_stats",
+        "ad_accounts_stats",
+        "ads_stats",
+        "ad_squads_stats",
+    }
+
     def handles_incrementality(self) -> bool:
         return True
 
@@ -4512,25 +4531,6 @@ class SnapchatAdsSource:
 
         organization_id = source_fields.get("organization_id")
 
-        # Resources that support ad_account_id filtering
-        ad_account_resources = [
-            "invoices",
-            "campaigns",
-            "adsquads",
-            "ads",
-            "event_details",
-            "creatives",
-            "segments",
-        ]
-
-        # Stats resources
-        stats_resources = [
-            "campaigns_stats",
-            "ad_accounts_stats",
-            "ads_stats",
-            "ad_squads_stats",
-        ]
-
         # Parse table name
         stats_config = None
         ad_account_id = None
@@ -4539,7 +4539,7 @@ class SnapchatAdsSource:
             parts = table.split(":")
             resource_name = parts[0]
 
-            if resource_name in stats_resources:
+            if resource_name in self.STATS_RESOURCES:
                 # Stats table format parsed in helpers
                 from ingestr.src.snapchat_ads.helpers import parse_stats_table
 
@@ -4555,7 +4555,7 @@ class SnapchatAdsSource:
                     )
         else:
             resource_name = table
-            if resource_name in stats_resources:
+            if resource_name in self.STATS_RESOURCES:
                 # Stats resource with default config
                 stats_config = {
                     "granularity": "DAY",
@@ -4563,9 +4563,9 @@ class SnapchatAdsSource:
                 }
 
         # Validation for non-stats resources
-        if resource_name not in stats_resources:
+        if resource_name not in self.STATS_RESOURCES:
             account_id_required = (
-                resource_name in ad_account_resources
+                resource_name in self.AD_ACCOUNT_RESOURCES
                 and ad_account_id is None
                 and not organization_id
             )
@@ -4581,9 +4581,7 @@ class SnapchatAdsSource:
         else:
             # Stats resources require organization_id
             if not organization_id:
-                raise ValueError(
-                    f"organization_id is required for '{resource_name}'"
-                )
+                raise ValueError(f"organization_id is required for '{resource_name}'")
 
         if resource_name not in self.resources:
             raise UnsupportedResourceError(table, "Snapchat Ads")
@@ -4600,7 +4598,7 @@ class SnapchatAdsSource:
             source_kwargs["organization_id"] = organization_id[0]
 
         # Only pass ad_account_id for non-stats resources
-        if ad_account_id and resource_name not in stats_resources:
+        if ad_account_id and resource_name not in self.STATS_RESOURCES:
             source_kwargs["ad_account_id"] = ad_account_id
 
         # Add interval_start and interval_end for client-side filtering

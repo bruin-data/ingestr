@@ -80,47 +80,38 @@ Snapchat Ads source supports fetching stats/measurement data for campaigns, ad s
 
 #### Stats Resources
 
-| Table           | Inc Strategy | Details                                                                                                                                        |
-| --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `campaigns_stats` | replace | Retrieves stats for all campaigns in the organization or specific ad account |
-| `ads_stats` | replace | Retrieves stats for all ads in the organization or specific ad account |
-| `ad_squads_stats` | replace | Retrieves stats for all ad squads in the organization or specific ad account |
-| `ad_accounts_stats` | replace | Retrieves stats for all ad accounts in the organization (Note: only `spend` field is supported) |
+| Table           | Inc Strategy | Primary Key | Details                                                                                                                                        |
+| --------------- | ------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `campaigns_stats` | merge | campaign_id, adsquad_id, ad_id, start_time, end_time | Retrieves stats for all campaigns. Supports breakdowns by `ad` or `adsquad` |
+| `ads_stats` | merge | campaign_id, adsquad_id, ad_id, start_time, end_time | Retrieves stats for all ads. No breakdown supported (already lowest level) |
+| `ad_squads_stats` | merge | campaign_id, adsquad_id, ad_id, start_time, end_time | Retrieves stats for all ad squads. Supports breakdown by `ad` |
+| `ad_accounts_stats` | merge | campaign_id, adsquad_id, ad_id, start_time, end_time | Retrieves stats for all ad accounts. Supports breakdowns by `ad`, `adsquad`, or `campaign` |
+
+**Note:** When breakdown is not specified, `adsquad_id` and `ad_id` will be `NULL` in the results.
 
 #### Stats Table Format
 
 ```plaintext
-<resource_name>:<granularity>[:<fields>][:<options>]
-```
-
-Or with specific ad account:
-
-```plaintext
-<resource_name>:<ad_account_id>:<granularity>[:<fields>][:<options>]
+<resource_name>:<granularity>,<fields>
+<resource_name>:<breakdown>,<granularity>,<fields>
 ```
 
 **Parameters:**
 
-- `resource_name`: One of `campaigns_stats`, `ads_stats`, `ad_squads_stats`, `ad_accounts_stats`
-- `ad_account_id` (optional): Specific ad account ID to fetch stats for
-- `granularity`: Time granularity - `TOTAL`, `DAY`, `HOUR`, or `LIFETIME`
-- `fields` (optional): Metrics requested (comma-separated). Default: `impressions,spend`
-- `options` (optional): Additional parameters in `key=value,key=value` format
+- `resource_name` (required): One of `campaigns_stats`, `ads_stats`, `ad_squads_stats`, `ad_accounts_stats`
+- `breakdown` (optional): Object-level breakdown. Valid values depend on the resource:
+  - `campaigns_stats`: `ad`, `adsquad`
+  - `ad_squads_stats`: `ad`
+  - `ad_accounts_stats`: `ad`, `adsquad`, `campaign`
+  - `ads_stats`: No breakdown supported
+- `granularity` (required): Time granularity - `TOTAL`, `DAY`, `HOUR`, or `LIFETIME`
+- `fields` (required): Metrics to retrieve (comma-separated). Examples: `impressions`, `spend`, `swipes`, `conversion_purchases`, etc.
 
-**Available Options:**
-
-| Parameter | Description | Values |
-|-----------|-------------|--------|
-| `breakdown` | Object-level breakdown | `ad`, `adsquad` (Campaign only), `campaign` (Ad Account only) |
-| `dimension` | Insight-level breakdown | `GEO`, `DEMO`, `INTEREST`, `DEVICE` |
-| `pivot` | Pivot for insights breakdown | `country`, `region`, `dma`, `gender`, `age_bucket`, `interest_category_id`, `interest_category_name`, `operating_system`, `make`, `model` |
-| `swipe_up_attribution_window` | Attribution window for swipe ups | `1_DAY`, `7_DAY`, `28_DAY` (default) |
-| `view_attribution_window` | Attribution window for views | `none`, `1_HOUR`, `3_HOUR`, `6_HOUR`, `1_DAY` (default), `7_DAY`, `28_DAY` |
-| `action_report_time` | Principle for conversion reporting | `conversion` (default), `impression` |
-| `conversion_source_types` | Conversion source breakout by platform | `web`, `app`, `offline`, `total`, `total_off_platform`, `total_on_platform` |
-| `omit_empty` | Omit records with zero data | `false` (default), `true` |
-| `position_stats` | Position metric breakdown for Snap Ads | `true` |
-| `test` | Return sample (fake) stats | `false` (default), `true` |
+**Format Examples:**
+- Without breakdown: `campaigns_stats:DAY,impressions,spend,swipes`
+- With ad breakdown: `campaigns_stats:ad,HOUR,impressions,spend`
+- With adsquad breakdown: `campaigns_stats:adsquad,DAY,impressions,swipes`
+- Ad account stats with campaign breakdown: `ad_accounts_stats:campaign,DAY,spend`
 
 ## Examples
 
@@ -133,36 +124,66 @@ ingestr ingest \
   --dest-table 'dest.campaigns'
 ```
 
-### Fetch stats for all campaigns (DAY granularity)
+### Fetch campaign stats without breakdown (hourly granularity)
 
 ```sh
 ingestr ingest \
   --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'campaigns_stats:DAY:impressions,spend,swipes' \
+  --source-table 'campaigns_stats:HOUR,impressions,spend,swipes' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
   --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
   --interval-end '2024-01-31'
 ```
 
-### Fetch stats with options
+Result will include `campaign_id`, but `adsquad_id` and `ad_id` will be NULL.
+
+### Fetch campaign stats with ad breakdown
 
 ```sh
 ingestr ingest \
   --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'campaigns_stats:DAY:impressions,spend:breakdown=ad,swipe_up_attribution_window=28_DAY' \
+  --source-table 'campaigns_stats:ad,DAY,impressions,spend' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
   --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
   --interval-end '2024-01-31'
 ```
 
-### Fetch ad account stats (LIFETIME with spend only)
+Result will include `campaign_id` and `ad_id`, but `adsquad_id` will be NULL.
+
+### Fetch ad account stats with campaign breakdown
 
 ```sh
 ingestr ingest \
   --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'ad_accounts_stats:LIFETIME:spend' \
+  --source-table 'ad_accounts_stats:campaign,LIFETIME,spend' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
-  --dest-table 'dest.ad_accounts_stats'
+  --dest-table 'dest.ad_accounts_stats' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-01-31'
 ```
+
+### Combining multiple breakdowns in the same table
+
+Since all stats resources use the same primary key structure, you can ingest data with different breakdowns into the same table. The merge strategy will append new rows when breakdown IDs differ:
+
+```sh
+# First: ingest without breakdown
+ingestr ingest \
+  --source-uri 'snapchatads://...' \
+  --source-table 'campaigns_stats:HOUR,impressions,spend' \
+  --dest-table 'dest.campaigns_stats' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-01-31'
+
+# Second: ingest with ad breakdown (appends to same table)
+ingestr ingest \
+  --source-uri 'snapchatads://...' \
+  --source-table 'campaigns_stats:ad,HOUR,impressions,spend' \
+  --dest-table 'dest.campaigns_stats' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-01-31'
+```
+
+The table will contain both campaign-level stats (where `ad_id` is NULL) and ad-level breakdown stats (where `ad_id` is populated).

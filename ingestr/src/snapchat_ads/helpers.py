@@ -4,6 +4,65 @@ import requests
 
 from .client import SnapchatAdsAPI, create_client
 
+# Module-level constant for entity type mapping
+ENTITY_TYPE_MAP = {
+    "campaign": "campaigns",
+    "adsquad": "adsquads",
+    "ad": "ads",
+    "adaccount": "adaccounts",
+}
+
+
+def build_metadata_fields(source: dict, **overrides) -> dict:
+    metadata_keys = [
+        "start_time",
+        "end_time",
+        "finalized_data_end_time",
+    ]
+    result = {key: source.get(key) for key in metadata_keys}
+    result.update(overrides)
+    return result
+
+
+def add_semantic_entity_fields(
+    record: dict,
+    entity_type: str,
+    entity_id: str,
+    breakdown_type: str | None = None,
+    breakdown_id: str | None = None,
+) -> None:
+    """Add semantic entity ID fields to a record in-place."""
+    parent_field_name = f"{entity_type.lower()}_id"
+    record[parent_field_name] = entity_id
+
+    if breakdown_type and breakdown_id is not None:
+        breakdown_field_name = f"{breakdown_type}_id"
+        record[breakdown_field_name] = breakdown_id
+
+
+def normalize_stats_record(record: dict) -> dict:
+    """Normalize stats record by ensuring required primary key fields exist.
+
+    Only campaign_id is required and will be filled with 'no_campaign_id' if missing.
+    Other fields (adsquad_id, ad_id) will be set to None if not present (no breakdown).
+    Time fields (start_time, end_time) are always expected to exist.
+    """
+    # Ensure campaign_id exists (required field)
+    if "campaign_id" not in record or record["campaign_id"] is None:
+        record["campaign_id"] = "no_campaign_id"
+
+    # For optional breakdown fields, set to None if not present
+    for field in ["adsquad_id", "ad_id"]:
+        if field not in record:
+            record[field] = None
+
+    # Time fields should always exist, but add fallback
+    for field in ["start_time", "end_time"]:
+        if field not in record or record[field] is None:
+            record[field] = f"no_{field}"
+
+    return record
+
 
 def client_side_date_filter(data: dict, start_date, end_date) -> bool:
     """
@@ -249,17 +308,10 @@ def build_stats_url(
     entity_type: str,
     entity_id: str,
 ) -> str:
-    entity_type_map = {
-        "campaign": "campaigns",
-        "adsquad": "adsquads",
-        "ad": "ads",
-        "adaccount": "adaccounts",
-    }
-
-    plural_entity = entity_type_map.get(entity_type)
+    plural_entity = ENTITY_TYPE_MAP.get(entity_type)
     if not plural_entity:
         raise ValueError(
-            f"Invalid entity_type: {entity_type}. Must be one of: {list(entity_type_map.keys())}"
+            f"Invalid entity_type: {entity_type}. Must be one of: {list(ENTITY_TYPE_MAP.keys())}"
         )
 
     return f"{base_url}/{plural_entity}/{entity_id}/stats"
@@ -271,7 +323,6 @@ def fetch_stats_data(
     params: dict,
     granularity: str,
 ) -> Iterator[dict]:
-
     client = create_client()
     headers = api.get_headers()
 
@@ -318,21 +369,7 @@ def parse_total_stats(result: dict) -> Iterator[dict]:
                 record = {
                     "id": total_stat.get("id"),
                     "type": total_stat.get("type"),
-                    "granularity": total_stat.get("granularity"),
-                    "start_time": total_stat.get("start_time"),
-                    "end_time": total_stat.get("end_time"),
-                    "finalized_data_end_time": total_stat.get(
-                        "finalized_data_end_time"
-                    ),
-                    "conversion_data_processed_end_time": total_stat.get(
-                        "conversion_data_processed_end_time"
-                    ),
-                    "swipe_up_attribution_window": total_stat.get(
-                        "swipe_up_attribution_window"
-                    ),
-                    "view_attribution_window": total_stat.get(
-                        "view_attribution_window"
-                    ),
+                    **build_metadata_fields(total_stat),
                 }
 
                 # Flatten nested stats
@@ -342,21 +379,39 @@ def parse_total_stats(result: dict) -> Iterator[dict]:
 
                 # Handle breakdown_stats if present
                 breakdown_stats = total_stat.get("breakdown_stats", {})
+
                 if breakdown_stats:
+                    # Yield breakdown data when no dimension
                     for breakdown_type, breakdown_items in breakdown_stats.items():
                         for item in breakdown_items:
-                            breakdown_record = record.copy()
-                            breakdown_record["breakdown_type"] = breakdown_type
-                            breakdown_record["breakdown_id"] = item.get("id")
-                            breakdown_record["breakdown_entity_type"] = item.get("type")
+                            breakdown_record: dict = {}
 
+                            # Add semantic entity fields (parent + breakdown)
+                            add_semantic_entity_fields(
+                                breakdown_record,
+                                record["type"],
+                                record["id"],
+                                breakdown_type,
+                                item.get("id"),
+                            )
+
+                            # Add metadata fields
+                            metadata = build_metadata_fields(record)
+                            breakdown_record.update(metadata)
+
+                            # Add stats
                             item_stats = item.get("stats", {})
                             for key, value in item_stats.items():
                                 breakdown_record[key] = value
 
-                            yield breakdown_record
+                            yield normalize_stats_record(breakdown_record)
                 else:
-                    yield record
+                    # No breakdown or dimension - yield parent record
+                    # Convert generic 'id' to semantic name for consistency
+                    parent_field_name = f"{record['type'].lower()}_id"
+                    record[parent_field_name] = record.pop("id")
+                    record.pop("type", None)  # Remove type field as it's redundant now
+                    yield normalize_stats_record(record)
 
 
 def parse_timeseries_stats(result: dict) -> Iterator[dict]:
@@ -377,65 +432,64 @@ def parse_timeseries_stats(result: dict) -> Iterator[dict]:
             if timeseries_stat:
                 entity_id = timeseries_stat.get("id")
                 entity_type = timeseries_stat.get("type")
-                granularity = timeseries_stat.get("granularity")
-                finalized_data_end_time = timeseries_stat.get("finalized_data_end_time")
-                conversion_data_processed_end_time = timeseries_stat.get(
-                    "conversion_data_processed_end_time"
-                )
-                swipe_up_attribution_window = timeseries_stat.get(
-                    "swipe_up_attribution_window"
-                )
-                view_attribution_window = timeseries_stat.get("view_attribution_window")
-
-                # Iterate through each time period
-                timeseries = timeseries_stat.get("timeseries", [])
-                for period in timeseries:
-                    record = {
-                        "id": entity_id,
-                        "type": entity_type,
-                        "granularity": granularity,
-                        "start_time": period.get("start_time"),
-                        "end_time": period.get("end_time"),
-                        "finalized_data_end_time": finalized_data_end_time,
-                        "conversion_data_processed_end_time": conversion_data_processed_end_time,
-                        "swipe_up_attribution_window": swipe_up_attribution_window,
-                        "view_attribution_window": view_attribution_window,
-                    }
-
-                    # Flatten nested stats
-                    stats = period.get("stats", {})
-                    for key, value in stats.items():
-                        record[key] = value
-
-                    yield record
 
                 # Handle breakdown_stats if present in timeseries
                 breakdown_stats = timeseries_stat.get("breakdown_stats", {})
+
                 if breakdown_stats:
+                    # Yield only breakdown data when breakdown is present
                     for breakdown_type, breakdown_items in breakdown_stats.items():
                         for item in breakdown_items:
                             item_timeseries = item.get("timeseries", [])
                             for period in item_timeseries:
-                                breakdown_record = {
-                                    "id": entity_id,
-                                    "type": entity_type,
-                                    "granularity": granularity,
-                                    "start_time": period.get("start_time"),
-                                    "end_time": period.get("end_time"),
-                                    "finalized_data_end_time": finalized_data_end_time,
-                                    "conversion_data_processed_end_time": conversion_data_processed_end_time,
-                                    "swipe_up_attribution_window": swipe_up_attribution_window,
-                                    "view_attribution_window": view_attribution_window,
-                                    "breakdown_type": breakdown_type,
-                                    "breakdown_id": item.get("id"),
-                                    "breakdown_entity_type": item.get("type"),
-                                }
+                                breakdown_record: dict = {}
 
+                                # Add semantic entity fields (parent + breakdown)
+                                add_semantic_entity_fields(
+                                    breakdown_record,
+                                    entity_type,
+                                    entity_id,
+                                    breakdown_type,
+                                    item.get("id"),
+                                )
+
+                                # Add metadata fields
+                                metadata = build_metadata_fields(
+                                    timeseries_stat,
+                                    start_time=period.get("start_time"),
+                                    end_time=period.get("end_time"),
+                                )
+                                breakdown_record.update(metadata)
+
+                                # Add stats
                                 item_stats = period.get("stats", {})
                                 for key, value in item_stats.items():
                                     breakdown_record[key] = value
 
-                                yield breakdown_record
+                                yield normalize_stats_record(breakdown_record)
+                else:
+                    # Yield parent entity data when no breakdown or dimension
+                    timeseries = timeseries_stat.get("timeseries", [])
+                    for period in timeseries:
+                        record: dict = {}
+
+                        # Add semantic entity field (parent only)
+                        add_semantic_entity_fields(record, entity_type, entity_id)
+
+                        # Add metadata fields
+                        metadata = build_metadata_fields(
+                            timeseries_stat,
+                            start_time=period.get("start_time"),
+                            end_time=period.get("end_time"),
+                        )
+                        record.update(metadata)
+
+                        # Flatten nested stats
+                        stats = period.get("stats", {})
+                        for key, value in stats.items():
+                            record[key] = value
+
+                        yield normalize_stats_record(record)
 
 
 def fetch_entity_stats(
@@ -449,26 +503,6 @@ def fetch_entity_stats(
     start_date=None,
     end_date=None,
 ) -> Iterator[dict]:
-    """
-    Fetch stats for all entities of a given type.
-
-    First fetches all entities (campaigns, ads, adsquads, or adaccounts),
-    then fetches stats for each entity.
-
-    Args:
-        api: SnapchatAdsAPI instance
-        entity_type: Type of entity (campaign, adsquad, ad, adaccount)
-        ad_account_id: Specific ad account ID (optional)
-        organization_id: Organization ID (required if ad_account_id not provided)
-        base_url: Base API URL
-        params: Query parameters for stats request
-        granularity: Granularity of stats (TOTAL, DAY, HOUR, LIFETIME)
-        start_date: Start date for filtering entities
-        end_date: End date for filtering entities
-
-    Yields:
-        Flattened stats records
-    """
     # Get account IDs
     account_ids = get_account_ids(
         api, ad_account_id, organization_id, base_url, "stats", start_date, end_date
@@ -484,13 +518,12 @@ def fetch_entity_stats(
             yield from fetch_stats_data(api, url, params, granularity)
     else:
         # For campaign, adsquad, ad - first fetch entities, then stats
-        entity_type_map = {
-            "campaign": ("campaigns", "campaign"),
-            "adsquad": ("adsquads", "adsquad"),
-            "ad": ("ads", "ad"),
-        }
+        # Build resource_name from ENTITY_TYPE_MAP and item_key from entity_type
+        resource_name = ENTITY_TYPE_MAP.get(entity_type)
+        if not resource_name:
+            raise ValueError(f"Invalid entity_type: {entity_type}")
 
-        resource_name, item_key = entity_type_map[entity_type]
+        item_key = entity_type
         client = create_client()
         headers = api.get_headers()
 
@@ -514,15 +547,12 @@ def fetch_entity_stats(
 
 
 def parse_stats_table(table: str) -> dict:
-
     import typing
 
     from ingestr.src.snapchat_ads.settings import (
         DEFAULT_STATS_FIELDS,
         TStatsBreakdown,
-        TStatsDimension,
         TStatsGranularity,
-        TStatsPivot,
     )
 
     parts = table.split(":")
@@ -536,8 +566,6 @@ def parse_stats_table(table: str) -> dict:
 
     valid_granularities = list(typing.get_args(TStatsGranularity))
     valid_breakdowns = list(typing.get_args(TStatsBreakdown))
-    valid_dimensions = list(typing.get_args(TStatsDimension))
-    valid_pivots = list(typing.get_args(TStatsPivot))
 
     # Parse all parameters from parts[1] (comma-separated)
     params = parts[1].split(",")
@@ -551,16 +579,12 @@ def parse_stats_table(table: str) -> dict:
 
         if param_clean.lower() in valid_breakdowns:
             stats_config["breakdown"] = param_clean.lower()
-        elif param_clean.upper() in valid_dimensions:
-            stats_config["dimension"] = param_clean.upper()
-        elif param_clean.lower() in valid_pivots:
-            stats_config["pivot"] = param_clean.lower()
         elif param_clean.upper() in valid_granularities:
             stats_config["granularity"] = param_clean.upper()
             granularity_found = True
             # Everything after granularity is fields
             if i + 1 < len(params):
-                fields_parts = params[i + 1:]
+                fields_parts = params[i + 1 :]
             break
 
     if not granularity_found:

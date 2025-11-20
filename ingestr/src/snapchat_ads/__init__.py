@@ -14,6 +14,7 @@ from .helpers import (
     fetch_with_paginate_account_id,
     paginate,
 )
+from .settings import STATS_PRIMARY_KEY
 
 BASE_URL = "https://adsapi.snapchat.com/v1"
 
@@ -344,11 +345,7 @@ def snapchat_ads_source(
 
         # Add optional parameters from stats_config
         if stats_config:
-            optional_params = [
-                "breakdown",
-                "dimension",
-                "pivot",
-            ]
+            optional_params = ["breakdown"]
 
             for param in optional_params:
                 if param in stats_config:
@@ -356,125 +353,80 @@ def snapchat_ads_source(
 
         return params
 
-    @dlt.resource(
-        write_disposition="merge",
-        merge_key=["id", "start_time"],
-        max_table_nesting=0
-    )
-    def campaigns_stats() -> Iterator[TDataItems]:
-        """Fetch stats for all campaigns.
+    def _create_stats_resource(entity_type: str, resource_name: str, docstring: str):
+        """Factory function to create stats resources dynamically."""
 
-        First fetches all campaigns, then fetches stats for each campaign.
-        """
-        if not stats_config:
-            raise ValueError("stats_config is required for campaigns_stats resource")
-
-        granularity = stats_config.get("granularity", "DAY")
-        fields = stats_config.get("fields", "impressions,spend")
-
-        params = _build_stats_params(granularity, fields)
-
-        yield from fetch_entity_stats(
-            api=api,
-            entity_type="campaign",
-            ad_account_id=ad_account_id,
-            organization_id=organization_id,
-            base_url=BASE_URL,
-            params=params,
-            granularity=granularity,
-            start_date=start_date,
-            end_date=end_date,
+        @dlt.resource(
+            name=resource_name,
+            write_disposition="merge",
+            primary_key=list(STATS_PRIMARY_KEY),
+            max_table_nesting=0,
+            columns={
+                "adsquad_id": {"nullable": True},
+                "ad_id": {"nullable": True},
+            },
         )
+        def stats_resource() -> Iterator[TDataItems]:
+            if not stats_config:
+                raise ValueError(
+                    f"stats_config is required for {resource_name} resource. "
+                    f"Use format: {resource_name}:GRANULARITY,field1,field2 "
+                    f"Example: {resource_name}:DAY,impressions,spend"
+                )
 
-    @dlt.resource(
-        write_disposition="merge",
-        merge_key=["id", "start_time"],
-        max_table_nesting=0
+            granularity = stats_config.get("granularity")
+            if not granularity:
+                raise ValueError(
+                    f"granularity is required in stats_config for {resource_name}"
+                )
+
+            fields = stats_config.get("fields")
+            if not fields:
+                raise ValueError(
+                    f"fields is required in stats_config for {resource_name}"
+                )
+
+            params = _build_stats_params(granularity, fields)
+
+            yield from fetch_entity_stats(
+                api=api,
+                entity_type=entity_type,
+                ad_account_id=ad_account_id,
+                organization_id=organization_id,
+                base_url=BASE_URL,
+                params=params,
+                granularity=granularity,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+        stats_resource.__doc__ = docstring
+        return stats_resource
+
+    # Create all stats resources using the factory
+    campaigns_stats = _create_stats_resource(
+        "campaign",
+        "campaigns_stats",
+        "Fetch stats for all campaigns.\n\nFirst fetches all campaigns, then fetches stats for each campaign.",
     )
-    def ad_accounts_stats() -> Iterator[TDataItems]:
-        """Fetch stats for all ad accounts.
 
-        Fetches stats for each ad account directly.
-        """
-        if not stats_config:
-            raise ValueError("stats_config is required for ad_accounts_stats resource")
-
-        granularity = stats_config.get("granularity", "DAY")
-        fields = stats_config.get("fields", "impressions,spend")
-
-        params = _build_stats_params(granularity, fields)
-
-        yield from fetch_entity_stats(
-            api=api,
-            entity_type="adaccount",
-            ad_account_id=ad_account_id,
-            organization_id=organization_id,
-            base_url=BASE_URL,
-            params=params,
-            granularity=granularity,
-            start_date=start_date,
-            end_date=end_date,
-        )
-
-    @dlt.resource(
-        write_disposition="merge",
-        merge_key=["id", "start_time"],
-        max_table_nesting=0
+    ad_accounts_stats = _create_stats_resource(
+        "adaccount",
+        "ad_accounts_stats",
+        "Fetch stats for all ad accounts.\n\nFetches stats for each ad account directly.",
     )
-    def ads_stats() -> Iterator[TDataItems]:
-        """Fetch stats for all ads.
 
-        First fetches all ads, then fetches stats for each ad.
-        """
-        if not stats_config:
-            raise ValueError("stats_config is required for ads_stats resource")
-
-        granularity = stats_config.get("granularity", "DAY")
-        fields = stats_config.get("fields", "impressions,spend")
-
-        params = _build_stats_params(granularity, fields)
-
-        yield from fetch_entity_stats(
-            api=api,
-            entity_type="ad",
-            ad_account_id=ad_account_id,
-            organization_id=organization_id,
-            base_url=BASE_URL,
-            params=params,
-            granularity=granularity,
-            start_date=start_date,
-            end_date=end_date,
-        )
-
-    @dlt.resource(
-        write_disposition="merge",
-        merge_key=["id", "start_time"],
-        max_table_nesting=0
+    ads_stats = _create_stats_resource(
+        "ad",
+        "ads_stats",
+        "Fetch stats for all ads.\n\nFirst fetches all ads, then fetches stats for each ad.",
     )
-    def ad_squads_stats() -> Iterator[TDataItems]:
-        """Fetch stats for all ad squads.
 
-        First fetches all ad squads, then fetches stats for each ad squad.
-        """
-        if not stats_config:
-            raise ValueError("stats_config is required for ad_squads_stats resource")
-
-        granularity = stats_config.get("granularity", "DAY")
-        fields = stats_config.get("fields", "impressions,spend")
-
-        params = _build_stats_params(granularity, fields)
-
-        yield from fetch_entity_stats(
-            api=api,
-            entity_type="adsquad",
-            ad_account_id=ad_account_id,
-            organization_id=organization_id,
-            base_url=BASE_URL,
-            params=params,
-            granularity=granularity,
-            start_date=start_date,
-            end_date=end_date,
-        )
+    ad_squads_stats = _create_stats_resource(
+        "adsquad",
+        "ad_squads_stats",
+        "Fetch stats for all ad squads.\n\nFirst fetches all ad squads, then fetches stats for each ad squad.",
+    )
 
     return (
         organizations,
