@@ -1045,9 +1045,8 @@ def mongodb_insert(uri: str):
                         if filter_dict:
                             operations.append(ReplaceOne(filter_dict, doc, upsert=True))
 
-
                     for i in range(0, len(operations), BATCH_SIZE):
-                        batch = operations[i:i + BATCH_SIZE]
+                        batch = operations[i : i + BATCH_SIZE]
                         if batch:
                             collection.bulk_write(batch, ordered=False)
                 else:
@@ -1056,7 +1055,7 @@ def mongodb_insert(uri: str):
                         state["first_batch"] = False
 
                     for i in range(0, len(documents), BATCH_SIZE):
-                        batch = documents[i:i + BATCH_SIZE]
+                        batch = documents[i : i + BATCH_SIZE]
                         if batch:
                             collection.insert_many(batch)
             else:
@@ -1065,7 +1064,7 @@ def mongodb_insert(uri: str):
                     state["first_batch"] = False
 
                 for i in range(0, len(documents), BATCH_SIZE):
-                    batch = documents[i:i + BATCH_SIZE]
+                    batch = documents[i : i + BATCH_SIZE]
                     if batch:
                         collection.insert_many(batch)
 
