@@ -5,6 +5,17 @@ export default defineConfig({
   title: "ingestr",
   description: "Ingest & copy data between any source and any destination",
   base: "/ingestr/",
+  sitemap: {
+    hostname: 'https://getbruin.com',
+    transformItems: (items) => {
+      return items.map((item) => {
+        const cleaned = item.url.replace(/^\/ingestr\//, '');
+        item.url = `https://getbruin.com/docs/ingestr/${cleaned}`;
+        return item;
+      });
+    },
+    trailingSlash: true,
+  },
   transformPageData(pageData) {
     const canonicalUrl = `https://getbruin.com/docs/ingestr/${pageData.relativePath}`
       .replace(/index\.md$/, '')
@@ -193,4 +204,5 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
       { icon: "github", link: "https://github.com/bruin-data/ingestr" },
     ],
   },
+
 });
