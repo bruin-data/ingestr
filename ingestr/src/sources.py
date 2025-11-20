@@ -4540,51 +4540,12 @@ class SnapchatAdsSource:
             resource_name = parts[0]
 
             if resource_name in stats_resources:
-                # Stats table format:
-                # resource_name:granularity:fields:options (all accounts)
-                # resource_name:ad_account_id:granularity:fields:options (specific account)
+                # Stats table format parsed in helpers
+                from ingestr.src.snapchat_ads.helpers import parse_stats_table
 
-                def parse_options(options_str: str) -> dict:
-                    """Parse key=value,key=value options string."""
-                    result = {}
-                    for option in options_str.split(","):
-                        if "=" in option:
-                            key, value = option.split("=", 1)
-                            result[key] = value
-                    return result
-
-                if len(parts) >= 2:
-                    valid_granularities = ["TOTAL", "DAY", "HOUR", "LIFETIME"]
-
-                    if parts[1].upper() in valid_granularities:
-                        # Format: resource_name:granularity:fields:options
-                        stats_config = {
-                            "granularity": parts[1].upper(),
-                            "fields": parts[2]
-                            if len(parts) > 2
-                            else "impressions,spend",
-                        }
-                        if len(parts) > 3:
-                            stats_config.update(parse_options(parts[3]))
-                    else:
-                        # Format: resource_name:ad_account_id:granularity:fields:options
-                        ad_account_id = parts[1]
-                        stats_config = {
-                            "granularity": parts[2].upper()
-                            if len(parts) > 2
-                            else "DAY",
-                            "fields": parts[3]
-                            if len(parts) > 3
-                            else "impressions,spend",
-                        }
-                        if len(parts) > 4:
-                            stats_config.update(parse_options(parts[4]))
-                else:
-                    # Just resource_name, use defaults
-                    stats_config = {
-                        "granularity": "DAY",
-                        "fields": "impressions,spend",
-                    }
+                parsed = parse_stats_table(table)
+                resource_name = parsed["resource_name"]
+                stats_config = parsed["stats_config"]
             else:
                 # Non-stats table with ad_account_id: resource_name:ad_account_id
                 ad_account_id = parts[1] if len(parts) > 1 else None
@@ -4618,10 +4579,10 @@ class SnapchatAdsSource:
                     f"organization_id is required for table '{table}'. Only 'organizations' table does not require organization_id."
                 )
         else:
-            # Stats resources need either ad_account_id or organization_id
-            if not ad_account_id and not organization_id:
+            # Stats resources require organization_id
+            if not organization_id:
                 raise ValueError(
-                    f"organization_id is required for '{resource_name}' when ad_account_id is not provided"
+                    f"organization_id is required for '{resource_name}'"
                 )
 
         if resource_name not in self.resources:
@@ -4638,7 +4599,8 @@ class SnapchatAdsSource:
         if organization_id:
             source_kwargs["organization_id"] = organization_id[0]
 
-        if ad_account_id:
+        # Only pass ad_account_id for non-stats resources
+        if ad_account_id and resource_name not in stats_resources:
             source_kwargs["ad_account_id"] = ad_account_id
 
         # Add interval_start and interval_end for client-side filtering

@@ -348,13 +348,6 @@ def snapchat_ads_source(
                 "breakdown",
                 "dimension",
                 "pivot",
-                "swipe_up_attribution_window",
-                "view_attribution_window",
-                "action_report_time",
-                "conversion_source_types",
-                "omit_empty",
-                "position_stats",
-                "test",
             ]
 
             for param in optional_params:
@@ -363,7 +356,11 @@ def snapchat_ads_source(
 
         return params
 
-    @dlt.resource(write_disposition="replace", max_table_nesting=0)
+    @dlt.resource(
+        write_disposition="merge",
+        merge_key=["id", "start_time"],
+        max_table_nesting=0
+    )
     def campaigns_stats() -> Iterator[TDataItems]:
         """Fetch stats for all campaigns.
 
@@ -389,7 +386,11 @@ def snapchat_ads_source(
             end_date=end_date,
         )
 
-    @dlt.resource(write_disposition="replace", max_table_nesting=0)
+    @dlt.resource(
+        write_disposition="merge",
+        merge_key=["id", "start_time"],
+        max_table_nesting=0
+    )
     def ad_accounts_stats() -> Iterator[TDataItems]:
         """Fetch stats for all ad accounts.
 
@@ -415,7 +416,11 @@ def snapchat_ads_source(
             end_date=end_date,
         )
 
-    @dlt.resource(write_disposition="replace", max_table_nesting=0)
+    @dlt.resource(
+        write_disposition="merge",
+        merge_key=["id", "start_time"],
+        max_table_nesting=0
+    )
     def ads_stats() -> Iterator[TDataItems]:
         """Fetch stats for all ads.
 
@@ -441,7 +446,11 @@ def snapchat_ads_source(
             end_date=end_date,
         )
 
-    @dlt.resource(write_disposition="replace", max_table_nesting=0)
+    @dlt.resource(
+        write_disposition="merge",
+        merge_key=["id", "start_time"],
+        max_table_nesting=0
+    )
     def ad_squads_stats() -> Iterator[TDataItems]:
         """Fetch stats for all ad squads.
 

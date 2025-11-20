@@ -249,17 +249,6 @@ def build_stats_url(
     entity_type: str,
     entity_id: str,
 ) -> str:
-    """
-    Build the stats URL for a given entity type and ID.
-
-    Args:
-        base_url: Base API URL
-        entity_type: Type of entity (campaign, adsquad, ad, adaccount)
-        entity_id: ID of the entity
-
-    Returns:
-        Complete stats URL
-    """
     entity_type_map = {
         "campaign": "campaigns",
         "adsquad": "adsquads",
@@ -282,18 +271,7 @@ def fetch_stats_data(
     params: dict,
     granularity: str,
 ) -> Iterator[dict]:
-    """
-    Fetch stats data from Snapchat API.
 
-    Args:
-        api: SnapchatAdsAPI instance
-        url: Stats endpoint URL
-        params: Query parameters
-        granularity: Granularity of stats (TOTAL, DAY, HOUR, LIFETIME)
-
-    Yields:
-        Flattened stats records
-    """
     client = create_client()
     headers = api.get_headers()
 
@@ -533,3 +511,70 @@ def fetch_entity_stats(
                             yield from fetch_stats_data(
                                 api, stats_url, params, granularity
                             )
+
+
+def parse_stats_table(table: str) -> dict:
+
+    import typing
+
+    from ingestr.src.snapchat_ads.settings import (
+        DEFAULT_STATS_FIELDS,
+        TStatsBreakdown,
+        TStatsDimension,
+        TStatsGranularity,
+        TStatsPivot,
+    )
+
+    parts = table.split(":")
+    resource_name = parts[0]
+    stats_config = {}
+
+    if len(parts) == 1:
+        raise ValueError(
+            f"Parameters required for stats table. Format: {resource_name}:<granularity>[,<fields>]"
+        )
+
+    valid_granularities = list(typing.get_args(TStatsGranularity))
+    valid_breakdowns = list(typing.get_args(TStatsBreakdown))
+    valid_dimensions = list(typing.get_args(TStatsDimension))
+    valid_pivots = list(typing.get_args(TStatsPivot))
+
+    # Parse all parameters from parts[1] (comma-separated)
+    params = parts[1].split(",")
+
+    # Find granularity (required)
+    granularity_found = False
+    fields_parts = []
+
+    for i, param in enumerate(params):
+        param_clean = param.strip()
+
+        if param_clean.lower() in valid_breakdowns:
+            stats_config["breakdown"] = param_clean.lower()
+        elif param_clean.upper() in valid_dimensions:
+            stats_config["dimension"] = param_clean.upper()
+        elif param_clean.lower() in valid_pivots:
+            stats_config["pivot"] = param_clean.lower()
+        elif param_clean.upper() in valid_granularities:
+            stats_config["granularity"] = param_clean.upper()
+            granularity_found = True
+            # Everything after granularity is fields
+            if i + 1 < len(params):
+                fields_parts = params[i + 1:]
+            break
+
+    if not granularity_found:
+        raise ValueError(
+            f"Granularity is required. Format: {resource_name}:<breakdown>,<granularity>[,<fields>]"
+        )
+
+    # Join remaining parts as fields
+    if fields_parts:
+        stats_config["fields"] = ",".join(p.strip() for p in fields_parts)
+    else:
+        stats_config["fields"] = DEFAULT_STATS_FIELDS
+
+    return {
+        "resource_name": resource_name,
+        "stats_config": stats_config,
+    }
