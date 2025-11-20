@@ -1036,28 +1036,24 @@ def mongodb_insert(uri: str):
                     if isinstance(col_def, dict) and col_def.get("primary_key")
                 ]
 
-                if primary_keys:
-                    operations = []
-                    for doc in documents:
-                        filter_dict = {
-                            key: doc[key] for key in primary_keys if key in doc
-                        }
-                        if filter_dict:
-                            operations.append(ReplaceOne(filter_dict, doc, upsert=True))
+                if not primary_keys:
+                    raise ValueError(
+                        f"Merge operation requires primary keys for table '{collection_name}'. "
+                        f"Please define primary keys in the table schema or use 'replace' write disposition."
+                    )
 
-                    for i in range(0, len(operations), BATCH_SIZE):
-                        batch = operations[i : i + BATCH_SIZE]
-                        if batch:
-                            collection.bulk_write(batch, ordered=False)
-                else:
-                    if state["first_batch"] and documents:
-                        collection.delete_many({})
-                        state["first_batch"] = False
+                operations = []
+                for doc in documents:
+                    filter_dict = {
+                        key: doc[key] for key in primary_keys if key in doc
+                    }
+                    if filter_dict:
+                        operations.append(ReplaceOne(filter_dict, doc, upsert=True))
 
-                    for i in range(0, len(documents), BATCH_SIZE):
-                        batch = documents[i : i + BATCH_SIZE]
-                        if batch:
-                            collection.insert_many(batch)
+                for i in range(0, len(operations), BATCH_SIZE):
+                    batch = operations[i : i + BATCH_SIZE]
+                    if batch:
+                        collection.bulk_write(batch, ordered=False)
             else:
                 if state["first_batch"] and documents:
                     collection.delete_many({})

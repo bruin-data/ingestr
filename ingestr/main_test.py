@@ -5462,6 +5462,7 @@ def mongodb_test_cases():
         diana = client["ingestr_db"][collection].find_one({"user_id": 4})
         assert diana is not None
         assert diana["name"] == "Diana"
+        assert diana["age"] == 28
 
     return [
         smoke_test,
