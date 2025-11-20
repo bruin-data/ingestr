@@ -1052,7 +1052,7 @@ def mongodb_insert(uri: str):
                     batch = operations[i : i + BATCH_SIZE]
                     if batch:
                         collection.bulk_write(batch, ordered=False)
-            else:
+            elif table.get("write_disposition") == "replace":
                 if state["first_batch"] and documents:
                     collection.delete_many({})
                     state["first_batch"] = False
