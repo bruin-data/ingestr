@@ -5446,6 +5446,11 @@ def mongodb_test_cases():
 
         assert client["ingestr_db"][collection].count_documents({}) == 4
 
+        alice = client["ingestr_db"][collection].find_one({"user_id": 1})
+        assert alice is not None
+        assert alice["name"] == "Alice"
+        assert alice["age"] == 25
+
         bob = client["ingestr_db"][collection].find_one({"user_id": 2})
         assert bob["name"] == "Bob Updated"
         assert bob["age"] == 31

@@ -1004,6 +1004,7 @@ def mongodb_insert(uri: str):
             connection_string += f"?{parsed_uri.query}"
 
     state = {"first_batch": True}
+    BATCH_SIZE = 10009
 
     def destination(items: TDataItem, table: TTableSchema) -> None:
         import pyarrow
@@ -1044,22 +1045,29 @@ def mongodb_insert(uri: str):
                         if filter_dict:
                             operations.append(ReplaceOne(filter_dict, doc, upsert=True))
 
-                    if operations:
-                        collection.bulk_write(operations, ordered=False)
+
+                    for i in range(0, len(operations), BATCH_SIZE):
+                        batch = operations[i:i + BATCH_SIZE]
+                        if batch:
+                            collection.bulk_write(batch, ordered=False)
                 else:
                     if state["first_batch"] and documents:
                         collection.delete_many({})
                         state["first_batch"] = False
 
-                    if documents:
-                        collection.insert_many(documents)
+                    for i in range(0, len(documents), BATCH_SIZE):
+                        batch = documents[i:i + BATCH_SIZE]
+                        if batch:
+                            collection.insert_many(batch)
             else:
                 if state["first_batch"] and documents:
                     collection.delete_many({})
                     state["first_batch"] = False
 
-                if documents:
-                    collection.insert_many(documents)
+                for i in range(0, len(documents), BATCH_SIZE):
+                    batch = documents[i:i + BATCH_SIZE]
+                    if batch:
+                        collection.insert_many(batch)
 
     return dlt.destination(
         destination,
