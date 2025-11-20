@@ -30,7 +30,7 @@ jobs:
 
   tests:
     needs: check-changes
-    if: always() && (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || needs.check-changes.outputs.code-changes == 'true')
+    if: github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || needs.check-changes.outputs.code-changes == 'true' || startsWith(github.ref, 'refs/tags/')
     strategy:
       matrix:
         # I tried running stuff on macOS but it was too slow and unreliable.
