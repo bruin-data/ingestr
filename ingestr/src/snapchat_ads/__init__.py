@@ -340,10 +340,23 @@ def snapchat_ads_source(
                 # For HOUR granularity, end_time must be at the beginning of an hour
                 # For DAY granularity, end_time must be at the beginning of a day
                 # Round up to next hour/day if needed
-                if granularity == "HOUR" and (end_dt.minute != 0 or end_dt.second != 0 or end_dt.microsecond != 0):
-                    end_dt = end_dt.add(hours=1).start_of('hour')
-                elif granularity == "DAY" and (end_dt.hour != 0 or end_dt.minute != 0 or end_dt.second != 0 or end_dt.microsecond != 0):
-                    end_dt = end_dt.add(days=1).start_of('day')
+                if (
+                    granularity == "HOUR"
+                    and (
+                        end_dt.minute != 0
+                        or end_dt.second != 0
+                        or end_dt.microsecond != 0
+                    )
+                ) or (
+                    granularity == "DAY"
+                    and (
+                        end_dt.hour != 0
+                        or end_dt.minute != 0
+                        or end_dt.second != 0
+                        or end_dt.microsecond != 0
+                    )
+                ):
+                    end_dt = end_dt.add(hours=1).start_of("hour")
                 params["end_time"] = end_dt.format("YYYY-MM-DDTHH:mm:ss.000")
 
         # Add optional parameters from stats_config
