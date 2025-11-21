@@ -46,6 +46,49 @@ Table           | PK | Inc Key | Inc Strategy | Details                         
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
+## Custom Objects
+
+HubSpot allows you to create custom objects to store unique business data that's not covered by the standard objects. ingestr supports ingesting data from custom objects using the following format:
+
+```plaintext
+custom:<custom_object_name>
+```
+
+or with associations to other objects:
+
+```plaintext
+custom:<custom_object_name>:<associations>
+```
+
+### Parameters
+
+- `custom_object_name`: The name of your custom object in HubSpot (can be either singular or plural form)
+- `associations` (optional): Comma-separated list of object types to include as associations (e.g., `companies,deals,tickets,contacts`)
+
+### Examples
+
+Ingesting a custom object called "licenses":
+
+```sh
+ingestr ingest \
+  --source-uri 'hubspot://?api_key=pat_test_12345' \
+  --source-table 'custom:licenses' \
+  --dest-uri duckdb:///hubspot.duckdb \
+  --dest-table 'licenses.data'
+```
+
+Ingesting a custom object with associations to companies, deals, and contacts:
+
+```sh
+ingestr ingest \
+  --source-uri 'hubspot://?api_key=pat_test_12345' \
+  --source-table 'custom:licenses:companies,deals,contacts' \
+  --dest-uri duckdb:///hubspot.duckdb \
+  --dest-table 'licenses.data'
+```
+
+When you include associations, the response will contain information about the related objects, allowing you to track relationships between your custom objects and standard HubSpot objects.
+
 > [!WARNING]
 > Hubspot does not support incremental loading, which means ingestr will do a full-refresh.
 
