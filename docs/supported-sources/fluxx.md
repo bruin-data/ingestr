@@ -96,6 +96,7 @@ Fluxx source allows ingesting the following sources into separate tables:
 | `request_transaction_funding_source` | id | - | replace | Funding source details for specific request transactions |
 | `request_user` | id | - | replace | Relationships between requests and users with roles and descriptions |
 | `salesforce_authentication` | id | - | replace | Salesforce authentication configurations with OAuth tokens, connection management, and API usage tracking |
+| `initiative` | id | - | replace | Third level of program hierarchy describing high-level goals of philanthropy efforts |
 | `sub_initiative` | id | - | replace | Sub-initiatives for detailed planning |
 | `sub_program` | id | - | replace | Sub-programs under main programs |
 | `ui_version` | id | - | replace | User interface version information and system configuration |

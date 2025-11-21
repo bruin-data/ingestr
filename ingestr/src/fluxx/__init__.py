@@ -2351,6 +2351,113 @@ FLUXX_RESOURCES = {
             "workflow_events": {"data_type": "json", "field_type": "relation"},
         },
     },
+    "initiative": {
+        "endpoint": "initiative",
+        "fields": {
+            # Primary key
+            "id": {"data_type": "bigint", "field_type": "column"},
+            # Boolean fields
+            "exclude_from_mel": {"data_type": "bool", "field_type": "column"},
+            "not_retired": {"data_type": "bool", "field_type": "boolean"},
+            "retired": {"data_type": "bool", "field_type": "column"},
+            # Timestamp fields
+            "created_at": {"data_type": "timestamp", "field_type": "column"},
+            "index_dirty_at": {"data_type": "timestamp", "field_type": "column"},
+            "indexed_at": {"data_type": "timestamp", "field_type": "column"},
+            "updated_at": {"data_type": "timestamp", "field_type": "column"},
+            # String fields
+            "index_status": {"data_type": "text", "field_type": "column"},
+            "migrate_id": {"data_type": "text", "field_type": "column"},
+            "migrate_source_name": {"data_type": "text", "field_type": "column"},
+            # Text fields
+            "description": {"data_type": "text", "field_type": "column"},
+            "name": {"data_type": "text", "field_type": "column"},
+            # Method fields returning strings
+            "__advanced_filter": {"data_type": "text", "field_type": "string"},
+            "__full_text": {"data_type": "text", "field_type": "string"},
+            "__index_plan": {"data_type": "text", "field_type": "string"},
+            "__managed_in_elastic_search": {
+                "data_type": "text",
+                "field_type": "string",
+            },
+            "all_notes": {"data_type": "text", "field_type": "string"},
+            "to_s": {"data_type": "text", "field_type": "string"},
+            # Relation fields - single IDs (bigint)
+            "created_by_id": {"data_type": "bigint", "field_type": "relation"},
+            "hierarchy_parent": {"data_type": "bigint", "field_type": "relation"},
+            "program_id": {"data_type": "bigint", "field_type": "relation"},
+            "sub_program_id": {"data_type": "bigint", "field_type": "relation"},
+            "updated_by_id": {"data_type": "bigint", "field_type": "relation"},
+            # Relation fields - Arrays/JSON
+            "alert_emails": {"data_type": "json", "field_type": "relation"},
+            "alert_ids_sent": {"data_type": "json", "field_type": "relation"},
+            "audit_soft_deletes": {"data_type": "json", "field_type": "relation"},
+            "clone_ancestries": {"data_type": "json", "field_type": "relation"},
+            "code_block_conversions": {"data_type": "json", "field_type": "relation"},
+            "concept_initiative_ids": {"data_type": "json", "field_type": "relation"},
+            "connection_ids": {"data_type": "json", "field_type": "relation"},
+            "created_by": {"data_type": "json", "field_type": "relation"},
+            "etl_relationships": {"data_type": "json", "field_type": "relation"},
+            "favorite_user_ids": {"data_type": "json", "field_type": "relation"},
+            "favorites": {"data_type": "json", "field_type": "relation"},
+            "fsa_etl_request_budget_ids": {
+                "data_type": "json",
+                "field_type": "relation",
+            },
+            "fsa_etl_request_transaction_budget_ids": {
+                "data_type": "json",
+                "field_type": "relation",
+            },
+            "geo_place_relationships": {"data_type": "json", "field_type": "relation"},
+            "group_members": {"data_type": "json", "field_type": "relation"},
+            "model_contexts": {"data_type": "json", "field_type": "relation"},
+            "model_documents": {"data_type": "json", "field_type": "relation"},
+            "model_emails": {"data_type": "json", "field_type": "relation"},
+            "model_summaries": {"data_type": "json", "field_type": "relation"},
+            "modifications": {"data_type": "json", "field_type": "relation"},
+            "notes": {"data_type": "json", "field_type": "relation"},
+            "post_relationships": {"data_type": "json", "field_type": "relation"},
+            "posts": {"data_type": "json", "field_type": "relation"},
+            "rd_tab_concept_initiatives": {
+                "data_type": "json",
+                "field_type": "relation",
+            },
+            "rd_tab_request_transactions": {
+                "data_type": "json",
+                "field_type": "relation",
+            },
+            "rd_tab_sub_initiatives": {"data_type": "json", "field_type": "relation"},
+            "rd_tab_sub_programs": {"data_type": "json", "field_type": "relation"},
+            "request_etl_request_budget_ids": {
+                "data_type": "json",
+                "field_type": "relation",
+            },
+            "request_etl_request_transaction_budget_ids": {
+                "data_type": "json",
+                "field_type": "relation",
+            },
+            "reverse_initiative_id_RequestTransaction": {
+                "data_type": "json",
+                "field_type": "relation",
+            },
+            "rfs_etl_request_budget_ids": {
+                "data_type": "json",
+                "field_type": "relation",
+            },
+            "rfs_etl_request_transaction_budget_ids": {
+                "data_type": "json",
+                "field_type": "relation",
+            },
+            "sub_initiative_ids": {"data_type": "json", "field_type": "relation"},
+            "sub_initiatives": {"data_type": "json", "field_type": "relation"},
+            "sub_program_ids": {"data_type": "json", "field_type": "relation"},
+            "taggings": {"data_type": "json", "field_type": "relation"},
+            "translator_assignments": {"data_type": "json", "field_type": "relation"},
+            "updated_by": {"data_type": "json", "field_type": "relation"},
+            "work_tasks": {"data_type": "json", "field_type": "relation"},
+            "workflow_events": {"data_type": "json", "field_type": "relation"},
+        },
+    },
     "sub_initiative": {
         "endpoint": "sub_initiative",
         "fields": {
