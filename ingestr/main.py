@@ -708,6 +708,9 @@ def example_uris():
         "[bold green]BigQuery:[/bold green] [white]bigquery://project-id?credentials_path=/path/to/credentials.json&location=US [/white]"
     )
     print(
+        "[white dim]   or use ADC: bigquery://project-id?use_adc=true&location=US[/white dim]"
+    )
+    print(
         "[white dim]└── https://github.com/googleapis/python-bigquery-sqlalchemy?tab=readme-ov-file#connection-string-parameters[/white dim]"
     )
 
