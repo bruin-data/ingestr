@@ -687,7 +687,7 @@ class LocalCsvSource:
         )
 
     def remove_empty_columns(self, row: Dict[str, str]) -> Dict[str, str]:
-        return {k: v for k, v in row.items() if v.strip() != ""}
+        return {k: v for k, v in row.items() if v and v.strip() != ""}
 
 
 class NotionSource:
