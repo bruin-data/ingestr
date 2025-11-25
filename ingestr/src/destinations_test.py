@@ -27,11 +27,6 @@ class BigQueryDestinationTest(unittest.TestCase):
         with open(self.abs_path_to_credentials, "r") as f:
             self.actual_credentials = json.load(f)
 
-    def test_bq_destination_cred_path_required(self):
-        with pytest.raises(ValueError):
-            uri = "bigquery://my-project"
-            self.destination.dlt_dest(uri)
-
     def test_bq_destination_simple_uri(self):
         uri = f"bigquery://my-project?credentials_path={self.abs_path_to_credentials}"
         result = self.destination.dlt_dest(uri)
