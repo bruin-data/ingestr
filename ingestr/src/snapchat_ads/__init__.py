@@ -3,6 +3,7 @@
 from typing import Iterator
 
 import dlt
+from dlt.common.schema.typing import TColumnSchema
 from dlt.common.typing import TDataItems
 
 from .client import SnapchatAdsAPI, create_client
@@ -14,7 +15,7 @@ from .helpers import (
     fetch_with_paginate_account_id,
     paginate,
 )
-from .settings import STATS_PRIMARY_KEY
+from .settings import STATS_METRICS_COLUMNS, STATS_PRIMARY_KEY
 
 BASE_URL = "https://adsapi.snapchat.com/v1"
 
@@ -345,7 +346,7 @@ def snapchat_ads_source(
 
         # Add optional parameters from stats_config
         if stats_config:
-            optional_params = ["breakdown"]
+            optional_params = ["breakdown", "dimension", "pivot"]
 
             for param in optional_params:
                 if param in stats_config:
@@ -356,15 +357,19 @@ def snapchat_ads_source(
     def _create_stats_resource(entity_type: str, resource_name: str, docstring: str):
         """Factory function to create stats resources dynamically."""
 
+        # Build columns dict with primary key fields and metrics
+        columns: dict[str, TColumnSchema] = {
+            "adsquad_id": {"nullable": True},
+            "ad_id": {"nullable": True},
+            **STATS_METRICS_COLUMNS,
+        }
+
         @dlt.resource(
             name=resource_name,
             write_disposition="merge",
-            primary_key=list(STATS_PRIMARY_KEY),
+            primary_key=STATS_PRIMARY_KEY,
             max_table_nesting=0,
-            columns={
-                "adsquad_id": {"nullable": True},
-                "ad_id": {"nullable": True},
-            },
+            columns=columns,
         )
         def stats_resource() -> Iterator[TDataItems]:
             if not stats_config:

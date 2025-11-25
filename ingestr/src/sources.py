@@ -4544,8 +4544,18 @@ class SnapchatAdsSource:
                 from ingestr.src.snapchat_ads.helpers import parse_stats_table
 
                 parsed = parse_stats_table(table)
-                resource_name = parsed["resource_name"]
-                stats_config = parsed["stats_config"]
+                resource_name = parsed.resource_name
+                # Build stats_config dict from ParsedStatsTable
+                stats_config = {
+                    "granularity": parsed.granularity,
+                    "fields": parsed.fields,
+                }
+                if parsed.breakdown:
+                    stats_config["breakdown"] = parsed.breakdown
+                if parsed.dimension:
+                    stats_config["dimension"] = parsed.dimension
+                if parsed.pivot:
+                    stats_config["pivot"] = parsed.pivot
             else:
                 # Non-stats table with ad_account_id: resource_name:ad_account_id
                 ad_account_id = parts[1] if len(parts) > 1 else None

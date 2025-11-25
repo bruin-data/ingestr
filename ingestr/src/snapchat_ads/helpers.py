@@ -1,8 +1,33 @@
+from dataclasses import dataclass
 from typing import Iterator
 
 import requests
 
 from .client import SnapchatAdsAPI, create_client
+
+
+@dataclass
+class ParsedStatsTable:
+    """Parsed stats table configuration.
+
+    Table format: <resource-name>:<dimension-like-values>:<metrics>
+
+    Dimension-like values (order-independent, comma-separated):
+        - granularity (required): TOTAL, DAY, HOUR, LIFETIME
+        - breakdown (optional): ad, adsquad, campaign
+        - dimension (optional): GEO, DEMO, INTEREST, DEVICE
+        - pivot (optional): country, region, dma, gender, age_bucket, etc.
+
+    Metrics: comma-separated field names (default: impressions,spend)
+    """
+
+    resource_name: str
+    granularity: str
+    fields: str
+    breakdown: str | None = None
+    dimension: str | None = None
+    pivot: str | None = None
+
 
 # Module-level constant for entity type mapping
 ENTITY_TYPE_MAP = {
@@ -62,31 +87,6 @@ def normalize_stats_record(record: dict) -> dict:
             record[field] = f"no_{field}"
 
     return record
-
-
-def client_side_date_filter(data: dict, start_date, end_date) -> bool:
-    """
-    Check if data item falls within the specified date range based on updated_at.
-
-    """
-    if not start_date and not end_date:
-        return True
-
-    from dlt.common.time import ensure_pendulum_datetime
-
-    updated_at_str = data.get("updated_at")
-    if not updated_at_str:
-        return True
-
-    updated_at = ensure_pendulum_datetime(updated_at_str)
-
-    if start_date and updated_at < ensure_pendulum_datetime(start_date):
-        return False
-
-    if end_date and updated_at > ensure_pendulum_datetime(end_date):
-        return False
-
-    return True
 
 
 def paginate(client: requests.Session, headers: dict, url: str, page_size: int = 1000):
@@ -192,9 +192,7 @@ def fetch_snapchat_data(
         if item.get("sub_request_status", "").upper() == "SUCCESS":
             data = item.get(item_key, {})
             if data:
-                # Client-side filtering by updated_at
-                if client_side_date_filter(data, start_date, end_date):
-                    yield data
+                yield data
 
 
 def fetch_snapchat_data_with_params(
@@ -299,8 +297,7 @@ def fetch_with_paginate_account_id(
                 if item.get("sub_request_status", "").upper() == "SUCCESS":
                     data = item.get(item_key, {})
                     if data:
-                        if client_side_date_filter(data, start_date, end_date):
-                            yield data
+                        yield data
 
 
 def build_stats_url(
@@ -427,69 +424,68 @@ def parse_timeseries_stats(result: dict) -> Iterator[dict]:
     timeseries_stats = result.get("timeseries_stats", [])
 
     for stat_item in timeseries_stats:
-        if stat_item.get("sub_request_status", "").upper() == "SUCCESS":
-            timeseries_stat = stat_item.get("timeseries_stat", {})
-            if timeseries_stat:
-                entity_id = timeseries_stat.get("id")
-                entity_type = timeseries_stat.get("type")
+        timeseries_stat = stat_item.get("timeseries_stat", {})
+        if timeseries_stat:
+            entity_id = timeseries_stat.get("id")
+            entity_type = timeseries_stat.get("type")
 
-                # Handle breakdown_stats if present in timeseries
-                breakdown_stats = timeseries_stat.get("breakdown_stats", {})
+            # Handle breakdown_stats if present in timeseries
+            breakdown_stats = timeseries_stat.get("breakdown_stats", {})
 
-                if breakdown_stats:
-                    # Yield only breakdown data when breakdown is present
-                    for breakdown_type, breakdown_items in breakdown_stats.items():
-                        for item in breakdown_items:
-                            item_timeseries = item.get("timeseries", [])
-                            for period in item_timeseries:
-                                breakdown_record: dict = {}
+            if breakdown_stats:
+                # Yield only breakdown data when breakdown is present
+                for breakdown_type, breakdown_items in breakdown_stats.items():
+                    for item in breakdown_items:
+                        item_timeseries = item.get("timeseries", [])
+                        for period in item_timeseries:
+                            breakdown_record: dict = {}
 
-                                # Add semantic entity fields (parent + breakdown)
-                                add_semantic_entity_fields(
-                                    breakdown_record,
-                                    entity_type,
-                                    entity_id,
-                                    breakdown_type,
-                                    item.get("id"),
-                                )
+                            # Add semantic entity fields (parent + breakdown)
+                            add_semantic_entity_fields(
+                                breakdown_record,
+                                entity_type,
+                                entity_id,
+                                breakdown_type,
+                                item.get("id"),
+                            )
 
-                                # Add metadata fields
-                                metadata = build_metadata_fields(
-                                    timeseries_stat,
-                                    start_time=period.get("start_time"),
-                                    end_time=period.get("end_time"),
-                                )
-                                breakdown_record.update(metadata)
+                            # Add metadata fields
+                            metadata = build_metadata_fields(
+                                timeseries_stat,
+                                start_time=period.get("start_time"),
+                                end_time=period.get("end_time"),
+                            )
+                            breakdown_record.update(metadata)
 
-                                # Add stats
-                                item_stats = period.get("stats", {})
-                                for key, value in item_stats.items():
-                                    breakdown_record[key] = value
+                            # Add stats
+                            item_stats = period.get("stats", {})
+                            for key, value in item_stats.items():
+                                breakdown_record[key] = value
 
-                                yield normalize_stats_record(breakdown_record)
-                else:
-                    # Yield parent entity data when no breakdown or dimension
-                    timeseries = timeseries_stat.get("timeseries", [])
-                    for period in timeseries:
-                        record: dict = {}
+                            yield normalize_stats_record(breakdown_record)
+            else:
+                # Yield parent entity data when no breakdown or dimension
+                timeseries = timeseries_stat.get("timeseries", [])
+                for period in timeseries:
+                    record: dict = {}
 
-                        # Add semantic entity field (parent only)
-                        add_semantic_entity_fields(record, entity_type, entity_id)
+                    # Add semantic entity field (parent only)
+                    add_semantic_entity_fields(record, entity_type, entity_id)
 
-                        # Add metadata fields
-                        metadata = build_metadata_fields(
-                            timeseries_stat,
-                            start_time=period.get("start_time"),
-                            end_time=period.get("end_time"),
-                        )
-                        record.update(metadata)
+                    # Add metadata fields
+                    metadata = build_metadata_fields(
+                        timeseries_stat,
+                        start_time=period.get("start_time"),
+                        end_time=period.get("end_time"),
+                    )
+                    record.update(metadata)
 
-                        # Flatten nested stats
-                        stats = period.get("stats", {})
-                        for key, value in stats.items():
-                            record[key] = value
+                    # Flatten nested stats
+                    stats = period.get("stats", {})
+                    for key, value in stats.items():
+                        record[key] = value
 
-                        yield normalize_stats_record(record)
+                    yield normalize_stats_record(record)
 
 
 def fetch_entity_stats(
@@ -546,59 +542,89 @@ def fetch_entity_stats(
                             )
 
 
-def parse_stats_table(table: str) -> dict:
-    import typing
+def parse_stats_table(table: str) -> ParsedStatsTable:
+    """Parse stats table string into ParsedStatsTable.
 
+    Format: <resource-name>:<dimension-like-values>:<metrics>
+
+    Examples:
+        campaigns_stats:DAY:impressions,spend
+        campaigns_stats:campaign,DAY:impressions,spend
+        campaigns_stats:campaign,DAY,GEO,country:impressions,spend
+
+    Args:
+        table: Table string in the format above
+
+    Returns:
+        ParsedStatsTable with categorized parameters
+
+    Raises:
+        ValueError: If granularity is missing or format is invalid
+    """
     from ingestr.src.snapchat_ads.settings import (
         DEFAULT_STATS_FIELDS,
-        TStatsBreakdown,
-        TStatsGranularity,
+        VALID_BREAKDOWNS,
+        VALID_DIMENSIONS,
+        VALID_GRANULARITIES,
+        VALID_PIVOTS,
     )
 
     parts = table.split(":")
     resource_name = parts[0]
-    stats_config = {}
 
-    if len(parts) == 1:
+    if len(parts) < 2:
         raise ValueError(
-            f"Parameters required for stats table. Format: {resource_name}:<granularity>[,<fields>]"
+            f"Parameters required for stats table. "
+            f"Format: {resource_name}:<dimension-like-values>:<metrics>"
         )
 
-    valid_granularities = list(typing.get_args(TStatsGranularity))
-    valid_breakdowns = list(typing.get_args(TStatsBreakdown))
+    # Parse dimension-like values (part 1)
+    dimension_params = [p.strip() for p in parts[1].split(",")]
 
-    # Parse all parameters from parts[1] (comma-separated)
-    params = parts[1].split(",")
+    # Categorize each parameter without depending on order
+    granularity: str | None = None
+    breakdown: str | None = None
+    dimension: str | None = None
+    pivot: str | None = None
 
-    # Find granularity (required)
-    granularity_found = False
-    fields_parts = []
+    for param in dimension_params:
+        param_upper = param.upper()
+        param_lower = param.lower()
 
-    for i, param in enumerate(params):
-        param_clean = param.strip()
+        if param_upper in VALID_GRANULARITIES:
+            granularity = param_upper
+        elif param_lower in VALID_BREAKDOWNS:
+            breakdown = param_lower
+        elif param_upper in VALID_DIMENSIONS:
+            dimension = param_upper
+        elif param_lower in VALID_PIVOTS:
+            pivot = param_lower
+        else:
+            raise ValueError(
+                f"Unknown parameter '{param}'. Must be a granularity "
+                f"({', '.join(VALID_GRANULARITIES)}), breakdown "
+                f"({', '.join(VALID_BREAKDOWNS)}), dimension "
+                f"({', '.join(VALID_DIMENSIONS)}), or pivot "
+                f"({', '.join(VALID_PIVOTS)})"
+            )
 
-        if param_clean.lower() in valid_breakdowns:
-            stats_config["breakdown"] = param_clean.lower()
-        elif param_clean.upper() in valid_granularities:
-            stats_config["granularity"] = param_clean.upper()
-            granularity_found = True
-            # Everything after granularity is fields
-            if i + 1 < len(params):
-                fields_parts = params[i + 1 :]
-            break
-
-    if not granularity_found:
+    if not granularity:
         raise ValueError(
-            f"Granularity is required. Format: {resource_name}:<breakdown>,<granularity>[,<fields>]"
+            f"Granularity is required. "
+            f"Format: {resource_name}:<dimension-like-values>:<metrics>"
         )
 
-    # Join remaining parts as fields
-    if fields_parts:
-        stats_config["fields"] = ",".join(p.strip() for p in fields_parts)
+    # Parse metrics (part 2) or use defaults
+    if len(parts) >= 3 and parts[2].strip():
+        fields = parts[2].strip()
     else:
-        stats_config["fields"] = DEFAULT_STATS_FIELDS
+        fields = DEFAULT_STATS_FIELDS
 
-    return {
-        "resource_name": resource_name,
-        "stats_config": stats_config,
-    }
+    return ParsedStatsTable(
+        resource_name=resource_name,
+        granularity=granularity,
+        fields=fields,
+        breakdown=breakdown,
+        dimension=dimension,
+        pivot=pivot,
+    )
