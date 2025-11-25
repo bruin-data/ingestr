@@ -61,10 +61,6 @@ class BigQueryDestination:
 
         cred_path = source_params.get("credentials_path")
         credentials_base64 = source_params.get("credentials_base64")
-        if not cred_path and not credentials_base64:
-            raise ValueError(
-                "credentials_path or credentials_base64 is required to connect BigQuery"
-            )
 
         location = None
         if source_params.get("location"):
@@ -73,7 +69,10 @@ class BigQueryDestination:
                 raise ValueError("Only one location is allowed")
             location = loc_params[0]
 
-        credentials = {}
+        # Following dlt's pattern (like google_analytics), we let dlt's credential resolution
+        # handle defaults automatically. When credentials_path or credentials_base64 are not
+        # provided, dlt will use Application Default Credentials via GcpServiceAccountCredentials.
+        credentials = None
         if cred_path:
             with open(cred_path[0], "r") as f:
                 credentials = json.load(f)
@@ -88,15 +87,16 @@ class BigQueryDestination:
                 raise ValueError("Staging bucket must start with gs://")
 
             os.environ["DESTINATION__FILESYSTEM__BUCKET_URL"] = staging_bucket
-            os.environ["DESTINATION__FILESYSTEM__CREDENTIALS__PROJECT_ID"] = (
-                credentials.get("project_id", None)
-            )
-            os.environ["DESTINATION__FILESYSTEM__CREDENTIALS__PRIVATE_KEY"] = (
-                credentials.get("private_key", None)
-            )
-            os.environ["DESTINATION__FILESYSTEM__CREDENTIALS__CLIENT_EMAIL"] = (
-                credentials.get("client_email", None)
-            )
+            if credentials:
+                os.environ["DESTINATION__FILESYSTEM__CREDENTIALS__PROJECT_ID"] = (
+                    credentials.get("project_id", None)
+                )
+                os.environ["DESTINATION__FILESYSTEM__CREDENTIALS__PRIVATE_KEY"] = (
+                    credentials.get("private_key", None)
+                )
+                os.environ["DESTINATION__FILESYSTEM__CREDENTIALS__CLIENT_EMAIL"] = (
+                    credentials.get("client_email", None)
+                )
 
         project_id = None
         if source_fields.hostname:
