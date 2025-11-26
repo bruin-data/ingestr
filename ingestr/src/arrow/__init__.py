@@ -46,12 +46,12 @@ def memory_mapped_arrow(
                     last_value = pa.scalar(last_value, type=pa.timestamp("ns"))
 
                 table = table.filter(
-                    pa.compute.field(incremental.cursor_path) > last_value  # type: ignore
+                    pa.compute.field(incremental.cursor_path) >= last_value  # type: ignore
                 )
             else:
                 # For non-date types, use direct comparison
                 table = table.filter(
-                    pa.compute.field(incremental.cursor_path) > last_value  # type: ignore
+                    pa.compute.field(incremental.cursor_path) >= last_value  # type: ignore
                 )
 
         if end_value is not None:
@@ -60,12 +60,12 @@ def memory_mapped_arrow(
                 if not isinstance(end_value, pa.TimestampScalar):
                     end_value = pa.scalar(end_value, type=pa.timestamp("ns"))
                 table = table.filter(
-                    pa.compute.field(incremental.cursor_path) < end_value  # type: ignore
+                    pa.compute.field(incremental.cursor_path) <= end_value  # type: ignore
                 )
             else:
                 # For non-date types, use direct comparison
                 table = table.filter(
-                    pa.compute.field(incremental.cursor_path) < end_value  # type: ignore
+                    pa.compute.field(incremental.cursor_path) <= end_value  # type: ignore
                 )
 
         yield table
