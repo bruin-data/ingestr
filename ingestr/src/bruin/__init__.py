@@ -5,7 +5,6 @@ from typing import Iterator
 import dlt
 from dlt.sources.helpers import requests
 
-
 BASE_URL = "https://cloud.getbruin.com/api/v1"
 
 
