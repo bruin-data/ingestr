@@ -180,15 +180,7 @@ def mongodb_insert(uri: str):
     from urllib.parse import urlparse
 
     parsed_uri = urlparse(uri)
-
-    # Handle both mongodb:// and mongodb+srv:// schemes
-    if uri.startswith("mongodb+srv://") or uri.startswith("mongodb://"):
-        # For modern connection strings (MongoDB Atlas), use the URI as-is
-        connection_string = uri
-        # Extract database from path or use default
-        database = (
-            parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
-        )
+    database = parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
     first_batch_per_table: dict[str, bool] = {}
     BATCH_SIZE = 10000
 
@@ -201,7 +193,7 @@ def mongodb_insert(uri: str):
         if collection_name not in first_batch_per_table:
             first_batch_per_table[collection_name] = True
 
-        with MongoClient(connection_string) as client:
+        with MongoClient(uri) as client:
             db = client[database]
             collection = db[collection_name]
 
