@@ -37,8 +37,13 @@ def bruin_source(api_token: str):
 
         for pipeline in data:
             yield {
-                "pipeline_id": pipeline.get("id"),
-                "pipeline_name": pipeline.get("name"),
+                "name": pipeline.get("name"),
+                "description": pipeline.get("description"),
+                "project": pipeline.get("project"),
+                "owner": pipeline.get("owner"),
+                "default_connection": pipeline.get("default_connection"),
+                "schedule": pipeline.get("schedule"),
+                "commit": pipeline.get("commit"),
             }
 
     @dlt.resource(write_disposition="replace")
