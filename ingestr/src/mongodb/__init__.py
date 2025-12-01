@@ -180,7 +180,9 @@ def mongodb_insert(uri: str):
     from urllib.parse import urlparse
 
     parsed_uri = urlparse(uri)
-    database = parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+    database = (
+        parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+    )
     first_batch_per_table: dict[str, bool] = {}
     BATCH_SIZE = 10000
 
