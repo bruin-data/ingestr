@@ -22,7 +22,7 @@ from dlt.destinations.impl.clickhouse.configuration import (
 from ingestr.src.elasticsearch.helpers import elasticsearch_insert
 from ingestr.src.errors import MissingValueError
 from ingestr.src.loader import load_dlt_file
-from ingestr.src.mongodb.helpers import mongodb_insert
+from ingestr.src.mongodb import mongodb_insert
 
 
 class GenericSqlDestination:

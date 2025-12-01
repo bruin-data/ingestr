@@ -11,6 +11,7 @@ from .helpers import (
     MongoDbCollectionResourceConfiguration,
     client_from_credentials,
     collection_documents,
+    process_file_items,
 )
 
 
@@ -164,4 +165,125 @@ def mongodb_collection(
         projection=projection,
         pymongoarrow_schema=pymongoarrow_schema,
         custom_query=custom_query,
+    )
+
+
+def mongodb_insert(uri: str):
+    """Creates a dlt.destination for inserting data into a MongoDB collection.
+
+    Args:
+        uri (str): MongoDB connection URI including database.
+
+    Returns:
+        dlt.destination: A DLT destination object configured for MongoDB.
+    """
+    from urllib.parse import urlparse
+
+    parsed_uri = urlparse(uri)
+
+    # Handle both mongodb:// and mongodb+srv:// schemes
+    if uri.startswith("mongodb+srv://") or uri.startswith("mongodb://"):
+        # For modern connection strings (MongoDB Atlas), use the URI as-is
+        connection_string = uri
+        # Extract database from path or use default
+        database = (
+            parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+        )
+    else:
+        # Legacy handling for backwards compatibility
+        host = parsed_uri.hostname or "localhost"
+        port = parsed_uri.port or 27017
+        username = parsed_uri.username
+        password = parsed_uri.password
+        database = (
+            parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
+        )
+
+        # Build connection string
+        if username and password:
+            connection_string = f"mongodb://{username}:{password}@{host}:{port}"
+        else:
+            connection_string = f"mongodb://{host}:{port}"
+
+        # Add query parameters if any
+        if parsed_uri.query:
+            connection_string += f"?{parsed_uri.query}"
+
+    state = {"first_batch": True}
+    BATCH_SIZE = 10000
+
+    def destination(items, table) -> None:
+        import pyarrow
+        from pymongo import MongoClient
+
+        collection_name = table["name"]
+
+        with MongoClient(connection_string) as client:
+            db = client[database]
+            collection = db[collection_name]
+
+            # Process documents
+            if isinstance(items, str):
+                documents = process_file_items(items)
+            elif isinstance(items, pyarrow.RecordBatch):
+                documents = items.to_pylist()
+            else:
+                documents = [item for item in items if isinstance(item, dict)]
+
+            write_disposition = table.get("write_disposition")
+
+            batches = [
+                documents[i : i + BATCH_SIZE]
+                for i in range(0, len(documents), BATCH_SIZE)
+            ]
+
+            if write_disposition == "merge":
+                from pymongo import ReplaceOne
+
+                primary_keys = [
+                    col_name
+                    for col_name, col_def in table.get("columns", {}).items()
+                    if isinstance(col_def, dict) and col_def.get("primary_key")
+                ]
+
+                if not primary_keys:
+                    raise ValueError(
+                        f"Merge operation requires primary keys for table '{collection_name}'. "
+                        f"Please define primary keys in the table schema or use 'replace' write disposition."
+                    )
+
+                for batch in batches:
+                    operations = [
+                        ReplaceOne(
+                            {key: doc[key] for key in primary_keys if key in doc},
+                            doc,
+                            upsert=True,
+                        )
+                        for doc in batch
+                        if any(key in doc for key in primary_keys)
+                    ]
+                    if operations:
+                        collection.bulk_write(operations, ordered=False)
+
+            elif write_disposition == "replace":
+                if state["first_batch"] and documents:
+                    collection.delete_many({})
+                    state["first_batch"] = False
+
+                for batch in batches:
+                    if batch:
+                        collection.insert_many(batch)
+
+            else:
+                raise ValueError(
+                    f"Unsupported write disposition '{write_disposition}' for MongoDB destination. "
+                )
+
+    return dlt.destination(
+        destination,
+        name="mongodb",
+        loader_file_format="typed-jsonl",
+        batch_size=1000,
+        naming_convention="snake_case",
+        loader_parallelism_strategy="sequential",
     )
