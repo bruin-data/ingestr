@@ -189,26 +189,6 @@ def mongodb_insert(uri: str):
         database = (
             parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
         )
-    else:
-        # Legacy handling for backwards compatibility
-        host = parsed_uri.hostname or "localhost"
-        port = parsed_uri.port or 27017
-        username = parsed_uri.username
-        password = parsed_uri.password
-        database = (
-            parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
-        )
-
-        # Build connection string
-        if username and password:
-            connection_string = f"mongodb://{username}:{password}@{host}:{port}"
-        else:
-            connection_string = f"mongodb://{host}:{port}"
-
-        # Add query parameters if any
-        if parsed_uri.query:
-            connection_string += f"?{parsed_uri.query}"
-
     first_batch_per_table: dict[str, bool] = {}
     BATCH_SIZE = 10000
 
