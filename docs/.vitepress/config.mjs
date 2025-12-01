@@ -144,6 +144,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Applovin Max", link: "/supported-sources/applovin_max"},
               { text: "Asana", link: "/supported-sources/asana" },
               { text: "Attio", link: "/supported-sources/attio" },
+              { text: "Bruin", link: "/supported-sources/bruin" },
               { text: "Chess.com", link: "/supported-sources/chess" },
               { text: "ClickUp", link: "/supported-sources/clickup" },
               { text: "Cursor", link: "/supported-sources/cursor" },
