@@ -649,6 +649,13 @@ class LocalCsvSource:
             page = []
             current_items = 0
             for dictionary in reader:
+                # Skip rows where all values are None or empty/whitespace
+                if all(
+                    v is None or (isinstance(v, str) and v.strip() == "")
+                    for v in dictionary.values()
+                ):
+                    continue
+
                 if current_items < page_size:
                     if incremental_key and incremental and incremental.start_value:
                         inc_value = dictionary.get(incremental_key)
