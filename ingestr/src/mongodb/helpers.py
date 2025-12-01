@@ -23,7 +23,6 @@ from bson.timestamp import Timestamp
 from dlt.common import logger
 from dlt.common.configuration.specs import BaseConfiguration, configspec
 from dlt.common.data_writers import TDataItemFormat
-from dlt.common.schema import TTableSchema
 from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TDataItem
 from dlt.common.utils import map_nested_in_place
@@ -960,84 +959,3 @@ def process_file_items(file_path: str) -> list[dict]:
                 doc = json.loads(line.strip())
                 documents.append(doc)  # Include all fields including DLT metadata
     return documents
-
-
-def mongodb_insert(uri: str):
-    """Creates a dlt.destination for inserting data into a MongoDB collection.
-
-    Args:
-        uri (str): MongoDB connection URI including database.
-
-    Returns:
-        dlt.destination: A DLT destination object configured for MongoDB.
-    """
-    from urllib.parse import urlparse
-
-    parsed_uri = urlparse(uri)
-
-    # Handle both mongodb:// and mongodb+srv:// schemes
-    if uri.startswith("mongodb+srv://") or uri.startswith("mongodb://"):
-        # For modern connection strings (MongoDB Atlas), use the URI as-is
-        connection_string = uri
-        # Extract database from path or use default
-        database = (
-            parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
-        )
-    else:
-        # Legacy handling for backwards compatibility
-        host = parsed_uri.hostname or "localhost"
-        port = parsed_uri.port or 27017
-        username = parsed_uri.username
-        password = parsed_uri.password
-        database = (
-            parsed_uri.path.lstrip("/") if parsed_uri.path.lstrip("/") else "ingestr_db"
-        )
-
-        # Build connection string
-        if username and password:
-            connection_string = f"mongodb://{username}:{password}@{host}:{port}"
-        else:
-            connection_string = f"mongodb://{host}:{port}"
-
-        # Add query parameters if any
-        if parsed_uri.query:
-            connection_string += f"?{parsed_uri.query}"
-
-    state = {"first_batch": True}
-
-    def destination(items: TDataItem, table: TTableSchema) -> None:
-        import pyarrow
-        from pymongo import MongoClient
-
-        # Extract database name from connection string
-        # Get collection name from table metadata
-        collection_name = table["name"]
-
-        # Connect to MongoDB
-        with MongoClient(connection_string) as client:
-            db = client[database]
-            collection = db[collection_name]
-
-            # Process and insert documents
-            if isinstance(items, str):
-                documents = process_file_items(items)
-            elif isinstance(items, pyarrow.RecordBatch):
-                documents = [item for item in items.to_pylist()]
-            else:
-                documents = [item for item in items if isinstance(item, dict)]
-
-            if state["first_batch"] and documents:
-                collection.delete_many({})
-                state["first_batch"] = False
-
-            if documents:
-                collection.insert_many(documents)  # Insert all new data
-
-    return dlt.destination(
-        destination,
-        name="mongodb",
-        loader_file_format="typed-jsonl",
-        batch_size=1000,
-        naming_convention="snake_case",
-        loader_parallelism_strategy="sequential",
-    )
