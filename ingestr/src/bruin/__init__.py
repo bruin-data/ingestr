@@ -41,9 +41,10 @@ def bruin_source(api_token: str):
                 "description": pipeline.get("description"),
                 "project": pipeline.get("project"),
                 "owner": pipeline.get("owner"),
-                "default_connection": pipeline.get("default_connection"),
+                "default_connections": pipeline.get("default_connections"),
                 "schedule": pipeline.get("schedule"),
                 "commit": pipeline.get("commit"),
+                "start_date": pipeline.get("start_date"),
             }
 
     @dlt.resource(write_disposition="replace")
