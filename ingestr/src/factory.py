@@ -30,6 +30,7 @@ from ingestr.src.sources import (
     AirtableSource,
     AlliumSource,
     AnthropicSource,
+    BruinSource,
     AppleAppStoreSource,
     ApplovinMaxSource,
     AppLovinSource,
@@ -165,6 +166,7 @@ class SourceDestinationFactory:
     sources: Dict[str, Type[SourceProtocol]] = {
         "allium": AlliumSource,
         "anthropic": AnthropicSource,
+        "bruin": BruinSource,
         "csv": LocalCsvSource,
         "couchbase": CouchbaseSource,
         "cursor": CursorSource,
