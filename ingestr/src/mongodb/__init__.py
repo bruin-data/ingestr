@@ -209,7 +209,7 @@ def mongodb_insert(uri: str):
         if parsed_uri.query:
             connection_string += f"?{parsed_uri.query}"
 
-    state = {"first_batch": True}
+    first_batch_per_table: dict[str, bool] = {}
     BATCH_SIZE = 10000
 
     def destination(items, table) -> None:
@@ -217,6 +217,9 @@ def mongodb_insert(uri: str):
         from pymongo import MongoClient
 
         collection_name = table["name"]
+
+        if collection_name not in first_batch_per_table:
+            first_batch_per_table[collection_name] = True
 
         with MongoClient(connection_string) as client:
             db = client[database]
@@ -255,20 +258,20 @@ def mongodb_insert(uri: str):
                 for batch in batches:
                     operations = [
                         ReplaceOne(
-                            {key: doc[key] for key in primary_keys if key in doc},
+                            {key: doc[key] for key in primary_keys},
                             doc,
                             upsert=True,
                         )
                         for doc in batch
-                        if any(key in doc for key in primary_keys)
+                        if all(key in doc for key in primary_keys)
                     ]
                     if operations:
                         collection.bulk_write(operations, ordered=False)
 
             elif write_disposition == "replace":
-                if state["first_batch"] and documents:
+                if first_batch_per_table[collection_name] and documents:
                     collection.delete_many({})
-                    state["first_batch"] = False
+                    first_batch_per_table[collection_name] = False
 
                 for batch in batches:
                     if batch:
