@@ -4658,7 +4658,7 @@ class BruinSource:
 
 
 class PrimerSource:
-    # primer://?api_key=<api_key>&api_version=<api_version>
+    # primer://?api_key=<api_key>
     def handles_incrementality(self) -> bool:
         return True
 
@@ -4669,10 +4669,7 @@ class PrimerSource:
         api_key = params.get("api_key")
         if api_key is None:
             raise MissingValueError("api_key", "Primer")
-
-        api_version = params.get("api_version", ["2.4"])[0]
-
-        if table not in ["payments", "payment_details"]:
+        if table not in ["payments"]:
             raise UnsupportedResourceError(table, "Primer")
 
         date_args = {}
@@ -4685,6 +4682,5 @@ class PrimerSource:
 
         return primer_source(
             api_key=api_key[0],
-            api_version=api_version,
             **date_args,
         ).with_resources(table)
