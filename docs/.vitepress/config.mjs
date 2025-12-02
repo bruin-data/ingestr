@@ -179,6 +179,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "PhantomBuster", link: "/supported-sources/phantombuster" },
               { text: "Pinterest", link: "/supported-sources/pinterest" },
               { text: "Pipedrive", link: "/supported-sources/pipedrive" },
+              { text: "Primer", link: "/supported-sources/primer" },
               { text: "Plus Vibe AI", link: "/supported-sources/plusvibeai" },
               { text: "QuickBooks", link: "/supported-sources/quickbooks" },
               { text: "RevenueCat", link: "/supported-sources/revenuecat" },
