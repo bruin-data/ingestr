@@ -52,6 +52,30 @@ class TestBuildDateParams(unittest.TestCase):
         result = build_date_params(end_date=end)
         self.assertEqual(result, {"to_date": "2025-12-01T00:00:00Z"})
 
+    def test_same_day_range_start_of_day(self):
+        start = pendulum.datetime(2025, 12, 1, 0, 0, 0)
+        end = pendulum.datetime(2025, 12, 1, 0, 0, 0)
+        result = build_date_params(start_date=start, end_date=end)
+        self.assertEqual(
+            result,
+            {
+                "from_date": "2025-12-01T00:00:00Z",
+                "to_date": "2025-12-02T00:00:00Z",
+            },
+        )
+
+    def test_same_day_range_end_of_day(self):
+        start = pendulum.datetime(2025, 12, 1, 0, 0, 0)
+        end = pendulum.datetime(2025, 12, 1, 23, 59, 59)
+        result = build_date_params(start_date=start, end_date=end)
+        self.assertEqual(
+            result,
+            {
+                "from_date": "2025-12-01T00:00:00Z",
+                "to_date": "2025-12-02T00:00:00Z",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
