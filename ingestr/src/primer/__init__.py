@@ -22,24 +22,24 @@ def primer_source(
     start_date_obj = ensure_pendulum_datetime(start_date) if start_date else None
     end_date_obj = ensure_pendulum_datetime(end_date) if end_date else None
 
-    @dlt.resource(
-        primary_key="id",
-        write_disposition="merge",
-    )
-    def payments() -> Iterable[TDataItem]:
-        """
-        The resource for detailed payment information from Primer.
-        Fetches payment IDs first, then gets detailed info for each payment.
-
-        Returns:
-            Iterable[TDataItem]: A generator of detailed payments.
-        """
-        payment_ids = client.list_payment_ids(
+    @dlt.resource(selected=False)
+    def payment_ids() -> Iterable[TDataItem]:
+        """List payment IDs from Primer API."""
+        ids = client.list_payment_ids(
             start_date=start_date_obj,
             end_date=end_date_obj,
         )
+        for payment_id in ids:
+            yield {"id": payment_id}
 
-        for payment_id in payment_ids:
-            yield client.get_payment(payment_id)
+    @dlt.transformer(
+        data_from=payment_ids,
+        primary_key="id",
+        write_disposition="merge",
+        parallelized=True,
+    )
+    def payments(payment_id_item: TDataItem) -> TDataItem:
+        """Fetch payment details in parallel."""
+        return client.get_payment(payment_id_item["id"])
 
-    return (payments,)
+    return (payment_ids, payments)
