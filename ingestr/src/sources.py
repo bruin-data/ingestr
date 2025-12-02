@@ -4655,3 +4655,36 @@ class BruinSource:
         from ingestr.src.bruin import bruin_source
 
         return bruin_source(api_token=api_token[0]).with_resources(table)
+
+
+class PrimerSource:
+    # primer://?api_key=<api_key>&api_version=<api_version>
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        api_key = params.get("api_key")
+        if api_key is None:
+            raise MissingValueError("api_key", "Primer")
+
+        api_version = params.get("api_version", ["2.4"])[0]
+
+        if table not in ["payments", "payment_details"]:
+            raise UnsupportedResourceError(table, "Primer")
+
+        date_args = {}
+        if kwargs.get("interval_start"):
+            date_args["start_date"] = kwargs.get("interval_start")
+        if kwargs.get("interval_end"):
+            date_args["end_date"] = kwargs.get("interval_end")
+
+        from ingestr.src.primer import primer_source
+
+        return primer_source(
+            api_key=api_key[0],
+            api_version=api_version,
+            **date_args,
+        ).with_resources(table)

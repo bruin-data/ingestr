@@ -79,6 +79,7 @@ from ingestr.src.sources import (
     PinterestSource,
     PipedriveSource,
     PlusVibeAISource,
+    PrimerSource,
     QuickBooksSource,
     RevenueCatSource,
     S3Source,
@@ -236,6 +237,7 @@ class SourceDestinationFactory:
         "plusvibeai": PlusVibeAISource,
         "monday": MondaySource,
         "mailchimp": MailchimpSource,
+        "primer": PrimerSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
