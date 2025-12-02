@@ -10,7 +10,6 @@ def build_date_params(
     start_date: Optional[pendulum.DateTime] = None,
     end_date: Optional[pendulum.DateTime] = None,
 ) -> Dict[str, str]:
-
     params: Dict[str, str] = {}
     if start_date:
         params["from_date"] = start_date.start_of("day").to_iso8601_string()
