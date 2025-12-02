@@ -83,8 +83,6 @@ def bruin_source(api_token: str):
                     "snowflake": asset.get("snowflake") or None,
                     "athena": asset.get("athena") or None,
                     "interval": asset.get("interval") or None,
-
-
                 }
 
     return pipelines, assets
