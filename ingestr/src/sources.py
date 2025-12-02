@@ -4672,11 +4672,11 @@ class PrimerSource:
         if table not in ["payments"]:
             raise UnsupportedResourceError(table, "Primer")
 
-        date_args = {}
+        date_args: dict[str, str] = {}
         if kwargs.get("interval_start"):
-            date_args["start_date"] = kwargs.get("interval_start")
+            date_args["start_date"] = kwargs["interval_start"]
         if kwargs.get("interval_end"):
-            date_args["end_date"] = kwargs.get("interval_end")
+            date_args["end_date"] = kwargs["interval_end"]
 
         from ingestr.src.primer import primer_source
 
