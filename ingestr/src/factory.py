@@ -37,6 +37,7 @@ from ingestr.src.sources import (
     ArrowMemoryMappedSource,
     AsanaSource,
     AttioSource,
+    BruinSource,
     ChessSource,
     ClickupSource,
     CouchbaseSource,
@@ -165,6 +166,7 @@ class SourceDestinationFactory:
     sources: Dict[str, Type[SourceProtocol]] = {
         "allium": AlliumSource,
         "anthropic": AnthropicSource,
+        "bruin": BruinSource,
         "csv": LocalCsvSource,
         "couchbase": CouchbaseSource,
         "cursor": CursorSource,
