@@ -89,3 +89,22 @@ jobs:
         run: make test-ci
       - name: check the formatting
         run: make lint-ci
+
+  tests-cratedb:
+    name: "CrateDB"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Acquire sources
+        uses: actions/checkout@v4
+      - name: Install Microsoft ODBC
+        run: sudo ACCEPT_EULA=Y apt-get install msodbcsql18 -y
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Install project
+        run: make deps-ci
+      - name: Run tests
+        run: make test-ci-cratedb
