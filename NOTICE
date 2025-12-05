@@ -1,0 +1,35 @@
+NOTICE
+
+This project contains code from the following Apache 2.0 licensed project:
+
+dlt-hub/verified-sources
+https://github.com/dlt-hub/verified-sources
+Copyright 2022-2025 ScaleVector
+Licensed under the Apache License, Version 2.0
+
+The following directories contain code from dlt-hub:
+- ingestr/src/airtable/
+- ingestr/src/asana_source/
+- ingestr/src/chess/
+- ingestr/src/facebook_ads/
+- ingestr/src/filesystem/
+- ingestr/src/freshdesk/
+- ingestr/src/github/
+- ingestr/src/google_ads/
+- ingestr/src/google_analytics/
+- ingestr/src/google_sheets/
+- ingestr/src/hubspot/
+- ingestr/src/jira_source/
+- ingestr/src/kafka/
+- ingestr/src/kinesis/
+- ingestr/src/mongodb/
+- ingestr/src/notion/
+- ingestr/src/personio/
+- ingestr/src/pipedrive/
+- ingestr/src/salesforce/
+- ingestr/src/shopify/
+- ingestr/src/slack/
+- ingestr/src/stripe_analytics/
+- ingestr/src/zendesk/
+
+The Apache License 2.0 can be found in the LICENSE.Apache-2.0 file.
