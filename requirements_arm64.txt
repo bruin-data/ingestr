@@ -114,7 +114,9 @@ duckdb==1.2.1
 duckdb-engine==0.17.0
     # via -r requirements.in
 ecdsa==0.19.1
-    # via python-jose
+    # via
+    #   -r requirements.in
+    #   python-jose
 elastic-transport==8.17.1
     # via elasticsearch
 elasticsearch==8.10.1
@@ -602,7 +604,6 @@ typing-extensions==4.15.0
     #   pyairtable
     #   pydantic
     #   pydantic-core
-    #   pyopenssl
     #   reactivex
     #   simple-salesforce
     #   snowflake-connector-python
@@ -627,8 +628,9 @@ tzlocal==5.3.1
     #   trino
 uritemplate==4.1.1
     # via google-api-python-client
-urllib3==2.5.0
+urllib3==2.6.2
     # via
+    #   -r requirements.in
     #   botocore
     #   clickhouse-connect
     #   crate
