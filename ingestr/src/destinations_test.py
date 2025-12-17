@@ -119,3 +119,23 @@ class DatabricksDestinationTest(unittest.TestCase, GenericSqlDestinationFixture)
         self.assertEqual(creds["http_path"], "/path/123")
         self.assertEqual(creds["catalog"], "workspace")
         self.assertEqual(creds["schema"], "dest")
+
+    def test_destination_run_params_uses_schema_from_uri(self):
+        uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace&schema=sandbox"
+        result = self.destination.dlt_run_params(uri, "sandbox.customer_raw")
+        # Should use schema from URI as dataset_name and only table name from dest-table
+        self.assertEqual(result, {"dataset_name": "sandbox", "table_name": "customer_raw"})
+
+    def test_destination_run_params_require_two_fields(self):
+        uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace&schema=dest"
+        with pytest.raises(ValueError):
+            self.destination.dlt_run_params(uri, "sometable")
+
+        with pytest.raises(ValueError):
+            self.destination.dlt_run_params(uri, "sometable.with.extra")
+
+    def test_destination_run_params_parse_table_names_correctly(self):
+        uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace&schema=myschema"
+        result = self.destination.dlt_run_params(uri, "dataset.sometable")
+        # For Databricks, dataset_name comes from URI schema, not from dest-table
+        self.assertEqual(result, {"dataset_name": "myschema", "table_name": "sometable"})
