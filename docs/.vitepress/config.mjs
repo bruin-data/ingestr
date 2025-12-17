@@ -46,8 +46,8 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
   themeConfig: {
     // https://vitepress.dev/reference/default-theme-config
     nav: [
-      { text: "Home", link: "/" },
-      { text: "Getting started", link: "/getting-started/quickstart.md" },
+      { text: "Introduction", link: "/" },
+      { text: "Quickstart", link: "/getting-started/quickstart.md" },
     ],
     outline: "deep",
     search: {
@@ -56,7 +56,8 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
 
     sidebar: [
       {
-        text: "Getting started",
+        text: "Introduction",
+        link: "/",
         items: [
           { text: "Quickstart", link: "/getting-started/quickstart.md" },
           { text: "Core Concepts", link: "/getting-started/core-concepts.md" },
