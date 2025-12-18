@@ -31,18 +31,6 @@ class GenericSqlDestination:
         if len(table_fields) != 2:
             raise ValueError("Table name must be in the format <schema>.<table>")
 
-        if uri.startswith("databricks://"):
-            p = urlparse(uri)
-            q = parse_qs(p.query)
-            schema = q.get("schema", [None])[0]
-            if not schema:
-                raise ValueError("Databricks requires schema in the URI.")
-            res = {
-                "dataset_name": schema,
-                "table_name": table_fields[-1],
-            }
-            return res
-
         res = {
             "dataset_name": table_fields[-2],
             "table_name": table_fields[-1],
@@ -290,14 +278,12 @@ class DatabricksDestination(GenericSqlDestination):
         server_hostname = p.hostname
         http_path = q.get("http_path", [None])[0]
         catalog = q.get("catalog", [None])[0]
-        schema = q.get("schema", [None])[0]
 
         creds = {
             "access_token": access_token,
             "server_hostname": server_hostname,
             "http_path": http_path,
             "catalog": catalog,
-            "schema": schema,
         }
 
         return dlt.destinations.databricks(
