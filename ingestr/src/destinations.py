@@ -27,6 +27,10 @@ from ingestr.src.mongodb import mongodb_insert
 
 class GenericSqlDestination:
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
+        table_fields = table.split(".")
+        if len(table_fields) != 2:
+            raise ValueError("Table name must be in the format <schema>.<table>")
+
         if uri.startswith("databricks://"):
             p = urlparse(uri)
             q = parse_qs(p.query)
@@ -35,13 +39,9 @@ class GenericSqlDestination:
                 raise ValueError("Databricks requires schema in the URI.")
             res = {
                 "dataset_name": schema,
-                "table_name": table,
+                "table_name": table_fields[-1],
             }
             return res
-
-        table_fields = table.split(".")
-        if len(table_fields) != 2:
-            raise ValueError("Table name must be in the format <schema>.<table>")
 
         res = {
             "dataset_name": table_fields[-2],
