@@ -491,7 +491,7 @@ def parse_timeseries_stats(result: dict) -> Iterator[dict]:
 def fetch_entity_stats(
     api: "SnapchatAdsAPI",
     entity_type: str,
-    ad_account_id: str | None,
+    ad_account_id: list[str] | None,
     organization_id: str | None,
     base_url: str,
     params: dict,
