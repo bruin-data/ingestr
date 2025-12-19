@@ -62,17 +62,19 @@ These resources require only authentication credentials:
 
 ### Ad Account-level Resources
 
-These resources can fetch data for a specific ad account or all ad accounts in the organization. All of these resources support the `table:ad_account_id` format to fetch data for a specific ad account.
+These resources can fetch data for a specific ad account, multiple ad accounts, or all ad accounts in the organization. All of these resources support the following formats:
+- `table:ad_account_id` - fetch data for a specific ad account
+- `table:id1,id2,id3` - fetch data for multiple ad accounts
 
 | Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `campaigns` | id | updated_at | merge | Retrieves all campaigns for ad account(s). Supports `campaigns:ad_account_id` |
-| `adsquads` | id | updated_at | merge | Retrieves all ad squads for ad account(s). Supports `adsquads:ad_account_id` |
-| `ads` | id | updated_at | merge | Retrieves all ads for ad account(s). Supports `ads:ad_account_id` |
-| `invoices` | id | updated_at | merge | Retrieves all invoices for ad account(s). Supports `invoices:ad_account_id` |
-| `event_details` | id | updated_at | merge | Retrieves all event details (pixel events) for ad account(s). Supports `event_details:ad_account_id` |
-| `creatives` | id | updated_at | merge | Retrieves all creatives for ad account(s). Supports `creatives:ad_account_id` |
-| `segments` | id | updated_at | merge | Retrieves all audience segments for ad account(s). Supports `segments:ad_account_id` |
+| `campaigns` | id | updated_at | merge | Retrieves all campaigns for ad account(s). Supports `campaigns:ad_account_id` or `campaigns:id1,id2,id3` |
+| `adsquads` | id | updated_at | merge | Retrieves all ad squads for ad account(s). Supports `adsquads:ad_account_id` or `adsquads:id1,id2,id3` |
+| `ads` | id | updated_at | merge | Retrieves all ads for ad account(s). Supports `ads:ad_account_id` or `ads:id1,id2,id3` |
+| `invoices` | id | updated_at | merge | Retrieves all invoices for ad account(s). Supports `invoices:ad_account_id` or `invoices:id1,id2,id3` |
+| `event_details` | id | updated_at | merge | Retrieves all event details (pixel events) for ad account(s). Supports `event_details:ad_account_id` or `event_details:id1,id2,id3` |
+| `creatives` | id | updated_at | merge | Retrieves all creatives for ad account(s). Supports `creatives:ad_account_id` or `creatives:id1,id2,id3` |
+| `segments` | id | updated_at | merge | Retrieves all audience segments for ad account(s). Supports `segments:ad_account_id` or `segments:id1,id2,id3` |
 
 ### Stats / Measurement Data
 
@@ -120,6 +122,15 @@ Snapchat Ads source supports fetching stats/measurement data for campaigns, ad s
 ingestr ingest \
   --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
   --source-table 'campaigns' \
+  --dest-uri 'duckdb:///snapchat.duckdb' \
+  --dest-table 'dest.campaigns'
+```
+
+### Fetch campaigns for specific ad accounts
+```sh
+ingestr ingest \
+  --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
+  --source-table 'campaigns:account_id_1,account_id_2,account_id_3' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
   --dest-table 'dest.campaigns'
 ```

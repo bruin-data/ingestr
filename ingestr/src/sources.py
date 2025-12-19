@@ -4564,12 +4564,15 @@ class SnapchatAdsSource:
                 if parsed.pivot:
                     stats_config["pivot"] = parsed.pivot
             else:
-                # Non-stats table with ad_account_id: resource_name:ad_account_id
-                ad_account_id = parts[1] if len(parts) > 1 else None
-                if not ad_account_id:
+                # Non-stats table with ad_account_id(s): resource_name:id1,id2,id3
+                ad_account_ids_str = parts[1] if len(parts) > 1 else None
+                if not ad_account_ids_str:
                     raise ValueError(
-                        f"ad_account_id must be provided in format '{resource_name}:ad_account_id'"
+                        f"ad_account_id must be provided in format '{resource_name}:ad_account_id' or '{resource_name}:id1,id2,id3'"
                     )
+                ad_account_id = [
+                    id.strip() for id in ad_account_ids_str.split(",") if id.strip()
+                ]
         else:
             resource_name = table
             if resource_name in self.STATS_RESOURCES:

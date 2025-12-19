@@ -26,7 +26,7 @@ def snapchat_ads_source(
     client_id: str = dlt.secrets.value,
     client_secret: str = dlt.secrets.value,
     organization_id: str | None = None,
-    ad_account_id: str | None = None,
+    ad_account_id: list[str] | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     stats_config: dict | None = None,
@@ -38,7 +38,7 @@ def snapchat_ads_source(
         client_id (str): OAuth client ID
         client_secret (str): OAuth client secret
         organization_id (str): Organization ID (optional for organizations table, required for others)
-        ad_account_id (str): Ad Account ID (optional, used to filter resources by ad account)
+        ad_account_id (list[str]): Ad Account IDs (optional, used to filter resources by ad accounts)
         start_date (str): Optional start date for filtering data
         end_date (str): Optional end date for filtering data
 
