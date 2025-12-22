@@ -38,7 +38,6 @@ from sqlalchemy.pool import NullPool
 from testcontainers.clickhouse import ClickHouseContainer  # type: ignore
 from testcontainers.core.container import DockerContainer  # type: ignore
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore
-from testcontainers.elasticsearch import ElasticSearchContainer  # type: ignore
 from testcontainers.kafka import KafkaContainer  # type: ignore
 from testcontainers.localstack import LocalStackContainer  # type: ignore
 from testcontainers.mongodb import MongoDbContainer  # type: ignore
