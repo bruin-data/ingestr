@@ -5939,7 +5939,9 @@ def elasticsearch_container_with_auth():
         container.stop()
 
 
-@pytest.mark.skip(reason="Covered by test_csv_to_elasticsearch_with_auth and test_elasticsearch_replace_strategy")
+@pytest.mark.skip(
+    reason="Covered by test_csv_to_elasticsearch_with_auth and test_elasticsearch_replace_strategy"
+)
 def test_csv_to_elasticsearch(elasticsearch_container):
     """Test loading CSV data into Elasticsearch."""
     try:
