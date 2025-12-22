@@ -131,7 +131,7 @@ def paginate(client: requests.Session, headers: dict, url: str, page_size: int =
 
 def get_account_ids(
     api: "SnapchatAdsAPI",
-    ad_account_id: str | None,
+    ad_account_id: list[str] | None,
     organization_id: str | None,
     base_url: str,
     resource_name: str,
@@ -141,11 +141,11 @@ def get_account_ids(
     """
     Get list of account IDs to fetch data for.
 
-    If ad_account_id is provided, returns a list with that single account.
+    If ad_account_id is provided, returns that list of accounts.
     Otherwise, fetches all ad accounts for the organization.
     """
     if ad_account_id:
-        return [ad_account_id]
+        return ad_account_id
 
     if not organization_id:
         raise ValueError(
@@ -227,7 +227,7 @@ def fetch_snapchat_data_with_params(
 
 def fetch_account_id_resource(
     api: "SnapchatAdsAPI",
-    ad_account_id: str | None,
+    ad_account_id: list[str] | None,
     organization_id: str | None,
     base_url: str,
     resource_name: str,
@@ -238,7 +238,7 @@ def fetch_account_id_resource(
     """
     Fetch resource data for ad accounts without pagination.
 
-    If ad_account_id is provided, fetches data for that specific account.
+    If ad_account_id is provided, fetches data for those specific accounts.
     Otherwise, fetches all ad accounts and then fetches data for each account.
     """
     account_ids = get_account_ids(
@@ -260,7 +260,7 @@ def fetch_account_id_resource(
 
 def fetch_with_paginate_account_id(
     api: "SnapchatAdsAPI",
-    ad_account_id: str | None,
+    ad_account_id: list[str] | None,
     organization_id: str | None,
     base_url: str,
     resource_name: str,
@@ -271,7 +271,7 @@ def fetch_with_paginate_account_id(
     """
     Fetch paginated resource data for ad accounts.
 
-    If ad_account_id is provided, fetches data for that specific account.
+    If ad_account_id is provided, fetches data for those specific accounts.
     Otherwise, fetches all ad accounts and then fetches data for each account.
     """
     account_ids = get_account_ids(
@@ -491,7 +491,7 @@ def parse_timeseries_stats(result: dict) -> Iterator[dict]:
 def fetch_entity_stats(
     api: "SnapchatAdsAPI",
     entity_type: str,
-    ad_account_id: str | None,
+    ad_account_id: list[str] | None,
     organization_id: str | None,
     base_url: str,
     params: dict,
