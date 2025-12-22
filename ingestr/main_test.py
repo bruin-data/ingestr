@@ -5906,6 +5906,7 @@ def elasticsearch_container_with_auth():
         container.stop()
 
 
+@pytest.mark.timeout(200)
 def test_csv_to_elasticsearch(elasticsearch_container):
     """Test loading CSV data into Elasticsearch."""
     try:
