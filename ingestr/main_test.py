@@ -5829,7 +5829,7 @@ def test_hostaway_source_full_refresh(hostaway_table):
         pass
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def elasticsearch_container():
     """Fixture that provides an Elasticsearch container for tests."""
     container = DockerContainer("docker.elastic.co/elasticsearch/elasticsearch:8.11.0")
@@ -5939,6 +5939,7 @@ def elasticsearch_container_with_auth():
         container.stop()
 
 
+@pytest.mark.skip(reason="Covered by test_csv_to_elasticsearch_with_auth and test_elasticsearch_replace_strategy")
 def test_csv_to_elasticsearch(elasticsearch_container):
     """Test loading CSV data into Elasticsearch."""
     try:
