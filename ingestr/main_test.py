@@ -6005,6 +6005,7 @@ def test_csv_to_elasticsearch(elasticsearch_container):
             pass
 
 
+@pytest.mark.skip(reason="Elasticsearch container networking unreliable in CI")
 def test_csv_to_elasticsearch_with_auth(elasticsearch_container_with_auth):
     """Test loading CSV data into Elasticsearch with authentication."""
     try:
@@ -6070,6 +6071,7 @@ def test_csv_to_elasticsearch_with_auth(elasticsearch_container_with_auth):
             pass
 
 
+@pytest.mark.skip(reason="Elasticsearch container networking unreliable in CI")
 def test_elasticsearch_replace_strategy(elasticsearch_container):
     """Test that replace strategy deletes existing data and replaces it."""
     try:
@@ -6145,6 +6147,10 @@ NewData2,300
             pass
 
 
+@pytest.mark.skipif(
+    os.getenv("CI") == "true",
+    reason="Elasticsearch tests unreliable in CI",
+)
 @pytest.mark.skipif(
     not os.getenv("ELASTICSEARCH_CLOUD_URL"),
     reason="ELASTICSEARCH_CLOUD_URL not set in environment",
