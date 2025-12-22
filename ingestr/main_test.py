@@ -5834,9 +5834,7 @@ def test_hostaway_source_full_refresh(hostaway_table):
 def elasticsearch_container():
     """Fixture that provides an Elasticsearch container for tests."""
     with ElasticSearchContainer(
-        "docker.elastic.co/elasticsearch/elasticsearch:8.11.0"
-    ).with_env("ES_JAVA_OPTS", "-Xms512m -Xmx512m").with_env(
-        "discovery.type", "single-node"
+        "docker.elastic.co/elasticsearch/elasticsearch:8.11.0", mem_limit="1G"
     ) as es:
         yield es
 
