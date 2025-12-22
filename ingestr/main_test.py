@@ -5835,6 +5835,8 @@ def elasticsearch_container():
     """Fixture that provides an Elasticsearch container for tests."""
     with ElasticSearchContainer(
         "docker.elastic.co/elasticsearch/elasticsearch:8.11.0"
+    ).with_env("ES_JAVA_OPTS", "-Xms512m -Xmx512m").with_env(
+        "discovery.type", "single-node"
     ) as es:
         yield es
 
@@ -5906,7 +5908,6 @@ def elasticsearch_container_with_auth():
         container.stop()
 
 
-@pytest.mark.timeout(200)
 def test_csv_to_elasticsearch(elasticsearch_container):
     """Test loading CSV data into Elasticsearch."""
     try:

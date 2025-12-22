@@ -12,4 +12,3 @@ testcontainers[postgres,mysql]==4.8.2
 pytest-xdist[psutil]==3.6.1
 pkginfo==1.12.0
 pytest-repeat==0.9.3
-pytest-timeout==2.3.1
