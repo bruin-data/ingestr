@@ -5833,10 +5833,44 @@ def test_hostaway_source_full_refresh(hostaway_table):
 @pytest.fixture(scope="module")
 def elasticsearch_container():
     """Fixture that provides an Elasticsearch container for tests."""
-    with ElasticSearchContainer(
-        "docker.elastic.co/elasticsearch/elasticsearch:8.11.0", mem_limit="1G"
-    ) as es:
-        yield es
+    container = DockerContainer("docker.elastic.co/elasticsearch/elasticsearch:8.11.0")
+    container.with_exposed_ports(9200)
+    container.with_env("discovery.type", "single-node")
+    container.with_env("xpack.security.enabled", "false")
+    container.with_env("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
+
+    container.start()
+
+    host = container.get_container_host_ip()
+    port = container.get_exposed_port(9200)
+    url = f"http://{host}:{port}"
+
+    max_retries = 30
+    for i in range(max_retries):
+        try:
+            response = urllib.request.urlopen(url, timeout=5)
+            if response.status == 200:
+                break
+        except Exception:
+            if i == max_retries - 1:
+                container.stop()
+                raise
+            time.sleep(2)
+
+    class ESContainer:
+        def __init__(self, container, url):
+            self._container = container
+            self._url = url
+
+        def get_url(self):
+            return self._url
+
+    es_container = ESContainer(container, url)
+
+    try:
+        yield es_container
+    finally:
+        container.stop()
 
 
 @pytest.fixture(scope="module")
