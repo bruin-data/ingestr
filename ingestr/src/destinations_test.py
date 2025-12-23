@@ -103,7 +103,7 @@ class MsSQLDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
     expected_class = dlt.destinations.mssql
 
 
-class DatabricksDestinationTest(unittest.TestCase, GenericSqlDestinationFixture):
+class DatabricksDestinationTest(unittest.TestCase):
     destination = DatabricksDestination()
     expected_class = dlt.destinations.databricks
 
@@ -120,3 +120,28 @@ class DatabricksDestinationTest(unittest.TestCase, GenericSqlDestinationFixture)
         self.assertEqual(creds["server_hostname"], "hostname")
         self.assertEqual(creds["http_path"], "/path/123")
         self.assertEqual(creds["catalog"], "workspace")
+
+    def test_run_params_with_schema_dot_table(self):
+        """Test that schema.table format works"""
+        uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace"
+        result = self.destination.dlt_run_params(uri, "myschema.mytable")
+        self.assertEqual(result, {"dataset_name": "myschema", "table_name": "mytable"})
+
+    def test_run_params_with_schema_in_uri(self):
+        """Test that just table name works when schema is in URI"""
+        uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace&schema=myschema"
+        result = self.destination.dlt_run_params(uri, "mytable")
+        self.assertEqual(result, {"dataset_name": "myschema", "table_name": "mytable"})
+
+    def test_run_params_schema_dot_table_overrides_uri_schema(self):
+        """Test that schema.table format overrides schema in URI"""
+        uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace&schema=old_schema"
+        result = self.destination.dlt_run_params(uri, "new_schema.mytable")
+        self.assertEqual(result, {"dataset_name": "new_schema", "table_name": "mytable"})
+
+    def test_run_params_requires_schema(self):
+        """Test that error is raised when no schema is provided"""
+        uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace"
+        with pytest.raises(ValueError) as exc_info:
+            self.destination.dlt_run_params(uri, "mytable")
+        self.assertIn("schema", str(exc_info.value).lower())
