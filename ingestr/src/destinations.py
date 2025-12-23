@@ -291,6 +291,31 @@ class DatabricksDestination(GenericSqlDestination):
             **kwargs,
         )
 
+    def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
+        p = urlparse(uri)
+        q = parse_qs(p.query)
+        uri_schema = q.get("schema", [None])[0]
+
+        table_fields = table.split(".")
+
+        # If table is in schema.table format, use that (overrides URI schema)
+        if len(table_fields) == 2:
+            return {
+                "dataset_name": table_fields[0],
+                "table_name": table_fields[1],
+            }
+
+        # If table is just a table name, use schema from URI
+        if len(table_fields) == 1 and uri_schema:
+            return {
+                "dataset_name": uri_schema,
+                "table_name": table_fields[0],
+            }
+
+        raise ValueError(
+            "Table name must be in the format <schema>.<table>, or specify schema in the URI"
+        )
+
 
 class SynapseDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
