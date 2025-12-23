@@ -27,18 +27,6 @@ from ingestr.src.mongodb import mongodb_insert
 
 class GenericSqlDestination:
     def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
-        if uri.startswith("databricks://"):
-            p = urlparse(uri)
-            q = parse_qs(p.query)
-            schema = q.get("schema", [None])[0]
-            if not schema:
-                raise ValueError("Databricks requires schema in the URI.")
-            res = {
-                "dataset_name": schema,
-                "table_name": table,
-            }
-            return res
-
         table_fields = table.split(".")
         if len(table_fields) != 2:
             raise ValueError("Table name must be in the format <schema>.<table>")
@@ -290,19 +278,42 @@ class DatabricksDestination(GenericSqlDestination):
         server_hostname = p.hostname
         http_path = q.get("http_path", [None])[0]
         catalog = q.get("catalog", [None])[0]
-        schema = q.get("schema", [None])[0]
 
         creds = {
             "access_token": access_token,
             "server_hostname": server_hostname,
             "http_path": http_path,
             "catalog": catalog,
-            "schema": schema,
         }
 
         return dlt.destinations.databricks(
             credentials=creds,
             **kwargs,
+        )
+
+    def dlt_run_params(self, uri: str, table: str, **kwargs) -> dict:
+        p = urlparse(uri)
+        q = parse_qs(p.query)
+        uri_schema = q.get("schema", [None])[0]
+
+        table_fields = table.split(".")
+
+        # If table is in schema.table format, use that (overrides URI schema)
+        if len(table_fields) == 2:
+            return {
+                "dataset_name": table_fields[0],
+                "table_name": table_fields[1],
+            }
+
+        # If table is just a table name, use schema from URI
+        if len(table_fields) == 1 and uri_schema:
+            return {
+                "dataset_name": uri_schema,
+                "table_name": table_fields[0],
+            }
+
+        raise ValueError(
+            "Table name must be in the format <schema>.<table>, or specify schema in the URI"
         )
 
 
