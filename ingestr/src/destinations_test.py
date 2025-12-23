@@ -123,7 +123,9 @@ class DatabricksDestinationTest(unittest.TestCase):
 
     def test_run_params_with_schema_dot_table(self):
         """Test that schema.table format works"""
-        uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace"
+        uri = (
+            "databricks://token:password@hostname?http_path=/path/123&catalog=workspace"
+        )
         result = self.destination.dlt_run_params(uri, "myschema.mytable")
         self.assertEqual(result, {"dataset_name": "myschema", "table_name": "mytable"})
 
@@ -137,11 +139,15 @@ class DatabricksDestinationTest(unittest.TestCase):
         """Test that schema.table format overrides schema in URI"""
         uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace&schema=old_schema"
         result = self.destination.dlt_run_params(uri, "new_schema.mytable")
-        self.assertEqual(result, {"dataset_name": "new_schema", "table_name": "mytable"})
+        self.assertEqual(
+            result, {"dataset_name": "new_schema", "table_name": "mytable"}
+        )
 
     def test_run_params_requires_schema(self):
         """Test that error is raised when no schema is provided"""
-        uri = "databricks://token:password@hostname?http_path=/path/123&catalog=workspace"
+        uri = (
+            "databricks://token:password@hostname?http_path=/path/123&catalog=workspace"
+        )
         with pytest.raises(ValueError) as exc_info:
             self.destination.dlt_run_params(uri, "mytable")
         self.assertIn("schema", str(exc_info.value).lower())
