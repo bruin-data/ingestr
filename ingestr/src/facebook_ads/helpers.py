@@ -125,20 +125,15 @@ def execute_job(
     time_start = time.time()
     sleep_time = 3
     while status != "Job Completed":
-        print("-----")
-        print("waiting for job to finish")
         duration = time.time() - time_start
         job = job.api_get()
         status = job["async_status"]
         percent_complete = job["async_percent_completion"]
-        print("async_status", status)
-        print("percent_complete", percent_complete)
 
         job_id = job["id"]
         logger.info("%s, %d%% done", status, percent_complete)
 
         if status == "Job Completed":
-            print("job completed")
             return job
 
         if duration > insights_max_wait_to_start_seconds and percent_complete == 0:

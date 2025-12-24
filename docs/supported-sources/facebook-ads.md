@@ -54,26 +54,28 @@ Use these as `--source-table` parameter in the `ingestr ingest` command.
 
 ### Facebook Insights Custom Configuration
 
-The `facebook_insights` table supports advanced configuration for breakdowns and custom metrics:
+The `facebook_insights` table supports advanced configuration for breakdowns and custom fields:
 
 #### Format Options
 
 There are two distinct configuration modes:
 
 **Mode 1: Predefined Breakdowns**
-- **Format**: `facebook_insights:breakdown_type` or `facebook_insights:breakdown_type:metric1,metric2,metric3`
+- **Format**: `facebook_insights:breakdown_type` or `facebook_insights:breakdown_type:field1,field2,field3`
 - Uses a predefined breakdown type (see list below)
 - Cannot be combined with custom dimensions
-- Custom metrics are optional - if omitted, uses default fields for that breakdown
+- Custom fields are optional - if omitted, uses default fields for that breakdown
 
 **Mode 2: Custom Dimensions**
-- **Format**: `facebook_insights:dimension1,dimension2:metric1,metric2,metric3` or `facebook_insights:level,dimension1,dimension2:metric1,metric2,metric3`
+- **Format**: `facebook_insights:dimension1,dimension2:field1,field2,field3` or `facebook_insights:level,dimension1,dimension2:field1,field2,field3`
 - Uses custom dimensions (not predefined breakdown names)
-- **Metrics are required** - you must always provide metrics after the second colon
+- **Fields are required** - you must always provide fields after the second colon
 - Can optionally specify a level (account, campaign, adset, ad) as the first dimension
 
-> [!NOTE]
-> The fields `campaign_id`, `adset_id`, and `ad_id` are always included in every generated insights report, regardless of the configuration or metrics specified, you don't need to specify them again. 
+> [!TIP]
+> You can include `campaign_id`, `adset_id`, and `ad_id` in your fields list alongside your metrics if you want to have these as part of the output. 
+> 
+> E.g. `facebook_insights:ad:campaign_id,adset_id,ad_id,spend,impressions,clicks`
 
 #### Available Predefined Breakdown Types
 
@@ -110,7 +112,7 @@ When using **custom dimensions** (not predefined breakdowns), you can use any va
 - `placement` - Ad placement
 
 **Important Notes:**
-- Custom dimensions **must always be accompanied by metrics** (after the second colon)
+- Custom dimensions **must always be accompanied by fields** (after the second colon)
 - Predefined breakdown names (like `ads_insights_age_and_gender`) cannot be used as custom dimensions
 - Not all dimension combinations are valid according to Facebook's API. Refer to [Facebook's Marketing API](https://developers.facebook.com/docs/marketing-api/insights/breakdowns/) documentation for valid dimension combinations
 
@@ -124,59 +126,59 @@ ingestr ingest \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.insights_basic'
 
-# Predefined breakdown: Age and gender with default metrics
+# Predefined breakdown: Age and gender with default fields
 ingestr ingest \
   --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
   --source-table 'facebook_insights:ads_insights_age_and_gender' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.insights_demographics'
 
-# Predefined breakdown: Country with custom metrics
+# Predefined breakdown: Country with custom fields
 ingestr ingest \
   --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
-  --source-table 'facebook_insights:ads_insights_country:impressions,clicks,spend,reach,cpm,ctr' \
+  --source-table 'facebook_insights:ads_insights_country:campaign_id,adset_id,ad_id,impressions,clicks,spend,reach,cpm,ctr' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.insights_by_country'
 
-# Predefined breakdown: Platform and device with default metrics
+# Predefined breakdown: Platform and device with default fields
 ingestr ingest \
   --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
   --source-table 'facebook_insights:ads_insights_platform_and_device' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.insights_platform_device'
 
-# Custom dimensions: Age and gender with custom metrics (metrics required)
+# Custom dimensions: Age and gender with custom fields (fields required)
 ingestr ingest \
   --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
-  --source-table 'facebook_insights:age,gender:impressions,clicks,spend' \
+  --source-table 'facebook_insights:age,gender:campaign_id,adset_id,ad_id,impressions,clicks,spend' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.insights_custom_dimensions'
 
-# Campaign level with custom dimensions and metrics
+# Campaign level with custom dimensions and fields
 ingestr ingest \
   --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
-  --source-table 'facebook_insights:campaign,age,gender:impressions,clicks,spend,reach' \
+  --source-table 'facebook_insights:campaign,age,gender:campaign_id,adset_id,ad_id,impressions,clicks,spend,reach' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.campaign_insights_demographics'
 
 # Ad level with geographic dimensions
 ingestr ingest \
   --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
-  --source-table 'facebook_insights:ad,country,age:clicks,impressions,spend' \
+  --source-table 'facebook_insights:ad,country,age:campaign_id,adset_id,ad_id,clicks,impressions,spend' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.ad_insights_geographic'
 
-# Account level insights only (no additional dimensions, metrics required)
+# Account level insights only (no additional dimensions, fields required)
 ingestr ingest \
   --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
-  --source-table 'facebook_insights:account:impressions,clicks,spend,reach' \
+  --source-table 'facebook_insights:account:campaign_id,adset_id,ad_id,impressions,clicks,spend,reach' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.account_level_insights'
 
 # Adset level with single dimension
 ingestr ingest \
   --source-uri 'facebookads://?access_token=easdyh&account_id=1234' \
-  --source-table 'facebook_insights:adset,gender:spend' \
+  --source-table 'facebook_insights:adset,gender:campaign_id,adset_id,ad_id,spend' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.adset_gender_insights'
 ```
