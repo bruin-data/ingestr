@@ -119,7 +119,7 @@ def facebook_insights_source(
     fields: Sequence[str] = None,
     time_increment_days: int = 1,
     action_breakdowns: Sequence[str] = ALL_ACTION_BREAKDOWNS,
-    level: TInsightsLevels = "ad",
+    level: TInsightsLevels | None = "ad",
     action_attribution_windows: Sequence[str] = ALL_ACTION_ATTRIBUTION_WINDOWS,
     batch_size: int = 50,
     request_timeout: int = 300,
