@@ -1035,6 +1035,7 @@ class FacebookAdsSource:
 
         from ingestr.src.facebook_ads import (
             facebook_ads_source,
+            facebook_insights_multi_ids_source,
             facebook_insights_source,
         )
 
@@ -1071,6 +1072,46 @@ class FacebookAdsSource:
                 ],
                 insights_max_async_sleep_seconds=insights_max_async_sleep_seconds[0],
             ).with_resources("facebook_insights")
+        elif table.startswith("facebook_insights_multi_ids:"):
+            parts = table.split(":")
+            if len(parts) < 2:
+                raise ValueError(
+                    "Invalid facebook_insights_multi_ids format. Expected: facebook_insights_multi_ids:account_id1,account_id2"
+                )
+
+            multi_account_ids = [a.strip() for a in parts[1].split(",") if a.strip()]
+            if not multi_account_ids:
+                raise ValueError(
+                    "At least one account_id must be provided in format: facebook_insights_multi_ids:account_id1,account_id2"
+                )
+
+            from ingestr.src.facebook_ads.helpers import (
+                parse_insights_table_to_source_kwargs,
+            )
+
+            source_kwargs = {
+                "access_token": access_token[0],
+                "account_ids": multi_account_ids,
+                "start_date": kwargs.get("interval_start"),
+                "end_date": kwargs.get("interval_end"),
+                "insights_max_wait_to_finish_seconds": int(
+                    insights_max_wait_to_finish_seconds[0]
+                ),
+                "insights_max_wait_to_start_seconds": int(
+                    insights_max_wait_to_start_seconds[0]
+                ),
+                "insights_max_async_sleep_seconds": int(
+                    insights_max_async_sleep_seconds[0]
+                ),
+            }
+
+            if len(parts) > 2:
+                remaining_table = ":".join(["facebook_insights"] + parts[2:])
+                source_kwargs.update(parse_insights_table_to_source_kwargs(remaining_table))
+
+            return facebook_insights_multi_ids_source(**source_kwargs).with_resources(
+                "facebook_insights"
+            )
         elif table.startswith("facebook_insights:"):
             # Parse custom breakdowns and metrics from table name
             # Supported formats:

@@ -237,3 +237,121 @@ def facebook_insights_source(
             start_date = start_date.add(days=time_increment_days)
 
     return facebook_insights
+
+
+@dlt.source(name="facebook_ads", max_table_nesting=0)
+def facebook_insights_multi_ids_source(
+    account_ids: list[str],
+    access_token: str = dlt.secrets.value,
+    initial_load_past_days: int = 1,
+    dimensions: Sequence[str] = None,
+    fields: Sequence[str] = None,
+    time_increment_days: int = 1,
+    action_breakdowns: Sequence[str] = ALL_ACTION_BREAKDOWNS,
+    level: TInsightsLevels | None = "ad",
+    action_attribution_windows: Sequence[str] = ALL_ACTION_ATTRIBUTION_WINDOWS,
+    batch_size: int = 50,
+    request_timeout: int = 300,
+    app_api_version: str = None,
+    start_date: pendulum.DateTime | None = None,
+    end_date: pendulum.DateTime | None = None,
+    insights_max_wait_to_finish_seconds: int = 60 * 60 * 4,
+    insights_max_wait_to_start_seconds: int = 60 * 30,
+    insights_max_async_sleep_seconds: int = 20,
+) -> DltResource:
+    """Incrementally loads insight reports for multiple account IDs.
+
+    Args:
+        account_ids (list[str]): List of account IDs to fetch insights for.
+        access_token (str): Access token associated with the Business Facebook App.
+        initial_load_past_days (int, optional): How many past days to initially load. Defaults to 1.
+        dimensions (Sequence[str], optional): Breakdown dimensions.
+        fields (Sequence[str], optional): Fields to include in reports.
+        time_increment_days (int, optional): Report aggregation window in days. Defaults to 1.
+        action_breakdowns (Sequence[str], optional): Action aggregation types.
+        level (TInsightsLevels, optional): Granularity level. Defaults to "ad".
+        action_attribution_windows (Sequence[str], optional): Attribution windows for actions.
+        batch_size (int, optional): Page size. Defaults to 50.
+        request_timeout (int, optional): Connection timeout. Defaults to 300.
+        app_api_version (str, optional): Facebook API version.
+        start_date: Start date for insights.
+        end_date: End date for insights.
+
+    Returns:
+        DltResource: facebook_insights
+    """
+    accounts = [
+        get_ads_account(acc_id, access_token, request_timeout, app_api_version)
+        for acc_id in account_ids
+    ]
+
+    if start_date is None:
+        start_date = pendulum.today().subtract(days=initial_load_past_days)
+
+    if dimensions is None:
+        dimensions = []
+    if fields is None:
+        fields = []
+
+    columns = {}
+    for field in fields:
+        if field in INSIGHT_FIELDS_TYPES:
+            columns[field] = INSIGHT_FIELDS_TYPES[field]
+
+    @dlt.resource(
+        write_disposition="merge",
+        merge_key="date_start",
+        columns=columns,
+    )
+    def facebook_insights(
+        date_start: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "date_start",
+            initial_value=ensure_pendulum_datetime(start_date).start_of("day").date(),
+            end_value=ensure_pendulum_datetime(end_date).end_of("day").date()
+            if end_date
+            else None,
+            range_end="closed",
+            range_start="closed",
+        ),
+    ) -> Iterator[TDataItems]:
+        current_start_date = date_start.last_value
+        if date_start.end_value:
+            end_date_val = pendulum.instance(date_start.end_value)
+            current_end_date = (
+                end_date_val
+                if isinstance(end_date_val, pendulum.Date)
+                else end_date_val.date()
+            )
+        else:
+            current_end_date = pendulum.now().date()
+
+        while current_start_date <= current_end_date:
+            query = {
+                "level": level,
+                "action_breakdowns": list(action_breakdowns),
+                "breakdowns": dimensions,
+                "limit": batch_size,
+                "fields": fields,
+                "time_increment": time_increment_days,
+                "action_attribution_windows": list(action_attribution_windows),
+                "time_ranges": [
+                    {
+                        "since": current_start_date.to_date_string(),
+                        "until": current_start_date.add(
+                            days=time_increment_days - 1
+                        ).to_date_string(),
+                    }
+                ],
+            }
+            for account in accounts:
+                job = execute_job(
+                    account.get_insights(params=query, is_async=True),
+                    insights_max_async_sleep_seconds=insights_max_async_sleep_seconds,
+                    insights_max_wait_to_finish_seconds=insights_max_wait_to_finish_seconds,
+                    insights_max_wait_to_start_seconds=insights_max_wait_to_start_seconds,
+                )
+                output = list(map(process_report_item, job.get_result()))
+                yield output
+            current_start_date = current_start_date.add(days=time_increment_days)
+
+    return facebook_insights
