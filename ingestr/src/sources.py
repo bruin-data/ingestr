@@ -1054,7 +1054,13 @@ class FacebookAdsSource:
 
         if table in ["campaigns", "ad_sets", "ad_creatives", "ads", "leads"]:
             endpoint = table
-        elif ":" in table and table.split(":")[0] in ["campaigns", "ad_sets", "ad_creatives", "ads", "leads"]:
+        elif ":" in table and table.split(":")[0] in [
+            "campaigns",
+            "ad_sets",
+            "ad_creatives",
+            "ads",
+            "leads",
+        ]:
             parts = table.split(":")
             endpoint = parts[0]
             table_account_ids = [a.strip() for a in parts[1].split(",") if a.strip()]
@@ -1107,7 +1113,9 @@ class FacebookAdsSource:
 
             if len(parts) > 2:
                 remaining_table = ":".join(["facebook_insights"] + parts[2:])
-                source_kwargs.update(parse_insights_table_to_source_kwargs(remaining_table))
+                source_kwargs.update(
+                    parse_insights_table_to_source_kwargs(remaining_table)
+                )
 
             return facebook_insights_multi_ids_source(**source_kwargs).with_resources(
                 "facebook_insights"
@@ -1156,7 +1164,9 @@ class FacebookAdsSource:
 
         return facebook_ads_source(
             access_token=access_token[0],
-            account_id=final_account_ids if len(final_account_ids) > 1 else final_account_ids[0],
+            account_id=final_account_ids
+            if len(final_account_ids) > 1
+            else final_account_ids[0],
         ).with_resources(endpoint)
 
 
