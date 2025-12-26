@@ -58,3 +58,6 @@ python-quickbooks==0.9.2
 influxdb-client==1.41.0
 oracledb==3.4.1
 trino[sqlalchemy]==0.336.0
+# Security constraints to fix vulnerabilities
+urllib3>=2.2.4  # Fixes CVE-2024-55608, CVE-2024-55609, CVE-2024-55610
+ecdsa>=0.19.1  # Latest version (Minerva timing attack mitigation - note: 0.19.1 is latest but may still have issues)
