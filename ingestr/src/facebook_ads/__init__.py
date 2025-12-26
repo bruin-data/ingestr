@@ -44,7 +44,7 @@ from .settings import (
 
 @dlt.source(name="facebook_ads", max_table_nesting=0)
 def facebook_ads_source(
-    account_id: str = dlt.config.value,
+    account_id: str | list[str] = dlt.config.value,
     access_token: str = dlt.secrets.value,
     chunk_size: int = 50,
     request_timeout: float = 300.0,
@@ -60,7 +60,7 @@ def facebook_ads_source(
     We also provide a transformation `enrich_ad_objects` that you can add to any of the resources to get additional data per object via `object.get_api`
 
     Args:
-        account_id (str, optional): Account id associated with add manager. See README.md
+        account_id (str | list[str], optional): Account id(s) associated with ad manager. Can be a single ID or a list of IDs. See README.md
         access_token (str, optional): Access token associated with the Business Facebook App. See README.md
         chunk_size (int, optional): A size of the page and batch request. You may need to decrease it if you request a lot of fields. Defaults to 50.
         request_timeout (float, optional): Connection timeout. Defaults to 300.0.
@@ -69,27 +69,32 @@ def facebook_ads_source(
     Returns:
         Sequence[DltResource]: campaigns, ads, ad_sets, ad_creatives, leads
     """
-    account = get_ads_account(
-        account_id, access_token, request_timeout, app_api_version
-    )
+    account_ids = account_id if isinstance(account_id, list) else [account_id]
+    accounts = [
+        get_ads_account(acc_id, access_token, request_timeout, app_api_version)
+        for acc_id in account_ids
+    ]
 
     @dlt.resource(primary_key="id", write_disposition="replace")
     def campaigns(
         fields: Sequence[str] = DEFAULT_CAMPAIGN_FIELDS, states: Sequence[str] = None
     ) -> Iterator[TDataItems]:
-        yield get_data_chunked(account.get_campaigns, fields, states, chunk_size)
+        for account in accounts:
+            yield get_data_chunked(account.get_campaigns, fields, states, chunk_size)
 
     @dlt.resource(primary_key="id", write_disposition="replace")
     def ads(
         fields: Sequence[str] = DEFAULT_AD_FIELDS, states: Sequence[str] = None
     ) -> Iterator[TDataItems]:
-        yield get_data_chunked(account.get_ads, fields, states, chunk_size)
+        for account in accounts:
+            yield get_data_chunked(account.get_ads, fields, states, chunk_size)
 
     @dlt.resource(primary_key="id", write_disposition="replace")
     def ad_sets(
         fields: Sequence[str] = DEFAULT_ADSET_FIELDS, states: Sequence[str] = None
     ) -> Iterator[TDataItems]:
-        yield get_data_chunked(account.get_ad_sets, fields, states, chunk_size)
+        for account in accounts:
+            yield get_data_chunked(account.get_ad_sets, fields, states, chunk_size)
 
     @dlt.transformer(primary_key="id", write_disposition="replace", selected=True)
     def leads(
@@ -105,7 +110,8 @@ def facebook_ads_source(
     def ad_creatives(
         fields: Sequence[str] = DEFAULT_ADCREATIVE_FIELDS, states: Sequence[str] = None
     ) -> Iterator[TDataItems]:
-        yield get_data_chunked(account.get_ad_creatives, fields, states, chunk_size)
+        for account in accounts:
+            yield get_data_chunked(account.get_ad_creatives, fields, states, chunk_size)
 
     return campaigns, ads, ad_sets, ad_creatives, ads | leads
 

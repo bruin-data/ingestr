@@ -1049,8 +1049,14 @@ class FacebookAdsSource:
         )
 
         endpoint = None
+        table_account_ids = None
+
         if table in ["campaigns", "ad_sets", "ad_creatives", "ads", "leads"]:
             endpoint = table
+        elif ":" in table and table.split(":")[0] in ["campaigns", "ad_sets", "ad_creatives", "ads", "leads"]:
+            parts = table.split(":")
+            endpoint = parts[0]
+            table_account_ids = [a.strip() for a in parts[1].split(",") if a.strip()]
         elif table == "facebook_insights":
             return facebook_insights_source(
                 access_token=access_token[0],
@@ -1105,9 +1111,11 @@ class FacebookAdsSource:
                 f"Resource '{table}' is not supported for Facebook Ads source yet, if you are interested in it please create a GitHub issue at https://github.com/bruin-data/ingestr"
             )
 
+        final_account_ids = table_account_ids if table_account_ids else account_id
+
         return facebook_ads_source(
             access_token=access_token[0],
-            account_id=account_id[0],
+            account_id=final_account_ids if len(final_account_ids) > 1 else final_account_ids[0],
         ).with_resources(endpoint)
 
 
