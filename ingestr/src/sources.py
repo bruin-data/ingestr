@@ -1028,10 +1028,8 @@ class FacebookAdsSource:
         access_token = source_params.get("access_token")
         account_id = source_params.get("account_id")
 
-        if not access_token or not account_id:
-            raise ValueError(
-                "access_token and accound_id are required to connect to Facebook Ads."
-            )
+        if not access_token:
+            raise ValueError("access_token is required to connect to Facebook Ads.")
 
         from ingestr.src.facebook_ads import (
             facebook_ads_source,
@@ -1065,6 +1063,10 @@ class FacebookAdsSource:
             endpoint = parts[0]
             table_account_ids = [a.strip() for a in parts[1].split(",") if a.strip()]
         elif table == "facebook_insights":
+            if not account_id:
+                raise ValueError(
+                    "account_id is required for facebook_insights. Provide it in the URI (?account_id=xxx) or use facebook_insights_multi_ids:account_id1,account_id2"
+                )
             return facebook_insights_source(
                 access_token=access_token[0],
                 account_id=account_id[0],
@@ -1138,6 +1140,11 @@ class FacebookAdsSource:
                     "Breakdown type must be provided in format: facebook_insights:breakdown_type"
                 )
 
+            if not account_id:
+                raise ValueError(
+                    "account_id is required for facebook_insights. Provide it in the URI (?account_id=xxx) or use facebook_insights_multi_ids:account_id1,account_id2"
+                )
+
             # Validate breakdown type against available options from settings
 
             from ingestr.src.facebook_ads.helpers import (
@@ -1161,6 +1168,11 @@ class FacebookAdsSource:
             )
 
         final_account_ids = table_account_ids if table_account_ids else account_id
+
+        if not final_account_ids:
+            raise ValueError(
+                "account_id is required. Provide it in the URI (?account_id=xxx) or in the table name (campaigns:xxx)"
+            )
 
         return facebook_ads_source(
             access_token=access_token[0],
