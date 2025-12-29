@@ -1033,8 +1033,8 @@ class FacebookAdsSource:
 
         from ingestr.src.facebook_ads import (
             facebook_ads_source,
-            facebook_insights_with_account_ids_source,
             facebook_insights_source,
+            facebook_insights_with_account_ids_source,
         )
 
         insights_max_wait_to_finish_seconds = source_params.get(
@@ -1119,9 +1119,9 @@ class FacebookAdsSource:
                     parse_insights_table_to_source_kwargs(remaining_table)
                 )
 
-            return facebook_insights_with_account_ids_source(**source_kwargs).with_resources(
-                "facebook_insights"
-            )
+            return facebook_insights_with_account_ids_source(
+                **source_kwargs
+            ).with_resources("facebook_insights")
         elif table.startswith("facebook_insights:"):
             # Parse custom breakdowns and metrics from table name
             # Supported formats:

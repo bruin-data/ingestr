@@ -42,6 +42,86 @@ from .settings import (
 )
 
 
+def _create_facebook_insights_resource(
+    accounts: list,
+    start_date,
+    end_date,
+    dimensions: Sequence[str],
+    fields: Sequence[str],
+    level,
+    action_breakdowns: Sequence[str],
+    batch_size: int,
+    time_increment_days: int,
+    action_attribution_windows: Sequence[str],
+    insights_max_async_sleep_seconds: int,
+    insights_max_wait_to_finish_seconds: int,
+    insights_max_wait_to_start_seconds: int,
+):
+    """Create a facebook_insights resource for the given accounts."""
+    columns = {}
+    for field in fields:
+        if field in INSIGHT_FIELDS_TYPES:
+            columns[field] = INSIGHT_FIELDS_TYPES[field]
+
+    @dlt.resource(
+        write_disposition="merge",
+        merge_key="date_start",
+        columns=columns,
+    )
+    def facebook_insights(
+        date_start: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "date_start",
+            initial_value=ensure_pendulum_datetime(start_date).start_of("day").date(),
+            end_value=ensure_pendulum_datetime(end_date).end_of("day").date()
+            if end_date
+            else None,
+            range_end="closed",
+            range_start="closed",
+        ),
+    ) -> Iterator[TDataItems]:
+        current_start_date = date_start.last_value
+        if date_start.end_value:
+            end_date_val = pendulum.instance(date_start.end_value)
+            current_end_date = (
+                end_date_val
+                if isinstance(end_date_val, pendulum.Date)
+                else end_date_val.date()
+            )
+        else:
+            current_end_date = pendulum.now().date()
+
+        while current_start_date <= current_end_date:
+            query = {
+                "level": level,
+                "action_breakdowns": list(action_breakdowns),
+                "breakdowns": dimensions,
+                "limit": batch_size,
+                "fields": fields,
+                "time_increment": time_increment_days,
+                "action_attribution_windows": list(action_attribution_windows),
+                "time_ranges": [
+                    {
+                        "since": current_start_date.to_date_string(),
+                        "until": current_start_date.add(
+                            days=time_increment_days - 1
+                        ).to_date_string(),
+                    }
+                ],
+            }
+            for account in accounts:
+                job = execute_job(
+                    account.get_insights(params=query, is_async=True),
+                    insights_max_async_sleep_seconds=insights_max_async_sleep_seconds,
+                    insights_max_wait_to_finish_seconds=insights_max_wait_to_finish_seconds,
+                    insights_max_wait_to_start_seconds=insights_max_wait_to_start_seconds,
+                )
+                output = list(map(process_report_item, job.get_result()))
+                yield output
+            current_start_date = current_start_date.add(days=time_increment_days)
+
+    return facebook_insights
+
+
 @dlt.source(name="facebook_ads", max_table_nesting=0)
 def facebook_ads_source(
     account_id: str | list[str] = dlt.config.value,
@@ -175,68 +255,21 @@ def facebook_insights_source(
     if fields is None:
         fields = []
 
-    columns = {}
-    for field in fields:
-        if field in INSIGHT_FIELDS_TYPES:
-            columns[field] = INSIGHT_FIELDS_TYPES[field]
-
-    @dlt.resource(
-        write_disposition="merge",
-        merge_key="date_start",
-        columns=columns,
+    return _create_facebook_insights_resource(
+        accounts=[account],
+        start_date=start_date,
+        end_date=end_date,
+        dimensions=dimensions,
+        fields=fields,
+        level=level,
+        action_breakdowns=action_breakdowns,
+        batch_size=batch_size,
+        time_increment_days=time_increment_days,
+        action_attribution_windows=action_attribution_windows,
+        insights_max_async_sleep_seconds=insights_max_async_sleep_seconds,
+        insights_max_wait_to_finish_seconds=insights_max_wait_to_finish_seconds,
+        insights_max_wait_to_start_seconds=insights_max_wait_to_start_seconds,
     )
-    def facebook_insights(
-        date_start: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "date_start",
-            initial_value=ensure_pendulum_datetime(start_date).start_of("day").date(),
-            end_value=ensure_pendulum_datetime(end_date).end_of("day").date()
-            if end_date
-            else None,
-            range_end="closed",
-            range_start="closed",
-        ),
-    ) -> Iterator[TDataItems]:
-        start_date = date_start.last_value
-        if date_start.end_value:
-            end_date_val = pendulum.instance(date_start.end_value)
-
-            end_date = (
-                end_date_val
-                if isinstance(end_date_val, pendulum.Date)
-                else end_date_val.date()
-            )
-        else:
-            end_date = pendulum.now().date()
-
-        while start_date <= end_date:
-            query = {
-                "level": level,
-                "action_breakdowns": list(action_breakdowns),
-                "breakdowns": dimensions,
-                "limit": batch_size,
-                "fields": fields,
-                "time_increment": time_increment_days,
-                "action_attribution_windows": list(action_attribution_windows),
-                "time_ranges": [
-                    {
-                        "since": start_date.to_date_string(),
-                        "until": start_date.add(
-                            days=time_increment_days - 1
-                        ).to_date_string(),
-                    }
-                ],
-            }
-            job = execute_job(
-                account.get_insights(params=query, is_async=True),
-                insights_max_async_sleep_seconds=insights_max_async_sleep_seconds,
-                insights_max_wait_to_finish_seconds=insights_max_wait_to_finish_seconds,
-                insights_max_wait_to_start_seconds=insights_max_wait_to_start_seconds,
-            )
-            output = list(map(process_report_item, job.get_result()))
-            yield output
-            start_date = start_date.add(days=time_increment_days)
-
-    return facebook_insights
 
 
 @dlt.source(name="facebook_ads", max_table_nesting=0)
@@ -293,65 +326,18 @@ def facebook_insights_with_account_ids_source(
     if fields is None:
         fields = []
 
-    columns = {}
-    for field in fields:
-        if field in INSIGHT_FIELDS_TYPES:
-            columns[field] = INSIGHT_FIELDS_TYPES[field]
-
-    @dlt.resource(
-        write_disposition="merge",
-        merge_key="date_start",
-        columns=columns,
+    return _create_facebook_insights_resource(
+        accounts=accounts,
+        start_date=start_date,
+        end_date=end_date,
+        dimensions=dimensions,
+        fields=fields,
+        level=level,
+        action_breakdowns=action_breakdowns,
+        batch_size=batch_size,
+        time_increment_days=time_increment_days,
+        action_attribution_windows=action_attribution_windows,
+        insights_max_async_sleep_seconds=insights_max_async_sleep_seconds,
+        insights_max_wait_to_finish_seconds=insights_max_wait_to_finish_seconds,
+        insights_max_wait_to_start_seconds=insights_max_wait_to_start_seconds,
     )
-    def facebook_insights(
-        date_start: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "date_start",
-            initial_value=ensure_pendulum_datetime(start_date).start_of("day").date(),
-            end_value=ensure_pendulum_datetime(end_date).end_of("day").date()
-            if end_date
-            else None,
-            range_end="closed",
-            range_start="closed",
-        ),
-    ) -> Iterator[TDataItems]:
-        current_start_date = date_start.last_value
-        if date_start.end_value:
-            end_date_val = pendulum.instance(date_start.end_value)
-            current_end_date = (
-                end_date_val
-                if isinstance(end_date_val, pendulum.Date)
-                else end_date_val.date()
-            )
-        else:
-            current_end_date = pendulum.now().date()
-
-        while current_start_date <= current_end_date:
-            query = {
-                "level": level,
-                "action_breakdowns": list(action_breakdowns),
-                "breakdowns": dimensions,
-                "limit": batch_size,
-                "fields": fields,
-                "time_increment": time_increment_days,
-                "action_attribution_windows": list(action_attribution_windows),
-                "time_ranges": [
-                    {
-                        "since": current_start_date.to_date_string(),
-                        "until": current_start_date.add(
-                            days=time_increment_days - 1
-                        ).to_date_string(),
-                    }
-                ],
-            }
-            for account in accounts:
-                job = execute_job(
-                    account.get_insights(params=query, is_async=True),
-                    insights_max_async_sleep_seconds=insights_max_async_sleep_seconds,
-                    insights_max_wait_to_finish_seconds=insights_max_wait_to_finish_seconds,
-                    insights_max_wait_to_start_seconds=insights_max_wait_to_start_seconds,
-                )
-                output = list(map(process_report_item, job.get_result()))
-                yield output
-            current_start_date = current_start_date.add(days=time_increment_days)
-
-    return facebook_insights
