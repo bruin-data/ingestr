@@ -14,10 +14,8 @@ facebookads://?access_token=<access_token>&account_id=<account_id>
 
 URI parameters:
 
-- `access_token` is associated with Business Facebook App.
-- `account_id` is associated with Ad manager.
-
-Both are used for authentication with Facebook Ads API.
+- `access_token` (required) is associated with Business Facebook App.
+- `account_id` (optional) is associated with Ad manager. Can also be provided in the table name.
 
 The URI is used to connect to Facebook Ads API for extracting data.
 
@@ -44,13 +42,39 @@ Facebook Ads source allows ingesting the following sources into separate tables:
 | Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `campaigns`       | id | –  |        replace     | Retrieves campaign data with `fields`: id, updated_time, created_time, name, status, effective_status, objective, start_time, stop_time, daily_budget, lifetime_budget              |
+| `campaigns:account_id1,account_id2`       | id | –  |        replace     | Same as above but with account IDs specified in table name (supports multiple accounts)              |
 | `ad_sets` | id | –                | replace            | Retrieves ad set data with `fields`: id, updated_time, created_time, name, status, effective_status, campaign_id, start_time, end_time, daily_budget, lifetime_budget, optimization_goal, promoted_object, billing_event, bid_amount, bid_strategy, targeting                       |
+| `ad_sets:account_id1,account_id2` | id | –                | replace            | Same as above but with account IDs specified in table name (supports multiple accounts)                       |
 | `ads`   | id | -     | replace  | Retrieves ad data with `fields`: id, updated_time, created_time, name, status, effective_status, adset_id, campaign_id, creative, targeting, tracking_specs, conversion_specs                          |
+| `ads:account_id1,account_id2`   | id | -     | replace  | Same as above but with account IDs specified in table name (supports multiple accounts)                          |
 | `ad_creatives`   | id | -     | replace  | Retrieves ad creative data with `fields`: id, name, status, thumbnail_url, object_story_spec, effective_object_story_id, call_to_action_type, object_type, template_url, url_tags, instagram_actor_id, product_set_id |
+| `ad_creatives:account_id1,account_id2`   | id | -     | replace  | Same as above but with account IDs specified in table name (supports multiple accounts) |
 | `leads`   | id | -     | replace  | Retrieves lead data with fields: id, created_time, ad_id, ad_name, adset_id, adset_name, campaign_id, campaign_name, form_id, field_data |
-| `facebook_insights`   | date_start | date_start     | merge  | Retrieves insights data with `fields`: campaign_id, adset_id, ad_id, date_start, date_stop, reach, impressions, frequency, clicks, unique_clicks, ctr, unique_ctr, cpc, cpm, cpp, spend, actions, action_values, cost_per_action_type, website_ctr, account_currency, ad_click_actions, ad_name, adset_name, campaign_name, country, dma, full_view_impressions, full_view_reach, inline_link_click_ctr, outbound_clicks, social_spend, conversions, video_thruplay_watched_actions. |
+| `leads:account_id1,account_id2`   | id | -     | replace  | Same as above but with account IDs specified in table name (supports multiple accounts) |
+| `facebook_insights`   | date_start | date_start     | merge  | Retrieves insights data (requires account_id in URI) |
+| `facebook_insights_with_account_ids:account_id1,account_id2`   | date_start | date_start     | merge  | Retrieves insights data for multiple accounts |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+### Account ID in Table Name
+
+For `campaigns`, `ad_sets`, `ads`, `ad_creatives`, and `leads`, you can specify account ID(s) directly in the table name instead of the URI:
+
+```sh
+# Single account in table name
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=your_token' \
+  --source-table 'campaigns:1234567890' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.campaigns'
+
+# Multiple accounts in table name
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=your_token' \
+  --source-table 'campaigns:1234567890,9876543210' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.campaigns'
+```
 
 ### Facebook Insights Custom Configuration
 
@@ -182,3 +206,49 @@ ingestr ingest \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.adset_gender_insights'
 ```
+
+### Facebook Insights with Multiple Accounts
+
+Use `facebook_insights_with_account_ids` to fetch insights from multiple accounts in a single request. The account IDs are specified in the table name.
+
+#### Format
+
+```plaintext
+facebook_insights_with_account_ids:account_id1,account_id2
+facebook_insights_with_account_ids:account_id1,account_id2:breakdown_type
+facebook_insights_with_account_ids:account_id1,account_id2:breakdown_type:field1,field2
+```
+
+#### Examples
+
+```sh
+# Basic insights from multiple accounts
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=your_token' \
+  --source-table 'facebook_insights_with_account_ids:1234567890,9876543210' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.multi_account_insights' \
+  --interval-start 2024-12-01 \
+  --interval-end 2024-12-31
+
+# Multiple accounts with predefined breakdown
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=your_token' \
+  --source-table 'facebook_insights_with_account_ids:1234567890,9876543210:ads_insights_age_and_gender' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.multi_account_demographics' \
+  --interval-start 2024-12-01 \
+  --interval-end 2024-12-31
+
+# Multiple accounts with breakdown and custom fields
+ingestr ingest \
+  --source-uri 'facebookads://?access_token=your_token' \
+  --source-table 'facebook_insights_with_account_ids:1234567890,9876543210:ads_insights_country:impressions,clicks,spend' \
+  --dest-uri 'duckdb:///facebook.duckdb' \
+  --dest-table 'dest.multi_account_by_country' \
+  --interval-start 2024-12-01 \
+  --interval-end 2024-12-31
+```
+
+> [!NOTE]
+> When using `facebook_insights_with_account_ids`, the `account_id` parameter in the URI is ignored. Account IDs must be provided in the table name.
