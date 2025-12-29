@@ -240,7 +240,7 @@ def facebook_insights_source(
 
 
 @dlt.source(name="facebook_ads", max_table_nesting=0)
-def facebook_insights_multi_ids_source(
+def facebook_insights_with_account_ids_source(
     account_ids: list[str],
     access_token: str = dlt.secrets.value,
     initial_load_past_days: int = 1,

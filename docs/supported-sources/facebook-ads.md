@@ -52,7 +52,7 @@ Facebook Ads source allows ingesting the following sources into separate tables:
 | `leads`   | id | -     | replace  | Retrieves lead data with fields: id, created_time, ad_id, ad_name, adset_id, adset_name, campaign_id, campaign_name, form_id, field_data |
 | `leads:account_id1,account_id2`   | id | -     | replace  | Same as above but with account IDs specified in table name (supports multiple accounts) |
 | `facebook_insights`   | date_start | date_start     | merge  | Retrieves insights data (requires account_id in URI) |
-| `facebook_insights_multi_ids:account_id1,account_id2`   | date_start | date_start     | merge  | Retrieves insights data for multiple accounts |
+| `facebook_insights_with_account_ids:account_id1,account_id2`   | date_start | date_start     | merge  | Retrieves insights data for multiple accounts |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
@@ -209,14 +209,14 @@ ingestr ingest \
 
 ### Facebook Insights with Multiple Accounts
 
-Use `facebook_insights_multi_ids` to fetch insights from multiple accounts in a single request. The account IDs are specified in the table name.
+Use `facebook_insights_with_account_ids` to fetch insights from multiple accounts in a single request. The account IDs are specified in the table name.
 
 #### Format
 
 ```plaintext
-facebook_insights_multi_ids:account_id1,account_id2
-facebook_insights_multi_ids:account_id1,account_id2:breakdown_type
-facebook_insights_multi_ids:account_id1,account_id2:breakdown_type:field1,field2
+facebook_insights_with_account_ids:account_id1,account_id2
+facebook_insights_with_account_ids:account_id1,account_id2:breakdown_type
+facebook_insights_with_account_ids:account_id1,account_id2:breakdown_type:field1,field2
 ```
 
 #### Examples
@@ -225,7 +225,7 @@ facebook_insights_multi_ids:account_id1,account_id2:breakdown_type:field1,field2
 # Basic insights from multiple accounts
 ingestr ingest \
   --source-uri 'facebookads://?access_token=your_token' \
-  --source-table 'facebook_insights_multi_ids:1234567890,9876543210' \
+  --source-table 'facebook_insights_with_account_ids:1234567890,9876543210' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.multi_account_insights' \
   --interval-start 2024-12-01 \
@@ -234,7 +234,7 @@ ingestr ingest \
 # Multiple accounts with predefined breakdown
 ingestr ingest \
   --source-uri 'facebookads://?access_token=your_token' \
-  --source-table 'facebook_insights_multi_ids:1234567890,9876543210:ads_insights_age_and_gender' \
+  --source-table 'facebook_insights_with_account_ids:1234567890,9876543210:ads_insights_age_and_gender' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.multi_account_demographics' \
   --interval-start 2024-12-01 \
@@ -243,7 +243,7 @@ ingestr ingest \
 # Multiple accounts with breakdown and custom fields
 ingestr ingest \
   --source-uri 'facebookads://?access_token=your_token' \
-  --source-table 'facebook_insights_multi_ids:1234567890,9876543210:ads_insights_country:impressions,clicks,spend' \
+  --source-table 'facebook_insights_with_account_ids:1234567890,9876543210:ads_insights_country:impressions,clicks,spend' \
   --dest-uri 'duckdb:///facebook.duckdb' \
   --dest-table 'dest.multi_account_by_country' \
   --interval-start 2024-12-01 \
@@ -251,4 +251,4 @@ ingestr ingest \
 ```
 
 > [!NOTE]
-> When using `facebook_insights_multi_ids`, the `account_id` parameter in the URI is ignored. Account IDs must be provided in the table name.
+> When using `facebook_insights_with_account_ids`, the `account_id` parameter in the URI is ignored. Account IDs must be provided in the table name.

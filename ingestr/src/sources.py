@@ -1033,7 +1033,7 @@ class FacebookAdsSource:
 
         from ingestr.src.facebook_ads import (
             facebook_ads_source,
-            facebook_insights_multi_ids_source,
+            facebook_insights_with_account_ids_source,
             facebook_insights_source,
         )
 
@@ -1065,7 +1065,7 @@ class FacebookAdsSource:
         elif table == "facebook_insights":
             if not account_id:
                 raise ValueError(
-                    "account_id is required for facebook_insights. Provide it in the URI (?account_id=xxx) or use facebook_insights_multi_ids:account_id1,account_id2"
+                    "account_id is required for facebook_insights. Provide it in the URI (?account_id=xxx) or use facebook_insights_with_account_ids:account_id1,account_id2"
                 )
             return facebook_insights_source(
                 access_token=access_token[0],
@@ -1080,17 +1080,17 @@ class FacebookAdsSource:
                 ],
                 insights_max_async_sleep_seconds=insights_max_async_sleep_seconds[0],
             ).with_resources("facebook_insights")
-        elif table.startswith("facebook_insights_multi_ids:"):
+        elif table.startswith("facebook_insights_with_account_ids:"):
             parts = table.split(":")
             if len(parts) < 2:
                 raise ValueError(
-                    "Invalid facebook_insights_multi_ids format. Expected: facebook_insights_multi_ids:account_id1,account_id2"
+                    "Invalid facebook_insights_with_account_ids format. Expected: facebook_insights_with_account_ids:account_id1,account_id2"
                 )
 
             multi_account_ids = [a.strip() for a in parts[1].split(",") if a.strip()]
             if not multi_account_ids:
                 raise ValueError(
-                    "At least one account_id must be provided in format: facebook_insights_multi_ids:account_id1,account_id2"
+                    "At least one account_id must be provided in format: facebook_insights_with_account_ids:account_id1,account_id2"
                 )
 
             from ingestr.src.facebook_ads.helpers import (
@@ -1119,7 +1119,7 @@ class FacebookAdsSource:
                     parse_insights_table_to_source_kwargs(remaining_table)
                 )
 
-            return facebook_insights_multi_ids_source(**source_kwargs).with_resources(
+            return facebook_insights_with_account_ids_source(**source_kwargs).with_resources(
                 "facebook_insights"
             )
         elif table.startswith("facebook_insights:"):
@@ -1142,7 +1142,7 @@ class FacebookAdsSource:
 
             if not account_id:
                 raise ValueError(
-                    "account_id is required for facebook_insights. Provide it in the URI (?account_id=xxx) or use facebook_insights_multi_ids:account_id1,account_id2"
+                    "account_id is required for facebook_insights. Provide it in the URI (?account_id=xxx) or use facebook_insights_with_account_ids:account_id1,account_id2"
                 )
 
             # Validate breakdown type against available options from settings
