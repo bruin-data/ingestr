@@ -172,7 +172,7 @@ class LinkedInAdsAPI:
         if elements:
             yield elements
 
-    def fetch_pages(self, url: str, page_size: int = 1000):
+    def fetch_token_pagination(self, url: str, page_size: int = 1000):
         next_page_token = None
         separator = "&" if "?" in url else "?"
 
@@ -206,3 +206,29 @@ class LinkedInAdsAPI:
 
             if not next_page_token:
                 break
+
+    def fetch_cursor_pagination(self, url: str, count: int = 1000):
+        start = 0
+        separator = "&" if "?" in url else "?"
+
+        while True:
+            paginated_url = f"{url}{separator}start={start}&count={count}"
+
+            response = self.client.get(url=paginated_url, headers=self.headers)
+
+            if response.status_code != 200:
+                error_data = response.json()
+                raise ValueError(f"LinkedIn API Error: {error_data}")
+
+            result = response.json()
+            elements = result.get("elements", [])
+
+            if not elements:
+                break
+
+            yield elements
+
+            if len(elements) < count:
+                break
+
+            start += count

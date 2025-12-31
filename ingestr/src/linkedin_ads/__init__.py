@@ -72,7 +72,7 @@ def linked_in_ads_source(access_token: str) -> list[DltResource]:
 
     @dlt.resource(write_disposition="replace", primary_key="id")
     def ad_accounts() -> Iterable[TDataItem]:
-        yield from linkedin_api.fetch_pages(
+        yield from linkedin_api.fetch_token_pagination(
             url="https://api.linkedin.com/rest/adAccounts?q=search"
         )
 
@@ -101,7 +101,7 @@ def linked_in_ads_source(access_token: str) -> list[DltResource]:
         for ad_account in ad_accounts:
             account_id = ad_account["id"]
             url = f"https://api.linkedin.com/rest/adAccounts/{account_id}/adCampaignGroups?q=search"
-            for page in linkedin_api.fetch_pages(url):
+            for page in linkedin_api.fetch_token_pagination(url):
                 for item in page:
                     item["account_id"] = account_id
 
@@ -116,7 +116,7 @@ def linked_in_ads_source(access_token: str) -> list[DltResource]:
         for ad_account in ad_accounts:
             account_id = ad_account["id"]
             url = f"https://api.linkedin.com/rest/adAccounts/{account_id}/adCampaigns?q=search"
-            for page in linkedin_api.fetch_pages(url):
+            for page in linkedin_api.fetch_token_pagination(url):
                 for item in page:
                     item["account_id"] = account_id
 
@@ -131,13 +131,12 @@ def linked_in_ads_source(access_token: str) -> list[DltResource]:
         for ad_account in ad_accounts:
             account_id = ad_account["id"]
             url = f"https://api.linkedin.com/rest/adAccounts/{account_id}/creatives?q=criteria"
-            for page in linkedin_api.fetch_pages(url):
+            for page in linkedin_api.fetch_token_pagination(url):
                 for item in page:
                     item["account_id"] = account_id
 
                 yield page
 
-    
     @dlt.transformer(
         write_disposition="replace",
         primary_key="id",
@@ -148,10 +147,34 @@ def linked_in_ads_source(access_token: str) -> list[DltResource]:
             account_id = ad_account["id"]
             encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
             url = f"https://api.linkedin.com/rest/conversions?q=account&account={encoded_id}"
-            for page in linkedin_api.fetch_full(url):
+            for page in linkedin_api.fetch_cursor_pagination(url):
                 for item in page:
                     item["account_id"] = account_id
 
                 yield page
 
-    return [ad_accounts, ad_account_users, campaign_groups, campaigns, creatives, conversions]
+    @dlt.transformer(
+        write_disposition="replace",
+        primary_key="id",
+        data_from=ad_accounts,
+    )
+    def lead_forms(ad_accounts) -> Iterable[TDataItem]:
+        for ad_account in ad_accounts:
+            account_id = ad_account["id"]
+            encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
+            url = f"https://api.linkedin.com/rest/leadForms?q=owner&owner=(sponsoredAccount:{encoded_id})"
+            for page in linkedin_api.fetch_cursor_pagination(url):
+                for item in page:
+                    item["account_id"] = account_id
+
+                yield page
+
+    return [
+        ad_accounts,
+        ad_account_users,
+        campaign_groups,
+        campaigns,
+        creatives,
+        conversions,
+        lead_forms,
+    ]
