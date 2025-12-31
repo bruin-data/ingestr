@@ -107,6 +107,7 @@ def mongodb(
     name=lambda args: args["collection"],
     standalone=True,
     spec=MongoDbCollectionResourceConfiguration,
+    max_table_nesting=0,
 )
 def mongodb_collection(
     connection_url: str = dlt.secrets.value,
