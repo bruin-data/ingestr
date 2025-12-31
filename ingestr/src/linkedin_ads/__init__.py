@@ -1,4 +1,5 @@
 from typing import Iterable
+from urllib.parse import quote
 
 import dlt
 import pendulum
@@ -64,14 +65,48 @@ def linked_in_ads_analytics_source(
 
 
 @dlt.source(max_table_nesting=0)
-def linked_in_ads_source(access_token: str) -> DltResource:
+def linked_in_ads_source(access_token: str) -> list[DltResource]:
+    linkedin_api = LinkedInAdsAPI(
+        access_token=access_token,
+    )
     @dlt.resource(write_disposition="replace", primary_key="id")
     def ad_accounts() -> Iterable[TDataItem]:
-        linkedin_api = LinkedInAdsAPI(
-            access_token=access_token,
-        )
-        yield linkedin_api.fetch_pages(
+        yield from linkedin_api.fetch_pages(
             url="https://api.linkedin.com/rest/adAccounts?q=search"
         )
 
-    return ad_accounts
+    @dlt.transformer(
+        write_disposition="replace",
+        primary_key=["user", "account"],
+        data_from=ad_accounts,
+    )
+    def ad_account_users(ad_accounts) -> Iterable[TDataItem]:
+        linkedin_api = LinkedInAdsAPI(
+            access_token=access_token,
+        )
+        for ad_account in ad_accounts:
+            account_id = ad_account["id"]
+            encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
+            url = f"https://api.linkedin.com/rest/adAccountUsers?q=accounts&accounts=List({encoded_id})"
+            for page in linkedin_api.fetch_pages(url):
+                for item in page:
+                    item["account_id"] = account_id
+
+                yield page
+
+    @dlt.transformer(
+        write_disposition="replace",
+        primary_key="id",
+        data_from=ad_accounts,
+    )
+    def campaign_groups(ad_accounts) -> Iterable[TDataItem]:
+        for ad_account in ad_accounts:
+            account_id = ad_account["id"]
+            url = f"https://api.linkedin.com/rest/adAccounts/{account_id}/adCampaignGroups?q=search"
+            for page in linkedin_api.fetch_pages(url):
+                for item in page:
+                    item["account_id"] = account_id
+
+                yield page
+
+    return [ad_accounts, ad_account_users, campaign_groups]

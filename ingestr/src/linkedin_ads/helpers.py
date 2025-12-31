@@ -159,12 +159,27 @@ class LinkedInAdsAPI:
         }
         self.client = create_client()
 
-    def fetch_pages(self, url: str):
-        response = self.client.get(url=url, headers=self.headers)
+    def fetch_pages(self, url: str, page_size: int = 100):
+        start = 0
+        separator = "&" if "?" in url else "?"
 
-        if response.status_code != 200:
-            error_data = response.json()
-            raise ValueError(f"LinkedIn API Error: {error_data.get('message')}")
+        while True:
+            paginated_url = f"{url}{separator}start={start}&count={page_size}"
+            response = self.client.get(url=paginated_url, headers=self.headers)
 
-        result = response.json()
-        yield result.get("elements", [])
+            if response.status_code != 200:
+                error_data = response.json()
+                raise ValueError(f"LinkedIn API Error: {error_data.get('message')}")
+
+            result = response.json()
+            elements = result.get("elements", [])
+
+            if not elements:
+                break
+
+            yield elements
+
+            if len(elements) < page_size:
+                break
+
+            start += page_size
