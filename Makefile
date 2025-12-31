@@ -22,13 +22,13 @@ deps-ci:
 	uv pip install --system -r requirements-dev.txt
 
 test-ci:
-	set -a; source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto -x -rP -vv --tb=short --durations=10 --cov=ingestr --no-cov-on-fail
+	set -a; [ -f test.env ] && source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto -x -rP -vv --tb=short --durations=10 --cov=ingestr --no-cov-on-fail
 
 test : venv lock-deps
 	. venv/bin/activate; $(MAKE) test-ci
 
 test-specific: venv lock-deps
-	. venv/bin/activate; set -a; source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto  -rP -vv --tb=short --capture=no -k $(test)
+	. venv/bin/activate; set -a; [ -f test.env ] && source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto  -rP -vv --tb=short --capture=no -k $(test)
 
 lint-ci:
 	@ruff format --diff ingestr && ruff check ingestr && mypy --config-file pyproject.toml --explicit-package-bases ingestr
