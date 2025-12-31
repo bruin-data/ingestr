@@ -103,7 +103,7 @@ def construct_url(
     return url
 
 
-class LinkedInAdsAPI:
+class LinkedInAdsAnalyticsAPI:
     def __init__(
         self,
         access_token,
@@ -145,3 +145,90 @@ class LinkedInAdsAPI:
             pivot=self.dimension,
             time_granularity=self.time_granularity,
         )
+
+
+class LinkedInAdsAPI:
+    def __init__(
+        self,
+        access_token,
+    ):
+        self.headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Linkedin-Version": "202411",
+            "X-Restli-Protocol-Version": "2.0.0",
+        }
+        self.client = create_client()
+
+    def fetch_full(self, url: str):
+        response = self.client.get(url=url, headers=self.headers)
+
+        if response.status_code != 200:
+            error_data = response.json()
+            raise ValueError(f"LinkedIn API Error: {error_data}")
+
+        result = response.json()
+        elements = result.get("elements", [])
+
+        if elements:
+            yield elements
+
+    def fetch_token_pagination(self, url: str, page_size: int = 1000):
+        next_page_token = None
+        separator = "&" if "?" in url else "?"
+
+        while True:
+            if next_page_token:
+                paginated_url = (
+                    f"{url}{separator}pageSize={page_size}&pageToken={next_page_token}"
+                )
+            else:
+                paginated_url = f"{url}{separator}pageSize={page_size}"
+
+            response = self.client.get(url=paginated_url, headers=self.headers)
+
+            if response.status_code != 200:
+                error_data = response.json()
+                raise ValueError(f"LinkedIn API Error: {error_data}")
+
+            result = response.json()
+            elements = result.get("elements", [])
+
+            if not elements:
+                break
+
+            yield elements
+
+            if len(elements) < page_size:
+                break
+
+            metadata = result.get("metadata", {})
+            next_page_token = metadata.get("nextPageToken")
+
+            if not next_page_token:
+                break
+
+    def fetch_cursor_pagination(self, url: str, count: int = 1000):
+        start = 0
+        separator = "&" if "?" in url else "?"
+
+        while True:
+            paginated_url = f"{url}{separator}start={start}&count={count}"
+
+            response = self.client.get(url=paginated_url, headers=self.headers)
+
+            if response.status_code != 200:
+                error_data = response.json()
+                raise ValueError(f"LinkedIn API Error: {error_data}")
+
+            result = response.json()
+            elements = result.get("elements", [])
+
+            if not elements:
+                break
+
+            yield elements
+
+            if len(elements) < count:
+                break
+
+            start += count
