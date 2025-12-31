@@ -7,11 +7,11 @@ from dlt.sources import DltResource
 from pendulum import Date
 
 from .dimension_time_enum import Dimension, TimeGranularity
-from .helpers import LinkedInAdsAPI, find_intervals
+from .helpers import LinkedInAdsAnalyticsAPI, LinkedInAdsAPI, find_intervals
 
 
 @dlt.source(max_table_nesting=0)
-def linked_in_ads_source(
+def linked_in_ads_analytics_source(
     start_date: Date,
     end_date: Date | None,
     access_token: str,
@@ -20,14 +20,6 @@ def linked_in_ads_source(
     metrics: list[str],
     time_granularity: TimeGranularity,
 ) -> DltResource:
-    linkedin_api = LinkedInAdsAPI(
-        access_token=access_token,
-        account_ids=account_ids,
-        dimension=dimension,
-        metrics=metrics,
-        time_granularity=time_granularity,
-    )
-
     if time_granularity == TimeGranularity.daily:
         primary_key = [dimension.value, "date"]
         incremental_loading_param = "date"
@@ -47,6 +39,14 @@ def linked_in_ads_source(
             )
         ),
     ) -> Iterable[TDataItem]:
+        linkedin_api = LinkedInAdsAnalyticsAPI(
+            access_token=access_token,
+            account_ids=account_ids,
+            dimension=dimension,
+            metrics=metrics,
+            time_granularity=time_granularity,
+        )
+
         if dateTime.end_value is None:
             end_date = pendulum.now().date()
         else:
@@ -61,3 +61,17 @@ def linked_in_ads_source(
             yield linkedin_api.fetch_pages(start, end)
 
     return custom_reports
+
+
+@dlt.source(max_table_nesting=0)
+def linked_in_ads_source(access_token: str) -> DltResource:
+    @dlt.resource(write_disposition="replace", primary_key="id")
+    def ad_accounts() -> Iterable[TDataItem]:
+        linkedin_api = LinkedInAdsAPI(
+            access_token=access_token,
+        )
+        yield linkedin_api.fetch_pages(
+            url="https://api.linkedin.com/rest/adAccounts?q=search"
+        )
+
+    return ad_accounts

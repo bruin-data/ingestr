@@ -103,7 +103,7 @@ def construct_url(
     return url
 
 
-class LinkedInAdsAPI:
+class LinkedInAdsAnalyticsAPI:
     def __init__(
         self,
         access_token,
@@ -145,3 +145,26 @@ class LinkedInAdsAPI:
             pivot=self.dimension,
             time_granularity=self.time_granularity,
         )
+
+
+class LinkedInAdsAPI:
+    def __init__(
+        self,
+        access_token,
+    ):
+        self.headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Linkedin-Version": "202411",
+            "X-Restli-Protocol-Version": "2.0.0",
+        }
+        self.client = create_client()
+
+    def fetch_pages(self, url: str):
+        response = self.client.get(url=url, headers=self.headers)
+
+        if response.status_code != 200:
+            error_data = response.json()
+            raise ValueError(f"LinkedIn API Error: {error_data.get('message')}")
+
+        result = response.json()
+        yield result.get("elements", [])
