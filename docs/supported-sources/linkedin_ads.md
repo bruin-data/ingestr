@@ -48,17 +48,44 @@ LinkedIn Ads requires an `access_token` and `account_ids` to retrieve reports fr
 
 To find the Ad Account IDs, the ad account owner can refer to the detailed instructions provided in this [guide](https://www.linkedin.com/help/linkedin/answer/a424270/find-linkedin-ads-account-details?lang=en).
 
-## Table:
-| Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
-| --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |  
-|  [custom](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder)      | [dimension, date] or [dimension, start_date, end_date]| date (daily) or start_date (monthly)    | merge               | Custom reports allow you to retrieve data based on specific dimensions and metrics. |
+## Tables
 
+LinkedIn Ads source allows ingesting the following sources into separate tables:
 
-Custom Table Format:
+| Table | PK | Inc Key | Inc Strategy | Details |
+| ----- | -- | ------- | ------------ | ------- |
+| [ad_accounts](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads/account-structure/create-and-manage-accounts?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves all ad accounts accessible by the authenticated user. |
+| [ad_account_users](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads/account-structure/create-and-manage-account-users?view=li-lms-2024-11&tabs=http) | user, account | – | replace | Retrieves users associated with each ad account. |
+| [campaign_groups](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads/account-structure/create-and-manage-campaign-groups?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves campaign groups for each ad account. |
+| [campaigns](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads/account-structure/create-and-manage-campaigns?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves campaigns for each ad account. |
+| [creatives](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads/account-structure/create-and-manage-creatives?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves creatives for each ad account. |
+| [conversions](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/conversion-tracking?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves conversion rules for each ad account. |
+| [lead_forms](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads/advertising-targeting/lead-gen-forms?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves lead generation forms for each ad account. |
+| [custom](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder) | [dimension, date] or [dimension, start_date, end_date] | date (daily) or start_date (monthly) | merge | Custom reports allow you to retrieve data based on specific dimensions and metrics. |
+
+Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+### Example
+
+Retrieve all campaigns:
+```sh
+ingestr ingest \
+    --source-uri "linkedinads://?access_token=token_123&account_ids=id_123,id_456" \
+    --source-table 'campaigns' \
+    --dest-uri 'duckdb:///linkedin.duckdb' \
+    --dest-table 'dest.campaigns'
+```
+
+### Custom Reports
+
+The `custom` table uses LinkedIn's [Analytics Finder API](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder) to pull advertising performance reports. This allows you to retrieve metrics like impressions, clicks, and conversions broken down by dimensions such as campaign, account, or creative.
+
+**Format:**
 ```
 custom:<dimensions>:<metrics>
 ```
-### Parameters:
+
+**Parameters:**
 - `dimensions`(required): A comma-separated list of dimensions is required. It must include at least one of the following: `campaign`, `account`, or `creative`, along with one time-based dimension, either `date` or `month`.
   - `date`: group the data in your report by day
   - `month`: group the data in your report by month
@@ -67,7 +94,7 @@ custom:<dimensions>:<metrics>
 > [!NOTE]
 > By default, ingestr fetches data from January 1, 2018 to today's date. You can specify a custom date range using the `--interval-start` and `--interval-end` parameters.
 
-### Example
+### Custom Reports Examples
 
 Retrieve data for campaign with `account_ids` id_123 and id_456:
 ```sh
