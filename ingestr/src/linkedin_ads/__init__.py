@@ -69,6 +69,7 @@ def linked_in_ads_source(access_token: str) -> list[DltResource]:
     linkedin_api = LinkedInAdsAPI(
         access_token=access_token,
     )
+
     @dlt.resource(write_disposition="replace", primary_key="id")
     def ad_accounts() -> Iterable[TDataItem]:
         yield from linkedin_api.fetch_pages(
@@ -88,7 +89,7 @@ def linked_in_ads_source(access_token: str) -> list[DltResource]:
             account_id = ad_account["id"]
             encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
             url = f"https://api.linkedin.com/rest/adAccountUsers?q=accounts&accounts=List({encoded_id})"
-            for page in linkedin_api.fetch_pages(url):
+            for page in linkedin_api.fetch_full(url):
                 for item in page:
                     item["account_id"] = account_id
 
@@ -109,4 +110,19 @@ def linked_in_ads_source(access_token: str) -> list[DltResource]:
 
                 yield page
 
-    return [ad_accounts, ad_account_users, campaign_groups]
+    @dlt.transformer(
+        write_disposition="replace",
+        primary_key="id",
+        data_from=ad_accounts,
+    )
+    def campaigns(ad_accounts) -> Iterable[TDataItem]:
+        for ad_account in ad_accounts:
+            account_id = ad_account["id"]
+            url = f"https://api.linkedin.com/rest/adAccounts/{account_id}/adCampaigns?q=search"
+            for page in linkedin_api.fetch_pages(url):
+                for item in page:
+                    item["account_id"] = account_id
+
+                yield page
+
+    return [ad_accounts, ad_account_users, campaign_groups, campaigns]

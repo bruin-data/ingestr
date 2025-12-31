@@ -159,17 +159,36 @@ class LinkedInAdsAPI:
         }
         self.client = create_client()
 
-    def fetch_pages(self, url: str, page_size: int = 100):
-        start = 0
+    def fetch_full(self, url: str):
+        response = self.client.get(url=url, headers=self.headers)
+
+        if response.status_code != 200:
+            error_data = response.json()
+            raise ValueError(f"LinkedIn API Error: {error_data}")
+
+        result = response.json()
+        elements = result.get("elements", [])
+
+        if elements:
+            yield elements
+
+    def fetch_pages(self, url: str, page_size: int = 1000):
+        next_page_token = None
         separator = "&" if "?" in url else "?"
 
         while True:
-            paginated_url = f"{url}{separator}start={start}&count={page_size}"
+            if next_page_token:
+                paginated_url = (
+                    f"{url}{separator}pageSize={page_size}&pageToken={next_page_token}"
+                )
+            else:
+                paginated_url = f"{url}{separator}pageSize={page_size}"
+
             response = self.client.get(url=paginated_url, headers=self.headers)
 
             if response.status_code != 200:
                 error_data = response.json()
-                raise ValueError(f"LinkedIn API Error: {error_data.get('message')}")
+                raise ValueError(f"LinkedIn API Error: {error_data}")
 
             result = response.json()
             elements = result.get("elements", [])
@@ -182,4 +201,8 @@ class LinkedInAdsAPI:
             if len(elements) < page_size:
                 break
 
-            start += page_size
+            metadata = result.get("metadata", {})
+            next_page_token = metadata.get("nextPageToken")
+
+            if not next_page_token:
+                break
