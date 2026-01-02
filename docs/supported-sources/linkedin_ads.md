@@ -60,7 +60,8 @@ LinkedIn Ads source allows ingesting the following sources into separate tables:
 | [campaigns](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads/account-structure/create-and-manage-campaigns?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves campaigns for each ad account. |
 | [creatives](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads/account-structure/create-and-manage-creatives?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves creatives for each ad account. |
 | [conversions](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/conversion-tracking?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves conversion rules for each ad account. |
-| [lead_forms](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads/advertising-targeting/lead-gen-forms?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves lead generation forms for each ad account. |
+| [lead_forms](https://learn.microsoft.com/en-us/linkedin/marketing/lead-sync/leadsync?view=li-lms-2025-11&viewFallbackFrom=li-lms-2024-06&tabs=http#lead-forms-1) | id | – | replace | Retrieves lead generation forms for each ad account. |
+| [lead_form_responses](https://learn.microsoft.com/en-us/linkedin/marketing/lead-sync/leadsync?view=li-lms-2025-11&viewFallbackFrom=li-lms-2024-06&tabs=http#get-lead-form-responses) | id | date (interval)| merge | Retrieves lead form responses for each ad account. |
 | [custom](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder) | [dimension, date] or [dimension, start_date, end_date] | date (daily) or start_date (monthly) | merge | Custom reports allow you to retrieve data based on specific dimensions and metrics. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
@@ -75,6 +76,18 @@ ingestr ingest \
     --dest-uri 'duckdb:///linkedin.duckdb' \
     --dest-table 'dest.campaigns'
 ```
+
+Retrieve lead form responses for a specific date interval:
+```sh
+ingestr ingest \
+    --source-uri "linkedinads://?access_token=token_123&account_ids=id_123,id_456" \
+    --source-table 'lead_form_responses' \
+    --dest-uri 'duckdb:///linkedin.duckdb' \
+    --dest-table 'dest.lead_form_responses' \
+    --interval-start '2024-01-01' \
+    --interval-end '2024-02-01'
+```
+If you omit `--interval-end`, ingestr fetches responses from `--interval-start` up to the current time.
 
 ### Custom Reports
 

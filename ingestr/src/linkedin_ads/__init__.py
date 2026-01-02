@@ -5,7 +5,7 @@ import dlt
 import pendulum
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
-from pendulum import Date
+from pendulum import Date, DateTime
 
 from .dimension_time_enum import Dimension, TimeGranularity
 from .helpers import LinkedInAdsAnalyticsAPI, LinkedInAdsAPI, find_intervals
@@ -65,7 +65,7 @@ def linked_in_ads_analytics_source(
 
 
 @dlt.source(max_table_nesting=0)
-def linked_in_ads_source(access_token: str) -> list[DltResource]:
+def linked_in_ads_source(access_token: str, start_datetime: DateTime | None, end_datetime: DateTime | None) -> list[DltResource]:
     linkedin_api = LinkedInAdsAPI(
         access_token=access_token,
     )
@@ -168,7 +168,30 @@ def linked_in_ads_source(access_token: str) -> list[DltResource]:
                     item["account_id"] = account_id
 
                 yield page
+                
+    @dlt.transformer(
+        write_disposition="merge",
+        primary_key="id",
+        data_from=ad_accounts,
+    )
+    def lead_form_responses(ad_accounts, submittedAt: dlt.sources.incremental[str] = dlt.sources.incremental(
+        "submittedAt", 
+        initial_value=int(start_datetime.int_timestamp * 1000),
+        end_value=end_datetime.int_timestamp * 1000 if end_datetime else int(pendulum.now().int_timestamp * 1000),
+        range_end="closed",
+        range_start="closed",
+    )) -> Iterable[TDataItem]:
+        
+        
+        for ad_account in ad_accounts:
+            account_id = ad_account["id"]
+            encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
+            url = f"https://api.linkedin.com/rest/leadFormResponses?leadType=(leadType:SPONSORED)&q=owner&owner=(sponsoredAccount:{encoded_id})&submittedAtTimeRange=(start:{submittedAt.start_value},end:{submittedAt.end_value})"
+            for page in linkedin_api.fetch_cursor_pagination(url):
+                for item in page:
+                    item["account_id"] = account_id
 
+                yield page
     return [
         ad_accounts,
         ad_account_users,
@@ -177,4 +200,5 @@ def linked_in_ads_source(access_token: str) -> list[DltResource]:
         creatives,
         conversions,
         lead_forms,
+        lead_form_responses
     ]
