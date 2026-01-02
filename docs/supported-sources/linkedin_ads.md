@@ -80,7 +80,7 @@ ingestr ingest \
 Retrieve lead form responses for a specific date interval:
 ```sh
 ingestr ingest \
-    --source-uri "linkedinads://?access_token=token_123&account_ids=id_123,id_456" \
+    --source-uri "linkedinads://?access_token=token_123" \
     --source-table 'lead_form_responses' \
     --dest-uri 'duckdb:///linkedin.duckdb' \
     --dest-table 'dest.lead_form_responses' \
