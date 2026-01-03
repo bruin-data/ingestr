@@ -95,10 +95,16 @@ def indeed_source(
         current_start = date.last_value or start_date.to_date_string()
         current_end = date.end_value or pendulum.now("UTC").to_date_string()
 
-        for stat in _get_campaign_stats(token, campaign["Id"], current_start, current_end):
+        for stat in _get_campaign_stats(
+            token, campaign["Id"], current_start, current_end
+        ):
             yield stat
 
-    @dlt.resource(name="account", primary_key=["employerId", "jobSourceId"], write_disposition="replace")
+    @dlt.resource(
+        name="account",
+        primary_key=["employerId", "jobSourceId"],
+        write_disposition="replace",
+    )
     def account() -> Iterator[Dict[str, Any]]:
         data = _get_account(token)
         employer_id = data.get("employerId")

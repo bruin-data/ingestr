@@ -119,7 +119,9 @@ def _get_campaign_jobs(token: str, campaign_id: str) -> Iterator[Dict[str, Any]]
                 yield job
 
             links = data.get("meta", {}).get("links", [])
-            next_link = next((link for link in links if link.get("rel") == "next"), None)
+            next_link = next(
+                (link for link in links if link.get("rel") == "next"), None
+            )
 
             if not next_link:
                 break
@@ -212,7 +214,11 @@ def _get_traffic_report_for_day(
 
 
 def _get_traffic_report(
-    token: str, start_date: str, end_date: str, max_retries: int = 10, retry_delay: int = 5
+    token: str,
+    start_date: str,
+    end_date: str,
+    max_retries: int = 10,
+    retry_delay: int = 5,
 ) -> Iterator[Dict[str, Any]]:
     start = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
@@ -220,7 +226,9 @@ def _get_traffic_report(
     current = start
     while current <= end:
         date_str = current.strftime("%Y-%m-%d")
-        yield from _get_traffic_report_for_day(token, date_str, max_retries, retry_delay)
+        yield from _get_traffic_report_for_day(
+            token, date_str, max_retries, retry_delay
+        )
         current += timedelta(days=1)
 
 
