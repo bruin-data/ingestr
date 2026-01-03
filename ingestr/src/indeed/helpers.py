@@ -10,7 +10,6 @@ INDEED_TOKEN_URL = "https://apis.indeed.com/oauth/v2/tokens"
 INDEED_API_BASE_URL = "https://apis.indeed.com/ads/v1"
 
 DEFAULT_SCOPES = [
-    "employer_access",
     "employer.advertising.campaign.read",
     "employer.advertising.campaign_report.read",
     "employer.advertising.account.read",
@@ -94,8 +93,10 @@ def _get_campaign_budget(token: str, campaign_id: str) -> Optional[Dict[str, Any
         data = response.json().get("data", {})
         data["campaignId"] = campaign_id
         return data
-    except requests.exceptions.HTTPError:
-        return None
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            return None
+        raise
 
 
 def _get_campaign_jobs(token: str, campaign_id: str) -> Iterator[Dict[str, Any]]:
@@ -128,8 +129,10 @@ def _get_campaign_jobs(token: str, campaign_id: str) -> Iterator[Dict[str, Any]]
                 cursor = href.split("start=")[1].split("&")[0]
             else:
                 break
-    except requests.exceptions.HTTPError:
-        return
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            return
+        raise
 
 
 def _get_campaign_properties(token: str, campaign_id: str) -> Optional[Dict[str, Any]]:
@@ -138,8 +141,10 @@ def _get_campaign_properties(token: str, campaign_id: str) -> Optional[Dict[str,
         data = response.json().get("data", {})
         data["campaignId"] = campaign_id
         return data
-    except requests.exceptions.HTTPError:
-        return None
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            return None
+        raise
 
 
 def _get_campaign_stats(
@@ -157,8 +162,10 @@ def _get_campaign_stats(
         for stat in stats:
             stat["campaignId"] = campaign_id
             yield stat
-    except requests.exceptions.HTTPError:
-        return
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            return
+        raise
 
 
 def _get_account(token: str) -> Dict[str, Any]:
@@ -183,7 +190,7 @@ def _get_traffic_report_for_day(
         if response.status_code == 202:
             location = response.json().get("data", {}).get("location", "")
             if not location:
-                return
+                raise ValueError(f"API returned 202 but no location for date {date}")
 
             if location.startswith("/v1"):
                 location = location[3:]
@@ -199,20 +206,7 @@ def _get_traffic_report_for_day(
                             row["date"] = date
                             yield row
                         return
-                    else:
-                        data = report_response.json().get("data", {})
-                        if "location" in data:
-                            location = data["location"]
-                            if location.startswith("/v1"):
-                                location = location[3:]
-                            continue
             return
-        else:
-            content_type = response.headers.get("Content-Type", "")
-            if "text/csv" in content_type or "application/csv" in content_type:
-                for row in _parse_csv(response.text):
-                    row["date"] = date
-                    yield row
     except requests.exceptions.HTTPError:
         return
 
