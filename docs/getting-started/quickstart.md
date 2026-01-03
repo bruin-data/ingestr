@@ -31,18 +31,30 @@ While installation with vanilla `pip` is possible, it's an order of magnitude sl
 
 ```bash
 ingestr ingest \
-    --source-uri 'postgresql://admin:admin@localhost:8837/web?sslmode=disable' \
-    --source-table 'public.some_data' \
-    --dest-uri 'bigquery://<your-project-name>?credentials_path=/path/to/service/account.json' \
-    --dest-table 'ingestr.some_data'
+    --source-uri 'chess://?players=awryaw,albertojgomez' \
+    --source-table 'profiles' \
+    --dest-uri 'duckdb:///./chess.duckdb' \
+    --dest-table 'raw.profiles'
 ```
 
-That's it.
+___That's it.___
 
-This command:
-- gets the table `public.some_data` from the Postgres instance.
-- uploads this data to your BigQuery warehouse under the schema `ingestr` and table `some_data`.
+> [!INFO]
+> The steps here assume you have [DuckDB](https://duckdb.org/install/) installed. DuckDB runs locally with zero setup and keeps the quickstart easy and fast.
 
+This command will:
+- fetch the `profiles` table for the requested chess players.
+- write the data into the DuckDB database at `./chess.duckdb` under `raw.profiles`.
+
+If you'd like a quick check, you can query the table directly:
+```bash
+duckdb ./chess.duckdb "select * from raw.profiles"
+```
+
+Or alternatively explore the table in the DuckDB UI:
+```bash
+duckdb -ui ./chess.duckdb
+```
 
 ## Supported sources & destinations
 
