@@ -2506,10 +2506,8 @@ class LinkedInAdsSource:
             if interval_start
             else pendulum.datetime(2018, 1, 1)
         )
-        end_datetime = (
-            ensure_pendulum_datetime(interval_end) if interval_end else None
-        )
-            
+        end_datetime = ensure_pendulum_datetime(interval_end) if interval_end else None
+
         if table.startswith("custom:"):
             account_ids = source_fields.get("account_ids")
             if not account_ids:
@@ -2560,8 +2558,8 @@ class LinkedInAdsSource:
                 metrics.append("pivotValues")
 
             return linked_in_ads_analytics_source(
-                start_date=start_datetime.date(),
-                end_date=end_datetime.date(),
+                start_date=start_datetime.date(),  # type: ignore[union-attr]
+                end_date=(end_datetime.date()),  # type: ignore[union-attr]
                 access_token=access_token[0],
                 account_ids=account_ids,
                 dimension=dimension,
@@ -2571,7 +2569,11 @@ class LinkedInAdsSource:
 
         from ingestr.src.linkedin_ads import linked_in_ads_source
 
-        return linked_in_ads_source(access_token=access_token[0],start_datetime=start_datetime,end_datetime=end_datetime).with_resources(table)
+        return linked_in_ads_source(
+            access_token=access_token[0],
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+        ).with_resources(table)
 
 
 class ClickupSource:
@@ -4303,7 +4305,7 @@ class CouchbaseSource:
                 end_value=end_value,
                 range_end="closed",
                 range_start="closed",
-            )  
+            )
 
         # Get optional parameters
         limit = kwargs.get("limit")
