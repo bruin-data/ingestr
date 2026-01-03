@@ -2558,8 +2558,8 @@ class LinkedInAdsSource:
                 metrics.append("pivotValues")
 
             return linked_in_ads_analytics_source(
-                start_date=start_datetime.date(),  # type: ignore[union-attr]
-                end_date=(end_datetime.date()),  # type: ignore[union-attr]
+                start_date=start_datetime.date(),
+                end_date=(end_datetime.date() if end_datetime else None),
                 access_token=access_token[0],
                 account_ids=account_ids,
                 dimension=dimension,

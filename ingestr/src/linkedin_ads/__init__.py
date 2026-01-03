@@ -66,7 +66,7 @@ def linked_in_ads_analytics_source(
 
 @dlt.source(max_table_nesting=0)
 def linked_in_ads_source(
-    access_token: str, start_datetime: DateTime | None, end_datetime: DateTime | None
+    access_token: str, start_datetime: DateTime, end_datetime: DateTime | None
 ) -> list[DltResource]:
     linkedin_api = LinkedInAdsAPI(
         access_token=access_token,
@@ -178,10 +178,10 @@ def linked_in_ads_source(
     )
     def lead_form_responses(
         ad_accounts,
-        submittedAt: dlt.sources.incremental[str] = dlt.sources.incremental(
+        submittedAt=dlt.sources.incremental(
             "submittedAt",
-            initial_value=int(start_datetime.int_timestamp * 1000),  # type: ignore[union-attr,arg-type]
-            end_value=end_datetime.int_timestamp * 1000  # type: ignore[union-attr,arg-type]
+            initial_value=int(start_datetime.int_timestamp * 1000),
+            end_value=end_datetime.int_timestamp * 1000
             if end_datetime
             else int(pendulum.now().int_timestamp * 1000),
             range_end="closed",
