@@ -2499,22 +2499,20 @@ class LinkedInAdsSource:
         if not access_token:
             raise ValueError("access_token is required to connect to LinkedIn Ads")
 
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+        start_datetime = (
+            ensure_pendulum_datetime(interval_start)
+            if interval_start
+            else pendulum.datetime(2018, 1, 1)
+        )
+        end_datetime = ensure_pendulum_datetime(interval_end) if interval_end else None
+
         if table.startswith("custom:"):
             account_ids = source_fields.get("account_ids")
             if not account_ids:
                 raise ValueError("account_ids is required to connect to LinkedIn Ads")
             account_ids = account_ids[0].replace(" ", "").split(",")
-
-            interval_start = kwargs.get("interval_start")
-            interval_end = kwargs.get("interval_end")
-            start_date = (
-                ensure_pendulum_datetime(interval_start).date()
-                if interval_start
-                else pendulum.datetime(2018, 1, 1).date()
-            )
-            end_date = (
-                ensure_pendulum_datetime(interval_end).date() if interval_end else None
-            )
 
             fields = table.split(":")
             if len(fields) != 3:
@@ -2560,8 +2558,8 @@ class LinkedInAdsSource:
                 metrics.append("pivotValues")
 
             return linked_in_ads_analytics_source(
-                start_date=start_date,
-                end_date=end_date,
+                start_date=start_datetime.date(),  # type: ignore[union-attr]
+                end_date=(end_datetime.date()),  # type: ignore[union-attr]
                 access_token=access_token[0],
                 account_ids=account_ids,
                 dimension=dimension,
@@ -2571,7 +2569,11 @@ class LinkedInAdsSource:
 
         from ingestr.src.linkedin_ads import linked_in_ads_source
 
-        return linked_in_ads_source(access_token=access_token[0]).with_resources(table)
+        return linked_in_ads_source(
+            access_token=access_token[0],
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+        ).with_resources(table)
 
 
 class ClickupSource:
