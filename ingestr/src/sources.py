@@ -4758,3 +4758,55 @@ class PrimerSource:
             api_key=api_key[0],
             **date_args,
         ).with_resources(table)
+
+
+class IndeedSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        client_id = params.get("client_id")
+        if client_id is None:
+            raise MissingValueError("client_id", "Indeed")
+
+        client_secret = params.get("client_secret")
+        if client_secret is None:
+            raise MissingValueError("client_secret", "Indeed")
+
+        employer_id = params.get("employer_id")
+        if employer_id is None:
+            raise MissingValueError("employer_id", "Indeed")
+
+        if table not in [
+            "campaigns",
+            "campaign_details",
+            "campaign_budget",
+            "campaign_jobs",
+            "campaign_stats",
+            "account",
+            "traffic_stats",
+        ]:
+            raise UnsupportedResourceError(table, "Indeed")
+
+        start_date = kwargs.get("interval_start")
+        if start_date is not None:
+            start_date = ensure_pendulum_datetime(start_date)
+        else:
+            start_date = pendulum.datetime(2020, 1, 1).in_tz("UTC")
+
+        end_date = kwargs.get("interval_end")
+        if end_date is not None:
+            end_date = ensure_pendulum_datetime(end_date).in_tz("UTC")
+
+        from ingestr.src.indeed import indeed_source
+
+        return indeed_source(
+            client_id=client_id[0],
+            client_secret=client_secret[0],
+            employer_id=employer_id[0],
+            start_date=start_date,
+            end_date=end_date,
+        ).with_resources(table)
