@@ -26,7 +26,7 @@ def indeed_source(
 ) -> Iterable[dlt.sources.DltResource]:
     token = _get_oauth_token(client_id, client_secret, employer_id)
 
-    @dlt.resource(name="campaigns", primary_key="Id", write_disposition="replace")
+    @dlt.resource(name="campaigns", write_disposition="replace")
     def campaigns() -> Iterator[Dict[str, Any]]:
         for campaign in _paginate_campaigns(token):
             yield campaign
@@ -43,7 +43,6 @@ def indeed_source(
 
     @dlt.transformer(
         name="campaign_budget",
-        primary_key="campaignId",
         write_disposition="replace",
         data_from=campaigns,
         parallelized=True,
@@ -55,7 +54,6 @@ def indeed_source(
 
     @dlt.transformer(
         name="campaign_jobs",
-        primary_key="jobKey",
         write_disposition="replace",
         data_from=campaigns,
         parallelized=True,
@@ -66,7 +64,6 @@ def indeed_source(
 
     @dlt.transformer(
         name="campaign_properties",
-        primary_key="campaignId",
         write_disposition="replace",
         data_from=campaigns,
         parallelized=True,
@@ -79,6 +76,7 @@ def indeed_source(
     @dlt.transformer(
         name="campaign_stats",
         write_disposition="merge",
+        merge_key="Date",
         data_from=campaigns,
         parallelized=True,
     )
@@ -102,7 +100,6 @@ def indeed_source(
 
     @dlt.resource(
         name="account",
-        primary_key=["employerId", "jobSourceId"],
         write_disposition="replace",
     )
     def account() -> Iterator[Dict[str, Any]]:
@@ -122,7 +119,11 @@ def indeed_source(
                 "jobSourceSiteName": job_source.get("siteName"),
             }
 
-    @dlt.resource(name="traffic_stats", write_disposition="merge")
+    @dlt.resource(
+        name="traffic_stats",
+        write_disposition="merge",
+        merge_key="date"
+    )
     def traffic_stats(
         date: dlt.sources.incremental[str] = dlt.sources.incremental(
             "date",

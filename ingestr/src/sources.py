@@ -4762,7 +4762,7 @@ class PrimerSource:
 
 class IndeedSource:
     def handles_incrementality(self) -> bool:
-        return False
+        return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
         parsed_uri = urlparse(uri)
