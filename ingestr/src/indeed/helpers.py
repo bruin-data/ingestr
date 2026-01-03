@@ -170,16 +170,23 @@ def _get_traffic_report_for_day(
     token: str, date: str, max_retries: int = 10, retry_delay: int = 5
 ) -> Iterator[Dict[str, Any]]:
     try:
+        start_dt = datetime.strptime(date, "%Y-%m-%d")
+        end_dt = start_dt + timedelta(days=1)
+        end_date_str = end_dt.strftime("%Y-%m-%d")
+
         response = _api_request(
             token,
             "/stats",
-            params={"startDate": date, "endDate": date, "v": "8"},
+            params={"startDate": date, "endDate": end_date_str, "v": "8"},
         )
 
         if response.status_code == 202:
             location = response.json().get("data", {}).get("location", "")
             if not location:
                 return
+
+            if location.startswith("/v1"):
+                location = location[3:]
 
             for attempt in range(max_retries):
                 time.sleep(retry_delay)
@@ -188,18 +195,24 @@ def _get_traffic_report_for_day(
                 if report_response.status_code == 200:
                     content_type = report_response.headers.get("Content-Type", "")
                     if "text/csv" in content_type or "application/csv" in content_type:
-                        yield from _parse_csv(report_response.text)
+                        for row in _parse_csv(report_response.text):
+                            row["date"] = date
+                            yield row
                         return
                     else:
                         data = report_response.json().get("data", {})
                         if "location" in data:
                             location = data["location"]
+                            if location.startswith("/v1"):
+                                location = location[3:]
                             continue
             return
         else:
             content_type = response.headers.get("Content-Type", "")
             if "text/csv" in content_type or "application/csv" in content_type:
-                yield from _parse_csv(response.text)
+                for row in _parse_csv(response.text):
+                    row["date"] = date
+                    yield row
     except requests.exceptions.HTTPError:
         return
 
