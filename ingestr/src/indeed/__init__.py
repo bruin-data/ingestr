@@ -119,11 +119,7 @@ def indeed_source(
                 "jobSourceSiteName": job_source.get("siteName"),
             }
 
-    @dlt.resource(
-        name="traffic_stats",
-        write_disposition="merge",
-        merge_key="date"
-    )
+    @dlt.resource(name="traffic_stats", write_disposition="merge", merge_key="date")
     def traffic_stats(
         date: dlt.sources.incremental[str] = dlt.sources.incremental(
             "date",
