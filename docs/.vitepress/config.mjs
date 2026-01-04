@@ -165,6 +165,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "GitHub", link: "/supported-sources/github" },
               { text: "Google Sheets", link: "/supported-sources/gsheets" },
               { text: "Hostaway", link: "/supported-sources/hostaway" },
+              { text: "Indeed", link: "/supported-sources/indeed" },
               { text: "Gorgias", link: "/supported-sources/gorgias" },
               { text: "HubSpot", link: "/supported-sources/hubspot" },
               { text: "Internet Society Pulse", link: "/supported-sources/isoc-pulse" },
