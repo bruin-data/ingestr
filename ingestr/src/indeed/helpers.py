@@ -100,39 +100,23 @@ def _get_campaign_budget(token: str, campaign_id: str) -> Optional[Dict[str, Any
 
 
 def _get_campaign_jobs(token: str, campaign_id: str) -> Iterator[Dict[str, Any]]:
-    cursor: Optional[str] = None
     try:
-        while True:
-            params: Dict[str, Any] = {"format": "detailed"}
-            if cursor:
-                params["start"] = cursor
-            response = _api_request(
-                token,
-                f"/campaigns/{campaign_id}/jobs",
-                params=params,
-            )
-            data = response.json()
+        response = _api_request(
+            token,
+            f"/campaigns/{campaign_id}/jobDetails",
+        )
+        data = response.json()
 
-            jobs = data.get("data", {}).get("Jobs", [])
-            for job in jobs:
-                job["campaignId"] = campaign_id
-                yield job
-
-            links = data.get("meta", {}).get("links", [])
-            next_link = next(
-                (link for link in links if link.get("rel") == "next"), None
-            )
-
-            if not next_link:
-                break
-
-            href = next_link.get("href", "")
-            if "start=" in href:
-                cursor = href.split("start=")[1].split("&")[0]
-            else:
-                break
+        jobs = data.get("data", {}).get("entries", [])
+        for job in jobs:
+            job["campaignId"] = campaign_id
+            yield job
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
+        if e.response is not None and e.response.status_code == 404:
+            return
+        if e.response is not None and e.response.status_code == 429:
+            time.sleep(5)
+            yield from _get_campaign_jobs(token, campaign_id)
             return
         raise
 
