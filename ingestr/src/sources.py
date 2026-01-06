@@ -372,6 +372,8 @@ class SqlSource:
             engine_adapter_callback=engine_adapter_callback,
         )
 
+        builder_res.max_table_nesting = 0
+
         return builder_res
 
 
