@@ -52,7 +52,10 @@ def _api_request(
         "Accept": "application/json",
     }
     response = requests.get(url, headers=headers, params=params)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        raise RuntimeError(f"{e} - Response body: {response.text}") from e
     return response
 
 
@@ -193,8 +196,9 @@ def _get_traffic_report_for_day(
                             yield row
                         return
             return
-    except requests.exceptions.HTTPError:
-        return
+    except requests.exceptions.HTTPError as e:
+        body = e.response.text if e.response is not None else "N/A"
+        raise RuntimeError(f"{e} - Response body: {body}") from e
 
 
 def _get_traffic_report(
@@ -205,10 +209,10 @@ def _get_traffic_report(
     retry_delay: int = 5,
 ) -> Iterator[Dict[str, Any]]:
     start = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
 
     current = start
-    while current <= end:
+    while current < end:
         date_str = current.strftime("%Y-%m-%d")
         yield from _get_traffic_report_for_day(
             token, date_str, max_retries, retry_delay
