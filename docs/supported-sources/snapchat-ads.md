@@ -94,8 +94,8 @@ Snapchat Ads source supports fetching stats/measurement data for campaigns, ad s
 #### Stats Table Format
 
 ```plaintext
-<resource_name>:<granularity>,<fields>
-<resource_name>:<breakdown>,<granularity>,<fields>
+<resource_name>:<granularity>:<fields>
+<resource_name>:<breakdown>,<granularity>:<fields>
 ```
 
 **Parameters:**
@@ -110,10 +110,10 @@ Snapchat Ads source supports fetching stats/measurement data for campaigns, ad s
 - `fields` (required): Metrics to retrieve (comma-separated). Examples: `impressions`, `spend`, `swipes`, `conversion_purchases`, etc.
 
 **Format Examples:**
-- Without breakdown: `campaigns_stats:DAY,impressions,spend,swipes`
-- With ad breakdown: `campaigns_stats:ad,HOUR,impressions,spend`
-- With adsquad breakdown: `campaigns_stats:adsquad,DAY,impressions,swipes`
-- Ad account stats with campaign breakdown: `ad_accounts_stats:campaign,DAY,spend`
+- Without breakdown: `campaigns_stats:DAY:impressions,spend,swipes`
+- With ad breakdown: `campaigns_stats:ad,HOUR:impressions,spend`
+- With adsquad breakdown: `campaigns_stats:adsquad,DAY:impressions,swipes`
+- Ad account stats with campaign breakdown: `ad_accounts_stats:campaign,DAY:spend`
 
 ## Examples
 
@@ -140,7 +140,7 @@ ingestr ingest \
 ```sh
 ingestr ingest \
   --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'campaigns_stats:HOUR,impressions,spend,swipes' \
+  --source-table 'campaigns_stats:HOUR:impressions,spend,swipes' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
   --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
@@ -154,7 +154,7 @@ Result will include `campaign_id`, but `adsquad_id` and `ad_id` will be NULL.
 ```sh
 ingestr ingest \
   --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'campaigns_stats:ad,DAY,impressions,spend' \
+  --source-table 'campaigns_stats:ad,DAY:impressions,spend' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
   --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
@@ -168,7 +168,7 @@ Result will include `campaign_id` and `ad_id`, but `adsquad_id` will be NULL.
 ```sh
 ingestr ingest \
   --source-uri 'snapchatads://?refresh_token=token&client_id=id&client_secret=secret&organization_id=org_id' \
-  --source-table 'ad_accounts_stats:campaign,LIFETIME,spend' \
+  --source-table 'ad_accounts_stats:campaign,LIFETIME:spend' \
   --dest-uri 'duckdb:///snapchat.duckdb' \
   --dest-table 'dest.ad_accounts_stats' \
   --interval-start '2024-01-01' \
@@ -183,7 +183,7 @@ Since all stats resources use the same primary key structure, you can ingest dat
 # First: ingest without breakdown
 ingestr ingest \
   --source-uri 'snapchatads://...' \
-  --source-table 'campaigns_stats:HOUR,impressions,spend' \
+  --source-table 'campaigns_stats:HOUR:impressions,spend' \
   --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
   --interval-end '2024-01-31'
@@ -191,7 +191,7 @@ ingestr ingest \
 # Second: ingest with ad breakdown (appends to same table)
 ingestr ingest \
   --source-uri 'snapchatads://...' \
-  --source-table 'campaigns_stats:ad,HOUR,impressions,spend' \
+  --source-table 'campaigns_stats:ad,HOUR:impressions,spend' \
   --dest-table 'dest.campaigns_stats' \
   --interval-start '2024-01-01' \
   --interval-end '2024-01-31'
