@@ -282,20 +282,8 @@ query Contacts {
 """
 
 BITES_QUERY = """
-query Bites(
-  $mine: Boolean
-  $transcriptId: ID
-  $myTeam: Boolean
-  $limit: Int
-  $skip: Int
-) {
-  bites(
-    mine: $mine
-    transcript_id: $transcriptId
-    my_team: $myTeam
-    limit: $limit
-    skip: $skip
-  ) {
+query Bites($my_team: Boolean) {
+  bites(my_team: $my_team){
     transcript_id
     name
     id
@@ -480,34 +468,8 @@ query Analytics($startTime: String!, $endTime: String!) {
 """
 
 TRANSCRIPTS_QUERY = """
-query Transcripts(
-  $keyword: String
-  $scope: String
-  $fromDate: DateTime
-  $toDate: DateTime
-  $limit: Int
-  $skip: Int
-  $hostEmail: String
-  $organizers: [String!]
-  $participants: [String!]
-  $userId: String
-  $mine: Boolean
-  $channelId: String
-) {
-  transcripts(
-    keyword: $keyword
-    scope: $scope
-    fromDate: $fromDate
-    toDate: $toDate
-    limit: $limit
-    skip: $skip
-    host_email: $hostEmail
-    organizers: $organizers
-    participants: $participants
-    user_id: $userId
-    mine: $mine
-    channel_id: $channelId
-  ) {
+query Transcripts{
+  transcripts {
     id
     analytics {
       sentiments {
@@ -890,49 +852,39 @@ class FirefliesAPI:
         if contacts:
             yield contacts
 
-    def fetch_bites(
-        self,
-        mine: bool,
-        transcript_id: Optional[str] = None,
-        my_team: Optional[bool] = None,
-        limit: Optional[int] = None,
-        skip: Optional[int] = None,
-    ) -> Iterator[List[dict]]:
-        variables: Dict[str, Any] = {}
-        variables["mine"] = mine
-        if transcript_id is not None:
-            variables["transcriptId"] = transcript_id
-        if my_team is not None:
-            variables["myTeam"] = my_team
-        if limit is not None:
-            variables["limit"] = limit
-        if skip is not None:
-            variables["skip"] = skip
+    def fetch_bites(self) -> Iterator[List[dict]]:        
+        while True:
+            variables: Dict[str, Any] = {
+                "my_team": True,
+            }
 
-        response = self.client.post(
-            url=GRAPHQL_API_BASE_URL,
-            json={"query": BITES_QUERY, "variables": variables},
-            headers=self.headers,
-        )
-
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
+            response = self.client.post(
+                url=GRAPHQL_API_BASE_URL,
+                json={"query": BITES_QUERY, "variables": variables},
+                headers=self.headers,
             )
 
-        result = response.json()
+            if response.status_code != 200:
+                error_data = response.json() if response.content else {}
+                raise ValueError(
+                    f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
+                )
 
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
+            result = response.json()
 
-        bites = result.get("data", {}).get("bites", [])
+            if "errors" in result:
+                error_messages = [
+                    error.get("message", "Unknown error") for error in result["errors"]
+                ]
+                raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
 
-        if bites:
+            bites = result.get("data", {}).get("bites", [])
+
+            if not bites:
+                break
+
             yield bites
+
 
     def fetch_bite(self, bite_id: str) -> Iterator[List[dict]]:
         variables = {
@@ -964,68 +916,31 @@ class FirefliesAPI:
         if bite:
             yield [bite]
 
-    def fetch_transcripts(
-        self,
-        keyword: Optional[str] = None,
-        scope: Optional[Literal["title", "sentences", "all"]] = None,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None,
-        limit: Optional[int] = None,
-        skip: Optional[int] = None,
-        host_email: Optional[str] = None,
-        organizers: Optional[List[str]] = None,
-        participants: Optional[List[str]] = None,
-        user_id: Optional[str] = None,
-        mine: Optional[bool] = None,
-        channel_id: Optional[str] = None,
-    ) -> Iterator[List[dict]]:
-        variables: Dict[str, Any] = {}
-        if keyword:
-            variables["keyword"] = keyword
-        if scope is not None:
-            variables["scope"] = scope
-        if from_date is not None:
-            variables["fromDate"] = from_date
-        if to_date is not None:
-            variables["toDate"] = to_date
-        if limit is not None:
-            variables["limit"] = limit
-        if skip is not None:
-            variables["skip"] = skip
-        if host_email:
-            variables["hostEmail"] = host_email
-        if organizers:
-            variables["organizers"] = organizers
-        if participants:
-            variables["participants"] = participants
-        if user_id is not None:
-            variables["userId"] = user_id
-        if mine is not None:
-            variables["mine"] = mine
-        if channel_id:
-            variables["channelId"] = channel_id
-
-        response = self.client.post(
-            url=GRAPHQL_API_BASE_URL,
-            json={"query": TRANSCRIPTS_QUERY, "variables": variables},
-            headers=self.headers,
-        )
-
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
+    def fetch_transcripts(self) -> Iterator[List[dict]]:
+        while True:
+            response = self.client.post(
+                url=GRAPHQL_API_BASE_URL,
+                json={"query": TRANSCRIPTS_QUERY},
+                headers=self.headers,
             )
 
-        result = response.json()
+            if response.status_code != 200:
+                error_data = response.json() if response.content else {}
+                raise ValueError(
+                    f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
+                )
 
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
+            result = response.json()
 
-        transcripts = result.get("data", {}).get("transcripts", [])
+            if "errors" in result:
+                error_messages = [
+                    error.get("message", "Unknown error") for error in result["errors"]
+                ]
+                raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
 
-        if transcripts:
+            transcripts = result.get("data", {}).get("transcripts", [])
+
+            if not transcripts:
+                break
+
             yield transcripts

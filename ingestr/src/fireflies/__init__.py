@@ -13,29 +13,10 @@ def fireflies_source(
     api_key: str,
     start_datetime: Optional[pendulum.DateTime],
     end_datetime: Optional[pendulum.DateTime],
-    # Bites parameters
-    bites_mine: bool = False,
-    bites_transcript_id: Optional[str] = None,
-    bites_my_team: Optional[bool] = None,
-    bites_limit: Optional[int] = None,
-    bites_skip: Optional[int] = None,
     channel_id: Optional[str] = None,
     user_id: Optional[str] = None,
     transcript_id: Optional[str] = None,
     bite_id: Optional[str] = None,
-    # Transcripts parameters
-    transcripts_keyword: Optional[str] = None,
-    transcripts_scope: Optional[Literal["title", "sentences", "all"]] = None,
-    transcripts_from_date: Optional[str] = None,
-    transcripts_to_date: Optional[str] = None,
-    transcripts_limit: Optional[int] = None,
-    transcripts_skip: Optional[int] = None,
-    transcripts_host_email: Optional[str] = None,
-    transcripts_organizers: Optional[List[str]] = None,
-    transcripts_participants: Optional[List[str]] = None,
-    transcripts_user_id: Optional[str] = None,
-    transcripts_mine: Optional[bool] = None,
-    transcripts_channel_id: Optional[str] = None,
 ) -> List[DltResource]:
     fireflies_api = FirefliesAPI(api_key=api_key)
 
@@ -130,21 +111,8 @@ def fireflies_source(
         primary_key="id",
     )
     def transcripts() -> Iterable[TDataItem]:
-        # Capture all transcripts parameters in closure
-        for page in fireflies_api.fetch_transcripts(
-            keyword=transcripts_keyword,
-            scope=transcripts_scope,
-            from_date=transcripts_from_date,
-            to_date=transcripts_to_date,
-            limit=transcripts_limit,
-            skip=transcripts_skip,
-            host_email=transcripts_host_email,
-            organizers=transcripts_organizers,
-            participants=transcripts_participants,
-            user_id=transcripts_user_id,
-            mine=transcripts_mine,
-            channel_id=transcripts_channel_id,
-        ):
+        """Fetch all transcripts from Fireflies API."""
+        for page in fireflies_api.fetch_transcripts():
             for item in page:
                 yield item
 
@@ -164,13 +132,8 @@ def fireflies_source(
         primary_key="id",
     )
     def bites() -> Iterable[TDataItem]:
-        for page in fireflies_api.fetch_bites(
-            mine=bites_mine,
-            transcript_id=bites_transcript_id,
-            my_team=bites_my_team,
-            limit=bites_limit,
-            skip=bites_skip,
-        ):
+        """Fetch all bites from Fireflies API."""
+        for page in fireflies_api.fetch_bites():
             for item in page:
                 yield item
 

@@ -2794,89 +2794,22 @@ class FirefliesSource:
             user_id = user_id_param[0]
         else:
             user_id = None
-
-        # Initialize all transcripts parameters to None
-        transcripts_title: Optional[str] = None
-        transcripts_keyword: Optional[str] = None
-        transcripts_scope: Optional[str] = None
-        transcripts_date: Optional[float] = None
-        transcripts_from_date: Optional[str] = None
-        transcripts_to_date: Optional[str] = None
-        transcripts_limit: Optional[int] = None
-        transcripts_skip: Optional[int] = None
-        transcripts_host_email: Optional[str] = None
-        transcripts_organizer_email: Optional[str] = None
-        transcripts_participant_email: Optional[str] = None
-        transcripts_organizers: Optional[List[str]] = None
-        transcripts_participants: Optional[List[str]] = None
-        transcripts_user_id: Optional[str] = None
-        transcripts_mine: Optional[bool] = None
-        transcripts_channel_id: Optional[str] = None
-
-        if table == "transcripts":
-            transcripts_title = kwargs.get("transcripts_title")
-            transcripts_keyword = kwargs.get("transcripts_keyword")
-            transcripts_scope = kwargs.get("transcripts_scope")
-
-            # Handle date parameters
-            transcripts_date_str = kwargs.get("transcripts_date")
-            if transcripts_date_str:
-                try:
-                    transcripts_date = float(transcripts_date_str)
-                except (ValueError, TypeError):
-                    pass
-
-            transcripts_from_date = kwargs.get("transcripts_from_date")
-            transcripts_to_date = kwargs.get("transcripts_to_date")
-
-            # Handle limit and skip
-            transcripts_limit_str = kwargs.get("transcripts_limit")
-            if transcripts_limit_str:
-                try:
-                    transcripts_limit = int(transcripts_limit_str)
-                except (ValueError, TypeError):
-                    pass
-
-            transcripts_skip_str = kwargs.get("transcripts_skip")
-            if transcripts_skip_str:
-                try:
-                    transcripts_skip = int(transcripts_skip_str)
-                except (ValueError, TypeError):
-                    pass
-
-            transcripts_host_email = kwargs.get("transcripts_host_email")
-            transcripts_organizer_email = kwargs.get("transcripts_organizer_email")
-            transcripts_participant_email = kwargs.get("transcripts_participant_email")
-
-            # Handle list parameters (organizers, participants)
-            transcripts_organizers_str = kwargs.get("transcripts_organizers")
-            if transcripts_organizers_str:
-                transcripts_organizers = [
-                    email.strip()
-                    for email in transcripts_organizers_str.split(",")
-                    if email.strip()
-                ]
-
-            transcripts_participants_str = kwargs.get("transcripts_participants")
-            if transcripts_participants_str:
-                transcripts_participants = [
-                    email.strip()
-                    for email in transcripts_participants_str.split(",")
-                    if email.strip()
-                ]
-
-            transcripts_user_id = kwargs.get("transcripts_user_id")
-
-            # Handle boolean parameter (mine)
-            transcripts_mine_str = kwargs.get("transcripts_mine")
-            if transcripts_mine_str:
-                transcripts_mine = str(transcripts_mine_str).lower() in (
-                    "true",
-                    "1",
-                    "yes",
-                )
-
-            transcripts_channel_id = kwargs.get("transcripts_channel_id")
+            
+        if table == "transcript":
+            transcript_id_param = source_fields.get("transcript_id")
+            if not transcript_id_param:
+                raise MissingValueError("transcript_id", "Fireflies")
+            transcript_id = transcript_id_param[0]
+        else:
+            transcript_id = None
+            
+        if table == "bite":
+            bite_id_param = source_fields.get("bite_id")
+            if not bite_id_param:
+                raise MissingValueError("bite_id", "Fireflies")
+            bite_id = bite_id_param[0]
+        else:
+            bite_id = None
 
         from ingestr.src.fireflies import fireflies_source
 
@@ -2886,22 +2819,8 @@ class FirefliesSource:
             end_datetime=end_datetime,
             channel_id=channel_id,
             user_id=user_id,
-            transcripts_title=transcripts_title,
-            transcripts_keyword=transcripts_keyword,
-            transcripts_scope=transcripts_scope,
-            transcripts_date=transcripts_date,
-            transcripts_from_date=transcripts_from_date,
-            transcripts_to_date=transcripts_to_date,
-            transcripts_limit=transcripts_limit,
-            transcripts_skip=transcripts_skip,
-            transcripts_host_email=transcripts_host_email,
-            transcripts_organizer_email=transcripts_organizer_email,
-            transcripts_participant_email=transcripts_participant_email,
-            transcripts_organizers=transcripts_organizers,
-            transcripts_participants=transcripts_participants,
-            transcripts_user_id=transcripts_user_id,
-            transcripts_mine=transcripts_mine,
-            transcripts_channel_id=transcripts_channel_id,
+            transcript_id=transcript_id,
+            bite_id=bite_id,
         ).with_resources(table)
 
 
