@@ -120,6 +120,7 @@ DIMENSIONS = {
     # Publisher dimensions
     "ad_type",
     "application",
+    "application_is_hidden",
     "bidding_integration",
     "country",
     "day",
@@ -146,6 +147,7 @@ DIMENSIONS = {
     "creative_set_id",
     "custom_page_id",
     "external_placement_id",
+    "optimization_day_target",
     "target_event",
     "traffic_source",
 }
