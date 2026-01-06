@@ -46,6 +46,7 @@ from ingestr.src.sources import (
     DynamoDBSource,
     ElasticsearchSource,
     FacebookAdsSource,
+    FirefliesSource,
     FluxxSource,
     FrankfurterSource,
     FreshdeskSource,
@@ -240,6 +241,7 @@ class SourceDestinationFactory:
         "monday": MondaySource,
         "mailchimp": MailchimpSource,
         "primer": PrimerSource,
+        "fireflies": FirefliesSource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,
