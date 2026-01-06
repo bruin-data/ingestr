@@ -282,8 +282,8 @@ query Contacts {
 """
 
 BITES_QUERY = """
-query Bites($my_team: Boolean) {
-  bites(my_team: $my_team){
+query Bites($my_team: Boolean, $limit: Int, $skip: Int) {
+  bites(my_team: $my_team, limit: $limit, skip: $skip){
     transcript_id
     name
     id
@@ -468,8 +468,8 @@ query Analytics($startTime: String!, $endTime: String!) {
 """
 
 TRANSCRIPTS_QUERY = """
-query Transcripts{
-  transcripts {
+query Transcripts($limit: Int, $skip: Int) {
+  transcripts(limit: $limit, skip: $skip) {
     id
     analytics {
       sentiments {
@@ -852,11 +852,22 @@ class FirefliesAPI:
         if contacts:
             yield contacts
 
-    def fetch_bites(self) -> Iterator[List[dict]]:        
+    def fetch_bites(self) -> Iterator[List[dict]]:
+        """
+        Fetch all bites from Fireflies API with automatic pagination.
+        API maximum limit is 50 per request.
+        """
+        MAX_LIMIT = 10
+        skip_offset = 0
+        
         while True:
             variables: Dict[str, Any] = {
                 "my_team": True,
+                "limit": MAX_LIMIT,
             }
+            
+            if skip_offset > 0:
+                variables["skip"] = skip_offset
 
             response = self.client.post(
                 url=GRAPHQL_API_BASE_URL,
@@ -884,6 +895,13 @@ class FirefliesAPI:
                 break
 
             yield bites
+
+            # If we got fewer results than requested, we've reached the end
+            if len(bites) < MAX_LIMIT:
+                break
+
+            # Increment skip for next page
+            skip_offset += len(bites)
 
 
     def fetch_bite(self, bite_id: str) -> Iterator[List[dict]]:
@@ -917,10 +935,24 @@ class FirefliesAPI:
             yield [bite]
 
     def fetch_transcripts(self) -> Iterator[List[dict]]:
+        """
+        Fetch all transcripts from Fireflies API with automatic pagination.
+        API maximum limit is 50 per request.
+        """
+        MAX_LIMIT = 10
+        skip_offset = 0
+        
         while True:
+            variables: Dict[str, Any] = {
+                "limit": MAX_LIMIT,
+            }
+            
+            if skip_offset > 0:
+                variables["skip"] = skip_offset
+
             response = self.client.post(
                 url=GRAPHQL_API_BASE_URL,
-                json={"query": TRANSCRIPTS_QUERY},
+                json={"query": TRANSCRIPTS_QUERY, "variables": variables},
                 headers=self.headers,
             )
 
@@ -944,3 +976,10 @@ class FirefliesAPI:
                 break
 
             yield transcripts
+
+            # If we got fewer results than requested, we've reached the end
+            if len(transcripts) < MAX_LIMIT:
+                break
+
+            # Increment skip for next page
+            skip_offset += len(transcripts)
