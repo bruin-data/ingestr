@@ -292,17 +292,16 @@ def ingest(
 ):
     import hashlib
     import tempfile
+    import time
     from datetime import datetime
 
-    import time
-
     import dlt
-    from dlt.pipeline.exceptions import PipelineStepFailed
     import humanize
     import typer
     from dlt.common.pipeline import LoadInfo
     from dlt.common.runtime.collector import Collector, LogCollector
     from dlt.common.schema.typing import TColumnSchema
+    from dlt.pipeline.exceptions import PipelineStepFailed
 
     import ingestr.src.partition as partition
     import ingestr.src.resource as resource
@@ -645,7 +644,9 @@ def ingest(
                     staging_bucket=staging_bucket,
                 ),
                 write_disposition=write_disposition,  # type: ignore
-                primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
+                primary_key=(
+                    primary_key if primary_key and len(primary_key) > 0 else None
+                ),  # type: ignore
                 loader_file_format=(
                     loader_file_format.value if loader_file_format is not None else None  # type: ignore
                 ),  # type: ignore
