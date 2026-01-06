@@ -57,6 +57,7 @@ REPORT_SCHEMA: Dict[ReportType, List[str]] = {
         "day",
         "device_type",
         "ecpm",
+        "hour",
         "impressions",
         "package_name",
         "placement_type",
@@ -95,6 +96,7 @@ REPORT_SCHEMA: Dict[ReportType, List[str]] = {
         "device_type",
         "external_placement_id",
         "first_purchase",
+        "hour",
         "impressions",
         "installs",
         "optimization_day_target",
@@ -112,6 +114,43 @@ PROBABILISTIC_REPORT_EXCLUDE = [
     "installs",
     "redownloads",
 ]
+
+# Dimensions that can be used in merge_key (excludes metrics)
+DIMENSIONS = {
+    # Publisher dimensions
+    "ad_type",
+    "application",
+    "application_is_hidden",
+    "bidding_integration",
+    "country",
+    "day",
+    "device_type",
+    "hour",
+    "package_name",
+    "placement_type",
+    "platform",
+    "size",
+    "store_id",
+    "zone",
+    "zone_id",
+    # Advertiser dimensions
+    "ad",
+    "ad_creative_type",
+    "ad_id",
+    "campaign",
+    "campaign_ad_type",
+    "campaign_id_external",
+    "campaign_package_name",
+    "campaign_store_id",
+    "campaign_type",
+    "creative_set",
+    "creative_set_id",
+    "custom_page_id",
+    "external_placement_id",
+    "optimization_day_target",
+    "target_event",
+    "traffic_source",
+}
 
 
 @dlt.source
@@ -207,10 +246,27 @@ def resource(
     dimensions: List[str],
     report_type: ReportType,
 ) -> EndpointResource:
+    # Build merge_key from dimensions only (exclude metrics)
+    # Always include "day" if present, then add other dimensions
+    merge_key_parts = []
+    if "day" in dimensions:
+        merge_key_parts.append("day")
+
+    # Add other dimensions (excluding metrics)
+    for dim in dimensions:
+        if dim in DIMENSIONS and dim not in merge_key_parts:
+            merge_key_parts.append(dim)
+
+    # If no dimensions found, default to "day"
+    merge_key = merge_key_parts if merge_key_parts else "day"
+    # If only one dimension, use string instead of list
+    if len(merge_key) == 1:
+        merge_key = merge_key[0]
+
     return {
         "name": name,
         "columns": build_type_hints(dimensions),
-        "merge_key": "day",
+        "merge_key": merge_key,
         "endpoint": {
             "path": endpoint,
             "params": {
