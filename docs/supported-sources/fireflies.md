@@ -55,6 +55,9 @@ ingestr ingest \
 > [!NOTE]
 > For `analytics`, the API has a 30-day limit per request. ingestr automatically chunks larger date ranges into 30-day intervals.
 
+> [!WARNING]
+> The `analytics` table returns **pre-aggregated data** for each 30-day chunk (e.g., average duration, total meetings). When querying periods longer than 30 days, each chunk is stored as a separate row with its own aggregations.
+
 ## Tables
 
 Fireflies source allows ingesting the following sources into separate tables:

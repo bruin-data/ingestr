@@ -441,7 +441,7 @@ class FirefliesAPI:
         else:
             current_start: pendulum.DateTime = start
 
-            while current_start < end:
+            while current_start <= end:
                 chunk_end: pendulum.DateTime = current_start.add(days=MAX_DAYS)
                 if chunk_end > end:
                     chunk_end = end
