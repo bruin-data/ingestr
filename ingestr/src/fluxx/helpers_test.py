@@ -272,6 +272,7 @@ def test_get_base_url_full_domain():
 
 
 def test_get_base_url_backward_compat():
-    """Test _get_base_url backward compatibility - instance without dot gets .fluxxlabs.com."""
+    """Test _get_base_url backward compatibility - instance without TLD gets .fluxxlabs.com."""
     assert _get_base_url("mycompany") == "https://mycompany.fluxxlabs.com"
     assert _get_base_url("testinstance") == "https://testinstance.fluxxlabs.com"
+    assert _get_base_url("acmefoundation.preprod") == "https://acmefoundation.preprod.fluxxlabs.com"

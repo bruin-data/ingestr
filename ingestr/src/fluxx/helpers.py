@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import dlt
 import pendulum
 import requests
+import tldextract
 
 FLUXX_OAUTH_TOKEN_PATH = "/oauth/token"
 FLUXX_API_V2_PATH = "/api/rest/v2"
@@ -12,10 +13,16 @@ FLUXX_API_V2_PATH = "/api/rest/v2"
 def _get_base_url(instance: str) -> str:
     """Get the base URL for Fluxx API.
 
-    If instance contains a dot (e.g., 'isoc.fluxx.io'), treat it as a full domain.
+    If instance has a valid TLD (e.g., 'acme.fluxx.io'), use it as full domain.
     Otherwise, append '.fluxxlabs.com' for backward compatibility.
+
+    Examples:
+        - "mycompany" -> "https://mycompany.fluxxlabs.com"
+        - "mycompany.preprod" -> "https://mycompany.preprod.fluxxlabs.com"
+        - "acme.fluxx.io" -> "https://acme.fluxx.io"
     """
-    if "." in instance:
+    extracted = tldextract.extract(instance)
+    if extracted.suffix:
         return f"https://{instance}"
     return f"https://{instance}.fluxxlabs.com"
 
