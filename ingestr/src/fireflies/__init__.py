@@ -1,7 +1,8 @@
-from typing import Iterable, List, Literal, Optional
+from typing import Iterable, List, Optional
 
 import dlt
 import pendulum
+from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import TDataItem
 from dlt.sources import DltResource
 
@@ -13,16 +14,13 @@ def fireflies_source(
     api_key: str,
     start_datetime: Optional[pendulum.DateTime],
     end_datetime: Optional[pendulum.DateTime],
-    channel_id: Optional[str] = None,
-    user_id: Optional[str] = None,
-    transcript_id: Optional[str] = None,
-    bite_id: Optional[str] = None,
 ) -> List[DltResource]:
     fireflies_api = FirefliesAPI(api_key=api_key)
 
-    # Convert DateTime to strings immediately to avoid DateTime objects in closure
-    start_time_iso = start_datetime.to_iso8601_string() if start_datetime else None
-    end_time_iso = end_datetime.to_iso8601_string() if end_datetime else None
+    start_datetime = (
+        ensure_pendulum_datetime(start_datetime) if start_datetime else None
+    )
+    end_datetime = ensure_pendulum_datetime(end_datetime) if end_datetime else None
 
     @dlt.resource(
         write_disposition="replace",
@@ -34,16 +32,37 @@ def fireflies_source(
                 yield item
 
     @dlt.resource(
-        write_disposition="replace",
+        write_disposition="merge",
+        primary_key=["start_time", "end_time"],
     )
-    def analytics() -> Iterable[TDataItem]:
-        if start_time_iso is None or end_time_iso is None:
-            raise ValueError(
-                "start_datetime and end_datetime are required for analytics"
-            )
+    def analytics(
+        updated_at: dlt.sources.incremental[
+            pendulum.DateTime
+        ] = dlt.sources.incremental(
+            "end_time",
+            initial_value=start_datetime
+            if start_datetime
+            else pendulum.datetime(1970, 1, 1, tz="UTC"),
+            end_value=end_datetime if end_datetime else None,
+            range_end="closed" if end_datetime else "open",
+            range_start="closed",
+        ),
+    ) -> Iterable[TDataItem]:
+        from_date_dt = updated_at.last_value
+        to_date_dt = (
+            updated_at.end_value if updated_at.end_value else pendulum.now(tz="UTC")
+        )
 
-        for page in fireflies_api.fetch_analytics(start_time_iso, end_time_iso):
+        from_date_iso = from_date_dt.to_iso8601_string() if from_date_dt else None
+        to_date_iso = to_date_dt.to_iso8601_string() if to_date_dt else None
+
+        for page in fireflies_api.fetch_analytics(
+            from_date=from_date_iso,
+            to_date=to_date_iso,
+        ):
             for item in page:
+                if "end_time" in item and isinstance(item["end_time"], str):
+                    item["end_time"] = pendulum.parse(item["end_time"])
                 yield item
 
     @dlt.resource(
@@ -52,17 +71,6 @@ def fireflies_source(
     )
     def channels() -> Iterable[TDataItem]:
         for page in fireflies_api.fetch_channels():
-            for item in page:
-                yield item
-
-    @dlt.resource(
-        write_disposition="replace",
-        primary_key="id",
-    )
-    def channel() -> Iterable[TDataItem]:
-        if channel_id is None:
-            return
-        for page in fireflies_api.fetch_channel(channel_id):
             for item in page:
                 yield item
 
@@ -77,28 +85,6 @@ def fireflies_source(
 
     @dlt.resource(
         write_disposition="replace",
-        primary_key="user_id",
-    )
-    def user() -> Iterable[TDataItem]:
-        if user_id is None:
-            return
-        for page in fireflies_api.fetch_user(user_id):
-            for item in page:
-                yield item
-
-    @dlt.resource(
-        write_disposition="replace",
-        primary_key="id",
-    )
-    def transcript() -> Iterable[TDataItem]:
-        if transcript_id is None:
-            return
-        for page in fireflies_api.fetch_transcript(transcript_id):
-            for item in page:
-                yield item
-
-    @dlt.resource(
-        write_disposition="replace",
         primary_key="id",
     )
     def user_groups() -> Iterable[TDataItem]:
@@ -107,24 +93,37 @@ def fireflies_source(
                 yield item
 
     @dlt.resource(
-        write_disposition="replace",
+        write_disposition="merge",
         primary_key="id",
     )
-    def transcripts() -> Iterable[TDataItem]:
-        """Fetch all transcripts from Fireflies API."""
-        for page in fireflies_api.fetch_transcripts():
-            for item in page:
-                yield item
+    def transcripts(
+        updated_at: dlt.sources.incremental[
+            pendulum.DateTime
+        ] = dlt.sources.incremental(
+            "date",
+            initial_value=start_datetime
+            if start_datetime
+            else pendulum.datetime(1970, 1, 1, tz="UTC"),
+            end_value=end_datetime if end_datetime else None,
+            range_end="closed" if end_datetime else "open",
+            range_start="closed",
+        ),
+    ) -> Iterable[TDataItem]:
+        from_date_dt = updated_at.last_value
+        to_date_dt = (
+            updated_at.end_value if updated_at.end_value else pendulum.now(tz="UTC")
+        )
 
-    @dlt.resource(
-        write_disposition="replace",
-        primary_key="id",
-    )
-    def bite() -> Iterable[TDataItem]:
-        if bite_id is None:
-            return
-        for page in fireflies_api.fetch_bite(bite_id):
+        from_date_iso = from_date_dt.to_iso8601_string() if from_date_dt else None
+        to_date_iso = to_date_dt.to_iso8601_string() if to_date_dt else None
+
+        for page in fireflies_api.fetch_transcripts(
+            from_date=from_date_iso,
+            to_date=to_date_iso,
+        ):
             for item in page:
+                if "date" in item and isinstance(item["date"], (int, float)):
+                    item["date"] = pendulum.from_timestamp(item["date"] / 1000)
                 yield item
 
     @dlt.resource(
@@ -132,7 +131,6 @@ def fireflies_source(
         primary_key="id",
     )
     def bites() -> Iterable[TDataItem]:
-        """Fetch all bites from Fireflies API."""
         for page in fireflies_api.fetch_bites():
             for item in page:
                 yield item
@@ -150,13 +148,9 @@ def fireflies_source(
         active_meetings,
         analytics,
         channels,
-        channel,
         users,
-        user,
-        transcript,
         transcripts,
         user_groups,
-        bite,
         bites,
         contacts,
     ]

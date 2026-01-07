@@ -1,25 +1,18 @@
-from typing import Any, Dict, Iterator, List, Literal, Optional
+import time
+from typing import Any, Dict, Iterator, List, Optional
 
+import pendulum
 import requests
-from dlt.sources.helpers.requests import Client
+
+from ingestr.src.http_client import create_client as create_http_client
 
 GRAPHQL_API_BASE_URL = "https://api.fireflies.ai/graphql"
 
 
-def retry_on_limit(
-    response: requests.Response | None, exception: BaseException | None
-) -> bool:
-    if response is None:
-        return False
-    return response.status_code == 429
-
-
 def create_client() -> requests.Session:
-    return Client(
-        raise_for_status=False,
-        retry_condition=retry_on_limit,
-        request_max_attempts=12,
-    ).session
+    # - 429: Rate limit exceeded
+    # - 500: Internal server error (INTERNAL_SERVER_ERROR)
+    return create_http_client(retry_status_codes=[429, 500])
 
 
 ACTIVE_MEETINGS_QUERY = """
@@ -40,24 +33,6 @@ query ActiveMeetings {
 CHANNELS_QUERY = """
 query Channels {
   channels {
-    id
-    title
-    is_private
-    created_by
-    created_at
-    updated_at
-    members {
-      user_id
-      email
-      name
-    }
-  }
-}
-"""
-
-CHANNEL_QUERY = """
-query Channel($channelId: ID!) {
-  channel(id: $channelId) {
     id
     title
     is_private
@@ -100,160 +75,6 @@ query Users {
 }
 """
 
-USER_QUERY = """
-query User($userId: String) {
-  user(id: $userId) {
-    user_id
-    email
-    name
-    num_transcripts
-    recent_transcript
-    recent_meeting
-    minutes_consumed
-    is_admin
-    integrations
-    user_groups {
-      id
-      name
-      handle
-      members {
-        user_id
-        first_name
-        last_name
-        email
-      }
-    }
-  }
-}
-"""
-
-TRANSCRIPT_QUERY = """
-query Transcript($transcriptId: String!) {
-  transcript(id: $transcriptId) {
-    id
-    dateString
-    privacy
-    analytics {
-      sentiments {
-        negative_pct
-        neutral_pct
-        positive_pct
-      }
-      categories {
-        questions
-        date_times
-        metrics
-        tasks
-      }
-      speakers {
-        speaker_id
-        name
-        duration
-        word_count
-        longest_monologue
-        monologues_count
-        filler_words
-        questions
-        duration_pct
-        words_per_minute
-      }
-    }
-    speakers {
-      id
-      name
-    }
-    sentences {
-      index
-      speaker_name
-      speaker_id
-      text
-      raw_text
-      start_time
-      end_time
-      ai_filters {
-        task
-        pricing
-        metric
-        question
-        date_and_time
-        text_cleanup
-        sentiment
-      }
-    }
-    title
-    host_email
-    organizer_email
-    calendar_id
-    user {
-      user_id
-      email
-      name
-      num_transcripts
-      recent_meeting
-      minutes_consumed
-      is_admin
-      integrations
-    }
-    fireflies_users
-    participants
-    date
-    transcript_url
-    audio_url
-    video_url
-    duration
-    meeting_attendees {
-      displayName
-      email
-      phoneNumber
-      name
-      location
-    }
-    meeting_attendance {
-      name
-      join_time
-      leave_time
-    }
-    summary {
-      keywords
-      action_items
-      outline
-      shorthand_bullet
-      overview
-      bullet_gist
-      gist
-      short_summary
-      short_overview
-      meeting_type
-      topics_discussed
-      transcript_chapters
-    }
-    cal_id
-    calendar_type
-    meeting_info {
-      fred_joined
-      silent_meeting
-      summary_status
-    }
-    apps_preview {
-      outputs {
-        transcript_id
-        user_id
-        app_id
-        created_at
-        title
-        prompt
-        response
-      }
-    }
-    meeting_link
-    channels {
-      id
-    }
-  }
-}
-"""
-
-
 USER_GROUPS_QUERY = """
 query UserGroups {
   user_groups {
@@ -284,53 +105,6 @@ query Contacts {
 BITES_QUERY = """
 query Bites($my_team: Boolean, $limit: Int, $skip: Int) {
   bites(my_team: $my_team, limit: $limit, skip: $skip){
-    transcript_id
-    name
-    id
-    thumbnail
-    preview
-    status
-    summary
-    user_id
-    start_time
-    end_time
-    summary_status
-    media_type
-    created_at
-    created_from {
-      description
-      duration
-      id
-      name
-      type
-    }
-    captions {
-      end_time
-      index
-      speaker_id
-      speaker_name
-      start_time
-      text
-    }
-    sources {
-      src
-      type
-    }
-    privacies
-    user {
-      first_name
-      last_name
-      picture
-      name
-      id
-    }
-  }
-}
-"""
-
-BITE_QUERY = """
-query Bite($biteId: ID!) {
-  bite(id: $biteId) {
     transcript_id
     name
     id
@@ -468,9 +242,40 @@ query Analytics($startTime: String!, $endTime: String!) {
 """
 
 TRANSCRIPTS_QUERY = """
-query Transcripts($limit: Int, $skip: Int) {
-  transcripts(limit: $limit, skip: $skip) {
+query Transcripts(
+  $limit: Int
+  $skip: Int
+  $fromDate: DateTime
+  $toDate: DateTime
+) {
+  transcripts(
+    limit: $limit
+    skip: $skip
+    fromDate: $fromDate
+    toDate: $toDate
+  ) {
     id
+    title
+    date
+    duration
+    transcript_url
+    audio_url
+    video_url
+    meeting_link
+    host_email
+    organizer_email
+    participants
+    fireflies_users
+    calendar_id
+    cal_id
+    calendar_type
+    channels {
+      id
+    }
+    speakers {
+      id
+      name
+    }
     analytics {
       sentiments {
         negative_pct
@@ -487,13 +292,13 @@ query Transcripts($limit: Int, $skip: Int) {
         speaker_id
         name
         duration
+        duration_pct
         word_count
+        words_per_minute
         longest_monologue
         monologues_count
         filler_words
         questions
-        duration_pct
-        words_per_minute
       }
     }
     sentences {
@@ -514,36 +319,11 @@ query Transcripts($limit: Int, $skip: Int) {
         sentiment
       }
     }
-    title
-    speakers {
-      id
-      name
-    }
-    host_email
-    organizer_email
     meeting_info {
       fred_joined
       silent_meeting
       summary_status
     }
-    calendar_id
-    user {
-      user_id
-      email
-      name
-      num_transcripts
-      recent_meeting
-      minutes_consumed
-      is_admin
-      integrations
-    }
-    fireflies_users
-    participants
-    date
-    transcript_url
-    audio_url
-    video_url
-    duration
     meeting_attendees {
       displayName
       email
@@ -570,8 +350,16 @@ query Transcripts($limit: Int, $skip: Int) {
       topics_discussed
       transcript_chapters
     }
-    cal_id
-    calendar_type
+    user {
+      user_id
+      email
+      name
+      num_transcripts
+      recent_meeting
+      minutes_consumed
+      is_admin
+      integrations
+    }
     apps_preview {
       outputs {
         transcript_id
@@ -583,7 +371,6 @@ query Transcripts($limit: Int, $skip: Int) {
         response
       }
     }
-    meeting_link
     channels {
       id
     }
@@ -627,7 +414,50 @@ class FirefliesAPI:
         if active_meetings:
             yield active_meetings
 
-    def fetch_analytics(self, start_time: str, end_time: str) -> Iterator[List[dict]]:
+    def fetch_analytics(
+        self,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Iterator[List[dict]]:
+        MAX_DAYS = 30
+
+        start: pendulum.DateTime = (
+            pendulum.parse(from_date)  # type: ignore[assignment]
+            if from_date
+            else pendulum.datetime(1970, 1, 1, tz="UTC")
+        )
+        end: pendulum.DateTime = (
+            pendulum.parse(to_date)  # type: ignore[assignment]
+            if to_date
+            else pendulum.now(tz="UTC")
+        )
+
+        total_days = (end - start).days
+
+        if total_days <= MAX_DAYS:
+            yield from self._fetch_analytics_chunk(
+                start.to_iso8601_string(), end.to_iso8601_string()
+            )
+        else:
+            current_start: pendulum.DateTime = start
+
+            while current_start < end:
+                chunk_end: pendulum.DateTime = current_start.add(days=MAX_DAYS)
+                if chunk_end > end:
+                    chunk_end = end
+
+                chunk_start_str = current_start.to_iso8601_string()
+                chunk_end_str = chunk_end.to_iso8601_string()
+
+                yield from self._fetch_analytics_chunk(chunk_start_str, chunk_end_str)
+
+                current_start = chunk_end.add(days=1)
+
+                time.sleep(0.5)
+
+    def _fetch_analytics_chunk(
+        self, start_time: str, end_time: str
+    ) -> Iterator[List[dict]]:
         variables = {
             "startTime": start_time,
             "endTime": end_time,
@@ -651,11 +481,24 @@ class FirefliesAPI:
             error_messages = [
                 error.get("message", "Unknown error") for error in result["errors"]
             ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
+
+            data = result.get("data", {})
+            if data and data.get("analytics"):
+                print(
+                    f"Warning: GraphQL errors encountered but data available: {', '.join(error_messages)}"
+                )
+            else:
+                error_details = [str(error) for error in result["errors"]]
+                raise ValueError(
+                    f"Fireflies GraphQL Error: {', '.join(error_messages)}\n"
+                    f"Error details: {', '.join(error_details)}"
+                )
 
         analytics = result.get("data", {}).get("analytics", {})
 
         if analytics:
+            analytics["start_time"] = start_time
+            analytics["end_time"] = end_time
             yield [analytics]
 
     def fetch_channels(self) -> Iterator[List[dict]]:
@@ -684,36 +527,6 @@ class FirefliesAPI:
         if channels:
             yield channels
 
-    def fetch_channel(self, channel_id: str) -> Iterator[List[dict]]:
-        variables = {
-            "channelId": channel_id,
-        }
-
-        response = self.client.post(
-            url=GRAPHQL_API_BASE_URL,
-            json={"query": CHANNEL_QUERY, "variables": variables},
-            headers=self.headers,
-        )
-
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-            )
-
-        result = response.json()
-
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
-
-        channel = result.get("data", {}).get("channel")
-
-        if channel:
-            yield [channel]
-
     def fetch_users(self) -> Iterator[List[dict]]:
         response = self.client.post(
             url=GRAPHQL_API_BASE_URL,
@@ -739,66 +552,6 @@ class FirefliesAPI:
 
         if users:
             yield users
-
-    def fetch_user(self, user_id: str) -> Iterator[List[dict]]:
-        variables = {
-            "userId": user_id,
-        }
-
-        response = self.client.post(
-            url=GRAPHQL_API_BASE_URL,
-            json={"query": USER_QUERY, "variables": variables},
-            headers=self.headers,
-        )
-
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-            )
-
-        result = response.json()
-
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
-
-        user = result.get("data", {}).get("user")
-
-        if user:
-            yield [user]
-
-    def fetch_transcript(self, transcript_id: str) -> Iterator[List[dict]]:
-        variables = {
-            "transcriptId": transcript_id,
-        }
-
-        response = self.client.post(
-            url=GRAPHQL_API_BASE_URL,
-            json={"query": TRANSCRIPT_QUERY, "variables": variables},
-            headers=self.headers,
-        )
-
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-            )
-
-        result = response.json()
-
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
-
-        transcript = result.get("data", {}).get("transcript")
-
-        if transcript:
-            yield [transcript]
 
     def fetch_user_groups(self) -> Iterator[List[dict]]:
         response = self.client.post(
@@ -853,19 +606,16 @@ class FirefliesAPI:
             yield contacts
 
     def fetch_bites(self) -> Iterator[List[dict]]:
-        """
-        Fetch all bites from Fireflies API with automatic pagination.
-        API maximum limit is 50 per request.
-        """
-        MAX_LIMIT = 10
+        PAGE_LIMIT = 50
         skip_offset = 0
-        
+        total_fetched = 0
+
         while True:
             variables: Dict[str, Any] = {
                 "my_team": True,
-                "limit": MAX_LIMIT,
+                "limit": PAGE_LIMIT,
             }
-            
+
             if skip_offset > 0:
                 variables["skip"] = skip_offset
 
@@ -883,72 +633,74 @@ class FirefliesAPI:
 
             result = response.json()
 
-            if "errors" in result:
-                error_messages = [
-                    error.get("message", "Unknown error") for error in result["errors"]
-                ]
-                raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
-
             bites = result.get("data", {}).get("bites", [])
+
+            bites_with_errors: Dict[int, List[str]] = {}
+            if "errors" in result:
+                if "data" in result and bites:
+                    for error in result["errors"]:
+                        error_path = error.get("path", [])
+                        if len(error_path) >= 2 and error_path[0] == "bites":
+                            bite_idx = error_path[1]
+                            if isinstance(bite_idx, int) and bite_idx < len(bites):
+                                field_name = (
+                                    error_path[2] if len(error_path) > 2 else "unknown"
+                                )
+                                if bite_idx not in bites_with_errors:
+                                    bites_with_errors[bite_idx] = []
+                                bites_with_errors[bite_idx].append(field_name)
+                else:
+                    error_messages = [
+                        error.get("message", "Unknown error")
+                        for error in result["errors"]
+                    ]
+                    error_details = [str(error) for error in result["errors"]]
+                    raise ValueError(
+                        f"Fireflies GraphQL Error: {', '.join(error_messages)}\n"
+                        f"Error details: {', '.join(error_details)}"
+                    )
+
+            for idx, bite in enumerate(bites):
+                if idx in bites_with_errors:
+                    error_fields = ", ".join(bites_with_errors[idx])
+                    bite["error"] = error_fields
+                else:
+                    bite["error"] = None
+
+            fetched_count = len(bites)
+            total_fetched += fetched_count
 
             if not bites:
                 break
 
             yield bites
 
-            # If we got fewer results than requested, we've reached the end
-            if len(bites) < MAX_LIMIT:
+            if fetched_count < PAGE_LIMIT:
                 break
 
-            # Increment skip for next page
-            skip_offset += len(bites)
+            time.sleep(0.5)
 
+            skip_offset += fetched_count
 
-    def fetch_bite(self, bite_id: str) -> Iterator[List[dict]]:
-        variables = {
-            "biteId": bite_id,
-        }
-
-        response = self.client.post(
-            url=GRAPHQL_API_BASE_URL,
-            json={"query": BITE_QUERY, "variables": variables},
-            headers=self.headers,
-        )
-
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-            )
-
-        result = response.json()
-
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
-
-        bite = result.get("data", {}).get("bite")
-
-        if bite:
-            yield [bite]
-
-    def fetch_transcripts(self) -> Iterator[List[dict]]:
-        """
-        Fetch all transcripts from Fireflies API with automatic pagination.
-        API maximum limit is 50 per request.
-        """
-        MAX_LIMIT = 10
+    def fetch_transcripts(
+        self,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Iterator[List[dict]]:
+        PAGE_LIMIT = 50
         skip_offset = 0
-        
+        total_fetched = 0
+
         while True:
             variables: Dict[str, Any] = {
-                "limit": MAX_LIMIT,
+                "skip": skip_offset,
+                "limit": PAGE_LIMIT,
             }
-            
-            if skip_offset > 0:
-                variables["skip"] = skip_offset
+
+            if from_date is not None:
+                variables["fromDate"] = from_date
+            if to_date is not None:
+                variables["toDate"] = to_date
 
             response = self.client.post(
                 url=GRAPHQL_API_BASE_URL,
@@ -964,22 +716,55 @@ class FirefliesAPI:
 
             result = response.json()
 
-            if "errors" in result:
-                error_messages = [
-                    error.get("message", "Unknown error") for error in result["errors"]
-                ]
-                raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
-
             transcripts = result.get("data", {}).get("transcripts", [])
+
+            transcripts_with_errors: Dict[int, List[str]] = {}
+            if "errors" in result:
+                if "data" in result and transcripts:
+                    for error in result["errors"]:
+                        error_path = error.get("path", [])
+                        if len(error_path) >= 2 and error_path[0] == "transcripts":
+                            transcript_idx = error_path[1]
+                            if isinstance(transcript_idx, int) and transcript_idx < len(
+                                transcripts
+                            ):
+                                field_name = (
+                                    error_path[2] if len(error_path) > 2 else "unknown"
+                                )
+                                if transcript_idx not in transcripts_with_errors:
+                                    transcripts_with_errors[transcript_idx] = []
+                                transcripts_with_errors[transcript_idx].append(
+                                    field_name
+                                )
+                else:
+                    error_messages = [
+                        error.get("message", "Unknown error")
+                        for error in result["errors"]
+                    ]
+                    error_details = [str(error) for error in result["errors"]]
+                    raise ValueError(
+                        f"Fireflies GraphQL Error: {', '.join(error_messages)}\n"
+                        f"Error details: {', '.join(error_details)}"
+                    )
+
+            for idx, transcript in enumerate(transcripts):
+                if idx in transcripts_with_errors:
+                    error_fields = ", ".join(transcripts_with_errors[idx])
+                    transcript["error"] = error_fields
+                else:
+                    transcript["error"] = None
+
+            fetched_count = len(transcripts)
+            total_fetched += fetched_count
 
             if not transcripts:
                 break
 
             yield transcripts
 
-            # If we got fewer results than requested, we've reached the end
-            if len(transcripts) < MAX_LIMIT:
+            if fetched_count < PAGE_LIMIT:
                 break
 
-            # Increment skip for next page
-            skip_offset += len(transcripts)
+            time.sleep(0.5)
+
+            skip_offset += fetched_count

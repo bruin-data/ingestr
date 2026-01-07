@@ -2730,34 +2730,31 @@ class ApplovinMaxSource:
             applications=applications,
         ).with_resources(requested_table)
 
+
 class FirefliesSource:
     def handles_incrementality(self) -> bool:
-        return False
+        return True
 
     def dlt_source(self, uri: str, table: str, **kwargs):
-        # if kwargs.get("incremental_key"):
-        #     raise ValueError(
-        #         "ClickUp takes care of incrementality on its own, you should not provide incremental_key"
-        #     )
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "FireFlies takes care of incrementality on its own, you should not provide incremental_key"
+            )
 
         parsed_uri = urlparse(uri)
         source_fields = parse_qs(parsed_uri.query)
         api_key = source_fields.get("api_key")
 
-        if not api_key:
+        if not api_key or not api_key[0]:
             raise MissingValueError("api_key", "Fireflies")
 
         if table not in {
             "active_meetings",
             "analytics",
             "channels",
-            "channel",
             "users",
-            "user",
-            "transcript",
             "transcripts",
             "user_groups",
-            "bite",
             "bites",
             "contacts",
         }:
@@ -2766,61 +2763,12 @@ class FirefliesSource:
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
 
-        start_datetime: Optional[pendulum.DateTime] = None
-        end_datetime: Optional[pendulum.DateTime] = None
-        channel_id: Optional[str] = None
-
-        # Default to 30 days ago if not provided
-        start_datetime = (
-            ensure_pendulum_datetime(interval_start)
-            if interval_start
-            else pendulum.now().subtract(days=30).start_of("day")
-        )
-        end_datetime = (
-            ensure_pendulum_datetime(interval_end) if interval_end else pendulum.now()
-        )
-        if table == "channel":
-            channel_id_param = source_fields.get("channel_id")
-            if not channel_id_param:
-                raise MissingValueError("channel_id", "Fireflies")
-            channel_id = channel_id_param[0]
-        else:
-            channel_id = None
-
-        if table == "user":
-            user_id_param = source_fields.get("user_id")
-            if not user_id_param:
-                raise MissingValueError("user_id", "Fireflies")
-            user_id = user_id_param[0]
-        else:
-            user_id = None
-            
-        if table == "transcript":
-            transcript_id_param = source_fields.get("transcript_id")
-            if not transcript_id_param:
-                raise MissingValueError("transcript_id", "Fireflies")
-            transcript_id = transcript_id_param[0]
-        else:
-            transcript_id = None
-            
-        if table == "bite":
-            bite_id_param = source_fields.get("bite_id")
-            if not bite_id_param:
-                raise MissingValueError("bite_id", "Fireflies")
-            bite_id = bite_id_param[0]
-        else:
-            bite_id = None
-
         from ingestr.src.fireflies import fireflies_source
 
         return fireflies_source(
             api_key=api_key[0],
-            start_datetime=start_datetime,
-            end_datetime=end_datetime,
-            channel_id=channel_id,
-            user_id=user_id,
-            transcript_id=transcript_id,
-            bite_id=bite_id,
+            start_datetime=interval_start,
+            end_datetime=interval_end,
         ).with_resources(table)
 
 

@@ -1,0 +1,80 @@
+# Fireflies
+
+[Fireflies.ai](https://fireflies.ai/) is an AI-powered meeting assistant that automatically records, transcribes, and analyzes voice conversations from meetings across various video conferencing platforms.
+
+Ingestr supports Fireflies as a source.
+
+## URI format
+
+The URI format for Fireflies is as follows:
+
+```plaintext
+fireflies://?api_key=<api-key-here>
+```
+
+URI parameters:
+
+- `api_key`: The API key used for authentication with the Fireflies GraphQL API.
+
+The URI is used to connect to the Fireflies API for extracting data. More details on the Fireflies API can be found [here](https://docs.fireflies.ai/getting-started/introduction#advantages-of-using-graphql).
+
+## Setting up a Fireflies Integration
+
+To set up Fireflies integration, you need to obtain an API key:
+
+1. Log in to your [Fireflies account](https://app.fireflies.ai/)
+2. Go to **Settings** → **Developer Settings** → **API & Integrations**
+3. Generate a new API key
+
+Once you have your API key, here's a sample command that will copy the transcripts from Fireflies into a DuckDB database:
+
+```sh
+ingestr ingest \
+  --source-uri 'fireflies://?api_key=your-api-key-here' \
+  --source-table 'transcripts' \
+  --dest-uri duckdb:///fireflies.duckdb \
+  --dest-table 'main.transcripts'
+```
+
+The result of this command will be a table in the `fireflies.duckdb` database.
+
+## Incremental Loading
+
+Fireflies source supports incremental loading for `analytics` and `transcripts` tables. You can use `--interval-start` and `--interval-end` parameters to specify the time range:
+
+```sh
+ingestr ingest \
+  --source-uri 'fireflies://?api_key=your-api-key-here' \
+  --source-table 'transcripts' \
+  --dest-uri duckdb:///fireflies.duckdb \
+  --dest-table 'main.transcripts' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-12-31'
+```
+
+> [!NOTE]
+> For `analytics`, the API has a 30-day limit per request. ingestr automatically chunks larger date ranges into 30-day intervals.
+
+## Tables
+
+Fireflies source allows ingesting the following sources into separate tables:
+
+| Table | PK | Inc Key | Inc Strategy | Details |
+|-------|-----|---------|--------------|---------|
+| `active_meetings` | id | - | replace | Currently active/ongoing meetings in your Fireflies account. |
+| `analytics` | start_time, end_time | end_time | merge | Meeting analytics including duration, speaker stats, and sentiment analysis. |
+| `channels` | id | - | replace | Channels (workspaces) configured in your Fireflies account. |
+| `users` | user_id | - | replace | Users in your Fireflies team/organization. |
+| `user_groups` | id | - | replace | User groups configured in your organization. |
+| `transcripts` | id | date | merge | Meeting transcripts with full conversation details, participants, and metadata. |
+| `bites` | id | - | replace | Short audio/video clips (bites) extracted from meetings. |
+| `contacts` | email | - | replace | Contacts associated with your Fireflies account. |
+
+Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+> [!TIP]
+> For loading meeting transcripts incrementally, use the `transcripts` table with `--interval-start` and `--interval-end` parameters. This is recommended for regular sync jobs to avoid re-fetching all historical data.
+
+> [!NOTE]
+> The `analytics` table uses `start_time` and `end_time` as a composite primary key, so overlapping date ranges will update existing records instead of creating duplicates.
+
