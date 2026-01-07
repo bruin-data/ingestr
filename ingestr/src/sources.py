@@ -2738,7 +2738,7 @@ class FirefliesSource:
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
-                "FireFlies takes care of incrementality on its own, you should not provide incremental_key"
+                "Fireflies takes care of incrementality on its own, you should not provide incremental_key"
             )
 
         parsed_uri = urlparse(uri)
