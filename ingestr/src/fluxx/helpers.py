@@ -5,14 +5,24 @@ import dlt
 import pendulum
 import requests
 
-FLUXX_API_BASE = "https://{instance}.fluxxlabs.com"
 FLUXX_OAUTH_TOKEN_PATH = "/oauth/token"
 FLUXX_API_V2_PATH = "/api/rest/v2"
 
 
+def _get_base_url(instance: str) -> str:
+    """Get the base URL for Fluxx API.
+
+    If instance contains a dot (e.g., 'isoc.fluxx.io'), treat it as a full domain.
+    Otherwise, append '.fluxxlabs.com' for backward compatibility.
+    """
+    if "." in instance:
+        return f"https://{instance}"
+    return f"https://{instance}.fluxxlabs.com"
+
+
 def get_access_token(instance: str, client_id: str, client_secret: str) -> str:
     """Obtain OAuth access token using client credentials flow."""
-    token_url = f"{FLUXX_API_BASE.format(instance=instance)}{FLUXX_OAUTH_TOKEN_PATH}"
+    token_url = f"{_get_base_url(instance)}{FLUXX_OAUTH_TOKEN_PATH}"
 
     response = requests.post(
         token_url,
@@ -37,7 +47,7 @@ def fluxx_api_request(
     data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Make an authenticated request to the Fluxx API."""
-    url = f"{FLUXX_API_BASE.format(instance=instance)}{FLUXX_API_V2_PATH}/{endpoint}"
+    url = f"{_get_base_url(instance)}{FLUXX_API_V2_PATH}/{endpoint}"
 
     headers = {
         "Authorization": f"Bearer {access_token}",

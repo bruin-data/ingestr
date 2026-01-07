@@ -10,7 +10,7 @@ Or run specific tests:
 
 import pytest
 
-from ingestr.src.fluxx.helpers import normalize_fluxx_item
+from ingestr.src.fluxx.helpers import _get_base_url, normalize_fluxx_item
 
 
 @pytest.fixture
@@ -262,3 +262,16 @@ def test_normalize_id_field_always_included():
     assert "id" in result
     assert result["id"] == 999
     assert "other_field" not in result
+
+
+def test_get_base_url_full_domain():
+    """Test _get_base_url with full domain."""
+    assert _get_base_url("acme.fluxx.io") == "https://acme.fluxx.io"
+    assert _get_base_url("mycompany.fluxxlabs.com") == "https://mycompany.fluxxlabs.com"
+    assert _get_base_url("test.preprod.fluxx.io") == "https://test.preprod.fluxx.io"
+
+
+def test_get_base_url_backward_compat():
+    """Test _get_base_url backward compatibility - instance without dot gets .fluxxlabs.com."""
+    assert _get_base_url("mycompany") == "https://mycompany.fluxxlabs.com"
+    assert _get_base_url("testinstance") == "https://testinstance.fluxxlabs.com"
