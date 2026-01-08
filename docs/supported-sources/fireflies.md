@@ -64,14 +64,14 @@ Fireflies source allows ingesting the following sources into separate tables:
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 | ----- | -- | ------- | ------------ | ------- |
-| `active_meetings` | id | - | replace | Currently active/ongoing meetings in your Fireflies account. |
+| `active_meetings` | - | - | replace | Currently active/ongoing meetings in your Fireflies account. |
 | `analytics` | start_time, end_time | end_time | merge | Meeting analytics including duration, speaker stats, and sentiment analysis. |
-| `channels` | id | - | replace | Channels (workspaces) configured in your Fireflies account. |
-| `users` | user_id | - | replace | Users in your Fireflies team/organization. |
-| `user_groups` | id | - | replace | User groups configured in your organization. |
+| `channels` | - | - | replace | Channels (workspaces) configured in your Fireflies account. |
+| `users` | - | - | replace | Users in your Fireflies team/organization. |
+| `user_groups` | - | - | replace | User groups configured in your organization. |
 | `transcripts` | id | date | merge | Meeting transcripts with full conversation details, participants, and metadata. |
-| `bites` | id | - | replace | Short audio/video clips (bites) extracted from meetings. |
-| `contacts` | email | - | replace | Contacts associated with your Fireflies account. |
+| `bites` | - | - | replace | Short audio/video clips (bites) extracted from meetings. |
+| `contacts` | - | - | replace | Contacts associated with your Fireflies account. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 

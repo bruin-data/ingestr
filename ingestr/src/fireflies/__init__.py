@@ -22,10 +22,7 @@ def fireflies_source(
     )
     end_datetime = ensure_pendulum_datetime(end_datetime) if end_datetime else None
 
-    @dlt.resource(
-        write_disposition="replace",
-        primary_key="id",
-    )
+    @dlt.resource(write_disposition="replace")
     def active_meetings() -> Iterable[TDataItem]:
         for page in fireflies_api.fetch_active_meetings():
             for item in page:
@@ -65,28 +62,19 @@ def fireflies_source(
                     item["end_time"] = pendulum.parse(item["end_time"])
                 yield item
 
-    @dlt.resource(
-        write_disposition="replace",
-        primary_key="id",
-    )
+    @dlt.resource(write_disposition="replace")
     def channels() -> Iterable[TDataItem]:
         for page in fireflies_api.fetch_channels():
             for item in page:
                 yield item
 
-    @dlt.resource(
-        write_disposition="replace",
-        primary_key="user_id",
-    )
+    @dlt.resource(write_disposition="replace")
     def users() -> Iterable[TDataItem]:
         for page in fireflies_api.fetch_users():
             for item in page:
                 yield item
 
-    @dlt.resource(
-        write_disposition="replace",
-        primary_key="id",
-    )
+    @dlt.resource(write_disposition="replace")
     def user_groups() -> Iterable[TDataItem]:
         for page in fireflies_api.fetch_user_groups():
             for item in page:
@@ -126,19 +114,13 @@ def fireflies_source(
                     item["date"] = pendulum.from_timestamp(item["date"] / 1000)
                 yield item
 
-    @dlt.resource(
-        write_disposition="replace",
-        primary_key="id",
-    )
+    @dlt.resource(write_disposition="replace")
     def bites() -> Iterable[TDataItem]:
         for page in fireflies_api.fetch_bites():
             for item in page:
                 yield item
 
-    @dlt.resource(
-        write_disposition="replace",
-        primary_key="email",
-    )
+    @dlt.resource(write_disposition="replace")
     def contacts() -> Iterable[TDataItem]:
         for page in fireflies_api.fetch_contacts():
             for item in page:
