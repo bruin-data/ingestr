@@ -2748,7 +2748,19 @@ class FirefliesSource:
         if not api_key or not api_key[0]:
             raise MissingValueError("api_key", "Fireflies")
 
-        if table not in {
+        # Parse granularity from table name (e.g., analytics:DAY, analytics:HOUR)
+        base_table = table
+        granularity = None
+        if ":" in table:
+            parts = table.split(":", 1)
+            base_table = parts[0]
+            granularity = parts[1].upper()
+            if granularity not in {"DAY", "HOUR", "MONTH"}:
+                raise ValueError(
+                    f"Invalid granularity '{granularity}'. Supported: DAY, HOUR, MONTH"
+                )
+
+        if base_table not in {
             "active_meetings",
             "analytics",
             "channels",
@@ -2760,6 +2772,11 @@ class FirefliesSource:
         }:
             raise UnsupportedResourceError(table, "Fireflies")
 
+        if granularity and base_table != "analytics":
+            raise ValueError(
+                f"Granularity is only supported for 'analytics' table, not '{base_table}'"
+            )
+
         interval_start = kwargs.get("interval_start")
         interval_end = kwargs.get("interval_end")
 
@@ -2769,7 +2786,8 @@ class FirefliesSource:
             api_key=api_key[0],
             start_datetime=interval_start,
             end_datetime=interval_end,
-        ).with_resources(table)
+            granularity=granularity,
+        ).with_resources(base_table)
 
 
 class SalesforceSource:

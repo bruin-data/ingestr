@@ -14,6 +14,7 @@ def fireflies_source(
     api_key: str,
     start_datetime: Optional[pendulum.DateTime],
     end_datetime: Optional[pendulum.DateTime],
+    granularity: Optional[str] = None,
 ) -> List[DltResource]:
     fireflies_api = FirefliesAPI(api_key=api_key)
 
@@ -21,6 +22,17 @@ def fireflies_source(
         ensure_pendulum_datetime(start_datetime) if start_datetime else None
     )
     end_datetime = ensure_pendulum_datetime(end_datetime) if end_datetime else None
+
+    # Select fetch method based on granularity
+    def get_analytics_fetcher():
+        if granularity == "DAY":
+            return fireflies_api.fetch_analytics_daily
+        elif granularity == "HOUR":
+            return fireflies_api.fetch_analytics_hourly
+        elif granularity == "MONTH":
+            return fireflies_api.fetch_analytics_monthly
+        else:
+            return fireflies_api.fetch_analytics
 
     @dlt.resource(write_disposition="replace")
     def active_meetings() -> Iterable[TDataItem]:
@@ -53,7 +65,8 @@ def fireflies_source(
         from_date_iso = from_date_dt.to_iso8601_string() if from_date_dt else None
         to_date_iso = to_date_dt.to_iso8601_string() if to_date_dt else None
 
-        for page in fireflies_api.fetch_analytics(
+        fetch_method = get_analytics_fetcher()
+        for page in fetch_method(
             from_date=from_date_iso,
             to_date=to_date_iso,
         ):

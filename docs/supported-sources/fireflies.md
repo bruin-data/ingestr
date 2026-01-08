@@ -56,7 +56,33 @@ ingestr ingest \
 > For `analytics`, the API has a 30-day limit per request. ingestr automatically chunks larger date ranges into 30-day intervals.
 >
 > [!WARNING]
-> The `analytics` table returns **pre-aggregated data** for each 30-day chunk (e.g., average duration, total meetings). When querying periods longer than 30 days, each chunk is stored as a separate row with its own aggregations.
+> The `analytics` table returns **pre-aggregated data** for each chunk (e.g., average duration, total meetings). When querying periods longer than the chunk size, each chunk is stored as a separate row with its own aggregations.
+
+## Analytics Granularity
+
+You can customize the chunk size for analytics by appending a granularity suffix to the table name:
+
+| Table Name | Chunk Size | Use Case |
+| ---------- | ---------- | -------- |
+| `analytics` | 30 days (default) | Monthly reports |
+| `analytics:DAY` | 1 day | Daily metrics |
+| `analytics:HOUR` | 1 hour | Detailed hourly analysis |
+| `analytics:MONTH` | Month boundaries (respects start/end dates) | Calendar month alignment |
+
+Example with daily granularity:
+
+```sh
+ingestr ingest \
+  --source-uri 'fireflies://?api_key=your-api-key-here' \
+  --source-table 'analytics:DAY' \
+  --dest-uri duckdb:///fireflies.duckdb \
+  --dest-table 'main.analytics_daily' \
+  --interval-start '2024-01-01' \
+  --interval-end '2024-01-31'
+```
+
+> [!NOTE]
+> Smaller granularity means more API requests. Use `analytics:HOUR` only for short date ranges to avoid rate limiting.
 
 ## Tables
 

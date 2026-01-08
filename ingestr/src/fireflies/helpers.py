@@ -447,13 +447,10 @@ class FirefliesAPI:
         if active_meetings:
             yield active_meetings
 
-    def fetch_analytics(
-        self,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None,
-    ) -> Iterator[List[dict]]:
-        MAX_DAYS = 30
-
+    def _parse_date_range(
+        self, from_date: Optional[str], to_date: Optional[str]
+    ) -> tuple[pendulum.DateTime, pendulum.DateTime]:
+        """Parse date strings into pendulum DateTime objects."""
         start: pendulum.DateTime = (
             pendulum.parse(from_date)  # type: ignore[assignment]
             if from_date
@@ -464,6 +461,16 @@ class FirefliesAPI:
             if to_date
             else pendulum.now(tz="UTC")
         )
+        return start, end
+
+    def fetch_analytics(
+        self,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Iterator[List[dict]]:
+        """Fetch analytics with default 30-day chunks."""
+        MAX_DAYS = 30
+        start, end = self._parse_date_range(from_date, to_date)
 
         total_days = (end - start).days
 
@@ -479,14 +486,85 @@ class FirefliesAPI:
                 if chunk_end > end:
                     chunk_end = end
 
-                chunk_start_str = current_start.to_iso8601_string()
-                chunk_end_str = chunk_end.to_iso8601_string()
-
-                yield from self._fetch_analytics_chunk(chunk_start_str, chunk_end_str)
+                yield from self._fetch_analytics_chunk(
+                    current_start.to_iso8601_string(), chunk_end.to_iso8601_string()
+                )
 
                 current_start = chunk_end.add(days=1)
-
                 time.sleep(0.5)
+
+    def fetch_analytics_daily(
+        self,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Iterator[List[dict]]:
+        """Fetch analytics with 1-day chunks respecting provided date range."""
+        start, end = self._parse_date_range(from_date, to_date)
+        # Use actual start time for first chunk
+        current_start: pendulum.DateTime = start
+
+        while current_start < end:
+            # For first chunk or partial day: go to next midnight
+            # For subsequent chunks: go day by day
+            next_midnight: pendulum.DateTime = current_start.add(days=1).start_of("day")
+            chunk_end: pendulum.DateTime = min(next_midnight, end)
+
+            yield from self._fetch_analytics_chunk(
+                current_start.to_iso8601_string(), chunk_end.to_iso8601_string()
+            )
+
+            # Move to next day boundary (midnight)
+            current_start = chunk_end
+            time.sleep(0.3)
+
+    def fetch_analytics_hourly(
+        self,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Iterator[List[dict]]:
+        """Fetch analytics with 1-hour chunks respecting provided date range."""
+        start, end = self._parse_date_range(from_date, to_date)
+        # Use actual start time for first chunk
+        current_start: pendulum.DateTime = start
+
+        while current_start < end:
+            # For first chunk or partial hour: go to next full hour
+            # For subsequent chunks: go hour by hour
+            next_hour: pendulum.DateTime = current_start.add(hours=1).start_of("hour")
+            chunk_end: pendulum.DateTime = min(next_hour, end)
+
+            yield from self._fetch_analytics_chunk(
+                current_start.to_iso8601_string(), chunk_end.to_iso8601_string()
+            )
+
+            # Move to next hour boundary
+            current_start = chunk_end
+            time.sleep(0.1)
+
+    def fetch_analytics_monthly(
+        self,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Iterator[List[dict]]:
+        """Fetch analytics with month-aligned chunks respecting provided date range."""
+        start, end = self._parse_date_range(from_date, to_date)
+        # Use actual start date, not aligned to start of month
+        current_start: pendulum.DateTime = start
+
+        while current_start < end:
+            # Last day of current month at 00:00:00
+            month_last_day: pendulum.DateTime = current_start.end_of("month").start_of(
+                "day"
+            )
+            chunk_end: pendulum.DateTime = min(month_last_day, end)
+
+            yield from self._fetch_analytics_chunk(
+                current_start.to_iso8601_string(), chunk_end.to_iso8601_string()
+            )
+
+            # Move to start of next month
+            current_start = current_start.add(months=1).start_of("month")
+            time.sleep(0.5)
 
     def _fetch_analytics_chunk(
         self, start_time: str, end_time: str
