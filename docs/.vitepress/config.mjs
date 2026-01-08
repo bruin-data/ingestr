@@ -154,6 +154,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads",
               },
+              { text: "Fireflies", link: "/supported-sources/fireflies" },
               { text: "Fluxx", link: "/supported-sources/fluxx" },
               { text: "Frankfurter", link: "/supported-sources/frankfurter" },
               { text: "Freshdesk", link: "/supported-sources/freshdesk" },
