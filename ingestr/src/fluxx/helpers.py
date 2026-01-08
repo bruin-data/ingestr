@@ -23,7 +23,7 @@ def _get_base_url(instance: str) -> str:
     """
     extracted = tldextract.extract(instance)
     if extracted.suffix:
-        return f"https://{instance}"
+        return f"https://{extracted.fqdn}"
     return f"https://{instance}.fluxxlabs.com"
 
 
