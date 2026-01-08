@@ -186,14 +186,13 @@ def linked_in_ads_source(
             range_start="closed",
         ),
     ) -> Iterable[TDataItem]:
-        submittedAt.end_value = (
-            submittedAt.end_value if submittedAt.end_value else pendulum.now(tz="UTC")
-        )
+        fromDate = submittedAt.start_value
+        toDate = submittedAt.end_value if submittedAt.end_value else pendulum.now(tz="UTC")
 
         for ad_account in ad_accounts:
             account_id = ad_account["id"]
             encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
-            url = f"https://api.linkedin.com/rest/leadFormResponses?leadType=(leadType:SPONSORED)&q=owner&owner=(sponsoredAccount:{encoded_id})&submittedAtTimeRange=(start:{submittedAt.start_value},end:{submittedAt.end_value})"
+            url = f"https://api.linkedin.com/rest/leadFormResponses?leadType=(leadType:SPONSORED)&q=owner&owner=(sponsoredAccount:{encoded_id})&submittedAtTimeRange=(start:{fromDate},end:{toDate})"
             for page in linkedin_api.fetch_cursor_pagination(url):
                 for item in page:
                     item["account_id"] = account_id
