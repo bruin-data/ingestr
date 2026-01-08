@@ -270,7 +270,7 @@ def test_get_base_url_full_domain():
     assert _get_base_url("mycompany.fluxxlabs.com") == "https://mycompany.fluxxlabs.com"
     assert _get_base_url("test.preprod.fluxx.io") == "https://test.preprod.fluxx.io"
     assert _get_base_url("https://acme.fluxx.io") == "https://acme.fluxx.io"
-    assert _get_base_url("http://acme.fluxx.io") == "https://acme.fluxx.io"
+    assert _get_base_url("http://acme.fluxx.io") == "http://acme.fluxx.io"
 
 
 def test_get_base_url_backward_compat():
@@ -282,4 +282,4 @@ def test_get_base_url_backward_compat():
         == "https://acmefoundation.preprod.fluxxlabs.com"
     )
     assert _get_base_url("https://mycompany.fluxxlabs.com") == "https://mycompany.fluxxlabs.com"
-    assert _get_base_url("http://acmefoundation.preprod.fluxxlabs.com") == "https://acmefoundation.preprod.fluxxlabs.com"
+    assert _get_base_url("http://acmefoundation.preprod.fluxxlabs.com") == "http://acmefoundation.preprod.fluxxlabs.com"

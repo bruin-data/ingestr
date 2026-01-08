@@ -1,5 +1,6 @@
 import json
 from typing import Any, Dict, Iterator, List, Optional
+from urllib.parse import urlparse
 
 import dlt
 import pendulum
@@ -15,16 +16,22 @@ def _get_base_url(instance: str) -> str:
 
     If instance has a valid TLD (e.g., 'acme.fluxx.io'), use it as full domain.
     Otherwise, append '.fluxxlabs.com' for backward compatibility.
+    Preserves the original scheme (http/https) if provided, defaults to https.
 
     Examples:
         - "mycompany" -> "https://mycompany.fluxxlabs.com"
         - "mycompany.preprod" -> "https://mycompany.preprod.fluxxlabs.com"
         - "acme.fluxx.io" -> "https://acme.fluxx.io"
+        - "http://acme.fluxx.io" -> "http://acme.fluxx.io"
     """
-    extracted = tldextract.extract(instance)
+    parsed = urlparse(instance)
+    scheme = parsed.scheme or "https"
+    host = parsed.netloc or instance
+
+    extracted = tldextract.extract(host)
     if extracted.suffix:
-        return f"https://{extracted.fqdn}"
-    return f"https://{instance}.fluxxlabs.com"
+        return f"{scheme}://{extracted.fqdn}"
+    return f"{scheme}://{host}.fluxxlabs.com"
 
 
 def get_access_token(instance: str, client_id: str, client_secret: str) -> str:
