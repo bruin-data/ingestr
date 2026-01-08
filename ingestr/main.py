@@ -292,6 +292,7 @@ def ingest(
 ):
     import hashlib
     import tempfile
+    import time
     from datetime import datetime
 
     import dlt
@@ -300,6 +301,7 @@ def ingest(
     from dlt.common.pipeline import LoadInfo
     from dlt.common.runtime.collector import Collector, LogCollector
     from dlt.common.schema.typing import TColumnSchema
+    from dlt.pipeline.exceptions import PipelineStepFailed
 
     import ingestr.src.partition as partition
     import ingestr.src.resource as resource
@@ -633,19 +635,50 @@ def ingest(
 
         start_time = datetime.now()
 
-        run_info: LoadInfo = pipeline.run(
-            dlt_source,
-            **destination.dlt_run_params(
-                uri=dest_uri,
-                table=dest_table,
-                staging_bucket=staging_bucket,
-            ),
-            write_disposition=write_disposition,  # type: ignore
-            primary_key=(primary_key if primary_key and len(primary_key) > 0 else None),  # type: ignore
-            loader_file_format=(
-                loader_file_format.value if loader_file_format is not None else None  # type: ignore
-            ),  # type: ignore
-        )
+        def run_pipeline():
+            return pipeline.run(
+                dlt_source,
+                **destination.dlt_run_params(
+                    uri=dest_uri,
+                    table=dest_table,
+                    staging_bucket=staging_bucket,
+                ),
+                write_disposition=write_disposition,  # type: ignore
+                primary_key=(
+                    primary_key if primary_key and len(primary_key) > 0 else None
+                ),  # type: ignore
+                loader_file_format=(
+                    loader_file_format.value if loader_file_format is not None else None  # type: ignore
+                ),  # type: ignore
+            )
+
+        # Databricks concurrency error patterns that are safe to retry
+        DATABRICKS_RETRYABLE_ERRORS = [
+            "SCHEMA_ALREADY_EXISTS",
+            "DELTA_METADATA_CHANGED",
+            "MetadataChangedException",
+        ]
+
+        def is_databricks_retryable_error(exception: Exception) -> bool:
+            if factory.destination_scheme != "databricks":
+                return False
+            error_str = str(exception)
+            return any(pattern in error_str for pattern in DATABRICKS_RETRYABLE_ERRORS)
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                run_info: LoadInfo = run_pipeline()
+                break
+            except PipelineStepFailed as e:
+                if is_databricks_retryable_error(e) and attempt < max_retries - 1:
+                    delay = (attempt + 1) * 2  # 2s, 4s backoff
+                    print(
+                        f"[yellow]Databricks concurrency error, retrying in {delay}s (attempt {attempt + 1}/{max_retries})...[/yellow]"
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
 
         report_errors(run_info)
 
