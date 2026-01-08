@@ -16,7 +16,7 @@ URI parameters:
 
 - `api_key`: The API key used for authentication with the Fireflies GraphQL API.
 
-The URI is used to connect to the Fireflies API for extracting data. More details on the Fireflies API can be found [here](https://docs.fireflies.ai/getting-started/introduction#advantages-of-using-graphql).
+The URI is used to connect to the Fireflies API for extracting data. More details can be found in the [Fireflies API documentation](https://docs.fireflies.ai/getting-started/introduction#advantages-of-using-graphql).
 
 ## Setting up a Fireflies Integration
 
@@ -54,7 +54,7 @@ ingestr ingest \
 
 > [!NOTE]
 > For `analytics`, the API has a 30-day limit per request. ingestr automatically chunks larger date ranges into 30-day intervals.
-
+>
 > [!WARNING]
 > The `analytics` table returns **pre-aggregated data** for each 30-day chunk (e.g., average duration, total meetings). When querying periods longer than 30 days, each chunk is stored as a separate row with its own aggregations.
 
@@ -63,7 +63,7 @@ ingestr ingest \
 Fireflies source allows ingesting the following sources into separate tables:
 
 | Table | PK | Inc Key | Inc Strategy | Details |
-|-------|-----|---------|--------------|---------|
+| ----- | -- | ------- | ------------ | ------- |
 | `active_meetings` | id | - | replace | Currently active/ongoing meetings in your Fireflies account. |
 | `analytics` | start_time, end_time | end_time | merge | Meeting analytics including duration, speaker stats, and sentiment analysis. |
 | `channels` | id | - | replace | Channels (workspaces) configured in your Fireflies account. |
@@ -77,7 +77,6 @@ Use these as `--source-table` parameter in the `ingestr ingest` command.
 
 > [!TIP]
 > For loading meeting transcripts incrementally, use the `transcripts` table with `--interval-start` and `--interval-end` parameters. This is recommended for regular sync jobs to avoid re-fetching all historical data.
-
+>
 > [!NOTE]
 > The `analytics` table uses `start_time` and `end_time` as a composite primary key, so overlapping date ranges will update existing records instead of creating duplicates.
-
