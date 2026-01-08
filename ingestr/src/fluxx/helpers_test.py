@@ -264,22 +264,21 @@ def test_normalize_id_field_always_included():
     assert "other_field" not in result
 
 
-def test_get_base_url_full_domain():
-    """Test _get_base_url with full domain."""
-    assert _get_base_url("acme.fluxx.io") == "https://acme.fluxx.io"
-    assert _get_base_url("mycompany.fluxxlabs.com") == "https://mycompany.fluxxlabs.com"
-    assert _get_base_url("test.preprod.fluxx.io") == "https://test.preprod.fluxx.io"
-    assert _get_base_url("https://acme.fluxx.io") == "https://acme.fluxx.io"
-    assert _get_base_url("http://acme.fluxx.io") == "http://acme.fluxx.io"
-
-
-def test_get_base_url_backward_compat():
-    """Test _get_base_url backward compatibility - instance without TLD gets .fluxxlabs.com."""
-    assert _get_base_url("mycompany") == "https://mycompany.fluxxlabs.com"
-    assert _get_base_url("testinstance") == "https://testinstance.fluxxlabs.com"
-    assert (
-        _get_base_url("acmefoundation.preprod")
-        == "https://acmefoundation.preprod.fluxxlabs.com"
-    )
-    assert _get_base_url("https://mycompany.fluxxlabs.com") == "https://mycompany.fluxxlabs.com"
-    assert _get_base_url("http://acmefoundation.preprod.fluxxlabs.com") == "http://acmefoundation.preprod.fluxxlabs.com"
+@pytest.mark.parametrize(
+    "instance,expected",
+    [
+        ("acme.fluxx.io", "https://acme.fluxx.io"),
+        ("mycompany.fluxxlabs.com", "https://mycompany.fluxxlabs.com"),
+        ("test.preprod.fluxx.io", "https://test.preprod.fluxx.io"),
+        ("https://acme.fluxx.io", "https://acme.fluxx.io"),
+        ("http://acme.fluxx.io", "http://acme.fluxx.io"),
+        ("mycompany", "https://mycompany.fluxxlabs.com"),
+        ("testinstance", "https://testinstance.fluxxlabs.com"),
+        ("acmefoundation.preprod", "https://acmefoundation.preprod.fluxxlabs.com"),
+        ("https://mycompany.fluxxlabs.com", "https://mycompany.fluxxlabs.com"),
+        ("http://acmefoundation.preprod.fluxxlabs.com", "http://acmefoundation.preprod.fluxxlabs.com"),
+    ],
+)
+def test_get_base_url(instance, expected):
+    """Test _get_base_url with various domain formats."""
+    assert _get_base_url(instance) == expected
