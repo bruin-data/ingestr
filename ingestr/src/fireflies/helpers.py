@@ -15,6 +15,51 @@ def create_client() -> requests.Session:
     return create_http_client(retry_status_codes=[429, 500])
 
 
+def check_graphql_errors(result: dict) -> None:
+    """Raise ValueError if GraphQL response contains errors."""
+    if "errors" in result:
+        error_messages = [
+            error.get("message", "Unknown error") for error in result["errors"]
+        ]
+        raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
+
+
+def extract_item_errors(
+    result: dict, items: List[dict], entity_name: str
+) -> Dict[int, List[str]]:
+    """Extract per-item errors from GraphQL response.
+
+    Returns a dict mapping item index to list of error field names.
+    Raises ValueError if errors exist but no data is available.
+    """
+    errors_by_index: Dict[int, List[str]] = {}
+
+    if "errors" in result:
+        if "data" in result and items:
+            for error in result["errors"]:
+                error_path = error.get("path", [])
+                if len(error_path) >= 2 and error_path[0] == entity_name:
+                    item_idx = error_path[1]
+                    if isinstance(item_idx, int) and item_idx < len(items):
+                        field_name = error_path[2] if len(error_path) > 2 else "unknown"
+                        if item_idx not in errors_by_index:
+                            errors_by_index[item_idx] = []
+                        errors_by_index[item_idx].append(field_name)
+        else:
+            check_graphql_errors(result)
+
+    return errors_by_index
+
+
+def apply_item_errors(items: List[dict], errors_by_index: Dict[int, List[str]]) -> None:
+    """Apply error information to items."""
+    for idx, item in enumerate(items):
+        if idx in errors_by_index:
+            item["error"] = ", ".join(errors_by_index[idx])
+        else:
+            item["error"] = None
+
+
 ACTIVE_MEETINGS_QUERY = """
 query ActiveMeetings {
   active_meetings {
@@ -395,12 +440,7 @@ class FirefliesAPI:
         response.raise_for_status()
 
         result = response.json()
-
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
+        check_graphql_errors(result)
 
         active_meetings = result.get("data", {}).get("active_meetings", [])
 
@@ -467,21 +507,9 @@ class FirefliesAPI:
         result = response.json()
 
         if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-
             data = result.get("data", {})
-            if data and data.get("analytics"):
-                print(
-                    f"Warning: GraphQL errors encountered but data available: {', '.join(error_messages)}"
-                )
-            else:
-                error_details = [str(error) for error in result["errors"]]
-                raise ValueError(
-                    f"Fireflies GraphQL Error: {', '.join(error_messages)}\n"
-                    f"Error details: {', '.join(error_details)}"
-                )
+            if not data or not data.get("analytics"):
+                check_graphql_errors(result)
 
         analytics = result.get("data", {}).get("analytics", {})
 
@@ -500,12 +528,7 @@ class FirefliesAPI:
         response.raise_for_status()
 
         result = response.json()
-
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
+        check_graphql_errors(result)
 
         channels = result.get("data", {}).get("channels", [])
 
@@ -522,12 +545,7 @@ class FirefliesAPI:
         response.raise_for_status()
 
         result = response.json()
-
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
+        check_graphql_errors(result)
 
         users = result.get("data", {}).get("users", [])
 
@@ -544,12 +562,7 @@ class FirefliesAPI:
         response.raise_for_status()
 
         result = response.json()
-
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
+        check_graphql_errors(result)
 
         user_groups = result.get("data", {}).get("user_groups", [])
 
@@ -566,12 +579,7 @@ class FirefliesAPI:
         response.raise_for_status()
 
         result = response.json()
-
-        if "errors" in result:
-            error_messages = [
-                error.get("message", "Unknown error") for error in result["errors"]
-            ]
-            raise ValueError(f"Fireflies GraphQL Error: {', '.join(error_messages)}")
+        check_graphql_errors(result)
 
         contacts = result.get("data", {}).get("contacts", [])
 
@@ -598,42 +606,12 @@ class FirefliesAPI:
             )
 
             response.raise_for_status()
-
             result = response.json()
 
             bites = result.get("data", {}).get("bites", [])
 
-            bites_with_errors: Dict[int, List[str]] = {}
-            if "errors" in result:
-                if "data" in result and bites:
-                    for error in result["errors"]:
-                        error_path = error.get("path", [])
-                        if len(error_path) >= 2 and error_path[0] == "bites":
-                            bite_idx = error_path[1]
-                            if isinstance(bite_idx, int) and bite_idx < len(bites):
-                                field_name = (
-                                    error_path[2] if len(error_path) > 2 else "unknown"
-                                )
-                                if bite_idx not in bites_with_errors:
-                                    bites_with_errors[bite_idx] = []
-                                bites_with_errors[bite_idx].append(field_name)
-                else:
-                    error_messages = [
-                        error.get("message", "Unknown error")
-                        for error in result["errors"]
-                    ]
-                    error_details = [str(error) for error in result["errors"]]
-                    raise ValueError(
-                        f"Fireflies GraphQL Error: {', '.join(error_messages)}\n"
-                        f"Error details: {', '.join(error_details)}"
-                    )
-
-            for idx, bite in enumerate(bites):
-                if idx in bites_with_errors:
-                    error_fields = ", ".join(bites_with_errors[idx])
-                    bite["error"] = error_fields
-                else:
-                    bite["error"] = None
+            errors_by_index = extract_item_errors(result, bites, "bites")
+            apply_item_errors(bites, errors_by_index)
 
             fetched_count = len(bites)
 
@@ -675,46 +653,12 @@ class FirefliesAPI:
             )
 
             response.raise_for_status()
-
             result = response.json()
 
             transcripts = result.get("data", {}).get("transcripts", [])
 
-            transcripts_with_errors: Dict[int, List[str]] = {}
-            if "errors" in result:
-                if "data" in result and transcripts:
-                    for error in result["errors"]:
-                        error_path = error.get("path", [])
-                        if len(error_path) >= 2 and error_path[0] == "transcripts":
-                            transcript_idx = error_path[1]
-                            if isinstance(transcript_idx, int) and transcript_idx < len(
-                                transcripts
-                            ):
-                                field_name = (
-                                    error_path[2] if len(error_path) > 2 else "unknown"
-                                )
-                                if transcript_idx not in transcripts_with_errors:
-                                    transcripts_with_errors[transcript_idx] = []
-                                transcripts_with_errors[transcript_idx].append(
-                                    field_name
-                                )
-                else:
-                    error_messages = [
-                        error.get("message", "Unknown error")
-                        for error in result["errors"]
-                    ]
-                    error_details = [str(error) for error in result["errors"]]
-                    raise ValueError(
-                        f"Fireflies GraphQL Error: {', '.join(error_messages)}\n"
-                        f"Error details: {', '.join(error_details)}"
-                    )
-
-            for idx, transcript in enumerate(transcripts):
-                if idx in transcripts_with_errors:
-                    error_fields = ", ".join(transcripts_with_errors[idx])
-                    transcript["error"] = error_fields
-                else:
-                    transcript["error"] = None
+            errors_by_index = extract_item_errors(result, transcripts, "transcripts")
+            apply_item_errors(transcripts, errors_by_index)
 
             fetched_count = len(transcripts)
 
