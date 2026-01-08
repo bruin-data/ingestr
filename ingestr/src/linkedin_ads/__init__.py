@@ -187,7 +187,9 @@ def linked_in_ads_source(
         ),
     ) -> Iterable[TDataItem]:
         fromDate = submittedAt.start_value
-        toDate = submittedAt.end_value if submittedAt.end_value else pendulum.now(tz="UTC")
+        toDate = (
+            submittedAt.end_value if submittedAt.end_value else pendulum.now(tz="UTC")
+        )
 
         for ad_account in ad_accounts:
             account_id = ad_account["id"]
