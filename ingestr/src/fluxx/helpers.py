@@ -1,18 +1,42 @@
 import json
 from typing import Any, Dict, Iterator, List, Optional
+from urllib.parse import urlparse
 
 import dlt
 import pendulum
 import requests
+import tldextract
 
-FLUXX_API_BASE = "https://{instance}.fluxxlabs.com"
 FLUXX_OAUTH_TOKEN_PATH = "/oauth/token"
 FLUXX_API_V2_PATH = "/api/rest/v2"
 
 
+def _get_base_url(instance: str) -> str:
+    """Get the base URL for Fluxx API.
+
+    If instance has a valid TLD (e.g., 'acme.fluxx.io'), use it as full domain.
+    Otherwise, append '.fluxxlabs.com' for backward compatibility.
+    Preserves the original scheme (http/https) if provided, defaults to https.
+
+    Examples:
+        - "mycompany" -> "https://mycompany.fluxxlabs.com"
+        - "mycompany.preprod" -> "https://mycompany.preprod.fluxxlabs.com"
+        - "acme.fluxx.io" -> "https://acme.fluxx.io"
+        - "http://acme.fluxx.io" -> "http://acme.fluxx.io"
+    """
+    parsed = urlparse(instance)
+    scheme = parsed.scheme or "https"
+    host = parsed.netloc or instance
+
+    extracted = tldextract.extract(host)
+    if extracted.suffix:
+        return f"{scheme}://{extracted.fqdn}"
+    return f"{scheme}://{host}.fluxxlabs.com"
+
+
 def get_access_token(instance: str, client_id: str, client_secret: str) -> str:
     """Obtain OAuth access token using client credentials flow."""
-    token_url = f"{FLUXX_API_BASE.format(instance=instance)}{FLUXX_OAUTH_TOKEN_PATH}"
+    token_url = f"{_get_base_url(instance)}{FLUXX_OAUTH_TOKEN_PATH}"
 
     response = requests.post(
         token_url,
@@ -37,7 +61,7 @@ def fluxx_api_request(
     data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Make an authenticated request to the Fluxx API."""
-    url = f"{FLUXX_API_BASE.format(instance=instance)}{FLUXX_API_V2_PATH}/{endpoint}"
+    url = f"{_get_base_url(instance)}{FLUXX_API_V2_PATH}/{endpoint}"
 
     headers = {
         "Authorization": f"Bearer {access_token}",

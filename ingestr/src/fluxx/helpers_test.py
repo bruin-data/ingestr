@@ -10,7 +10,7 @@ Or run specific tests:
 
 import pytest
 
-from ingestr.src.fluxx.helpers import normalize_fluxx_item
+from ingestr.src.fluxx.helpers import _get_base_url, normalize_fluxx_item
 
 
 @pytest.fixture
@@ -262,3 +262,26 @@ def test_normalize_id_field_always_included():
     assert "id" in result
     assert result["id"] == 999
     assert "other_field" not in result
+
+
+@pytest.mark.parametrize(
+    "instance,expected",
+    [
+        ("acme.fluxx.io", "https://acme.fluxx.io"),
+        ("mycompany.fluxxlabs.com", "https://mycompany.fluxxlabs.com"),
+        ("test.preprod.fluxx.io", "https://test.preprod.fluxx.io"),
+        ("https://acme.fluxx.io", "https://acme.fluxx.io"),
+        ("http://acme.fluxx.io", "http://acme.fluxx.io"),
+        ("mycompany", "https://mycompany.fluxxlabs.com"),
+        ("testinstance", "https://testinstance.fluxxlabs.com"),
+        ("acmefoundation.preprod", "https://acmefoundation.preprod.fluxxlabs.com"),
+        ("https://mycompany.fluxxlabs.com", "https://mycompany.fluxxlabs.com"),
+        (
+            "http://acmefoundation.preprod.fluxxlabs.com",
+            "http://acmefoundation.preprod.fluxxlabs.com",
+        ),
+    ],
+)
+def test_get_base_url(instance, expected):
+    """Test _get_base_url with various domain formats."""
+    assert _get_base_url(instance) == expected
