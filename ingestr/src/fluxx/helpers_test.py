@@ -276,7 +276,10 @@ def test_normalize_id_field_always_included():
         ("testinstance", "https://testinstance.fluxxlabs.com"),
         ("acmefoundation.preprod", "https://acmefoundation.preprod.fluxxlabs.com"),
         ("https://mycompany.fluxxlabs.com", "https://mycompany.fluxxlabs.com"),
-        ("http://acmefoundation.preprod.fluxxlabs.com", "http://acmefoundation.preprod.fluxxlabs.com"),
+        (
+            "http://acmefoundation.preprod.fluxxlabs.com",
+            "http://acmefoundation.preprod.fluxxlabs.com",
+        ),
     ],
 )
 def test_get_base_url(instance, expected):
