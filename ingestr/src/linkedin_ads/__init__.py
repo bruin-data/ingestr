@@ -186,7 +186,6 @@ def linked_in_ads_source(
             range_start="closed",
         ),
     ) -> Iterable[TDataItem]:
-
         submittedAt.end_value = (
             submittedAt.end_value if submittedAt.end_value else pendulum.now(tz="UTC")
         )
