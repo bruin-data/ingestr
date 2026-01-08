@@ -371,9 +371,6 @@ query Transcripts(
         response
       }
     }
-    channels {
-      id
-    }
   }
 }
 """
@@ -395,11 +392,7 @@ class FirefliesAPI:
             headers=self.headers,
         )
 
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-            )
+        response.raise_for_status()
 
         result = response.json()
 
@@ -469,11 +462,7 @@ class FirefliesAPI:
             headers=self.headers,
         )
 
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-            )
+        response.raise_for_status()
 
         result = response.json()
 
@@ -508,11 +497,7 @@ class FirefliesAPI:
             headers=self.headers,
         )
 
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-            )
+        response.raise_for_status()
 
         result = response.json()
 
@@ -534,11 +519,7 @@ class FirefliesAPI:
             headers=self.headers,
         )
 
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-            )
+        response.raise_for_status()
 
         result = response.json()
 
@@ -560,11 +541,7 @@ class FirefliesAPI:
             headers=self.headers,
         )
 
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-            )
+        response.raise_for_status()
 
         result = response.json()
 
@@ -586,11 +563,7 @@ class FirefliesAPI:
             headers=self.headers,
         )
 
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            raise ValueError(
-                f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-            )
+        response.raise_for_status()
 
         result = response.json()
 
@@ -608,7 +581,6 @@ class FirefliesAPI:
     def fetch_bites(self) -> Iterator[List[dict]]:
         PAGE_LIMIT = 50
         skip_offset = 0
-        total_fetched = 0
 
         while True:
             variables: Dict[str, Any] = {
@@ -625,11 +597,7 @@ class FirefliesAPI:
                 headers=self.headers,
             )
 
-            if response.status_code != 200:
-                error_data = response.json() if response.content else {}
-                raise ValueError(
-                    f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-                )
+            response.raise_for_status()
 
             result = response.json()
 
@@ -668,7 +636,6 @@ class FirefliesAPI:
                     bite["error"] = None
 
             fetched_count = len(bites)
-            total_fetched += fetched_count
 
             if not bites:
                 break
@@ -689,7 +656,6 @@ class FirefliesAPI:
     ) -> Iterator[List[dict]]:
         PAGE_LIMIT = 50
         skip_offset = 0
-        total_fetched = 0
 
         while True:
             variables: Dict[str, Any] = {
@@ -708,11 +674,7 @@ class FirefliesAPI:
                 headers=self.headers,
             )
 
-            if response.status_code != 200:
-                error_data = response.json() if response.content else {}
-                raise ValueError(
-                    f"Fireflies API Error: {error_data.get('message', 'Unknown error')}"
-                )
+            response.raise_for_status()
 
             result = response.json()
 
@@ -755,7 +717,6 @@ class FirefliesAPI:
                     transcript["error"] = None
 
             fetched_count = len(transcripts)
-            total_fetched += fetched_count
 
             if not transcripts:
                 break
