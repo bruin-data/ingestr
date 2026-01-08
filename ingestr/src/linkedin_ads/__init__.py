@@ -88,7 +88,7 @@ def linked_in_ads_source(
             account_id = ad_account["id"]
             encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
             url = f"https://api.linkedin.com/rest/adAccountUsers?q=accounts&accounts=List({encoded_id})"
-            for page in linkedin_api.fetch_full(url):
+            for page in linkedin_api.fetch_cursor_pagination(url):
                 for item in page:
                     item["account_id"] = account_id
 
@@ -181,13 +181,16 @@ def linked_in_ads_source(
         submittedAt=dlt.sources.incremental(
             "submittedAt",
             initial_value=int(start_datetime.int_timestamp * 1000),
-            end_value=end_datetime.int_timestamp * 1000
-            if end_datetime
-            else int(pendulum.now().int_timestamp * 1000),
-            range_end="closed",
+            end_value=end_datetime.int_timestamp * 1000 if end_datetime else None,
+            range_end="closed" if end_datetime else "open",
             range_start="closed",
         ),
     ) -> Iterable[TDataItem]:
+
+        submittedAt.end_value = (
+            submittedAt.end_value if submittedAt.end_value else pendulum.now(tz="UTC")
+        )
+
         for ad_account in ad_accounts:
             account_id = ad_account["id"]
             encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
