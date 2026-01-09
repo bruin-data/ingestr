@@ -270,14 +270,67 @@ class MsSQLDestination(GenericSqlDestination):
         return cls(credentials=uri, **kwargs)
 
 
+def get_databricks_oauth_token(server_hostname: str, client_id: str, client_secret: str) -> str:
+    """
+    Exchange Databricks OAuth M2M client credentials for an access token.
+
+    This implements the OAuth 2.0 client credentials grant flow for Databricks
+    service principal authentication.
+
+    Args:
+        server_hostname: The Databricks workspace hostname (e.g., dbc-xxx.cloud.databricks.com)
+        client_id: The service principal's client ID (application ID)
+        client_secret: The OAuth secret for the service principal
+
+    Returns:
+        The access token string
+
+    Raises:
+        ValueError: If the token request fails
+    """
+    import requests
+
+    token_url = f"https://{server_hostname}/oidc/v1/token"
+
+    response = requests.post(
+        token_url,
+        data={
+            "grant_type": "client_credentials",
+            "scope": "all-apis",
+        },
+        auth=(client_id, client_secret),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+    if response.status_code != 200:
+        raise ValueError(
+            f"Failed to obtain Databricks OAuth token: {response.status_code} - {response.text}"
+        )
+
+    token_data = response.json()
+    return token_data["access_token"]
+
+
 class DatabricksDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
         p = urlparse(uri)
         q = parse_qs(p.query)
-        access_token = p.password
         server_hostname = p.hostname
         http_path = q.get("http_path", [None])[0]
         catalog = q.get("catalog", [None])[0]
+
+        # Check for OAuth M2M credentials (client_id and client_secret)
+        client_id = q.get("client_id", [None])[0]
+        client_secret = q.get("client_secret", [None])[0]
+
+        if client_id and client_secret:
+            # OAuth M2M authentication: exchange client credentials for access token
+            access_token = get_databricks_oauth_token(
+                server_hostname, client_id, client_secret
+            )
+        else:
+            # Traditional token-based authentication
+            access_token = p.password
 
         creds = {
             "access_token": access_token,
