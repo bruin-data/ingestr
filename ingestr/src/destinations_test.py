@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from unittest.mock import MagicMock, patch
 
 import dlt
 import pytest
@@ -13,6 +14,7 @@ from ingestr.src.destinations import (
     PostgresDestination,
     RedshiftDestination,
     SnowflakeDestination,
+    get_databricks_oauth_token,
 )
 
 
@@ -151,3 +153,72 @@ class DatabricksDestinationTest(unittest.TestCase):
         with pytest.raises(ValueError) as exc_info:
             self.destination.dlt_run_params(uri, "mytable")
         self.assertIn("schema", str(exc_info.value).lower())
+
+    @patch("ingestr.src.destinations.get_databricks_oauth_token")
+    def test_oauth_m2m_credentials(self, mock_get_token):
+        """Test that OAuth M2M credentials (client_id/client_secret) work"""
+        mock_get_token.return_value = "oauth_access_token_123"
+
+        uri = "databricks://@hostname.cloud.databricks.com?http_path=/path/123&catalog=workspace&client_id=my_client_id&client_secret=my_client_secret"
+        result = self.destination.dlt_dest(uri)
+
+        self.assertTrue(isinstance(result, self.expected_class))
+        creds = result.config_params["credentials"]
+        self.assertEqual(creds["access_token"], "oauth_access_token_123")
+        self.assertEqual(creds["server_hostname"], "hostname.cloud.databricks.com")
+        self.assertEqual(creds["http_path"], "/path/123")
+        self.assertEqual(creds["catalog"], "workspace")
+
+        # Verify the OAuth token was fetched with correct parameters
+        mock_get_token.assert_called_once_with(
+            "hostname.cloud.databricks.com", "my_client_id", "my_client_secret"
+        )
+
+    def test_traditional_token_auth_still_works(self):
+        """Test that traditional token auth continues to work when no client_id/client_secret"""
+        uri = "databricks://token:my_access_token@hostname?http_path=/path/123&catalog=workspace"
+        result = self.destination.dlt_dest(uri)
+
+        self.assertTrue(isinstance(result, self.expected_class))
+        creds = result.config_params["credentials"]
+        self.assertEqual(creds["access_token"], "my_access_token")
+
+
+class TestDatabricksOAuthToken(unittest.TestCase):
+    @patch("ingestr.src.destinations.requests.post")
+    def test_get_databricks_oauth_token_success(self, mock_post):
+        """Test successful OAuth token retrieval"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"access_token": "test_token_abc"}
+        mock_post.return_value = mock_response
+
+        token = get_databricks_oauth_token(
+            "dbc-xxx.cloud.databricks.com", "client_123", "secret_456"
+        )
+
+        self.assertEqual(token, "test_token_abc")
+        mock_post.assert_called_once_with(
+            "https://dbc-xxx.cloud.databricks.com/oidc/v1/token",
+            data={
+                "grant_type": "client_credentials",
+                "scope": "all-apis",
+            },
+            auth=("client_123", "secret_456"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+    @patch("ingestr.src.destinations.requests.post")
+    def test_get_databricks_oauth_token_failure(self, mock_post):
+        """Test OAuth token retrieval failure raises ValueError"""
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_response.text = "Unauthorized"
+        mock_post.return_value = mock_response
+
+        with pytest.raises(ValueError) as exc_info:
+            get_databricks_oauth_token(
+                "dbc-xxx.cloud.databricks.com", "bad_client", "bad_secret"
+            )
+        self.assertIn("Failed to obtain Databricks OAuth token", str(exc_info.value))
+        self.assertIn("401", str(exc_info.value))
