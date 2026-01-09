@@ -110,14 +110,20 @@ class SqlSource:
                     server_hostname, client_id, client_secret
                 )
 
-                # Rebuild URI with access token, removing client_id and client_secret
-                new_params = {
-                    k: v[0]
+                # Remove client_id and client_secret from query params
+                filtered_params = {
+                    k: v
                     for k, v in query_params.items()
                     if k not in ("client_id", "client_secret")
                 }
-                new_query = "&".join(f"{k}={v}" for k, v in new_params.items())
-                uri = f"databricks://token:{access_token}@{server_hostname}?{new_query}"
+
+                # Rebuild URI preserving all components (port, path, etc.)
+                uri = parsed_uri._replace(
+                    netloc=f"token:{access_token}@{parsed_uri.netloc.split('@')[-1]}",
+                    query=urlencode(filtered_params, doseq=True)
+                    if filtered_params
+                    else "",
+                ).geturl()
 
         # Monkey patch cx_Oracle to use oracledb (thin mode, no client libraries required)
         if uri.startswith("oracle+") or uri.startswith("oracle://"):
