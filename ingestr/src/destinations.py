@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
 import dlt.destinations.impl.filesystem.filesystem
+import requests
 from dlt.common.configuration.specs import AwsCredentials
 from dlt.common.destination.capabilities import DestinationCapabilitiesContext
 from dlt.common.schema import Schema
@@ -288,28 +289,48 @@ def get_databricks_oauth_token(
         The access token string
 
     Raises:
-        ValueError: If the token request fails
+        ValueError: If inputs are invalid or the token request fails
     """
-    import requests
+    if not server_hostname:
+        raise ValueError("server_hostname is required for OAuth token exchange")
+    if not client_id:
+        raise ValueError("client_id is required for OAuth token exchange")
+    if not client_secret:
+        raise ValueError("client_secret is required for OAuth token exchange")
 
     token_url = f"https://{server_hostname}/oidc/v1/token"
 
-    response = requests.post(
-        token_url,
-        data={
-            "grant_type": "client_credentials",
-            "scope": "all-apis",
-        },
-        auth=(client_id, client_secret),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
-
-    if response.status_code != 200:
-        raise ValueError(
-            f"Failed to obtain Databricks OAuth token: {response.status_code} - {response.text}"
+    try:
+        response = requests.post(
+            token_url,
+            data={
+                "grant_type": "client_credentials",
+                "scope": "all-apis",
+            },
+            auth=(client_id, client_secret),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
         )
+    except requests.exceptions.RequestException as e:
+        raise ValueError(
+            f"Failed to connect to Databricks OAuth endpoint at {token_url}: {e}"
+        ) from e
 
-    token_data = response.json()
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        raise ValueError(
+            f"Failed to obtain Databricks OAuth token: HTTP {response.status_code}"
+        ) from e
+
+    try:
+        token_data = response.json()
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ValueError("Invalid JSON response from Databricks OAuth endpoint") from e
+
+    if "access_token" not in token_data:
+        raise ValueError("Databricks OAuth response missing 'access_token' field")
+
     return token_data["access_token"]
 
 
