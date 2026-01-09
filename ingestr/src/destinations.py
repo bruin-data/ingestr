@@ -270,7 +270,9 @@ class MsSQLDestination(GenericSqlDestination):
         return cls(credentials=uri, **kwargs)
 
 
-def get_databricks_oauth_token(server_hostname: str, client_id: str, client_secret: str) -> str:
+def get_databricks_oauth_token(
+    server_hostname: str, client_id: str, client_secret: str
+) -> str:
     """
     Exchange Databricks OAuth M2M client credentials for an access token.
 
@@ -319,10 +321,14 @@ class DatabricksDestination(GenericSqlDestination):
         http_path = q.get("http_path", [None])[0]
         catalog = q.get("catalog", [None])[0]
 
+        if not server_hostname:
+            raise ValueError("Databricks URI must include a server hostname")
+
         # Check for OAuth M2M credentials (client_id and client_secret)
         client_id = q.get("client_id", [None])[0]
         client_secret = q.get("client_secret", [None])[0]
 
+        access_token: str
         if client_id and client_secret:
             # OAuth M2M authentication: exchange client credentials for access token
             access_token = get_databricks_oauth_token(
@@ -330,6 +336,10 @@ class DatabricksDestination(GenericSqlDestination):
             )
         else:
             # Traditional token-based authentication
+            if not p.password:
+                raise ValueError(
+                    "Databricks URI must include an access token or client_id/client_secret"
+                )
             access_token = p.password
 
         creds = {
