@@ -98,10 +98,6 @@ def elasticsearch_insert(
     # Connect to Elasticsearch
     client = Elasticsearch(**es_config)
 
-    # Replace mode: delete existing index if it exists
-    if client.indices.exists(index=index_name):
-        client.indices.delete(index=index_name)
-
     # Process and insert documents
     if isinstance(items, str):
         documents = process_file_items(items)

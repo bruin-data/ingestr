@@ -31,7 +31,7 @@ def elasticsearch_source(
                 range_filter["lt"] = incremental.end_value
             body = {"query": {"range": {incremental.cursor_path: range_filter}}}
 
-        page = client.search(index=index, scroll="5m", size=5, body=body)
+        page = client.search(index=index, scroll="5m", size=1000, body=body)
 
         sid = page["_scroll_id"]
         hits = page["hits"]["hits"]
