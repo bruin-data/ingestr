@@ -101,7 +101,8 @@ def elasticsearch_insert(
     client = Elasticsearch(**es_config)
 
     if index_name not in _cleared_indices:
-        client.indices.delete(index=index_name, ignore=[404])
+        if client.indices.exists(index=index_name):
+            client.indices.delete(index=index_name)
         _cleared_indices.add(index_name)
 
     # Process and insert documents
