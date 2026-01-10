@@ -1,7 +1,7 @@
 import json
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import dlt
 import pytest
@@ -14,7 +14,6 @@ from ingestr.src.destinations import (
     PostgresDestination,
     RedshiftDestination,
     SnowflakeDestination,
-    get_databricks_oauth_token,
 )
 
 
@@ -180,67 +179,3 @@ class DatabricksDestinationTest(unittest.TestCase):
         with pytest.raises(ValueError) as exc_info:
             self.destination.dlt_dest(uri)
         self.assertIn("access token", str(exc_info.value).lower())
-
-
-class TestGetDatabricksOAuthToken(unittest.TestCase):
-    @patch("ingestr.src.destinations.requests.post")
-    def test_successful_token_exchange(self, mock_post):
-        """Test successful OAuth token exchange"""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"access_token": "test_token_123"}
-        mock_response.raise_for_status = MagicMock()
-        mock_post.return_value = mock_response
-
-        token = get_databricks_oauth_token("hostname.com", "client_id", "client_secret")
-
-        self.assertEqual(token, "test_token_123")
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        self.assertEqual(call_args[0][0], "https://hostname.com/oidc/v1/token")
-        self.assertEqual(call_args[1]["auth"], ("client_id", "client_secret"))
-
-    def test_missing_server_hostname_raises_error(self):
-        """Test that empty server_hostname raises ValueError"""
-        with pytest.raises(ValueError) as exc_info:
-            get_databricks_oauth_token("", "client_id", "client_secret")
-        self.assertIn("server_hostname", str(exc_info.value))
-
-    def test_missing_client_id_raises_error(self):
-        """Test that empty client_id raises ValueError"""
-        with pytest.raises(ValueError) as exc_info:
-            get_databricks_oauth_token("hostname.com", "", "client_secret")
-        self.assertIn("client_id", str(exc_info.value))
-
-    def test_missing_client_secret_raises_error(self):
-        """Test that empty client_secret raises ValueError"""
-        with pytest.raises(ValueError) as exc_info:
-            get_databricks_oauth_token("hostname.com", "client_id", "")
-        self.assertIn("client_secret", str(exc_info.value))
-
-    @patch("ingestr.src.destinations.requests.post")
-    def test_http_error_raises_value_error(self, mock_post):
-        """Test that HTTP errors are converted to ValueError"""
-        import requests
-
-        mock_response = MagicMock()
-        mock_response.status_code = 401
-        mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError()
-        mock_post.return_value = mock_response
-
-        with pytest.raises(ValueError) as exc_info:
-            get_databricks_oauth_token("hostname.com", "client_id", "client_secret")
-        self.assertIn("401", str(exc_info.value))
-
-    @patch("ingestr.src.destinations.requests.post")
-    def test_missing_access_token_in_response_raises_error(self, mock_post):
-        """Test that missing access_token in response raises ValueError"""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"token_type": "Bearer"}  # No access_token
-        mock_response.raise_for_status = MagicMock()
-        mock_post.return_value = mock_response
-
-        with pytest.raises(ValueError) as exc_info:
-            get_databricks_oauth_token("hostname.com", "client_id", "client_secret")
-        self.assertIn("access_token", str(exc_info.value))
