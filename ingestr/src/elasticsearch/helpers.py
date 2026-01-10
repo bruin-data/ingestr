@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, Set
 from urllib.parse import urlparse
 
 import dlt
@@ -13,6 +13,8 @@ from elasticsearch.helpers import bulk
 # Suppress Elasticsearch transport logging
 logging.getLogger("elasticsearch.transport").setLevel(logging.WARNING)
 logging.getLogger("elastic_transport.transport").setLevel(logging.WARNING)
+
+_cleared_indices: Set[str] = set()
 
 
 def process_file_items(file_path: str) -> Iterator[Dict[str, Any]]:
@@ -98,9 +100,10 @@ def elasticsearch_insert(
     # Connect to Elasticsearch
     client = Elasticsearch(**es_config)
 
-    # Replace mode: delete existing index if it exists
-    if client.indices.exists(index=index_name):
-        client.indices.delete(index=index_name)
+    if index_name not in _cleared_indices:
+        if client.indices.exists(index=index_name):
+            client.indices.delete(index=index_name)
+        _cleared_indices.add(index_name)
 
     # Process and insert documents
     if isinstance(items, str):
