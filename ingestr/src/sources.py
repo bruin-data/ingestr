@@ -658,21 +658,23 @@ class LocalCsvSource:
                 ):
                     continue
 
-                if current_items < page_size:
-                    if incremental_key and incremental and incremental.start_value:
-                        inc_value = dictionary.get(incremental_key)
-                        if inc_value is None:
-                            raise ValueError(
-                                f"incremental_key '{incremental_key}' not found in the CSV file"
-                            )
+                # Skip rows based on incremental key if specified
+                if incremental_key and incremental and incremental.start_value:
+                    inc_value = dictionary.get(incremental_key)
+                    if inc_value is None:
+                        raise ValueError(
+                            f"incremental_key '{incremental_key}' not found in the CSV file"
+                        )
 
-                        if inc_value < incremental.start_value:
-                            continue
+                    if inc_value < incremental.start_value:
+                        continue
 
-                    dictionary = self.remove_empty_columns(dictionary)
-                    page.append(dictionary)
-                    current_items += 1
-                else:
+                dictionary = self.remove_empty_columns(dictionary)
+                page.append(dictionary)
+                current_items += 1
+
+                # Yield page when it reaches page_size
+                if current_items >= page_size:
                     yield page
                     page = []
                     current_items = 0
