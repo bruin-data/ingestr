@@ -381,7 +381,11 @@ def ingest(
                         f"[red]Column type '{column_type}' is not supported, supported types: {possible_types + custom_types}.[/red]"
                     )
                     raise typer.Abort()
-                types[column_name] = cast(TDataType, column_type) if column_type in possible_types else column_type
+                types[column_name] = (
+                    cast(TDataType, column_type)
+                    if column_type in possible_types
+                    else column_type
+                )
         return types
 
     track(
