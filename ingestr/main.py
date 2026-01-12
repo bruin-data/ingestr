@@ -373,7 +373,10 @@ def ingest(
         for column in columns:
             for candidate in column.split(","):
                 column_name, column_type = candidate.split(":")
-                if column_type not in possible_types and column_type not in custom_types:
+                if (
+                    column_type not in possible_types
+                    and column_type not in custom_types
+                ):
                     print(
                         f"[red]Column type '{column_type}' is not supported, supported types: {possible_types + custom_types}.[/red]"
                     )
