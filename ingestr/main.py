@@ -609,9 +609,7 @@ def ingest(
 
         def col_h(x):
             if column_hints:
-                print(f"[yellow]Applying column hints: {column_hints}[/yellow]")
                 x.apply_hints(columns=column_hints)
-                print(f"[yellow]Schema after hints: {x.columns}[/yellow]")
 
         resource.for_each(dlt_source, col_h)
 
