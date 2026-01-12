@@ -431,7 +431,7 @@ def ingest(
                     column_hints[column_name] = {
                         "data_type": "decimal",
                         "precision": 76,
-                        "scale": 76,
+                        "scale": 38,
                     }
                 else:
                     column_hints[column_name] = {"data_type": column_type}
@@ -606,7 +606,9 @@ def ingest(
 
         def col_h(x):
             if column_hints:
+                print(f"[yellow]Applying column hints: {column_hints}[/yellow]")
                 x.apply_hints(columns=column_hints)
+                print(f"[yellow]Schema after hints: {x.columns}[/yellow]")
 
         resource.for_each(dlt_source, col_h)
 
