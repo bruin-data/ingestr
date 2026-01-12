@@ -107,7 +107,7 @@ dlt-cratedb==0.0.2
     # via -r requirements.in
 dnspython==2.7.0
     # via pymongo
-duckdb==1.2.1
+duckdb==1.4.3
     # via
     #   -r requirements.in
     #   duckdb-engine

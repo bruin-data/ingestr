@@ -7,7 +7,7 @@ dataclasses-json==0.6.7
 dlt==1.16.0
 dlt-cratedb==0.0.2
 duckdb_engine==0.17.0
-duckdb==1.2.1
+duckdb==1.4.3
 google-ads==25.1.0
 facebook-business==23.0.0
 google-api-python-client==2.130.0
