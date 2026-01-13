@@ -74,3 +74,22 @@ def parse_endpoint(path: str) -> str:
     else:
         raise UnsupportedEndpointError(f"Unsupported file format: {file_extension}")
     return endpoint
+
+
+def determine_endpoint(table: str, path: str) -> str:
+    """
+    determines the endpoint/method to use for reading data from a blob source
+    """
+
+    if "#" in table:
+        _, endpoint = table.split("#")
+        if endpoint not in ["csv", "jsonl", "parquet"]:
+            raise UnsupportedEndpointError(f"Unsupported file format: {endpoint}")
+        endpoint = f"read_{endpoint}"
+    else:
+        try:
+            endpoint = parse_endpoint(path)
+        except Exception as e:
+            raise ValueError(f"Failed to parse endpoint from path: {path}") from e
+
+    return endpoint
