@@ -30,7 +30,7 @@ class MaskingEngine:
         algorithm = algorithm.lower()
 
         # Hash-based masking
-        if algorithm == "hash" or algorithm == "sha256":
+        if algorithm in ("hash", "sha256"):
             return self._hash_sha256
         elif algorithm == "md5":
             return self._hash_md5
