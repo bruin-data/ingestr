@@ -97,9 +97,7 @@ class SqlSourceTest(unittest.TestCase):
         source.dlt_source(uri, table)
 
         # Verify OAuth function was called with correct args
-        mock_get_token.assert_called_once_with(
-            "hostname", "my_client_id", "my_secret"
-        )
+        mock_get_token.assert_called_once_with("hostname", "my_client_id", "my_secret")
 
         # Verify the URI was reconstructed with the access token
         self.assertIn("token:mocked_access_token@", captured_uri)
