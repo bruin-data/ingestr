@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from unittest.mock import patch
 
 import dlt
 import pytest
@@ -151,3 +152,30 @@ class DatabricksDestinationTest(unittest.TestCase):
         with pytest.raises(ValueError) as exc_info:
             self.destination.dlt_run_params(uri, "mytable")
         self.assertIn("schema", str(exc_info.value).lower())
+
+    @patch("ingestr.src.destinations.get_databricks_oauth_token")
+    def test_oauth_m2m_credentials(self, mock_get_token):
+        """Test that client_id and client_secret trigger OAuth M2M flow"""
+        mock_get_token.return_value = "mocked_access_token"
+
+        uri = "databricks://@hostname?http_path=/path/123&catalog=workspace&client_id=my_client_id&client_secret=my_secret"
+        result = self.destination.dlt_dest(uri)
+
+        mock_get_token.assert_called_once_with("hostname", "my_client_id", "my_secret")
+        creds = result.config_params["credentials"]
+        self.assertEqual(creds["access_token"], "mocked_access_token")
+        self.assertEqual(creds["server_hostname"], "hostname")
+
+    def test_missing_hostname_raises_error(self):
+        """Test that missing hostname raises ValueError"""
+        uri = "databricks://?http_path=/path/123&catalog=workspace"
+        with pytest.raises(ValueError) as exc_info:
+            self.destination.dlt_dest(uri)
+        self.assertIn("hostname", str(exc_info.value).lower())
+
+    def test_missing_token_and_oauth_raises_error(self):
+        """Test that missing both token and OAuth credentials raises ValueError"""
+        uri = "databricks://@hostname?http_path=/path/123&catalog=workspace"
+        with pytest.raises(ValueError) as exc_info:
+            self.destination.dlt_dest(uri)
+        self.assertIn("access token", str(exc_info.value).lower())

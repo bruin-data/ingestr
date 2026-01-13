@@ -91,6 +91,40 @@ class SqlSource:
         if uri.startswith("mysql://"):
             uri = uri.replace("mysql://", "mysql+pymysql://")
 
+        # Handle Databricks OAuth M2M authentication
+        if uri.startswith("databricks://"):
+            parsed_uri = urlparse(uri)
+            query_params = parse_qs(parsed_uri.query)
+            client_id = query_params.get("client_id", [None])[0]
+            client_secret = query_params.get("client_secret", [None])[0]
+
+            if client_id and client_secret:
+                from ingestr.src.destinations import get_databricks_oauth_token
+
+                server_hostname = parsed_uri.hostname
+                if not server_hostname:
+                    raise ValueError("Databricks URI must include a server hostname")
+
+                # Exchange client credentials for access token
+                access_token = get_databricks_oauth_token(
+                    server_hostname, client_id, client_secret
+                )
+
+                # Remove client_id and client_secret from query params
+                filtered_params = {
+                    k: v
+                    for k, v in query_params.items()
+                    if k not in ("client_id", "client_secret")
+                }
+
+                # Rebuild URI preserving all components (port, path, etc.)
+                uri = parsed_uri._replace(
+                    netloc=f"token:{access_token}@{parsed_uri.netloc.split('@')[-1]}",
+                    query=urlencode(filtered_params, doseq=True)
+                    if filtered_params
+                    else "",
+                ).geturl()
+
         # Monkey patch cx_Oracle to use oracledb (thin mode, no client libraries required)
         if uri.startswith("oracle+") or uri.startswith("oracle://"):
             try:
