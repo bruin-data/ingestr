@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import dlt
 import pendulum
@@ -67,6 +68,75 @@ class SqlSourceTest(unittest.TestCase):
         source = SqlSource(table_builder=sql_table)
         res = source.dlt_source(uri, table, incremental_key=incremental_key)
         self.assertIsNotNone(res)
+
+    @patch("ingestr.src.destinations.get_databricks_oauth_token")
+    def test_databricks_oauth_m2m_credentials(self, mock_get_token):
+        """Test that Databricks client_id and client_secret trigger OAuth M2M flow"""
+        mock_get_token.return_value = "mocked_access_token"
+
+        uri = "databricks://@hostname?http_path=/sql/1.0/warehouses/abc&catalog=main&client_id=my_client_id&client_secret=my_secret"
+        table = "schema.table"
+
+        # Track the URI that gets passed to sql_table
+        captured_uri = None
+
+        def sql_table(
+            credentials: ConnectionStringCredentials,
+            schema,
+            table,
+            incremental,
+            backend,
+            chunk_size,
+            **kwargs,
+        ):
+            nonlocal captured_uri
+            captured_uri = str(credentials.to_url())
+            return dlt.resource()
+
+        source = SqlSource(table_builder=sql_table)
+        source.dlt_source(uri, table)
+
+        # Verify OAuth function was called with correct args
+        mock_get_token.assert_called_once_with(
+            "hostname", "my_client_id", "my_secret"
+        )
+
+        # Verify the URI was reconstructed with the access token
+        self.assertIn("token:mocked_access_token@", captured_uri)
+        # Verify client_id and client_secret were removed from query params
+        self.assertNotIn("client_id", captured_uri)
+        self.assertNotIn("client_secret", captured_uri)
+        # Verify other query params are preserved
+        self.assertIn("http_path", captured_uri)
+        self.assertIn("catalog", captured_uri)
+
+    def test_databricks_password_auth_skips_oauth(self):
+        """Test that Databricks with password (token) in URI skips OAuth flow"""
+        uri = "databricks://token:dapi123abc@hostname?http_path=/sql/1.0/warehouses/abc&catalog=main"
+        table = "schema.table"
+
+        # Track the URI that gets passed to sql_table
+        captured_uri = None
+
+        def sql_table(
+            credentials: ConnectionStringCredentials,
+            schema,
+            table,
+            incremental,
+            backend,
+            chunk_size,
+            **kwargs,
+        ):
+            nonlocal captured_uri
+            captured_uri = str(credentials.to_url())
+            return dlt.resource()
+
+        source = SqlSource(table_builder=sql_table)
+        source.dlt_source(uri, table)
+
+        # Verify the URI passes through unchanged (still has the original token)
+        self.assertIn("dapi123abc", captured_uri)
+        self.assertIn("hostname", captured_uri)
 
 
 class MongoDbSourceTest(unittest.TestCase):
