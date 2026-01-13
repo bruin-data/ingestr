@@ -215,7 +215,9 @@ def applovin_source(
             resource(
                 "advertiser-probabilistic-report",
                 "probabilisticReport",
-                exclude(REPORT_SCHEMA[ReportType.ADVERTISER], PROBABILISTIC_REPORT_EXCLUDE),
+                exclude(
+                    REPORT_SCHEMA[ReportType.ADVERTISER], PROBABILISTIC_REPORT_EXCLUDE
+                ),
                 ReportType.ADVERTISER,
                 day_only_merge_key=True,
             ),
@@ -248,10 +250,10 @@ def resource(
 ) -> EndpointResource:
     # For probabilistic and SKA reports use only "day" as merge_key
     # because other dimensions may return null values
-    if day_only_merge_key:
-        merge_key = "day"
-    else:
-        merge_key_parts = []
+    merge_key: str | List[str] = "day"
+
+    if not day_only_merge_key:
+        merge_key_parts: List[str] = []
         if "day" in dimensions:
             merge_key_parts.append("day")
 
@@ -260,10 +262,10 @@ def resource(
                 merge_key_parts.append(dim)
 
         # If no dimensions found, default to "day"
-        merge_key = merge_key_parts if merge_key_parts else "day"
-        # If only one dimension, use string instead of list
-        if len(merge_key) == 1:
-            merge_key = merge_key[0]
+        if merge_key_parts:
+            merge_key = (
+                merge_key_parts[0] if len(merge_key_parts) == 1 else merge_key_parts
+            )
 
     return {
         "name": name,
