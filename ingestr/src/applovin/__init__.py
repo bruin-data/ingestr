@@ -110,10 +110,9 @@ REPORT_SCHEMA: Dict[ReportType, List[str]] = {
     ],
 }
 
-PROBABILISTIC_REPORT_EXCLUDE = [
-    "installs",
-    "redownloads",
-]
+# Columns to exclude from probabilistic reports
+PROBABILISTIC_REPORT_EXCLUDE = ["installs", "redownloads"]
+
 
 # Dimensions that can be used in merge_key (excludes metrics)
 DIMENSIONS = {
@@ -216,16 +215,16 @@ def applovin_source(
             resource(
                 "advertiser-probabilistic-report",
                 "probabilisticReport",
-                exclude(
-                    REPORT_SCHEMA[ReportType.ADVERTISER], PROBABILISTIC_REPORT_EXCLUDE
-                ),
+                exclude(REPORT_SCHEMA[ReportType.ADVERTISER], PROBABILISTIC_REPORT_EXCLUDE),
                 ReportType.ADVERTISER,
+                day_only_merge_key=True,
             ),
             resource(
                 "advertiser-ska-report",
                 "skaReport",
                 REPORT_SCHEMA[ReportType.ADVERTISER],
                 ReportType.ADVERTISER,
+                day_only_merge_key=True,
             ),
         ],
     }
@@ -245,23 +244,26 @@ def resource(
     endpoint: str,
     dimensions: List[str],
     report_type: ReportType,
+    day_only_merge_key: bool = False,
 ) -> EndpointResource:
-    # Build merge_key from dimensions only (exclude metrics)
-    # Always include "day" if present, then add other dimensions
-    merge_key_parts = []
-    if "day" in dimensions:
-        merge_key_parts.append("day")
+    # For probabilistic and SKA reports use only "day" as merge_key
+    # because other dimensions may return null values
+    if day_only_merge_key:
+        merge_key = "day"
+    else:
+        merge_key_parts = []
+        if "day" in dimensions:
+            merge_key_parts.append("day")
 
-    # Add other dimensions (excluding metrics)
-    for dim in dimensions:
-        if dim in DIMENSIONS and dim not in merge_key_parts:
-            merge_key_parts.append(dim)
+        for dim in dimensions:
+            if dim in DIMENSIONS and dim not in merge_key_parts:
+                merge_key_parts.append(dim)
 
-    # If no dimensions found, default to "day"
-    merge_key = merge_key_parts if merge_key_parts else "day"
-    # If only one dimension, use string instead of list
-    if len(merge_key) == 1:
-        merge_key = merge_key[0]
+        # If no dimensions found, default to "day"
+        merge_key = merge_key_parts if merge_key_parts else "day"
+        # If only one dimension, use string instead of list
+        if len(merge_key) == 1:
+            merge_key = merge_key[0]
 
     return {
         "name": name,
@@ -304,13 +306,12 @@ def validate_dimensions(dimensions: str) -> List[str]:
     return dims
 
 
-def exclude(source: List[str], exclude_list: List[str]) -> List[str]:
-    excludes = set(exclude_list)
-    return [col for col in source if col not in excludes]
-
-
 def build_type_hints(cols: List[str]) -> dict:
     return {col: TYPE_HINTS[col] for col in cols if col in TYPE_HINTS}
+
+
+def exclude(dimensions: List[str], excludes: List[str]) -> List[str]:
+    return [dim for dim in dimensions if dim not in excludes]
 
 
 def http_error_handler(resp: Response):
