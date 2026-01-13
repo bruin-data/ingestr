@@ -367,17 +367,25 @@ def ingest(
         from dlt.common.data_types import TDataType
 
         possible_types = get_args(TDataType)
+        custom_types = ("bigdecimal",)
 
-        types: dict[str, TDataType] = {}
+        types: dict[str, TDataType | str] = {}
         for column in columns:
             for candidate in column.split(","):
                 column_name, column_type = candidate.split(":")
-                if column_type not in possible_types:
+                if (
+                    column_type not in possible_types
+                    and column_type not in custom_types
+                ):
                     print(
-                        f"[red]Column type '{column_type}' is not supported, supported types: {possible_types}.[/red]"
+                        f"[red]Column type '{column_type}' is not supported, supported types: {possible_types + custom_types}.[/red]"
                     )
                     raise typer.Abort()
-                types[column_name] = cast(TDataType, column_type)
+                types[column_name] = (
+                    cast(TDataType, column_type)
+                    if column_type in possible_types
+                    else column_type
+                )
         return types
 
     track(
@@ -426,7 +434,14 @@ def ingest(
         if columns:
             column_types = parse_columns(columns)
             for column_name, column_type in column_types.items():
-                column_hints[column_name] = {"data_type": column_type}
+                if column_type == "bigdecimal":
+                    column_hints[column_name] = {
+                        "data_type": "decimal",
+                        "precision": 76,
+                        "scale": 38,
+                    }
+                else:
+                    column_hints[column_name] = {"data_type": column_type}
 
         merge_key = None
         if incremental_strategy == IncrementalStrategy.delete_insert:
