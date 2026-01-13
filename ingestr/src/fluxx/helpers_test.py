@@ -267,7 +267,7 @@ def test_normalize_id_field_always_included():
 @pytest.mark.parametrize(
     "instance,expected",
     [
-        ("acme.fluxx.io", "https://acme.fluxx.io"),
+        ("https://acme.fluxx.io", "https://acme.fluxx.io"),
         ("mycompany.fluxxlabs.com", "https://mycompany.fluxxlabs.com"),
         ("test.preprod.fluxx.io", "https://test.preprod.fluxx.io"),
         ("https://acme.fluxx.io", "https://acme.fluxx.io"),
@@ -280,8 +280,90 @@ def test_normalize_id_field_always_included():
             "http://acmefoundation.preprod.fluxxlabs.com",
             "http://acmefoundation.preprod.fluxxlabs.com",
         ),
+
     ],
 )
 def test_get_base_url(instance, expected):
     """Test _get_base_url with various domain formats."""
     assert _get_base_url(instance) == expected
+
+
+# =============================================================================
+# Integration tests: URI parsing (sources.py) -> _get_base_url (helpers.py)
+# =============================================================================
+
+from urllib.parse import urlparse
+
+
+@pytest.mark.parametrize(
+    "uri,expected_base_url",
+    [
+        # Simple instance names - hostname extraction gives just the subdomain
+        (
+            "fluxx://mycompany?client_id=xxx&client_secret=xxx",
+            "https://mycompany.fluxxlabs.com",
+        ),
+        (
+            "fluxx://testinstance?client_id=abc&client_secret=def",
+            "https://testinstance.fluxxlabs.com",
+        ),
+        # Preprod/staging instances
+        (
+            "fluxx://acmefoundation.preprod?client_id=xxx&client_secret=xxx",
+            "https://acmefoundation.preprod.fluxxlabs.com",
+        ),
+        (
+            "fluxx://mycompany.staging?client_id=xxx&client_secret=xxx",
+            "https://mycompany.staging.fluxxlabs.com",
+        ),
+        # Full domain with TLD - hostname includes full domain
+        (
+            "fluxx://acme.fluxx.io?client_id=xxx&client_secret=xxx",
+            "https://acme.fluxx.io",
+        ),
+        (
+            "fluxx://test.preprod.fluxx.io?client_id=xxx&client_secret=xxx",
+            "https://test.preprod.fluxx.io",
+        ),
+        # Full fluxxlabs.com domain
+        (
+            "fluxx://mycompany.fluxxlabs.com?client_id=xxx&client_secret=xxx",
+            "https://mycompany.fluxxlabs.com",
+        ),
+    ],
+)
+def test_uri_parsing_to_base_url(uri, expected_base_url):
+    """
+    Integration test: verify the full flow from fluxx:// URI to _get_base_url.
+
+    This simulates the parsing done in sources.py FluxxSource.dlt_source():
+    1. Parse the URI with urlparse()
+    2. Extract hostname (instance)
+    3. Pass to _get_base_url() to construct the API base URL
+    """
+    # Step 1: Parse URI exactly like sources.py does
+    parsed_uri = urlparse(uri)
+
+    # Step 2: Extract hostname (this is what sources.py passes as 'instance')
+    instance = parsed_uri.hostname
+    assert instance is not None, f"Failed to extract hostname from URI: {uri}"
+
+    # Step 3: Get base URL - this is what helpers.py does
+    base_url = _get_base_url(instance)
+
+    # Verify the full flow produces correct base URL
+    assert base_url == expected_base_url
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "fluxx://?client_id=xxx&client_secret=xxx",  # Missing instance
+        "fluxx:///path?client_id=xxx&client_secret=xxx",  # Empty hostname with path
+    ],
+)
+def test_uri_parsing_missing_instance(uri):
+    """Test that URIs without a valid hostname result in None."""
+    parsed_uri = urlparse(uri)
+    instance = parsed_uri.hostname
+    assert instance is None, f"Expected None hostname for URI: {uri}"
