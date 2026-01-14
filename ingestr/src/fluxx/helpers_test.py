@@ -292,12 +292,7 @@ def test_get_base_url(instance, expected):
     assert _get_base_url(instance) == expected
 
 
-# =============================================================================
-# Integration tests: URI parsing (sources.py) -> _get_base_url (helpers.py)
-# =============================================================================
-
 from urllib.parse import urlparse
-
 
 @pytest.mark.parametrize(
     "uri,expected_base_url",
