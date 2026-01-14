@@ -27,6 +27,7 @@ app = typer.Typer(
 console = Console()
 print = console.print
 
+
 DATE_FORMATS = [
     "%Y-%m-%d",
     "%Y-%m-%dT%H:%M:%S",
