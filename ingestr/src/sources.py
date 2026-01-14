@@ -3547,7 +3547,10 @@ class FluxxSource:
         parsed_uri = urlparse(uri)
         source_params = parse_qs(parsed_uri.query)
 
-        instance = parsed_uri.hostname
+        from ingestr.src.fluxx.helpers import extract_instance_from_uri
+
+        instance = extract_instance_from_uri(uri)
+        
         if not instance:
             raise ValueError(
                 "Instance is required in the URI (e.g., fluxx://mycompany.preprod)"

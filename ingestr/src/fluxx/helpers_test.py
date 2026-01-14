@@ -10,7 +10,11 @@ Or run specific tests:
 
 import pytest
 
-from ingestr.src.fluxx.helpers import _get_base_url, normalize_fluxx_item
+from ingestr.src.fluxx.helpers import (
+    _get_base_url,
+    extract_instance_from_uri,
+    normalize_fluxx_item,
+)
 
 
 @pytest.fixture
@@ -367,3 +371,31 @@ def test_uri_parsing_missing_instance(uri):
     parsed_uri = urlparse(uri)
     instance = parsed_uri.hostname
     assert instance is None, f"Expected None hostname for URI: {uri}"
+
+
+@pytest.mark.parametrize(
+    "uri,expected_base_url",
+    [
+        (
+            "fluxx://https://acme.fluxx.io?client_id=xxx&client_secret=xxx",
+            "https://acme.fluxx.io",
+        ),
+        (
+            "fluxx://http://acme.fluxx.io?client_id=xxx&client_secret=xxx",
+            "http://acme.fluxx.io",
+        ),
+        (
+            "fluxx://https://mycompany.fluxxlabs.com?client_id=xxx&client_secret=xxx",
+            "https://mycompany.fluxxlabs.com",
+        ),
+        (
+            "fluxx://http://test.preprod.fluxxlabs.com?client_id=xxx&client_secret=xxx",
+            "http://test.preprod.fluxxlabs.com",
+        ),
+    ],
+)
+def test_malformed_uri_with_embedded_scheme(uri, expected_base_url):
+    """Test that malformed URIs with embedded http:// or https:// are handled correctly."""
+    instance = extract_instance_from_uri(uri)
+    base_url = _get_base_url(instance)
+    assert base_url == expected_base_url
