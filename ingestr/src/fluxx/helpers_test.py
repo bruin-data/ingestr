@@ -8,6 +8,8 @@ Or run specific tests:
     pytest ingestr/src/fluxx/helpers_test.py::test_connection_ids_single_number_to_array -v
 """
 
+from urllib.parse import urlparse
+
 import pytest
 
 from ingestr.src.fluxx.helpers import (
@@ -284,15 +286,12 @@ def test_normalize_id_field_always_included():
             "http://acmefoundation.preprod.fluxxlabs.com",
             "http://acmefoundation.preprod.fluxxlabs.com",
         ),
-
     ],
 )
 def test_get_base_url(instance, expected):
     """Test _get_base_url with various domain formats."""
     assert _get_base_url(instance) == expected
 
-
-from urllib.parse import urlparse
 
 @pytest.mark.parametrize(
     "uri,expected_base_url",

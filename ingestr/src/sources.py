@@ -3550,7 +3550,7 @@ class FluxxSource:
         from ingestr.src.fluxx.helpers import extract_instance_from_uri
 
         instance = extract_instance_from_uri(uri)
-        
+
         if not instance:
             raise ValueError(
                 "Instance is required in the URI (e.g., fluxx://mycompany.preprod)"
