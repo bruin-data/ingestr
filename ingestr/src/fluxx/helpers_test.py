@@ -276,7 +276,6 @@ def test_normalize_id_field_always_included():
         ("https://acme.fluxx.io", "https://acme.fluxx.io"),
         ("mycompany.fluxxlabs.com", "https://mycompany.fluxxlabs.com"),
         ("test.preprod.fluxx.io", "https://test.preprod.fluxx.io"),
-        ("https://acme.fluxx.io", "https://acme.fluxx.io"),
         ("http://acme.fluxx.io", "http://acme.fluxx.io"),
         ("mycompany", "https://mycompany.fluxxlabs.com"),
         ("testinstance", "https://testinstance.fluxxlabs.com"),
