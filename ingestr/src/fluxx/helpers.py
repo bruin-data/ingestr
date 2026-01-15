@@ -11,31 +11,6 @@ FLUXX_OAUTH_TOKEN_PATH = "/oauth/token"
 FLUXX_API_V2_PATH = "/api/rest/v2"
 
 
-def extract_instance_from_uri(uri: str) -> Optional[str]:
-    """Extract Fluxx instance from URI, handling malformed URIs.
-
-    Handles the case where user mistakenly includes scheme in the URI:
-    - fluxx://https://domain.com -> returns "https://domain.com"
-    - fluxx://http://domain.com -> returns "http://domain.com"
-    - fluxx://mycompany -> returns "mycompany"
-
-    Args:
-        uri: The full fluxx:// URI string
-
-    Returns:
-        The extracted instance string, or None if no hostname found
-    """
-    parsed_uri = urlparse(uri)
-    instance = parsed_uri.hostname
-
-    if instance and instance.lower() in ("http", "https"):
-        actual_domain = parsed_uri.path.lstrip("/")
-        if actual_domain:
-            instance = f"{instance}://{actual_domain}"
-
-    return instance
-
-
 def _get_base_url(instance: str) -> str:
     """Get the base URL for Fluxx API.
 
