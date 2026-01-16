@@ -3578,6 +3578,11 @@ class FluxxSource:
                 "Instance is required in the URI (e.g., fluxx://mycompany.preprod)"
             )
 
+        if instance.lower() in ("http", "https"):
+            raise ValueError(
+                "Invalid Fluxx URI format. Do not include http:// or https:// in the URI. "
+            )
+
         client_id = source_params.get("client_id")
         if not client_id:
             raise ValueError("client_id in the URI is required to connect to Fluxx")

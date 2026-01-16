@@ -7,7 +7,7 @@ import pytest
 from dlt.sources.credentials import ConnectionStringCredentials
 
 from ingestr.src import sources
-from ingestr.src.sources import AdjustSource, MongoDbSource, SqlSource
+from ingestr.src.sources import AdjustSource, FluxxSource, MongoDbSource, SqlSource
 
 
 class SqlSourceTest(unittest.TestCase):
@@ -272,3 +272,19 @@ class AdjustSourceTest(unittest.TestCase):
         source = AdjustSource()
         res = source.dlt_source(uri, table)
         self.assertIsNotNone(res)
+
+
+class FluxxSourceTest(unittest.TestCase):
+    def test_rejects_uri_with_embedded_scheme(self):
+        source = FluxxSource()
+
+        uris = [
+            "fluxx://https://acme.fluxx.io?client_id=xxx&client_secret=xxx",
+            "fluxx://http://acme.fluxx.io?client_id=xxx&client_secret=xxx",
+        ]
+
+        for uri in uris:
+            with self.assertRaises(ValueError) as exc_info:
+                source.dlt_source(uri, "grant_request")
+
+            self.assertIn("Invalid Fluxx URI format", str(exc_info.exception))
