@@ -3568,6 +3568,12 @@ class FluxxSource:
                 "Fluxx takes care of incrementality on its own, you should not provide incremental_key"
             )
 
+        # Check for malformed URI with embedded scheme
+        if "http://" in uri.lower() or "https://" in uri.lower():
+            raise ValueError(
+                "Invalid Fluxx URI format. Do not include http:// or https:// in the URI."
+            )
+
         # Parse URI: fluxx://instance?client_id=xxx&client_secret=xxx
         parsed_uri = urlparse(uri)
         source_params = parse_qs(parsed_uri.query)
@@ -3576,11 +3582,6 @@ class FluxxSource:
         if not instance:
             raise ValueError(
                 "Instance is required in the URI (e.g., fluxx://mycompany.preprod)"
-            )
-
-        if instance.lower() in ("http", "https"):
-            raise ValueError(
-                "Invalid Fluxx URI format. Do not include http:// or https:// in the URI. "
             )
 
         client_id = source_params.get("client_id")
