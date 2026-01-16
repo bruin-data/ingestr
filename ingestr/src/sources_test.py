@@ -288,4 +288,3 @@ class FluxxSourceTest(unittest.TestCase):
                 source.dlt_source(uri, "grant_request")
 
             self.assertIn("Invalid Fluxx URI format", str(exc_info.exception))
-
