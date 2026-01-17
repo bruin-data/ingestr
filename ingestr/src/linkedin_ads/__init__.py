@@ -194,7 +194,7 @@ def linked_in_ads_source(
         for ad_account in ad_accounts:
             account_id = ad_account["id"]
             encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
-            url = f"https://api.linkedin.com/rest/leadFormResponses?leadType=(leadType:SPONSORED)&q=owner&owner=(sponsoredAccount:{encoded_id})&submittedAtTimeRange=(start:{fromDate},end:{toDate})"
+            url = f"https://api.linkedin.com/rest/leadFormResponses?leadType=(leadType:SPONSORED)&q=owner&owner=(sponsoredAccount:{encoded_id})&submittedAtTimeRange=(start:{fromDate},end:{toDate})&limitedToTestLeads=false"
             for page in linkedin_api.fetch_cursor_pagination(url):
                 for item in page:
                     item["account_id"] = account_id
