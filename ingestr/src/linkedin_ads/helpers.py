@@ -118,7 +118,7 @@ class LinkedInAdsAnalyticsAPI:
         self.metrics: list[str] = metrics
         self.headers = {
             "Authorization": f"Bearer {access_token}",
-            "Linkedin-Version": "202411",
+            "Linkedin-Version": "202601",
             "X-Restli-Protocol-Version": "2.0.0",
         }
 
@@ -154,7 +154,7 @@ class LinkedInAdsAPI:
     ):
         self.headers = {
             "Authorization": f"Bearer {access_token}",
-            "Linkedin-Version": "202411",
+            "Linkedin-Version": "202601",
             "X-Restli-Protocol-Version": "2.0.0",
         }
         self.client = create_client()
