@@ -60,10 +60,16 @@ def readers(
     #     incremental=dlt.sources.incremental("modification_date"),
     # )
     return (
-        filesystem_resource | dlt.transformer(name="read_csv", max_table_nesting=0)(_read_csv) ,
-        filesystem_resource | dlt.transformer(name="read_jsonl", max_table_nesting=0)(_read_jsonl),
-        filesystem_resource | dlt.transformer(name="read_parquet", max_table_nesting=0)(_read_parquet),
-        filesystem_resource | dlt.transformer(name="read_csv_duckdb", max_table_nesting=0)(_read_csv_duckdb),
+        filesystem_resource
+        | dlt.transformer(name="read_csv", max_table_nesting=0)(_read_csv),
+        filesystem_resource
+        | dlt.transformer(name="read_jsonl", max_table_nesting=0)(_read_jsonl),
+        filesystem_resource
+        | dlt.transformer(name="read_parquet", max_table_nesting=0)(_read_parquet),
+        filesystem_resource
+        | dlt.transformer(name="read_csv_duckdb", max_table_nesting=0)(
+            _read_csv_duckdb
+        ),
     )
 
 
@@ -111,7 +117,9 @@ def filesystem(
         yield files_chunk
 
 
-read_csv = dlt.transformer(standalone=True)(_read_csv)
-read_jsonl = dlt.transformer(standalone=True)(_read_jsonl)
-read_parquet = dlt.transformer(standalone=True)(_read_parquet)
-read_csv_duckdb = dlt.transformer(standalone=True)(_read_csv_duckdb)
+read_csv = dlt.transformer(standalone=True, max_table_nesting=0)(_read_csv)
+read_jsonl = dlt.transformer(standalone=True, max_table_nesting=0)(_read_jsonl)
+read_parquet = dlt.transformer(standalone=True, max_table_nesting=0)(_read_parquet)
+read_csv_duckdb = dlt.transformer(standalone=True, max_table_nesting=0)(
+    _read_csv_duckdb
+)
