@@ -60,10 +60,10 @@ def readers(
     #     incremental=dlt.sources.incremental("modification_date"),
     # )
     return (
-        filesystem_resource | dlt.transformer(name="read_csv")(_read_csv),
-        filesystem_resource | dlt.transformer(name="read_jsonl")(_read_jsonl),
-        filesystem_resource | dlt.transformer(name="read_parquet")(_read_parquet),
-        filesystem_resource | dlt.transformer(name="read_csv_duckdb")(_read_csv_duckdb),
+        filesystem_resource | dlt.transformer(name="read_csv", max_table_nesting=0)(_read_csv) ,
+        filesystem_resource | dlt.transformer(name="read_jsonl", max_table_nesting=0)(_read_jsonl),
+        filesystem_resource | dlt.transformer(name="read_parquet", max_table_nesting=0)(_read_parquet),
+        filesystem_resource | dlt.transformer(name="read_csv_duckdb", max_table_nesting=0)(_read_csv_duckdb),
     )
 
 
