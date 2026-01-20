@@ -218,12 +218,34 @@ class CollectionLoader:
 
         cursor = self._limit(cursor, limit)
 
+        seen_columns = {}
+
         while docs_slice := list(islice(cursor, self.chunk_size)):
+            new_object_columns = {}
+
             res = map_nested_in_place(convert_mongo_objs, docs_slice)
-            if len(res) > 0 and "_id" in res[0] and isinstance(res[0]["_id"], dict):
+            if len(res) == 0:
+                continue
+
+            for doc in res:
+                for key, value in doc.items():
+                    if key in seen_columns:
+                        continue
+                    
+                    if key in new_object_columns:
+                        continue
+                    
+                    if isinstance(value, dict) or isinstance(value, list):
+                        new_object_columns[key] = {"data_type": "json"}
+                    
+                    seen_columns[key] = True
+
+            if len(new_object_columns) > 0:
                 yield dlt.mark.with_hints(
                     res,
-                    dlt.mark.make_hints(columns={"_id": {"data_type": "json"}}),
+                    dlt.mark.make_hints(
+                        columns=new_object_columns
+                    ),
                 )
             else:
                 yield res
