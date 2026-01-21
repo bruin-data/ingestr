@@ -288,6 +288,33 @@ async def _fetch_chunk_data_async_fast(
     return chunk_data
 
 
+def generate_date_ranges(
+    start_ts: int, end_ts: int
+) -> Iterable[Dict[str, int]]:
+    """Generate hourly date range dicts for parallel processing.
+
+    Args:
+        start_ts (int): Start timestamp (unix)
+        end_ts (int): End timestamp (unix)
+
+    Yields:
+        Dict[str, int]: Dictionary with 'start_ts' and 'end_ts' keys for each hour
+    """
+    current_ts = start_ts
+    while current_ts < end_ts:
+        current_date = datetime.utcfromtimestamp(current_ts)
+        next_hour = datetime(
+            current_date.year, current_date.month, current_date.day, current_date.hour
+        ) + timedelta(hours=1)
+        next_ts = min(int(next_hour.timestamp()), end_ts)
+        yield {"start_ts": current_ts, "end_ts": next_ts}
+        current_ts = next_ts
+
+
+# Alias for backwards compatibility
+generate_daily_date_ranges = generate_date_ranges
+
+
 def transform_date(date: Union[str, DateTime, int]) -> int:
     if isinstance(date, str):
         date = pendulum.from_format(date, "%Y-%m-%dT%H:%M:%SZ")
