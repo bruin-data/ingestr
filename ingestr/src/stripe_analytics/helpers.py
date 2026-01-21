@@ -288,9 +288,7 @@ async def _fetch_chunk_data_async_fast(
     return chunk_data
 
 
-def generate_date_ranges(
-    start_ts: int, end_ts: int
-) -> Iterable[Dict[str, int]]:
+def generate_date_ranges(start_ts: int, end_ts: int) -> Iterable[Dict[str, int]]:
     """Generate hourly date range dicts for parallel processing.
 
     Args:

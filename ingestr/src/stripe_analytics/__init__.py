@@ -123,12 +123,17 @@ def incremental_stripe_source(
     )
 
     for endpoint in endpoints:
+
         def date_range_resource(
             endpoint: str = endpoint,
         ) -> Generator[Dict[str, Any], None, None]:
             from dlt.common import pendulum
 
-            end_ts = transform_date(end_date) if end_date is not None else int(pendulum.now().timestamp())
+            end_ts = (
+                transform_date(end_date)
+                if end_date is not None
+                else int(pendulum.now().timestamp())
+            )
             for date_range in generate_daily_date_ranges(start_date_unix, end_ts):
                 date_range["endpoint"] = endpoint
                 yield date_range

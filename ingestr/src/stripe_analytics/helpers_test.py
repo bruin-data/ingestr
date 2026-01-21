@@ -16,8 +16,6 @@
 
 from datetime import datetime
 
-import pytest
-
 from .helpers import generate_date_ranges
 
 
