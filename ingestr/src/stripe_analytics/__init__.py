@@ -23,7 +23,7 @@ from pendulum import DateTime
 
 from .helpers import (
     async_parallel_pagination,
-    generate_daily_date_ranges,
+    generate_date_ranges,
     pagination,
     transform_date,
 )
@@ -126,20 +126,6 @@ def incremental_stripe_source(
 
         def date_range_resource(
             endpoint: str = endpoint,
-        ) -> Generator[Dict[str, Any], None, None]:
-            from dlt.common import pendulum
-
-            end_ts = (
-                transform_date(end_date)
-                if end_date is not None
-                else int(pendulum.now().timestamp())
-            )
-            for date_range in generate_daily_date_ranges(start_date_unix, end_ts):
-                date_range["endpoint"] = endpoint
-                yield date_range
-
-        def fetch_date_range(
-            date_range: Dict[str, int],
             created: Optional[Any] = dlt.sources.incremental(
                 "created",
                 initial_value=start_date_unix,
@@ -147,6 +133,18 @@ def incremental_stripe_source(
                 range_end="closed",
                 range_start="closed",
             ),
+        ) -> Generator[Dict[str, Any], None, None]:
+            from dlt.common import pendulum
+
+            start_ts = created.last_value if created.last_value is not None else start_date_unix
+            end_ts = created.end_value if created.end_value is not None else int(pendulum.now().timestamp())
+            for date_range in generate_date_ranges(start_ts, end_ts):
+                date_range["endpoint"] = endpoint
+                date_range["created"] = date_range["end_ts"]
+                yield date_range
+
+        def fetch_date_range(
+            date_range: Dict[str, int],
         ) -> Generator[Dict[Any, Any], Any, None]:
             """Transformer that fetches data for a given date range."""
             yield from pagination(

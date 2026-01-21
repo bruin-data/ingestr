@@ -309,10 +309,6 @@ def generate_date_ranges(start_ts: int, end_ts: int) -> Iterable[Dict[str, int]]
         current_ts = next_ts
 
 
-# Alias for backwards compatibility
-generate_daily_date_ranges = generate_date_ranges
-
-
 def transform_date(date: Union[str, DateTime, int]) -> int:
     if isinstance(date, str):
         date = pendulum.from_format(date, "%Y-%m-%dT%H:%M:%SZ")
