@@ -136,8 +136,16 @@ def incremental_stripe_source(
         ) -> Generator[Dict[str, Any], None, None]:
             from dlt.common import pendulum
 
-            start_ts = created.last_value if created.last_value is not None else start_date_unix
-            end_ts = created.end_value if created.end_value is not None else int(pendulum.now().timestamp())
+            start_ts = (
+                created.last_value
+                if created.last_value is not None
+                else start_date_unix
+            )
+            end_ts = (
+                created.end_value
+                if created.end_value is not None
+                else int(pendulum.now().timestamp())
+            )
             for date_range in generate_date_ranges(start_ts, end_ts):
                 date_range["endpoint"] = endpoint
                 date_range["created"] = date_range["end_ts"]
