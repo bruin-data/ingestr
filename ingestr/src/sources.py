@@ -1212,13 +1212,20 @@ class FacebookAdsSource:
                 "account_id is required. Provide it in the URI (?account_id=xxx) or in the table name (campaigns:xxx)"
             )
 
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+        if interval_start is not None and hasattr(interval_start, "strftime"):
+            interval_start = interval_start.strftime("%Y-%m-%d")
+        if interval_end is not None and hasattr(interval_end, "strftime"):
+            interval_end = interval_end.strftime("%Y-%m-%d")
+
         return facebook_ads_source(
             access_token=access_token[0],
             account_id=final_account_ids
             if len(final_account_ids) > 1
             else final_account_ids[0],
-            interval_start=kwargs.get("interval_start"),
-            interval_end=kwargs.get("interval_end"),
+            interval_start=interval_start,
+            interval_end=interval_end,
         ).with_resources(endpoint)
 
 
