@@ -163,12 +163,12 @@ def facebook_ads_source(
         for acc_id in account_ids
     ]
 
-    def filter_by_interval(records, time_field):
-        if not (interval_start and interval_end):
+    def filter_by_end_date(records, time_field):
+        if not interval_end:
             return records
         return [
             r for r in records
-            if r.get(time_field) and interval_start <= r[time_field][:10] <= interval_end
+            if r.get(time_field) and r[time_field][:10] <= interval_end
         ]
 
     @dlt.resource(primary_key="id", write_disposition="merge")
@@ -176,12 +176,12 @@ def facebook_ads_source(
         fields: Sequence[str] = DEFAULT_CAMPAIGN_FIELDS,
         states: Sequence[str] = None,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updated_time", initial_value=None
+            "updated_time", initial_value=interval_start
         ),
     ) -> Iterator[TDataItems]:
         for account in accounts:
             for chunk in get_data_chunked(account.get_campaigns, fields, states, chunk_size):
-                filtered = filter_by_interval(chunk, "updated_time")
+                filtered = filter_by_end_date(chunk, "updated_time")
                 if filtered:
                     yield filtered
 
@@ -195,7 +195,7 @@ def facebook_ads_source(
             updated_since = int(pendulum.parse(interval_start).timestamp())
         for account in accounts:
             for chunk in get_data_chunked(account.get_ads, fields, states, chunk_size, updated_since=updated_since):
-                filtered = filter_by_interval(chunk, "updated_time")
+                filtered = filter_by_end_date(chunk, "updated_time")
                 if filtered:
                     yield filtered
 
@@ -209,7 +209,7 @@ def facebook_ads_source(
             updated_since = int(pendulum.parse(interval_start).timestamp())
         for account in accounts:
             for chunk in get_data_chunked(account.get_ad_sets, fields, states, chunk_size, updated_since=updated_since):
-                filtered = filter_by_interval(chunk, "updated_time")
+                filtered = filter_by_end_date(chunk, "updated_time")
                 if filtered:
                     yield filtered
 
@@ -227,11 +227,11 @@ def facebook_ads_source(
         for item in items:
             ad = Ad(item["id"])
             for chunk in get_data_chunked(ad.get_leads, fields, states, chunk_size):
-                filtered = filter_by_interval(chunk, "created_time")
+                filtered = filter_by_end_date(chunk, "created_time")
                 if filtered:
                     yield filtered
 
-    @dlt.resource(primary_key="id", write_disposition="merge")
+    @dlt.resource(primary_key="id", write_disposition="replace")
     def ad_creatives(
         fields: Sequence[str] = DEFAULT_ADCREATIVE_FIELDS,
         states: Sequence[str] = None,
