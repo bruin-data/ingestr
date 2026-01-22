@@ -167,7 +167,8 @@ def facebook_ads_source(
         if not interval_end:
             return records
         return [
-            r for r in records
+            r
+            for r in records
             if r.get(time_field) and r[time_field][:10] <= interval_end
         ]
 
@@ -180,7 +181,9 @@ def facebook_ads_source(
         ),
     ) -> Iterator[TDataItems]:
         for account in accounts:
-            for chunk in get_data_chunked(account.get_campaigns, fields, states, chunk_size):
+            for chunk in get_data_chunked(
+                account.get_campaigns, fields, states, chunk_size
+            ):
                 filtered = filter_by_end_date(chunk, "updated_time")
                 if filtered:
                     yield filtered
@@ -194,7 +197,9 @@ def facebook_ads_source(
         if interval_start:
             updated_since = int(pendulum.parse(interval_start).timestamp())
         for account in accounts:
-            for chunk in get_data_chunked(account.get_ads, fields, states, chunk_size, updated_since=updated_since):
+            for chunk in get_data_chunked(
+                account.get_ads, fields, states, chunk_size, updated_since=updated_since
+            ):
                 filtered = filter_by_end_date(chunk, "updated_time")
                 if filtered:
                     yield filtered
@@ -208,7 +213,13 @@ def facebook_ads_source(
         if interval_start:
             updated_since = int(pendulum.parse(interval_start).timestamp())
         for account in accounts:
-            for chunk in get_data_chunked(account.get_ad_sets, fields, states, chunk_size, updated_since=updated_since):
+            for chunk in get_data_chunked(
+                account.get_ad_sets,
+                fields,
+                states,
+                chunk_size,
+                updated_since=updated_since,
+            ):
                 filtered = filter_by_end_date(chunk, "updated_time")
                 if filtered:
                     yield filtered
@@ -237,7 +248,9 @@ def facebook_ads_source(
         states: Sequence[str] = None,
     ) -> Iterator[TDataItems]:
         for account in accounts:
-            for chunk in get_data_chunked(account.get_ad_creatives, fields, states, chunk_size):
+            for chunk in get_data_chunked(
+                account.get_ad_creatives, fields, states, chunk_size
+            ):
                 yield chunk
 
     return campaigns, ads, ad_sets, ad_creatives, ads | leads
