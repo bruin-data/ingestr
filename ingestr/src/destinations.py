@@ -162,8 +162,9 @@ class MotherduckDestination(GenericSqlDestination):
         creds = {
             "password": token,
         }
-        if parsed.path.lstrip("/"):
-            creds["database"] = parsed.path.lstrip("/")
+        database = parsed.path.lstrip("/") or parsed.netloc
+        if database:
+            creds["database"] = database
 
         return dlt.destinations.motherduck(MotherDuckCredentials(creds), **kwargs)
 

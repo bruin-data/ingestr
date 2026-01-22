@@ -78,10 +78,8 @@ class SqlSource:
             parsed_uri = urlparse(uri)
             query_params = parse_qs(parsed_uri.query)
             # Convert md:// URI to duckdb:///md: format
-            if parsed_uri.path:
-                db_path = parsed_uri.path
-            else:
-                db_path = ""
+            db_path = parsed_uri.path or parsed_uri.netloc
+            db_path = db_path.lstrip("/")
 
             token = query_params.get("token", [""])[0]
             if not token:
