@@ -129,6 +129,8 @@ def facebook_ads_source(
     chunk_size: int = 50,
     request_timeout: float = 300.0,
     app_api_version: str = "v20.0",
+    interval_start=None,
+    interval_end=None,
 ) -> Sequence[DltResource]:
     """Returns a list of resources to load campaigns, ad sets, ads, creatives and ad leads data from Facebook Marketing API.
 
@@ -149,49 +151,107 @@ def facebook_ads_source(
     Returns:
         Sequence[DltResource]: campaigns, ads, ad_sets, ad_creatives, leads
     """
+    # Convert interval dates to strings if they are datetime objects
+    if interval_start is not None and hasattr(interval_start, "strftime"):
+        interval_start = interval_start.strftime("%Y-%m-%d")
+    if interval_end is not None and hasattr(interval_end, "strftime"):
+        interval_end = interval_end.strftime("%Y-%m-%d")
+
     account_ids = account_id if isinstance(account_id, list) else [account_id]
     accounts = [
         get_ads_account(acc_id, access_token, request_timeout, app_api_version)
         for acc_id in account_ids
     ]
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    def filter_by_end_date(records, time_field):
+        if not interval_end:
+            return records
+        return [
+            r
+            for r in records
+            if r.get(time_field) and r[time_field][:10] <= interval_end
+        ]
+
+    @dlt.resource(primary_key="id", write_disposition="merge")
     def campaigns(
-        fields: Sequence[str] = DEFAULT_CAMPAIGN_FIELDS, states: Sequence[str] = None
+        fields: Sequence[str] = DEFAULT_CAMPAIGN_FIELDS,
+        states: Sequence[str] = None,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updated_time", initial_value=interval_start
+        ),
     ) -> Iterator[TDataItems]:
         for account in accounts:
-            yield get_data_chunked(account.get_campaigns, fields, states, chunk_size)
+            for chunk in get_data_chunked(
+                account.get_campaigns, fields, states, chunk_size
+            ):
+                filtered = filter_by_end_date(chunk, "updated_time")
+                if filtered:
+                    yield filtered
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    @dlt.resource(primary_key="id", write_disposition="merge")
     def ads(
-        fields: Sequence[str] = DEFAULT_AD_FIELDS, states: Sequence[str] = None
+        fields: Sequence[str] = DEFAULT_AD_FIELDS,
+        states: Sequence[str] = None,
     ) -> Iterator[TDataItems]:
+        updated_since = None
+        if interval_start:
+            updated_since = int(pendulum.parse(interval_start).timestamp())
         for account in accounts:
-            yield get_data_chunked(account.get_ads, fields, states, chunk_size)
+            for chunk in get_data_chunked(
+                account.get_ads, fields, states, chunk_size, updated_since=updated_since
+            ):
+                filtered = filter_by_end_date(chunk, "updated_time")
+                if filtered:
+                    yield filtered
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    @dlt.resource(primary_key="id", write_disposition="merge")
     def ad_sets(
-        fields: Sequence[str] = DEFAULT_ADSET_FIELDS, states: Sequence[str] = None
+        fields: Sequence[str] = DEFAULT_ADSET_FIELDS,
+        states: Sequence[str] = None,
     ) -> Iterator[TDataItems]:
+        updated_since = None
+        if interval_start:
+            updated_since = int(pendulum.parse(interval_start).timestamp())
         for account in accounts:
-            yield get_data_chunked(account.get_ad_sets, fields, states, chunk_size)
+            for chunk in get_data_chunked(
+                account.get_ad_sets,
+                fields,
+                states,
+                chunk_size,
+                updated_since=updated_since,
+            ):
+                filtered = filter_by_end_date(chunk, "updated_time")
+                if filtered:
+                    yield filtered
 
-    @dlt.transformer(primary_key="id", write_disposition="replace", selected=True)
+    @dlt.transformer(
+        primary_key=["id", "created_time"], write_disposition="merge", selected=True
+    )
     def leads(
         items: TDataItems,
         fields: Sequence[str] = DEFAULT_LEAD_FIELDS,
         states: Sequence[str] = None,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "created_time", initial_value=None
+        ),
     ) -> Iterator[TDataItems]:
         for item in items:
             ad = Ad(item["id"])
-            yield get_data_chunked(ad.get_leads, fields, states, chunk_size)
+            for chunk in get_data_chunked(ad.get_leads, fields, states, chunk_size):
+                filtered = filter_by_end_date(chunk, "created_time")
+                if filtered:
+                    yield filtered
 
     @dlt.resource(primary_key="id", write_disposition="replace")
     def ad_creatives(
-        fields: Sequence[str] = DEFAULT_ADCREATIVE_FIELDS, states: Sequence[str] = None
+        fields: Sequence[str] = DEFAULT_ADCREATIVE_FIELDS,
+        states: Sequence[str] = None,
     ) -> Iterator[TDataItems]:
         for account in accounts:
-            yield get_data_chunked(account.get_ad_creatives, fields, states, chunk_size)
+            for chunk in get_data_chunked(
+                account.get_ad_creatives, fields, states, chunk_size
+            ):
+                yield chunk
 
     return campaigns, ads, ad_sets, ad_creatives, ads | leads
 

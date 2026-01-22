@@ -1217,6 +1217,8 @@ class FacebookAdsSource:
             account_id=final_account_ids
             if len(final_account_ids) > 1
             else final_account_ids[0],
+            interval_start=kwargs.get("interval_start"),
+            interval_end=kwargs.get("interval_end"),
         ).with_resources(endpoint)
 
 

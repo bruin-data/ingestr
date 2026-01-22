@@ -55,12 +55,18 @@ def process_report_item(item: AbstractObject) -> DictStrAny:
 
 
 def get_data_chunked(
-    method: TFbMethod, fields: Sequence[str], states: Sequence[str], chunk_size: int
+    method: TFbMethod,
+    fields: Sequence[str],
+    states: Sequence[str],
+    chunk_size: int,
+    updated_since: int = None,
 ) -> Iterator[TDataItems]:
     # add pagination and chunk into lists
     params: DictStrAny = {"limit": chunk_size}
     if states:
         params.update({"effective_status": states})
+    if updated_since:
+        params.update({"updated_since": updated_since})
     it: map[DictStrAny] = map(
         lambda c: c.export_all_data(), method(fields=fields, params=params)
     )
@@ -164,9 +170,10 @@ def execute_job(
     return job
 
 
-def get_ads_account(
-    account_id: str, access_token: str, request_timeout: float, app_api_version: str
-) -> AdAccount:
+def _init_facebook_api(
+    access_token: str, request_timeout: float, app_api_version: str
+) -> None:
+    """Initialize Facebook API with retry session."""
     notify_on_token_expiration()
 
     def retry_on_limit(response: requests.Response, exception: BaseException) -> bool:
@@ -204,25 +211,28 @@ def get_ads_account(
         request_backoff_factor=2,
     ).session
     retry_session.params.update({"access_token": access_token})  # type: ignore
-    # patch dlt requests session with retries
     API = FacebookAdsApi.init(
-        account_id="act_" + account_id,
         access_token=access_token,
         api_version=app_api_version,
     )
     API._session.requests = retry_session
+
+
+def get_ads_account(
+    account_id: str, access_token: str, request_timeout: float, app_api_version: str
+) -> AdAccount:
+    """Get a specific ad account by ID."""
+    _init_facebook_api(access_token, request_timeout, app_api_version)
+    return AdAccount(f"act_{account_id}")
+
+
+def get_all_ad_accounts(
+    access_token: str, request_timeout: float, app_api_version: str
+) -> list[AdAccount]:
+    """Get all ad accounts for the authenticated user."""
+    _init_facebook_api(access_token, request_timeout, app_api_version)
     user = User(fbid="me")
-
-    accounts = user.get_ad_accounts()
-    account: AdAccount = None
-    for acc in accounts:
-        if acc["account_id"] == account_id:
-            account = acc
-
-    if not account:
-        raise ValueError("Couldn't find account with id {}".format(account_id))
-
-    return account
+    return list(user.get_ad_accounts())
 
 
 @with_config(sections=("sources", "facebook_ads"))
