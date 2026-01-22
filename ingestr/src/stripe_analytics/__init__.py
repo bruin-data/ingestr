@@ -23,6 +23,7 @@ from pendulum import DateTime
 
 from .helpers import (
     async_parallel_pagination,
+    generate_date_ranges,
     pagination,
     transform_date,
 )
@@ -121,24 +122,62 @@ def incremental_stripe_source(
         transform_date(initial_start_date) if initial_start_date is not None else -1
     )
 
-    def incremental_resource(
-        endpoint: str,
-        created: Optional[Any] = dlt.sources.incremental(
-            "created",
-            initial_value=start_date_unix,
-            end_value=transform_date(end_date) if end_date is not None else None,
-            range_end="closed",
-            range_start="closed",
-        ),
-    ) -> Generator[Dict[Any, Any], Any, None]:
-        yield from pagination(
-            endpoint, start_date=created.last_value, end_date=created.end_value
-        )
-
     for endpoint in endpoints:
-        yield dlt.resource(
-            incremental_resource,
-            name=endpoint,
-            write_disposition="merge",
-            primary_key="id",
-        )(endpoint)
+
+        def date_range_resource(
+            endpoint: str = endpoint,
+            created: Optional[Any] = dlt.sources.incremental(
+                "created",
+                initial_value=start_date_unix,
+                end_value=transform_date(end_date) if end_date is not None else None,
+                range_end="closed",
+                range_start="closed",
+            ),
+        ) -> Generator[Dict[str, Any], None, None]:
+            from dlt.common import pendulum
+
+            # Use 2010-01-01 as default start (Stripe founding year) to avoid
+            # generating hundreds of thousands of hourly ranges from 1969
+            default_start_ts = int(pendulum.datetime(2010, 1, 1).timestamp())
+            start_ts = (
+                created.last_value
+                if created.last_value is not None
+                else start_date_unix
+            )
+            if start_ts < 0:
+                start_ts = default_start_ts
+            end_ts = (
+                created.end_value
+                if created.end_value is not None
+                else int(pendulum.now().timestamp())
+            )
+            for date_range in generate_date_ranges(start_ts, end_ts):
+                date_range["endpoint"] = endpoint
+                date_range["created"] = date_range["end_ts"]
+                yield date_range
+
+        def fetch_date_range(
+            date_range: Dict[str, int],
+        ) -> Generator[Dict[Any, Any], Any, None]:
+            """Transformer that fetches data for a given date range."""
+            yield from pagination(
+                date_range["endpoint"],
+                start_date=date_range["start_ts"],
+                end_date=date_range["end_ts"],
+            )
+
+        date_ranges = dlt.resource(
+            date_range_resource,
+            name=f"{endpoint}_date_ranges",
+        )()
+
+        yield (
+            date_ranges
+            | dlt.transformer(
+                fetch_date_range,
+                name=endpoint,
+                write_disposition="merge",
+                primary_key="id",
+                parallelized=True,
+            )
+        )
