@@ -55,12 +55,19 @@ def process_report_item(item: AbstractObject) -> DictStrAny:
 
 
 def get_data_chunked(
-    method: TFbMethod, fields: Sequence[str], states: Sequence[str], chunk_size: int
+    method: TFbMethod,
+    fields: Sequence[str],
+    states: Sequence[str],
+    chunk_size: int,
+    interval_start: str = None,
+    interval_end: str = None,
 ) -> Iterator[TDataItems]:
     # add pagination and chunk into lists
     params: DictStrAny = {"limit": chunk_size}
     if states:
         params.update({"effective_status": states})
+    if interval_start and interval_end:
+        params.update({"time_range": {"since": interval_start, "until": interval_end}})
     it: map[DictStrAny] = map(
         lambda c: c.export_all_data(), method(fields=fields, params=params)
     )

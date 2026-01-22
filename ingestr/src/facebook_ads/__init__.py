@@ -155,40 +155,70 @@ def facebook_ads_source(
         for acc_id in account_ids
     ]
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    @dlt.resource(primary_key="id", write_disposition="merge")
     def campaigns(
-        fields: Sequence[str] = DEFAULT_CAMPAIGN_FIELDS, states: Sequence[str] = None
+        fields: Sequence[str] = DEFAULT_CAMPAIGN_FIELDS,
+        states: Sequence[str] = None,
+        interval_start: str = None,
+        interval_end: str = None,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updated_time", initial_value=None
+        ),
     ) -> Iterator[TDataItems]:
         for account in accounts:
-            yield get_data_chunked(account.get_campaigns, fields, states, chunk_size)
+            yield get_data_chunked(
+                account.get_campaigns,
+                fields,
+                states,
+                chunk_size,
+                interval_start,
+                interval_end,
+            )
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    @dlt.resource(primary_key="id", write_disposition="merge")
     def ads(
-        fields: Sequence[str] = DEFAULT_AD_FIELDS, states: Sequence[str] = None
+        fields: Sequence[str] = DEFAULT_AD_FIELDS,
+        states: Sequence[str] = None,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updated_time", initial_value=None
+        ),
     ) -> Iterator[TDataItems]:
         for account in accounts:
             yield get_data_chunked(account.get_ads, fields, states, chunk_size)
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    @dlt.resource(primary_key="id", write_disposition="merge")
     def ad_sets(
-        fields: Sequence[str] = DEFAULT_ADSET_FIELDS, states: Sequence[str] = None
+        fields: Sequence[str] = DEFAULT_ADSET_FIELDS,
+        states: Sequence[str] = None,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updated_time", initial_value=None
+        ),
     ) -> Iterator[TDataItems]:
         for account in accounts:
             yield get_data_chunked(account.get_ad_sets, fields, states, chunk_size)
 
-    @dlt.transformer(primary_key="id", write_disposition="replace", selected=True)
+    @dlt.transformer(
+        primary_key=["id", "created_time"], write_disposition="merge", selected=True
+    )
     def leads(
         items: TDataItems,
         fields: Sequence[str] = DEFAULT_LEAD_FIELDS,
         states: Sequence[str] = None,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "created_time", initial_value=None
+        ),
     ) -> Iterator[TDataItems]:
         for item in items:
             ad = Ad(item["id"])
             yield get_data_chunked(ad.get_leads, fields, states, chunk_size)
 
-    @dlt.resource(primary_key="id", write_disposition="replace")
+    @dlt.resource(primary_key="id", write_disposition="merge")
     def ad_creatives(
-        fields: Sequence[str] = DEFAULT_ADCREATIVE_FIELDS, states: Sequence[str] = None
+        fields: Sequence[str] = DEFAULT_ADCREATIVE_FIELDS,
+        states: Sequence[str] = None,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "updated_time", initial_value=None
+        ),
     ) -> Iterator[TDataItems]:
         for account in accounts:
             yield get_data_chunked(account.get_ad_creatives, fields, states, chunk_size)
