@@ -136,11 +136,16 @@ def incremental_stripe_source(
         ) -> Generator[Dict[str, Any], None, None]:
             from dlt.common import pendulum
 
+            # Use 2010-01-01 as default start (Stripe founding year) to avoid
+            # generating hundreds of thousands of hourly ranges from 1969
+            default_start_ts = int(pendulum.datetime(2010, 1, 1).timestamp())
             start_ts = (
                 created.last_value
                 if created.last_value is not None
                 else start_date_unix
             )
+            if start_ts < 0:
+                start_ts = default_start_ts
             end_ts = (
                 created.end_value
                 if created.end_value is not None
