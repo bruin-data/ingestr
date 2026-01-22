@@ -189,9 +189,6 @@ def facebook_ads_source(
     def ads(
         fields: Sequence[str] = DEFAULT_AD_FIELDS,
         states: Sequence[str] = None,
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updated_time", initial_value=None
-        ),
     ) -> Iterator[TDataItems]:
         updated_since = None
         if interval_start:
@@ -206,12 +203,12 @@ def facebook_ads_source(
     def ad_sets(
         fields: Sequence[str] = DEFAULT_ADSET_FIELDS,
         states: Sequence[str] = None,
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updated_time", initial_value=None
-        ),
     ) -> Iterator[TDataItems]:
+        updated_since = None
+        if interval_start:
+            updated_since = int(pendulum.parse(interval_start).timestamp())
         for account in accounts:
-            for chunk in get_data_chunked(account.get_ad_sets, fields, states, chunk_size):
+            for chunk in get_data_chunked(account.get_ad_sets, fields, states, chunk_size, updated_since=updated_since):
                 filtered = filter_by_interval(chunk, "updated_time")
                 if filtered:
                     yield filtered
@@ -238,15 +235,10 @@ def facebook_ads_source(
     def ad_creatives(
         fields: Sequence[str] = DEFAULT_ADCREATIVE_FIELDS,
         states: Sequence[str] = None,
-        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "updated_time", initial_value=None
-        ),
     ) -> Iterator[TDataItems]:
         for account in accounts:
             for chunk in get_data_chunked(account.get_ad_creatives, fields, states, chunk_size):
-                filtered = filter_by_interval(chunk, "updated_time")
-                if filtered:
-                    yield filtered
+                yield chunk
 
     return campaigns, ads, ad_sets, ad_creatives, ads | leads
 
