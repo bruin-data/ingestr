@@ -225,9 +225,14 @@ class JiraClient:
         total_returned = 0
         consecutive_empty_pages = 0
         max_empty_pages = 3
+        next_page_token = None
 
         while True:
             try:
+                if next_page_token:
+                    params["nextPageToken"] = next_page_token
+                elif "nextPageToken" in params:
+                    del params["nextPageToken"]
                 response = self._make_request(endpoint, params)
 
                 # Handle different response structures
@@ -235,10 +240,12 @@ class JiraClient:
                     items = response["values"]
                     total = response.get("total", len(items))
                     is_last = response.get("isLast", False)
+                    next_page_token = response.get("nextPageToken")
                 elif "issues" in response:
                     items = response["issues"]
                     total = response.get("total", len(items))
-                    is_last = len(items) < page_size
+                    is_last = response.get("isLast", len(items) < page_size)
+                    next_page_token = response.get("nextPageToken")
                 elif isinstance(response, list):
                     # Some endpoints return arrays directly
                     items = response
@@ -267,15 +274,18 @@ class JiraClient:
                     total_returned += 1
 
                 # Check if we've reached the end
-                if is_last or len(items) < page_size:
+                if is_last:
                     break
 
-                # Check if we've got all available items
-                if total and total_returned >= total:
+                # Use nextPageToken if available, otherwise fall back to startAt
+                if next_page_token:
+                    continue
+                elif len(items) < page_size:
                     break
-
-                # Move to next page
-                params["startAt"] += page_size
+                elif total and total_returned >= total:
+                    break
+                else:
+                    params["startAt"] += page_size
 
                 # Safety check to prevent infinite loops
                 if params["startAt"] > 100000:  # Arbitrary large number
@@ -433,6 +443,53 @@ class JiraClient:
         if isinstance(response, list):
             for event in response:
                 yield event
+
+    def get_changelogs_bulk(
+        self,
+        issue_ids_or_keys: list[str],
+        batch_size: int = 1000,
+    ) -> Iterator[Dict[str, Any]]:
+        url = urljoin(self.api_url + "/", "changelog/bulkfetch")
+
+        for i in range(0, len(issue_ids_or_keys), batch_size):
+            batch = issue_ids_or_keys[i : i + batch_size]
+            next_page_token = None
+
+            while True:
+                body: Dict[str, Any] = {
+                    "issueIdsOrKeys": batch,
+                }
+
+                if next_page_token:
+                    body["nextPageToken"] = next_page_token
+
+                response = requests.post(
+                    url,
+                    headers=self.headers,
+                    json=body,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                for issue_changelog in data.get("issueChangeLogs", []):
+                    issue_id = issue_changelog.get("issueId")
+                    for history in issue_changelog.get("changeHistories", []):
+                        history["issue_id"] = issue_id
+                        if history.get("created"):
+                            from datetime import datetime
+
+                            history["created"] = datetime.fromtimestamp(
+                                history["created"] / 1000
+                            ).isoformat()
+                        for item in history.get("items", []):
+                            history["from_string"] = item.pop("fromString", None)
+                            history["to_string"] = item.pop("toString", None)
+                        yield history
+
+                next_page_token = data.get("nextPageToken")
+                if not next_page_token:
+                    break
 
 
 def get_client(

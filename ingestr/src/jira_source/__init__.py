@@ -52,6 +52,7 @@ def jira_source() -> Any:
         project_versions,
         project_components,
         events,
+        issue_changelogs,
     ]
 
 
@@ -352,3 +353,25 @@ def events(
     """
     client = get_client(base_url, email, api_token)
     yield from client.get_events()
+
+
+@dlt.resource(write_disposition="replace", max_table_nesting=0)
+def issue_changelogs(
+    base_url: str = dlt.secrets.value,
+    email: str = dlt.secrets.value,
+    api_token: str = dlt.secrets.value,
+) -> Iterable[TDataItem]:
+    client = get_client(base_url, email, api_token)
+
+    issue_keys = []
+    for project in client.get_projects():
+        project_key = project.get("key")
+        if project_key:
+            jql = f"project = {project_key} order by updated DESC"
+            for issue in client.search_issues(jql=jql, fields="key"):
+                issue_key = issue.get("key")
+                if issue_key:
+                    issue_keys.append(issue_key)
+
+    if issue_keys:
+        yield from client.get_changelogs_bulk(issue_keys)

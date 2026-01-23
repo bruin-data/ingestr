@@ -1951,6 +1951,7 @@ class JiraSource:
         "project_versions",
         "project_components",
         "events",
+        "issue_changelogs",
     ]
 
     def handles_incrementality(self) -> bool:
