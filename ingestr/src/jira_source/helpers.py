@@ -463,6 +463,11 @@ class JiraClient:
                 issue_id = issue_changelog.get("issueId")
                 for history in issue_changelog.get("changeHistories", []):
                     history["issue_id"] = issue_id
+                    if history.get("created"):
+                        from datetime import datetime
+                        history["created"] = datetime.fromtimestamp(
+                            history["created"] / 1000
+                        ).isoformat()
                     for item in history.get("items", []):
                         history["from_string"] = item.pop("fromString", None)
                         history["to_string"] = item.pop("toString", None)
