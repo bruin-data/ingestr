@@ -463,6 +463,7 @@ class JiraClient:
                     history["issue_id"] = issue_id
                     if history.get("created"):
                         from datetime import datetime
+
                         history["created"] = datetime.fromtimestamp(
                             history["created"] / 1000
                         ).isoformat()

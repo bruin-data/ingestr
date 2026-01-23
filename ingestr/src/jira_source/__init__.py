@@ -369,7 +369,9 @@ def issue_changelogs(
         if project_key:
             jql = f"project = {project_key} order by updated DESC"
             for issue in client.search_issues(jql=jql, fields="key"):
-                issue_keys.append(issue.get("key"))
+                issue_key = issue.get("key")
+                if issue_key:
+                    issue_keys.append(issue_key)
 
     if issue_keys:
         yield from client.get_changelogs_bulk(issue_keys)
