@@ -443,10 +443,8 @@ class JiraClient:
         while True:
             body: Dict[str, Any] = {
                 "issueIdsOrKeys": issue_ids_or_keys,
-                "maxResults": 100,
             }
-            if field_ids:
-                body["fieldIds"] = field_ids
+
             if next_page_token:
                 body["nextPageToken"] = next_page_token
 
