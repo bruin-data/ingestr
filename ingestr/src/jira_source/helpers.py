@@ -231,6 +231,8 @@ class JiraClient:
             try:
                 if next_page_token:
                     params["nextPageToken"] = next_page_token
+                elif "nextPageToken" in params:
+                    del params["nextPageToken"]
                 response = self._make_request(endpoint, params)
 
                 # Handle different response structures
