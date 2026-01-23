@@ -225,9 +225,12 @@ class JiraClient:
         total_returned = 0
         consecutive_empty_pages = 0
         max_empty_pages = 3
+        next_page_token = None
 
         while True:
             try:
+                if next_page_token:
+                    params["nextPageToken"] = next_page_token
                 response = self._make_request(endpoint, params)
 
                 # Handle different response structures
@@ -235,10 +238,12 @@ class JiraClient:
                     items = response["values"]
                     total = response.get("total", len(items))
                     is_last = response.get("isLast", False)
+                    next_page_token = response.get("nextPageToken")
                 elif "issues" in response:
                     items = response["issues"]
                     total = response.get("total", len(items))
-                    is_last = len(items) < page_size
+                    is_last = response.get("isLast", len(items) < page_size)
+                    next_page_token = response.get("nextPageToken")
                 elif isinstance(response, list):
                     # Some endpoints return arrays directly
                     items = response
@@ -267,15 +272,18 @@ class JiraClient:
                     total_returned += 1
 
                 # Check if we've reached the end
-                if is_last or len(items) < page_size:
+                if is_last:
                     break
 
-                # Check if we've got all available items
-                if total and total_returned >= total:
+                # Use nextPageToken if available, otherwise fall back to startAt
+                if next_page_token:
+                    continue
+                elif len(items) < page_size:
                     break
-
-                # Move to next page
-                params["startAt"] += page_size
+                elif total and total_returned >= total:
+                    break
+                else:
+                    params["startAt"] += page_size
 
                 # Safety check to prevent infinite loops
                 if params["startAt"] > 100000:  # Arbitrary large number
