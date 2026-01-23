@@ -434,6 +434,44 @@ class JiraClient:
             for event in response:
                 yield event
 
+    def get_changelogs_bulk(
+        self, issue_ids_or_keys: list[str], field_ids: Optional[list[str]] = None
+    ) -> Iterator[Dict[str, Any]]:
+        url = urljoin(self.base_url + "/", "rest/api/2/changelog/bulkfetch")
+        next_page_token = None
+
+        while True:
+            body: Dict[str, Any] = {
+                "issueIdsOrKeys": issue_ids_or_keys,
+                "maxResults": 100,
+            }
+            if field_ids:
+                body["fieldIds"] = field_ids
+            if next_page_token:
+                body["nextPageToken"] = next_page_token
+
+            response = requests.post(
+                url,
+                headers=self.headers,
+                json=body,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            for issue_changelog in data.get("issueChangeLogs", []):
+                issue_id = issue_changelog.get("issueId")
+                for history in issue_changelog.get("changeHistories", []):
+                    history["issue_id"] = issue_id
+                    for item in history.get("items", []):
+                        history["from_string"] = item.pop("fromString", None)
+                        history["to_string"] = item.pop("toString", None)
+                    yield history
+
+            next_page_token = data.get("nextPageToken")
+            if not next_page_token:
+                break
+
 
 def get_client(
     base_url: str, email: str, api_token: str, timeout: int = REQUEST_TIMEOUT
