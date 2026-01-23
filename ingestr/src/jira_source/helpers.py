@@ -437,7 +437,7 @@ class JiraClient:
     def get_changelogs_bulk(
         self, issue_ids_or_keys: list[str], field_ids: Optional[list[str]] = None
     ) -> Iterator[Dict[str, Any]]:
-        url = urljoin(self.base_url + "/", "rest/api/2/changelog/bulkfetch")
+        url = urljoin(self.api_url + "/", "changelog/bulkfetch")
         next_page_token = None
 
         while True:

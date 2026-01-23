@@ -50,6 +50,7 @@ Jira source allows ingesting the following tables:
 | `resolutions` | id | - | replace | Fetches all issue resolutions from your Jira instance. |
 | `project_versions` | id | - | replace | Fetches versions for each project. |
 | `project_components` | id | - | replace | Fetches components for each project. |
+| `issue_changelogs` | id | - | replace | Fetches changelog entries for all issues across all projects. |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
