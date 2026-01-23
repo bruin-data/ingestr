@@ -435,46 +435,51 @@ class JiraClient:
                 yield event
 
     def get_changelogs_bulk(
-        self, issue_ids_or_keys: list[str], field_ids: Optional[list[str]] = None
+        self,
+        issue_ids_or_keys: list[str],
+        batch_size: int = 1000,
     ) -> Iterator[Dict[str, Any]]:
         url = urljoin(self.api_url + "/", "changelog/bulkfetch")
-        next_page_token = None
 
-        while True:
-            body: Dict[str, Any] = {
-                "issueIdsOrKeys": issue_ids_or_keys,
-            }
+        for i in range(0, len(issue_ids_or_keys), batch_size):
+            batch = issue_ids_or_keys[i : i + batch_size]
+            next_page_token = None
 
-            if next_page_token:
-                body["nextPageToken"] = next_page_token
+            while True:
+                body: Dict[str, Any] = {
+                    "issueIdsOrKeys": batch,
+                }
 
-            response = requests.post(
-                url,
-                headers=self.headers,
-                json=body,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
+                if next_page_token:
+                    body["nextPageToken"] = next_page_token
 
-            for issue_changelog in data.get("issueChangeLogs", []):
-                issue_id = issue_changelog.get("issueId")
-                for history in issue_changelog.get("changeHistories", []):
-                    history["issue_id"] = issue_id
-                    if history.get("created"):
-                        from datetime import datetime
+                response = requests.post(
+                    url,
+                    headers=self.headers,
+                    json=body,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                data = response.json()
 
-                        history["created"] = datetime.fromtimestamp(
-                            history["created"] / 1000
-                        ).isoformat()
-                    for item in history.get("items", []):
-                        history["from_string"] = item.pop("fromString", None)
-                        history["to_string"] = item.pop("toString", None)
-                    yield history
+                for issue_changelog in data.get("issueChangeLogs", []):
+                    issue_id = issue_changelog.get("issueId")
+                    for history in issue_changelog.get("changeHistories", []):
+                        history["issue_id"] = issue_id
+                        if history.get("created"):
+                            from datetime import datetime
 
-            next_page_token = data.get("nextPageToken")
-            if not next_page_token:
-                break
+                            history["created"] = datetime.fromtimestamp(
+                                history["created"] / 1000
+                            ).isoformat()
+                        for item in history.get("items", []):
+                            history["from_string"] = item.pop("fromString", None)
+                            history["to_string"] = item.pop("toString", None)
+                        yield history
+
+                next_page_token = data.get("nextPageToken")
+                if not next_page_token:
+                    break
 
 
 def get_client(
