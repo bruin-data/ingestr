@@ -11,14 +11,20 @@ from dlt.sources import TDataItems
 class HttpReader:
     """Reader for HTTP-based file sources"""
 
-    def __init__(self, url: str, file_format: Optional[str] = None):
+    def __init__(
+        self,
+        url: str,
+        file_format: Optional[str] = None,
+        column_names: Optional[list[str]] = None,
+    ):
         self.url = url
         self.file_format = file_format or self._infer_format(url)
+        self.column_names = column_names
 
-        if self.file_format not in ["csv", "json", "parquet"]:
+        if self.file_format not in ["csv", "csv_headless", "json", "parquet"]:
             raise ValueError(
                 f"Unsupported file format: {self.file_format}. "
-                "Supported formats: csv, json, parquet"
+                "Supported formats: csv, csv_headless, json, parquet"
             )
 
     def _infer_format(self, url: str) -> str:
@@ -50,6 +56,8 @@ class HttpReader:
 
         if self.file_format == "csv":
             yield from self._read_csv(content, **kwargs)
+        elif self.file_format == "csv_headless":
+            yield from self._read_csv_headless(content, **kwargs)
         elif self.file_format == "json":
             yield from self._read_json(content, **kwargs)
         elif self.file_format == "parquet":
@@ -62,6 +70,30 @@ class HttpReader:
         import pandas as pd  # type: ignore
 
         kwargs = {**{"header": "infer", "chunksize": chunksize}, **pandas_kwargs}
+
+        file_obj = io.BytesIO(content)
+        for df in pd.read_csv(file_obj, **kwargs):
+            yield df.to_dict(orient="records")
+
+    def _read_csv_headless(
+        self, content: bytes, chunksize: int = 10000, **pandas_kwargs: Any
+    ) -> Iterator[TDataItems]:
+        """Read CSV file without headers, using provided column names or generating them"""
+        import pandas as pd  # type: ignore
+
+        # Determine column names
+        if self.column_names:
+            names = self.column_names
+        else:
+            # Use pandas to count columns reliably (handles quoted commas)
+            first_row = pd.read_csv(io.BytesIO(content), header=None, nrows=1)
+            num_columns = len(first_row.columns)
+            names = [f"unknown_col_{i}" for i in range(num_columns)]
+
+        kwargs = {
+            **{"header": None, "names": names, "chunksize": chunksize},
+            **pandas_kwargs,
+        }
 
         file_obj = io.BytesIO(content)
         for df in pd.read_csv(file_obj, **kwargs):
