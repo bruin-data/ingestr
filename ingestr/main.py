@@ -431,8 +431,8 @@ def ingest(
         column_hints: dict[str, TColumnSchema] = {}
         original_incremental_strategy = incremental_strategy
 
-        if columns:
-            column_types = parse_columns(columns)
+        column_types = parse_columns(columns) if columns else None
+        if column_types:
             for column_name, column_type in column_types.items():
                 if column_type == "bigdecimal":
                     column_hints[column_name] = {
@@ -578,6 +578,7 @@ def ingest(
             sql_limit=sql_limit,
             sql_exclude_columns=sql_exclude_columns,
             extract_parallelism=extract_parallelism,
+            column_types=column_types,
         )
 
         resource.for_each(dlt_source, lambda x: x.add_map(cast_set_to_list))
