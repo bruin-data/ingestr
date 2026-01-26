@@ -4111,7 +4111,8 @@ class HttpSource:
         if "#" in table:
             _, format_suffix = table.split("#", 1)
             if format_suffix in ["csv", "csv_headless", "json", "jsonl", "parquet"]:
-                file_format = format_suffix
+                # Map jsonl to json (reader treats them the same)
+                file_format = "json" if format_suffix == "jsonl" else format_suffix
 
         chunksize = kwargs.get("chunksize")
         merge_key = kwargs.get("merge_key")

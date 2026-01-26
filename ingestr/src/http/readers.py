@@ -85,10 +85,9 @@ class HttpReader:
         if self.column_names:
             names = self.column_names
         else:
-            # Count columns from first line to generate unknown_col_N names
-            file_obj = io.BytesIO(content)
-            first_line = file_obj.readline().decode("utf-8")
-            num_columns = len(first_line.strip().split(","))
+            # Use pandas to count columns reliably (handles quoted commas)
+            first_row = pd.read_csv(io.BytesIO(content), header=None, nrows=1)
+            num_columns = len(first_row.columns)
             names = [f"unknown_col_{i}" for i in range(num_columns)]
 
         kwargs = {
