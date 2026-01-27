@@ -29,6 +29,7 @@ from .readers import (
     ReadersSource,
     _read_csv,
     _read_csv_duckdb,
+    _read_csv_headless,
     _read_jsonl,
     _read_parquet,
 )
@@ -62,6 +63,10 @@ def readers(
     return (
         filesystem_resource
         | dlt.transformer(name="read_csv", max_table_nesting=0)(_read_csv),
+        filesystem_resource
+        | dlt.transformer(name="read_csv_headless", max_table_nesting=0)(
+            _read_csv_headless
+        ),
         filesystem_resource
         | dlt.transformer(name="read_jsonl", max_table_nesting=0)(_read_jsonl),
         filesystem_resource
@@ -118,6 +123,9 @@ def filesystem(
 
 
 read_csv = dlt.transformer(standalone=True, max_table_nesting=0)(_read_csv)
+read_csv_headless = dlt.transformer(standalone=True, max_table_nesting=0)(
+    _read_csv_headless
+)
 read_jsonl = dlt.transformer(standalone=True, max_table_nesting=0)(_read_jsonl)
 read_parquet = dlt.transformer(standalone=True, max_table_nesting=0)(_read_parquet)
 read_csv_duckdb = dlt.transformer(standalone=True, max_table_nesting=0)(
