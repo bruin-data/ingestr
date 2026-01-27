@@ -11,7 +11,7 @@ duckdb==1.4.3
 google-ads==28.0.0
 facebook-business==23.0.0
 google-api-python-client==2.130.0
-google-cloud-bigquery-storage==2.24.0
+google-cloud-bigquery-storage==2.27.0
 mysql-connector-python==9.2.0
 pendulum==3.0.0
 psutil==6.1.1
