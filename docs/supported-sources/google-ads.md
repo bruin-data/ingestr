@@ -13,6 +13,7 @@ URI parameters:
 - `customer_id`: Customer ID of the Google Ads account to use.
 - `credentials_path`: path to the service account JSON file.
 - `dev_token`: [developer token](https://developers.google.com/google-ads/api/docs/get-started/dev-token) to use for accessing the account.
+- `login_customer_id` (optional): The Manager Account (MCC) ID to use when accessing client accounts. Required when your service account has access to an MCC and you want to pull data from a client account under that MCC. See [Google Ads API docs](https://developers.google.com/google-ads/api/docs/concepts/call-structure#cid) for more details.
 
 > [!NOTE]
 > You may specify credentials using `credentials_base64` instead of `credentials_path`.
@@ -54,6 +55,23 @@ ingestr ingest \
   --dest-uri "duckdb://./adverts.db" \
   --dest-table "public.campaigns"
 ```
+
+### Using a Manager Account (MCC)
+
+If your service account has access to a Manager Account (MCC) and you want to pull data from a client account under that MCC, you need to specify the `login_customer_id` parameter:
+
+```sh
+ingestr ingest \
+  --source-uri "googleads://CLIENT_ID?credentials_path=./svc_account.json&dev_token=dev-token-spec-1&login_customer_id=MCC_ID" \
+  --source-table "campaign_report_daily" \
+  --dest-uri "duckdb://./adverts.db" \
+  --dest-table "public.campaigns"
+```
+
+Where:
+- `CLIENT_ID` is the customer ID of the client account you want to pull data from
+- `MCC_ID` is the customer ID of the Manager Account that has access to the client account
+
 ## Tables
 
 | Name             | Description                                                             |
