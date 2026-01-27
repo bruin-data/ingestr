@@ -2453,6 +2453,11 @@ class GoogleAdsSource:
             "use_proto_plus": True,
             "developer_token": dev_token[0],
         }
+
+        login_customer_id = params.get("login_customer_id")
+        if login_customer_id:
+            conf["login_customer_id"] = login_customer_id[0]
+
         try:
             client = GoogleAdsClient.load_from_dict(conf)
         finally:
