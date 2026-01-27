@@ -153,7 +153,7 @@ gitpython==3.1.44
     # via dlt
 giturlparse==0.12.0
     # via dlt
-google-ads==25.1.0
+google-ads==28.0.0
     # via -r requirements.in
 google-analytics-data==0.18.17
     # via -r requirements.in
@@ -179,6 +179,7 @@ google-auth==2.38.0
     #   google-auth-httplib2
     #   google-auth-oauthlib
     #   google-cloud-bigquery
+    #   google-cloud-bigquery-storage
     #   google-cloud-core
     #   google-cloud-storage
     #   sqlalchemy-bigquery
@@ -190,7 +191,7 @@ google-auth-oauthlib==1.2.1
     #   google-ads
 google-cloud-bigquery==3.31.0
     # via sqlalchemy-bigquery
-google-cloud-bigquery-storage==2.24.0
+google-cloud-bigquery-storage==2.27.0
     # via -r requirements.in
 google-cloud-core==2.4.3
     # via
@@ -231,7 +232,7 @@ grpcio==1.71.0
     #   grpc-google-iam-v1
     #   grpc-interceptor
     #   grpcio-status
-grpcio-status==1.62.3
+grpcio-status==1.71.0
     # via
     #   google-ads
     #   google-api-core
@@ -354,7 +355,7 @@ proto-plus==1.26.1
     #   google-api-core
     #   google-cloud-bigquery-storage
     #   google-cloud-spanner
-protobuf==4.25.8
+protobuf==5.29.5
     # via
     #   google-ads
     #   google-analytics-data
@@ -610,7 +611,6 @@ typing-extensions==4.15.0
     #   pyairtable
     #   pydantic
     #   pydantic-core
-    #   pyopenssl
     #   reactivex
     #   simple-salesforce
     #   snowflake-connector-python
