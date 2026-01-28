@@ -2541,9 +2541,11 @@ class GoogleAdsSource:
 
         parsed_uri = urlparse(uri)
 
-        customer_id = parsed_uri.hostname
-        if not customer_id:
+        customer_id_raw = parsed_uri.hostname
+        if not customer_id_raw:
             raise MissingValueError("customer_id", "Google Ads")
+
+        customer_ids = [cid.strip() for cid in customer_id_raw.split(",")]
 
         params = parse_qs(parsed_uri.query)
 
@@ -2568,11 +2570,21 @@ class GoogleAdsSource:
             report_spec = table
             table = "daily_report"
 
+            from ingestr.src.google_ads.reports import Report
+
+            _, spec_customer_ids = Report.from_spec(report_spec)
+            if spec_customer_ids:
+                customer_ids = spec_customer_ids
+        elif ":" in table:
+            parts = table.split(":", 1)
+            table = parts[0]
+            customer_ids = [cid.strip() for cid in parts[1].split(",")]
+
         from ingestr.src.google_ads import google_ads
 
         src = google_ads(
             client,
-            customer_id,
+            customer_ids,
             report_spec,
             start_date=start_date,
             end_date=end_date,

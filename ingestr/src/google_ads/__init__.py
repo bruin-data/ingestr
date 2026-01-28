@@ -38,7 +38,7 @@ except ImportError:
 @dlt.source
 def google_ads(
     client: GoogleAdsClient,
-    customer_id: str,
+    customer_ids: list[str],
     report_spec: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
@@ -51,28 +51,28 @@ def google_ads(
         range_end="closed",
     )
     if report_spec is not None:
-        custom_report = Report().from_spec(report_spec)
+        custom_report, _ = Report.from_spec(report_spec)
         yield dlt.resource(
             daily_report,
             name="daily_report",
             write_disposition="merge",
-            primary_key=custom_report.primary_keys(),
+            primary_key=custom_report.primary_keys() + ["customer_id"],
             columns=dlt_metrics_schema(custom_report.metrics),
-        )(client, customer_id, custom_report, date_range)
+        )(client, customer_ids, custom_report, date_range)
 
     for report_name, report in BUILTIN_REPORTS.items():
         yield dlt.resource(
             daily_report,
             name=report_name,
             write_disposition="merge",
-            primary_key=report.primary_keys(),
+            primary_key=report.primary_keys() + ["customer_id"],
             columns=dlt_metrics_schema(report.metrics),
-        )(client, customer_id, report, date_range)
+        )(client, customer_ids, report, date_range)
 
 
 def daily_report(
     client: Resource,
-    customer_id: str,
+    customer_ids: list[str],
     report: Report,
     date: dlt.sources.incremental[date],
 ) -> Iterator[TDataItem]:
@@ -92,15 +92,18 @@ def daily_report(
         query = query[:i]
 
     allowed_keys = set([field.to_column(k) for k in fields])
-    stream = ga_service.search_stream(customer_id=customer_id, query=query)
-    for batch in stream:
-        for row in batch.results:
-            data = flatten(merge_lists(to_dict(row)))
-            if "segments_date" in data:
-                data["segments_date"] = datetime.strptime(
-                    data["segments_date"], "%Y-%m-%d"
-                ).date()
-            yield {k: v for k, v in data.items() if k in allowed_keys}
+    for customer_id in customer_ids:
+        stream = ga_service.search_stream(customer_id=customer_id, query=query)
+        for batch in stream:
+            for row in batch.results:
+                data = flatten(merge_lists(to_dict(row)))
+                if "segments_date" in data:
+                    data["segments_date"] = datetime.strptime(
+                        data["segments_date"], "%Y-%m-%d"
+                    ).date()
+                row_data = {k: v for k, v in data.items() if k in allowed_keys}
+                row_data["customer_id"] = customer_id
+                yield row_data
 
 
 def to_dict(item: Any) -> TDataItem:

@@ -10,7 +10,7 @@ googleads://<customer_id>?credentials_path=/path/to/service-account.json&dev_tok
 
 URI parameters:
 
-- `customer_id`: Customer ID of the Google Ads account to use.
+- `customer_id`: Customer ID of the Google Ads account to use. You can specify multiple customer IDs separated by commas (e.g., `1234567890,0987654321,1122334455`).
 - `credentials_path`: path to the service account JSON file.
 - `dev_token`: [developer token](https://developers.google.com/google-ads/api/docs/get-started/dev-token) to use for accessing the account.
 - `login_customer_id` (optional): The Manager Account (MCC) ID to use when accessing client accounts. Required when your service account has access to an MCC and you want to pull data from a client account under that MCC. See [Google Ads API docs](https://developers.google.com/google-ads/api/docs/concepts/call-structure#cid) for more details.
@@ -72,6 +72,34 @@ Where:
 - `CLIENT_ID` is the customer ID of the client account you want to pull data from
 - `MCC_ID` is the customer ID of the Manager Account that has access to the client account
 
+### Multiple Customer IDs
+
+You can ingest data from multiple Google Ads accounts in a single command by specifying comma-separated customer IDs:
+
+```sh
+ingestr ingest \
+  --source-uri "googleads://1234567890,0987654321,1122334455?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
+  --source-table "campaign_report_daily" \
+  --dest-uri "duckdb://./adverts.db" \
+  --dest-table "public.campaigns"
+```
+
+When using multiple customer IDs, each row in the output will include a `customer_id` field to identify which account the data came from.
+
+### Overriding Customer IDs per Table
+
+You can override the customer IDs from the URI by appending `:customer_ids` to the table name:
+
+```sh
+ingestr ingest \
+  --source-uri "googleads://default_customer?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
+  --source-table "campaign_report_daily:1234567890,0987654321" \
+  --dest-uri "duckdb://./adverts.db" \
+  --dest-table "public.campaigns"
+```
+
+This will use `1234567890` and `0987654321` instead of `default_customer` from the URI.
+
 ## Tables
 
 | Name             | Description                                                             |
@@ -95,15 +123,16 @@ Where:
 
 The format of a custom report looks like the following:
 ```
-daily:{resource_name}:{dimensions}:{metrics}
+daily:{resource_name}:{dimensions}:{metrics}:{customer_ids}
 ```
 Where:
 * `{resource_name}` is a [Google Ads Resource](https://developers.google.com/google-ads/api/fields/v18/overview_query_builder#list-of-all-resources).
 * `{dimensions}` is a comma separated list of the Resource's attribute fields, or fields of [attributed resources](https://developers.google.com/google-ads/api/docs/query/overview).
-* `{metrics}` is a comma separated list of the Resource's [metrics](https://developers.google.com/google-ads/api/fields/v18/metrics). Note that the `metrics.` prefix is optional. 
+* `{metrics}` is a comma separated list of the Resource's [metrics](https://developers.google.com/google-ads/api/fields/v18/metrics). Note that the `metrics.` prefix is optional.
+* `{customer_ids}` (optional) is a comma separated list of customer IDs to use for this report. If not provided, the customer IDs from the URI will be used.
 
 Notes:
-* `{dimensions}` and `{metrics}` are optional. If you don't need them, you can leave their respective segment blank.
+* `{dimensions}` and `{metrics}` are required.
 * `segments` are currently not supported as dimensions.
 * `segments.date` is automatically added to all custom reports.
 
@@ -131,22 +160,15 @@ ingestr ingest \
 Notice the lack of `metrics.` prefix in the metrics segment. Please note that `--dest-table` is mandatory when creating
 a custom report.
 
-**Without Metrics**
+**With Custom Customer IDs**
 
-Here's an example of the above report, without any associated metrics:
+You can specify customer IDs directly in the custom report definition. This overrides the customer IDs from the URI:
 ```sh
 ingestr ingest \
-  --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
-  --source-table "daily:ad_group_ad_asset_view:ad_group.id,campaign.id,customer.id:" \
+  --source-uri "googleads://default_customer?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
+  --source-table "daily:ad_group_ad_asset_view:ad_group.id,campaign.id,customer.id:clicks,conversions,impressions:1234567890,0987654321" \
   --dest-uri "duckdb:///custom.db" \
+  --dest-table "public.report"
 ```
 
-**Without Dimensions**
-
-Here's an example of the above report, without any associated dimensions:
-```sh
-ingestr ingest \
-  --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
-  --source-table "daily:ad_group_ad_asset_view::clicks,conversions,impressions" \
-  --dest-uri "duckdb:///custom.db" \
-```
+In this example, `1234567890` and `0987654321` will be used instead of `default_customer` from the URI.

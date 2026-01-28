@@ -46,28 +46,41 @@ class Report:
         """
         Parse a report specification string into a Report object.
         The expected format is:
-        custom:{resource}:{dimensions}:{metrics}
+        daily:{resource}:{dimensions}:{metrics}:{customer_ids}
 
         Example:
-        custom:ad_group_ad_asset_view:ad_group.id,campaign.id:clicks,conversions
+        daily:ad_group_ad_asset_view:ad_group.id,campaign.id:clicks,conversions:1234567890,9876543210
+
+        customer_ids is optional - if not provided, falls back to URI hostname.
         """
-        if spec.count(":") != 3:
+        colon_count = spec.count(":")
+        if colon_count not in (3, 4):
             raise ValueError(
-                "Invalid report specification format. Expected daily:{resource}:{dimensions}:{metrics}"
+                "Invalid report specification format. Expected daily:{resource}:{dimensions}:{metrics} or daily:{resource}:{dimensions}:{metrics}:{customer_ids}"
             )
 
-        _, resource, dimensions, metrics = spec.split(":")
+        parts = spec.split(":")
+        _, resource, dimensions, metrics = parts[:4]
+        customer_ids_str = parts[4] if len(parts) > 4 else None
+
+        if dimensions.strip() == "":
+            raise ValueError("Dimensions are required")
+        if metrics.strip() == "":
+            raise ValueError("Metrics are required")
 
         report = cls()
         report.segments = ["segments.date"]
         report.resource = resource
-        if dimensions.strip() != "":
-            report.dimensions = [
-                d for d in map(cls._parse_dimension, dimensions.split(","))
-            ]
-        if metrics.strip() != "":
-            report.metrics = [m for m in map(cls._parse_metric, metrics.split(","))]
-        return report
+        report.dimensions = [
+            d for d in map(cls._parse_dimension, dimensions.split(","))
+        ]
+        report.metrics = [m for m in map(cls._parse_metric, metrics.split(","))]
+
+        customer_ids = None
+        if customer_ids_str and customer_ids_str.strip() != "":
+            customer_ids = [cid.strip() for cid in customer_ids_str.split(",")]
+
+        return report, customer_ids
 
     @classmethod
     def _parse_dimension(self, dim: str):
