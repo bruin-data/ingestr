@@ -57,7 +57,7 @@ def google_ads(
             daily_report,
             name="daily_report",
             write_disposition="merge",
-            primary_key=custom_report.primary_keys(),
+            primary_key=custom_report.primary_keys() + ["customer_id"],
             columns=dlt_metrics_schema(custom_report.metrics),
         )(client, customer_ids, custom_report, date_range)
 
@@ -66,7 +66,7 @@ def google_ads(
             daily_report,
             name=report_name,
             write_disposition="merge",
-            primary_key=report.primary_keys(),
+            primary_key=report.primary_keys() + ["customer_id"],
             columns=dlt_metrics_schema(report.metrics),
         )(client, customer_ids, report, date_range)
 
