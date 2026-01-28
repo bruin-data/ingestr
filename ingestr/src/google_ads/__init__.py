@@ -52,7 +52,7 @@ def google_ads(
         range_end="closed",
     )
     if report_spec is not None:
-        custom_report = Report().from_spec(report_spec)
+        custom_report, _ = Report.from_spec(report_spec)
         yield dlt.resource(
             daily_report,
             name="daily_report",

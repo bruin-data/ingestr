@@ -2508,6 +2508,10 @@ class GoogleAdsSource:
             _, spec_customer_ids = Report.from_spec(report_spec)
             if spec_customer_ids:
                 customer_ids = spec_customer_ids
+        elif ":" in table:
+            parts = table.split(":", 1)
+            table = parts[0]
+            customer_ids = [cid.strip() for cid in parts[1].split(",")]
 
         from ingestr.src.google_ads import google_ads
 

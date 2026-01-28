@@ -88,12 +88,12 @@ When using multiple customer IDs, each row in the output will include a `custome
 
 ### Overriding Customer IDs per Table
 
-You can override the customer IDs from the URI by prefixing the table name with `:customer_ids:`. This is useful when you want to use different customer IDs for specific tables:
+You can override the customer IDs from the URI by appending `:customer_ids` to the table name:
 
 ```sh
 ingestr ingest \
   --source-uri "googleads://default_customer?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
-  --source-table ":1234567890,0987654321:campaign_report_daily" \
+  --source-table "campaign_report_daily:1234567890,0987654321" \
   --dest-uri "duckdb://./adverts.db" \
   --dest-table "public.campaigns"
 ```
@@ -123,15 +123,16 @@ This will use `1234567890` and `0987654321` instead of `default_customer` from t
 
 The format of a custom report looks like the following:
 ```
-daily:{resource_name}:{dimensions}:{metrics}
+daily:{resource_name}:{dimensions}:{metrics}:{customer_ids}
 ```
 Where:
 * `{resource_name}` is a [Google Ads Resource](https://developers.google.com/google-ads/api/fields/v18/overview_query_builder#list-of-all-resources).
 * `{dimensions}` is a comma separated list of the Resource's attribute fields, or fields of [attributed resources](https://developers.google.com/google-ads/api/docs/query/overview).
-* `{metrics}` is a comma separated list of the Resource's [metrics](https://developers.google.com/google-ads/api/fields/v18/metrics). Note that the `metrics.` prefix is optional. 
+* `{metrics}` is a comma separated list of the Resource's [metrics](https://developers.google.com/google-ads/api/fields/v18/metrics). Note that the `metrics.` prefix is optional.
+* `{customer_ids}` (optional) is a comma separated list of customer IDs to use for this report. If not provided, the customer IDs from the URI will be used.
 
 Notes:
-* `{dimensions}` and `{metrics}` are optional. If you don't need them, you can leave their respective segment blank.
+* `{dimensions}` and `{metrics}` are required.
 * `segments` are currently not supported as dimensions.
 * `segments.date` is automatically added to all custom reports.
 
@@ -159,22 +160,15 @@ ingestr ingest \
 Notice the lack of `metrics.` prefix in the metrics segment. Please note that `--dest-table` is mandatory when creating
 a custom report.
 
-**Without Metrics**
+**With Custom Customer IDs**
 
-Here's an example of the above report, without any associated metrics:
+You can specify customer IDs directly in the custom report definition. This overrides the customer IDs from the URI:
 ```sh
 ingestr ingest \
-  --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
-  --source-table "daily:ad_group_ad_asset_view:ad_group.id,campaign.id,customer.id:" \
+  --source-uri "googleads://default_customer?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
+  --source-table "daily:ad_group_ad_asset_view:ad_group.id,campaign.id,customer.id:clicks,conversions,impressions:1234567890,0987654321" \
   --dest-uri "duckdb:///custom.db" \
+  --dest-table "public.report"
 ```
 
-**Without Dimensions**
-
-Here's an example of the above report, without any associated dimensions:
-```sh
-ingestr ingest \
-  --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
-  --source-table "daily:ad_group_ad_asset_view::clicks,conversions,impressions" \
-  --dest-uri "duckdb:///custom.db" \
-```
+In this example, `1234567890` and `0987654321` will be used instead of `default_customer` from the URI.
