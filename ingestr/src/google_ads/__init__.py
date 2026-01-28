@@ -43,7 +43,6 @@ def google_ads(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> Iterator[DltResource]:
-
     date_range = dlt.sources.incremental(
         "segments_date",
         initial_value=start_date.date(),  # type: ignore
