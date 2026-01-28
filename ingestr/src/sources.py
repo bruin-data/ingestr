@@ -2474,9 +2474,11 @@ class GoogleAdsSource:
 
         parsed_uri = urlparse(uri)
 
-        customer_id = parsed_uri.hostname
-        if not customer_id:
+        customer_id_raw = parsed_uri.hostname
+        if not customer_id_raw:
             raise MissingValueError("customer_id", "Google Ads")
+
+        customer_ids = [cid.strip() for cid in customer_id_raw.split(",")]
 
         params = parse_qs(parsed_uri.query)
 
@@ -2505,7 +2507,7 @@ class GoogleAdsSource:
 
         src = google_ads(
             client,
-            customer_id,
+            customer_ids,
             report_spec,
             start_date=start_date,
             end_date=end_date,
