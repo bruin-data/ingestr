@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, List, Optional
 
 from dlt.common import json
 from dlt.common.typing import copy_sig
@@ -42,6 +42,45 @@ def _read_csv(
         # Here we use pandas chunksize to read the file in chunks and avoid loading the whole file
         # in memory.
         with file_obj.open() as file:
+            for df in pd.read_csv(file, **kwargs):
+                yield df.to_dict(orient="records")
+
+
+def _read_csv_headless(
+    items: Iterator[FileItemDict],
+    chunksize: int = 10000,
+    column_names: Optional[List[str]] = None,
+    **pandas_kwargs: Any,
+) -> Iterator[TDataItems]:
+    """Reads csv file without headers, using provided column names or generating them.
+
+    Args:
+        chunksize (int): Number of records to read in one chunk
+        column_names (list[str], optional): Column names for the CSV. If not provided,
+            columns will be named unknown_col_0, unknown_col_1, etc.
+        **pandas_kwargs: Additional keyword arguments passed to Pandas.read_csv
+    Returns:
+        TDataItem: The file content
+    """
+    import pandas as pd
+
+    for file_obj in items:
+        with file_obj.open() as file:
+            # Determine column names
+            if column_names:
+                names = column_names
+            else:
+                # Count columns from first row
+                first_row = pd.read_csv(file, header=None, nrows=1)
+                num_columns = len(first_row.columns)
+                names = [f"unknown_col_{i}" for i in range(num_columns)]
+                file.seek(0)  # Reset file pointer after reading first row
+
+            kwargs = {
+                **{"header": None, "names": names, "chunksize": chunksize},
+                **pandas_kwargs,
+            }
+
             for df in pd.read_csv(file, **kwargs):
                 yield df.to_dict(orient="records")
 
@@ -131,6 +170,9 @@ if TYPE_CHECKING:
 
         @copy_sig(_read_csv)
         def read_csv(self) -> DltResource: ...
+
+        @copy_sig(_read_csv_headless)
+        def read_csv_headless(self) -> DltResource: ...
 
         @copy_sig(_read_jsonl)
         def read_jsonl(self) -> DltResource: ...

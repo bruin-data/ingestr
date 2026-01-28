@@ -1761,21 +1761,57 @@ class S3Source:
 
         import s3fs  # type: ignore
 
-        fs = s3fs.S3FileSystem(
-            key=access_key_id[0],
-            secret=secret_access_key[0],
-        )
+        endpoint_url = source_fields.get("endpoint_url")
+        fs_kwargs: dict = {
+            "key": access_key_id[0],
+            "secret": secret_access_key[0],
+        }
+        if endpoint_url:
+            fs_kwargs["endpoint_url"] = endpoint_url[0]
+
+        fs = s3fs.S3FileSystem(**fs_kwargs)
 
         try:
             endpoint: str = blob.determine_endpoint(table, path_to_file)
         except blob.UnsupportedEndpointError:
             raise ValueError(
-                "S3 Source only supports specific formats files: csv, jsonl, parquet"
+                "S3 Source only supports specific formats files: csv, csv_headless, jsonl, parquet"
             )
         except Exception as e:
             raise ValueError(
                 f"Failed to parse endpoint from path: {path_to_file}"
             ) from e
+
+        # Handle csv_headless with column_names
+        if endpoint == "read_csv_headless":
+            from typing import Any, Iterator
+
+            import dlt
+            from dlt.sources import TDataItems
+            from dlt.sources.filesystem import FileItemDict
+
+            from ingestr.src.filesystem import filesystem
+            from ingestr.src.filesystem.readers import _read_csv_headless
+
+            column_types = kwargs.get("column_types")
+            column_names = list(column_types.keys()) if column_types else None
+
+            def read_csv_headless_with_cols(
+                items: Iterator[FileItemDict],
+                chunksize: int = 10000,
+                **pandas_kwargs: Any,
+            ) -> Iterator[TDataItems]:
+                yield from _read_csv_headless(
+                    items,
+                    chunksize=chunksize,
+                    column_names=column_names,
+                    **pandas_kwargs,
+                )
+
+            filesystem_resource = filesystem(bucket_url, fs, file_glob=path_to_file)
+            return filesystem_resource | dlt.transformer(
+                name="read_csv_headless", max_table_nesting=0
+            )(read_csv_headless_with_cols)
 
         from ingestr.src.filesystem import readers
 
@@ -2402,12 +2438,43 @@ class GCSSource:
             endpoint: str = blob.determine_endpoint(table, path_to_file)
         except blob.UnsupportedEndpointError:
             raise ValueError(
-                "GCS Source only supports specific formats files: csv, jsonl, parquet"
+                "GCS Source only supports specific formats files: csv, csv_headless, jsonl, parquet"
             )
         except Exception as e:
             raise ValueError(
                 f"Failed to parse endpoint from path: {path_to_file}"
             ) from e
+
+        # Handle csv_headless with column_names
+        if endpoint == "read_csv_headless":
+            from typing import Any, Iterator
+
+            import dlt
+            from dlt.sources import TDataItems
+            from dlt.sources.filesystem import FileItemDict
+
+            from ingestr.src.filesystem import filesystem
+            from ingestr.src.filesystem.readers import _read_csv_headless
+
+            column_types = kwargs.get("column_types")
+            column_names = list(column_types.keys()) if column_types else None
+
+            def read_csv_headless_with_cols(
+                items: Iterator[FileItemDict],
+                chunksize: int = 10000,
+                **pandas_kwargs: Any,
+            ) -> Iterator[TDataItems]:
+                yield from _read_csv_headless(
+                    items,
+                    chunksize=chunksize,
+                    column_names=column_names,
+                    **pandas_kwargs,
+                )
+
+            filesystem_resource = filesystem(bucket_url, fs, file_glob=path_to_file)
+            return filesystem_resource | dlt.transformer(
+                name="read_csv_headless", max_table_nesting=0
+            )(read_csv_headless_with_cols)
 
         from ingestr.src.filesystem import readers
 

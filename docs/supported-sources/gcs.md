@@ -104,7 +104,8 @@ List of available Layout variables is available [here](https://dlthub.com/docs/d
 
 ## Supported File Formats
 `gs` source only supports loading files in the following formats:
-* `csv`: Comma Separated Values 
+* `csv`: Comma Separated Values with headers
+* `csv_headless`: CSV files without headers (use `#csv_headless` suffix)
 * `parquet`: [Apache Parquet](https://parquet.apache.org/) storage format.
 * `jsonl`: Line delimited JSON. see [https://jsonlines.org/](https://jsonlines.org/)
 
@@ -160,10 +161,36 @@ For example, if you have JSONL-formatted log files stored in GCS with a non-stan
 This tells `ingestr` to process the files as JSONL, regardless of their actual extension.
 
 Supported format hints include:
-- `#csv` - For comma-separated values files
+- `#csv` - For comma-separated values files with headers
+- `#csv_headless` - For CSV files without headers
 - `#jsonl` - For line-delimited JSON files
 - `#parquet` - For Parquet format files
 
 ::: tip
 File type hinting works with `gzip` compressed files as well.
 :::
+
+### CSV files without headers
+
+For CSV files that don't have a header row, use the `#csv_headless` format hint. You can optionally provide column names using the `--columns` flag:
+
+```sh
+# With custom column names
+ingestr ingest \
+    --source-uri "gs://?credentials_path=$PWD/service_account.json" \
+    --source-table "my-org-bucket/data/raw-data.csv#csv_headless" \
+    --columns "id:bigint,name:text,value:double" \
+    --dest-uri "duckdb:///local.db" \
+    --dest-table "public.raw_data"
+```
+
+If no column names are provided, columns will be automatically named `unknown_col_0`, `unknown_col_1`, etc.:
+
+```sh
+# Without column names (auto-generated)
+ingestr ingest \
+    --source-uri "gs://?credentials_path=$PWD/service_account.json" \
+    --source-table "my-org-bucket/data/raw-data.csv#csv_headless" \
+    --dest-uri "duckdb:///local.db" \
+    --dest-table "public.raw_data"
+```

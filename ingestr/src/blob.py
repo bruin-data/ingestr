@@ -83,7 +83,7 @@ def determine_endpoint(table: str, path: str) -> str:
 
     if "#" in table:
         _, endpoint = table.split("#")
-        if endpoint not in ["csv", "jsonl", "parquet"]:
+        if endpoint not in ["csv", "csv_headless", "jsonl", "parquet"]:
             raise UnsupportedEndpointError(f"Unsupported file format: {endpoint}")
         endpoint = f"read_{endpoint}"
     else:
