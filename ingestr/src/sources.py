@@ -2503,6 +2503,12 @@ class GoogleAdsSource:
             report_spec = table
             table = "daily_report"
 
+            from ingestr.src.google_ads.reports import Report
+
+            _, spec_customer_ids = Report.from_spec(report_spec)
+            if spec_customer_ids:
+                customer_ids = spec_customer_ids
+
         from ingestr.src.google_ads import google_ads
 
         src = google_ads(

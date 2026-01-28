@@ -86,6 +86,20 @@ ingestr ingest \
 
 When using multiple customer IDs, each row in the output will include a `customer_id` field to identify which account the data came from.
 
+### Overriding Customer IDs per Table
+
+You can override the customer IDs from the URI by prefixing the table name with `:customer_ids:`. This is useful when you want to use different customer IDs for specific tables:
+
+```sh
+ingestr ingest \
+  --source-uri "googleads://default_customer?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
+  --source-table ":1234567890,0987654321:campaign_report_daily" \
+  --dest-uri "duckdb://./adverts.db" \
+  --dest-table "public.campaigns"
+```
+
+This will use `1234567890` and `0987654321` instead of `default_customer` from the URI.
+
 ## Tables
 
 | Name             | Description                                                             |
