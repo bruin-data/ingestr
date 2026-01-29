@@ -218,8 +218,6 @@ query ($ids: [ID!]) {
         users_subscribers {
             id
         }
-        settings {
-            icon
         }
     }
 }
