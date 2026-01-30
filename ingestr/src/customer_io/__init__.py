@@ -69,7 +69,22 @@ def customer_io_source(
         ):
             yield item
 
-    return (activities, broadcasts, broadcast_actions, broadcast_messages)
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def campaigns(
+        updated=dlt.sources.incremental(
+            "updated",
+            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            end_value=end_date,
+        ),
+    ) -> Iterable[TDataItem]:
+        for item in client.fetch_campaigns(create_client()):
+            item_updated = pendulum.from_timestamp(item.get("updated", 0))
+            if item_updated >= updated.last_value:
+                if updated.end_value is None or item_updated <= updated.end_value:
+                    item["updated"] = item_updated
+                    yield item
+
+    return (activities, broadcasts, broadcast_actions, broadcast_messages, campaigns)
 
 
 @dlt.source(max_table_nesting=0)
@@ -121,3 +136,35 @@ def customer_io_broadcast_action_metrics_source(
             yield item
 
     return (broadcasts | broadcast_actions | broadcast_action_metrics,)
+
+
+@dlt.source(max_table_nesting=0)
+def customer_io_campaign_metrics_source(
+    api_key: str,
+    period: str = "days",
+    start_date: TAnyDateTime | None = None,
+    end_date: TAnyDateTime | None = None,
+) -> Iterable[DltResource]:
+    client = CustomerIoClient(api_key)
+
+    start_ts = int(start_date.timestamp()) if start_date else None
+    end_ts = int(end_date.timestamp()) if end_date else None
+
+    @dlt.resource(write_disposition="replace", primary_key="id", selected=False)
+    def campaigns() -> Iterable[TDataItem]:
+        for item in client.fetch_campaigns(create_client()):
+            yield item
+
+    @dlt.transformer(
+        data_from=campaigns,
+        write_disposition="replace",
+        primary_key=["campaign_id", "period", "step_index"],
+    )
+    def campaign_metrics(campaign: TDataItem) -> Iterable[TDataItem]:
+        campaign_id = campaign.get("id")
+        for item in client.fetch_campaign_metrics(
+            create_client(), campaign_id, period, start_ts, end_ts
+        ):
+            yield item
+
+    return (campaigns | campaign_metrics,)

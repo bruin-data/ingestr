@@ -5069,7 +5069,29 @@ class CustomerIoSource:
                 period=period,
             )
 
-        if table not in ["activities", "broadcasts", "broadcast_actions", "broadcast_messages"]:
+        # Handle campaign_metrics:period format
+        if table.startswith("campaign_metrics:"):
+            parts = table.split(":")
+            period = parts[1]
+
+            if period not in ["hours", "days", "weeks", "months"]:
+                raise ValueError(
+                    f"Invalid period '{period}' for campaign_metrics. Must be one of: hours, days, weeks, months"
+                )
+
+            start_date = kwargs.get("interval_start")
+            end_date = kwargs.get("interval_end")
+
+            from ingestr.src.customer_io import customer_io_campaign_metrics_source
+
+            return customer_io_campaign_metrics_source(
+                api_key=api_key[0],
+                period=period,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+        if table not in ["activities", "broadcasts", "broadcast_actions", "broadcast_messages", "campaigns"]:
             raise UnsupportedResourceError(table, "Customer.io")
 
         start_date = kwargs.get("interval_start")
