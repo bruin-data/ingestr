@@ -5027,29 +5027,28 @@ class CustomerIoSource:
         if not api_key:
             raise MissingValueError("api_key", "Customer.io")
 
-        # Handle broadcast_metrics:period or broadcast_metrics:period:type format
+        region = params.get("region", ["us"])[0]
+        if region.lower() not in ["us", "eu"]:
+            raise ValueError(
+                f"Invalid region '{region}' for Customer.io. Must be one of: us, eu"
+            )
+
+        # Handle broadcast_metrics:period format
         if table.startswith("broadcast_metrics:"):
             parts = table.split(":")
             period = parts[1]
-            metric_type = parts[2] if len(parts) > 2 else None
 
             if period not in ["hours", "days", "weeks", "months"]:
                 raise ValueError(
                     f"Invalid period '{period}' for broadcast_metrics. Must be one of: hours, days, weeks, months"
                 )
 
-            valid_types = ["email", "webhook", "twilio", "slack", "push", "in_app"]
-            if metric_type and metric_type not in valid_types:
-                raise ValueError(
-                    f"Invalid type '{metric_type}' for broadcast_metrics. Must be one of: {', '.join(valid_types)}"
-                )
-
             from ingestr.src.customer_io import customer_io_broadcast_metrics_source
 
             return customer_io_broadcast_metrics_source(
                 api_key=api_key[0],
+                region=region,
                 period=period,
-                metric_type=metric_type,
             ).with_resources("broadcast_metrics")
 
         # Handle broadcast_action_metrics:period format
@@ -5066,6 +5065,7 @@ class CustomerIoSource:
 
             return customer_io_broadcast_action_metrics_source(
                 api_key=api_key[0],
+                region=region,
                 period=period,
             )
 
@@ -5086,6 +5086,7 @@ class CustomerIoSource:
 
             return customer_io_campaign_metrics_source(
                 api_key=api_key[0],
+                region=region,
                 period=period,
                 start_date=start_date,
                 end_date=end_date,
@@ -5108,6 +5109,7 @@ class CustomerIoSource:
 
             return customer_io_campaign_action_metrics_source(
                 api_key=api_key[0],
+                region=region,
                 period=period,
                 start_date=start_date,
                 end_date=end_date,
@@ -5127,10 +5129,11 @@ class CustomerIoSource:
 
             return customer_io_newsletter_metrics_source(
                 api_key=api_key[0],
+                region=region,
                 period=period,
             )
 
-        if table not in ["activities", "broadcasts", "broadcast_actions", "broadcast_messages", "campaigns", "campaign_actions", "collections", "exports", "info_ip_addresses", "messages", "newsletters", "newsletter_test_groups", "reporting_webhooks", "segments", "senders", "transactional_messages", "workspaces"]:
+        if table not in ["activities", "broadcasts", "broadcast_actions", "broadcast_messages", "campaigns", "campaign_actions", "collections", "exports", "info_ip_addresses", "messages", "newsletters", "newsletter_test_groups", "reporting_webhooks", "segments", "sender_identities", "transactional_messages", "workspaces"]:
             raise UnsupportedResourceError(table, "Customer.io")
 
         start_date = kwargs.get("interval_start")
@@ -5140,6 +5143,7 @@ class CustomerIoSource:
 
         return customer_io_source(
             api_key=api_key[0],
+            region=region,
             start_date=start_date,
             end_date=end_date,
         ).with_resources(table)
