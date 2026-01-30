@@ -5013,3 +5013,72 @@ class IndeedSource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(table)
+
+
+class CustomerIoSource:
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        api_key = params.get("api_key")
+        if not api_key:
+            raise MissingValueError("api_key", "Customer.io")
+
+        # Handle broadcast_metrics:period or broadcast_metrics:period:type format
+        if table.startswith("broadcast_metrics:"):
+            parts = table.split(":")
+            period = parts[1]
+            metric_type = parts[2] if len(parts) > 2 else None
+
+            if period not in ["hours", "days", "weeks", "months"]:
+                raise ValueError(
+                    f"Invalid period '{period}' for broadcast_metrics. Must be one of: hours, days, weeks, months"
+                )
+
+            valid_types = ["email", "webhook", "twilio", "slack", "push", "in_app"]
+            if metric_type and metric_type not in valid_types:
+                raise ValueError(
+                    f"Invalid type '{metric_type}' for broadcast_metrics. Must be one of: {', '.join(valid_types)}"
+                )
+
+            from ingestr.src.customer_io import customer_io_broadcast_metrics_source
+
+            return customer_io_broadcast_metrics_source(
+                api_key=api_key[0],
+                period=period,
+                metric_type=metric_type,
+            ).with_resources("broadcast_metrics")
+
+        # Handle broadcast_action_metrics:period format
+        if table.startswith("broadcast_action_metrics:"):
+            parts = table.split(":")
+            period = parts[1]
+
+            if period not in ["hours", "days", "weeks", "months"]:
+                raise ValueError(
+                    f"Invalid period '{period}' for broadcast_action_metrics. Must be one of: hours, days, weeks, months"
+                )
+
+            from ingestr.src.customer_io import customer_io_broadcast_action_metrics_source
+
+            return customer_io_broadcast_action_metrics_source(
+                api_key=api_key[0],
+                period=period,
+            )
+
+        if table not in ["activities", "broadcasts", "broadcast_actions", "broadcast_messages"]:
+            raise UnsupportedResourceError(table, "Customer.io")
+
+        start_date = kwargs.get("interval_start")
+        end_date = kwargs.get("interval_end")
+
+        from ingestr.src.customer_io import customer_io_source
+
+        return customer_io_source(
+            api_key=api_key[0],
+            start_date=start_date,
+            end_date=end_date,
+        ).with_resources(table)
