@@ -27,10 +27,11 @@ def create_client() -> requests.Session:
 @dlt.source(max_table_nesting=0)
 def customer_io_source(
     api_key: str,
+    region: str = "us",
     start_date: TAnyDateTime | None = None,
     end_date: TAnyDateTime | None = None,
 ) -> Iterable[DltResource]:
-    client = CustomerIoClient(api_key)
+    client = CustomerIoClient(api_key, region)
 
     @dlt.resource(write_disposition="replace", primary_key="id")
     def activities() -> Iterable[TDataItem]:
@@ -40,25 +41,28 @@ def customer_io_source(
     def broadcasts(
         updated=dlt.sources.incremental(
             "updated",
-            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            initial_value=start_date or pendulum.datetime(1970, 1, 1, tz="UTC"),
             end_value=end_date,
         ),
     ) -> Iterable[TDataItem]:
+        last_value = pendulum.instance(updated.last_value).in_tz("UTC") if updated.last_value else pendulum.datetime(1970, 1, 1, tz="UTC")
+        end_value = pendulum.instance(updated.end_value).in_tz("UTC") if updated.end_value else None
         for item in client.fetch_broadcasts(create_client()):
             item_updated = pendulum.from_timestamp(item.get("updated", 0))
-            if item_updated >= updated.last_value:
-                if updated.end_value is None or item_updated <= updated.end_value:
+            if item_updated >= last_value:
+                if end_value is None or item_updated <= end_value:
                     item["updated"] = item_updated
                     yield item
 
     @dlt.transformer(data_from=broadcasts, write_disposition="merge", primary_key="id")
     def broadcast_actions(broadcast: TDataItem) -> Iterable[TDataItem]:
         broadcast_id = broadcast.get("id")
-        start_val = start_date or pendulum.datetime(1970, 1, 1)
+        start_val = pendulum.instance(start_date).in_tz("UTC") if start_date else pendulum.datetime(1970, 1, 1, tz="UTC")
+        end_val = pendulum.instance(end_date).in_tz("UTC") if end_date else None
         for item in client.fetch_broadcast_actions(create_client(), broadcast_id):
             item_updated = pendulum.from_timestamp(item.get("updated", 0))
             if item_updated >= start_val:
-                if end_date is None or item_updated <= end_date:
+                if end_val is None or item_updated <= end_val:
                     item["updated"] = item_updated
                     yield item
 
@@ -76,14 +80,16 @@ def customer_io_source(
     def campaigns(
         updated=dlt.sources.incremental(
             "updated",
-            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            initial_value=start_date or pendulum.datetime(1970, 1, 1, tz="UTC"),
             end_value=end_date,
         ),
     ) -> Iterable[TDataItem]:
+        last_value = pendulum.instance(updated.last_value).in_tz("UTC") if updated.last_value else pendulum.datetime(1970, 1, 1, tz="UTC")
+        end_value = pendulum.instance(updated.end_value).in_tz("UTC") if updated.end_value else None
         for item in client.fetch_campaigns(create_client()):
             item_updated = pendulum.from_timestamp(item.get("updated", 0))
-            if item_updated >= updated.last_value:
-                if updated.end_value is None or item_updated <= updated.end_value:
+            if item_updated >= last_value:
+                if end_value is None or item_updated <= end_value:
                     item["updated"] = item_updated
                     yield item
 
@@ -99,14 +105,16 @@ def customer_io_source(
     def collections(
         updated_at=dlt.sources.incremental(
             "updated_at",
-            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            initial_value=start_date or pendulum.datetime(1970, 1, 1, tz="UTC"),
             end_value=end_date,
         ),
     ) -> Iterable[TDataItem]:
+        last_value = pendulum.instance(updated_at.last_value).in_tz("UTC") if updated_at.last_value else pendulum.datetime(1970, 1, 1, tz="UTC")
+        end_value = pendulum.instance(updated_at.end_value).in_tz("UTC") if updated_at.end_value else None
         for item in client.fetch_collections(create_client()):
             item_updated = pendulum.from_timestamp(item.get("updated_at", 0))
-            if item_updated >= updated_at.last_value:
-                if updated_at.end_value is None or item_updated <= updated_at.end_value:
+            if item_updated >= last_value:
+                if end_value is None or item_updated <= end_value:
                     item["updated_at"] = item_updated
                     yield item
 
@@ -114,14 +122,16 @@ def customer_io_source(
     def exports(
         updated_at=dlt.sources.incremental(
             "updated_at",
-            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            initial_value=start_date or pendulum.datetime(1970, 1, 1, tz="UTC"),
             end_value=end_date,
         ),
     ) -> Iterable[TDataItem]:
+        last_value = pendulum.instance(updated_at.last_value).in_tz("UTC") if updated_at.last_value else pendulum.datetime(1970, 1, 1, tz="UTC")
+        end_value = pendulum.instance(updated_at.end_value).in_tz("UTC") if updated_at.end_value else None
         for item in client.fetch_exports(create_client()):
             item_updated = pendulum.from_timestamp(item.get("updated_at", 0))
-            if item_updated >= updated_at.last_value:
-                if updated_at.end_value is None or item_updated <= updated_at.end_value:
+            if item_updated >= last_value:
+                if end_value is None or item_updated <= end_value:
                     item["updated_at"] = item_updated
                     yield item
 
@@ -139,14 +149,16 @@ def customer_io_source(
     def newsletters(
         updated=dlt.sources.incremental(
             "updated",
-            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            initial_value=start_date or pendulum.datetime(1970, 1, 1, tz="UTC"),
             end_value=end_date,
         ),
     ) -> Iterable[TDataItem]:
+        last_value = pendulum.instance(updated.last_value).in_tz("UTC") if updated.last_value else pendulum.datetime(1970, 1, 1, tz="UTC")
+        end_value = pendulum.instance(updated.end_value).in_tz("UTC") if updated.end_value else None
         for item in client.fetch_newsletters(create_client()):
             item_updated = pendulum.from_timestamp(item.get("updated", 0))
-            if item_updated >= updated.last_value:
-                if updated.end_value is None or item_updated <= updated.end_value:
+            if item_updated >= last_value:
+                if end_value is None or item_updated <= end_value:
                     item["updated"] = item_updated
                     yield item
 
@@ -163,20 +175,18 @@ def customer_io_source(
     def segments(
         updated_at=dlt.sources.incremental(
             "updated_at",
-            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            initial_value=start_date or pendulum.datetime(1970, 1, 1, tz="UTC"),
             end_value=end_date,
         ),
     ) -> Iterable[TDataItem]:
+        last_value = pendulum.instance(updated_at.last_value).in_tz("UTC") if updated_at.last_value else pendulum.datetime(1970, 1, 1, tz="UTC")
+        end_value = pendulum.instance(updated_at.end_value).in_tz("UTC") if updated_at.end_value else None
         for item in client.fetch_segments(create_client()):
             item_updated = pendulum.from_timestamp(item.get("updated_at", 0))
-            if item_updated >= updated_at.last_value:
-                if updated_at.end_value is None or item_updated <= updated_at.end_value:
+            if item_updated >= last_value:
+                if end_value is None or item_updated <= end_value:
                     item["updated_at"] = item_updated
                     yield item
-
-    @dlt.resource(write_disposition="replace", primary_key="id")
-    def senders() -> Iterable[TDataItem]:
-        yield from client.fetch_senders(create_client())
 
     @dlt.resource(write_disposition="replace", primary_key="id")
     def transactional_messages() -> Iterable[TDataItem]:
@@ -186,22 +196,26 @@ def customer_io_source(
     def workspaces() -> Iterable[TDataItem]:
         yield from client.fetch_workspaces(create_client())
 
-    return (activities, broadcasts, broadcast_actions, broadcast_messages, campaigns, campaign_actions, collections, exports, info_ip_addresses, messages, newsletters, newsletter_test_groups, reporting_webhooks, segments, senders, transactional_messages, workspaces)
+    @dlt.resource(write_disposition="replace", primary_key="id")
+    def sender_identities() -> Iterable[TDataItem]:
+        yield from client.fetch_sender_identities(create_client())
+
+    return (activities, broadcasts, broadcast_actions, broadcast_messages, campaigns, campaign_actions, collections, exports, info_ip_addresses, messages, newsletters, newsletter_test_groups, reporting_webhooks, segments, sender_identities, transactional_messages, workspaces)
 
 
 @dlt.source(max_table_nesting=0)
 def customer_io_broadcast_metrics_source(
     api_key: str,
+    region: str = "us",
     period: str = "days",
-    metric_type: str | None = None,
 ) -> Iterable[DltResource]:
-    client = CustomerIoClient(api_key)
+    client = CustomerIoClient(api_key, region)
 
     @dlt.resource(
         write_disposition="replace"
     )
     def broadcast_metrics() -> Iterable[TDataItem]:
-        yield from client.fetch_broadcast_metrics(create_client(), period, metric_type)
+        yield from client.fetch_broadcast_metrics(create_client(), period)
 
     return (broadcast_metrics,)
 
@@ -209,9 +223,10 @@ def customer_io_broadcast_metrics_source(
 @dlt.source(max_table_nesting=0)
 def customer_io_broadcast_action_metrics_source(
     api_key: str,
+    region: str = "us",
     period: str = "days",
 ) -> Iterable[DltResource]:
-    client = CustomerIoClient(api_key)
+    client = CustomerIoClient(api_key, region)
 
     @dlt.resource(write_disposition="replace", primary_key="id", selected=False)
     def broadcasts() -> Iterable[TDataItem]:
@@ -243,11 +258,12 @@ def customer_io_broadcast_action_metrics_source(
 @dlt.source(max_table_nesting=0)
 def customer_io_campaign_metrics_source(
     api_key: str,
+    region: str = "us",
     period: str = "days",
     start_date: TAnyDateTime | None = None,
     end_date: TAnyDateTime | None = None,
 ) -> Iterable[DltResource]:
-    client = CustomerIoClient(api_key)
+    client = CustomerIoClient(api_key, region)
 
     start_ts = int(start_date.timestamp()) if start_date else None
     end_ts = int(end_date.timestamp()) if end_date else None
@@ -275,11 +291,12 @@ def customer_io_campaign_metrics_source(
 @dlt.source(max_table_nesting=0)
 def customer_io_campaign_action_metrics_source(
     api_key: str,
+    region: str = "us",
     period: str = "days",
     start_date: TAnyDateTime | None = None,
     end_date: TAnyDateTime | None = None,
 ) -> Iterable[DltResource]:
-    client = CustomerIoClient(api_key)
+    client = CustomerIoClient(api_key, region)
 
     start_ts = int(start_date.timestamp()) if start_date else None
     end_ts = int(end_date.timestamp()) if end_date else None
@@ -314,9 +331,10 @@ def customer_io_campaign_action_metrics_source(
 @dlt.source(max_table_nesting=0)
 def customer_io_newsletter_metrics_source(
     api_key: str,
+    region: str = "us",
     period: str = "days",
 ) -> Iterable[DltResource]:
-    client = CustomerIoClient(api_key)
+    client = CustomerIoClient(api_key, region)
 
     @dlt.resource(write_disposition="replace", primary_key="id", selected=False)
     def newsletters() -> Iterable[TDataItem]:

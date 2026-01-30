@@ -1,11 +1,15 @@
 import requests
 
-BASE_URL = "https://api.customer.io"
+BASE_URLS = {
+    "us": "https://api.customer.io",
+    "eu": "https://api-eu.customer.io",
+}
 
 
 class CustomerIoClient:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, region: str = "us"):
         self.api_key = api_key
+        self.base_url = BASE_URLS.get(region.lower(), BASE_URLS["us"])
 
     def _get_headers(self):
         return {
@@ -31,11 +35,11 @@ class CustomerIoClient:
             response.raise_for_status()
             result = response.json()
 
-            items = result.get(data_key, [])
+            items = result.get(data_key) or []
             all_items.extend(items)
 
             next_token = result.get("next")
-            if next_token is None:
+            if not next_token:
                 break
 
             params["start"] = next_token
@@ -52,7 +56,7 @@ class CustomerIoClient:
         deleted: bool = False,
         limit: int = 100,
     ):
-        url = f"{BASE_URL}/v1/activities"
+        url = f"{self.base_url}/v1/activities"
         params = {"limit": limit, "deleted": str(deleted).lower()}
 
         if activity_type:
@@ -67,23 +71,23 @@ class CustomerIoClient:
         return self._fetch_pages(session, url, params, data_key="activities")
 
     def fetch_broadcasts(self, session: requests.Session):
-        url = f"{BASE_URL}/v1/broadcasts"
+        url = f"{self.base_url}/v1/broadcasts"
         return self._fetch_pages(session, url, data_key="broadcasts")
 
     def fetch_campaigns(self, session: requests.Session):
-        url = f"{BASE_URL}/v1/campaigns"
+        url = f"{self.base_url}/v1/campaigns"
         return self._fetch_pages(session, url, data_key="campaigns")
 
     def fetch_collections(self, session: requests.Session):
-        url = f"{BASE_URL}/v1/collections"
+        url = f"{self.base_url}/v1/collections"
         return self._fetch_pages(session, url, data_key="collections")
 
     def fetch_exports(self, session: requests.Session):
-        url = f"{BASE_URL}/v1/exports"
+        url = f"{self.base_url}/v1/exports"
         return self._fetch_pages(session, url, data_key="exports")
 
     def fetch_info_ip_addresses(self, session: requests.Session):
-        url = f"{BASE_URL}/v1/info/ip_addresses"
+        url = f"{self.base_url}/v1/info/ip_addresses"
         response = session.get(url=url, headers=self._get_headers())
         response.raise_for_status()
         result = response.json()
@@ -96,7 +100,7 @@ class CustomerIoClient:
         start_ts: int | None = None,
         end_ts: int | None = None,
     ) -> list:
-        url = f"{BASE_URL}/v1/messages"
+        url = f"{self.base_url}/v1/messages"
         params = {"limit": 1000}
 
         if start_ts:
@@ -107,31 +111,27 @@ class CustomerIoClient:
         return self._fetch_pages(session, url, params, data_key="messages")
 
     def fetch_newsletters(self, session: requests.Session) -> list:
-        url = f"{BASE_URL}/v1/newsletters"
+        url = f"{self.base_url}/v1/newsletters"
         params = {"limit": 100}
         return self._fetch_pages(session, url, params, data_key="newsletters")
 
     def fetch_reporting_webhooks(self, session: requests.Session) -> list:
-        url = f"{BASE_URL}/v1/reporting_webhooks"
+        url = f"{self.base_url}/v1/reporting_webhooks"
         response = session.get(url=url, headers=self._get_headers())
         response.raise_for_status()
         result = response.json()
-        return result.get("reporting_webhooks", [])
+        return result.get("reporting_webhooks") or []
 
     def fetch_segments(self, session: requests.Session) -> list:
-        url = f"{BASE_URL}/v1/segments"
+        url = f"{self.base_url}/v1/segments"
         return self._fetch_pages(session, url, data_key="segments")
 
-    def fetch_senders(self, session: requests.Session) -> list:
-        url = f"{BASE_URL}/v1/senders"
-        return self._fetch_pages(session, url, data_key="senders")
-
     def fetch_transactional_messages(self, session: requests.Session) -> list:
-        url = f"{BASE_URL}/v1/transactional"
+        url = f"{self.base_url}/v1/transactional"
         return self._fetch_pages(session, url, data_key="transactional")
 
     def fetch_workspaces(self, session: requests.Session) -> list:
-        url = f"{BASE_URL}/v1/workspaces"
+        url = f"{self.base_url}/v1/workspaces"
         response = session.get(url=url, headers=self._get_headers())
         response.raise_for_status()
         result = response.json()
@@ -140,7 +140,7 @@ class CustomerIoClient:
     def fetch_newsletter_test_groups(
         self, session: requests.Session, newsletter_id: int
     ) -> list:
-        url = f"{BASE_URL}/v1/newsletters/{newsletter_id}/test_groups"
+        url = f"{self.base_url}/v1/newsletters/{newsletter_id}/test_groups"
         response = session.get(url=url, headers=self._get_headers())
         response.raise_for_status()
         result = response.json()
@@ -166,7 +166,7 @@ class CustomerIoClient:
         }
         steps = max_steps.get(period, 45)
 
-        url = f"{BASE_URL}/v1/newsletters/{newsletter_id}/metrics"
+        url = f"{self.base_url}/v1/newsletters/{newsletter_id}/metrics"
         params = {"period": period, "steps": steps}
 
         response = session.get(url=url, headers=self._get_headers(), params=params)
@@ -186,7 +186,6 @@ class CustomerIoClient:
         self,
         session: requests.Session,
         period: str = "days",
-        metric_type: str | None = None,
     ) -> list:
         max_steps = {
             "hours": 24,
@@ -201,11 +200,8 @@ class CustomerIoClient:
 
         for broadcast in broadcasts:
             broadcast_id = broadcast.get("id")
-            url = f"{BASE_URL}/v1/broadcasts/{broadcast_id}/metrics"
+            url = f"{self.base_url}/v1/broadcasts/{broadcast_id}/metrics"
             params = {"period": period, "steps": steps}
-
-            if metric_type:
-                params["type"] = metric_type
 
             response = session.get(url=url, headers=self._get_headers(), params=params)
             response.raise_for_status()
@@ -215,8 +211,6 @@ class CustomerIoClient:
                 metric["broadcast_id"] = broadcast_id
                 metric["period"] = period
                 metric["step_index"] = i
-                if metric_type:
-                    metric["metric_type"] = metric_type
                 all_metrics.append(metric)
 
         return all_metrics
@@ -224,7 +218,7 @@ class CustomerIoClient:
     def fetch_broadcast_actions(
         self, session: requests.Session, broadcast_id: int
     ) -> list:
-        url = f"{BASE_URL}/v1/broadcasts/{broadcast_id}/actions"
+        url = f"{self.base_url}/v1/broadcasts/{broadcast_id}/actions"
 
         response = session.get(url=url, headers=self._get_headers())
         response.raise_for_status()
@@ -244,7 +238,7 @@ class CustomerIoClient:
         start_ts: int | None = None,
         end_ts: int | None = None,
     ) -> list:
-        url = f"{BASE_URL}/v1/broadcasts/{broadcast_id}/messages"
+        url = f"{self.base_url}/v1/broadcasts/{broadcast_id}/messages"
         params = {}
 
         if start_ts:
@@ -269,7 +263,7 @@ class CustomerIoClient:
         }
         steps = max_steps.get(period, 45)
 
-        url = f"{BASE_URL}/v1/broadcasts/{broadcast_id}/actions/{action_id}/metrics"
+        url = f"{self.base_url}/v1/broadcasts/{broadcast_id}/actions/{action_id}/metrics"
         params = {"period": period, "steps": steps}
 
         response = session.get(url=url, headers=self._get_headers(), params=params)
@@ -294,7 +288,7 @@ class CustomerIoClient:
         start_ts: int | None = None,
         end_ts: int | None = None,
     ) -> list:
-        url = f"{BASE_URL}/v1/campaigns/{campaign_id}/metrics"
+        url = f"{self.base_url}/v1/campaigns/{campaign_id}/metrics"
         params = {"version": 2, "res": period}
 
         if start_ts:
@@ -318,11 +312,15 @@ class CustomerIoClient:
     def fetch_campaign_actions(
         self, session: requests.Session, campaign_id: int
     ) -> list:
-        url = f"{BASE_URL}/v1/campaigns/{campaign_id}/actions"
+        url = f"{self.base_url}/v1/campaigns/{campaign_id}/actions"
         actions = self._fetch_pages(session, url, data_key="actions")
         for action in actions:
             action["campaign_id"] = campaign_id
         return actions
+
+    def fetch_sender_identities(self, session: requests.Session) -> list:
+        url = f"{self.base_url}/v1/sender_identities"
+        return self._fetch_pages(session, url, data_key="sender_identities")
 
     def fetch_campaign_action_metrics(
         self,
@@ -333,7 +331,7 @@ class CustomerIoClient:
         start_ts: int | None = None,
         end_ts: int | None = None,
     ) -> list:
-        url = f"{BASE_URL}/v1/campaigns/{campaign_id}/actions/{action_id}/metrics"
+        url = f"{self.base_url}/v1/campaigns/{campaign_id}/actions/{action_id}/metrics"
         params = {"version": 2, "res": period}
 
         if start_ts:
