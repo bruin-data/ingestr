@@ -51,15 +51,24 @@ Customer.io source allows ingesting the following sources into separate tables:
 | [broadcast_messages](https://customer.io/docs/api/app/#operation/listBroadcastMessages) | id | – | merge | Retrieves messages sent by broadcasts. |
 | [campaigns](https://customer.io/docs/api/app/#operation/listCampaigns) | id | updated | merge | Retrieves triggered campaigns. |
 | [campaign_actions](https://customer.io/docs/api/app/#operation/listCampaignActions) | id | updated | merge | Retrieves actions for campaigns. |
+| [campaign_messages](https://customer.io/docs/api/app/#operation/getCampaignMessages) | id | – | merge | Retrieves messages/deliveries sent from campaigns. |
 | [collections](https://customer.io/docs/api/app/#operation/listCollections) | id | updated_at | merge | Retrieves data collections. |
+| [customers](https://customer.io/docs/api/app/#operation/getPeopleFilter) | cio_id | – | replace | Retrieves all customers/people in the workspace. |
+| [customer_attributes](https://customer.io/docs/api/app/#operation/getPersonAttributes) | customer_id | – | replace | Retrieves attributes for each customer. |
+| [customer_activities](https://customer.io/docs/api/app/#operation/getPersonActivities) | id | – | replace | Retrieves activities performed by each customer. |
+| [customer_messages](https://customer.io/docs/api/app/#operation/getPersonMessages) | id | – | merge | Retrieves messages sent to each customer. |
+| [customer_relationships](https://customer.io/docs/api/app/#operation/getPersonRelationships) | customer_id, object_type_id, object_id | – | replace | Retrieves object relationships for each customer. |
 | [exports](https://customer.io/docs/api/app/#operation/listExports) | id | updated_at | merge | Retrieves export jobs. |
 | [info_ip_addresses](https://customer.io/docs/api/app/#operation/listIPAddresses) | ip | – | replace | Retrieves IP addresses used by Customer.io. |
 | [messages](https://customer.io/docs/api/app/#operation/listMessages) | id | – | merge | Retrieves sent messages. |
 | [newsletters](https://customer.io/docs/api/app/#operation/listNewsletters) | id | updated | merge | Retrieves newsletters. |
 | [newsletter_test_groups](https://customer.io/docs/api/app/#operation/listNewsletterTestGroups) | id | – | replace | Retrieves test groups for newsletters. |
+| [object_types](https://customer.io/docs/api/app/#operation/getObjectTypes) | id | – | replace | Retrieves object types in the workspace. |
+| [objects](https://customer.io/docs/api/app/#operation/getObjectsFilter) | object_type_id, object_id | – | replace | Retrieves all objects for each object type. |
 | [reporting_webhooks](https://customer.io/docs/api/app/#operation/listReportingWebhooks) | id | – | replace | Retrieves reporting webhooks. |
 | [segments](https://customer.io/docs/api/app/#operation/listSegments) | id | updated_at | merge | Retrieves customer segments. |
 | [sender_identities](https://customer.io/docs/api/app/#operation/listSenderIdentities) | id | – | replace | Retrieves sender identities. |
+| [subscription_topics](https://customer.io/docs/api/app/#operation/getTopics) | id | – | replace | Retrieves subscription topics. |
 | [transactional_messages](https://customer.io/docs/api/app/#operation/listTransactional) | id | – | replace | Retrieves transactional message templates. |
 | [workspaces](https://customer.io/docs/api/app/#operation/listWorkspaces) | id | – | replace | Retrieves workspaces in your account. |
 
@@ -100,6 +109,40 @@ ingestr ingest \
   --source-table 'newsletter_metrics:weeks' \
   --dest-uri duckdb:///customerio.duckdb \
   --dest-table 'customerio.newsletter_metrics'
+```
+
+## People and Objects Tables
+
+Customer.io supports retrieving people (customers) and custom objects data. These tables are especially useful for syncing your customer profiles and their relationships.
+
+```sh
+# Get all customers with their identifiers
+ingestr ingest \
+  --source-uri 'customerio://?api_key=your_api_key&region=us' \
+  --source-table 'customers' \
+  --dest-uri duckdb:///customerio.duckdb \
+  --dest-table 'customerio.customers'
+
+# Get detailed customer attributes
+ingestr ingest \
+  --source-uri 'customerio://?api_key=your_api_key&region=us' \
+  --source-table 'customer_attributes' \
+  --dest-uri duckdb:///customerio.duckdb \
+  --dest-table 'customerio.customer_attributes'
+
+# Get customer-object relationships
+ingestr ingest \
+  --source-uri 'customerio://?api_key=your_api_key&region=us' \
+  --source-table 'customer_relationships' \
+  --dest-uri duckdb:///customerio.duckdb \
+  --dest-table 'customerio.customer_relationships'
+
+# Get all object types (e.g., Companies, Accounts)
+ingestr ingest \
+  --source-uri 'customerio://?api_key=your_api_key&region=us' \
+  --source-table 'object_types' \
+  --dest-uri duckdb:///customerio.duckdb \
+  --dest-table 'customerio.object_types'
 ```
 
 ## Incremental Loading

@@ -352,3 +352,194 @@ class CustomerIoClient:
             metrics.append(metric)
 
         return metrics
+
+    def fetch_customers(
+        self,
+        session: requests.Session,
+        limit: int = 1000,
+    ) -> list:
+        """Fetch customers by iterating through all segments and getting their members."""
+        # The POST /v1/customers endpoint requires a filter, so we fetch segment members instead
+        all_customers = {}
+        segments = self.fetch_segments(session)
+
+        for segment in segments:
+            segment_id = segment.get("id")
+            if segment_id:
+                members = self.fetch_segment_members(session, segment_id, limit)
+                for member in members:
+                    # Use cio_id as unique key to deduplicate across segments
+                    cio_id = member.get("cio_id")
+                    if cio_id and cio_id not in all_customers:
+                        all_customers[cio_id] = member
+
+        return list(all_customers.values())
+
+    def fetch_segment_members(
+        self,
+        session: requests.Session,
+        segment_id: int,
+        limit: int = 1000,
+    ) -> list:
+        """Fetch members of a specific segment."""
+        url = f"{self.base_url}/v1/segments/{segment_id}/membership"
+        params = {"limit": limit}
+        return self._fetch_pages(session, url, params, data_key="identifiers")
+
+    def _fetch_pages_post(
+        self,
+        session: requests.Session,
+        url: str,
+        params: dict | None = None,
+        data_key: str = "identifiers",
+    ) -> list:
+        """Pagination helper for POST requests."""
+        all_items = []
+        if params is None:
+            params = {}
+        query_params = {}
+
+        while True:
+            response = session.post(
+                url=url, headers=self._get_headers(), json=params, params=query_params
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            items = result.get(data_key) or []
+            all_items.extend(items)
+
+            next_token = result.get("next")
+            if not next_token:
+                break
+
+            query_params["start"] = next_token
+
+        return all_items
+
+    def fetch_customer_attributes(
+        self, session: requests.Session, customer_id: str
+    ) -> dict | None:
+        """Fetch attributes for a specific customer."""
+        url = f"{self.base_url}/v1/customers/{customer_id}/attributes"
+        response = session.get(url=url, headers=self._get_headers())
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        result = response.json()
+        customer = result.get("customer", {})
+        customer["customer_id"] = customer_id
+        return customer
+
+    def fetch_customer_messages(
+        self,
+        session: requests.Session,
+        customer_id: str,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+    ) -> list:
+        """Fetch messages sent to a specific customer."""
+        url = f"{self.base_url}/v1/customers/{customer_id}/messages"
+        params = {}
+        if start_ts:
+            params["start_ts"] = start_ts
+        if end_ts:
+            params["end_ts"] = end_ts
+
+        messages = self._fetch_pages(session, url, params, data_key="messages")
+        for msg in messages:
+            msg["customer_id"] = customer_id
+        return messages
+
+    def fetch_customer_activities(
+        self, session: requests.Session, customer_id: str
+    ) -> list:
+        """Fetch activities for a specific customer."""
+        url = f"{self.base_url}/v1/customers/{customer_id}/activities"
+        activities = self._fetch_pages(session, url, data_key="activities")
+        for activity in activities:
+            activity["customer_id"] = customer_id
+        return activities
+
+    def fetch_customer_relationships(
+        self, session: requests.Session, customer_id: str
+    ) -> list:
+        """Fetch object relationships for a specific customer."""
+        url = f"{self.base_url}/v1/customers/{customer_id}/relationships"
+        relationships = self._fetch_pages(session, url, data_key="cio_relationships")
+        for rel in relationships:
+            rel["customer_id"] = customer_id
+        return relationships
+
+    def fetch_object_types(self, session: requests.Session) -> list:
+        """Fetch all object types in the workspace."""
+        url = f"{self.base_url}/v1/object_types"
+        response = session.get(url=url, headers=self._get_headers())
+        response.raise_for_status()
+        result = response.json()
+        return result.get("types", [])
+
+    def fetch_objects(
+        self, session: requests.Session, object_type_id: str, limit: int = 1000
+    ) -> list:
+        """Fetch objects of a specific type."""
+        url = f"{self.base_url}/v1/objects"
+        params = {"object_type_id": object_type_id, "limit": limit}
+        objects = self._fetch_pages_post(session, url, params, data_key="identifiers")
+        for obj in objects:
+            obj["object_type_id"] = object_type_id
+        return objects
+
+    def fetch_object_attributes(
+        self, session: requests.Session, object_type_id: str, object_id: str
+    ) -> dict | None:
+        """Fetch attributes for a specific object."""
+        url = f"{self.base_url}/v1/objects/{object_type_id}/{object_id}/attributes"
+        response = session.get(url=url, headers=self._get_headers())
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        result = response.json()
+        obj = result.get("object", {})
+        obj["object_type_id"] = object_type_id
+        obj["object_id"] = object_id
+        return obj
+
+    def fetch_object_relationships(
+        self, session: requests.Session, object_type_id: str, object_id: str
+    ) -> list:
+        """Fetch people related to a specific object."""
+        url = f"{self.base_url}/v1/objects/{object_type_id}/{object_id}/relationships"
+        relationships = self._fetch_pages(session, url, data_key="cio_relationships")
+        for rel in relationships:
+            rel["object_type_id"] = object_type_id
+            rel["object_id"] = object_id
+        return relationships
+
+    def fetch_campaign_messages(
+        self,
+        session: requests.Session,
+        campaign_id: int,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+    ) -> list:
+        """Fetch messages/deliveries for a specific campaign."""
+        url = f"{self.base_url}/v1/campaigns/{campaign_id}/messages"
+        params = {}
+        if start_ts:
+            params["start_ts"] = start_ts
+        if end_ts:
+            params["end_ts"] = end_ts
+
+        messages = self._fetch_pages(session, url, params, data_key="messages")
+        for msg in messages:
+            msg["campaign_id"] = campaign_id
+        return messages
+
+    def fetch_subscription_topics(self, session: requests.Session) -> list:
+        """Fetch subscription topics in the workspace."""
+        url = f"{self.base_url}/v1/subscription_topics"
+        response = session.get(url=url, headers=self._get_headers())
+        response.raise_for_status()
+        result = response.json()
+        return result.get("topics", [])
