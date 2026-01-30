@@ -5,6 +5,22 @@ BASE_URLS = {
     "eu": "https://api-eu.customer.io",
 }
 
+# Maximum steps for each metrics period type
+MAX_STEPS_BY_PERIOD = {
+    "hours": 24,
+    "days": 45,
+    "weeks": 12,
+    "months": 12,
+}
+
+# For newsletter metrics, months has a different max
+MAX_STEPS_NEWSLETTER = {
+    "hours": 24,
+    "days": 45,
+    "weeks": 12,
+    "months": 121,
+}
+
 
 class CustomerIoClient:
     def __init__(self, api_key: str, region: str = "us"):
@@ -16,6 +32,22 @@ class CustomerIoClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+    def _extract_metrics(
+        self,
+        result: dict,
+        period: str,
+        extra_fields: dict | None = None,
+    ) -> list:
+        """Extract metrics from API response and add common fields."""
+        metrics = []
+        for i, metric in enumerate(result.get("series", {}).get("series", [])):
+            metric["period"] = period
+            metric["step_index"] = i
+            if extra_fields:
+                metric.update(extra_fields)
+            metrics.append(metric)
+        return metrics
 
     def _fetch_pages(
         self,
@@ -158,43 +190,20 @@ class CustomerIoClient:
         newsletter_id: int,
         period: str = "days",
     ) -> list:
-        max_steps = {
-            "hours": 24,
-            "days": 45,
-            "weeks": 12,
-            "months": 121,
-        }
-        steps = max_steps.get(period, 45)
-
+        steps = MAX_STEPS_NEWSLETTER.get(period, 45)
         url = f"{self.base_url}/v1/newsletters/{newsletter_id}/metrics"
         params = {"period": period, "steps": steps}
 
         response = session.get(url=url, headers=self._get_headers(), params=params)
         response.raise_for_status()
-        result = response.json()
-
-        metrics = []
-        for i, metric in enumerate(result.get("series", {}).get("series", [])):
-            metric["newsletter_id"] = newsletter_id
-            metric["period"] = period
-            metric["step_index"] = i
-            metrics.append(metric)
-
-        return metrics
+        return self._extract_metrics(response.json(), period, {"newsletter_id": newsletter_id})
 
     def fetch_broadcast_metrics(
         self,
         session: requests.Session,
         period: str = "days",
     ) -> list:
-        max_steps = {
-            "hours": 24,
-            "days": 45,
-            "weeks": 12,
-            "months": 12,
-        }
-        steps = max_steps.get(period, 45)
-
+        steps = MAX_STEPS_BY_PERIOD.get(period, 45)
         broadcasts = self.fetch_broadcasts(session)
         all_metrics = []
 
@@ -205,13 +214,9 @@ class CustomerIoClient:
 
             response = session.get(url=url, headers=self._get_headers(), params=params)
             response.raise_for_status()
-            result = response.json()
-
-            for i, metric in enumerate(result.get("series", {}).get("series", [])):
-                metric["broadcast_id"] = broadcast_id
-                metric["period"] = period
-                metric["step_index"] = i
-                all_metrics.append(metric)
+            all_metrics.extend(
+                self._extract_metrics(response.json(), period, {"broadcast_id": broadcast_id})
+            )
 
         return all_metrics
 
@@ -255,30 +260,15 @@ class CustomerIoClient:
         action_id: int,
         period: str = "days",
     ) -> list:
-        max_steps = {
-            "hours": 24,
-            "days": 45,
-            "weeks": 12,
-            "months": 12,
-        }
-        steps = max_steps.get(period, 45)
-
+        steps = MAX_STEPS_BY_PERIOD.get(period, 45)
         url = f"{self.base_url}/v1/broadcasts/{broadcast_id}/actions/{action_id}/metrics"
         params = {"period": period, "steps": steps}
 
         response = session.get(url=url, headers=self._get_headers(), params=params)
         response.raise_for_status()
-        result = response.json()
-
-        metrics = []
-        for i, metric in enumerate(result.get("series", {}).get("series", [])):
-            metric["broadcast_id"] = broadcast_id
-            metric["action_id"] = action_id
-            metric["period"] = period
-            metric["step_index"] = i
-            metrics.append(metric)
-
-        return metrics
+        return self._extract_metrics(
+            response.json(), period, {"broadcast_id": broadcast_id, "action_id": action_id}
+        )
 
     def fetch_campaign_metrics(
         self,
@@ -298,16 +288,7 @@ class CustomerIoClient:
 
         response = session.get(url=url, headers=self._get_headers(), params=params)
         response.raise_for_status()
-        result = response.json()
-
-        metrics = []
-        for i, metric in enumerate(result.get("series", {}).get("series", [])):
-            metric["campaign_id"] = campaign_id
-            metric["period"] = period
-            metric["step_index"] = i
-            metrics.append(metric)
-
-        return metrics
+        return self._extract_metrics(response.json(), period, {"campaign_id": campaign_id})
 
     def fetch_campaign_actions(
         self, session: requests.Session, campaign_id: int
@@ -341,17 +322,9 @@ class CustomerIoClient:
 
         response = session.get(url=url, headers=self._get_headers(), params=params)
         response.raise_for_status()
-        result = response.json()
-
-        metrics = []
-        for i, metric in enumerate(result.get("series", {}).get("series", [])):
-            metric["campaign_id"] = campaign_id
-            metric["action_id"] = action_id
-            metric["period"] = period
-            metric["step_index"] = i
-            metrics.append(metric)
-
-        return metrics
+        return self._extract_metrics(
+            response.json(), period, {"campaign_id": campaign_id, "action_id": action_id}
+        )
 
     def fetch_customers(
         self,
