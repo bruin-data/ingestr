@@ -1,4 +1,4 @@
-# Customer.io
+mak # Customer.io
 
 [Customer.io](https://customer.io/) is a customer engagement platform that enables businesses to send automated messages across email, push, SMS, and more.
 
@@ -48,20 +48,25 @@ Customer.io source allows ingesting the following sources into separate tables:
 | [activities](https://customer.io/docs/api/app/#operation/listActivities) | id | – | replace | Retrieves account activity log. |
 | [broadcasts](https://customer.io/docs/api/app/#operation/listBroadcasts) | id | updated | merge | Retrieves broadcast campaigns. |
 | [broadcast_actions](https://customer.io/docs/api/app/#operation/listBroadcastActions) | id | updated | merge | Retrieves actions for broadcasts. |
+| broadcast_action_metrics:period | broadcast_id, action_id, period, step_index | – | replace | Retrieves metrics for broadcast actions. Period: `hours`, `days`, `weeks`, `months`. |
 | [broadcast_messages](https://customer.io/docs/api/app/#operation/listBroadcastMessages) | id | – | merge | Retrieves messages sent by broadcasts. |
+| broadcast_metrics:period | broadcast_id, period, step_index | – | replace | Retrieves metrics for all broadcasts. Period: `hours`, `days`, `weeks`, `months`. |
 | [campaigns](https://customer.io/docs/api/app/#operation/listCampaigns) | id | updated | merge | Retrieves triggered campaigns. |
 | [campaign_actions](https://customer.io/docs/api/app/#operation/listCampaignActions) | id | updated | merge | Retrieves actions for campaigns. |
+| campaign_action_metrics:period | campaign_id, action_id, period, step_index | – | replace | Retrieves metrics for campaign actions. Period: `hours`, `days`, `weeks`, `months`. |
 | [campaign_messages](https://customer.io/docs/api/app/#operation/getCampaignMessages) | id | – | merge | Retrieves messages/deliveries sent from campaigns. |
+| campaign_metrics:period | campaign_id, period, step_index | – | replace | Retrieves metrics for all campaigns. Period: `hours`, `days`, `weeks`, `months`. |
 | [collections](https://customer.io/docs/api/app/#operation/listCollections) | id | updated_at | merge | Retrieves data collections. |
 | [customers](https://customer.io/docs/api/app/#operation/getPeopleFilter) | cio_id | – | replace | Retrieves all customers/people in the workspace. |
-| [customer_attributes](https://customer.io/docs/api/app/#operation/getPersonAttributes) | customer_id | – | replace | Retrieves attributes for each customer. |
 | [customer_activities](https://customer.io/docs/api/app/#operation/getPersonActivities) | id | – | replace | Retrieves activities performed by each customer. |
+| [customer_attributes](https://customer.io/docs/api/app/#operation/getPersonAttributes) | customer_id | – | replace | Retrieves attributes for each customer. |
 | [customer_messages](https://customer.io/docs/api/app/#operation/getPersonMessages) | id | – | merge | Retrieves messages sent to each customer. |
 | [customer_relationships](https://customer.io/docs/api/app/#operation/getPersonRelationships) | customer_id, object_type_id, object_id | – | replace | Retrieves object relationships for each customer. |
 | [exports](https://customer.io/docs/api/app/#operation/listExports) | id | updated_at | merge | Retrieves export jobs. |
 | [info_ip_addresses](https://customer.io/docs/api/app/#operation/listIPAddresses) | ip | – | replace | Retrieves IP addresses used by Customer.io. |
 | [messages](https://customer.io/docs/api/app/#operation/listMessages) | id | – | merge | Retrieves sent messages. |
 | [newsletters](https://customer.io/docs/api/app/#operation/listNewsletters) | id | updated | merge | Retrieves newsletters. |
+| newsletter_metrics:period | newsletter_id, period, step_index | – | replace | Retrieves metrics for all newsletters. Period: `hours`, `days`, `weeks`, `months`. |
 | [newsletter_test_groups](https://customer.io/docs/api/app/#operation/listNewsletterTestGroups) | id | – | replace | Retrieves test groups for newsletters. |
 | [object_types](https://customer.io/docs/api/app/#operation/getObjectTypes) | id | – | replace | Retrieves object types in the workspace. |
 | [objects](https://customer.io/docs/api/app/#operation/getObjectsFilter) | object_type_id, object_id | – | replace | Retrieves all objects for each object type. |
@@ -74,19 +79,11 @@ Customer.io source allows ingesting the following sources into separate tables:
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
-## Metrics Tables
+## Examples
 
-Customer.io also supports fetching metrics data with configurable time periods. Use the format `table_name:period` where period can be `hours`, `days`, `weeks`, or `months`.
+### Metrics Tables
 
-| Table | Format | PK | Inc Strategy | Details |
-| ----- | ------ | -- | ------------ | ------- |
-| broadcast_metrics | `broadcast_metrics:period` | broadcast_id, period, step_index | replace | Retrieves metrics for all broadcasts. |
-| broadcast_action_metrics | `broadcast_action_metrics:period` | broadcast_id, action_id, period, step_index | replace | Retrieves metrics for broadcast actions. |
-| campaign_metrics | `campaign_metrics:period` | campaign_id, period, step_index | replace | Retrieves metrics for all campaigns. |
-| campaign_action_metrics | `campaign_action_metrics:period` | campaign_id, action_id, period, step_index | replace | Retrieves metrics for campaign actions. |
-| newsletter_metrics | `newsletter_metrics:period` | newsletter_id, period, step_index | replace | Retrieves metrics for all newsletters. |
-
-### Metrics Examples
+Metrics tables require a period suffix. Use the format `table_name:period` where period can be `hours`, `days`, `weeks`, or `months`.
 
 ```sh
 # Get daily broadcast metrics
@@ -102,18 +99,9 @@ ingestr ingest \
   --source-table 'campaign_metrics:hours' \
   --dest-uri duckdb:///customerio.duckdb \
   --dest-table 'customerio.campaign_metrics'
-
-# Get weekly newsletter metrics
-ingestr ingest \
-  --source-uri 'customerio://?api_key=your_api_key&region=us' \
-  --source-table 'newsletter_metrics:weeks' \
-  --dest-uri duckdb:///customerio.duckdb \
-  --dest-table 'customerio.newsletter_metrics'
 ```
 
-## People and Objects Tables
-
-Customer.io supports retrieving people (customers) and custom objects data. These tables are especially useful for syncing your customer profiles and their relationships.
+### People and Objects
 
 ```sh
 # Get all customers with their identifiers
@@ -129,20 +117,6 @@ ingestr ingest \
   --source-table 'customer_attributes' \
   --dest-uri duckdb:///customerio.duckdb \
   --dest-table 'customerio.customer_attributes'
-
-# Get customer-object relationships
-ingestr ingest \
-  --source-uri 'customerio://?api_key=your_api_key&region=us' \
-  --source-table 'customer_relationships' \
-  --dest-uri duckdb:///customerio.duckdb \
-  --dest-table 'customerio.customer_relationships'
-
-# Get all object types (e.g., Companies, Accounts)
-ingestr ingest \
-  --source-uri 'customerio://?api_key=your_api_key&region=us' \
-  --source-table 'object_types' \
-  --dest-uri duckdb:///customerio.duckdb \
-  --dest-table 'customerio.object_types'
 ```
 
 ## Incremental Loading

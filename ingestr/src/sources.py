@@ -5036,9 +5036,15 @@ class CustomerIoSource:
         # Handle metrics tables with period format (e.g., broadcast_metrics:days)
         metrics_sources = {
             "broadcast_metrics": ("customer_io_broadcast_metrics_source", False),
-            "broadcast_action_metrics": ("customer_io_broadcast_action_metrics_source", False),
+            "broadcast_action_metrics": (
+                "customer_io_broadcast_action_metrics_source",
+                False,
+            ),
             "campaign_metrics": ("customer_io_campaign_metrics_source", True),
-            "campaign_action_metrics": ("customer_io_campaign_action_metrics_source", True),
+            "campaign_action_metrics": (
+                "customer_io_campaign_action_metrics_source",
+                True,
+            ),
             "newsletter_metrics": ("customer_io_newsletter_metrics_source", False),
         }
 
@@ -5053,9 +5059,10 @@ class CustomerIoSource:
                     )
 
                 from ingestr.src import customer_io
+
                 source_func = getattr(customer_io, source_name)
 
-                source_kwargs = {
+                source_kwargs: dict = {
                     "api_key": api_key[0],
                     "region": region,
                     "period": period,
@@ -5066,7 +5073,34 @@ class CustomerIoSource:
 
                 return source_func(**source_kwargs)
 
-        if table not in ["activities", "broadcasts", "broadcast_actions", "broadcast_messages", "campaigns", "campaign_actions", "campaign_messages", "collections", "exports", "info_ip_addresses", "messages", "newsletters", "newsletter_test_groups", "reporting_webhooks", "segments", "sender_identities", "transactional_messages", "workspaces", "customers", "customer_attributes", "customer_messages", "customer_activities", "customer_relationships", "object_types", "objects", "subscription_topics"]:
+        if table not in [
+            "activities",
+            "broadcasts",
+            "broadcast_actions",
+            "broadcast_messages",
+            "campaigns",
+            "campaign_actions",
+            "campaign_messages",
+            "collections",
+            "exports",
+            "info_ip_addresses",
+            "messages",
+            "newsletters",
+            "newsletter_test_groups",
+            "reporting_webhooks",
+            "segments",
+            "sender_identities",
+            "transactional_messages",
+            "workspaces",
+            "customers",
+            "customer_attributes",
+            "customer_messages",
+            "customer_activities",
+            "customer_relationships",
+            "object_types",
+            "objects",
+            "subscription_topics",
+        ]:
             raise UnsupportedResourceError(table, "Customer.io")
 
         start_date = kwargs.get("interval_start")

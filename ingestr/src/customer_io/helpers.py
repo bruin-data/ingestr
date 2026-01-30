@@ -1,3 +1,5 @@
+from typing import Any
+
 import requests
 
 BASE_URLS = {
@@ -53,17 +55,15 @@ class CustomerIoClient:
         self,
         session: requests.Session,
         url: str,
-        params: dict | None = None,
+        params: dict[str, Any] | None = None,
         data_key: str = "activities",
     ) -> list:
-        all_items = []
+        all_items: list[Any] = []
         if params is None:
             params = {}
 
         while True:
-            response = session.get(
-                url=url, headers=self._get_headers(), params=params
-            )
+            response = session.get(url=url, headers=self._get_headers(), params=params)
             response.raise_for_status()
             result = response.json()
 
@@ -192,11 +192,13 @@ class CustomerIoClient:
     ) -> list:
         steps = MAX_STEPS_NEWSLETTER.get(period, 45)
         url = f"{self.base_url}/v1/newsletters/{newsletter_id}/metrics"
-        params = {"period": period, "steps": steps}
+        params: dict[str, Any] = {"period": period, "steps": steps}
 
         response = session.get(url=url, headers=self._get_headers(), params=params)
         response.raise_for_status()
-        return self._extract_metrics(response.json(), period, {"newsletter_id": newsletter_id})
+        return self._extract_metrics(
+            response.json(), period, {"newsletter_id": newsletter_id}
+        )
 
     def fetch_broadcast_metrics(
         self,
@@ -210,12 +212,14 @@ class CustomerIoClient:
         for broadcast in broadcasts:
             broadcast_id = broadcast.get("id")
             url = f"{self.base_url}/v1/broadcasts/{broadcast_id}/metrics"
-            params = {"period": period, "steps": steps}
+            params: dict[str, Any] = {"period": period, "steps": steps}
 
             response = session.get(url=url, headers=self._get_headers(), params=params)
             response.raise_for_status()
             all_metrics.extend(
-                self._extract_metrics(response.json(), period, {"broadcast_id": broadcast_id})
+                self._extract_metrics(
+                    response.json(), period, {"broadcast_id": broadcast_id}
+                )
             )
 
         return all_metrics
@@ -244,7 +248,7 @@ class CustomerIoClient:
         end_ts: int | None = None,
     ) -> list:
         url = f"{self.base_url}/v1/broadcasts/{broadcast_id}/messages"
-        params = {}
+        params: dict[str, Any] = {}
 
         if start_ts:
             params["start_ts"] = start_ts
@@ -261,13 +265,17 @@ class CustomerIoClient:
         period: str = "days",
     ) -> list:
         steps = MAX_STEPS_BY_PERIOD.get(period, 45)
-        url = f"{self.base_url}/v1/broadcasts/{broadcast_id}/actions/{action_id}/metrics"
-        params = {"period": period, "steps": steps}
+        url = (
+            f"{self.base_url}/v1/broadcasts/{broadcast_id}/actions/{action_id}/metrics"
+        )
+        params: dict[str, Any] = {"period": period, "steps": steps}
 
         response = session.get(url=url, headers=self._get_headers(), params=params)
         response.raise_for_status()
         return self._extract_metrics(
-            response.json(), period, {"broadcast_id": broadcast_id, "action_id": action_id}
+            response.json(),
+            period,
+            {"broadcast_id": broadcast_id, "action_id": action_id},
         )
 
     def fetch_campaign_metrics(
@@ -279,7 +287,7 @@ class CustomerIoClient:
         end_ts: int | None = None,
     ) -> list:
         url = f"{self.base_url}/v1/campaigns/{campaign_id}/metrics"
-        params = {"version": 2, "res": period}
+        params: dict[str, Any] = {"version": 2, "res": period}
 
         if start_ts:
             params["start"] = start_ts
@@ -288,7 +296,9 @@ class CustomerIoClient:
 
         response = session.get(url=url, headers=self._get_headers(), params=params)
         response.raise_for_status()
-        return self._extract_metrics(response.json(), period, {"campaign_id": campaign_id})
+        return self._extract_metrics(
+            response.json(), period, {"campaign_id": campaign_id}
+        )
 
     def fetch_campaign_actions(
         self, session: requests.Session, campaign_id: int
@@ -313,7 +323,7 @@ class CustomerIoClient:
         end_ts: int | None = None,
     ) -> list:
         url = f"{self.base_url}/v1/campaigns/{campaign_id}/actions/{action_id}/metrics"
-        params = {"version": 2, "res": period}
+        params: dict[str, Any] = {"version": 2, "res": period}
 
         if start_ts:
             params["start"] = start_ts
@@ -323,7 +333,9 @@ class CustomerIoClient:
         response = session.get(url=url, headers=self._get_headers(), params=params)
         response.raise_for_status()
         return self._extract_metrics(
-            response.json(), period, {"campaign_id": campaign_id, "action_id": action_id}
+            response.json(),
+            period,
+            {"campaign_id": campaign_id, "action_id": action_id},
         )
 
     def fetch_customers(
@@ -363,14 +375,14 @@ class CustomerIoClient:
         self,
         session: requests.Session,
         url: str,
-        params: dict | None = None,
+        params: dict[str, Any] | None = None,
         data_key: str = "identifiers",
     ) -> list:
         """Pagination helper for POST requests."""
-        all_items = []
+        all_items: list[Any] = []
         if params is None:
             params = {}
-        query_params = {}
+        query_params: dict[str, Any] = {}
 
         while True:
             response = session.post(
