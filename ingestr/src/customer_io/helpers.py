@@ -74,6 +74,114 @@ class CustomerIoClient:
         url = f"{BASE_URL}/v1/campaigns"
         return self._fetch_pages(session, url, data_key="campaigns")
 
+    def fetch_collections(self, session: requests.Session):
+        url = f"{BASE_URL}/v1/collections"
+        return self._fetch_pages(session, url, data_key="collections")
+
+    def fetch_exports(self, session: requests.Session):
+        url = f"{BASE_URL}/v1/exports"
+        return self._fetch_pages(session, url, data_key="exports")
+
+    def fetch_info_ip_addresses(self, session: requests.Session):
+        url = f"{BASE_URL}/v1/info/ip_addresses"
+        response = session.get(url=url, headers=self._get_headers())
+        response.raise_for_status()
+        result = response.json()
+        ips = result.get("ips", [])
+        return [{"ip": ip} for ip in ips]
+
+    def fetch_messages(
+        self,
+        session: requests.Session,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+    ) -> list:
+        url = f"{BASE_URL}/v1/messages"
+        params = {"limit": 1000}
+
+        if start_ts:
+            params["start_ts"] = start_ts
+        if end_ts:
+            params["end_ts"] = end_ts
+
+        return self._fetch_pages(session, url, params, data_key="messages")
+
+    def fetch_newsletters(self, session: requests.Session) -> list:
+        url = f"{BASE_URL}/v1/newsletters"
+        params = {"limit": 100}
+        return self._fetch_pages(session, url, params, data_key="newsletters")
+
+    def fetch_reporting_webhooks(self, session: requests.Session) -> list:
+        url = f"{BASE_URL}/v1/reporting_webhooks"
+        response = session.get(url=url, headers=self._get_headers())
+        response.raise_for_status()
+        result = response.json()
+        return result.get("reporting_webhooks", [])
+
+    def fetch_segments(self, session: requests.Session) -> list:
+        url = f"{BASE_URL}/v1/segments"
+        return self._fetch_pages(session, url, data_key="segments")
+
+    def fetch_senders(self, session: requests.Session) -> list:
+        url = f"{BASE_URL}/v1/senders"
+        return self._fetch_pages(session, url, data_key="senders")
+
+    def fetch_transactional_messages(self, session: requests.Session) -> list:
+        url = f"{BASE_URL}/v1/transactional"
+        return self._fetch_pages(session, url, data_key="transactional")
+
+    def fetch_workspaces(self, session: requests.Session) -> list:
+        url = f"{BASE_URL}/v1/workspaces"
+        response = session.get(url=url, headers=self._get_headers())
+        response.raise_for_status()
+        result = response.json()
+        return result.get("workspaces", [])
+
+    def fetch_newsletter_test_groups(
+        self, session: requests.Session, newsletter_id: int
+    ) -> list:
+        url = f"{BASE_URL}/v1/newsletters/{newsletter_id}/test_groups"
+        response = session.get(url=url, headers=self._get_headers())
+        response.raise_for_status()
+        result = response.json()
+
+        groups = []
+        for group in result.get("test_groups", []):
+            group["newsletter_id"] = newsletter_id
+            groups.append(group)
+
+        return groups
+
+    def fetch_newsletter_metrics(
+        self,
+        session: requests.Session,
+        newsletter_id: int,
+        period: str = "days",
+    ) -> list:
+        max_steps = {
+            "hours": 24,
+            "days": 45,
+            "weeks": 12,
+            "months": 121,
+        }
+        steps = max_steps.get(period, 45)
+
+        url = f"{BASE_URL}/v1/newsletters/{newsletter_id}/metrics"
+        params = {"period": period, "steps": steps}
+
+        response = session.get(url=url, headers=self._get_headers(), params=params)
+        response.raise_for_status()
+        result = response.json()
+
+        metrics = []
+        for i, metric in enumerate(result.get("series", {}).get("series", [])):
+            metric["newsletter_id"] = newsletter_id
+            metric["period"] = period
+            metric["step_index"] = i
+            metrics.append(metric)
+
+        return metrics
+
     def fetch_broadcast_metrics(
         self,
         session: requests.Session,

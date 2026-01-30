@@ -95,7 +95,98 @@ def customer_io_source(
             item["updated"] = item_updated
             yield item
 
-    return (activities, broadcasts, broadcast_actions, broadcast_messages, campaigns, campaign_actions)
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def collections(
+        updated_at=dlt.sources.incremental(
+            "updated_at",
+            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            end_value=end_date,
+        ),
+    ) -> Iterable[TDataItem]:
+        for item in client.fetch_collections(create_client()):
+            item_updated = pendulum.from_timestamp(item.get("updated_at", 0))
+            if item_updated >= updated_at.last_value:
+                if updated_at.end_value is None or item_updated <= updated_at.end_value:
+                    item["updated_at"] = item_updated
+                    yield item
+
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def exports(
+        updated_at=dlt.sources.incremental(
+            "updated_at",
+            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            end_value=end_date,
+        ),
+    ) -> Iterable[TDataItem]:
+        for item in client.fetch_exports(create_client()):
+            item_updated = pendulum.from_timestamp(item.get("updated_at", 0))
+            if item_updated >= updated_at.last_value:
+                if updated_at.end_value is None or item_updated <= updated_at.end_value:
+                    item["updated_at"] = item_updated
+                    yield item
+
+    @dlt.resource(write_disposition="replace", primary_key="ip")
+    def info_ip_addresses() -> Iterable[TDataItem]:
+        yield from client.fetch_info_ip_addresses(create_client())
+
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def messages() -> Iterable[TDataItem]:
+        start_ts = int(start_date.timestamp()) if start_date else None
+        end_ts = int(end_date.timestamp()) if end_date else None
+        yield from client.fetch_messages(create_client(), start_ts, end_ts)
+
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def newsletters(
+        updated=dlt.sources.incremental(
+            "updated",
+            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            end_value=end_date,
+        ),
+    ) -> Iterable[TDataItem]:
+        for item in client.fetch_newsletters(create_client()):
+            item_updated = pendulum.from_timestamp(item.get("updated", 0))
+            if item_updated >= updated.last_value:
+                if updated.end_value is None or item_updated <= updated.end_value:
+                    item["updated"] = item_updated
+                    yield item
+
+    @dlt.transformer(data_from=newsletters, write_disposition="replace", primary_key="id")
+    def newsletter_test_groups(newsletter: TDataItem) -> Iterable[TDataItem]:
+        newsletter_id = newsletter.get("id")
+        yield from client.fetch_newsletter_test_groups(create_client(), newsletter_id)
+
+    @dlt.resource(write_disposition="replace", primary_key="id")
+    def reporting_webhooks() -> Iterable[TDataItem]:
+        yield from client.fetch_reporting_webhooks(create_client())
+
+    @dlt.resource(write_disposition="merge", primary_key="id")
+    def segments(
+        updated_at=dlt.sources.incremental(
+            "updated_at",
+            initial_value=start_date or pendulum.datetime(1970, 1, 1),
+            end_value=end_date,
+        ),
+    ) -> Iterable[TDataItem]:
+        for item in client.fetch_segments(create_client()):
+            item_updated = pendulum.from_timestamp(item.get("updated_at", 0))
+            if item_updated >= updated_at.last_value:
+                if updated_at.end_value is None or item_updated <= updated_at.end_value:
+                    item["updated_at"] = item_updated
+                    yield item
+
+    @dlt.resource(write_disposition="replace", primary_key="id")
+    def senders() -> Iterable[TDataItem]:
+        yield from client.fetch_senders(create_client())
+
+    @dlt.resource(write_disposition="replace", primary_key="id")
+    def transactional_messages() -> Iterable[TDataItem]:
+        yield from client.fetch_transactional_messages(create_client())
+
+    @dlt.resource(write_disposition="replace", primary_key="id")
+    def workspaces() -> Iterable[TDataItem]:
+        yield from client.fetch_workspaces(create_client())
+
+    return (activities, broadcasts, broadcast_actions, broadcast_messages, campaigns, campaign_actions, collections, exports, info_ip_addresses, messages, newsletters, newsletter_test_groups, reporting_webhooks, segments, senders, transactional_messages, workspaces)
 
 
 @dlt.source(max_table_nesting=0)
@@ -218,3 +309,30 @@ def customer_io_campaign_action_metrics_source(
             yield item
 
     return (campaigns | campaign_actions | campaign_action_metrics,)
+
+
+@dlt.source(max_table_nesting=0)
+def customer_io_newsletter_metrics_source(
+    api_key: str,
+    period: str = "days",
+) -> Iterable[DltResource]:
+    client = CustomerIoClient(api_key)
+
+    @dlt.resource(write_disposition="replace", primary_key="id", selected=False)
+    def newsletters() -> Iterable[TDataItem]:
+        for item in client.fetch_newsletters(create_client()):
+            yield item
+
+    @dlt.transformer(
+        data_from=newsletters,
+        write_disposition="replace",
+        primary_key=["newsletter_id", "period", "step_index"],
+    )
+    def newsletter_metrics(newsletter: TDataItem) -> Iterable[TDataItem]:
+        newsletter_id = newsletter.get("id")
+        for item in client.fetch_newsletter_metrics(
+            create_client(), newsletter_id, period
+        ):
+            yield item
+
+    return (newsletters | newsletter_metrics,)
