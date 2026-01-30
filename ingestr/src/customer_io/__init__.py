@@ -54,10 +54,13 @@ def customer_io_source(
     @dlt.transformer(data_from=broadcasts, write_disposition="merge", primary_key="id")
     def broadcast_actions(broadcast: TDataItem) -> Iterable[TDataItem]:
         broadcast_id = broadcast.get("id")
+        start_val = start_date or pendulum.datetime(1970, 1, 1)
         for item in client.fetch_broadcast_actions(create_client(), broadcast_id):
             item_updated = pendulum.from_timestamp(item.get("updated", 0))
-            item["updated"] = item_updated
-            yield item
+            if item_updated >= start_val:
+                if end_date is None or item_updated <= end_date:
+                    item["updated"] = item_updated
+                    yield item
 
     @dlt.transformer(data_from=broadcasts, write_disposition="merge", primary_key="id")
     def broadcast_messages(broadcast: TDataItem) -> Iterable[TDataItem]:
@@ -84,7 +87,15 @@ def customer_io_source(
                     item["updated"] = item_updated
                     yield item
 
-    return (activities, broadcasts, broadcast_actions, broadcast_messages, campaigns)
+    @dlt.transformer(data_from=campaigns, write_disposition="merge", primary_key="id")
+    def campaign_actions(campaign: TDataItem) -> Iterable[TDataItem]:
+        campaign_id = campaign.get("id")
+        for item in client.fetch_campaign_actions(create_client(), campaign_id):
+            item_updated = pendulum.from_timestamp(item.get("updated", 0))
+            item["updated"] = item_updated
+            yield item
+
+    return (activities, broadcasts, broadcast_actions, broadcast_messages, campaigns, campaign_actions)
 
 
 @dlt.source(max_table_nesting=0)
@@ -168,3 +179,42 @@ def customer_io_campaign_metrics_source(
             yield item
 
     return (campaigns | campaign_metrics,)
+
+
+@dlt.source(max_table_nesting=0)
+def customer_io_campaign_action_metrics_source(
+    api_key: str,
+    period: str = "days",
+    start_date: TAnyDateTime | None = None,
+    end_date: TAnyDateTime | None = None,
+) -> Iterable[DltResource]:
+    client = CustomerIoClient(api_key)
+
+    start_ts = int(start_date.timestamp()) if start_date else None
+    end_ts = int(end_date.timestamp()) if end_date else None
+
+    @dlt.resource(write_disposition="replace", primary_key="id", selected=False)
+    def campaigns() -> Iterable[TDataItem]:
+        for item in client.fetch_campaigns(create_client()):
+            yield item
+
+    @dlt.transformer(data_from=campaigns, write_disposition="replace", selected=False)
+    def campaign_actions(campaign: TDataItem) -> Iterable[TDataItem]:
+        campaign_id = campaign.get("id")
+        for item in client.fetch_campaign_actions(create_client(), campaign_id):
+            yield item
+
+    @dlt.transformer(
+        data_from=campaign_actions,
+        write_disposition="replace",
+        primary_key=["campaign_id", "action_id", "period", "step_index"],
+    )
+    def campaign_action_metrics(action: TDataItem) -> Iterable[TDataItem]:
+        campaign_id = action.get("campaign_id")
+        action_id = action.get("id")
+        for item in client.fetch_campaign_action_metrics(
+            create_client(), campaign_id, action_id, period, start_ts, end_ts
+        ):
+            yield item
+
+    return (campaigns | campaign_actions | campaign_action_metrics,)

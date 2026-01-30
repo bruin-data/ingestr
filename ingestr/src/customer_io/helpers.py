@@ -206,3 +206,43 @@ class CustomerIoClient:
             metrics.append(metric)
 
         return metrics
+
+    def fetch_campaign_actions(
+        self, session: requests.Session, campaign_id: int
+    ) -> list:
+        url = f"{BASE_URL}/v1/campaigns/{campaign_id}/actions"
+        actions = self._fetch_pages(session, url, data_key="actions")
+        for action in actions:
+            action["campaign_id"] = campaign_id
+        return actions
+
+    def fetch_campaign_action_metrics(
+        self,
+        session: requests.Session,
+        campaign_id: int,
+        action_id: int,
+        period: str = "days",
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+    ) -> list:
+        url = f"{BASE_URL}/v1/campaigns/{campaign_id}/actions/{action_id}/metrics"
+        params = {"version": 2, "res": period}
+
+        if start_ts:
+            params["start"] = start_ts
+        if end_ts:
+            params["end"] = end_ts
+
+        response = session.get(url=url, headers=self._get_headers(), params=params)
+        response.raise_for_status()
+        result = response.json()
+
+        metrics = []
+        for i, metric in enumerate(result.get("series", {}).get("series", [])):
+            metric["campaign_id"] = campaign_id
+            metric["action_id"] = action_id
+            metric["period"] = period
+            metric["step_index"] = i
+            metrics.append(metric)
+
+        return metrics
