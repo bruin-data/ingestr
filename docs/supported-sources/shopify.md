@@ -18,12 +18,25 @@ The URI is used to connect to the Shopify API for extracting data. More details 
 
 ## Setting up a Shopify Integration
 
-Shopify requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/shopify#setup-guide).
+To use the Shopify API, you must create and install a custom app in your store. API credentials are generated as part of this process.
 
-Once you complete the guide, you should have an API key and the store name to connect to. Let's say your API key is `shpkey_12345` and the store you'd like to connect to is `my-store`, here's a sample command that will copy the data from the Shopify store into a DuckDB database:
+Steps to get your API credentials:
+1) Open Shopify admin: `https://admin.shopify.com/store/your-store-name`
+2) **Settings** → **Apps and sales channels**
+3) **Develop apps** (top-right). If prompted, enable custom app development.
+4) If you see **Legacy custom apps**, open it; otherwise click **Create an app**.
+5) Name the app (e.g., "My Integration") and select yourself as the app developer.
+6) **Configuration** → **Admin API access scopes**: grant only the permissions you need (e.g., `read_products`, `read_orders`, `write_products`).
+7) **Install app** and confirm.
+8) Open **API credentials** and Find the **API key**
+
+Important: The access token is displayed only once. Copy and store it securely.
+
+Once you complete these steps, you will have the API key and your store name (e.g. `my-store.myshopify.com`) to connect. Example: if your API key is stored in `SHOPIFY_API_KEY` and your store is `my-store`, the command below will copy Shopify data into DuckDB:
 
 ```sh
-ingestr ingest --source-uri 'shopify://my-store.myshopify.com?api_key=shpkey_12345' --source-table 'orders' --dest-uri duckdb:///shopify.duckdb --dest-table 'dest.orders'
+SHOPIFY_API_KEY=your_api_key \
+ingestr ingest --source-uri "shopify://my-store.myshopify.com?api_key=${SHOPIFY_API_KEY}" --source-table "orders" --dest-uri "duckdb:///shopify.duckdb" --dest-table "dest.orders"
 ```
 
 The result of this command will be a table in the `shopify.duckdb` database with JSON columns.
@@ -39,7 +52,7 @@ Shopify source allows ingesting the following sources into separate tables:
 | [inventory_items](https://shopify.dev/api/admin-rest/2023-10/resources/inventoryitem) | id | updated_at | merge | Retrieves Shopify inventory item details and stock levels |
 | [transactions](https://shopify.dev/api/admin-rest/2023-10/resources/transaction) | id | id | merge | Retrieves Shopify transaction data for payments and refunds |
 | [balance](https://shopify.dev/api/admin-rest/2023-10/resources/balance) | currency | - | merge | Retrieves Shopify balance information for financial tracking |
-| [events](https://shopify.dev/api/admin-rest/2023-10/resources/event) | id | created_at |merge| Retrieves Shopify event data for audit trails and activity tracking |
+| [events](https://shopify.dev/api/admin-rest/2023-10/resources/event) | id | created_at | merge | Retrieves Shopify event data for audit trails and activity tracking |
 | [price_rules](https://shopify.dev/api/admin-rest/2023-10/resources/pricerule) | id | updated_at | merge | **DEPRECATED** - Use `discounts` table instead |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
