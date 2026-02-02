@@ -155,14 +155,14 @@ def run_gaql_query(
     ga_service = client.get_service("GoogleAdsService")
 
     if ":interval_start" in query:
-        start_str = (
-            start_date.strftime("%Y-%m-%d") if start_date else "1970-01-01"
-        )
+        start_str = start_date.strftime("%Y-%m-%d") if start_date else "1970-01-01"
         query = query.replace(":interval_start", f"'{start_str}'")
 
     if ":interval_end" in query:
         end_str = (
-            end_date.strftime("%Y-%m-%d") if end_date else date.today().strftime("%Y-%m-%d")
+            end_date.strftime("%Y-%m-%d")
+            if end_date
+            else date.today().strftime("%Y-%m-%d")
         )
         query = query.replace(":interval_end", f"'{end_str}'")
 
