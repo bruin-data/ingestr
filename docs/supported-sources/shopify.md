@@ -35,10 +35,11 @@ Steps to get your API credentials:
 
 Important: The access token is displayed only once. Copy and store it securely.
 
-Once you complete these steps, you will have the API key and your store name (e.g. `my-store.myshopify.com`) to connect. Example: if your API key is `shpkey_12345` and your store is `my-store`, the command below will copy Shopify data into DuckDB:
+Once you complete these steps, you will have the API key and your store name (e.g. `my-store.myshopify.com`) to connect. Example: if your API key is stored in `SHOPIFY_API_KEY` and your store is `my-store`, the command below will copy Shopify data into DuckDB:
 
 ```sh
-ingestr ingest --source-uri 'shopify://my-store.myshopify.com?api_key=shpkey_12345' --source-table 'orders' --dest-uri duckdb:///shopify.duckdb --dest-table 'dest.orders'
+SHOPIFY_API_KEY=your_api_key \
+ingestr ingest --source-uri "shopify://my-store.myshopify.com?api_key=${SHOPIFY_API_KEY}" --source-table "orders" --dest-uri "duckdb:///shopify.duckdb" --dest-table "dest.orders"
 ```
 
 The result of this command will be a table in the `shopify.duckdb` database with JSON columns.
