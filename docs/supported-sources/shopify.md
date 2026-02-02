@@ -28,10 +28,7 @@ Steps to get your API credentials:
 5) Name the app (e.g., "My Integration") and select yourself as the app developer.
 6) **Configuration** → **Admin API access scopes**: grant only the permissions you need (e.g., `read_products`, `read_orders`, `write_products`).
 7) **Install app** and confirm.
-8) Open **API credentials** and copy:
-   - **API key**
-   - **API secret key**
-   - **Admin API access token** (typically used to authenticate API requests)
+8) Open **API credentials** and Find the **API key**
 
 Important: The access token is displayed only once. Copy and store it securely.
 
