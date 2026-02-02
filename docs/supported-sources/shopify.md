@@ -18,9 +18,24 @@ The URI is used to connect to the Shopify API for extracting data. More details 
 
 ## Setting up a Shopify Integration
 
-Shopify requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/shopify#setup-guide).
+To use the Shopify API, you must create and install a custom app in your store. API credentials are generated as part of this process.
 
-Once you complete the guide, you should have an API key and the store name to connect to. Let's say your API key is `shpkey_12345` and the store you'd like to connect to is `my-store`, here's a sample command that will copy the data from the Shopify store into a DuckDB database:
+Steps to get your API credentials:
+1) Open Shopify admin: `https://admin.shopify.com/store/your-store-name`
+2) **Settings** → **Apps and sales channels**
+3) **Develop apps** (top-right). If prompted, enable custom app development.
+4) If you see **Legacy custom apps**, open it; otherwise click **Create an app**.
+5) Name the app (e.g., "My Integration") and select yourself as the app developer.
+6) **Configuration** → **Admin API access scopes**: grant only the permissions you need (e.g., `read_products`, `read_orders`, `write_products`).
+7) **Install app** and confirm.
+8) Open **API credentials** and copy:
+   - **API key**
+   - **API secret key**
+   - **Admin API access token** (typically used to authenticate API requests)
+
+Important: The access token is displayed only once. Copy and store it securely.
+
+Once you complete these steps, you will have the API key and your store name (e.g. `my-store.myshopify.com`) to connect. Example: if your API key is `shpkey_12345` and your store is `my-store`, the command below will copy Shopify data into DuckDB:
 
 ```sh
 ingestr ingest --source-uri 'shopify://my-store.myshopify.com?api_key=shpkey_12345' --source-table 'orders' --dest-uri duckdb:///shopify.duckdb --dest-table 'dest.orders'
