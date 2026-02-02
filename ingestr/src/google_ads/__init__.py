@@ -40,6 +40,7 @@ def google_ads(
     client: GoogleAdsClient,
     customer_ids: list[str],
     report_spec: Optional[str] = None,
+    gaql_query: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> Iterator[DltResource]:
@@ -59,6 +60,13 @@ def google_ads(
             primary_key=custom_report.primary_keys() + ["customer_id"],
             columns=dlt_metrics_schema(custom_report.metrics),
         )(client, customer_ids, custom_report, date_range)
+
+    if gaql_query is not None:
+        yield dlt.resource(
+            run_gaql_query,
+            name="gaql_query",
+            write_disposition="append",
+        )(client, customer_ids, gaql_query, start_date, end_date)
 
     for report_name, report in BUILTIN_REPORTS.items():
         yield dlt.resource(
@@ -131,3 +139,41 @@ def merge_lists(item: dict) -> dict:
         return item
     item["metrics"].update(replacements)
     return item
+
+
+def run_gaql_query(
+    client: GoogleAdsClient,
+    customer_ids: list[str],
+    query: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> Iterator[TDataItem]:
+    """
+    Execute a raw Google Ads Query Language (GAQL) query.
+    Supports :interval_start and :interval_end placeholders for date filtering.
+    """
+    ga_service = client.get_service("GoogleAdsService")
+
+    if ":interval_start" in query:
+        start_str = (
+            start_date.strftime("%Y-%m-%d") if start_date else "1970-01-01"
+        )
+        query = query.replace(":interval_start", f"'{start_str}'")
+
+    if ":interval_end" in query:
+        end_str = (
+            end_date.strftime("%Y-%m-%d") if end_date else date.today().strftime("%Y-%m-%d")
+        )
+        query = query.replace(":interval_end", f"'{end_str}'")
+
+    for customer_id in customer_ids:
+        stream = ga_service.search_stream(customer_id=customer_id, query=query)
+        for batch in stream:
+            for row in batch.results:
+                data = flatten(merge_lists(to_dict(row)))
+                if "segments_date" in data:
+                    data["segments_date"] = datetime.strptime(
+                        data["segments_date"], "%Y-%m-%d"
+                    ).date()
+                data["customer_id"] = customer_id
+                yield data

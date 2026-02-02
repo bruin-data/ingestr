@@ -2483,7 +2483,7 @@ class GCSSource:
 
 class GoogleAdsSource:
     def handles_incrementality(self) -> bool:
-        return True
+        return False
 
     def init_client(self, params: Dict[str, List[str]]):
         from google.ads.googleads.client import GoogleAdsClient  # type: ignore
@@ -2566,6 +2566,7 @@ class GoogleAdsSource:
             start_date = end_date - timedelta(days=30)  # type: ignore
 
         report_spec = None
+        gaql_query = None
         if table.startswith("daily:"):
             report_spec = table
             table = "daily_report"
@@ -2575,6 +2576,9 @@ class GoogleAdsSource:
             _, spec_customer_ids = Report.from_spec(report_spec)
             if spec_customer_ids:
                 customer_ids = spec_customer_ids
+        elif table.startswith("gaql_query:"):
+            gaql_query = table[len("gaql_query:") :]
+            table = "gaql_query"
         elif ":" in table:
             parts = table.split(":", 1)
             table = parts[0]
@@ -2586,6 +2590,7 @@ class GoogleAdsSource:
             client,
             customer_ids,
             report_spec,
+            gaql_query=gaql_query,
             start_date=start_date,
             end_date=end_date,
         )
