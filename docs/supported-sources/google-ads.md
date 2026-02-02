@@ -172,3 +172,65 @@ ingestr ingest \
 ```
 
 In this example, `1234567890` and `0987654321` will be used instead of `default_customer` from the URI.
+
+## GAQL Queries
+
+In addition to predefined tables and custom reports, you can execute raw [Google Ads Query Language (GAQL)](https://developers.google.com/google-ads/api/docs/query/overview) queries directly. This gives you full flexibility to query any resource with any combination of fields, segments, and metrics.
+
+### GAQL Query Format
+
+To run a GAQL query, use the `gaql_query:` prefix followed by your query:
+
+```sh
+ingestr ingest \
+  --source-uri "googleads://CUSTOMER_ID?credentials_path=./svc_account.json&dev_token=dev-token-spec-1&login_customer_id=MCC_ID" \
+  --source-table "gaql_query:SELECT campaign.id, campaign.name, campaign.status FROM campaign LIMIT 10" \
+  --dest-uri "duckdb://./adverts.db" \
+  --dest-table "public.campaigns"
+```
+
+### Date Filtering with Placeholders
+
+GAQL queries support special placeholders for date filtering that integrate with ingestr's `--interval-start` and `--interval-end` parameters:
+
+- `:interval_start` - Replaced with the value of `--interval-start` (defaults to `1970-01-01` if not provided)
+- `:interval_end` - Replaced with the value of `--interval-end` (defaults to today's date if not provided)
+
+**Example with date range:**
+```sh
+ingestr ingest \
+  --source-uri "googleads://CUSTOMER_ID?credentials_path=./svc_account.json&dev_token=dev-token-spec-1&login_customer_id=MCC_ID" \
+  --source-table "gaql_query:SELECT campaign.id, campaign.name, metrics.impressions, metrics.clicks, segments.date FROM campaign WHERE segments.date BETWEEN :interval_start AND :interval_end" \
+  --dest-uri "duckdb://./adverts.db" \
+  --dest-table "public.campaign_metrics" \
+  --interval-start "2024-01-01" \
+  --interval-end "2024-01-31"
+```
+
+### GAQL Query Examples
+
+**Get all campaigns with their status:**
+```sh
+--source-table "gaql_query:SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type FROM campaign"
+```
+
+**Get ad group performance metrics:**
+```sh
+--source-table "gaql_query:SELECT ad_group.id, ad_group.name, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, segments.date FROM ad_group WHERE segments.date DURING LAST_30_DAYS"
+```
+
+**Get keyword performance:**
+```sh
+--source-table "gaql_query:SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, metrics.impressions, metrics.clicks, metrics.conversions, segments.date FROM keyword_view WHERE segments.date DURING LAST_7_DAYS"
+```
+
+**Get search terms report:**
+```sh
+--source-table "gaql_query:SELECT search_term_view.search_term, campaign.name, ad_group.name, metrics.impressions, metrics.clicks, metrics.cost_micros FROM search_term_view WHERE segments.date DURING LAST_30_DAYS ORDER BY metrics.impressions DESC LIMIT 100"
+```
+
+> [!NOTE]
+> GAQL queries use `append` write disposition by default. Each row includes a `customer_id` field to identify which account the data came from.
+
+> [!TIP]
+> Use the [Google Ads Query Builder](https://developers.google.com/google-ads/api/fields/v18/overview_query_builder) to construct and validate your GAQL queries before using them with ingestr.
