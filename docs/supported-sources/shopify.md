@@ -52,7 +52,7 @@ Shopify source allows ingesting the following sources into separate tables:
 | [inventory_items](https://shopify.dev/api/admin-rest/2023-10/resources/inventoryitem) | id | updated_at | merge | Retrieves Shopify inventory item details and stock levels |
 | [transactions](https://shopify.dev/api/admin-rest/2023-10/resources/transaction) | id | id | merge | Retrieves Shopify transaction data for payments and refunds |
 | [balance](https://shopify.dev/api/admin-rest/2023-10/resources/balance) | currency | - | merge | Retrieves Shopify balance information for financial tracking |
-| [events](https://shopify.dev/api/admin-rest/2023-10/resources/event) | id | created_at |merge| Retrieves Shopify event data for audit trails and activity tracking |
+| [events](https://shopify.dev/api/admin-rest/2023-10/resources/event) | id | created_at | merge | Retrieves Shopify event data for audit trails and activity tracking |
 | [price_rules](https://shopify.dev/api/admin-rest/2023-10/resources/pricerule) | id | updated_at | merge | **DEPRECATED** - Use `discounts` table instead |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
