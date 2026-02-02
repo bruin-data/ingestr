@@ -8,6 +8,7 @@ from requests.exceptions import HTTPError
 DEFAULT_DIMENSIONS = ["campaign", "day", "app", "store_type", "channel", "country"]
 
 DEFAULT_METRICS = [
+    "installs",
     "network_cost",
     "all_revenue_total_d0",
     "ad_revenue_total_d0",
