@@ -39,7 +39,17 @@ class Report:
         self.unfilterable = unfilterable
 
     def primary_keys(self) -> List[str]:
-        return [field.to_column(k) for k in self.dimensions + self.segments]
+        dims = self.dimensions + self.segments
+        prefix_set = set()
+        for d in dims:
+            if d.endswith(".id"):
+                prefix_set.add(d[:-3])
+        filtered = []
+        for d in dims:
+            if d.endswith(".name") and d[:-5] in prefix_set:
+                continue
+            filtered.append(field.to_column(d))
+        return filtered
 
     @classmethod
     def from_spec(cls, spec: str):
