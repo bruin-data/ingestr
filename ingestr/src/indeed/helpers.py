@@ -62,7 +62,7 @@ def _api_request(
 def _paginate_campaigns(token: str) -> Iterator[Dict[str, Any]]:
     cursor: Optional[str] = None
     while True:
-        params: Dict[str, Any] = {"perPage": 500}
+        params: Dict[str, Any] = {"perPage": 500, "status": "ACTIVE"}
         if cursor:
             params["start"] = cursor
         response = _api_request(token, "/campaigns", params=params)
