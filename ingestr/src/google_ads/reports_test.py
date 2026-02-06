@@ -108,7 +108,9 @@ class TestReportPrimaryKeys(unittest.TestCase):
             segments=["customer.id", "customer.name"],
         )
         result = report.primary_keys()
-        self.assertEqual(result, ["campaign_id", "campaign_name", "customer_id", "customer_name"])
+        self.assertEqual(
+            result, ["campaign_id", "campaign_name", "customer_id", "customer_name"]
+        )
 
     def test_multiple_name_fields_with_single_id(self):
         """All fields including multiple .name fields should be included."""
