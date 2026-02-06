@@ -51,8 +51,8 @@ class TestReportPrimaryKeys(unittest.TestCase):
         result = report.primary_keys()
         self.assertEqual(result, ["campaign_id", "customer_id"])
 
-    def test_filters_out_name_when_id_exists(self):
-        """Name fields should be filtered out when matching .id exists."""
+    def test_includes_name_and_id_fields(self):
+        """Both .id and .name fields should be included."""
         report = Report(
             resource="campaign",
             dimensions=["campaign.id", "campaign.name", "customer.id"],
@@ -60,9 +60,7 @@ class TestReportPrimaryKeys(unittest.TestCase):
             segments=[],
         )
         result = report.primary_keys()
-        # campaign.name should be filtered out because campaign.id exists
-        self.assertEqual(result, ["campaign_id", "customer_id"])
-        self.assertNotIn("campaign_name", result)
+        self.assertEqual(result, ["campaign_id", "campaign_name", "customer_id"])
 
     def test_keeps_name_when_no_matching_id(self):
         """Name fields should be kept when no matching .id exists."""
@@ -101,8 +99,8 @@ class TestReportPrimaryKeys(unittest.TestCase):
             ["campaign_id", "customer_id", "segments_date", "segments_ad_network_type"],
         )
 
-    def test_filter_name_across_dimensions_and_segments(self):
-        """Name fields should be filtered based on .id from both dimensions and segments."""
+    def test_name_across_dimensions_and_segments(self):
+        """All fields from both dimensions and segments should be included."""
         report = Report(
             resource="campaign",
             dimensions=["campaign.id", "campaign.name"],
@@ -110,11 +108,10 @@ class TestReportPrimaryKeys(unittest.TestCase):
             segments=["customer.id", "customer.name"],
         )
         result = report.primary_keys()
-        # Both name fields should be filtered out
-        self.assertEqual(result, ["campaign_id", "customer_id"])
+        self.assertEqual(result, ["campaign_id", "campaign_name", "customer_id", "customer_name"])
 
     def test_multiple_name_fields_with_single_id(self):
-        """Multiple .name fields with single matching .id should filter correctly."""
+        """All fields including multiple .name fields should be included."""
         report = Report(
             resource="campaign",
             dimensions=["campaign.id", "campaign.name", "ad_group.name"],
@@ -122,11 +119,10 @@ class TestReportPrimaryKeys(unittest.TestCase):
             segments=[],
         )
         result = report.primary_keys()
-        # campaign.name filtered (campaign.id exists), ad_group.name kept (no ad_group.id)
-        self.assertEqual(result, ["campaign_id", "ad_group_name"])
+        self.assertEqual(result, ["campaign_id", "campaign_name", "ad_group_name"])
 
     def test_nested_field_id_and_name(self):
-        """Nested fields like ad_group_ad.ad.id should work correctly."""
+        """Nested fields like ad_group_ad.ad.id should be included."""
         report = Report(
             resource="ad_group_ad",
             dimensions=["ad_group_ad.ad.id", "ad_group_ad.ad.name"],
@@ -134,8 +130,7 @@ class TestReportPrimaryKeys(unittest.TestCase):
             segments=[],
         )
         result = report.primary_keys()
-        # ad_group_ad.ad.name should be filtered (ad_group_ad.ad.id exists)
-        self.assertEqual(result, ["ad_group_ad_ad_id"])
+        self.assertEqual(result, ["ad_group_ad_ad_id", "ad_group_ad_ad_name"])
 
     def test_preserves_order(self):
         """Primary keys should preserve the order of dimensions then segments."""
@@ -157,8 +152,8 @@ class TestReportPrimaryKeys(unittest.TestCase):
             ],
         )
 
-    def test_id_in_segment_filters_name_in_dimension(self):
-        """An .id in segments should filter matching .name in dimensions."""
+    def test_id_in_segment_and_name_in_dimension(self):
+        """Both .name in dimensions and .id in segments should be included."""
         report = Report(
             resource="campaign",
             dimensions=["campaign.name"],
@@ -166,8 +161,7 @@ class TestReportPrimaryKeys(unittest.TestCase):
             segments=["campaign.id"],
         )
         result = report.primary_keys()
-        # campaign.name should be filtered because campaign.id is in segments
-        self.assertEqual(result, ["campaign_id"])
+        self.assertEqual(result, ["campaign_name", "campaign_id"])
 
     def test_real_world_campaign_report(self):
         """Test with a realistic campaign report configuration."""
@@ -187,12 +181,11 @@ class TestReportPrimaryKeys(unittest.TestCase):
             segments=["segments.date", "segments.ad_network_type", "segments.device"],
         )
         result = report.primary_keys()
-        # campaign.name should be filtered (campaign.id exists)
-        # customer.descriptive_name should NOT be filtered (it's not .name)
         self.assertEqual(
             result,
             [
                 "campaign_id",
+                "campaign_name",
                 "customer_id",
                 "customer_descriptive_name",
                 "segments_date",
