@@ -40,14 +40,8 @@ class Report:
 
     def primary_keys(self) -> List[str]:
         dims = self.dimensions + self.segments
-        prefix_set = set()
-        for d in dims:
-            if d.endswith(".id"):
-                prefix_set.add(d[:-3])
         filtered = []
         for d in dims:
-            if d.endswith(".name") and d[:-5] in prefix_set:
-                continue
             filtered.append(field.to_column(d))
         return filtered
 

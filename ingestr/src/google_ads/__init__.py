@@ -110,6 +110,9 @@ def daily_report(
                         data["segments_date"], "%Y-%m-%d"
                     ).date()
                 row_data = {k: v for k, v in data.items() if k in allowed_keys}
+                for pk in report.primary_keys():
+                    if pk not in row_data or row_data[pk] is None or row_data[pk] == "":
+                        row_data[pk] = "-"
                 row_data["customer_id"] = customer_id
                 yield row_data
 
