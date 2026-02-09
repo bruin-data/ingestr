@@ -66,6 +66,7 @@ def google_ads(
             run_gaql_query,
             name="gaql_query",
             write_disposition="append",
+            max_table_nesting=0,
         )(client, customer_ids, gaql_query, start_date, end_date)
 
     for report_name, report in BUILTIN_REPORTS.items():
@@ -173,10 +174,6 @@ def run_gaql_query(
         stream = ga_service.search_stream(customer_id=customer_id, query=query)
         for batch in stream:
             for row in batch.results:
-                data = flatten(merge_lists(to_dict(row)))
-                if "segments_date" in data:
-                    data["segments_date"] = datetime.strptime(
-                        data["segments_date"], "%Y-%m-%d"
-                    ).date()
+                data = to_dict(row)
                 data["customer_id"] = customer_id
                 yield data
