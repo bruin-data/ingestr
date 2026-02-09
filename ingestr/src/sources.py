@@ -819,7 +819,6 @@ class ShopifySource:
             )
             api_key = [access_token]
 
-
         date_args = {}
         if kwargs.get("interval_start"):
             date_args["start_date"] = kwargs.get("interval_start")
