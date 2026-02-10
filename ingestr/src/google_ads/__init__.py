@@ -114,7 +114,7 @@ def daily_report(
                 for pk in report.primary_keys():
                     if pk not in row_data or row_data[pk] is None or row_data[pk] == "":
                         row_data[pk] = "-"
-                row_data["customer_id"] = customer_id 
+                row_data["customer_id"] = customer_id
                 yield row_data
 
 
