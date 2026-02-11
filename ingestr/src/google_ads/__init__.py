@@ -145,6 +145,23 @@ def merge_lists(item: dict) -> dict:
     return item
 
 
+def extract_fields(data: dict, field_paths: list[str]) -> dict:
+    result = {}
+    for path in field_paths:
+        parts = path.split(".")
+        value = data
+        for part in parts:
+            if isinstance(value, dict):
+                value = value.get(part)
+            else:
+                value = None
+                break
+        if value is not None:
+            column_name = path.replace(".", "_")
+            result[column_name] = value
+    return result
+
+
 def run_gaql_query(
     client: GoogleAdsClient,
     customer_ids: list[str],
@@ -170,10 +187,13 @@ def run_gaql_query(
         )
         query = query.replace(":interval_end", f"'{end_str}'")
 
+    field_paths = None
     for customer_id in customer_ids:
         stream = ga_service.search_stream(customer_id=customer_id, query=query)
         for batch in stream:
+            if field_paths is None:
+                field_paths = list(batch.field_mask.paths)
             for row in batch.results:
-                data = to_dict(row)
+                data = extract_fields(to_dict(row), field_paths)
                 data["customer_id"] = customer_id
                 yield data
