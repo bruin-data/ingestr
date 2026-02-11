@@ -1,6 +1,5 @@
 from ingestr.src.google_ads import extract_fields
 
-
 FIELD_PATHS = [
     "customer.id",
     "campaign.id",
@@ -46,9 +45,7 @@ def test_responsive_display_ad():
                 "type": "RESPONSIVE_DISPLAY_AD",
                 "responsive_display_ad": {
                     "headlines": [{"text": "Buy Now"}],
-                    "long_headline": {
-                        "text": "Great deals on summer products"
-                    },
+                    "long_headline": {"text": "Great deals on summer products"},
                     "descriptions": [
                         {"text": "Free shipping on all orders"},
                         {"text": "Limited time offer"},
@@ -69,12 +66,16 @@ def test_responsive_display_ad():
     assert result["campaign_name"] == "Summer Display Campaign"
     assert result["ad_group_id"] == "222"
     assert result["ad_group_name"] == "Display Ad Group"
-    assert result["ad_group_ad_resource_name"] == "customers/1234567890/adGroupAds/222~333"
+    assert (
+        result["ad_group_ad_resource_name"] == "customers/1234567890/adGroupAds/222~333"
+    )
     assert result["ad_group_ad_status"] == "ENABLED"
     assert result["ad_group_ad_ad_id"] == "333"
     assert result["ad_group_ad_ad_type"] == "RESPONSIVE_DISPLAY_AD"
     assert result["ad_group_ad_ad_final_urls"] == ["https://example.com/summer"]
-    assert result["ad_group_ad_ad_responsive_display_ad_headlines"] == [{"text": "Buy Now"}]
+    assert result["ad_group_ad_ad_responsive_display_ad_headlines"] == [
+        {"text": "Buy Now"}
+    ]
     assert result["ad_group_ad_ad_responsive_display_ad_long_headline"] == {
         "text": "Great deals on summer products"
     }
@@ -82,7 +83,9 @@ def test_responsive_display_ad():
         {"text": "Free shipping on all orders"},
         {"text": "Limited time offer"},
     ]
-    assert result["ad_group_ad_ad_responsive_display_ad_format_setting"] == "ALL_FORMATS"
+    assert (
+        result["ad_group_ad_ad_responsive_display_ad_format_setting"] == "ALL_FORMATS"
+    )
 
     assert "ad_group_ad_ad_responsive_search_ad_path1" not in result
     assert "ad_group_ad_ad_responsive_search_ad_path2" not in result
