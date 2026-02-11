@@ -1,5 +1,6 @@
 from ingestr.src.google_ads import extract_fields
 
+
 FIELD_PATHS = [
     "customer.id",
     "campaign.id",
@@ -21,9 +22,11 @@ FIELD_PATHS = [
     "ad_group_ad.ad.responsive_display_ad.descriptions",
 ]
 
+EXPECTED_KEYS = {path.replace(".", "_") for path in FIELD_PATHS}
 
-def test_responsive_display_ad():
-    data = {
+
+def test_extract_fields():
+    display_ad_data = {
         "customer": {
             "resource_name": "customers/1234567890",
             "id": "1234567890",
@@ -59,41 +62,7 @@ def test_responsive_display_ad():
         },
     }
 
-    result = extract_fields(data, FIELD_PATHS)
-
-    assert result["customer_id"] == "1234567890"
-    assert result["campaign_id"] == "111"
-    assert result["campaign_name"] == "Summer Display Campaign"
-    assert result["ad_group_id"] == "222"
-    assert result["ad_group_name"] == "Display Ad Group"
-    assert (
-        result["ad_group_ad_resource_name"] == "customers/1234567890/adGroupAds/222~333"
-    )
-    assert result["ad_group_ad_status"] == "ENABLED"
-    assert result["ad_group_ad_ad_id"] == "333"
-    assert result["ad_group_ad_ad_type"] == "RESPONSIVE_DISPLAY_AD"
-    assert result["ad_group_ad_ad_final_urls"] == ["https://example.com/summer"]
-    assert result["ad_group_ad_ad_responsive_display_ad_headlines"] == [
-        {"text": "Buy Now"}
-    ]
-    assert result["ad_group_ad_ad_responsive_display_ad_long_headline"] == {
-        "text": "Great deals on summer products"
-    }
-    assert result["ad_group_ad_ad_responsive_display_ad_descriptions"] == [
-        {"text": "Free shipping on all orders"},
-        {"text": "Limited time offer"},
-    ]
-    assert (
-        result["ad_group_ad_ad_responsive_display_ad_format_setting"] == "ALL_FORMATS"
-    )
-
-    assert "ad_group_ad_ad_responsive_search_ad_path1" not in result
-    assert "ad_group_ad_ad_responsive_search_ad_path2" not in result
-    assert "ad_group_ad_ad_name" not in result
-
-
-def test_call_ad():
-    data = {
+    call_ad_data = {
         "customer": {
             "resource_name": "customers/1234567890",
             "id": "1234567890",
@@ -120,25 +89,7 @@ def test_call_ad():
         },
     }
 
-    result = extract_fields(data, FIELD_PATHS)
-
-    assert result["customer_id"] == "1234567890"
-    assert result["campaign_name"] == "Call Campaign"
-    assert result["ad_group_ad_status"] == "PAUSED"
-    assert result["ad_group_ad_ad_type"] == "CALL_AD"
-    assert result["ad_group_ad_ad_id"] == "666"
-    assert result["ad_group_ad_ad_final_urls"] == ["https://example.com/contact"]
-
-    assert "ad_group_ad_ad_responsive_display_ad_headlines" not in result
-    assert "ad_group_ad_ad_responsive_display_ad_descriptions" not in result
-    assert "ad_group_ad_ad_responsive_display_ad_long_headline" not in result
-    assert "ad_group_ad_ad_responsive_search_ad_path1" not in result
-    assert "ad_group_ad_ad_responsive_search_ad_path2" not in result
-    assert "ad_group_ad_ad_name" not in result
-
-
-def test_responsive_search_ad():
-    data = {
+    search_ad_data = {
         "customer": {
             "resource_name": "customers/1234567890",
             "id": "1234567890",
@@ -169,16 +120,59 @@ def test_responsive_search_ad():
         },
     }
 
-    result = extract_fields(data, FIELD_PATHS)
+    for row_data in [display_ad_data, call_ad_data, search_ad_data]:
+        result = extract_fields(row_data, FIELD_PATHS)
+        assert set(result.keys()) == EXPECTED_KEYS
 
-    assert result["customer_id"] == "1234567890"
-    assert result["campaign_name"] == "Search Campaign"
-    assert result["ad_group_ad_ad_type"] == "RESPONSIVE_SEARCH_AD"
-    assert result["ad_group_ad_ad_responsive_search_ad_path1"] == "deals"
-    assert result["ad_group_ad_ad_responsive_search_ad_path2"] == "today"
-    assert result["ad_group_ad_ad_final_urls"] == ["https://example.com/search"]
+    # display ad
+    display = extract_fields(display_ad_data, FIELD_PATHS)
+    assert display["customer_id"] == "1234567890"
+    assert display["campaign_id"] == "111"
+    assert display["campaign_name"] == "Summer Display Campaign"
+    assert display["ad_group_id"] == "222"
+    assert display["ad_group_name"] == "Display Ad Group"
+    assert display["ad_group_ad_resource_name"] == "customers/1234567890/adGroupAds/222~333"
+    assert display["ad_group_ad_status"] == "ENABLED"
+    assert display["ad_group_ad_ad_id"] == "333"
+    assert display["ad_group_ad_ad_type"] == "RESPONSIVE_DISPLAY_AD"
+    assert display["ad_group_ad_ad_final_urls"] == ["https://example.com/summer"]
+    assert display["ad_group_ad_ad_responsive_display_ad_headlines"] == [{"text": "Buy Now"}]
+    assert display["ad_group_ad_ad_responsive_display_ad_long_headline"] == {
+        "text": "Great deals on summer products"
+    }
+    assert display["ad_group_ad_ad_responsive_display_ad_descriptions"] == [
+        {"text": "Free shipping on all orders"},
+        {"text": "Limited time offer"},
+    ]
+    assert display["ad_group_ad_ad_responsive_display_ad_format_setting"] == "ALL_FORMATS"
+    assert display["ad_group_ad_ad_responsive_search_ad_path1"] is None
+    assert display["ad_group_ad_ad_responsive_search_ad_path2"] is None
+    assert display["ad_group_ad_ad_name"] is None
 
-    assert "ad_group_ad_ad_responsive_display_ad_headlines" not in result
-    assert "ad_group_ad_ad_responsive_display_ad_descriptions" not in result
-    assert "ad_group_ad_ad_responsive_display_ad_long_headline" not in result
-    assert "ad_group_ad_ad_name" not in result
+    # call ad
+    call = extract_fields(call_ad_data, FIELD_PATHS)
+    assert call["customer_id"] == "1234567890"
+    assert call["campaign_name"] == "Call Campaign"
+    assert call["ad_group_ad_status"] == "PAUSED"
+    assert call["ad_group_ad_ad_type"] == "CALL_AD"
+    assert call["ad_group_ad_ad_id"] == "666"
+    assert call["ad_group_ad_ad_final_urls"] == ["https://example.com/contact"]
+    assert call["ad_group_ad_ad_responsive_display_ad_headlines"] is None
+    assert call["ad_group_ad_ad_responsive_display_ad_descriptions"] is None
+    assert call["ad_group_ad_ad_responsive_display_ad_long_headline"] is None
+    assert call["ad_group_ad_ad_responsive_search_ad_path1"] is None
+    assert call["ad_group_ad_ad_responsive_search_ad_path2"] is None
+    assert call["ad_group_ad_ad_name"] is None
+
+    # search ad
+    search = extract_fields(search_ad_data, FIELD_PATHS)
+    assert search["customer_id"] == "1234567890"
+    assert search["campaign_name"] == "Search Campaign"
+    assert search["ad_group_ad_ad_type"] == "RESPONSIVE_SEARCH_AD"
+    assert search["ad_group_ad_ad_responsive_search_ad_path1"] == "deals"
+    assert search["ad_group_ad_ad_responsive_search_ad_path2"] == "today"
+    assert search["ad_group_ad_ad_final_urls"] == ["https://example.com/search"]
+    assert search["ad_group_ad_ad_responsive_display_ad_headlines"] is None
+    assert search["ad_group_ad_ad_responsive_display_ad_descriptions"] is None
+    assert search["ad_group_ad_ad_responsive_display_ad_long_headline"] is None
+    assert search["ad_group_ad_ad_name"] is None

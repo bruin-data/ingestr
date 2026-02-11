@@ -156,9 +156,8 @@ def extract_fields(data: dict, field_paths: list[str]) -> dict:
             else:
                 value = None
                 break
-        if value is not None:
-            column_name = path.replace(".", "_")
-            result[column_name] = value
+        column_name = path.replace(".", "_")
+        result[column_name] = value
     return result
 
 
