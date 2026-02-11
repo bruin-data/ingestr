@@ -149,7 +149,7 @@ def extract_fields(data: dict, field_paths: list[str]) -> dict:
     result = {}
     for path in field_paths:
         parts = path.split(".")
-        value = data
+        value: Any = data
         for part in parts:
             if isinstance(value, dict):
                 value = value.get(part)
