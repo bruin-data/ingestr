@@ -74,7 +74,7 @@ clickhouse-driver==0.2.9
     #   clickhouse-sqlalchemy
 clickhouse-sqlalchemy==0.2.7
     # via -r requirements.in
-confluent-kafka==2.8.0
+confluent-kafka==2.13.0
     # via -r requirements.in
 couchbase==4.3.6
     # via -r requirements.in
