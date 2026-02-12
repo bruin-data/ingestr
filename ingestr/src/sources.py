@@ -220,6 +220,28 @@ class SqlSource:
                 return engine.execution_options(read_only=True)
 
             engine_adapter_callback = eng_callback
+
+        if uri.startswith("cratedb://"):
+            # CrateDB's SQLAlchemy dialect uses the `crate://` protocol scheme,
+            # but we would like to harmonize on `cratedb://` across the board.
+            # https://github.com/bruin-data/bruin/issues/1640
+
+            # Rewrite parameter `sslmode` to `ssl`.
+            parsed_uri = urlparse(uri)
+            query_params = parse_qs(parsed_uri.query)
+            if "sslmode" in query_params:
+                sslmode = query_params.get("sslmode")[0]
+                del query_params["sslmode"]
+                ssl = "false"
+                if sslmode.lower() in ["require", "verify-ca", "verify-full"]:
+                    ssl = "true"
+                query_params["ssl"] = [ssl]
+
+            # Rebuild URI
+            uri = parsed_uri._replace(
+                scheme="crate", query=urlencode(query_params, doseq=True)
+            ).geturl()
+
         from dlt.common.libs.sql_alchemy import (
             Engine,
             MetaData,

@@ -106,6 +106,7 @@ from ingestr.src.sources import (
 SQL_SOURCE_SCHEMES = [
     "bigquery",
     "crate",
+    "cratedb",
     "duckdb",
     "mssql",
     "mssql+pyodbc",
