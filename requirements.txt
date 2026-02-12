@@ -218,6 +218,8 @@ googleapis-common-protos==1.69.0
     #   google-api-core
     #   grpc-google-iam-v1
     #   grpcio-status
+greenlet==3.3.1
+    # via sqlalchemy
 grpc-google-iam-v1==0.14.2
     # via google-cloud-spanner
 grpc-interceptor==0.15.4
@@ -609,6 +611,7 @@ typing-extensions==4.15.0
     #   pyairtable
     #   pydantic
     #   pydantic-core
+    #   pyopenssl
     #   reactivex
     #   simple-salesforce
     #   snowflake-connector-python
@@ -630,8 +633,9 @@ tzlocal==5.3
     #   trino
 uritemplate==4.1.1
     # via google-api-python-client
-urllib3==2.3.0
+urllib3==2.6.0
     # via
+    #   -r requirements.in
     #   botocore
     #   clickhouse-connect
     #   crate
