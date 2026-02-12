@@ -4,7 +4,7 @@ aiobotocore==2.21.1
     # via s3fs
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.11.15
+aiohttp==3.13.3
     # via
     #   -r requirements.in
     #   aiobotocore
@@ -13,7 +13,7 @@ aiohttp==3.11.15
     #   s3fs
 aioitertools==0.12.0
     # via aiobotocore
-aiosignal==1.3.2
+aiosignal==1.4.0
     # via aiohttp
 alembic==1.15.2
     # via sqlalchemy-spanner
@@ -606,6 +606,7 @@ types-setuptools==78.1.0.20250329
     # via requirements-parser
 typing-extensions==4.15.0
     # via
+    #   aiosignal
     #   alembic
     #   dlt
     #   oracledb
