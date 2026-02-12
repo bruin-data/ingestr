@@ -355,8 +355,9 @@ proto-plus==1.26.1
     #   google-api-core
     #   google-cloud-bigquery-storage
     #   google-cloud-spanner
-protobuf==5.29.5
+protobuf==5.29.6
     # via
+    #   -r requirements.in
     #   google-ads
     #   google-analytics-data
     #   google-api-core
