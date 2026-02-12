@@ -17,9 +17,9 @@ ingestr supports Zoom as a source.
 - Give your app a name.
 - Go to **App Credentials**, you will find your `Account ID`, `Client ID`, and `Client Secret`.
 - Go to **Scopes** and add the required permissions depending on the tables you want to ingest:
-  - `meeting:read:admin`, `meeting:read` for meetings
-  - `user:read`, `user:read:admin` for users
-  - `report:read:admin` for participants
+  - `meeting:read:admin`, `meeting:read` for meetings. Granular permissions: `meeting:read:list_meetings`, `meeting:read:list_meetings:admin`
+  - `user:read`, `user:read:admin` for users. Granular permissions: `user:read:list_users:admin`
+  - `report:read:admin` for participants. Granular permissions: `report:read:list_meeting_participants:admin`
 - Go to **Activation** and activate your app. Your app will not work until it is activated.
 
 ## URI format
