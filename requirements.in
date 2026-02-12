@@ -59,4 +59,4 @@ influxdb-client==1.41.0
 oracledb==3.4.1
 trino[sqlalchemy]==0.336.0
 tldextract==5.1.3
-urllib3==2.6.0
+urllib3==2.6.3
