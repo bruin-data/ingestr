@@ -230,10 +230,14 @@ class SqlSource:
             parsed_uri = urlparse(uri)
             query_params = parse_qs(parsed_uri.query)
             if "sslmode" in query_params:
-                sslmode = query_params.get("sslmode")[0]
+                sslmode: str = query_params.get("sslmode", [""])[0]
                 del query_params["sslmode"]
                 ssl = "false"
-                if sslmode.lower() in ["require", "verify-ca", "verify-full"]:
+                if sslmode.lower() in [
+                    "require",
+                    "verify-ca",
+                    "verify-full",
+                ]:
                     ssl = "true"
                 query_params["ssl"] = [ssl]
 
