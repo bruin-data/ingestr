@@ -21,8 +21,9 @@ clickhouse://<username>:<password>@<host>:<port>?http_port=<http_port>&secure=<s
 - `password` (required): The password is required to authenticate the provided username.
 - `host` (required): The hostname or IP address of the ClickHouse server where the database is hosted.
 - `port` (required): The TCP port number used by the ClickHouse server.
-- `http_port` (optional): The port number to use when connecting to the ClickHouse server's HTTP interface. By default, it is set to port `8443`. It should only be used when ClickHouse is the destination. 
+- `http_port` (optional): The port number to use when connecting to the ClickHouse server's HTTP interface. By default, it is set to port `8443`. It should only be used when ClickHouse is the destination.
 - `secure` (optional): Set to `1` for a secure HTTPS connection or `0` for a non-secure HTTP connection. By default, it is set to `1`.
+- `engine.*` (optional): Engine-level settings to include in the `CREATE TABLE` statement. Prefix each setting name with `engine.`. For example, `engine.index_granularity=8192` will add `SETTINGS index_granularity = 8192` to the table definition. Only applicable when ClickHouse is the destination.
 
 ClickHouse requires a `username`, `password`, `host` and `port` to connect to the ClickHouse server. For more information, read [here](https://dlthub.com/docs/dlt-ecosystem/destinations/clickhouse#2-setup-clickhouse-database). Once you've completed the guide, you should have all the above-mentioned credentials.
 
@@ -34,9 +35,20 @@ ingestr ingest \
     --dest-table 'stripe.event'
 ```
 
-This is a sample command that will copy the data from the Stripe source into Athena.
+This is a sample command that will copy the data from the Stripe source into ClickHouse.
 
 <img alt="clickhouse_img" src="../media/clickhouse_img.png" />
+
+You can also specify engine settings for the destination table:
+
+```
+ingestr ingest \
+    --source-uri "stripe://?api_key=key123" \
+    --source-table 'event' \
+    --dest-uri "clickhouse://user_123:pass123@localhost:9000?engine.index_granularity=8192" \
+    --dest-table 'stripe.event'
+```
+
 
 <!-- 
     see https://github.com/dlt-hub/dlt/issues/2248
