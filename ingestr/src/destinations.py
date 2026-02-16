@@ -620,6 +620,12 @@ class ClickhouseDestination:
                 "Invalid value for secure. Set to `1` for a secure HTTPS connection or `0` for a non-secure HTTP connection."
             )
 
+        self.engine_settings = {
+            key[len("engine."):]: query_params[key][0]
+            for key in query_params
+            if key.startswith("engine.")
+        }
+
         credentials = ClickHouseCredentials(
             {
                 "host": host,
