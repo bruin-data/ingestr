@@ -621,10 +621,7 @@ def ingest(
         if isinstance(destination, AthenaDestination) and partition_by:
             partition.apply_athena_hints(dlt_source, partition_by, column_hints)
 
-        if (
-            isinstance(destination, ClickhouseDestination)
-            and destination.engine_settings
-        ):
+        if isinstance(destination, ClickhouseDestination):
             from dlt.destinations.adapters import clickhouse_adapter
 
             settings = ClickhouseDestination.engine_settings(dest_uri)

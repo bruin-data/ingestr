@@ -655,7 +655,6 @@ class ClickhouseDestination:
         }
 
 
-
 class BlobFSClient(dlt.destinations.impl.filesystem.filesystem.FilesystemClient):
     @property
     def dataset_path(self):

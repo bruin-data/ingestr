@@ -197,9 +197,7 @@ class ClickhouseDestinationTest(unittest.TestCase):
         settings = self.destination.engine_settings(uri)
         self.assertNotIn("secure", settings)
         self.assertNotIn("http_port", settings)
-        self.assertEqual(
-            settings, {"index_granularity": "8192"}
-        )
+        self.assertEqual(settings, {"index_granularity": "8192"})
 
     def test_no_engine_settings_returns_empty_dict(self):
         uri = "clickhouse://user:pass@localhost:9000/mydb?secure=0"
