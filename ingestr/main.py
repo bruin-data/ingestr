@@ -621,14 +621,15 @@ def ingest(
         if isinstance(destination, AthenaDestination) and partition_by:
             partition.apply_athena_hints(dlt_source, partition_by, column_hints)
 
-        if isinstance(destination, ClickhouseDestination) and destination.engine_settings:
+        if (
+            isinstance(destination, ClickhouseDestination)
+            and destination.engine_settings
+        ):
             from dlt.destinations.adapters import clickhouse_adapter
 
             resource.for_each(
                 dlt_source,
-                lambda x: clickhouse_adapter(
-                    x, settings=destination.engine_settings
-                ),
+                lambda x: clickhouse_adapter(x, settings=destination.engine_settings),  # type: ignore
             )
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:

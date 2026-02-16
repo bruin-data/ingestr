@@ -621,7 +621,7 @@ class ClickhouseDestination:
             )
 
         self.engine_settings = {
-            key[len("engine."):]: query_params[key][0]
+            key[len("engine.") :]: query_params[key][0]
             for key in query_params
             if key.startswith("engine.")
         }
