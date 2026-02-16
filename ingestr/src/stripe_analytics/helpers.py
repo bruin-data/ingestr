@@ -300,11 +300,7 @@ def generate_date_ranges(start_ts: int, end_ts: int) -> Iterable[Dict[str, int]]
     """
     current_ts = start_ts
     while current_ts < end_ts:
-        current_date = datetime.utcfromtimestamp(current_ts)
-        next_hour = datetime(
-            current_date.year, current_date.month, current_date.day, current_date.hour
-        ) + timedelta(hours=1)
-        next_ts = min(int(next_hour.timestamp()), end_ts)
+        next_ts = min(current_ts + 3600, end_ts)
         yield {"start_ts": current_ts, "end_ts": next_ts}
         current_ts = next_ts
 
