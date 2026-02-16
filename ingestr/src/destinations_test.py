@@ -202,3 +202,26 @@ class ClickhouseDestinationTest(unittest.TestCase):
     def test_no_engine_settings_returns_empty_dict(self):
         uri = "clickhouse://user:pass@localhost:9000/mydb?secure=0"
         self.assertEqual(self.destination.engine_settings(uri), {})
+
+    def test_engine_type_parsed_from_uri(self):
+        uri = "clickhouse://user:pass@localhost:9000/mydb?secure=0&engine=shared_merge_tree"
+        self.assertEqual(self.destination.engine_type(uri), "shared_merge_tree")
+
+    def test_engine_type_returns_none_when_absent(self):
+        uri = "clickhouse://user:pass@localhost:9000/mydb?secure=0"
+        self.assertIsNone(self.destination.engine_type(uri))
+
+    def test_engine_and_engine_settings_together(self):
+        uri = "clickhouse://user:pass@localhost:9000/mydb?engine=merge_tree&engine.index_granularity=8192&engine.storage_policy=default"
+        self.assertEqual(self.destination.engine_type(uri), "merge_tree")
+        self.assertEqual(
+            self.destination.engine_settings(uri),
+            {"index_granularity": "8192", "storage_policy": "default"},
+        )
+
+    def test_engine_not_included_in_engine_settings(self):
+        uri = "clickhouse://user:pass@localhost:9000/mydb?engine=shared_merge_tree&engine.index_granularity=8192"
+        settings = self.destination.engine_settings(uri)
+        self.assertNotIn("", settings)
+        self.assertNotIn("shared_merge_tree", settings.values())
+        self.assertEqual(settings, {"index_granularity": "8192"})

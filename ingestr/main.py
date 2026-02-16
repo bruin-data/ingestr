@@ -625,10 +625,17 @@ def ingest(
             from dlt.destinations.adapters import clickhouse_adapter
 
             settings = ClickhouseDestination.engine_settings(dest_uri)
+            engine_type = ClickhouseDestination.engine_type(dest_uri)
+
+            def apply_clickhouse_adapter(x):
+                kwargs = {"settings": settings}
+                if engine_type:
+                    kwargs["table_engine_type"] = engine_type
+                clickhouse_adapter(x, **kwargs)
 
             resource.for_each(
                 dlt_source,
-                lambda x: clickhouse_adapter(x, settings=settings),  # type: ignore
+                apply_clickhouse_adapter,
             )
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
