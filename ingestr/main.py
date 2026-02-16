@@ -627,9 +627,11 @@ def ingest(
         ):
             from dlt.destinations.adapters import clickhouse_adapter
 
+            settings = ClickhouseDestination.engine_settings(dest_uri)
+
             resource.for_each(
                 dlt_source,
-                lambda x: clickhouse_adapter(x, settings=destination.engine_settings),  # type: ignore
+                lambda x: clickhouse_adapter(x, settings=settings),  # type: ignore
             )
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
