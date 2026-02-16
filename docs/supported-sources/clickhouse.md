@@ -23,6 +23,7 @@ clickhouse://<username>:<password>@<host>:<port>?http_port=<http_port>&secure=<s
 - `port` (required): The TCP port number used by the ClickHouse server.
 - `http_port` (optional): The port number to use when connecting to the ClickHouse server's HTTP interface. By default, it is set to port `8443`. It should only be used when ClickHouse is the destination.
 - `secure` (optional): Set to `1` for a secure HTTPS connection or `0` for a non-secure HTTP connection. By default, it is set to `1`.
+- `engine` (optional): The table engine type to use when creating destination tables. Valid values: `merge_tree`, `shared_merge_tree`, `replicated_merge_tree`, `stripe_log`, `tiny_log`. Only applicable when ClickHouse is the destination.
 - `engine.*` (optional): Engine-level settings to include in the `CREATE TABLE` statement. Prefix each setting name with `engine.`. For example, `engine.index_granularity=8192` will add `SETTINGS index_granularity = 8192` to the table definition. Only applicable when ClickHouse is the destination.
 
 ClickHouse requires a `username`, `password`, `host` and `port` to connect to the ClickHouse server. For more information, read [here](https://dlthub.com/docs/dlt-ecosystem/destinations/clickhouse#2-setup-clickhouse-database). Once you've completed the guide, you should have all the above-mentioned credentials.

@@ -654,6 +654,15 @@ class ClickhouseDestination:
             if key.startswith("engine.")
         }
 
+    @staticmethod
+    def engine_type(uri: str) -> str | None:
+        parsed_uri = urlparse(uri)
+        query_params = parse_qs(parsed_uri.query)
+        values = query_params.get("engine")
+        if values:
+            return values[0]
+        return None
+
 
 class BlobFSClient(dlt.destinations.impl.filesystem.filesystem.FilesystemClient):
     @property
