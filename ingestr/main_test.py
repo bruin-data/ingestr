@@ -2882,23 +2882,24 @@ def test_custom_query(testcase, source, dest):
     dest.stop()
 
 
-# Integration testing when the access token is not provided, and it is only for the resource "repo_events
-@pytest.mark.parametrize(
-    "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
-)
-def test_github_to_duckdb(dest):
-    dest_uri = dest.start()
-    source_uri = "github://?owner=bruin-data&repo=ingestr"
-    source_table = "repo_events"
+# TODO(turtledev): use a token with higher rate limits
+# # Integration testing when the access token is not provided, and it is only for the resource "repo_events
+# @pytest.mark.parametrize(
+#     "dest", list(DESTINATIONS.values()), ids=list(DESTINATIONS.keys())
+# )
+# def test_github_to_duckdb(dest):
+#     dest_uri = dest.start()
+#     source_uri = "github://?owner=bruin-data&repo=ingestr"
+#     source_table = "repo_events"
 
-    dest_table = "dest.github_repo_events"
-    res = invoke_ingest_command(source_uri, source_table, dest_uri, dest_table)
+#     dest_table = "dest.github_repo_events"
+#     res = invoke_ingest_command(source_uri, source_table, dest_uri, dest_table)
 
-    assert res.exit_code == 0
-    dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
-    res = dest_engine.execute(f"select count(*) from {dest_table}").fetchall()
-    dest_engine.dispose()
-    assert len(res) > 0
+#     assert res.exit_code == 0
+#     dest_engine = sqlalchemy.create_engine(dest_uri, poolclass=NullPool)
+#     res = dest_engine.execute(f"select count(*) from {dest_table}").fetchall()
+#     dest_engine.dispose()
+#     assert len(res) > 0
 
 
 def appstore_test_cases() -> Iterable[Callable]:
