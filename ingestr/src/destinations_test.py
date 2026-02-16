@@ -187,22 +187,20 @@ class ClickhouseDestinationTest(unittest.TestCase):
 
     def test_engine_settings_parsed_from_uri(self):
         uri = "clickhouse://user:pass@localhost:9000/mydb?secure=0&engine.index_granularity=8192&engine.storage_policy=default"
-        self.destination.dlt_dest(uri)
         self.assertEqual(
-            self.destination.engine_settings,
+            self.destination.engine_settings(uri),
             {"index_granularity": "8192", "storage_policy": "default"},
         )
 
     def test_non_engine_params_excluded(self):
         uri = "clickhouse://user:pass@localhost:9000/mydb?secure=0&http_port=8123&engine.index_granularity=8192"
-        self.destination.dlt_dest(uri)
-        self.assertNotIn("secure", self.destination.engine_settings)
-        self.assertNotIn("http_port", self.destination.engine_settings)
+        settings = self.destination.engine_settings(uri)
+        self.assertNotIn("secure", settings)
+        self.assertNotIn("http_port", settings)
         self.assertEqual(
-            self.destination.engine_settings, {"index_granularity": "8192"}
+            settings, {"index_granularity": "8192"}
         )
 
     def test_no_engine_settings_returns_empty_dict(self):
         uri = "clickhouse://user:pass@localhost:9000/mydb?secure=0"
-        self.destination.dlt_dest(uri)
-        self.assertEqual(self.destination.engine_settings, {})
+        self.assertEqual(self.destination.engine_settings(uri), {})
