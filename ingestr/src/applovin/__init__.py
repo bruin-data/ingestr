@@ -159,7 +159,6 @@ def applovin_source(
     end_date: Optional[str],
     custom: Optional[str],
 ):
-    
     if end_date is None:
         # use the greatest of yesterday and start_date
         end_date = max(
