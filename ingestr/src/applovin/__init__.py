@@ -237,8 +237,6 @@ def applovin_source(
 
     if backfill:
         config["resource_defaults"]["endpoint"]["incremental"]["end_value"] = end_date  # type: ignore
-    elif end_date is not None:
-        config["resource_defaults"]["endpoint"]["incremental"]["end_value"] = end_date  # type: ignore
 
     yield from rest_api_resources(config)
 
