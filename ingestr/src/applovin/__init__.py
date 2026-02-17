@@ -159,10 +159,7 @@ def applovin_source(
     end_date: Optional[str],
     custom: Optional[str],
 ):
-    backfill = False
     if end_date is None:
-        backfill = True
-
         # use the greatest of yesterday and start_date
         end_date = max(
             datetime.now(timezone.utc) - timedelta(days=1),
@@ -185,13 +182,14 @@ def applovin_source(
                 "incremental": {
                     "cursor_path": "day",
                     "start_param": "start",
+                    "end_param": "end",
                     "initial_value": start_date,
+                    "end_value": end_date,
                     "range_start": "closed",
                     "range_end": "closed",
                 },
                 "params": {
                     "format": "json",
-                    "end": end_date,
                 },
                 "paginator": "single_page",
                 "response_actions": [
@@ -234,9 +232,6 @@ def applovin_source(
     if custom:
         custom_report = custom_report_from_spec(custom)
         config["resources"].append(custom_report)
-
-    if backfill:
-        config["resource_defaults"]["endpoint"]["incremental"]["end_value"] = end_date  # type: ignore
 
     yield from rest_api_resources(config)
 
