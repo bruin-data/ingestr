@@ -25,10 +25,11 @@ class MixpanelClient:
 
         url = f"https://{server}.mixpanel.com/api/2.0/export/"
         params = {
-            "project_id": self.project_id,
             "from_date": start_date.format("YYYY-MM-DD"),
             "to_date": end_date.format("YYYY-MM-DD"),
         }
+        if self.project_id:
+            params["project_id"] = self.project_id
         headers = {
             "accept": "text/plain",
         }
@@ -69,7 +70,9 @@ class MixpanelClient:
         page = 0
         session_id = None
         while True:
-            params = {"project_id": self.project_id, "page": str(page)}
+            params = {"page": str(page)}
+            if self.project_id:
+                params["project_id"] = self.project_id
             if session_id:
                 params["session_id"] = session_id
             start_str = start_date.format("YYYY-MM-DDTHH:mm:ss")

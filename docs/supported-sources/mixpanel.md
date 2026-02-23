@@ -14,9 +14,11 @@ URI parameters:
 
 - `username`: Mixpanel service account username.
 - `password`: Mixpanel service account secret. This is the secret associated with the service account.
+- `api_secret`: (Optional) Mixpanel project secret. Can be used instead of `username` and `password`. Can be found in the [Access Keys section](https://mixpanel.com/settings/project/) of your project settings.
 - `project_id`: The numeric project ID.
 - `server`: (Optional) The server region to use. Can be "us", "eu", or "in". Defaults to "eu".
 
+Either `username`/`password` or `api_secret` must be provided for authentication.
 
 To grab mixpanel credentials, please follow the guide [here](https://developer.mixpanel.com/reference/service-accounts).
 

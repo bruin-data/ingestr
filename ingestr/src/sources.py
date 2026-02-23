@@ -1500,12 +1500,20 @@ class MixpanelSource:
         params = parse_qs(parsed.query)
         username = params.get("username")
         password = params.get("password")
+        api_secret = params.get("api_secret")
         project_id = params.get("project_id")
         server = params.get("server", ["eu"])
 
-        if not username or not password or not project_id:
+        has_service_account = username and password
+        has_api_secret = api_secret
+
+        if not has_service_account and not has_api_secret:
             raise ValueError(
-                "username, password, project_id are required to connect to Mixpanel"
+                "Either (username, password) for Service Account auth or api_secret for Project Secret auth is required to connect to Mixpanel"
+            )
+        if has_service_account and not project_id:
+            raise ValueError(
+                "project_id is required to connect to Mixpanel when using service account authentication"
             )
 
         if table not in ["events", "profiles"]:
@@ -1527,10 +1535,17 @@ class MixpanelSource:
 
         from ingestr.src.mixpanel import mixpanel_source
 
+        if has_service_account:
+            auth_username = username[0]
+            auth_password = password[0]
+        else:
+            auth_username = api_secret[0]
+            auth_password = ""
+
         return mixpanel_source(
-            username=username[0],
-            password=password[0],
-            project_id=project_id[0],
+            username=auth_username,
+            password=auth_password,
+            project_id=project_id[0] if project_id else None,
             start_date=start_date,
             end_date=end_date,
             server=server[0],
