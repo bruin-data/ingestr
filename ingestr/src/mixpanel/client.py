@@ -6,7 +6,9 @@ from dlt.sources.helpers.requests import Client
 
 
 class MixpanelClient:
-    def __init__(self, username: str, password: str, project_id: str, server: str):
+    def __init__(
+        self, username: str, password: str, project_id: str | None, server: str
+    ):
         self.username = username
         self.password = password
         self.project_id = project_id

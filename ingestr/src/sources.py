@@ -1536,10 +1536,10 @@ class MixpanelSource:
         from ingestr.src.mixpanel import mixpanel_source
 
         if has_service_account:
-            auth_username = username[0]
-            auth_password = password[0]
+            auth_username = username[0]  # type: ignore[index]
+            auth_password = password[0]  # type: ignore[index]
         else:
-            auth_username = api_secret[0]
+            auth_username = api_secret[0]  # type: ignore[index]
             auth_password = ""
 
         return mixpanel_source(
