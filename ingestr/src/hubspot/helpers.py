@@ -162,6 +162,20 @@ def fetch_data(
                             "updatedAt": _result.get("updatedAt", ""),
                         }
                     )
+                elif resource_name == "owners":
+                    _objects.append(
+                        {
+                            "id": _result.get("id", ""),
+                            "email": _result.get("email", ""),
+                            "type": _result.get("type", ""),
+                            "firstName": _result.get("firstName", ""),
+                            "lastName": _result.get("lastName", ""),
+                            "createdAt": _result.get("createdAt", ""),
+                            "updatedAt": _result.get("updatedAt", ""),
+                            "userId": _result.get("userId", ""),
+                            "teams": _result.get("teams", []),
+                        }
+                    )
                 else:
                     _obj = _result.get("properties", _result)
                     if "id" not in _obj and "id" in _result:

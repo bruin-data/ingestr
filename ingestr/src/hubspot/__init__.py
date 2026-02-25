@@ -55,8 +55,16 @@ from .helpers import (
 from .settings import (
     ALL,
     CRM_OBJECT_ENDPOINTS,
+    CRM_OWNERS_ENDPOINT,
     CRM_SCHEMAS_ENDPOINT,
+    DEFAULT_CALL_PROPS,
     DEFAULT_COMPANY_PROPS,
+    DEFAULT_EMAIL_PROPS,
+    DEFAULT_FEEDBACK_SUBMISSION_PROPS,
+    DEFAULT_LINE_ITEM_PROPS,
+    DEFAULT_MEETING_PROPS,
+    DEFAULT_NOTE_PROPS,
+    DEFAULT_TASK_PROPS,
     DEFAULT_CONTACT_PROPS,
     DEFAULT_DEAL_PROPS,
     DEFAULT_PRODUCT_PROPS,
@@ -67,7 +75,7 @@ from .settings import (
     WEB_ANALYTICS_EVENTS_ENDPOINT,
 )
 
-THubspotObjectType = Literal["company", "contact", "deal", "ticket", "product", "quote"]
+THubspotObjectType = Literal["company", "contact", "deal", "ticket", "product", "quote", "call", "email", "feedback_submission", "line_item", "meeting", "note", "task"]
 
 
 @dlt.source(name="hubspot", max_table_nesting=0)
@@ -178,6 +186,118 @@ def hubspot(
             include_custom_props,
         )
 
+    @dlt.resource(name="calls", write_disposition="replace")
+    def calls(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+    ) -> Iterator[TDataItems]:
+        """Hubspot calls resource"""
+        yield from crm_objects(
+            "call",
+            api_key,
+            include_history,
+            DEFAULT_CALL_PROPS,
+            include_custom_props,
+        )
+
+    @dlt.resource(name="emails", write_disposition="replace")
+    def emails(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+    ) -> Iterator[TDataItems]:
+        """Hubspot emails resource"""
+        yield from crm_objects(
+            "email",
+            api_key,
+            include_history,
+            DEFAULT_EMAIL_PROPS,
+            include_custom_props,
+        )
+
+    @dlt.resource(name="feedback_submissions", write_disposition="replace")
+    def feedback_submissions(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+    ) -> Iterator[TDataItems]:
+        """Hubspot feedback submissions resource"""
+        yield from crm_objects(
+            "feedback_submission",
+            api_key,
+            include_history,
+            DEFAULT_FEEDBACK_SUBMISSION_PROPS,
+            include_custom_props,
+        )
+
+    @dlt.resource(name="line_items", write_disposition="replace")
+    def line_items(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+    ) -> Iterator[TDataItems]:
+        """Hubspot line items resource"""
+        yield from crm_objects(
+            "line_item",
+            api_key,
+            include_history,
+            DEFAULT_LINE_ITEM_PROPS,
+            include_custom_props,
+        )
+
+    @dlt.resource(name="meetings", write_disposition="replace")
+    def meetings(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+    ) -> Iterator[TDataItems]:
+        """Hubspot meetings resource"""
+        yield from crm_objects(
+            "meeting",
+            api_key,
+            include_history,
+            DEFAULT_MEETING_PROPS,
+            include_custom_props,
+        )
+
+    @dlt.resource(name="notes", write_disposition="replace")
+    def notes(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+    ) -> Iterator[TDataItems]:
+        """Hubspot notes resource"""
+        yield from crm_objects(
+            "note",
+            api_key,
+            include_history,
+            DEFAULT_NOTE_PROPS,
+            include_custom_props,
+        )
+
+    @dlt.resource(name="tasks", write_disposition="replace")
+    def tasks(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+    ) -> Iterator[TDataItems]:
+        """Hubspot tasks resource"""
+        yield from crm_objects(
+            "task",
+            api_key,
+            include_history,
+            DEFAULT_TASK_PROPS,
+            include_custom_props,
+        )
+
+    @dlt.resource(name="owners", write_disposition="replace", primary_key="id")
+    def owners(
+        api_key: str = api_key,
+    ) -> Iterator[TDataItems]:
+        """Hubspot owners resource"""
+        yield from fetch_data(CRM_OWNERS_ENDPOINT, api_key, resource_name="owners")
+
     @dlt.resource(name="schemas", write_disposition="merge", primary_key="id")
     def schemas(
         api_key: str = api_key,
@@ -244,7 +364,7 @@ def hubspot(
         """Hubspot custom object details resource"""
         yield from fetch_data(custom_object_endpoint, api_key, resource_name="custom")
 
-    return companies, contacts, deals, tickets, products, quotes, schemas, custom
+    return companies, contacts, deals, tickets, products, quotes, calls, emails, feedback_submissions, line_items, meetings, notes, tasks, owners, schemas, custom
 
 
 def crm_objects(

@@ -1381,6 +1381,14 @@ class HubspotSource:
             "tickets",
             "products",
             "quotes",
+            "calls",
+            "emails",
+            "feedback_submissions",
+            "line_items",
+            "meetings",
+            "notes",
+            "tasks",
+            "owners",
             "schemas",
         ]:
             endpoint = table
