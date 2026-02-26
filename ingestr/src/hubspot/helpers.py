@@ -19,7 +19,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from dlt.sources.helpers import requests
 
-from .settings import OBJECT_TYPE_PLURAL
+from .settings import DEFAULT_LAST_MODIFIED_PROPERTY, LAST_MODIFIED_PROPERTY, OBJECT_TYPE_PLURAL
 
 BASE_URL = "https://api.hubapi.com/"
 
@@ -278,13 +278,14 @@ def fetch_data_search(
     url = get_url(f"/crm/v3/objects/{OBJECT_TYPE_PLURAL[object_type]}/search")
     headers = _get_headers(api_key)
     from_type = OBJECT_TYPE_PLURAL[object_type]
+    modified_prop = LAST_MODIFIED_PROPERTY.get(object_type, DEFAULT_LAST_MODIFIED_PROPERTY)
 
     body: Dict[str, Any] = {
         "filterGroups": [
             {
                 "filters": [
                     {
-                        "propertyName": "hs_lastmodifieddate",
+                        "propertyName": modified_prop,
                         "operator": "GTE",
                         "value": start_date_ms,
                     }
@@ -292,7 +293,7 @@ def fetch_data_search(
             }
         ],
         "properties": [p for p in properties.split(",") if p],
-        "sorts": [{"propertyName": "hs_lastmodifieddate", "direction": "ASCENDING"}],
+        "sorts": [{"propertyName": modified_prop, "direction": "ASCENDING"}],
         "limit": 100,
     }
 
@@ -300,6 +301,9 @@ def fetch_data_search(
         r = requests.post(url, headers=headers, json=body)
         r.raise_for_status()
         _data = r.json()
+
+        if _data.get("status") == "error":
+            raise ValueError(f"HubSpot search error: {_data.get('message')} (correlationId: {_data.get('correlationId')})")
 
         if "results" in _data:
             _objects: List[Dict[str, Any]] = []

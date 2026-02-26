@@ -94,6 +94,12 @@ OBJECT_TYPE_SINGULAR = {
 
 OBJECT_TYPE_PLURAL = {v: k for k, v in OBJECT_TYPE_SINGULAR.items()}
 
+# Contacts use "lastmodifieddate"; all other CRM objects use "hs_lastmodifieddate"
+LAST_MODIFIED_PROPERTY = {
+    "contact": "lastmodifieddate",
+}
+DEFAULT_LAST_MODIFIED_PROPERTY = "hs_lastmodifieddate"
+
 DEFAULT_DEAL_PROPS = [
     "amount",
     "closedate",
