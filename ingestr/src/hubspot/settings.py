@@ -44,16 +44,16 @@ CRM_FEEDBACK_SUBMISSIONS_ENDPOINT = (
     "/crm/v3/objects/feedback_submissions?associations=contacts,companies,deals,products,quotes"
 )
 CRM_LINE_ITEMS_ENDPOINT = (
-    "/crm/v3/objects/line_items?associations=deals,quotes"
+    "/crm/v3/objects/line_items?associations=contacts,companies,deals,products,quotes"
 )
 CRM_MEETINGS_ENDPOINT = (
-    "/crm/v3/objects/meetings?associations=contacts,companies,deals"
+    "/crm/v3/objects/meetings?associations=contacts,companies,deals,products,quotes"
 )
 CRM_NOTES_ENDPOINT = (
-    "/crm/v3/objects/notes?associations=contacts,companies,deals,tickets"
+    "/crm/v3/objects/notes?associations=contacts,companies,deals,products,quotes"
 )
 CRM_TASKS_ENDPOINT = (
-    "/crm/v3/objects/tasks?associations=contacts,companies,deals"
+    "/crm/v3/objects/tasks?associations=contacts,companies,deals,products,quotes"
 )
 CRM_OWNERS_ENDPOINT = "/crm/v3/owners"
 CRM_SCHEMAS_ENDPOINT = "/crm/v3/schemas"
