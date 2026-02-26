@@ -119,6 +119,7 @@ DEFAULT_CONTACT_PROPS = [
     "firstname",
     "hs_object_id",
     "lastmodifieddate",
+    "hs_lastmodifieddate",
     "lastname",
 ]
 
@@ -162,6 +163,7 @@ DEFAULT_CALL_PROPS = [
     "hs_call_status",
     "hs_call_title",
     "hs_call_to_number",
+    "hs_lastmodifieddate",
     "hs_timestamp",
 ]
 
@@ -174,6 +176,7 @@ DEFAULT_EMAIL_PROPS = [
     "hs_email_subject",
     "hs_email_text",
     "hs_timestamp",
+    "hs_lastmodifieddate",
     "hubspot_owner_id",
 ]
 
@@ -191,6 +194,7 @@ DEFAULT_LINE_ITEM_PROPS = [
     "hs_line_item_currency_code",
     "hs_recurring_billing_end_date",
     "hs_recurring_billing_start_date",
+    "hs_lastmodifieddate",
     "hs_sku",
     "name",
     "price",
@@ -208,6 +212,7 @@ DEFAULT_MEETING_PROPS = [
     "hs_meeting_start_time",
     "hs_meeting_title",
     "hs_timestamp",
+    "hs_lastmodifieddate",
     "hubspot_owner_id",
 ]
 
@@ -215,6 +220,7 @@ DEFAULT_NOTE_PROPS = [
     "hs_attachment_ids",
     "hs_note_body",
     "hs_timestamp",
+    "hs_lastmodifieddate",
     "hubspot_owner_id",
 ]
 
@@ -225,6 +231,7 @@ DEFAULT_TASK_PROPS = [
     "hs_task_subject",
     "hs_task_type",
     "hs_timestamp",
+    "hs_lastmodifieddate",
     "hubspot_owner_id",
 ]
 

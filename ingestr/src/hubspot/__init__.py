@@ -38,8 +38,8 @@ python
 >>> resources = hubspot(api_key="your_api_key")
 """
 
-from typing import Any, Dict, Iterator, List, Literal, Sequence
-from urllib.parse import quote
+from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence
+from urllib.parse import parse_qs, quote, urlparse
 
 import dlt
 from dlt.common import pendulum
@@ -50,6 +50,7 @@ from .helpers import (
     _get_property_names,
     fetch_data,
     fetch_data_raw,
+    fetch_data_search,
     fetch_property_history,
 )
 from .settings import (
@@ -84,6 +85,7 @@ def hubspot(
     include_history: bool = False,
     include_custom_props: bool = True,
     custom_object: str = None,
+    start_date: Optional[pendulum.DateTime] = None,
 ) -> Sequence[DltResource]:
     """
     A DLT source that retrieves data from the HubSpot API using the
@@ -116,6 +118,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot companies resource"""
         yield from crm_objects(
@@ -124,6 +127,7 @@ def hubspot(
             include_history=include_history,
             props=DEFAULT_COMPANY_PROPS,
             include_custom_props=include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="contacts", write_disposition="replace")
@@ -131,6 +135,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot contacts resource"""
         yield from crm_objects(
@@ -139,6 +144,7 @@ def hubspot(
             include_history,
             DEFAULT_CONTACT_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="deals", write_disposition="replace")
@@ -146,6 +152,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot deals resource"""
         yield from crm_objects(
@@ -154,6 +161,7 @@ def hubspot(
             include_history,
             DEFAULT_DEAL_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="tickets", write_disposition="replace")
@@ -161,6 +169,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot tickets resource"""
         yield from crm_objects(
@@ -169,6 +178,7 @@ def hubspot(
             include_history,
             DEFAULT_TICKET_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="products", write_disposition="replace")
@@ -176,6 +186,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot products resource"""
         yield from crm_objects(
@@ -184,6 +195,7 @@ def hubspot(
             include_history,
             DEFAULT_PRODUCT_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="calls", write_disposition="replace")
@@ -191,6 +203,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot calls resource"""
         yield from crm_objects(
@@ -199,6 +212,7 @@ def hubspot(
             include_history,
             DEFAULT_CALL_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="emails", write_disposition="replace")
@@ -206,6 +220,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot emails resource"""
         yield from crm_objects(
@@ -214,6 +229,7 @@ def hubspot(
             include_history,
             DEFAULT_EMAIL_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="feedback_submissions", write_disposition="replace")
@@ -221,6 +237,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot feedback submissions resource"""
         yield from crm_objects(
@@ -229,6 +246,7 @@ def hubspot(
             include_history,
             DEFAULT_FEEDBACK_SUBMISSION_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="line_items", write_disposition="replace")
@@ -236,6 +254,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot line items resource"""
         yield from crm_objects(
@@ -244,6 +263,7 @@ def hubspot(
             include_history,
             DEFAULT_LINE_ITEM_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="meetings", write_disposition="replace")
@@ -251,6 +271,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot meetings resource"""
         yield from crm_objects(
@@ -259,6 +280,7 @@ def hubspot(
             include_history,
             DEFAULT_MEETING_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="notes", write_disposition="replace")
@@ -266,6 +288,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot notes resource"""
         yield from crm_objects(
@@ -274,6 +297,7 @@ def hubspot(
             include_history,
             DEFAULT_NOTE_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="tasks", write_disposition="replace")
@@ -281,6 +305,7 @@ def hubspot(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        start_date: Optional[pendulum.DateTime] = start_date,
     ) -> Iterator[TDataItems]:
         """Hubspot tasks resource"""
         yield from crm_objects(
@@ -289,6 +314,7 @@ def hubspot(
             include_history,
             DEFAULT_TASK_PROPS,
             include_custom_props,
+            start_date=start_date,
         )
 
     @dlt.resource(name="owners", write_disposition="replace", primary_key="id")
@@ -364,6 +390,14 @@ def hubspot(
         """Hubspot custom object details resource"""
         yield from fetch_data(custom_object_endpoint, api_key, resource_name="custom")
 
+    if start_date is not None:
+        crm_resources = [
+            companies, contacts, deals, tickets, products, quotes,
+            calls, emails, feedback_submissions, line_items, meetings, notes, tasks,
+        ]
+        for r in crm_resources:
+            r.apply_hints(write_disposition="merge", primary_key=["hs_object_id"])
+
     return companies, contacts, deals, tickets, products, quotes, calls, emails, feedback_submissions, line_items, meetings, notes, tasks, owners, schemas, custom
 
 
@@ -373,6 +407,7 @@ def crm_objects(
     include_history: bool = False,
     props: Sequence[str] = None,
     include_custom_props: bool = True,
+    start_date: Optional[pendulum.DateTime] = None,
 ) -> Iterator[TDataItems]:
     """Building blocks for CRM resources."""
     if props == ALL:
@@ -384,6 +419,13 @@ def crm_objects(
         props = props + custom_props  # type: ignore
 
     props = ",".join(sorted(list(set(props))))
+
+    if start_date is not None:
+        start_date_ms = str(int(start_date.timestamp() * 1000))
+        _qs = parse_qs(urlparse(CRM_OBJECT_ENDPOINTS[object_type]).query)
+        assoc_types = [t for t in _qs.get("associations", [""])[0].split(",") if t]
+        yield from fetch_data_search(object_type, api_key, props, start_date_ms, association_types=assoc_types)
+        return
 
     params = {"properties": props, "limit": 100}
 

@@ -1336,7 +1336,7 @@ class SlackSource:
 
 class HubspotSource:
     def handles_incrementality(self) -> bool:
-        return False
+        return True
 
     # hubspot://?api_key=<api_key>
     def dlt_source(self, uri: str, table: str, **kwargs):
@@ -1354,6 +1354,7 @@ class HubspotSource:
             raise ValueError("api_key in the URI is required to connect to Hubspot")
 
         endpoint = None
+        start_date = kwargs.get("interval_start")
 
         from ingestr.src.hubspot import hubspot
 
@@ -1399,6 +1400,7 @@ class HubspotSource:
 
         return hubspot(
             api_key=api_key[0],
+            start_date=start_date,
         ).with_resources(endpoint)
 
 
