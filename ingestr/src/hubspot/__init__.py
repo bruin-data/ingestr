@@ -79,13 +79,20 @@ from .settings import (
 THubspotObjectType = Literal["company", "contact", "deal", "ticket", "product", "quote", "call", "email", "feedback_submission", "line_item", "meeting", "note", "task"]
 
 
+def _last_value_to_ms(last_value) -> Optional[str]:
+    """Convert dlt incremental last_value (ISO string or datetime) to ms timestamp string."""
+    if last_value is None:
+        return None
+    dt = pendulum.parse(last_value) if isinstance(last_value, str) else pendulum.instance(last_value)
+    return str(int(dt.timestamp() * 1000))
+
+
 @dlt.source(name="hubspot", max_table_nesting=0)
 def hubspot(
     api_key: str = dlt.secrets.value,
     include_history: bool = False,
     include_custom_props: bool = True,
     custom_object: str = None,
-    start_date: Optional[pendulum.DateTime] = None,
 ) -> Sequence[DltResource]:
     """
     A DLT source that retrieves data from the HubSpot API using the
@@ -113,12 +120,14 @@ def hubspot(
         `api_key` argument.
     """
 
-    @dlt.resource(name="companies", write_disposition="replace")
+    @dlt.resource(name="companies", write_disposition="merge", primary_key=["hs_object_id"])
     def companies(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot companies resource"""
         yield from crm_objects(
@@ -127,15 +136,17 @@ def hubspot(
             include_history=include_history,
             props=DEFAULT_COMPANY_PROPS,
             include_custom_props=include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="contacts", write_disposition="replace")
+    @dlt.resource(name="contacts", write_disposition="merge", primary_key=["hs_object_id"])
     def contacts(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot contacts resource"""
         yield from crm_objects(
@@ -144,15 +155,17 @@ def hubspot(
             include_history,
             DEFAULT_CONTACT_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="deals", write_disposition="replace")
+    @dlt.resource(name="deals", write_disposition="merge", primary_key=["hs_object_id"])
     def deals(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot deals resource"""
         yield from crm_objects(
@@ -161,15 +174,17 @@ def hubspot(
             include_history,
             DEFAULT_DEAL_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="tickets", write_disposition="replace")
+    @dlt.resource(name="tickets", write_disposition="merge", primary_key=["hs_object_id"])
     def tickets(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot tickets resource"""
         yield from crm_objects(
@@ -178,15 +193,17 @@ def hubspot(
             include_history,
             DEFAULT_TICKET_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="products", write_disposition="replace")
+    @dlt.resource(name="products", write_disposition="merge", primary_key=["hs_object_id"])
     def products(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot products resource"""
         yield from crm_objects(
@@ -195,15 +212,17 @@ def hubspot(
             include_history,
             DEFAULT_PRODUCT_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="calls", write_disposition="replace")
+    @dlt.resource(name="calls", write_disposition="merge", primary_key=["hs_object_id"])
     def calls(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot calls resource"""
         yield from crm_objects(
@@ -212,15 +231,17 @@ def hubspot(
             include_history,
             DEFAULT_CALL_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="emails", write_disposition="replace")
+    @dlt.resource(name="emails", write_disposition="merge", primary_key=["hs_object_id"])
     def emails(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot emails resource"""
         yield from crm_objects(
@@ -229,15 +250,17 @@ def hubspot(
             include_history,
             DEFAULT_EMAIL_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="feedback_submissions", write_disposition="replace")
+    @dlt.resource(name="feedback_submissions", write_disposition="merge", primary_key=["hs_object_id"])
     def feedback_submissions(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot feedback submissions resource"""
         yield from crm_objects(
@@ -246,15 +269,17 @@ def hubspot(
             include_history,
             DEFAULT_FEEDBACK_SUBMISSION_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="line_items", write_disposition="replace")
+    @dlt.resource(name="line_items", write_disposition="merge", primary_key=["hs_object_id"])
     def line_items(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot line items resource"""
         yield from crm_objects(
@@ -263,15 +288,17 @@ def hubspot(
             include_history,
             DEFAULT_LINE_ITEM_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="meetings", write_disposition="replace")
+    @dlt.resource(name="meetings", write_disposition="merge", primary_key=["hs_object_id"])
     def meetings(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot meetings resource"""
         yield from crm_objects(
@@ -280,15 +307,17 @@ def hubspot(
             include_history,
             DEFAULT_MEETING_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="notes", write_disposition="replace")
+    @dlt.resource(name="notes", write_disposition="merge", primary_key=["hs_object_id"])
     def notes(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot notes resource"""
         yield from crm_objects(
@@ -297,15 +326,17 @@ def hubspot(
             include_history,
             DEFAULT_NOTE_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="tasks", write_disposition="replace")
+    @dlt.resource(name="tasks", write_disposition="merge", primary_key=["hs_object_id"])
     def tasks(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
-        start_date: Optional[pendulum.DateTime] = start_date,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot tasks resource"""
         yield from crm_objects(
@@ -314,7 +345,7 @@ def hubspot(
             include_history,
             DEFAULT_TASK_PROPS,
             include_custom_props,
-            start_date=start_date,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
     @dlt.resource(name="owners", write_disposition="replace", primary_key="id")
@@ -331,11 +362,14 @@ def hubspot(
         """Hubspot schemas resource"""
         yield from fetch_data(CRM_SCHEMAS_ENDPOINT, api_key, resource_name="schemas")
 
-    @dlt.resource(name="quotes", write_disposition="replace")
+    @dlt.resource(name="quotes", write_disposition="merge", primary_key=["hs_object_id"])
     def quotes(
         api_key: str = api_key,
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
     ) -> Iterator[TDataItems]:
         """Hubspot quotes resource"""
         yield from crm_objects(
@@ -344,6 +378,7 @@ def hubspot(
             include_history,
             DEFAULT_QUOTE_PROPS,
             include_custom_props,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
     @dlt.resource(write_disposition="merge", primary_key="hs_object_id")
@@ -390,14 +425,6 @@ def hubspot(
         """Hubspot custom object details resource"""
         yield from fetch_data(custom_object_endpoint, api_key, resource_name="custom")
 
-    if start_date is not None:
-        crm_resources = [
-            companies, contacts, deals, tickets, products, quotes,
-            calls, emails, feedback_submissions, line_items, meetings, notes, tasks,
-        ]
-        for r in crm_resources:
-            r.apply_hints(write_disposition="merge", primary_key=["hs_object_id"])
-
     return companies, contacts, deals, tickets, products, quotes, calls, emails, feedback_submissions, line_items, meetings, notes, tasks, owners, schemas, custom
 
 
@@ -407,7 +434,7 @@ def crm_objects(
     include_history: bool = False,
     props: Sequence[str] = None,
     include_custom_props: bool = True,
-    start_date: Optional[pendulum.DateTime] = None,
+    start_date_ms: Optional[str] = None,
 ) -> Iterator[TDataItems]:
     """Building blocks for CRM resources."""
     if props == ALL:
@@ -420,8 +447,7 @@ def crm_objects(
 
     props = ",".join(sorted(list(set(props))))
 
-    if start_date is not None:
-        start_date_ms = str(int(start_date.timestamp() * 1000))
+    if start_date_ms is not None:
         _qs = parse_qs(urlparse(CRM_OBJECT_ENDPOINTS[object_type]).query)
         assoc_types = [t for t in _qs.get("associations", [""])[0].split(",") if t]
         yield from fetch_data_search(object_type, api_key, props, start_date_ms, association_types=assoc_types)
