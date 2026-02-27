@@ -71,7 +71,7 @@ CRM_COMMERCE_PAYMENTS_ENDPOINT = (
     "/crm/v3/objects/commerce_payments?associations=contacts,companies,deals,quotes,invoices,products,fees"
 )
 CRM_TAXES_ENDPOINT = (
-    "/crm/v3/objects/tax?associations=line_items,companies,deals,products,quotes,fees"
+    "/crm/v3/objects/taxes?associations=line_items,companies,deals,products,quotes,fees"
 )
 CRM_OWNERS_ENDPOINT = "/crm/v3/owners"
 CRM_SCHEMAS_ENDPOINT = "/crm/v3/schemas"
