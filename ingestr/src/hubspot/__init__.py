@@ -66,6 +66,12 @@ from .settings import (
     DEFAULT_MEETING_PROPS,
     DEFAULT_NOTE_PROPS,
     DEFAULT_TASK_PROPS,
+    DEFAULT_CART_PROPS,
+    DEFAULT_DISCOUNT_PROPS,
+    DEFAULT_FEE_PROPS,
+    DEFAULT_INVOICE_PROPS,
+    DEFAULT_COMMERCE_PAYMENT_PROPS,
+    DEFAULT_TAX_PROPS,
     DEFAULT_CONTACT_PROPS,
     DEFAULT_DEAL_PROPS,
     DEFAULT_PRODUCT_PROPS,
@@ -76,7 +82,7 @@ from .settings import (
     WEB_ANALYTICS_EVENTS_ENDPOINT,
 )
 
-THubspotObjectType = Literal["company", "contact", "deal", "ticket", "product", "quote", "call", "email", "feedback_submission", "line_item", "meeting", "note", "task"]
+THubspotObjectType = Literal["company", "contact", "deal", "ticket", "product", "quote", "call", "email", "feedback_submission", "line_item", "meeting", "note", "task", "cart", "discount", "fee", "invoice", "commerce_payment", "tax"]
 
 
 def _last_value_to_ms(last_value) -> Optional[str]:
@@ -348,6 +354,120 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
+    @dlt.resource(name="carts", write_disposition="merge", primary_key=["hs_object_id"])
+    def carts(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
+    ) -> Iterator[TDataItems]:
+        """Hubspot carts resource"""
+        yield from crm_objects(
+            "cart",
+            api_key,
+            include_history,
+            DEFAULT_CART_PROPS,
+            include_custom_props,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
+        )
+
+    @dlt.resource(name="discounts", write_disposition="merge", primary_key=["hs_object_id"])
+    def discounts(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
+    ) -> Iterator[TDataItems]:
+        """Hubspot discounts resource"""
+        yield from crm_objects(
+            "discount",
+            api_key,
+            include_history,
+            DEFAULT_DISCOUNT_PROPS,
+            include_custom_props,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
+        )
+
+    @dlt.resource(name="fees", write_disposition="merge", primary_key=["hs_object_id"])
+    def fees(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
+    ) -> Iterator[TDataItems]:
+        """Hubspot fees resource"""
+        yield from crm_objects(
+            "fee",
+            api_key,
+            include_history,
+            DEFAULT_FEE_PROPS,
+            include_custom_props,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
+        )
+
+    @dlt.resource(name="invoices", write_disposition="merge", primary_key=["hs_object_id"])
+    def invoices(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
+    ) -> Iterator[TDataItems]:
+        """Hubspot invoices resource"""
+        yield from crm_objects(
+            "invoice",
+            api_key,
+            include_history,
+            DEFAULT_INVOICE_PROPS,
+            include_custom_props,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
+        )
+
+    @dlt.resource(name="commerce_payments", write_disposition="merge", primary_key=["hs_object_id"])
+    def commerce_payments(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
+    ) -> Iterator[TDataItems]:
+        """Hubspot commerce payments resource"""
+        yield from crm_objects(
+            "commerce_payment",
+            api_key,
+            include_history,
+            DEFAULT_COMMERCE_PAYMENT_PROPS,
+            include_custom_props,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
+        )
+
+    @dlt.resource(name="taxes", write_disposition="merge", primary_key=["hs_object_id"])
+    def taxes(
+        api_key: str = api_key,
+        include_history: bool = include_history,
+        include_custom_props: bool = include_custom_props,
+        updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
+            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+        ),
+    ) -> Iterator[TDataItems]:
+        """Hubspot taxes resource"""
+        yield from crm_objects(
+            "tax",
+            api_key,
+            include_history,
+            DEFAULT_TAX_PROPS,
+            include_custom_props,
+            start_date_ms=_last_value_to_ms(updated_at.last_value),
+        )
+
     @dlt.resource(name="quotes", write_disposition="merge", primary_key=["hs_object_id"])
     def quotes(
         api_key: str = api_key,
@@ -425,7 +545,7 @@ def hubspot(
         """Hubspot custom object details resource"""
         yield from fetch_data(custom_object_endpoint, api_key, resource_name="custom")
 
-    return companies, contacts, deals, tickets, products, quotes, calls, emails, feedback_submissions, line_items, meetings, notes, tasks, owners, schemas, custom
+    return companies, contacts, deals, tickets, products, quotes, calls, emails, feedback_submissions, line_items, meetings, notes, tasks, carts, discounts, fees, invoices, commerce_payments, taxes, owners, schemas, custom
 
 
 def crm_objects(

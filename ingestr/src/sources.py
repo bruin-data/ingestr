@@ -1388,6 +1388,12 @@ class HubspotSource:
             "meetings",
             "notes",
             "tasks",
+            "carts",
+            "discounts",
+            "fees",
+            "invoices",
+            "commerce_payments",
+            "taxes",
             "owners",
             "schemas",
         ]:

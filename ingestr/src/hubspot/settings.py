@@ -55,6 +55,24 @@ CRM_NOTES_ENDPOINT = (
 CRM_TASKS_ENDPOINT = (
     "/crm/v3/objects/tasks?associations=contacts,companies,deals,products,quotes"
 )
+CRM_CARTS_ENDPOINT = (
+    "/crm/v3/objects/carts?associations=contacts,companies,deals,products,quotes"
+)
+CRM_DISCOUNTS_ENDPOINT = (
+    "/crm/v3/objects/discounts?associations=contacts,line_items,companies,deals,products,quotes"
+)
+CRM_FEES_ENDPOINT = (
+    "/crm/v3/objects/fees?associations=contacts,line_items,companies,deals,products,quotes"
+)
+CRM_INVOICES_ENDPOINT = (
+    "/crm/v3/objects/invoices?associations=contacts,line_items,companies,fees,products,quotes"
+)
+CRM_COMMERCE_PAYMENTS_ENDPOINT = (
+    "/crm/v3/objects/commerce_payments?associations=contacts,companies,deals,quotes,invoices,products,fees"
+)
+CRM_TAXES_ENDPOINT = (
+    "/crm/v3/objects/tax?associations=line_items,companies,deals,products,quotes,fees"
+)
 CRM_OWNERS_ENDPOINT = "/crm/v3/owners"
 CRM_SCHEMAS_ENDPOINT = "/crm/v3/schemas"
 
@@ -72,6 +90,12 @@ CRM_OBJECT_ENDPOINTS = {
     "meeting": CRM_MEETINGS_ENDPOINT,
     "note": CRM_NOTES_ENDPOINT,
     "task": CRM_TASKS_ENDPOINT,
+    "cart": CRM_CARTS_ENDPOINT,
+    "discount": CRM_DISCOUNTS_ENDPOINT,
+    "fee": CRM_FEES_ENDPOINT,
+    "invoice": CRM_INVOICES_ENDPOINT,
+    "commerce_payment": CRM_COMMERCE_PAYMENTS_ENDPOINT,
+    "tax": CRM_TAXES_ENDPOINT,
 }
 
 WEB_ANALYTICS_EVENTS_ENDPOINT = "/events/v3/events?objectType={objectType}&objectId={objectId}&occurredAfter={occurredAfter}&occurredBefore={occurredBefore}&sort=-occurredAt"
@@ -90,6 +114,12 @@ OBJECT_TYPE_SINGULAR = {
     "meetings": "meeting",
     "notes": "note",
     "tasks": "task",
+    "carts": "cart",
+    "discounts": "discount",
+    "fees": "fee",
+    "invoices": "invoice",
+    "commerce_payments": "commerce_payment",
+    "taxes": "tax",
 }
 
 OBJECT_TYPE_PLURAL = {v: k for k, v in OBJECT_TYPE_SINGULAR.items()}
@@ -238,6 +268,72 @@ DEFAULT_TASK_PROPS = [
     "hs_timestamp",
     "hs_lastmodifieddate",
     "hubspot_owner_id",
+]
+
+DEFAULT_CART_PROPS = [
+    "hs_cart_discount",
+    "hs_cart_name",
+    "hs_cart_url",
+    "hs_createdate",
+    "hs_currency_code",
+    "hs_external_cart_id",
+    "hs_external_status",
+    "hs_lastmodifieddate",
+    "hs_object_id",
+    "hs_shipping_cost",
+    "hs_source_store",
+    "hs_tags",
+    "hs_tax",
+    "hs_total_price",
+]
+
+DEFAULT_DISCOUNT_PROPS = [
+    "hs_duration",
+    "hs_label",
+    "hs_lastmodifieddate",
+    "hs_sort_order",
+    "hs_type",
+    "hs_value",
+]
+
+DEFAULT_FEE_PROPS = [
+    "hs_label",
+    "hs_lastmodifieddate",
+    "hs_type",
+    "hs_value",
+]
+
+DEFAULT_INVOICE_PROPS = [
+    "hs_currency",
+    "hs_due_date",
+    "hs_invoice_date",
+    "hs_lastmodifieddate",
+    "hs_tax_id",
+]
+
+DEFAULT_COMMERCE_PAYMENT_PROPS = [
+    "hs_currency_code",
+    "hs_customer_email",
+    "hs_fees_amount",
+    "hs_initial_amount",
+    "hs_initiated_date",
+    "hs_internal_comment",
+    "hs_lastmodifieddate",
+    "hs_latest_status",
+    "hs_payment_method_type",
+    "hs_payout_date",
+    "hs_processor_type",
+    "hs_reference_number",
+    "hs_refunds_amount",
+    "hs_billing_address_city",
+    "hs_billing_address_country",
+]
+
+DEFAULT_TAX_PROPS = [
+    "hs_label",
+    "hs_lastmodifieddate",
+    "hs_type",
+    "hs_value",
 ]
 
 ALL = ("ALL",)
