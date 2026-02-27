@@ -125,7 +125,6 @@ DEFAULT_CONTACT_PROPS = [
     "firstname",
     "hs_object_id",
     "lastmodifieddate",
-    "hs_lastmodifieddate",
     "lastname",
 ]
 

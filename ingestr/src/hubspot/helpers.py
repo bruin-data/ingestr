@@ -287,7 +287,7 @@ def fetch_data_search(
                     {
                         "propertyName": modified_prop,
                         "operator": "GTE",
-                        "value": "1769990400000",
+                        "value": start_date_ms,
                     }
                 ]
             }
