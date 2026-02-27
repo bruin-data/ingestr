@@ -40,9 +40,7 @@ CRM_CALLS_ENDPOINT = (
 CRM_EMAILS_ENDPOINT = (
     "/crm/v3/objects/emails?associations=contacts,companies,deals,products,quotes"
 )
-CRM_FEEDBACK_SUBMISSIONS_ENDPOINT = (
-    "/crm/v3/objects/feedback_submissions?associations=contacts,companies,deals,products,quotes"
-)
+CRM_FEEDBACK_SUBMISSIONS_ENDPOINT = "/crm/v3/objects/feedback_submissions?associations=contacts,companies,deals,products,quotes"
 CRM_LINE_ITEMS_ENDPOINT = (
     "/crm/v3/objects/line_items?associations=contacts,companies,deals,products,quotes"
 )
@@ -58,18 +56,10 @@ CRM_TASKS_ENDPOINT = (
 CRM_CARTS_ENDPOINT = (
     "/crm/v3/objects/carts?associations=contacts,companies,deals,products,quotes"
 )
-CRM_DISCOUNTS_ENDPOINT = (
-    "/crm/v3/objects/discounts?associations=contacts,line_items,companies,deals,products,quotes"
-)
-CRM_FEES_ENDPOINT = (
-    "/crm/v3/objects/fees?associations=contacts,line_items,companies,deals,products,quotes"
-)
-CRM_INVOICES_ENDPOINT = (
-    "/crm/v3/objects/invoices?associations=contacts,line_items,companies,fees,products,quotes"
-)
-CRM_COMMERCE_PAYMENTS_ENDPOINT = (
-    "/crm/v3/objects/commerce_payments?associations=contacts,companies,deals,quotes,invoices,products,fees"
-)
+CRM_DISCOUNTS_ENDPOINT = "/crm/v3/objects/discounts?associations=contacts,line_items,companies,deals,products,quotes"
+CRM_FEES_ENDPOINT = "/crm/v3/objects/fees?associations=contacts,line_items,companies,deals,products,quotes"
+CRM_INVOICES_ENDPOINT = "/crm/v3/objects/invoices?associations=contacts,line_items,companies,fees,products,quotes"
+CRM_COMMERCE_PAYMENTS_ENDPOINT = "/crm/v3/objects/commerce_payments?associations=contacts,companies,deals,quotes,invoices,products,fees"
 CRM_TAXES_ENDPOINT = (
     "/crm/v3/objects/taxes?associations=line_items,companies,deals,products,quotes,fees"
 )

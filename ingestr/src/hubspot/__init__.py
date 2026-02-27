@@ -59,37 +59,61 @@ from .settings import (
     CRM_OWNERS_ENDPOINT,
     CRM_SCHEMAS_ENDPOINT,
     DEFAULT_CALL_PROPS,
+    DEFAULT_CART_PROPS,
+    DEFAULT_COMMERCE_PAYMENT_PROPS,
     DEFAULT_COMPANY_PROPS,
+    DEFAULT_CONTACT_PROPS,
+    DEFAULT_DEAL_PROPS,
+    DEFAULT_DISCOUNT_PROPS,
     DEFAULT_EMAIL_PROPS,
+    DEFAULT_FEE_PROPS,
     DEFAULT_FEEDBACK_SUBMISSION_PROPS,
+    DEFAULT_INVOICE_PROPS,
     DEFAULT_LINE_ITEM_PROPS,
     DEFAULT_MEETING_PROPS,
     DEFAULT_NOTE_PROPS,
-    DEFAULT_TASK_PROPS,
-    DEFAULT_CART_PROPS,
-    DEFAULT_DISCOUNT_PROPS,
-    DEFAULT_FEE_PROPS,
-    DEFAULT_INVOICE_PROPS,
-    DEFAULT_COMMERCE_PAYMENT_PROPS,
-    DEFAULT_TAX_PROPS,
-    DEFAULT_CONTACT_PROPS,
-    DEFAULT_DEAL_PROPS,
     DEFAULT_PRODUCT_PROPS,
     DEFAULT_QUOTE_PROPS,
+    DEFAULT_TASK_PROPS,
+    DEFAULT_TAX_PROPS,
     DEFAULT_TICKET_PROPS,
     OBJECT_TYPE_PLURAL,
     STARTDATE,
     WEB_ANALYTICS_EVENTS_ENDPOINT,
 )
 
-THubspotObjectType = Literal["company", "contact", "deal", "ticket", "product", "quote", "call", "email", "feedback_submission", "line_item", "meeting", "note", "task", "cart", "discount", "fee", "invoice", "commerce_payment", "tax"]
+THubspotObjectType = Literal[
+    "company",
+    "contact",
+    "deal",
+    "ticket",
+    "product",
+    "quote",
+    "call",
+    "email",
+    "feedback_submission",
+    "line_item",
+    "meeting",
+    "note",
+    "task",
+    "cart",
+    "discount",
+    "fee",
+    "invoice",
+    "commerce_payment",
+    "tax",
+]
 
 
 def _last_value_to_ms(last_value) -> Optional[str]:
     """Convert dlt incremental last_value (ISO string or datetime) to ms timestamp string."""
     if last_value is None:
         return None
-    dt = pendulum.parse(last_value) if isinstance(last_value, str) else pendulum.instance(last_value)
+    dt = (
+        pendulum.parse(last_value)
+        if isinstance(last_value, str)
+        else pendulum.instance(last_value)
+    )
     return str(int(dt.timestamp() * 1000))
 
 
@@ -126,7 +150,9 @@ def hubspot(
         `api_key` argument.
     """
 
-    @dlt.resource(name="companies", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="companies", write_disposition="merge", primary_key=["hs_object_id"]
+    )
     def companies(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -145,7 +171,9 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="contacts", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="contacts", write_disposition="merge", primary_key=["hs_object_id"]
+    )
     def contacts(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -183,7 +211,9 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="tickets", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="tickets", write_disposition="merge", primary_key=["hs_object_id"]
+    )
     def tickets(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -202,7 +232,9 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="products", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="products", write_disposition="merge", primary_key=["hs_object_id"]
+    )
     def products(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -240,7 +272,9 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="emails", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="emails", write_disposition="merge", primary_key=["hs_object_id"]
+    )
     def emails(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -259,7 +293,11 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="feedback_submissions", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="feedback_submissions",
+        write_disposition="merge",
+        primary_key=["hs_object_id"],
+    )
     def feedback_submissions(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -278,7 +316,9 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="line_items", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="line_items", write_disposition="merge", primary_key=["hs_object_id"]
+    )
     def line_items(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -297,7 +337,9 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="meetings", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="meetings", write_disposition="merge", primary_key=["hs_object_id"]
+    )
     def meetings(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -373,7 +415,9 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="discounts", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="discounts", write_disposition="merge", primary_key=["hs_object_id"]
+    )
     def discounts(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -411,7 +455,9 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="invoices", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="invoices", write_disposition="merge", primary_key=["hs_object_id"]
+    )
     def invoices(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -430,7 +476,11 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="commerce_payments", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="commerce_payments",
+        write_disposition="merge",
+        primary_key=["hs_object_id"],
+    )
     def commerce_payments(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -468,7 +518,9 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="quotes", write_disposition="merge", primary_key=["hs_object_id"])
+    @dlt.resource(
+        name="quotes", write_disposition="merge", primary_key=["hs_object_id"]
+    )
     def quotes(
         api_key: str = api_key,
         include_history: bool = include_history,
@@ -486,7 +538,7 @@ def hubspot(
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
-        
+
     @dlt.resource(name="owners", write_disposition="merge", primary_key="id")
     def owners(
         api_key: str = api_key,
@@ -545,7 +597,30 @@ def hubspot(
         """Hubspot custom object details resource"""
         yield from fetch_data(custom_object_endpoint, api_key, resource_name="custom")
 
-    return companies, contacts, deals, tickets, products, quotes, calls, emails, feedback_submissions, line_items, meetings, notes, tasks, carts, discounts, fees, invoices, commerce_payments, taxes, owners, schemas, custom
+    return (
+        companies,
+        contacts,
+        deals,
+        tickets,
+        products,
+        quotes,
+        calls,
+        emails,
+        feedback_submissions,
+        line_items,
+        meetings,
+        notes,
+        tasks,
+        carts,
+        discounts,
+        fees,
+        invoices,
+        commerce_payments,
+        taxes,
+        owners,
+        schemas,
+        custom,
+    )
 
 
 def crm_objects(
@@ -570,7 +645,9 @@ def crm_objects(
     if start_date_ms is not None:
         _qs = parse_qs(urlparse(CRM_OBJECT_ENDPOINTS[object_type]).query)
         assoc_types = [t for t in _qs.get("associations", [""])[0].split(",") if t]
-        yield from fetch_data_search(object_type, api_key, props, start_date_ms, association_types=assoc_types)
+        yield from fetch_data_search(
+            object_type, api_key, props, start_date_ms, association_types=assoc_types
+        )
         return
 
     params = {"properties": props, "limit": 100}

@@ -19,7 +19,11 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from dlt.sources.helpers import requests
 
-from .settings import DEFAULT_LAST_MODIFIED_PROPERTY, LAST_MODIFIED_PROPERTY, OBJECT_TYPE_PLURAL
+from .settings import (
+    DEFAULT_LAST_MODIFIED_PROPERTY,
+    LAST_MODIFIED_PROPERTY,
+    OBJECT_TYPE_PLURAL,
+)
 
 BASE_URL = "https://api.hubapi.com/"
 
@@ -251,9 +255,13 @@ def _fetch_associations_batch(
     if not object_ids:
         return {}
 
-    url = get_url(f"/crm/v4/associations/{from_object_type}/{to_object_type}/batch/read")
+    url = get_url(
+        f"/crm/v4/associations/{from_object_type}/{to_object_type}/batch/read"
+    )
     headers = _get_headers(api_key)
-    r = requests.post(url, headers=headers, json={"inputs": [{"id": oid} for oid in object_ids]})
+    r = requests.post(
+        url, headers=headers, json={"inputs": [{"id": oid} for oid in object_ids]}
+    )
 
     if r.status_code in (400, 404):
         return {}
@@ -262,7 +270,9 @@ def _fetch_associations_batch(
     result: Dict[str, List[str]] = {}
     for item in r.json().get("results", []):
         from_id = str(item.get("from", {}).get("id", ""))
-        to_ids = [str(a["toObjectId"]) for a in item.get("to", []) if a.get("toObjectId")]
+        to_ids = [
+            str(a["toObjectId"]) for a in item.get("to", []) if a.get("toObjectId")
+        ]
         if from_id and to_ids:
             result[from_id] = to_ids
     return result
@@ -278,7 +288,9 @@ def fetch_data_search(
     url = get_url(f"/crm/v3/objects/{OBJECT_TYPE_PLURAL[object_type]}/search")
     headers = _get_headers(api_key)
     from_type = OBJECT_TYPE_PLURAL[object_type]
-    modified_prop = LAST_MODIFIED_PROPERTY.get(object_type, DEFAULT_LAST_MODIFIED_PROPERTY)
+    modified_prop = LAST_MODIFIED_PROPERTY.get(
+        object_type, DEFAULT_LAST_MODIFIED_PROPERTY
+    )
 
     body: Dict[str, Any] = {
         "filterGroups": [
@@ -303,7 +315,9 @@ def fetch_data_search(
         _data = r.json()
 
         if _data.get("status") == "error":
-            raise ValueError(f"HubSpot search error: {_data.get('message')} (correlationId: {_data.get('correlationId')})")
+            raise ValueError(
+                f"HubSpot search error: {_data.get('message')} (correlationId: {_data.get('correlationId')})"
+            )
 
         if "results" in _data:
             _objects: List[Dict[str, Any]] = []
@@ -314,18 +328,25 @@ def fetch_data_search(
                 _objects.append(_obj)
 
             if association_types and _objects:
-                obj_ids = [str(obj.get("hs_object_id") or obj.get("id") or "") for obj in _objects]
+                obj_ids = [
+                    str(obj.get("hs_object_id") or obj.get("id") or "")
+                    for obj in _objects
+                ]
                 for assoc_type in association_types:
                     if not assoc_type:
                         continue
-                    assoc_map = _fetch_associations_batch(from_type, assoc_type, obj_ids, api_key)
+                    assoc_map = _fetch_associations_batch(
+                        from_type, assoc_type, obj_ids, api_key
+                    )
                     for obj in _objects:
                         obj_id = str(obj.get("hs_object_id") or obj.get("id") or "")
                         values = [
                             {"value": obj_id, f"{assoc_type}_id": aid}
                             for aid in assoc_map.get(obj_id, [])
                         ]
-                        obj[assoc_type] = [dict(t) for t in {tuple(d.items()) for d in values}]
+                        obj[assoc_type] = [
+                            dict(t) for t in {tuple(d.items()) for d in values}
+                        ]
 
             yield _objects
 
