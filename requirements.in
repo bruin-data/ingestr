@@ -63,3 +63,4 @@ urllib3==2.6.3
 protobuf==5.29.6
 aiohttp==3.13.3
 pyasn1==0.6.2
+toolz==1.0.0

@@ -14,54 +14,87 @@
 
 from typing import Any, Dict, List, Optional
 
+import orjson
 from confluent_kafka import Consumer, Message, TopicPartition  # type: ignore
 from confluent_kafka.admin import TopicMetadata  # type: ignore
 from dlt import config
 from dlt.common import pendulum
 from dlt.common.configuration import configspec
 from dlt.common.configuration.specs import CredentialsConfiguration
-from dlt.common.time import ensure_pendulum_datetime
 from dlt.common.typing import DictStrAny, TSecretValue
-from dlt.common.utils import digest128
+
+from ingestr.src.kafka.model import KafkaDecodingOptions, KafkaEvent
 
 
-def default_msg_processor(msg: Message) -> Dict[str, Any]:
-    """Basic Kafka message processor.
-
-    Returns the message value and metadata. Timestamp consists of two values:
-    (type of the timestamp, timestamp). Type represents one of the Python
-    Kafka constants:
-        TIMESTAMP_NOT_AVAILABLE - Timestamps not supported by broker.
-        TIMESTAMP_CREATE_TIME - Message creation time (or source / producer time).
-        TIMESTAMP_LOG_APPEND_TIME - Broker receive time.
-
-    Args:
-        msg (confluent_kafka.Message): A single Kafka message.
-
-    Returns:
-        dict: Processed Kafka message.
+class KafkaEventProcessor:
     """
-    ts = msg.timestamp()
-    topic = msg.topic()
-    partition = msg.partition()
-    key = msg.key()
-    if key is not None:
-        key = key.decode("utf-8")
+    A processor for Kafka events with processing stages and configuration capabilities.
 
-    return {
-        "_kafka": {
-            "partition": partition,
-            "topic": topic,
-            "key": key,
-            "offset": msg.offset(),
-            "ts": {
-                "type": ts[0],
-                "value": ensure_pendulum_datetime(ts[1] / 1e3),
-            },
-            "data": msg.value().decode("utf-8"),
-        },
-        "_kafka_msg_id": digest128(topic + str(partition) + str(key)),
-    }
+    It cycles through "decode", "deserialize" and "format".
+    """
+
+    def __init__(self, options: Optional[KafkaDecodingOptions] = None):
+        self.options = options or KafkaDecodingOptions()
+
+    def process(self, msg: Message) -> Dict[str, Any]:
+        """
+        Progress Kafka event.
+
+        Returns the message value and metadata. Timestamp consists of two values:
+        (type of the timestamp, timestamp). Type represents one of the Python
+        Kafka constants:
+            TIMESTAMP_NOT_AVAILABLE - Timestamps not supported by broker.
+            TIMESTAMP_CREATE_TIME - Message creation time (or source / producer time).
+            TIMESTAMP_LOG_APPEND_TIME - Broker receive time.
+
+        Args:
+            msg (confluent_kafka.Message): A single Kafka message.
+
+        Returns:
+            dict: Processed Kafka message.
+        """
+
+        # Decode.
+        event = self.decode(msg)
+
+        # Deserialize.
+        self.deserialize(event)
+
+        # Format egress message based on input options.
+        return event.to_dict(self.options)
+
+    def decode(self, msg: Message) -> KafkaEvent:
+        """
+        Translate from Confluent library's `Message` instance to `Event` instance.
+        """
+        return KafkaEvent(
+            ts=msg.timestamp(),
+            topic=msg.topic(),
+            partition=msg.partition(),
+            offset=msg.offset(),
+            key=msg.key(),
+            value=msg.value(),
+        )
+
+    def deserialize(self, event: KafkaEvent) -> KafkaEvent:
+        """
+        Deserialize event key and value according to decoding options.
+        """
+        if self.options.key_type is not None:
+            if self.options.key_type == "json":
+                event.key = orjson.loads(event.key)
+            else:
+                raise NotImplementedError(
+                    f"Unknown key type: {self.options.value_type}"
+                )
+        if self.options.value_type is not None:
+            if self.options.value_type == "json":
+                event.value = orjson.loads(event.value)
+            else:
+                raise NotImplementedError(
+                    f"Unknown value type: {self.options.value_type}"
+                )
+        return event
 
 
 class OffsetTracker(dict):  # type: ignore
