@@ -1336,7 +1336,7 @@ class SlackSource:
 
 class HubspotSource:
     def handles_incrementality(self) -> bool:
-        return False
+        return True
 
     # hubspot://?api_key=<api_key>
     def dlt_source(self, uri: str, table: str, **kwargs):
@@ -1381,6 +1381,20 @@ class HubspotSource:
             "tickets",
             "products",
             "quotes",
+            "calls",
+            "emails",
+            "feedback_submissions",
+            "line_items",
+            "meetings",
+            "notes",
+            "tasks",
+            "carts",
+            "discounts",
+            "fees",
+            "invoices",
+            "commerce_payments",
+            "taxes",
+            "owners",
             "schemas",
         ]:
             endpoint = table
