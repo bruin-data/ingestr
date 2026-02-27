@@ -38,13 +38,14 @@ def bruin_source(api_token: str):
         for pipeline in data:
             yield {
                 "name": pipeline.get("name"),
-                "description": pipeline.get("description"),
+                "description": pipeline.get("description") or "",
                 "project": pipeline.get("project"),
-                "owner": pipeline.get("owner"),
+                "owner": pipeline.get("owner") or "",
                 "default_connections": pipeline.get("default_connections"),
                 "schedule": pipeline.get("schedule"),
                 "commit": pipeline.get("commit"),
                 "start_date": pipeline.get("start_date"),
+                "variables": pipeline.get("variables") or [],
             }
 
     @dlt.resource(write_disposition="replace")
@@ -64,13 +65,24 @@ def bruin_source(api_token: str):
                     "project": asset.get("project"),
                     "uri": asset.get("uri"),
                     "description": asset.get("description"),
-                    "upstreams": asset.get("upstreams"),
-                    "downstream": asset.get("downstream"),
-                    "owner": asset.get("owner"),
+                    "upstreams": asset.get("upstreams") or [],
+                    "downstream": asset.get("downstream") or [],
+                    "owner": asset.get("owner") or None,
                     "content": asset.get("content"),
-                    "columns": asset.get("columns"),
-                    "materialization": asset.get("materialization"),
-                    "parameters": asset.get("parameters"),
+                    "columns": asset.get("columns") or [],
+                    "materialization": asset.get("materialization") or None,
+                    "parameters": asset.get("parameters") or None,
+                    "secrets": asset.get("secrets") or [],
+                    "tags": asset.get("tags") or [],
+                    "meta": asset.get("meta") or None,
+                    "domains": asset.get("domains") or [],
+                    "connection": asset.get("connection") or None,
+                    "image": asset.get("image") or None,
+                    "extends": asset.get("extends") or [],
+                    "metadata": asset.get("metadata") or [],
+                    "snowflake": asset.get("snowflake") or None,
+                    "athena": asset.get("athena") or None,
+                    "interval": asset.get("interval") or None,
                 }
 
     return pipelines, assets
