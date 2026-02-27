@@ -348,20 +348,6 @@ def hubspot(
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
 
-    @dlt.resource(name="owners", write_disposition="replace", primary_key="id")
-    def owners(
-        api_key: str = api_key,
-    ) -> Iterator[TDataItems]:
-        """Hubspot owners resource"""
-        yield from fetch_data(CRM_OWNERS_ENDPOINT, api_key, resource_name="owners")
-
-    @dlt.resource(name="schemas", write_disposition="merge", primary_key="id")
-    def schemas(
-        api_key: str = api_key,
-    ) -> Iterator[TDataItems]:
-        """Hubspot schemas resource"""
-        yield from fetch_data(CRM_SCHEMAS_ENDPOINT, api_key, resource_name="schemas")
-
     @dlt.resource(name="quotes", write_disposition="merge", primary_key=["hs_object_id"])
     def quotes(
         api_key: str = api_key,
@@ -380,6 +366,20 @@ def hubspot(
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
         )
+        
+    @dlt.resource(name="owners", write_disposition="merge", primary_key="id")
+    def owners(
+        api_key: str = api_key,
+    ) -> Iterator[TDataItems]:
+        """Hubspot owners resource"""
+        yield from fetch_data(CRM_OWNERS_ENDPOINT, api_key, resource_name="owners")
+
+    @dlt.resource(name="schemas", write_disposition="merge", primary_key="id")
+    def schemas(
+        api_key: str = api_key,
+    ) -> Iterator[TDataItems]:
+        """Hubspot schemas resource"""
+        yield from fetch_data(CRM_SCHEMAS_ENDPOINT, api_key, resource_name="schemas")
 
     @dlt.resource(write_disposition="merge", primary_key="hs_object_id")
     def custom(
