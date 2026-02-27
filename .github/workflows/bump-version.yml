@@ -1,0 +1,25 @@
+name: Bump Version
+
+on:
+  workflow_dispatch:
+    
+jobs:
+  bump_version:
+    name: Bump Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: '0'
+      - name: Set branch name
+        id: extract_branch
+        run: echo "::set-output name=branch_name::$(echo ${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}})"
+      - name: Bump version and push tag
+        id: bump_version
+        uses: anothrNick/github-tag-action@1.36.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          WITH_V: true
+          DEFAULT_BUMP: patch
+          PRERELEASE: true
+          RELEASE_BRANCHES: ${{ steps.extract_branch.outputs.branch_name }}
