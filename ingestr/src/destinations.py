@@ -213,7 +213,7 @@ def build_mssql_dest():
         SKIP_CREDENTIALS = {"PWD", "AUTHENTICATION", "UID"}
 
         def open_connection(self):
-            cfg = self.credentials._get_odbc_dsn_dict()
+            cfg = self.credentials.get_odbc_dsn_dict()
             if (
                 cfg.get("AUTHENTICATION", "").strip().lower()
                 != "activedirectoryaccesstoken"
