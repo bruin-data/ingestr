@@ -94,6 +94,7 @@ from ingestr.src.sources import (
     SnapchatAdsSource,
     SocrataSource,
     SolidgateSource,
+    SpotifySource,
     SqlSource,
     StripeAnalyticsSource,
     TikTokSource,
@@ -245,6 +246,7 @@ class SourceDestinationFactory:
         "primer": PrimerSource,
         "fireflies": FirefliesSource,
         "customerio": CustomerIoSource,
+        "spotify": SpotifySource,
     }
     destinations: Dict[str, Type[DestinationProtocol]] = {
         "bigquery": BigQueryDestination,

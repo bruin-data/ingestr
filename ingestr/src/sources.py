@@ -5214,3 +5214,43 @@ class CustomerIoSource:
             start_date=start_date,
             end_date=end_date,
         ).with_resources(table)
+
+
+class SpotifySource:
+    # spotify://?client_id=<client_id>&client_secret=<client_secret>&q=<search_query>&market=US
+    # q: required search query
+    # market: ISO 3166-1 alpha-2 country code, filters to content available in that country (default: US)
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        params = parse_qs(parsed_uri.query)
+
+        client_id = params.get("client_id")
+        if not client_id:
+            raise MissingValueError("client_id", "Spotify")
+
+        client_secret = params.get("client_secret")
+        if not client_secret:
+            raise MissingValueError("client_secret", "Spotify")
+
+        query = params.get("q")
+        if not query:
+            raise MissingValueError("q (search query)", "Spotify")
+        market = params.get("market", ["US"])[0]
+
+        from ingestr.src.spotify.helpers import SEARCH_TYPE_MAP
+
+        table_lower = table.lower()
+        if table_lower not in SEARCH_TYPE_MAP:
+            raise UnsupportedResourceError(table, "Spotify")
+
+        from ingestr.src.spotify import spotify_source
+
+        return spotify_source(
+            client_id=client_id[0],
+            client_secret=client_secret[0],
+            query=query[0],
+            market=market,
+        ).with_resources(table_lower)
