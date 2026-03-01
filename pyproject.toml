@@ -164,7 +164,7 @@ oracle = [
     "oracledb>=2.0.0",
 ]
 odbc = [
-    "pyodbc==5.1.0",
+    "pyodbc==5.3.0",
 ]
 ibm-db = [
     "ibm-db==3.2.6",
