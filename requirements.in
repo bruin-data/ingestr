@@ -5,7 +5,7 @@ databricks-sql-connector==4.0.5
 databricks-sqlalchemy==1.0.2
 dataclasses-json==0.6.7
 dlt==1.21.0
-dlt-cratedb==0.0.2
+dlt-cratedb==0.1.0
 duckdb_engine==0.17.0
 duckdb==1.4.3
 google-ads==28.0.0
