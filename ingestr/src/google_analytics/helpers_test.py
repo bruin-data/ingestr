@@ -43,9 +43,14 @@ def test_convert_minutes_ranges_to_minute_range_objects():
 
 def test_parse_google_analytics_uri():
     uri1 = "google_analytics://?credentials_base64=eyJrZXkiOiAidmFsdWUifQ==&property_id=1234567890"
-    expected_result = {"credentials": {"key": "value"}, "property_id": "1234567890"}
+    expected_result = {"credentials": {"key": "value"}, "property_ids": ["1234567890"]}
     result = parse_google_analytics_uri(uri1)
     assert result == expected_result
+
+    # multiple property ids
+    uri_multi = "google_analytics://?credentials_base64=eyJrZXkiOiAidmFsdWUifQ==&property_id=111111,222222,333333"
+    result_multi = parse_google_analytics_uri(uri_multi)
+    assert result_multi == {"credentials": {"key": "value"}, "property_ids": ["111111", "222222", "333333"]}
 
     uri_2 = "google_analytics://?credentials_base64=eyJrZXkiOiAidmFsdWUifQ=="
     with pytest.raises(

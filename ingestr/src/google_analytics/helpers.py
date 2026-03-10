@@ -111,7 +111,9 @@ def get_realtime_report(
             response=response, ingest_at=ingest_at
         )
         # import pdb; pdb.set_trace()
-        yield from processed_response_generator
+        for row in processed_response_generator:
+            row["property_id"] = str(property_id)
+            yield row
         offset += per_page
         if len(response.rows) < per_page or offset > 1000000:
             break
@@ -165,7 +167,9 @@ def get_report(
         processed_response_generator = process_report(response=response)
 
         # import pdb; pdb.set_trace()
-        yield from processed_response_generator
+        for row in processed_response_generator:
+            row["property_id"] = str(property_id)
+            yield row
         offset += per_page
         if len(response.rows) < per_page or offset > 1000000:
             break
@@ -301,4 +305,8 @@ def parse_google_analytics_uri(uri: str):
             "credentials_path or credentials_base64 and property_id are required to connect Google Analytics"
         )
 
-    return {"credentials": credentials, "property_id": property_id[0]}
+    property_ids = [pid.strip() for pid in property_id[0].split(",") if pid.strip()]
+    if not property_ids:
+        raise ValueError("property_id is required to connect to Google Analytics")
+
+    return {"credentials": credentials, "property_ids": property_ids}
