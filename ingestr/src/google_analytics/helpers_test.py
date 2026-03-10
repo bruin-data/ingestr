@@ -50,7 +50,10 @@ def test_parse_google_analytics_uri():
     # multiple property ids
     uri_multi = "google_analytics://?credentials_base64=eyJrZXkiOiAidmFsdWUifQ==&property_id=111111,222222,333333"
     result_multi = parse_google_analytics_uri(uri_multi)
-    assert result_multi == {"credentials": {"key": "value"}, "property_ids": ["111111", "222222", "333333"]}
+    assert result_multi == {
+        "credentials": {"key": "value"},
+        "property_ids": ["111111", "222222", "333333"],
+    }
 
     uri_2 = "google_analytics://?credentials_base64=eyJrZXkiOiAidmFsdWUifQ=="
     with pytest.raises(
