@@ -2278,7 +2278,7 @@ class GoogleAnalyticsSource:
 
         result = helpers.parse_google_analytics_uri(uri)
         credentials = result["credentials"]
-        property_id = result["property_id"]
+        property_ids = result["property_ids"]
 
         fields = table.split(":")
         if len(fields) != 3 and len(fields) != 4:
@@ -2332,7 +2332,7 @@ class GoogleAnalyticsSource:
         from ingestr.src.google_analytics import google_analytics
 
         return google_analytics(
-            property_id=property_id,
+            property_ids=property_ids,
             start_date=start_date,
             end_date=end_date,
             datetime_dimension=datetime,
