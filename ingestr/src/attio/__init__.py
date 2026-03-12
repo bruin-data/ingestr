@@ -16,9 +16,6 @@ def attio_source(
     @dlt.resource(
         name="objects",
         write_disposition="replace",
-        columns={
-            "created_at": {"data_type": "timestamp", "partition": True},
-        },
     )
     # https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects - does not support pagination
     def fetch_objects() -> Iterator[dict]:
@@ -32,9 +29,6 @@ def attio_source(
     @dlt.resource(
         name="records",
         write_disposition="replace",
-        columns={
-            "created_at": {"data_type": "timestamp", "partition": True},
-        },
     )
     def fetch_records() -> Iterator[dict]:
         if len(params) != 1:
@@ -50,9 +44,6 @@ def attio_source(
     @dlt.resource(
         name="lists",
         write_disposition="replace",
-        columns={
-            "created_at": {"data_type": "timestamp", "partition": True},
-        },
     )
     def fetch_lists() -> Iterator[dict]:
         path = "lists"
@@ -62,9 +53,6 @@ def attio_source(
     @dlt.resource(
         name="list_entries",
         write_disposition="replace",
-        columns={
-            "created_at": {"data_type": "timestamp", "partition": True},
-        },
     )
     def fetch_list_entries() -> Iterator[dict]:
         if len(params) != 1:
@@ -78,9 +66,6 @@ def attio_source(
     @dlt.resource(
         name="all_list_entries",
         write_disposition="replace",
-        columns={
-            "created_at": {"data_type": "timestamp", "partition": True},
-        },
     )
     def fetch_all_list_entries() -> Iterator[dict]:
         if len(params) != 1:
