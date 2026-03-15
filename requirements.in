@@ -25,7 +25,8 @@ pymysql==1.1.1
 pyrate-limiter==3.7.0
 rich==13.9.4
 rudder-sdk-python==2.1.4
-snowflake-sqlalchemy==1.6.1
+snowflake-connector-python==3.18.0
+snowflake-sqlalchemy==1.9.0
 sqlalchemy-bigquery==1.12.1
 sqlalchemy-cratedb==0.41.0
 sqlalchemy-hana==2.0.0

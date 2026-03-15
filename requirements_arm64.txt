@@ -34,13 +34,16 @@ backoff==2.2.1
 bcrypt==4.3.0
     # via paramiko
 boto3==1.37.1
-    # via pyathena
+    # via
+    #   pyathena
+    #   snowflake-connector-python
 botocore==1.37.1
     # via
     #   aiobotocore
     #   boto3
     #   pyathena
     #   s3transfer
+    #   snowflake-connector-python
 cachetools==5.5.2
     # via google-auth
 certifi==2025.1.31
@@ -541,9 +544,11 @@ smartsheet-python-sdk==3.0.5
     # via -r requirements.in
 smmap==5.0.2
     # via gitdb
-snowflake-connector-python==3.14.0
-    # via snowflake-sqlalchemy
-snowflake-sqlalchemy==1.6.1
+snowflake-connector-python==3.18.0
+    # via
+    #   -r requirements.in
+    #   snowflake-sqlalchemy
+snowflake-sqlalchemy==1.9.0
     # via -r requirements.in
 sortedcontainers==2.4.0
     # via snowflake-connector-python
