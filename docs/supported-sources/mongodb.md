@@ -160,6 +160,31 @@ ingestr performs several validations on custom aggregation pipelines:
 - Consider using `$limit` to restrict the number of documents processed
 - For large datasets, MongoDB's `allowDiskUse: true` option is automatically enabled for aggregation pipelines
 
+## Using MongoDB Atlas as a source
+
+MongoDB Atlas can be used as a source to extract data using the SRV connection string format.
+
+```bash
+ingestr ingest \
+  --source-uri "mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority" \
+  --source-table "mydb.users" \
+  --dest-uri "duckdb:///local.duckdb" \
+  --dest-table "analytics.users"
+```
+
+> [!NOTE]
+> When using MongoDB Atlas as a source, ensure your IP address is whitelisted in Network Access settings. You can find this under Security > Network Access in your Atlas dashboard.
+
+All the custom aggregation features described above work with MongoDB Atlas as well:
+
+```bash
+ingestr ingest \
+  --source-uri "mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority" \
+  --source-table 'mydb.orders:[{"$match": {"status": "completed"}}]' \
+  --dest-uri "duckdb:///local.duckdb" \
+  --dest-table "analytics.completed_orders"
+```
+
 ## Using MongoDB as a destination
 
 MongoDB can be used as a destination to load data from various sources. The `--dest-table` option follows the same format: `database.collection`.
