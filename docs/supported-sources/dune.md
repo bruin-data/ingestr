@@ -45,7 +45,7 @@ The `--source-table` parameter supports three formats:
 
 | Format | Example | Description |
 |--------|---------|-------------|
-| `queries` | `queries` | Fetches data from a supported table |
+| `queries` | `queries` | Lists all saved queries |
 | `query:<id>` | `query:1234567` | Executes a saved query by its numeric ID |
 | `query:<id>:<params>` | `query:1234567:bar=1000&foo=value` | Executes a saved query with [query parameters](#query-parameters) |
 | `sql:<raw SQL>` | `sql:SELECT * FROM ethereum.transactions LIMIT 100` | Executes raw SQL directly |
