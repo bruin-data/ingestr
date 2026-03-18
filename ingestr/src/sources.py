@@ -4385,6 +4385,61 @@ class MailchimpSource:
             raise UnsupportedResourceError(table, "Mailchimp")
 
 
+class DuneSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        query_params = parse_qs(parsed_uri.query)
+        api_key = query_params.get("api_key")
+
+        if api_key is None:
+            raise MissingValueError("api_key", "Dune")
+
+        performance = query_params.get("performance")
+
+        from ingestr.src.dune import dune_source
+
+        # "query:<id>" → execute saved query by ID
+        # "sql:<raw SQL>" → execute raw SQL
+        # otherwise → treat as a resource name (e.g. "queries")
+        if table.startswith("query:"):
+            parts = table.split(":", 2)
+            query_id = parts[1]
+            query_parameters = None
+            if len(parts) == 3:
+                query_parameters = dict(
+                    param.split("=", 1)
+                    for param in parts[2].split("&")
+                    if "=" in param
+                )
+
+            return dune_source(
+                api_key=api_key[0],
+                sql="",
+                query_id=query_id,
+                performance=performance[0] if performance else "medium",
+                query_parameters=query_parameters,
+            )
+
+        if table.startswith("sql:"):
+            sql = table[4:]
+            return dune_source(
+                api_key=api_key[0],
+                sql=sql,
+                performance=performance[0] if performance else "medium",
+            )
+
+        try:
+            return dune_source(
+                api_key=api_key[0],
+                sql="",
+            ).with_resources(table)
+        except ResourcesNotFoundError:
+            raise UnsupportedResourceError(table, "Dune")
+
+
 class AlliumSource:
     def handles_incrementality(self) -> bool:
         return False
