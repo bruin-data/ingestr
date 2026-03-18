@@ -14,6 +14,7 @@
 
 """Hubspot source helpers"""
 
+import logging
 import urllib.parse
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -23,7 +24,18 @@ from .settings import (
     DEFAULT_LAST_MODIFIED_PROPERTY,
     LAST_MODIFIED_PROPERTY,
     OBJECT_TYPE_PLURAL,
+    SEARCH_RESULTS_THRESHOLD,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _iso_to_ms(iso_string: str) -> str:
+    """Convert an ISO-8601 datetime string to a millisecond timestamp string."""
+    from dlt.common import pendulum
+
+    dt = pendulum.parse(iso_string)
+    return str(int(dt.timestamp() * 1000))
 
 BASE_URL = "https://api.hubapi.com/"
 
@@ -309,6 +321,9 @@ def fetch_data_search(
         "limit": 100,
     }
 
+    total_in_window = 0
+    max_modified_ts: Optional[str] = None
+
     while True:
         r = requests.post(url, headers=headers, json=body)
         r.raise_for_status()
@@ -325,6 +340,11 @@ def fetch_data_search(
                 _obj = _result.get("properties", _result)
                 if "id" not in _obj and "id" in _result:
                     _obj["id"] = _result["id"]
+
+                ts = _obj.get(modified_prop)
+                if ts is not None and (max_modified_ts is None or ts > max_modified_ts):
+                    max_modified_ts = ts
+
                 _objects.append(_obj)
 
             if association_types and _objects:
@@ -348,13 +368,48 @@ def fetch_data_search(
                             dict(t) for t in {tuple(d.items()) for d in values}
                         ]
 
+            total_in_window += len(_objects)
             yield _objects
 
         _next = _data.get("paging", {}).get("next", None)
-        if _next:
-            body["after"] = _next["after"]
-        else:
+        if not _next:
             break
+
+        # Rolling window: approaching the 10,000 result hard limit
+        if total_in_window >= SEARCH_RESULTS_THRESHOLD:
+            if max_modified_ts is None:
+                logger.warning(
+                    "HubSpot rolling window: no '%s' values seen, stopping pagination",
+                    modified_prop,
+                )
+                break
+
+            new_start = _iso_to_ms(max_modified_ts)
+            old_start = body["filterGroups"][0]["filters"][0]["value"]
+
+            if new_start == old_start:
+                logger.warning(
+                    "HubSpot rolling window: >%d results share timestamp %s for %s, "
+                    "some records may be skipped",
+                    SEARCH_RESULTS_THRESHOLD,
+                    max_modified_ts,
+                    object_type,
+                )
+                break
+
+            logger.info(
+                "HubSpot rolling window: advancing %s filter from %s to %s (%d items fetched in window)",
+                modified_prop,
+                old_start,
+                new_start,
+                total_in_window,
+            )
+            body["filterGroups"][0]["filters"][0]["value"] = new_start
+            body.pop("after", None)
+            total_in_window = 0
+            max_modified_ts = None
+        else:
+            body["after"] = _next["after"]
 
 
 def fetch_data_raw(

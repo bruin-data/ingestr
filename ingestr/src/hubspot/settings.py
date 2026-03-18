@@ -326,4 +326,6 @@ DEFAULT_TAX_PROPS = [
     "hs_value",
 ]
 
+SEARCH_RESULTS_THRESHOLD = 9_900
+
 ALL = ("ALL",)
