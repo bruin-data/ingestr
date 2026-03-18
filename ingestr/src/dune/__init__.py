@@ -20,7 +20,7 @@ from ingestr.src.http_client import create_client
 @dlt.source(max_table_nesting=0, name="dune_source")
 def dune_source(
     api_key: str,
-    sql: str,
+    sql: str | None = None,
     query_id: str | None = None,
     performance: str = "medium",
     query_parameters: dict[str, Any] | None = None,

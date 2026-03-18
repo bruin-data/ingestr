@@ -72,7 +72,7 @@ def fetch_results(
         yield from rows
 
         next_offset = results_data.get("next_offset")
-        if next_offset is None:
+        if not next_offset:
             break
 
         offset = next_offset

@@ -4407,6 +4407,8 @@ class DuneSource:
         if table.startswith("query:"):
             parts = table.split(":", 2)
             query_id = parts[1]
+            if not query_id:
+                raise ValueError("SQL query cannot be empty in 'sql:' table format")
             query_parameters = None
             if len(parts) == 3:
                 query_parameters = dict(
@@ -4423,6 +4425,8 @@ class DuneSource:
 
         if table.startswith("sql:"):
             sql = table[4:]
+            if not sql:
+                raise ValueError("SQL query cannot be empty in 'sql:' table format")
             return dune_source(
                 api_key=api_key[0],
                 sql=sql,
