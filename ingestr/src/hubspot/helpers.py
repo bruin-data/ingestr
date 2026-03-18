@@ -17,6 +17,7 @@
 import urllib.parse
 from typing import Any, Dict, Iterator, List, Optional
 
+import pendulum
 from dlt.sources.helpers import requests
 
 from .settings import (
@@ -283,8 +284,13 @@ def fetch_data_search(
     api_key: str,
     properties: str,
     start_date_ms: str,
+    end_date_ms: Optional[str] = None,
     association_types: Optional[List[str]] = None,
 ) -> Iterator[List[Dict[str, Any]]]:
+    import logging
+
+    logger = logging.getLogger("hubspot.search")
+
     url = get_url(f"/crm/v3/objects/{OBJECT_TYPE_PLURAL[object_type]}/search")
     headers = _get_headers(api_key)
     from_type = OBJECT_TYPE_PLURAL[object_type]
@@ -292,67 +298,138 @@ def fetch_data_search(
         object_type, DEFAULT_LAST_MODIFIED_PROPERTY
     )
 
-    body: Dict[str, Any] = {
-        "filterGroups": [
-            {
-                "filters": [
-                    {
-                        "propertyName": modified_prop,
-                        "operator": "GTE",
-                        "value": start_date_ms,
-                    }
-                ]
-            }
-        ],
-        "properties": [p for p in properties.split(",") if p],
-        "sorts": [{"propertyName": modified_prop, "direction": "ASCENDING"}],
-        "limit": 100,
-    }
+    props_list = [p for p in properties.split(",") if p]
+    current_start_ms = start_date_ms
+    window_num = 0
 
     while True:
-        r = requests.post(url, headers=headers, json=body)
-        r.raise_for_status()
-        _data = r.json()
-
-        if _data.get("status") == "error":
-            raise ValueError(
-                f"HubSpot search error: {_data.get('message')} (correlationId: {_data.get('correlationId')})"
+        window_num += 1
+        filters = [
+            {
+                "propertyName": modified_prop,
+                "operator": "GTE",
+                "value": current_start_ms,
+            }
+        ]
+        if end_date_ms is not None:
+            filters.append(
+                {
+                    "propertyName": modified_prop,
+                    "operator": "LTE",
+                    "value": end_date_ms,
+                }
             )
 
-        if "results" in _data:
-            _objects: List[Dict[str, Any]] = []
-            for _result in _data["results"]:
-                _obj = _result.get("properties", _result)
-                if "id" not in _obj and "id" in _result:
-                    _obj["id"] = _result["id"]
-                _objects.append(_obj)
+        start_human = pendulum.from_timestamp(int(current_start_ms) / 1000).to_iso8601_string()
+        end_human = pendulum.from_timestamp(int(end_date_ms) / 1000).to_iso8601_string() if end_date_ms else "none"
+        logger.info(
+            f"[hubspot] search window #{window_num} for {object_type}: "
+            f"GTE={current_start_ms} ({start_human}) LTE={end_date_ms} ({end_human})"
+        )
 
-            if association_types and _objects:
-                obj_ids = [
-                    str(obj.get("hs_object_id") or obj.get("id") or "")
-                    for obj in _objects
-                ]
-                for assoc_type in association_types:
-                    if not assoc_type:
-                        continue
-                    assoc_map = _fetch_associations_batch(
-                        from_type, assoc_type, obj_ids, api_key
-                    )
-                    for obj in _objects:
-                        obj_id = str(obj.get("hs_object_id") or obj.get("id") or "")
-                        values = [
-                            {"value": obj_id, f"{assoc_type}_id": aid}
-                            for aid in assoc_map.get(obj_id, [])
-                        ]
-                        obj[assoc_type] = [
-                            dict(t) for t in {tuple(d.items()) for d in values}
-                        ]
+        body: Dict[str, Any] = {
+            "filterGroups": [{"filters": filters}],
+            "properties": props_list,
+            "sorts": [{"propertyName": modified_prop, "direction": "ASCENDING"}],
+            "limit": 100,
+        }
 
-            yield _objects
+        total_yielded = 0
+        max_modified_ms: Optional[str] = None
+        page_num = 0
 
-        _next = _data.get("paging", {}).get("next", None)
-        if _next:
-            body["after"] = _next["after"]
+        while True:
+            page_num += 1
+            r = requests.post(url, headers=headers, json=body)
+            r.raise_for_status()
+            _data = r.json()
+
+            if _data.get("status") == "error":
+                raise ValueError(
+                    f"HubSpot search error: {_data.get('message')} (correlationId: {_data.get('correlationId')})"
+                )
+
+            result_count = len(_data.get("results", []))
+            api_total = _data.get("total", "?")
+            logger.info(
+                f"[hubspot] window #{window_num} page #{page_num}: "
+                f"got {result_count} results, api_total={api_total}, yielded_so_far={total_yielded}"
+            )
+
+            if "results" in _data:
+                _objects: List[Dict[str, Any]] = []
+                for _result in _data["results"]:
+                    _obj = _result.get("properties", _result)
+                    if "id" not in _obj and "id" in _result:
+                        _obj["id"] = _result["id"]
+                    _objects.append(_obj)
+
+                    # Track the max modified date we've seen
+                    mod_val = _obj.get(modified_prop)
+                    if mod_val is not None:
+                        mod_ms = str(
+                            int(
+                                pendulum.parse(mod_val).timestamp() * 1000  # type: ignore[union-attr]
+                            )
+                        )
+                        if max_modified_ms is None or int(mod_ms) > int(max_modified_ms):
+                            max_modified_ms = mod_ms
+
+                if association_types and _objects:
+                    obj_ids = [
+                        str(obj.get("hs_object_id") or obj.get("id") or "")
+                        for obj in _objects
+                    ]
+                    for assoc_type in association_types:
+                        if not assoc_type:
+                            continue
+                        assoc_map = _fetch_associations_batch(
+                            from_type, assoc_type, obj_ids, api_key
+                        )
+                        for obj in _objects:
+                            obj_id = str(obj.get("hs_object_id") or obj.get("id") or "")
+                            values = [
+                                {"value": obj_id, f"{assoc_type}_id": aid}
+                                for aid in assoc_map.get(obj_id, [])
+                            ]
+                            obj[assoc_type] = [
+                                dict(t) for t in {tuple(d.items()) for d in values}
+                            ]
+
+                total_yielded += len(_objects)
+                yield _objects
+
+            # Break BEFORE trying to fetch beyond the 10k limit — HubSpot's
+            # search API hangs/errors when paging past 10,000 results.
+            if total_yielded >= 10000:
+                logger.info(
+                    f"[hubspot] window #{window_num}: reached {total_yielded} rows, "
+                    f"breaking inner loop to restart with new GTE"
+                )
+                break
+
+            _next = _data.get("paging", {}).get("next", None)
+            if _next:
+                body["after"] = _next["after"]
+            else:
+                break
+
+        max_human = pendulum.from_timestamp(int(max_modified_ms) / 1000).to_iso8601_string() if max_modified_ms else "none"
+        logger.info(
+            f"[hubspot] window #{window_num} done: total_yielded={total_yielded}, "
+            f"max_modified={max_modified_ms} ({max_human})"
+        )
+
+        # HubSpot search API has a 10,000 result hard limit. If we hit it,
+        # restart the search using the max modified date + 1ms as the new GTE
+        # to avoid re-fetching the same rows.
+        if total_yielded >= 10000 and max_modified_ms is not None:
+            new_start = str(int(max_modified_ms) + 1)
+            logger.info(
+                f"[hubspot] hit 10k limit, restarting with new GTE={new_start} "
+                f"({pendulum.from_timestamp(int(new_start) / 1000).to_iso8601_string()})"
+            )
+            current_start_ms = new_start
         else:
             break
 

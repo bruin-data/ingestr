@@ -179,6 +179,7 @@ def hubspot(
             props=DEFAULT_COMPANY_PROPS,
             include_custom_props=include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -203,6 +204,7 @@ def hubspot(
             DEFAULT_CONTACT_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(name="deals", write_disposition="merge", primary_key=["hs_object_id"])
@@ -225,6 +227,7 @@ def hubspot(
             DEFAULT_DEAL_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -249,6 +252,7 @@ def hubspot(
             DEFAULT_TICKET_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -273,6 +277,7 @@ def hubspot(
             DEFAULT_PRODUCT_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(name="calls", write_disposition="merge", primary_key=["hs_object_id"])
@@ -295,6 +300,7 @@ def hubspot(
             DEFAULT_CALL_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -319,6 +325,7 @@ def hubspot(
             DEFAULT_EMAIL_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -345,6 +352,7 @@ def hubspot(
             DEFAULT_FEEDBACK_SUBMISSION_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -369,6 +377,7 @@ def hubspot(
             DEFAULT_LINE_ITEM_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -393,6 +402,7 @@ def hubspot(
             DEFAULT_MEETING_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(name="notes", write_disposition="merge", primary_key=["hs_object_id"])
@@ -415,6 +425,7 @@ def hubspot(
             DEFAULT_NOTE_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(name="tasks", write_disposition="merge", primary_key=["hs_object_id"])
@@ -437,6 +448,7 @@ def hubspot(
             DEFAULT_TASK_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(name="carts", write_disposition="merge", primary_key=["hs_object_id"])
@@ -459,6 +471,7 @@ def hubspot(
             DEFAULT_CART_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -483,6 +496,7 @@ def hubspot(
             DEFAULT_DISCOUNT_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(name="fees", write_disposition="merge", primary_key=["hs_object_id"])
@@ -505,6 +519,7 @@ def hubspot(
             DEFAULT_FEE_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -529,6 +544,7 @@ def hubspot(
             DEFAULT_INVOICE_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -555,6 +571,7 @@ def hubspot(
             DEFAULT_COMMERCE_PAYMENT_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(name="taxes", write_disposition="merge", primary_key=["hs_object_id"])
@@ -577,6 +594,7 @@ def hubspot(
             DEFAULT_TAX_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(
@@ -601,6 +619,7 @@ def hubspot(
             DEFAULT_QUOTE_PROPS,
             include_custom_props,
             start_date_ms=_last_value_to_ms(updated_at.last_value),
+            end_date_ms=_last_value_to_ms(end_date),
         )
 
     @dlt.resource(name="owners", write_disposition="merge", primary_key="id")
@@ -694,6 +713,7 @@ def crm_objects(
     props: Sequence[str] = None,
     include_custom_props: bool = True,
     start_date_ms: Optional[str] = None,
+    end_date_ms: Optional[str] = None,
 ) -> Iterator[TDataItems]:
     """Building blocks for CRM resources."""
     if props == ALL:
@@ -710,7 +730,7 @@ def crm_objects(
         _qs = parse_qs(urlparse(CRM_OBJECT_ENDPOINTS[object_type]).query)
         assoc_types = [t for t in _qs.get("associations", [""])[0].split(",") if t]
         yield from fetch_data_search(
-            object_type, api_key, props, start_date_ms, association_types=assoc_types
+            object_type, api_key, props, start_date_ms, end_date_ms=end_date_ms, association_types=assoc_types
         )
         return
 
