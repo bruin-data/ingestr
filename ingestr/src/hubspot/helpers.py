@@ -17,7 +17,6 @@
 import urllib.parse
 from typing import Any, Dict, Iterator, List, Optional
 
-import pendulum
 from dlt.sources.helpers import requests
 
 from .settings import (
@@ -299,16 +298,14 @@ def fetch_data_search(
     )
 
     props_list = [p for p in properties.split(",") if p]
-    current_start_ms = start_date_ms
-    window_num = 0
+    last_id: Optional[str] = None
 
     while True:
-        window_num += 1
         filters = [
             {
                 "propertyName": modified_prop,
                 "operator": "GTE",
-                "value": current_start_ms,
+                "value": start_date_ms,
             }
         ]
         if end_date_ms is not None:
@@ -319,33 +316,30 @@ def fetch_data_search(
                     "value": end_date_ms,
                 }
             )
+        if last_id is not None:
+            filters.append(
+                {
+                    "propertyName": "hs_object_id",
+                    "operator": "GT",
+                    "value": last_id,
+                }
+            )
 
-        start_human = pendulum.from_timestamp(
-            int(current_start_ms) / 1000
-        ).to_iso8601_string()
-        end_human = (
-            pendulum.from_timestamp(int(end_date_ms) / 1000).to_iso8601_string()
-            if end_date_ms
-            else "none"
-        )
         logger.info(
-            f"[hubspot] search window #{window_num} for {object_type}: "
-            f"GTE={current_start_ms} ({start_human}) LTE={end_date_ms} ({end_human})"
+            f"[hubspot] search {object_type}: "
+            f"GTE={start_date_ms} LTE={end_date_ms} after_id={last_id}"
         )
 
         body: Dict[str, Any] = {
             "filterGroups": [{"filters": filters}],
             "properties": props_list,
-            "sorts": [{"propertyName": modified_prop, "direction": "ASCENDING"}],
+            "sorts": [{"propertyName": "hs_object_id", "direction": "ASCENDING"}],
             "limit": 100,
         }
 
         total_yielded = 0
-        max_modified_ms: Optional[str] = None
-        page_num = 0
 
         while True:
-            page_num += 1
             r = requests.post(url, headers=headers, json=body)
             r.raise_for_status()
             _data = r.json()
@@ -355,13 +349,6 @@ def fetch_data_search(
                     f"HubSpot search error: {_data.get('message')} (correlationId: {_data.get('correlationId')})"
                 )
 
-            result_count = len(_data.get("results", []))
-            api_total = _data.get("total", "?")
-            logger.info(
-                f"[hubspot] window #{window_num} page #{page_num}: "
-                f"got {result_count} results, api_total={api_total}, yielded_so_far={total_yielded}"
-            )
-
             if "results" in _data:
                 _objects: List[Dict[str, Any]] = []
                 for _result in _data["results"]:
@@ -370,18 +357,9 @@ def fetch_data_search(
                         _obj["id"] = _result["id"]
                     _objects.append(_obj)
 
-                    # Track the max modified date we've seen
-                    mod_val = _obj.get(modified_prop)
-                    if mod_val is not None:
-                        mod_ms = str(
-                            int(
-                                pendulum.parse(mod_val).timestamp() * 1000  # type: ignore[union-attr]
-                            )
-                        )
-                        if max_modified_ms is None or int(mod_ms) > int(
-                            max_modified_ms
-                        ):
-                            max_modified_ms = mod_ms
+                    obj_id = str(_obj.get("hs_object_id") or _obj.get("id") or "")
+                    if last_id is None or int(obj_id) > int(last_id):
+                        last_id = obj_id
 
                 if association_types and _objects:
                     obj_ids = [
@@ -408,12 +386,8 @@ def fetch_data_search(
                 yield _objects
 
             # Break BEFORE trying to fetch beyond the 10k limit — HubSpot's
-            # search API hangs/errors when paging past 10,000 results.
+            # search API hangs when paging past 10,000 results.
             if total_yielded >= 10000:
-                logger.info(
-                    f"[hubspot] window #{window_num}: reached {total_yielded} rows, "
-                    f"breaking inner loop to restart with new GTE"
-                )
                 break
 
             _next = _data.get("paging", {}).get("next", None)
@@ -422,27 +396,15 @@ def fetch_data_search(
             else:
                 break
 
-        max_human = (
-            pendulum.from_timestamp(int(max_modified_ms) / 1000).to_iso8601_string()
-            if max_modified_ms
-            else "none"
-        )
         logger.info(
-            f"[hubspot] window #{window_num} done: total_yielded={total_yielded}, "
-            f"max_modified={max_modified_ms} ({max_human})"
+            f"[hubspot] search {object_type}: window done, "
+            f"yielded={total_yielded} last_id={last_id}"
         )
 
         # HubSpot search API has a 10,000 result hard limit. If we hit it,
-        # restart the search using the max modified date + 1ms as the new GTE
-        # to avoid re-fetching the same rows.
-        if total_yielded >= 10000 and max_modified_ms is not None:
-            new_start = str(int(max_modified_ms) + 1)
-            logger.info(
-                f"[hubspot] hit 10k limit, restarting with new GTE={new_start} "
-                f"({pendulum.from_timestamp(int(new_start) / 1000).to_iso8601_string()})"
-            )
-            current_start_ms = new_start
-        else:
+        # restart with the same date filters plus hs_object_id > last_id
+        # to continue from where we left off.
+        if total_yielded < 10000:
             break
 
 
