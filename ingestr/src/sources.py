@@ -4414,8 +4414,8 @@ class DuneSource:
         default_parameters = {
             "start_date": start_date.strftime("%Y-%m-%d"),
             "end_date": end_date.strftime("%Y-%m-%d"),
-            "start_timestamp": start_date.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_timestamp": end_date.strftime("%Y-%m-%d %H:%M:%S"),
+            "start_timestamp": str(int(start_date.timestamp())),
+            "end_timestamp": str(int(start_date.timestamp())),
         }
 
         from ingestr.src.dune import dune_source

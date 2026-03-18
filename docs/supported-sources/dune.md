@@ -119,7 +119,7 @@ ingestr ingest \
 >   - `start_date` and `end_date` parameters in the format `YYYY-MM-DD`
 >   - `start_timestamp` and `end_timestamp` parameters in the format `YYYY-MM-DD HH:MM:SS`
 > - **Default dates**: If not specified, defaults to 2 days ago (00:00) to yesterday (00:00)
-> - Dune API does not have a native timestamp parameter type (see [query parameters](#query-parameters)). In your query, use `CAST` to convert them, e.g.: `AND block_time >= CAST('{{start_timestamp}}' AS TIMESTAMP)`
+> - Dune API does not have a native timestamp parameter type (see [query parameters](#query-parameters)). All parameters are passed as strings, so you need to handle conversion inside your query, e.g.: `block_time >= from_unixtime({{start_timestamp}})`, `block_date >= CAST('{{start_date}}' AS DATE)`
 > - Custom parameters will override default parameters if they have the same name
 > - Make sure your query ID is valid and accessible with your API key
 
