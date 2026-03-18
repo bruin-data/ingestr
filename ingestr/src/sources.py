@@ -1372,6 +1372,8 @@ class HubspotSource:
             return hubspot(
                 api_key=api_key[0],
                 custom_object=endpoint,
+                start_date=kwargs.get("interval_start"),
+                end_date=kwargs.get("interval_end"),
             ).with_resources("custom")
 
         elif table in [
@@ -1405,6 +1407,8 @@ class HubspotSource:
 
         return hubspot(
             api_key=api_key[0],
+            start_date=kwargs.get("interval_start"),
+            end_date=kwargs.get("interval_end"),
         ).with_resources(endpoint)
 
 

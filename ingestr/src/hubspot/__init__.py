@@ -123,6 +123,8 @@ def hubspot(
     include_history: bool = False,
     include_custom_props: bool = True,
     custom_object: str = None,
+    start_date: Optional[Any] = None,
+    end_date: Optional[Any] = None,
 ) -> Sequence[DltResource]:
     """
     A DLT source that retrieves data from the HubSpot API using the
@@ -150,6 +152,11 @@ def hubspot(
         `api_key` argument.
     """
 
+    if start_date is not None and not isinstance(start_date, str):
+        start_date = pendulum.instance(start_date).to_iso8601_string()
+    if end_date is not None and not isinstance(end_date, str):
+        end_date = pendulum.instance(end_date).to_iso8601_string()
+
     @dlt.resource(
         name="companies", write_disposition="merge", primary_key=["hs_object_id"]
     )
@@ -158,7 +165,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot companies resource"""
@@ -179,7 +189,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "lastmodifieddate", initial_value=None, row_order="asc"
+            "lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot contacts resource"""
@@ -198,7 +211,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot deals resource"""
@@ -219,7 +235,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot tickets resource"""
@@ -240,7 +259,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot products resource"""
@@ -259,7 +281,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot calls resource"""
@@ -280,7 +305,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot emails resource"""
@@ -303,7 +331,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot feedback submissions resource"""
@@ -324,7 +355,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot line items resource"""
@@ -345,7 +379,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot meetings resource"""
@@ -364,7 +401,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot notes resource"""
@@ -383,7 +423,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot tasks resource"""
@@ -402,7 +445,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot carts resource"""
@@ -423,7 +469,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot discounts resource"""
@@ -442,7 +491,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot fees resource"""
@@ -463,7 +515,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot invoices resource"""
@@ -486,7 +541,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot commerce payments resource"""
@@ -505,7 +563,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot taxes resource"""
@@ -526,7 +587,10 @@ def hubspot(
         include_history: bool = include_history,
         include_custom_props: bool = include_custom_props,
         updated_at: dlt.sources.incremental[str] = dlt.sources.incremental(
-            "hs_lastmodifieddate", initial_value=None, row_order="asc"
+            "hs_lastmodifieddate",
+            initial_value=start_date,
+            end_value=end_date,
+            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot quotes resource"""
