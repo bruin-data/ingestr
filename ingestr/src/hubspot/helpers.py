@@ -357,17 +357,13 @@ def fetch_data_search(
                         _obj["id"] = _result["id"]
                     _objects.append(_obj)
 
-                    obj_id = str(
-                        _obj.get("hs_object_id") or _obj.get("id") or ""
-                    )
+                    obj_id = str(_obj.get("hs_object_id") or _obj.get("id") or "")
                     if last_id is None or int(obj_id) > int(last_id):
                         last_id = obj_id
 
                 if association_types and _objects:
                     obj_ids = [
-                        str(
-                            obj.get("hs_object_id") or obj.get("id") or ""
-                        )
+                        str(obj.get("hs_object_id") or obj.get("id") or "")
                         for obj in _objects
                     ]
                     for assoc_type in association_types:
@@ -377,18 +373,13 @@ def fetch_data_search(
                             from_type, assoc_type, obj_ids, api_key
                         )
                         for obj in _objects:
-                            obj_id = str(
-                                obj.get("hs_object_id")
-                                or obj.get("id")
-                                or ""
-                            )
+                            obj_id = str(obj.get("hs_object_id") or obj.get("id") or "")
                             values = [
                                 {"value": obj_id, f"{assoc_type}_id": aid}
                                 for aid in assoc_map.get(obj_id, [])
                             ]
                             obj[assoc_type] = [
-                                dict(t)
-                                for t in {tuple(d.items()) for d in values}
+                                dict(t) for t in {tuple(d.items()) for d in values}
                             ]
 
                 total_yielded += len(_objects)
