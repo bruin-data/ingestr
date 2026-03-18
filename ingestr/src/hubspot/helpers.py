@@ -283,6 +283,7 @@ def fetch_data_search(
     api_key: str,
     properties: str,
     start_date_ms: str,
+    end_date_ms: Optional[str] = None,
     association_types: Optional[List[str]] = None,
 ) -> Iterator[List[Dict[str, Any]]]:
     url = get_url(f"/crm/v3/objects/{OBJECT_TYPE_PLURAL[object_type]}/search")
@@ -292,18 +293,24 @@ def fetch_data_search(
         object_type, DEFAULT_LAST_MODIFIED_PROPERTY
     )
 
-    body: Dict[str, Any] = {
-        "filterGroups": [
+    filters = [
+        {
+            "propertyName": modified_prop,
+            "operator": "GTE",
+            "value": start_date_ms,
+        }
+    ]
+    if end_date_ms is not None:
+        filters.append(
             {
-                "filters": [
-                    {
-                        "propertyName": modified_prop,
-                        "operator": "GTE",
-                        "value": start_date_ms,
-                    }
-                ]
+                "propertyName": modified_prop,
+                "operator": "LTE",
+                "value": end_date_ms,
             }
-        ],
+        )
+
+    body: Dict[str, Any] = {
+        "filterGroups": [{"filters": filters}],
         "properties": [p for p in properties.split(",") if p],
         "sorts": [{"propertyName": modified_prop, "direction": "ASCENDING"}],
         "limit": 100,
