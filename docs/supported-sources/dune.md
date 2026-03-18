@@ -111,5 +111,15 @@ ingestr ingest \
   --dest-table 'dune.transactions'
 ```
 
-
+## Notes
+> - Query execution is asynchronous and may take time depending on the complexity of your query
+> - The connector will wait up to 12 hours for query completion
+> - Use `--interval-start` and `--interval-end` flags to pass date parameters to your Dune query
+> - The dates will be automatically converted to:
+>   - `start_date` and `end_date` parameters in the format `YYYY-MM-DD`
+>   - `start_timestamp` and `end_timestamp` parameters in the format `YYYY-MM-DD HH:MM:SS`
+> - **Default dates**: If not specified, defaults to 2 days ago (00:00) to yesterday (00:00)
+> - Dune API does not have a native timestamp parameter type (see [query parameters](#query-parameters)). In your query, use `CAST` to convert them, e.g.: `AND block_time >= CAST('{{start_timestamp}}' AS TIMESTAMP)`
+> - Custom parameters will override default parameters if they have the same name
+> - Make sure your query ID is valid and accessible with your API key
 

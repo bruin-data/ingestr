@@ -4399,6 +4399,25 @@ class DuneSource:
 
         performance = query_params.get("performance")
 
+        # Extract parameters from interval_start and interval_end
+        # Default: 2 days ago 00:00 to yesterday 00:00
+        now = pendulum.now()
+        default_start = now.subtract(days=2).start_of("day")
+        default_end = now.subtract(days=1).start_of("day")
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        start_date = interval_start if interval_start is not None else default_start
+        end_date = interval_end if interval_end is not None else default_end
+
+        default_parameters = {
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d"),
+            "start_timestamp": start_date.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp": end_date.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
         from ingestr.src.dune import dune_source
 
         # "query:<id>" → execute saved query by ID
@@ -4408,16 +4427,19 @@ class DuneSource:
             parts = table.split(":", 2)
             query_id = parts[1]
             if not query_id:
-                raise ValueError("SQL query cannot be empty in 'sql:' table format")
-            query_parameters = None
+                raise ValueError("Query ID cannot be empty in 'query:' table format")
+            query_parameters = dict(default_parameters)
             if len(parts) == 3:
-                query_parameters = dict(
-                    param.split("=", 1) for param in parts[2].split("&") if "=" in param
+                query_parameters.update(
+                    dict(
+                        param.split("=", 1)
+                        for param in parts[2].split("&")
+                        if "=" in param
+                    )
                 )
 
             return dune_source(
                 api_key=api_key[0],
-                sql="",
                 query_id=query_id,
                 performance=performance[0] if performance else "medium",
                 query_parameters=query_parameters,
