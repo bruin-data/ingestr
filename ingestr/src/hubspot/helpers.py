@@ -37,6 +37,7 @@ def _iso_to_ms(iso_string: str) -> str:
     dt = pendulum.parse(iso_string)
     return str(int(dt.timestamp() * 1000))
 
+
 BASE_URL = "https://api.hubapi.com/"
 
 
