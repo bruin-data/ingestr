@@ -730,7 +730,12 @@ def crm_objects(
         _qs = parse_qs(urlparse(CRM_OBJECT_ENDPOINTS[object_type]).query)
         assoc_types = [t for t in _qs.get("associations", [""])[0].split(",") if t]
         yield from fetch_data_search(
-            object_type, api_key, props, start_date_ms, end_date_ms=end_date_ms, association_types=assoc_types
+            object_type,
+            api_key,
+            props,
+            start_date_ms,
+            end_date_ms=end_date_ms,
+            association_types=assoc_types,
         )
         return
 

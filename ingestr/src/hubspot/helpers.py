@@ -320,8 +320,14 @@ def fetch_data_search(
                 }
             )
 
-        start_human = pendulum.from_timestamp(int(current_start_ms) / 1000).to_iso8601_string()
-        end_human = pendulum.from_timestamp(int(end_date_ms) / 1000).to_iso8601_string() if end_date_ms else "none"
+        start_human = pendulum.from_timestamp(
+            int(current_start_ms) / 1000
+        ).to_iso8601_string()
+        end_human = (
+            pendulum.from_timestamp(int(end_date_ms) / 1000).to_iso8601_string()
+            if end_date_ms
+            else "none"
+        )
         logger.info(
             f"[hubspot] search window #{window_num} for {object_type}: "
             f"GTE={current_start_ms} ({start_human}) LTE={end_date_ms} ({end_human})"
@@ -372,7 +378,9 @@ def fetch_data_search(
                                 pendulum.parse(mod_val).timestamp() * 1000  # type: ignore[union-attr]
                             )
                         )
-                        if max_modified_ms is None or int(mod_ms) > int(max_modified_ms):
+                        if max_modified_ms is None or int(mod_ms) > int(
+                            max_modified_ms
+                        ):
                             max_modified_ms = mod_ms
 
                 if association_types and _objects:
@@ -414,7 +422,11 @@ def fetch_data_search(
             else:
                 break
 
-        max_human = pendulum.from_timestamp(int(max_modified_ms) / 1000).to_iso8601_string() if max_modified_ms else "none"
+        max_human = (
+            pendulum.from_timestamp(int(max_modified_ms) / 1000).to_iso8601_string()
+            if max_modified_ms
+            else "none"
+        )
         logger.info(
             f"[hubspot] window #{window_num} done: total_yielded={total_yielded}, "
             f"max_modified={max_modified_ms} ({max_human})"
