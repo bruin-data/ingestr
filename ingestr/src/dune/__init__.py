@@ -8,7 +8,12 @@ from typing import Any, Iterator
 
 import dlt
 
-from ingestr.src.dune.helpers import BASE_URL, fetch_queries, fetch_results, poll_execution
+from ingestr.src.dune.helpers import (
+    BASE_URL,
+    fetch_queries,
+    fetch_results,
+    poll_execution,
+)
 from ingestr.src.http_client import create_client
 
 

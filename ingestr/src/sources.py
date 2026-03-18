@@ -4410,9 +4410,7 @@ class DuneSource:
             query_parameters = None
             if len(parts) == 3:
                 query_parameters = dict(
-                    param.split("=", 1)
-                    for param in parts[2].split("&")
-                    if "=" in param
+                    param.split("=", 1) for param in parts[2].split("&") if "=" in param
                 )
 
             return dune_source(
