@@ -150,6 +150,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "ClickUp", link: "/supported-sources/clickup.md" },
               { text: "Cursor", link: "/supported-sources/cursor.md" },
               { text: "Docebo", link: "/supported-sources/docebo.md" },
+              { text: "Dune", link: "/supported-sources/dune.md" },
               {
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
@@ -182,6 +183,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "PhantomBuster", link: "/supported-sources/phantombuster.md" },
               { text: "Pinterest", link: "/supported-sources/pinterest.md" },
               { text: "Pipedrive", link: "/supported-sources/pipedrive.md" },
+              { text: "PostHog", link: "/supported-sources/posthog.md" },
               { text: "Primer", link: "/supported-sources/primer.md" },
               { text: "Plus Vibe AI", link: "/supported-sources/plusvibeai.md" },
               { text: "QuickBooks", link: "/supported-sources/quickbooks.md" },
