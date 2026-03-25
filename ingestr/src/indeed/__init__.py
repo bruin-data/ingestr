@@ -26,14 +26,15 @@ def indeed_source(
 ) -> Iterable[dlt.sources.DltResource]:
     token = _get_oauth_token(client_id, client_secret, employer_id)
 
-    @dlt.resource(name="campaigns", write_disposition="replace")
+    @dlt.resource(name="campaigns", write_disposition="merge", primary_key="Id")
     def campaigns() -> Iterator[Dict[str, Any]]:
         for campaign in _paginate_campaigns(token):
             yield campaign
 
     @dlt.transformer(
         name="campaign_details",
-        write_disposition="replace",
+        write_disposition="merge",
+        primary_key="campaignId",
         data_from=campaigns,
         parallelized=True,
     )
@@ -43,7 +44,8 @@ def indeed_source(
 
     @dlt.transformer(
         name="campaign_budget",
-        write_disposition="replace",
+        write_disposition="merge",
+        primary_key="campaignId",
         data_from=campaigns,
         parallelized=True,
     )
@@ -54,7 +56,8 @@ def indeed_source(
 
     @dlt.transformer(
         name="campaign_jobs",
-        write_disposition="replace",
+        write_disposition="merge",
+        primary_key=["campaignId", "jobKey"],
         data_from=campaigns,
         parallelized=True,
     )
@@ -64,7 +67,8 @@ def indeed_source(
 
     @dlt.transformer(
         name="campaign_properties",
-        write_disposition="replace",
+        write_disposition="merge",
+        primary_key="campaignId",
         data_from=campaigns,
         parallelized=True,
     )
@@ -76,6 +80,7 @@ def indeed_source(
     @dlt.transformer(
         name="campaign_stats",
         write_disposition="merge",
+        primary_key=["campaignId", "Date"],
         merge_key="Date",
         data_from=campaigns,
         parallelized=True,
@@ -100,7 +105,8 @@ def indeed_source(
 
     @dlt.resource(
         name="account",
-        write_disposition="replace",
+        write_disposition="merge",
+        primary_key=["employerId", "jobSourceId"],
     )
     def account() -> Iterator[Dict[str, Any]]:
         data = _get_account(token)
@@ -119,7 +125,7 @@ def indeed_source(
                 "jobSourceSiteName": job_source.get("siteName"),
             }
 
-    @dlt.resource(name="traffic_stats", write_disposition="merge", merge_key="date")
+    @dlt.resource(name="traffic_stats", write_disposition="merge", primary_key=["date", "Campaign ID", "Job Reference Number"], merge_key="date")
     def traffic_stats(
         date: dlt.sources.incremental[str] = dlt.sources.incremental(
             "date",

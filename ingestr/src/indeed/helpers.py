@@ -87,7 +87,9 @@ def _paginate_campaigns(token: str) -> Iterator[Dict[str, Any]]:
 
 def _get_campaign_details(token: str, campaign_id: str) -> Dict[str, Any]:
     response = _api_request(token, f"/campaigns/{campaign_id}")
-    return response.json().get("data", {})
+    data = response.json().get("data", {})
+    data["campaignId"] = campaign_id
+    return data
 
 
 def _get_campaign_budget(token: str, campaign_id: str) -> Optional[Dict[str, Any]]:
