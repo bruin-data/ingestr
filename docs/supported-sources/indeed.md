@@ -45,13 +45,13 @@ Indeed source allows ingesting the following resources into separate tables:
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 | ----- | -- | ------- | ------------ | ------- |
-| `campaigns` | - | - | replace | Retrieves all campaigns for the employer |
-| `campaign_details` | - | - | replace | Retrieves detailed information for each campaign |
-| `campaign_budget` | - | - | replace | Retrieves budget information for each campaign |
-| `campaign_jobs` | - | - | replace | Retrieves all jobs associated with each campaign |
-| `campaign_properties` | - | - | replace | Retrieves properties for each campaign |
-| `campaign_stats` | - | Date | merge | Retrieves daily statistics for each campaign |
-| `account` | - | - | replace | Retrieves account information including job sources |
+| `campaigns` | Id | - | merge | Retrieves all campaigns for the employer |
+| `campaign_details` | campaignId | - | merge | Retrieves detailed information for each campaign |
+| `campaign_budget` | campaignId | - | merge | Retrieves budget information for each campaign |
+| `campaign_jobs` | campaignId, jobKey | - | merge | Retrieves all jobs associated with each campaign |
+| `campaign_properties` | campaignId | - | merge | Retrieves properties for each campaign |
+| `campaign_stats` | campaignId, Date | Date | merge | Retrieves daily statistics for each campaign |
+| `account` | employerId, jobSourceId | - | merge | Retrieves account information including job sources |
 | `traffic_stats` | - | date | merge | Retrieves daily traffic statistics |
 
 ## Incremental Loading
