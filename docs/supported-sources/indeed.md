@@ -52,7 +52,7 @@ Indeed source allows ingesting the following resources into separate tables:
 | `campaign_properties` | campaignId | - | merge | Retrieves properties for each campaign |
 | `campaign_stats` | campaignId, Date | Date | merge | Retrieves daily statistics for each campaign |
 | `account` | employerId, jobSourceId | - | merge | Retrieves account information including job sources |
-| `traffic_stats` | date, Campaign ID, Job Reference Number | date | merge | Retrieves daily traffic statistics |
+| `traffic_stats` | - | date | merge | Retrieves daily traffic statistics |
 
 ## Incremental Loading
 
