@@ -562,7 +562,7 @@ class MongoDbSource:
                 incremental=incremental,
                 custom_query=query,
             )
-            table_instance.max_table_nesting = 1
+            table_instance.max_table_nesting = 0
             return table_instance
         else:
             # Default behavior for simple collection names
@@ -586,7 +586,7 @@ class MongoDbSource:
                 parallel=False,
                 incremental=incremental,
             )
-            table_instance.max_table_nesting = 1
+            table_instance.max_table_nesting = 0
 
             return table_instance
 
