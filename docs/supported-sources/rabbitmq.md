@@ -42,7 +42,7 @@ Once you have your RabbitMQ server running, here's a sample command to ingest me
 ingestr ingest \
     --source-uri 'amqp://guest:guest@localhost:5672/' \
     --source-table 'my_queue' \
-    --dest-uri duckdb:///rabbitmq.duckdb \
+    --dest-uri 'duckdb://./rabbitmq.duckdb' \
     --dest-table 'dest.my_queue'
 ```
 
