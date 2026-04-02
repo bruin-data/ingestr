@@ -118,6 +118,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "MySQL", link: "/supported-sources/mysql.md" },
               { text: "Oracle", link: "/supported-sources/oracle.md" },
               { text: "Postgres", link: "/supported-sources/postgres.md" },
+              { text: "RabbitMQ", link: "/supported-sources/rabbitmq.md" },
               { text: "SAP Hana", link: "/supported-sources/sap-hana.md" },
               { text: "Snowflake", link: "/supported-sources/snowflake.md" },
               { text: "Socrata", link: "/supported-sources/socrata.md" },
