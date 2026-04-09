@@ -2591,34 +2591,53 @@ class GoogleAdsSource:
         if dev_token is None or len(dev_token) == 0:
             raise MissingValueError("dev_token", "Google Ads")
 
+        client_id = params.get("client_id")
+        client_secret = params.get("client_secret")
+        refresh_token = params.get("refresh_token")
+        oauth_available = all(
+            x is not None and len(x) > 0
+            for x in [client_id, client_secret, refresh_token]
+        )
+
         credentials_path = params.get("credentials_path")
         credentials_base64 = params.get("credentials_base64")
-        credentials_available = any(
+        service_account_available = any(
             map(
                 lambda x: x is not None,
                 [credentials_path, credentials_base64],
             )
         )
-        if credentials_available is False:
+
+        if not oauth_available and not service_account_available:
             raise MissingValueError(
-                "credentials_path or credentials_base64", "Google Ads"
+                "client_id/client_secret/refresh_token or credentials_path/credentials_base64",
+                "Google Ads",
             )
 
-        path = None
         fd = None
-        if credentials_path:
-            path = credentials_path[0]
+        if oauth_available:
+            conf = {
+                "client_id": client_id[0],  # type: ignore
+                "client_secret": client_secret[0],  # type: ignore
+                "refresh_token": refresh_token[0],  # type: ignore
+                "developer_token": dev_token[0],
+                "use_proto_plus": True,
+            }
         else:
-            (fd, path) = tempfile.mkstemp(prefix="secret-")
-            secret = base64.b64decode(credentials_base64[0])  # type: ignore
-            os.write(fd, secret)
-            os.close(fd)
+            path = None
+            if credentials_path:
+                path = credentials_path[0]
+            else:
+                (fd, path) = tempfile.mkstemp(prefix="secret-")
+                secret = base64.b64decode(credentials_base64[0])  # type: ignore
+                os.write(fd, secret)
+                os.close(fd)
 
-        conf = {
-            "json_key_file_path": path,
-            "use_proto_plus": True,
-            "developer_token": dev_token[0],
-        }
+            conf = {
+                "json_key_file_path": path,
+                "use_proto_plus": True,
+                "developer_token": dev_token[0],
+            }
 
         login_customer_id = params.get("login_customer_id")
         if login_customer_id:
@@ -2628,7 +2647,7 @@ class GoogleAdsSource:
             client = GoogleAdsClient.load_from_dict(conf)
         finally:
             if fd is not None:
-                os.remove(path)
+                os.remove(path)  # type: ignore
 
         return client
 
