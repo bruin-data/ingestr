@@ -190,6 +190,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Primer", link: "/supported-sources/primer.md" },
               { text: "Plus Vibe AI", link: "/supported-sources/plusvibeai.md" },
               { text: "QuickBooks", link: "/supported-sources/quickbooks.md" },
+              { text: "Reddit Ads", link: "/supported-sources/reddit_ads.md" },
               { text: "RevenueCat", link: "/supported-sources/revenuecat.md" },
               { text: "S3", link: "/supported-sources/s3.md" },
               { text: "Salesforce", link: "/supported-sources/salesforce.md" },
