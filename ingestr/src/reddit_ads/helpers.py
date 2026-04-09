@@ -30,6 +30,35 @@ VALID_BREAKDOWNS = {
     "carousel_card",
 }
 
+VALID_METRICS = {
+    "IMPRESSIONS",
+    "REACH",
+    "CLICKS",
+    "SPEND",
+    "ECPM",
+    "CTR",
+    "CPC",
+    "CONVERSIONS",
+    "CONVERSION_ROAS",
+    "TOTAL_ITEMS",
+    "TOTAL_VALUE",
+    "AVG_VALUE",
+    "REDDIT_LEADS",
+    "COMMENTS_PAGE_VIEWS",
+    "COMMENT_UPVOTES",
+    "COMMENT_DOWNVOTES",
+    "VIEWER_COMMENTS",
+    "VIDEO_STARTED",
+    "VIDEO_WATCHED_3_SECONDS",
+    "VIDEO_WATCHED_5_SECONDS",
+    "VIDEO_WATCHED_25_PERCENT",
+    "VIDEO_WATCHED_50_PERCENT",
+    "VIDEO_WATCHED_75_PERCENT",
+    "VIDEO_WATCHED_100_PERCENT",
+    "VIDEO_WATCHED_6_SECONDS_RATE",
+    "VIDEO_WATCHED_15_SECONDS_RATE",
+}
+
 
 def retry_on_limit(
     response: requests.Response | None, exception: BaseException | None
@@ -89,7 +118,7 @@ def parse_custom_table(table: str) -> tuple[str, list[str], list[str]]:
             f"Invalid level '{level}'. Must be one of: {', '.join(sorted(VALID_LEVELS))}"
         )
 
-    breakdowns = dimensions[1:]
+    breakdowns = [b.lower() for b in dimensions[1:]]
     if len(breakdowns) > 2:
         raise ValueError("Reddit Ads supports at most 2 breakdowns per report")
 
@@ -102,6 +131,12 @@ def parse_custom_table(table: str) -> tuple[str, list[str], list[str]]:
     metrics = [m.strip().upper() for m in parts[2].split(",") if m.strip()]
     if not metrics:
         raise ValueError("At least one metric is required")
+
+    for m in metrics:
+        if m not in VALID_METRICS:
+            raise ValueError(
+                f"Invalid metric '{m}'. Must be one of: {', '.join(sorted(VALID_METRICS))}"
+            )
 
     return level, breakdowns, metrics
 

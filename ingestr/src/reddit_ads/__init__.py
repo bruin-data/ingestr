@@ -24,8 +24,11 @@ def reddit_ads_source(
     @dlt.resource(write_disposition="replace", primary_key="id")
     def accounts() -> Iterable[TDataItem]:
         url = f"{BASE_URL}/accounts"
+        account_id_set = set(account_ids)
         for page in reddit_api.fetch_pages(url):
-            yield page
+            filtered = [item for item in page if str(item.get("id")) in account_id_set]
+            if filtered:
+                yield filtered
 
     @dlt.resource(write_disposition="replace", primary_key="id")
     def campaigns() -> Iterable[TDataItem]:

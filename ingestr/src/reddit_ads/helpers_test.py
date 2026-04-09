@@ -88,9 +88,21 @@ def test_parse_custom_table_invalid_level():
         parse_custom_table("custom:invalid,date:impressions")
 
 
+def test_parse_custom_table_normalizes_breakdown_case():
+    level, breakdowns, metrics = parse_custom_table(
+        "custom:campaign,Date,COUNTRY:impressions"
+    )
+    assert breakdowns == ["date", "country"]
+
+
 def test_parse_custom_table_invalid_breakdown():
     with pytest.raises(ValueError, match="Invalid breakdown"):
         parse_custom_table("custom:campaign,invalid_dim:impressions")
+
+
+def test_parse_custom_table_invalid_metric():
+    with pytest.raises(ValueError, match="Invalid metric"):
+        parse_custom_table("custom:campaign,date:IMPRESIONS")
 
 
 def test_parse_custom_table_missing_metrics():
