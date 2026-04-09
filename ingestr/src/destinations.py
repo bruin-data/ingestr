@@ -474,14 +474,21 @@ class CsvDestination(GenericSqlDestination):
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         with open(output_path, "w", newline="") as csv_file:
-            csv_writer = None
+            all_rows = []
+            all_fieldnames = []
+            seen = set()
             for row in load_dlt_file(first_file_path):
                 row = filter_keys(row)
-                if csv_writer is None:
-                    csv_writer = csv.DictWriter(csv_file, fieldnames=row.keys())
-                    csv_writer.writeheader()
+                for key in row.keys():
+                    if key not in seen:
+                        seen.add(key)
+                        all_fieldnames.append(key)
+                all_rows.append(row)
 
-                csv_writer.writerow(row)
+            if all_rows:
+                csv_writer = csv.DictWriter(csv_file, fieldnames=all_fieldnames, restval="")
+                csv_writer.writeheader()
+                csv_writer.writerows(all_rows)
         shutil.rmtree(self.temp_path)
 
 
