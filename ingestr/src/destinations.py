@@ -473,22 +473,50 @@ class CsvDestination(GenericSqlDestination):
         if output_path.count("/") > 1:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        with open(output_path, "w", newline="") as csv_file:
-            all_rows = []
-            all_fieldnames = []
-            seen = set()
+        def _rewrite_csv_with_fieldnames(path, fieldnames):
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                suffix=".csv", dir=os.path.dirname(path) or "."
+            )
+            try:
+                os.close(tmp_fd)
+                with open(path, "r", newline="") as old, open(tmp_path, "w", newline="") as new:
+                    reader = csv.DictReader(old)
+                    writer = csv.DictWriter(new, fieldnames=fieldnames, restval="")
+                    writer.writeheader()
+                    for r in reader:
+                        writer.writerow(r)
+                os.replace(tmp_path, path)
+            except BaseException:
+                os.unlink(tmp_path)
+                raise
+
+        fieldnames = {}
+        csv_writer = None
+        csv_file = None
+
+        try:
             for row in load_dlt_file(first_file_path):
                 row = filter_keys(row)
-                for key in row.keys():
-                    if key not in seen:
-                        seen.add(key)
-                        all_fieldnames.append(key)
-                all_rows.append(row)
+                new_fields = False
+                for key in row:
+                    if key not in fieldnames:
+                        fieldnames[key] = None
+                        new_fields = True
 
-            if all_rows:
-                csv_writer = csv.DictWriter(csv_file, fieldnames=all_fieldnames, restval="")
-                csv_writer.writeheader()
-                csv_writer.writerows(all_rows)
+                if csv_writer is None:
+                    csv_file = open(output_path, "w", newline="")
+                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames, restval="")
+                    csv_writer.writeheader()
+                elif new_fields:
+                    csv_file.close()
+                    _rewrite_csv_with_fieldnames(output_path, list(fieldnames))
+                    csv_file = open(output_path, "a", newline="")
+                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames, restval="")
+
+                csv_writer.writerow(row)
+        finally:
+            if csv_file:
+                csv_file.close()
         shutil.rmtree(self.temp_path)
 
 
