@@ -473,22 +473,22 @@ class CsvDestination(GenericSqlDestination):
         if output_path.count("/") > 1:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        with open(output_path, "w", newline="") as csv_file:
-            all_rows = []
-            all_fieldnames = []
-            seen = set()
-            for row in load_dlt_file(first_file_path):
-                row = filter_keys(row)
-                for key in row.keys():
-                    if key not in seen:
-                        seen.add(key)
-                        all_fieldnames.append(key)
-                all_rows.append(row)
+        # First pass: collect all fieldnames across all rows
+        all_fieldnames = []
+        seen = set()
+        for row in load_dlt_file(first_file_path):
+            for key in row.keys():
+                if not key.startswith("_dlt_") and key not in seen:
+                    seen.add(key)
+                    all_fieldnames.append(key)
 
-            if all_rows:
-                csv_writer = csv.DictWriter(csv_file, fieldnames=all_fieldnames, restval="")
+        # Second pass: stream rows to CSV
+        if all_fieldnames:
+            with open(output_path, "w", newline="") as csv_file:
+                csv_writer = csv.DictWriter(csv_file, fieldnames=all_fieldnames, restval="", extrasaction="ignore")
                 csv_writer.writeheader()
-                csv_writer.writerows(all_rows)
+                for row in load_dlt_file(first_file_path):
+                    csv_writer.writerow(filter_keys(row))
         shutil.rmtree(self.temp_path)
 
 
