@@ -479,7 +479,10 @@ class CsvDestination(GenericSqlDestination):
             )
             try:
                 os.close(tmp_fd)
-                with open(path, "r", newline="") as old, open(tmp_path, "w", newline="") as new:
+                with (
+                    open(path, "r", newline="") as old,
+                    open(tmp_path, "w", newline="") as new,
+                ):
                     reader = csv.DictReader(old)
                     writer = csv.DictWriter(new, fieldnames=fieldnames, restval="")
                     writer.writeheader()
@@ -505,13 +508,17 @@ class CsvDestination(GenericSqlDestination):
 
                 if csv_writer is None:
                     csv_file = open(output_path, "w", newline="")
-                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames, restval="")
+                    csv_writer = csv.DictWriter(
+                        csv_file, fieldnames=fieldnames, restval=""
+                    )
                     csv_writer.writeheader()
                 elif new_fields:
                     csv_file.close()
                     _rewrite_csv_with_fieldnames(output_path, list(fieldnames))
                     csv_file = open(output_path, "a", newline="")
-                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames, restval="")
+                    csv_writer = csv.DictWriter(
+                        csv_file, fieldnames=fieldnames, restval=""
+                    )
 
                 csv_writer.writerow(row)
         finally:
@@ -647,9 +654,7 @@ class ClickhouseDestination:
         http_port = (
             int(query_params["http_port"][0])
             if "http_port" in query_params
-            else 8443
-            if secure == 1
-            else 8123
+            else 8443 if secure == 1 else 8123
         )
 
         if secure not in (0, 1):
