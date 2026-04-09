@@ -2740,13 +2740,22 @@ class LinkedInAdsSource:
 
             dimensions = fields[1].replace(" ", "").split(",")
             dimensions = [item for item in dimensions if item.strip()]
-            if (
-                "campaign" not in dimensions
-                and "creative" not in dimensions
-                and "account" not in dimensions
-            ):
+            valid_entity_dimensions = {
+                "campaign",
+                "creative",
+                "account",
+                "member_job_title",
+                "member_seniority",
+                "member_industry",
+                "member_company_size",
+                "member_company",
+            }
+            if not valid_entity_dimensions.intersection(dimensions):
                 raise ValueError(
-                    "'campaign', 'creative' or 'account' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
+                    "A valid dimension is required to connect to LinkedIn Ads. "
+                    "Please provide one of: campaign, creative, account, "
+                    "member_job_title, member_seniority, member_industry, "
+                    "member_company_size, member_company."
                 )
             if "date" not in dimensions and "month" not in dimensions:
                 raise ValueError(
