@@ -237,7 +237,7 @@ def linked_in_ads_source(
 
     @dlt.transformer(
         write_disposition="replace",
-        primary_key="id",
+        primary_key=["domainName", "account_id"],
         data_from=ad_accounts,
     )
     def insight_tag_domains(ad_accounts) -> Iterable[TDataItem]:
