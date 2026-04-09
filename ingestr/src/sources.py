@@ -2602,16 +2602,20 @@ class GoogleAdsSource:
         credentials_path = params.get("credentials_path")
         credentials_base64 = params.get("credentials_base64")
         service_account_available = any(
-            map(
-                lambda x: x is not None,
-                [credentials_path, credentials_base64],
-            )
+            x is not None and len(x) > 0 for x in [credentials_path, credentials_base64]
         )
 
         if not oauth_available and not service_account_available:
             raise MissingValueError(
                 "client_id/client_secret/refresh_token or credentials_path/credentials_base64",
                 "Google Ads",
+            )
+
+        if oauth_available and service_account_available:
+            import logging
+
+            logging.warning(
+                "Both OAuth and service account credentials provided for Google Ads; using OAuth."
             )
 
         fd = None
