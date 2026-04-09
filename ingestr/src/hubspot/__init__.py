@@ -168,7 +168,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot companies resource"""
@@ -193,7 +192,6 @@ def hubspot(
             "lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot contacts resource"""
@@ -216,7 +214,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot deals resource"""
@@ -241,7 +238,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot tickets resource"""
@@ -266,7 +262,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot products resource"""
@@ -289,7 +284,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot calls resource"""
@@ -314,7 +308,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot emails resource"""
@@ -341,7 +334,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot feedback submissions resource"""
@@ -366,7 +358,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot line items resource"""
@@ -391,7 +382,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot meetings resource"""
@@ -414,7 +404,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot notes resource"""
@@ -437,7 +426,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot tasks resource"""
@@ -460,7 +448,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot carts resource"""
@@ -485,7 +472,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot discounts resource"""
@@ -508,7 +494,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot fees resource"""
@@ -533,7 +518,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot invoices resource"""
@@ -560,7 +544,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot commerce payments resource"""
@@ -583,7 +566,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot taxes resource"""
@@ -608,7 +590,6 @@ def hubspot(
             "hs_lastmodifieddate",
             initial_value=start_date,
             end_value=end_date,
-            row_order="asc",
         ),
     ) -> Iterator[TDataItems]:
         """Hubspot quotes resource"""
