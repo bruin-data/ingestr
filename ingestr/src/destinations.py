@@ -651,10 +651,11 @@ class ClickhouseDestination:
         query_params = parse_qs(parsed_uri.query)
         secure = int(query_params["secure"][0]) if "secure" in query_params else 1
 
+        default_http_port = 8443 if secure == 1 else 8123
         http_port = (
             int(query_params["http_port"][0])
             if "http_port" in query_params
-            else 8443 if secure == 1 else 8123
+            else default_http_port
         )
 
         if secure not in (0, 1):
