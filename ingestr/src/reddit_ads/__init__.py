@@ -131,16 +131,11 @@ def reddit_ads_analytics_source(
     has_date_breakdown = "date" in breakdowns
 
     if has_date_breakdown:
-        incremental_cursor = "date"
-    else:
-        incremental_cursor = None
-
-    if incremental_cursor:
 
         @dlt.resource(write_disposition="merge", primary_key=primary_key)
         def custom_reports(
             dateTime=dlt.sources.incremental(
-                incremental_cursor,
+                "date",
                 initial_value=start_date,
                 end_value=end_date,
                 range_start="closed",
