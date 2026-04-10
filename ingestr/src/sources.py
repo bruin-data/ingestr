@@ -2841,9 +2841,7 @@ class RedditAdsSource:
                 else pendulum.date(2020, 1, 1)
             )
             end_date = (
-                ensure_pendulum_datetime(interval_end).date()
-                if interval_end
-                else None
+                ensure_pendulum_datetime(interval_end).date() if interval_end else None
             )
 
             from ingestr.src.reddit_ads import reddit_ads_analytics_source

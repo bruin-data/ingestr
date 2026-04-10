@@ -10,7 +10,9 @@ from ingestr.src.reddit_ads.helpers import (
 
 
 def test_convert_microcurrency_converts_monetary_fields():
-    records = [{"spend": 5_000_000, "impressions": 100, "ecpm": 1_500_000, "cpc": 250_000}]
+    records = [
+        {"spend": 5_000_000, "impressions": 100, "ecpm": 1_500_000, "cpc": 250_000}
+    ]
     result = convert_microcurrency(records, ["SPEND", "ECPM", "CPC"])
     assert result[0]["spend"] == 5.0
     assert result[0]["ecpm"] == 1.5
@@ -70,9 +72,7 @@ def test_parse_custom_table_no_breakdowns():
 
 
 def test_parse_custom_table_ad_level():
-    level, breakdowns, metrics = parse_custom_table(
-        "custom:ad,date:impressions,clicks"
-    )
+    level, breakdowns, metrics = parse_custom_table("custom:ad,date:impressions,clicks")
     assert level == "AD"
     assert breakdowns == ["date"]
     assert metrics == ["IMPRESSIONS", "CLICKS"]
@@ -129,7 +129,9 @@ def test_parse_custom_table_preserves_breakdown_order():
 
 def test_handle_rate_limit_sleeps_when_remaining_low(monkeypatch):
     sleep_calls = []
-    monkeypatch.setattr("ingestr.src.reddit_ads.helpers.time.sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(
+        "ingestr.src.reddit_ads.helpers.time.sleep", lambda s: sleep_calls.append(s)
+    )
 
     response = MagicMock()
     response.headers = {"X-RateLimit-Remaining": "1", "X-RateLimit-Reset": "5"}
@@ -141,7 +143,9 @@ def test_handle_rate_limit_sleeps_when_remaining_low(monkeypatch):
 
 def test_handle_rate_limit_no_sleep_when_remaining_high(monkeypatch):
     sleep_calls = []
-    monkeypatch.setattr("ingestr.src.reddit_ads.helpers.time.sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(
+        "ingestr.src.reddit_ads.helpers.time.sleep", lambda s: sleep_calls.append(s)
+    )
 
     response = MagicMock()
     response.headers = {"X-RateLimit-Remaining": "50", "X-RateLimit-Reset": "10"}
@@ -152,7 +156,9 @@ def test_handle_rate_limit_no_sleep_when_remaining_high(monkeypatch):
 
 def test_handle_rate_limit_no_headers(monkeypatch):
     sleep_calls = []
-    monkeypatch.setattr("ingestr.src.reddit_ads.helpers.time.sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(
+        "ingestr.src.reddit_ads.helpers.time.sleep", lambda s: sleep_calls.append(s)
+    )
 
     response = MagicMock()
     response.headers = {}
@@ -163,7 +169,9 @@ def test_handle_rate_limit_no_headers(monkeypatch):
 
 def test_handle_rate_limit_zero_remaining(monkeypatch):
     sleep_calls = []
-    monkeypatch.setattr("ingestr.src.reddit_ads.helpers.time.sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(
+        "ingestr.src.reddit_ads.helpers.time.sleep", lambda s: sleep_calls.append(s)
+    )
 
     response = MagicMock()
     response.headers = {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "3"}
