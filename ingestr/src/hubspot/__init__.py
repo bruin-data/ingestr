@@ -701,9 +701,7 @@ def crm_objects(
         props = list(_get_property_names(api_key, object_type))
 
     if include_custom_props:
-        all_props = _get_property_names(api_key, object_type)
-        custom_props = [prop for prop in all_props if not prop.startswith("hs_")]
-        props = props + custom_props  # type: ignore
+        props += _get_property_names(api_key, object_type)
 
     props = ",".join(sorted(list(set(props))))
 
