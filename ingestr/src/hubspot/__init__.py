@@ -152,7 +152,9 @@ def hubspot(
         `api_key` argument.
     """
 
-    if start_date is not None and not isinstance(start_date, str):
+    if start_date is None:
+        start_date = "1970-01-01T00:00:00Z"
+    elif not isinstance(start_date, str):
         start_date = pendulum.instance(start_date).to_iso8601_string()
     if end_date is not None and not isinstance(end_date, str):
         end_date = pendulum.instance(end_date).to_iso8601_string()
