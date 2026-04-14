@@ -66,27 +66,28 @@ For every CRM object table listed above, a corresponding **property history** ta
 
 Use the format `property_history:<table>` as the `--source-table` value:
 
-| Table | Details |
-| ----------------------------------- | --------------------------------------------------------- |
-| property_history:contacts           | Property change history for contacts.                     |
-| property_history:companies          | Property change history for companies.                    |
-| property_history:deals              | Property change history for deals.                        |
-| property_history:tickets            | Property change history for tickets.                      |
-| property_history:products           | Property change history for products.                     |
-| property_history:quotes             | Property change history for quotes.                       |
-| property_history:calls              | Property change history for calls.                        |
-| property_history:emails             | Property change history for emails.                       |
-| property_history:feedback_submissions | Property change history for feedback submissions.       |
-| property_history:line_items         | Property change history for line items.                   |
-| property_history:meetings           | Property change history for meetings.                     |
-| property_history:notes              | Property change history for notes.                        |
-| property_history:tasks              | Property change history for tasks.                        |
-| property_history:carts              | Property change history for carts.                        |
-| property_history:discounts          | Property change history for discounts.                    |
-| property_history:fees               | Property change history for fees.                         |
-| property_history:invoices           | Property change history for invoices.                     |
-| property_history:commerce_payments  | Property change history for commerce payments.            |
-| property_history:taxes              | Property change history for taxes.                        |
+| Table | PK | Inc Key | Inc Strategy | Details |
+| ------------------------------------- | ---------------------------------------- | --------- | ------------ | ------------------------------------------------------- |
+| property_history:contacts             | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for contacts.                   |
+| property_history:companies            | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for companies.                  |
+| property_history:deals                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for deals.                      |
+| property_history:tickets              | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for tickets.                    |
+| property_history:products             | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for products.                   |
+| property_history:quotes               | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for quotes.                     |
+| property_history:calls                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for calls.                      |
+| property_history:emails               | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for emails.                     |
+| property_history:feedback_submissions | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for feedback submissions.       |
+| property_history:line_items           | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for line items.                 |
+| property_history:meetings             | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for meetings.                   |
+| property_history:notes                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for notes.                      |
+| property_history:tasks                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for tasks.                      |
+| property_history:carts                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for carts.                      |
+| property_history:discounts            | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for discounts.                  |
+| property_history:fees                 | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for fees.                       |
+| property_history:invoices             | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for invoices.                   |
+| property_history:commerce_payments    | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for commerce payments.          |
+| property_history:taxes                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for taxes.                      |
+
 
 > **Note:** The `owners` and `schemas` tables do not have history variants.
 
