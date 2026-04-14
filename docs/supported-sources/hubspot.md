@@ -60,6 +60,38 @@ HubSpot source allows ingesting the following sources into separate tables:
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
+### Property History Tables
+
+For every CRM object table listed above, a corresponding **property history** table is available. These tables return one row per property change, enabling you to track how properties changed over time.
+
+Use the format `property_history:<table>` as the `--source-table` value:
+
+| Table | Details |
+| ----------------------------------- | --------------------------------------------------------- |
+| property_history:contacts           | Property change history for contacts.                     |
+| property_history:companies          | Property change history for companies.                    |
+| property_history:deals              | Property change history for deals.                        |
+| property_history:tickets            | Property change history for tickets.                      |
+| property_history:products           | Property change history for products.                     |
+| property_history:quotes             | Property change history for quotes.                       |
+| property_history:calls              | Property change history for calls.                        |
+| property_history:emails             | Property change history for emails.                       |
+| property_history:feedback_submissions | Property change history for feedback submissions.       |
+| property_history:line_items         | Property change history for line items.                   |
+| property_history:meetings           | Property change history for meetings.                     |
+| property_history:notes              | Property change history for notes.                        |
+| property_history:tasks              | Property change history for tasks.                        |
+| property_history:carts              | Property change history for carts.                        |
+| property_history:discounts          | Property change history for discounts.                    |
+| property_history:fees               | Property change history for fees.                         |
+| property_history:invoices           | Property change history for invoices.                     |
+| property_history:commerce_payments  | Property change history for commerce payments.            |
+| property_history:taxes              | Property change history for taxes.                        |
+
+> **Note:** The `owners` and `schemas` tables do not have history variants.
+
+Custom objects also support history via `property_history:custom:<objectType>` (e.g., `property_history:custom:myObject`).
+
 ## Incremental Loading
 
 HubSpot supports incremental loading out of the box. On the first run, ingestr performs a full load of all records. On subsequent runs, it uses the `hs_lastmodifieddate` field to fetch only records that have been created or updated since the last successful run.
