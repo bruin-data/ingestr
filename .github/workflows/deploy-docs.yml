@@ -35,15 +35,10 @@ jobs:
         with:
           node-version: 22
           cache: npm # or pnpm / yarn
-      - name: Upgrade npm to v11 for min-release-age support
-        run: |
-          npm cache clean --force
-          npm install -g npm@11 --force
-          npm --version
       - name: Setup Pages
         uses: actions/configure-pages@v4
-      - name: Install dependencies
-        run: npm ci # or pnpm install / yarn install / bun install
+      - name: Install dependencies with npm@11 (for min-release-age support)
+        run: npx npm@11 ci
       - name: Build with VitePress
         run: |
           npm run docs:build
