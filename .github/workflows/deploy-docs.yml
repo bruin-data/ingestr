@@ -35,6 +35,8 @@ jobs:
         with:
           node-version: 22
           cache: npm # or pnpm / yarn
+      - name: Upgrade npm to v11 for min-release-age support
+        run: npm install -g npm@11
       - name: Setup Pages
         uses: actions/configure-pages@v4
       - name: Install dependencies
