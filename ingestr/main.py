@@ -306,7 +306,7 @@ def ingest(
     import ingestr.src.partition as partition
     import ingestr.src.resource as resource
     from ingestr.src.collector.spinner import SpinnerCollector
-    from ingestr.src.destinations import AthenaDestination
+    from ingestr.src.destinations import AthenaDestination, ClickhouseDestination
     from ingestr.src.factory import SourceDestinationFactory
     from ingestr.src.filters import (
         cast_set_to_list,
@@ -620,6 +620,23 @@ def ingest(
 
         if isinstance(destination, AthenaDestination) and partition_by:
             partition.apply_athena_hints(dlt_source, partition_by, column_hints)
+
+        if isinstance(destination, ClickhouseDestination):
+            from dlt.destinations.adapters import clickhouse_adapter
+
+            settings = ClickhouseDestination.engine_settings(dest_uri)
+            engine_type = ClickhouseDestination.engine_type(dest_uri)
+
+            def apply_clickhouse_adapter(x):
+                kwargs = {"settings": settings}
+                if engine_type:
+                    kwargs["table_engine_type"] = engine_type
+                clickhouse_adapter(x, **kwargs)
+
+            resource.for_each(
+                dlt_source,
+                apply_clickhouse_adapter,
+            )
 
         if original_incremental_strategy == IncrementalStrategy.delete_insert:
 

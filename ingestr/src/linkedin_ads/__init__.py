@@ -203,6 +203,54 @@ def linked_in_ads_source(
 
                 yield page
 
+    @dlt.transformer(
+        write_disposition="replace",
+        primary_key="id",
+        data_from=ad_accounts,
+    )
+    def dmp_segments(ad_accounts) -> Iterable[TDataItem]:
+        for ad_account in ad_accounts:
+            account_id = ad_account["id"]
+            encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
+            url = f"https://api.linkedin.com/rest/dmpSegments?q=account&account={encoded_id}"
+            for page in linkedin_api.fetch_cursor_pagination(url):
+                for item in page:
+                    item["account_id"] = account_id
+
+                yield page
+
+    @dlt.transformer(
+        write_disposition="replace",
+        primary_key="id",
+        data_from=ad_accounts,
+    )
+    def insight_tags(ad_accounts) -> Iterable[TDataItem]:
+        for ad_account in ad_accounts:
+            account_id = ad_account["id"]
+            encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
+            url = f"https://api.linkedin.com/rest/insightTags?q=account&account={encoded_id}"
+            for page in linkedin_api.fetch_cursor_pagination(url):
+                for item in page:
+                    item["account_id"] = account_id
+
+                yield page
+
+    @dlt.transformer(
+        write_disposition="replace",
+        primary_key=["domainName", "account_id"],
+        data_from=ad_accounts,
+    )
+    def insight_tag_domains(ad_accounts) -> Iterable[TDataItem]:
+        for ad_account in ad_accounts:
+            account_id = ad_account["id"]
+            encoded_id = quote(f"urn:li:sponsoredAccount:{account_id}")
+            url = f"https://api.linkedin.com/rest/insightTagDomains?q=account&account={encoded_id}"
+            for page in linkedin_api.fetch_cursor_pagination(url):
+                for item in page:
+                    item["account_id"] = account_id
+
+                yield page
+
     return [
         ad_accounts,
         ad_account_users,
@@ -212,4 +260,7 @@ def linked_in_ads_source(
         conversions,
         lead_forms,
         lead_form_responses,
+        dmp_segments,
+        insight_tags,
+        insight_tag_domains,
     ]

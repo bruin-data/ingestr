@@ -39,23 +39,27 @@ def google_analytics(
     credentials: Union[
         GcpOAuthCredentials, GcpServiceAccountCredentials
     ] = dlt.secrets.value,
-    property_id: int = dlt.config.value,
+    property_ids: List[str] = dlt.config.value,
     queries: List[DictStrAny] = dlt.config.value,
     start_date: Optional[pendulum.DateTime] = pendulum.datetime(2024, 1, 1),
     end_date: Optional[pendulum.DateTime] = None,
     rows_per_page: int = 10000,
     minute_range_objects: List[MinuteRange] | None = None,
 ) -> List[DltResource]:
-    try:
-        property_id = int(property_id)
-    except ValueError:
-        raise ValueError(
-            f"{property_id} is an invalid google property id. Please use a numeric id, and not your Measurement ID like G-7F1AE12JLR"
-        )
-    if property_id == 0:
-        raise ValueError(
-            "Google Analytics property id is 0. Did you forget to configure it?"
-        )
+    validated_property_ids = []
+    for pid in property_ids:
+        try:
+            int_pid = int(pid)
+        except ValueError:
+            raise ValueError(
+                f"{pid} is an invalid google property id. Please use a numeric id, and not your Measurement ID like G-7F1AE12JLR"
+            )
+        if int_pid == 0:
+            raise ValueError(
+                "Google Analytics property id is 0. Did you forget to configure it?"
+            )
+        validated_property_ids.append(int_pid)
+
     if not rows_per_page:
         raise ValueError("Rows per page cannot be 0")
     # generate access token for credentials if we are using OAuth2.0
@@ -93,15 +97,16 @@ def google_analytics(
             start_date = pendulum.datetime(2024, 1, 1)
         if end_date is None:
             end_date = pendulum.yesterday()
-        yield from get_report(
-            client=client,
-            property_id=property_id,
-            dimension_list=[Dimension(name=dimension) for dimension in dimensions],
-            metric_list=[Metric(name=metric) for metric in query["metrics"]],
-            per_page=rows_per_page,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        for property_id in validated_property_ids:
+            yield from get_report(
+                client=client,
+                property_id=property_id,
+                dimension_list=[Dimension(name=dimension) for dimension in dimensions],
+                metric_list=[Metric(name=metric) for metric in query["metrics"]],
+                per_page=rows_per_page,
+                start_date=start_date,
+                end_date=end_date,
+            )
 
     # real time report
     @dlt.resource(
@@ -110,14 +115,15 @@ def google_analytics(
         write_disposition="merge",
     )
     def real_time_report() -> Iterator[TDataItem]:
-        yield from get_realtime_report(
-            client=client,
-            property_id=property_id,
-            dimension_list=[Dimension(name=dimension) for dimension in dimensions],
-            metric_list=[Metric(name=metric) for metric in query["metrics"]],
-            per_page=rows_per_page,
-            minute_range_objects=minute_range_objects,
-        )
+        for property_id in validated_property_ids:
+            yield from get_realtime_report(
+                client=client,
+                property_id=property_id,
+                dimension_list=[Dimension(name=dimension) for dimension in dimensions],
+                metric_list=[Metric(name=metric) for metric in query["metrics"]],
+                per_page=rows_per_page,
+                minute_range_objects=minute_range_objects,
+            )
 
     # res = dlt.resource(
     #     basic_report, name="basic_report", merge_key=datetime_dimension, write_disposition="merge"

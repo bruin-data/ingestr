@@ -220,6 +220,32 @@ class SqlSource:
                 return engine.execution_options(read_only=True)
 
             engine_adapter_callback = eng_callback
+
+        if uri.startswith("cratedb://"):
+            # CrateDB's SQLAlchemy dialect uses the `crate://` protocol scheme,
+            # but we would like to harmonize on `cratedb://` across the board.
+            # https://github.com/bruin-data/bruin/issues/1640
+
+            # Rewrite parameter `sslmode` to `ssl`.
+            parsed_uri = urlparse(uri)
+            query_params = parse_qs(parsed_uri.query)
+            if "sslmode" in query_params:
+                sslmode: str = query_params.get("sslmode", [""])[0]
+                del query_params["sslmode"]
+                ssl = "false"
+                if sslmode.lower() in [
+                    "require",
+                    "verify-ca",
+                    "verify-full",
+                ]:
+                    ssl = "true"
+                query_params["ssl"] = [ssl]
+
+            # Rebuild URI
+            uri = parsed_uri._replace(
+                scheme="crate", query=urlencode(query_params, doseq=True)
+            ).geturl()
+
         from dlt.common.libs.sql_alchemy import (
             Engine,
             MetaData,
@@ -767,6 +793,33 @@ class ShopifySource:
     def handles_incrementality(self) -> bool:
         return True
 
+    def _get_shopify_access_token(
+        self, shop_url: str, client_id: str, client_secret: str
+    ) -> str:
+        import requests
+
+        token_url = f"{shop_url}/admin/oauth/access_token"
+
+        payload = {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+
+        response = requests.post(
+            token_url,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+        if response.status_code != 200:
+            raise ValueError(
+                f"Failed to get Shopify access token: {response.status_code} - {response.text}"
+            )
+
+        token_data = response.json()
+        return token_data.get("access_token")
+
     def dlt_source(self, uri: str, table: str, **kwargs):
         if kwargs.get("incremental_key"):
             raise ValueError(
@@ -776,8 +829,21 @@ class ShopifySource:
         source_fields = urlparse(uri)
         source_params = parse_qs(source_fields.query)
         api_key = source_params.get("api_key")
+
         if not api_key:
-            raise ValueError("api_key in the URI is required to connect to Shopify")
+            client_id = source_params.get("client_id")
+            client_secret = source_params.get("client_secret")
+
+            if not client_id or not client_secret:
+                raise ValueError(
+                    "Either api_key or both client_id and client_secret must be provided in the URI"
+                )
+
+            shop_url = f"https://{source_fields.netloc}"
+            access_token = self._get_shopify_access_token(
+                shop_url, client_id[0], client_secret[0]
+            )
+            api_key = [access_token]
 
         date_args = {}
         if kwargs.get("interval_start"):
@@ -1270,7 +1336,7 @@ class SlackSource:
 
 class HubspotSource:
     def handles_incrementality(self) -> bool:
-        return False
+        return True
 
     # hubspot://?api_key=<api_key>
     def dlt_source(self, uri: str, table: str, **kwargs):
@@ -1306,6 +1372,8 @@ class HubspotSource:
             return hubspot(
                 api_key=api_key[0],
                 custom_object=endpoint,
+                start_date=kwargs.get("interval_start"),
+                end_date=kwargs.get("interval_end"),
             ).with_resources("custom")
 
         elif table in [
@@ -1315,6 +1383,20 @@ class HubspotSource:
             "tickets",
             "products",
             "quotes",
+            "calls",
+            "emails",
+            "feedback_submissions",
+            "line_items",
+            "meetings",
+            "notes",
+            "tasks",
+            "carts",
+            "discounts",
+            "fees",
+            "invoices",
+            "commerce_payments",
+            "taxes",
+            "owners",
             "schemas",
         ]:
             endpoint = table
@@ -1325,6 +1407,8 @@ class HubspotSource:
 
         return hubspot(
             api_key=api_key[0],
+            start_date=kwargs.get("interval_start"),
+            end_date=kwargs.get("interval_end"),
         ).with_resources(endpoint)
 
 
@@ -1434,12 +1518,20 @@ class MixpanelSource:
         params = parse_qs(parsed.query)
         username = params.get("username")
         password = params.get("password")
+        api_secret = params.get("api_secret")
         project_id = params.get("project_id")
         server = params.get("server", ["eu"])
 
-        if not username or not password or not project_id:
+        has_service_account = username and password
+        has_api_secret = api_secret
+
+        if not has_service_account and not has_api_secret:
             raise ValueError(
-                "username, password, project_id are required to connect to Mixpanel"
+                "Either (username, password) for Service Account auth or api_secret for Project Secret auth is required to connect to Mixpanel"
+            )
+        if has_service_account and not project_id:
+            raise ValueError(
+                "project_id is required to connect to Mixpanel when using service account authentication"
             )
 
         if table not in ["events", "profiles"]:
@@ -1461,10 +1553,17 @@ class MixpanelSource:
 
         from ingestr.src.mixpanel import mixpanel_source
 
+        if has_service_account:
+            auth_username = username[0]  # type: ignore[index]
+            auth_password = password[0]  # type: ignore[index]
+        else:
+            auth_username = api_secret[0]  # type: ignore[index]
+            auth_password = ""
+
         return mixpanel_source(
-            username=username[0],
-            password=password[0],
-            project_id=project_id[0],
+            username=auth_username,
+            password=auth_password,
+            project_id=project_id[0] if project_id else None,
             start_date=start_date,
             end_date=end_date,
             server=server[0],
@@ -2183,7 +2282,7 @@ class GoogleAnalyticsSource:
 
         result = helpers.parse_google_analytics_uri(uri)
         credentials = result["credentials"]
-        property_id = result["property_id"]
+        property_ids = result["property_ids"]
 
         fields = table.split(":")
         if len(fields) != 3 and len(fields) != 4:
@@ -2237,7 +2336,7 @@ class GoogleAnalyticsSource:
         from ingestr.src.google_analytics import google_analytics
 
         return google_analytics(
-            property_id=property_id,
+            property_ids=property_ids,
             start_date=start_date,
             end_date=end_date,
             datetime_dimension=datetime,
@@ -2492,34 +2591,57 @@ class GoogleAdsSource:
         if dev_token is None or len(dev_token) == 0:
             raise MissingValueError("dev_token", "Google Ads")
 
+        client_id = params.get("client_id")
+        client_secret = params.get("client_secret")
+        refresh_token = params.get("refresh_token")
+        oauth_available = all(
+            x is not None and len(x) > 0
+            for x in [client_id, client_secret, refresh_token]
+        )
+
         credentials_path = params.get("credentials_path")
         credentials_base64 = params.get("credentials_base64")
-        credentials_available = any(
-            map(
-                lambda x: x is not None,
-                [credentials_path, credentials_base64],
-            )
+        service_account_available = any(
+            x is not None and len(x) > 0 for x in [credentials_path, credentials_base64]
         )
-        if credentials_available is False:
+
+        if not oauth_available and not service_account_available:
             raise MissingValueError(
-                "credentials_path or credentials_base64", "Google Ads"
+                "client_id/client_secret/refresh_token or credentials_path/credentials_base64",
+                "Google Ads",
             )
 
-        path = None
-        fd = None
-        if credentials_path:
-            path = credentials_path[0]
-        else:
-            (fd, path) = tempfile.mkstemp(prefix="secret-")
-            secret = base64.b64decode(credentials_base64[0])  # type: ignore
-            os.write(fd, secret)
-            os.close(fd)
+        if oauth_available and service_account_available:
+            import logging
 
-        conf = {
-            "json_key_file_path": path,
-            "use_proto_plus": True,
-            "developer_token": dev_token[0],
-        }
+            logging.warning(
+                "Both OAuth and service account credentials provided for Google Ads; using OAuth."
+            )
+
+        fd = None
+        if oauth_available:
+            conf = {
+                "client_id": client_id[0],  # type: ignore
+                "client_secret": client_secret[0],  # type: ignore
+                "refresh_token": refresh_token[0],  # type: ignore
+                "developer_token": dev_token[0],
+                "use_proto_plus": True,
+            }
+        else:
+            path = None
+            if credentials_path:
+                path = credentials_path[0]
+            else:
+                (fd, path) = tempfile.mkstemp(prefix="secret-")
+                secret = base64.b64decode(credentials_base64[0])  # type: ignore
+                os.write(fd, secret)
+                os.close(fd)
+
+            conf = {
+                "json_key_file_path": path,
+                "use_proto_plus": True,
+                "developer_token": dev_token[0],
+            }
 
         login_customer_id = params.get("login_customer_id")
         if login_customer_id:
@@ -2529,7 +2651,7 @@ class GoogleAdsSource:
             client = GoogleAdsClient.load_from_dict(conf)
         finally:
             if fd is not None:
-                os.remove(path)
+                os.remove(path)  # type: ignore
 
         return client
 
@@ -2641,13 +2763,22 @@ class LinkedInAdsSource:
 
             dimensions = fields[1].replace(" ", "").split(",")
             dimensions = [item for item in dimensions if item.strip()]
-            if (
-                "campaign" not in dimensions
-                and "creative" not in dimensions
-                and "account" not in dimensions
-            ):
+            valid_entity_dimensions = {
+                "campaign",
+                "creative",
+                "account",
+                "member_job_title",
+                "member_seniority",
+                "member_industry",
+                "member_company_size",
+                "member_company",
+            }
+            if not valid_entity_dimensions.intersection(dimensions):
                 raise ValueError(
-                    "'campaign', 'creative' or 'account' is required to connect to LinkedIn Ads, please provide at least one of these dimensions."
+                    "A valid dimension is required to connect to LinkedIn Ads. "
+                    "Please provide one of: campaign, creative, account, "
+                    "member_job_title, member_seniority, member_industry, "
+                    "member_company_size, member_company."
                 )
             if "date" not in dimensions and "month" not in dimensions:
                 raise ValueError(
@@ -2692,6 +2823,81 @@ class LinkedInAdsSource:
             access_token=access_token[0],
             start_datetime=start_datetime,
             end_datetime=end_datetime,
+        ).with_resources(table)
+
+
+class RedditAdsSource:
+    ENTITY_TABLES = [
+        "accounts",
+        "campaigns",
+        "ad_groups",
+        "ads",
+        "posts",
+        "custom_audiences",
+        "saved_audiences",
+        "pixels",
+        "funding_instruments",
+    ]
+
+    def handles_incrementality(self) -> bool:
+        return True
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        if kwargs.get("incremental_key"):
+            raise ValueError(
+                "Reddit Ads takes care of incrementality on its own, you should not provide incremental_key"
+            )
+
+        parsed_uri = urlparse(uri)
+        source_fields = parse_qs(parsed_uri.query)
+
+        access_token = source_fields.get("access_token")
+        if not access_token:
+            raise ValueError("access_token is required to connect to Reddit Ads")
+
+        account_ids = source_fields.get("account_ids")
+        if not account_ids:
+            raise ValueError("account_ids is required to connect to Reddit Ads")
+        account_ids = account_ids[0].replace(" ", "").split(",")
+
+        if table.startswith("custom:"):
+            from ingestr.src.reddit_ads.helpers import parse_custom_table
+
+            level, breakdowns, metrics = parse_custom_table(table)
+
+            interval_start = kwargs.get("interval_start")
+            interval_end = kwargs.get("interval_end")
+            start_date = (
+                ensure_pendulum_datetime(interval_start).date()
+                if interval_start
+                else pendulum.date(2020, 1, 1)
+            )
+            end_date = (
+                ensure_pendulum_datetime(interval_end).date() if interval_end else None
+            )
+
+            from ingestr.src.reddit_ads import reddit_ads_analytics_source
+
+            return reddit_ads_analytics_source(
+                access_token=access_token[0],
+                account_ids=account_ids,
+                level=level,
+                breakdowns=breakdowns,
+                metrics=metrics,
+                start_date=start_date,
+                end_date=end_date,
+            ).with_resources("custom_reports")
+
+        if table not in self.ENTITY_TABLES:
+            raise ValueError(
+                f"Unsupported table '{table}' for Reddit Ads. Valid tables: {', '.join(self.ENTITY_TABLES)} or custom:<level>,<breakdowns>:<metrics>"
+            )
+
+        from ingestr.src.reddit_ads import reddit_ads_source
+
+        return reddit_ads_source(
+            access_token=access_token[0],
+            account_ids=account_ids,
         ).with_resources(table)
 
 
@@ -4288,6 +4494,85 @@ class MailchimpSource:
             ).with_resources(table)
         except ResourcesNotFoundError:
             raise UnsupportedResourceError(table, "Mailchimp")
+
+
+class DuneSource:
+    def handles_incrementality(self) -> bool:
+        return False
+
+    def dlt_source(self, uri: str, table: str, **kwargs):
+        parsed_uri = urlparse(uri)
+        query_params = parse_qs(parsed_uri.query)
+        api_key = query_params.get("api_key")
+
+        if api_key is None:
+            raise MissingValueError("api_key", "Dune")
+
+        performance = query_params.get("performance")
+
+        # Extract parameters from interval_start and interval_end
+        # Default: 2 days ago 00:00 to yesterday 00:00
+        now = pendulum.now()
+        default_start = now.subtract(days=2).start_of("day")
+        default_end = now.subtract(days=1).start_of("day")
+
+        interval_start = kwargs.get("interval_start")
+        interval_end = kwargs.get("interval_end")
+
+        start_date = interval_start if interval_start is not None else default_start
+        end_date = interval_end if interval_end is not None else default_end
+
+        default_parameters = {
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d"),
+            "start_timestamp": str(int(start_date.timestamp())),
+            "end_timestamp": str(int(start_date.timestamp())),
+        }
+
+        from ingestr.src.dune import dune_source
+
+        # "query:<id>" → execute saved query by ID
+        # "sql:<raw SQL>" → execute raw SQL
+        # otherwise → treat as a resource name (e.g. "queries")
+        if table.startswith("query:"):
+            parts = table.split(":", 2)
+            query_id = parts[1]
+            if not query_id:
+                raise ValueError("Query ID cannot be empty in 'query:' table format")
+            query_parameters = dict(default_parameters)
+            if len(parts) == 3:
+                query_parameters.update(
+                    dict(
+                        param.split("=", 1)
+                        for param in parts[2].split("&")
+                        if "=" in param
+                    )
+                )
+
+            return dune_source(
+                api_key=api_key[0],
+                query_id=query_id,
+                performance=performance[0] if performance else "medium",
+                query_parameters=query_parameters,
+            )
+
+        if table.startswith("sql:"):
+            sql = table[4:]
+            if not sql:
+                raise ValueError("SQL query cannot be empty in 'sql:' table format")
+            return dune_source(
+                api_key=api_key[0],
+                sql=sql,
+                performance=performance[0] if performance else "medium",
+            )
+
+        try:
+            return dune_source(
+                api_key=api_key[0],
+                sql="",
+            ).with_resources(table)
+        except ResourcesNotFoundError:
+            raise UnsupportedResourceError(table, "Dune")
 
 
 class AlliumSource:

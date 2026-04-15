@@ -75,6 +75,18 @@ def find_intervals(start_date: Date, end_date: Date, time_granularity: TimeGranu
     return intervals
 
 
+DIMENSION_PIVOT_MAP = {
+    "campaign": "CAMPAIGN",
+    "creative": "CREATIVE",
+    "account": "ACCOUNT",
+    "member_job_title": "MEMBER_JOB_TITLE",
+    "member_seniority": "MEMBER_SENIORITY",
+    "member_industry": "MEMBER_INDUSTRY",
+    "member_company_size": "MEMBER_COMPANY_SIZE",
+    "member_company": "MEMBER_COMPANY",
+}
+
+
 def construct_url(
     start: Date,
     end: Date,
@@ -89,7 +101,7 @@ def construct_url(
         [quote(f"urn:li:sponsoredAccount:{account_id}") for account_id in account_ids]
     )
     encoded_accounts = f"List({accounts})"
-    dimension_str = dimension.value.upper()
+    dimension_str = DIMENSION_PIVOT_MAP[dimension.value]
     time_granularity_str = time_granularity.value
     metrics_str = ",".join([metric for metric in metrics])
 

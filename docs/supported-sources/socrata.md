@@ -8,15 +8,16 @@
 
 The URI format for Socrata is as follows:
 ```
-socrata://?domain=<domain>&dataset_id=<dataset_id>&app_token=<app_token>
+socrata://<domain>?app_token=<app_token>
 ```
 
 URI Parameters:
 * `domain`: The Socrata domain (e.g., `data.seattle.gov`, `data.cityofnewyork.us`)
-* `dataset_id`: The dataset identifier (4x4 format like `6udu-fhnu`)
 * `app_token`: Socrata app token for API access (required)
 * `username` (optional): Username for authentication (required for private datasets)
 * `password` (optional): Password for authentication (required for private datasets)
+
+The dataset ID is specified using the `--source-table` flag.
 
 ## Setting up Socrata Integration
 
@@ -49,8 +50,8 @@ We will run `ingestr` to save this data to a [duckdb](https://duckdb.org/) datab
 
 ```sh
 ingestr ingest \
-    --source-uri "socrata://?domain=data.seattle.gov&dataset_id=2khk-5ukd&app_token=your_app_token_here" \
-    --source-table "dataset" \
+    --source-uri "socrata://data.seattle.gov?app_token=your_app_token_here" \
+    --source-table "2khk-5ukd" \
     --dest-uri "duckdb:///socrata.db" \
     --dest-table "public.wage_data"
 ```
@@ -63,8 +64,8 @@ First, run an initial load for a specific time range using `:updated_at` as the 
 
 ```sh
 ingestr ingest \
-    --source-uri "socrata://?domain=data.seattle.gov&dataset_id=2khk-5ukd&app_token=your_app_token_here" \
-    --source-table "dataset" \
+    --source-uri "socrata://data.seattle.gov?app_token=your_app_token_here" \
+    --source-table "2khk-5ukd" \
     --dest-uri "duckdb:///socrata.db" \
     --dest-table "public.wage_data" \
     --incremental-key ":updated_at" \
@@ -79,8 +80,8 @@ Now, we will run `ingestr` again without specifying dates to load only new or up
 
 ```sh
 ingestr ingest \
-    --source-uri "socrata://?domain=data.seattle.gov&dataset_id=2khk-5ukd&app_token=your_app_token_here" \
-    --source-table "dataset" \
+    --source-uri "socrata://data.seattle.gov?app_token=your_app_token_here" \
+    --source-table "2khk-5ukd" \
     --dest-uri "duckdb:///socrata.db" \
     --dest-table "public.wage_data" \
     --incremental-key ":updated_at"
@@ -94,8 +95,8 @@ For private datasets that require authentication:
 
 ```sh
 ingestr ingest \
-    --source-uri "socrata://?domain=your.domain.com&dataset_id=xxxx-xxxx&app_token=your_token&username=your_username&password=your_password" \
-    --source-table "dataset" \
+    --source-uri "socrata://your.domain.com?app_token=your_token&username=your_username&password=your_password" \
+    --source-table "xxxx-xxxx" \
     --dest-uri "duckdb:///socrata.db" \
     --dest-table "public.private_data"
 ```

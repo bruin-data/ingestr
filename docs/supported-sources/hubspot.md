@@ -33,18 +33,71 @@ The result of this command will be a table in the `hubspot.duckdb` database.
 ## Tables
 
 HubSpot source allows ingesting the following sources into separate tables:
- 
-Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
+
+| Table | PK | Inc Key | Inc Strategy | Details |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| [companies](https://developers.hubspot.com/docs/reference/api/crm/objects/companies#get-%2Fcrm%2Fv3%2Fobjects%2Fcompanies)     | - | –                | replace               | Retrieves information about organizations. |
-| [contacts](https://developers.hubspot.com/docs/reference/api/crm/objects/contacts#get-%2Fcrm%2Fv3%2Fobjects%2Fcontacts)     | - | –                | replace               | Retrieves information about visitors, potential customers, and leads. |
-| [deals](https://developers.hubspot.com/docs/reference/api/crm/objects/deals#get-%2Fcrm%2Fv3%2Fobjects%2Fdeals)       | - | –                | replace               | Retrieves deal records and tracks deal progress.|
-| [tickets](https://developers.hubspot.com/docs/reference/api/crm/objects/tickets#basic)     | - | –                | replace               | Handles requests for help from customers or users. |
-| [products](https://developers.hubspot.com/docs/reference/api/crm/objects/products#get-%2Fcrm%2Fv3%2Fobjects%2Fproducts)     | - | –                | replace               | Retrieves pricing information of products. |
-| [quotes](https://developers.hubspot.com/docs/reference/api/crm/objects/quotes#get-%2Fcrm%2Fv3%2Fobjects%2Fquotes)        | - | –                | replace               | Retrieves price proposals that salespeople can create and send to their contacts. |
-| [schemas](https://developers.hubspot.com/docs/reference/api/crm/objects/schemas#get-%2Fcrm-object-schemas%2Fv3%2Fschemas)      | id | –                | merge               | Returns all object schemas that have been defined for your account.  |
+| [companies](https://developers.hubspot.com/docs/reference/api/crm/objects/companies#get-%2Fcrm%2Fv3%2Fobjects%2Fcompanies) | hs_object_id | hs_lastmodifieddate | merge | Retrieves information about organizations. |
+| [contacts](https://developers.hubspot.com/docs/reference/api/crm/objects/contacts#get-%2Fcrm%2Fv3%2Fobjects%2Fcontacts) | hs_object_id | lastmodifieddate | merge | Retrieves information about visitors, potential customers, and leads. |
+| [deals](https://developers.hubspot.com/docs/reference/api/crm/objects/deals#get-%2Fcrm%2Fv3%2Fobjects%2Fdeals) | hs_object_id | hs_lastmodifieddate | merge | Retrieves deal records and tracks deal progress. |
+| [tickets](https://developers.hubspot.com/docs/api-reference/crm-tickets-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Handles requests for help from customers or users. |
+| [products](https://developers.hubspot.com/docs/api-reference/crm-products-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves pricing information of products. |
+| [quotes](https://developers.hubspot.com/docs/reference/api/crm/objects/quotes#get-%2Fcrm%2Fv3%2Fobjects%2Fquotes) | hs_object_id | hs_lastmodifieddate | merge | Retrieves price proposals that salespeople can create and send to their contacts. |
+| [calls](https://developers.hubspot.com/docs/api-reference/crm-calls-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves call engagement records. |
+| [emails](https://developers.hubspot.com/docs/api-reference/crm-emails-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves email engagement records. |
+| [feedback_submissions](https://developers.hubspot.com/docs/reference/api/crm/objects/feedback-submissions) | hs_object_id | hs_lastmodifieddate | merge | Retrieves customer feedback survey responses. |
+| [line_items](https://developers.hubspot.com/docs/api-reference/crm-line-items-v3/guide#crm-api-line-items) | hs_object_id | hs_lastmodifieddate | merge | Retrieves individual products or services associated with deals. |
+| [meetings](https://developers.hubspot.com/docs/api-reference/crm-meetings-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves meeting engagement records. |
+| [notes](https://developers.hubspot.com/docs/api-reference/crm-notes-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves note engagement records. |
+| [tasks](https://developers.hubspot.com/docs/api-reference/crm-tasks-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves task engagement records. |
+| [carts](https://developers.hubspot.com/docs/reference/api/crm/objects/carts) | hs_object_id | hs_lastmodifieddate | merge | Retrieves shopping cart records. |
+| [discounts](https://developers.hubspot.com/docs/reference/api/crm/objects/discounts) | hs_object_id | hs_lastmodifieddate | merge | Retrieves discount records. |
+| [fees](https://developers.hubspot.com/docs/api-reference/crm-fees-v3/guide#crm-api-fees) | hs_object_id | hs_lastmodifieddate | merge | Retrieves fee records. |
+| [invoices](https://developers.hubspot.com/docs/api-reference/crm-invoices-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves invoice records. |
+| [commerce_payments](https://developers.hubspot.com/docs/api-reference/crm-commerce-payments-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves commerce payment records. |
+| [taxes](https://developers.hubspot.com/docs/api-reference/crm-taxes-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves tax records. |
+| [owners](https://developers.hubspot.com/docs/api-reference/crm-crm-owners-v3/guide#crm-api-owners) | id | – | merge | Retrieves HubSpot users who can be assigned to CRM records. |
+| [schemas](https://developers.hubspot.com/docs/reference/api/crm/objects/schemas#get-%2Fcrm-object-schemas%2Fv3%2Fschemas) | id | – | merge | Returns all object schemas that have been defined for your account. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+### Property History Tables
+
+For every CRM object table listed above, a corresponding **property history** table is available. These tables return one row per property change, enabling you to track how properties changed over time.
+
+Use the format `property_history:<table>` as the `--source-table` value:
+
+| Table | PK | Inc Key | Inc Strategy | Details |
+| ------------------------------------- | ---------------------------------------- | --------- | ------------ | ------------------------------------------------------- |
+| property_history:contacts             | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for contacts.                   |
+| property_history:companies            | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for companies.                  |
+| property_history:deals                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for deals.                      |
+| property_history:tickets              | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for tickets.                    |
+| property_history:products             | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for products.                   |
+| property_history:quotes               | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for quotes.                     |
+| property_history:calls                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for calls.                      |
+| property_history:emails               | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for emails.                     |
+| property_history:feedback_submissions | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for feedback submissions.       |
+| property_history:line_items           | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for line items.                 |
+| property_history:meetings             | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for meetings.                   |
+| property_history:notes                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for notes.                      |
+| property_history:tasks                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for tasks.                      |
+| property_history:carts                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for carts.                      |
+| property_history:discounts            | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for discounts.                  |
+| property_history:fees                 | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for fees.                       |
+| property_history:invoices             | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for invoices.                   |
+| property_history:commerce_payments    | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for commerce payments.          |
+| property_history:taxes                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for taxes.                      |
+
+
+> **Note:** The `owners` and `schemas` tables do not have history variants.
+
+Custom objects also support history via `property_history:custom:<objectType>` (e.g., `property_history:custom:myObject`).
+
+## Incremental Loading
+
+HubSpot supports incremental loading out of the box. On the first run, ingestr performs a full load of all records. On subsequent runs, it uses the `hs_lastmodifieddate` field to fetch only records that have been created or updated since the last successful run.
+
+No additional flags are needed — incremental state is managed automatically by ingestr.
 
 ## Custom Objects
 
@@ -88,8 +141,3 @@ ingestr ingest \
 ```
 
 When you include associations, the response will contain information about the related objects, allowing you to track relationships between your custom objects and standard HubSpot objects.
-
-> [!WARNING]
-> Hubspot does not support incremental loading, which means ingestr will do a full-refresh.
-
-

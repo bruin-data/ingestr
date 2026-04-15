@@ -10,6 +10,18 @@ ingestr supports Zoom as a source.
 `user:read,user:write,user:read:admin,user:write:admin`
 - Obtain the `client_id`, `client_secret` and `account_id`  credentials from the app
 
+### Please follow the steps below to get Zoom credentials
+- Go to [Zoom App Marketplace](https://marketplace.zoom.us/) and log in with your Zoom account.
+- Click **Develop** > **Build App**.
+- Select **Server-to-Server OAuth** as the app type and click **Create**.
+- Give your app a name.
+- Go to **App Credentials**, you will find your `Account ID`, `Client ID`, and `Client Secret`.
+- Go to **Scopes** and add the required permissions depending on the tables you want to ingest:
+  - `meeting:read:admin`, `meeting:read` for meetings. Granular permissions: `meeting:read:list_meetings`, `meeting:read:list_meetings:admin`
+  - `user:read`, `user:read:admin` for users. Granular permissions: `user:read:list_users:admin`
+  - `report:read:admin` for participants. Granular permissions: `report:read:list_meeting_participants:admin`
+- Go to **Activation** and activate your app. Your app will not work until it is activated.
+
 ## URI format
 ```plaintext
 zoom://?client_id=<client_id>&client_secret=<client_secret>&account_id=<account_id>

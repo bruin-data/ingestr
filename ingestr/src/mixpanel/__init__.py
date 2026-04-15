@@ -12,7 +12,7 @@ from .client import MixpanelClient
 def mixpanel_source(
     username: str,
     password: str,
-    project_id: str,
+    project_id: str | None,
     server: str,
     start_date: pendulum.DateTime,
     end_date: pendulum.DateTime | None = None,

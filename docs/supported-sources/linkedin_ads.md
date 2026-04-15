@@ -62,6 +62,9 @@ LinkedIn Ads source allows ingesting the following sources into separate tables:
 | [conversions](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/conversion-tracking?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves conversion rules for each ad account. |
 | [lead_forms](https://learn.microsoft.com/en-us/linkedin/marketing/lead-sync/leadsync?view=li-lms-2025-11&viewFallbackFrom=li-lms-2024-06&tabs=http#lead-forms-1) | id | – | replace | Retrieves lead generation forms for each ad account. |
 | [lead_form_responses](https://learn.microsoft.com/en-us/linkedin/marketing/lead-sync/leadsync?view=li-lms-2025-11&viewFallbackFrom=li-lms-2024-06&tabs=http#get-lead-form-responses) | id | date (interval)| merge | Retrieves lead form responses for each ad account. |
+| dmp_segments | id | – | replace | Retrieves matched/retargeting audience segments (sizes, match rates, rules) for each ad account. |
+| insight_tags | id | – | replace | Retrieves Insight Tag configuration and installation status for each ad account. |
+| insight_tag_domains | domainName, account_id | – | replace | Retrieves domains associated with Insight Tags for each ad account. |
 | [custom](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder) | [dimension, date] or [dimension, start_date, end_date] | date (daily) or start_date (monthly) | merge | Custom reports allow you to retrieve data based on specific dimensions and metrics. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
@@ -99,7 +102,9 @@ custom:<dimensions>:<metrics>
 ```
 
 **Parameters:**
-- `dimensions`(required): A comma-separated list of dimensions is required. It must include at least one of the following: `campaign`, `account`, or `creative`, along with one time-based dimension, either `date` or `month`.
+- `dimensions`(required): A comma-separated list of dimensions is required. It must include at least one entity dimension and one time-based dimension (`date` or `month`).
+  - Entity dimensions: `campaign`, `account`, `creative`
+  - Demographic dimensions: `member_job_title`, `member_seniority`, `member_industry`, `member_company_size`, `member_company`
   - `date`: group the data in your report by day
   - `month`: group the data in your report by month
 - `metrics`(required): A comma-separated list of [metrics](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#metrics-available) to retrieve.
@@ -146,6 +151,19 @@ ingestr ingest \
 The applied parameters for the report are:
 - dimensions: `account`, `month`
 - metrics: `totalEngagements`, `impressions`
+
+### Demographic Reports
+
+You can use demographic dimensions to audit targeting quality. For example, to retrieve impressions and clicks broken down by job title:
+```sh
+ingestr ingest \
+    --source-uri "linkedinads://?access_token=token_123&account_ids=id_123,id_456" \
+    --source-table 'custom:member_job_title,date:impressions,clicks' \
+    --dest-uri 'duckdb:///linkedin.duckdb' \
+    --dest-table 'dest.job_title_report'
+```
+
+Available demographic dimensions: `member_job_title`, `member_seniority`, `member_industry`, `member_company_size`, `member_company`.
 
 This command will retrieve data and save it to the destination table in the DuckDB database.
 

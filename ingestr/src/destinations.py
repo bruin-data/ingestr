@@ -147,6 +147,8 @@ class RedshiftDestination(GenericSqlDestination):
 
 class DuckDBDestination(GenericSqlDestination):
     def dlt_dest(self, uri: str, **kwargs):
+        kwargs.pop("dest_table", None)
+        kwargs.pop("staging_bucket", None)
         return dlt.destinations.duckdb(uri, **kwargs)
 
 
@@ -213,7 +215,7 @@ def build_mssql_dest():
         SKIP_CREDENTIALS = {"PWD", "AUTHENTICATION", "UID"}
 
         def open_connection(self):
-            cfg = self.credentials._get_odbc_dsn_dict()
+            cfg = self.credentials.get_odbc_dsn_dict()
             if (
                 cfg.get("AUTHENTICATION", "").strip().lower()
                 != "activedirectoryaccesstoken"
@@ -471,15 +473,57 @@ class CsvDestination(GenericSqlDestination):
         if output_path.count("/") > 1:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        with open(output_path, "w", newline="") as csv_file:
-            csv_writer = None
+        def _rewrite_csv_with_fieldnames(path, fieldnames):
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                suffix=".csv", dir=os.path.dirname(path) or "."
+            )
+            try:
+                os.close(tmp_fd)
+                with (
+                    open(path, "r", newline="") as old,
+                    open(tmp_path, "w", newline="") as new,
+                ):
+                    reader = csv.DictReader(old)
+                    writer = csv.DictWriter(new, fieldnames=fieldnames, restval="")
+                    writer.writeheader()
+                    for r in reader:
+                        writer.writerow(r)
+                os.replace(tmp_path, path)
+            except BaseException:
+                os.unlink(tmp_path)
+                raise
+
+        fieldnames = {}
+        csv_writer = None
+        csv_file = None
+
+        try:
             for row in load_dlt_file(first_file_path):
                 row = filter_keys(row)
+                new_fields = False
+                for key in row:
+                    if key not in fieldnames:
+                        fieldnames[key] = None
+                        new_fields = True
+
                 if csv_writer is None:
-                    csv_writer = csv.DictWriter(csv_file, fieldnames=row.keys())
+                    csv_file = open(output_path, "w", newline="")
+                    csv_writer = csv.DictWriter(
+                        csv_file, fieldnames=fieldnames, restval=""
+                    )
                     csv_writer.writeheader()
+                elif new_fields:
+                    csv_file.close()
+                    _rewrite_csv_with_fieldnames(output_path, list(fieldnames))
+                    csv_file = open(output_path, "a", newline="")
+                    csv_writer = csv.DictWriter(
+                        csv_file, fieldnames=fieldnames, restval=""
+                    )
 
                 csv_writer.writerow(row)
+        finally:
+            if csv_file:
+                csv_file.close()
         shutil.rmtree(self.temp_path)
 
 
@@ -607,12 +651,11 @@ class ClickhouseDestination:
         query_params = parse_qs(parsed_uri.query)
         secure = int(query_params["secure"][0]) if "secure" in query_params else 1
 
+        default_http_port = 8443 if secure == 1 else 8123
         http_port = (
             int(query_params["http_port"][0])
             if "http_port" in query_params
-            else 8443
-            if secure == 1
-            else 8123
+            else default_http_port
         )
 
         if secure not in (0, 1):
@@ -643,6 +686,25 @@ class ClickhouseDestination:
 
     def post_load(self):
         pass
+
+    @staticmethod
+    def engine_settings(uri: str) -> dict[str, str]:
+        parsed_uri = urlparse(uri)
+        query_params = parse_qs(parsed_uri.query)
+        return {
+            key[len("engine.") :]: query_params[key][0]
+            for key in query_params
+            if key.startswith("engine.")
+        }
+
+    @staticmethod
+    def engine_type(uri: str) -> str | None:
+        parsed_uri = urlparse(uri)
+        query_params = parse_qs(parsed_uri.query)
+        values = query_params.get("engine")
+        if values:
+            return values[0]
+        return None
 
 
 class BlobFSClient(dlt.destinations.impl.filesystem.filesystem.FilesystemClient):

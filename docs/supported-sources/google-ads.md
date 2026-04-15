@@ -3,42 +3,61 @@
 
 ## URI format
 
-The URI format for Google Ads is as follows:
+Google Ads supports two authentication methods: **service account** and **OAuth2**. Both require a [developer token](https://developers.google.com/google-ads/api/docs/get-started/dev-token).
+
+### Service Account
 ```plaintext
 googleads://<customer_id>?credentials_path=/path/to/service-account.json&dev_token=<dev_token>
+```
+
+### OAuth2
+```plaintext
+googleads://<customer_id>?client_id=<client_id>&client_secret=<client_secret>&refresh_token=<refresh_token>&dev_token=<dev_token>
 ```
 
 URI parameters:
 
 - `customer_id`: Customer ID of the Google Ads account to use. You can specify multiple customer IDs separated by commas (e.g., `1234567890,0987654321,1122334455`).
-- `credentials_path`: path to the service account JSON file.
 - `dev_token`: [developer token](https://developers.google.com/google-ads/api/docs/get-started/dev-token) to use for accessing the account.
+- `credentials_path`: path to the service account JSON file (service account auth).
+- `client_id`: OAuth2 client ID (OAuth2 auth).
+- `client_secret`: OAuth2 client secret (OAuth2 auth).
+- `refresh_token`: OAuth2 refresh token (OAuth2 auth).
 - `login_customer_id` (optional): The Manager Account (MCC) ID to use when accessing client accounts. Required when your service account has access to an MCC and you want to pull data from a client account under that MCC. See [Google Ads API docs](https://developers.google.com/google-ads/api/docs/concepts/call-structure#cid) for more details.
 
 > [!NOTE]
-> You may specify credentials using `credentials_base64` instead of `credentials_path`.
-> The value of this parameter is the base64 encoded contents of the 
+> For service account auth, you may specify credentials using `credentials_base64` instead of `credentials_path`.
+> The value of this parameter is the base64 encoded contents of the
 > service account json file. However, we don't recommend using this
 > parameter, unless you're integrating ingestr into another system.
 ## Setting up a Google Ads integration
 
 ### Prerequisites
-* A Google cloud [service account](https://cloud.google.com/iam/docs/service-account-overview)
 * A Google Ads [developer token](https://developers.google.com/google-ads/api/docs/get-started/dev-token)
-* A Google Ads account 
-
+* A Google Ads account
+* **Either** a Google Cloud [service account](https://cloud.google.com/iam/docs/service-account-overview) **or** OAuth2 credentials (client ID, client secret, and refresh token)
 
 ### Obtaining necessary credentials
+
+#### Option 1: Service Account
 
 You can use the [Google Cloud IAM Console](https://cloud.google.com/security/products/iam) to create a service account for ingesting data from Google Ads. Make sure to enable Google Ads API in your console.
 
 Next, you need to add your service account user to your Google Ads account. See [Google Developers Docs](https://developers.google.com/google-ads/api/docs/oauth/service-accounts) for exact steps.
 
-Finally, you need to obtain a Google Ads Developer Token. Developer token lets your app connect to the Google Ads API. Each developer token is assigned an API access level which controls the number of API calls you can make per day with as well as the environment to which you can make calls. See [Google Ads docs](https://developers.google.com/google-ads/api/docs/get-started/dev-token) for more information on how to obtain this token.
+#### Option 2: OAuth2
+
+Create OAuth2 credentials in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials) and enable the Google Ads API in the same project. You will need the `client_id`, `client_secret`, and a `refresh_token` obtained through the OAuth2 flow. See [Google Ads API docs](https://developers.google.com/google-ads/api/docs/client-libs/python/authentication) for more details.
+
+#### Developer Token & Customer ID
+
+For both methods, you need to obtain a Google Ads Developer Token. Developer token lets your app connect to the Google Ads API. Each developer token is assigned an API access level which controls the number of API calls you can make per day with as well as the environment to which you can make calls. See [Google Ads docs](https://developers.google.com/google-ads/api/docs/get-started/dev-token) for more information on how to obtain this token.
 
 You also need the 10-digit customer id of the account you're making API calls to. This is displayed in the Google Ads web interface in the form 123-456-7890. In this case, your customer id would be `1234567890`
 
-### Example
+### Examples
+
+#### Service Account
 
 Let's say we want to ingest information about campaigns (on a daily interval) and save them to a table `public.campaigns` in duckdb database called `adverts.db`.
 
@@ -51,6 +70,17 @@ You can run the following to achieve this:
 ```sh
 ingestr ingest \
   --source-uri "googleads://12345678?credentials_path=./svc_account.json&dev_token=dev-token-spec-1" \
+  --source-table "campaign_report_daily" \
+  --dest-uri "duckdb://./adverts.db" \
+  --dest-table "public.campaigns"
+```
+
+#### OAuth2
+
+Using OAuth2 credentials instead of a service account:
+```sh
+ingestr ingest \
+  --source-uri "googleads://1234567890?client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET&refresh_token=YOUR_REFRESH_TOKEN&dev_token=dev-token-spec-1" \
   --source-table "campaign_report_daily" \
   --dest-uri "duckdb://./adverts.db" \
   --dest-table "public.campaigns"

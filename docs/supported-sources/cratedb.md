@@ -4,12 +4,14 @@
 massive amounts of data in near real-time, even with complex queries. It is
 PostgreSQL-compatible, and based on Lucene.
 
-ingestr supports CrateDB as a source and destination database.
+ingestr supports CrateDB as a source and destination database, using different
+adapters and protocols (HTTP vs. PostgreSQL, see below).
 
 ## Source
 
 For connecting to CrateDB as a database source, ingestr uses its SQLAlchemy
-dialect package [sqlalchemy-cratedb].
+dialect package [sqlalchemy-cratedb], effectively talking HTTP to port 4200
+by default.
 
 ### URI format
 
@@ -56,11 +58,17 @@ duckdb cratedb.duckdb 'SELECT * FROM dest.summits LIMIT 5'
 
 <img alt="CrateDB_img" src="../media/cratedb-source.png" />
 
+Note that, as of February 2026, for compatibility and harmonization reasons,
+the CrateDB source adapter can also be addressed using the `cratedb://`-style
+URI format like outlined below. However, please note that both are still
+different adapters using different protocols.
+
 ## Destination
 
 For connecting to CrateDB as a database destination, ingestr uses the
 [dlt cratedb adapter], which is based on the [dlt postgres adapter],
-in turn using the [psycopg2] package.
+in turn using the [psycopg2] package, effectively speaking the PostgreSQL
+wire protocol on port 5432 by default.
 
 ### URI format
 
