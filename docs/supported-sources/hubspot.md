@@ -64,7 +64,7 @@ Use these as `--source-table` parameter in the `ingestr ingest` command.
 
 For every CRM object table listed above, a corresponding **property history** table is available. These tables return one row per property change, enabling you to track how properties changed over time.
 
-Use the format `property_history:<table>` as the `--source-table` value:
+Use the format `property_history:<table>` as the `--source-table` value. An optional comma-separated list of property names can be appended (`property_history:<table>:<prop1>,<prop2>,...`) to restrict the history to just those properties — see [Filtering properties in property_history:* tables](#filtering-properties-in-property-history-tables).
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 | ------------------------------------- | ---------------------------------------- | --------- | ------------ | ------------------------------------------------------- |
@@ -92,6 +92,49 @@ Use the format `property_history:<table>` as the `--source-table` value:
 > **Note:** The `owners` and `schemas` tables do not have history variants.
 
 Custom objects also support history via `property_history:custom:<objectType>` (e.g., `property_history:custom:myObject`).
+
+### Filtering properties in property_history:* tables
+
+By default, `property_history:*` tables return change history for **every** property on the object type. For tenants with many properties this produces large, slow responses and consumes more HubSpot API quota than necessary.
+
+You can append a comma-separated allow-list of property names to the table name to restrict the request to just those properties. When the suffix is present, ingestr passes exactly that list to HubSpot's API, so only those properties' history is returned. When the suffix is omitted, behavior is unchanged.
+
+Syntax:
+
+- Built-in object: `property_history:<object>[:<prop1>,<prop2>,...]`
+- Custom object:   `property_history:custom:<object>[:<prop1>,<prop2>,...]`
+
+Examples:
+
+Fetch only `email`, `firstname`, and `lastname` history for contacts:
+
+```sh
+ingestr ingest \
+  --source-uri 'hubspot://?api_key=pat_test_12345' \
+  --source-table 'property_history:contacts:email,firstname,lastname' \
+  --dest-uri duckdb:///hubspot.duckdb \
+  --dest-table 'contacts.property_history'
+```
+
+Fetch only `amount` and `dealstage` history for deals:
+
+```sh
+ingestr ingest \
+  --source-uri 'hubspot://?api_key=pat_test_12345' \
+  --source-table 'property_history:deals:amount,dealstage' \
+  --dest-uri duckdb:///hubspot.duckdb \
+  --dest-table 'deals.property_history'
+```
+
+Fetch only `field_a` and `field_b` history for a custom object `my_object`:
+
+```sh
+ingestr ingest \
+  --source-uri 'hubspot://?api_key=pat_test_12345' \
+  --source-table 'property_history:custom:my_object:field_a,field_b' \
+  --dest-uri duckdb:///hubspot.duckdb \
+  --dest-table 'my_object.property_history'
+```
 
 ## Incremental Loading
 
