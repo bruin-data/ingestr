@@ -97,7 +97,7 @@ Custom objects also support history via `property_history:custom:<objectType>` (
 
 By default, `property_history:*` tables return change history for **every** property on the object type. For tenants with many properties this produces large, slow responses and consumes more HubSpot API quota than necessary.
 
-You can append a comma-separated allow-list of property names to the table name to restrict the request to just those properties. When the suffix is present, ingestr passes exactly that list as `propertiesWithHistory` to HubSpot's `POST /crm/v3/objects/{type}/batch/read` endpoint, so only those properties' history is returned. When the suffix is omitted, behavior is unchanged.
+You can append a comma-separated allow-list of property names to the table name to restrict the request to just those properties. When the suffix is present, ingestr passes exactly that list to HubSpot's API, so only those properties' history is returned. When the suffix is omitted, behavior is unchanged.
 
 Syntax:
 
