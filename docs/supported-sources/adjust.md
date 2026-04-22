@@ -30,18 +30,18 @@ The result of this command will be a table in the `adjust.duckdb` database.
 
 ### App Token Filtering
 
-You can filter data for a specific app by appending `:app_token=<token>` to the source table name. Multiple app tokens can be separated by commas:
+You can filter data for a specific app by appending `:<app_token>` to the source table name. Multiple app tokens can be separated by commas:
 
 ```sh
 # Single app token
 ingestr ingest --source-uri 'adjust://?api_key=nr_123' \
---source-table 'campaigns:app_token=abc123xyz' \
+--source-table 'campaigns:abc123xyz' \
 --dest-uri duckdb:///adjust.duckdb \
 --dest-table 'adjust.output'
 
 # Multiple app tokens
 ingestr ingest --source-uri 'adjust://?api_key=nr_123' \
---source-table 'campaigns:app_token=abc123,def456' \
+--source-table 'campaigns:abc123,def456' \
 --dest-uri duckdb:///adjust.duckdb \
 --dest-table 'adjust.output'
 ```
@@ -94,7 +94,7 @@ Copy creatives data filtered by app token:
 ```sh
 ingestr ingest \
     --source-uri 'adjust://?api_key=nr_123' \
-    --source-table 'creatives:app_token=abc123xyz' \
+    --source-table 'creatives:abc123xyz' \
     --dest-uri duckdb:///adjust.duckdb \
     --dest-table 'dest.output'
 ```
