@@ -201,6 +201,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Snapchat Ads", link: "/supported-sources/snapchat-ads.md" },
               { text: "Solidgate", link: "/supported-sources/solidgate.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
+              { text: "SurveyMonkey", link: "/supported-sources/surveymonkey.md" },
               { text: "TikTok Ads", link: "/supported-sources/tiktok-ads.md" },
               { text: "Wise", link: "/supported-sources/wise.md" },
               { text: "Zendesk", link: "/supported-sources/zendesk.md" },
