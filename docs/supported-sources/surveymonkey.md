@@ -26,13 +26,15 @@ surveymonkey://?access_token=<access_token>&datacenter=eu
 SurveyMonkey requires an access token to connect to the API. To get one:
 
 1. Go to the [SurveyMonkey Developer Portal](https://developer.surveymonkey.com/apps/) and create a new app.
-2. Select "Public App" as the app type.
+2. Select the app type:
+   - **Private App** (recommended for Enterprise plans): Issues a non-expiring access token directly. All users must belong to the same SurveyMonkey team.
+   - **Public App** (for Basic/free plans): Issues a draft token that expires after 90 days.
 3. Under the Scopes section, enable the required scopes: **View Surveys**, **View Responses**, **View Response Details**, **View Collectors**, **View Contacts**.
 4. Click **Update Scopes**.
 5. Copy the **Access Token** from the Credentials section.
 
 > [!NOTE]
-> Draft app tokens expire after 90 days. For EU accounts, use the [EU Developer Portal](https://developer.eu.surveymonkey.com/apps/) and set `datacenter=eu` in the URI. For CA accounts, use the [CA Developer Portal](https://developer.ca.surveymonkey.com/apps/) and set `datacenter=ca` in the URI.
+> For EU accounts, use the [EU Developer Portal](https://developer.eu.surveymonkey.com/apps/) and set `datacenter=eu` in the URI. For CA accounts, use the [CA Developer Portal](https://developer.ca.surveymonkey.com/apps/) and set `datacenter=ca` in the URI.
 
 Once you have the access token, here's a sample command that will copy survey data into a DuckDB database:
 
