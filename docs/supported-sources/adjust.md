@@ -9,11 +9,10 @@ ingestr supports Adjust as a source.
 The URI format for Adjust is as follows:
 
 ```plaintext
-adjust://?api_key=<api-key-here>&app_token=<app-token>&lookback_days=40
+adjust://?api_key=<api-key-here>&lookback_days=40
 ```
 Parameters:
 - `api_key`: Required. The API key for the Adjust account.
-- `app_token`: Optional. The app token to filter results for a specific app. When provided, all API requests will include the `app_token__in` filter to return data only for the specified app.
 - `lookback_days`: Optional. The number of days to go back than the given start date for data. Defaults to 30 days.
 
 An API token is required to retrieve reports from the Adjust reporting API. please follow the guide to [obtain an API key](https://dev.adjust.com/en/api/rs-api/authentication/).
@@ -27,16 +26,27 @@ ingestr ingest --source-uri 'adjust://?api_key=nr_123' \
 --dest-table 'adjust.output'
 ```
 
-To filter data for a specific app, include the `app_token` parameter:
+The result of this command will be a table in the `adjust.duckdb` database.
+
+### App Token Filtering
+
+You can filter data for a specific app by appending `:app_token=<token>` to the source table name. Multiple app tokens can be separated by commas:
 
 ```sh
-ingestr ingest --source-uri 'adjust://?api_key=nr_123&app_token=abc123xyz' \
---source-table 'campaigns' \
+# Single app token
+ingestr ingest --source-uri 'adjust://?api_key=nr_123' \
+--source-table 'campaigns:app_token=abc123xyz' \
+--dest-uri duckdb:///adjust.duckdb \
+--dest-table 'adjust.output'
+
+# Multiple app tokens
+ingestr ingest --source-uri 'adjust://?api_key=nr_123' \
+--source-table 'campaigns:app_token=abc123,def456' \
 --dest-uri duckdb:///adjust.duckdb \
 --dest-table 'adjust.output'
 ```
 
-The result of this command will be a table in the `adjust.duckdb` database.
+This works for `events`, `campaigns`, and `creatives` tables. For custom tables, use the `app_token__in` filter in the filters section instead (see below).
 
 ### Lookback days
 
@@ -65,7 +75,6 @@ Parameters:
 - `dimensions`: A comma-separated list of [dimensions](https://dev.adjust.com/en/api/rs-api/reports#dimensions) to retrieve.
 - `metrics`: A comma-separated list of [metrics](https://dev.adjust.com/en/api/rs-api/reports#metrics) to retrieve.
 - `filters`: A comma-separated list of [filters](https://dev.adjust.com/en/api/rs-api/reports#filters) to apply to the data. For example, `app_token__in=abc123` filters results to a specific app.
-  - Parsing the `filters` key is smart enough to handle filters that contain commas inside them.
 
 > [!WARNING]
 > Custom tables require a time-based dimension for efficient operation, such as `hour`, `day`, `week`, `month`, or `year`.
@@ -81,11 +90,11 @@ ingestr ingest \
     --dest-table 'dest.output'
 ```
 
-Copy creatives data from Adjust into a DuckDB database:
+Copy creatives data filtered by app token:
 ```sh
 ingestr ingest \
     --source-uri 'adjust://?api_key=nr_123' \
-    --source-table 'creatives' \
+    --source-table 'creatives:app_token=abc123xyz' \
     --dest-uri duckdb:///adjust.duckdb \
     --dest-table 'dest.output'
 ```
