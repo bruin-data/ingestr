@@ -141,6 +141,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Amazon Kinesis", link: "/supported-sources/kinesis.md" },
               { text: "Anthropic", link: "/supported-sources/anthropic.md" },
               { text: "AppsFlyer", link: "/supported-sources/appsflyer.md" },
+              { text: "Apple Ads", link: "/supported-sources/appleads.md"},
               { text: "Apple App Store", link: "/supported-sources/appstore.md"},
               { text: "Applovin", link: "/supported-sources/applovin.md"},
               { text: "Applovin Max", link: "/supported-sources/applovin_max.md"},
