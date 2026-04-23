@@ -13,12 +13,12 @@ surveymonkey://?access_token=<access_token>
 URI parameters:
 
 - `access_token`: The access token used to authenticate with the SurveyMonkey API.
-- `datacenter` (optional): The datacenter region. Must be `us` (default), `eu`, or `ca`.
+- `region` (optional): The region. Must be `us` (default), `eu`, or `ca`.
 
-For EU or CA accounts, specify the datacenter:
+For EU or CA accounts, specify the region:
 
 ```
-surveymonkey://?access_token=<access_token>&datacenter=eu
+surveymonkey://?access_token=<access_token>&region=eu
 ```
 
 ## Setting up a SurveyMonkey Integration
@@ -34,7 +34,7 @@ SurveyMonkey requires an access token to connect to the API. To get one:
 5. Copy the **Access Token** from the Credentials section.
 
 > [!NOTE]
-> For EU accounts, use the [EU Developer Portal](https://developer.eu.surveymonkey.com/apps/) and set `datacenter=eu` in the URI. For CA accounts, use the [CA Developer Portal](https://developer.ca.surveymonkey.com/apps/) and set `datacenter=ca` in the URI.
+> For EU accounts, use the [EU Developer Portal](https://developer.eu.surveymonkey.com/apps/) and set `region=eu` in the URI. For CA accounts, use the [CA Developer Portal](https://developer.ca.surveymonkey.com/apps/) and set `region=ca` in the URI.
 
 Once you have the access token, here's a sample command that will copy survey data into a DuckDB database:
 
