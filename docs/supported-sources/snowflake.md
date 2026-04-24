@@ -64,23 +64,15 @@ This will show a column named `RSA_PUBLIC_KEY`. You should see your actual key t
 
 #### Step 4: Use the private key in the URI
 
-URL-encode the PEM file and pass it as the `private_key` parameter:
+Convert the key to base64 DER format and pass it as the `private_key` parameter:
 
 ```bash
+# Convert PEM to base64 DER (single line, no headers)
+openssl pkey -in rsa_key.p8 -outform DER | base64
+
+# Use the output as the private_key parameter
 ingestr ingest \
-  --source-uri="snowflake://USER@account/dbname?warehouse=WH&role=ROLE&private_key=$(python3 -c "import urllib.parse; print(urllib.parse.quote(open('rsa_key.p8').read().strip()))")" \
-  --source-table="schema.table_name" \
-  --dest-uri="duckdb:///path/to/output.duckdb" \
-  --dest-table="main.table_name"
-```
-
-Alternatively, you can convert the key to base64 DER format (a single line with no headers) to avoid URL-encoding:
-
-```bash
-KEY=$(openssl pkey -in rsa_key.p8 -outform DER | base64 | tr -d '\n')
-
-ingestr ingest \
-  --source-uri="snowflake://USER@account/dbname?warehouse=WH&role=ROLE&private_key=$KEY" \
+  --source-uri="snowflake://USER@account/dbname?warehouse=WH&role=ROLE&private_key=<base64-der-key>" \
   --source-table="schema.table_name" \
   --dest-uri="duckdb:///path/to/output.duckdb" \
   --dest-table="main.table_name"
