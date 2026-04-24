@@ -19,3 +19,61 @@ URI parameters:
 - `role`: optional, the name of the role to use
 
 The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's Snowflake dialect [here](https://docs.snowflake.com/en/developer-guide/python-connector/sqlalchemy#connection-parameters).
+
+## Key-Pair Authentication
+
+Snowflake supports key-pair (JWT) authentication as an alternative to password-based authentication. To use it, pass the private key via the `private_key` query parameter instead of a password:
+
+```plaintext
+snowflake://user@account/dbname?warehouse=COMPUTE_WH&role=data_scientist&private_key=<private-key>
+```
+
+If your private key is encrypted with a passphrase, add the `private_key_passphrase` parameter:
+
+```plaintext
+snowflake://user@account/dbname?private_key=<key>&private_key_passphrase=<passphrase>
+```
+
+### Setting up key-pair authentication
+
+#### Step 1: Generate a key pair
+
+Open your terminal and run the following command to create a key pair. If you're using a mac, OpenSSL should be installed by default, so no additional setup is required. For Linux or Windows, you may need to [install OpenSSL first](https://docs.openssl.org/3.4/man7/ossl-guide-introduction/).
+
+```bash
+openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out rsa_key.p8 -nocrypt
+openssl pkey -in rsa_key.p8 -pubout -out rsa_key.pub
+```
+
+#### Step 2: Set public key for Snowflake user
+
+Log into Snowflake as an admin, create a new worksheet and run the following command (don't forget the single quotes around the key):
+
+```sql
+ALTER USER your_snowflake_username
+SET RSA_PUBLIC_KEY='your_public_key_here';
+```
+
+#### Step 3: Verify
+
+```sql
+DESC USER your_snowflake_username;
+```
+
+This will show a column named `RSA_PUBLIC_KEY`. You should see your actual key there.
+
+#### Step 4: Use the private key in the URI
+
+The private key must be URL-encoded when passed as a URI parameter. You can do this directly from the PEM file:
+
+```bash
+KEY=$(python3 -c "import urllib.parse; print(urllib.parse.quote(open('rsa_key.p8').read().strip()))")
+
+ingestr ingest \
+  --source-uri="snowflake://USER@account/dbname?warehouse=WH&role=ROLE&private_key=$KEY" \
+  --source-table="schema.table_name" \
+  --dest-uri="duckdb:///path/to/output.duckdb" \
+  --dest-table="main.table_name"
+```
+
+For more details on how to set up key-based authentication, see [this guide](https://select.dev/docs/snowflake-developer-guide/snowflake-key-pair).
