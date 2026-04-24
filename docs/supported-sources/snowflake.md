@@ -42,7 +42,7 @@ Open your terminal and run the following command to create a key pair. If you're
 
 ```bash
 openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out rsa_key.p8 -nocrypt
-openssl rsa -in rsa_key.p8 -pubout -out rsa_key.pub
+openssl pkey -in rsa_key.p8 -pubout -out rsa_key.pub
 ```
 
 #### Step 2: Set public key for Snowflake user
