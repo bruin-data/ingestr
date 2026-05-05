@@ -1,0 +1,112 @@
+defaults:
+  rows: 10000000
+  runs: 5
+  warmup: 1
+
+sources:
+  local_postgres:
+    type: postgres
+    uri: "postgres://bench_user:bench_pass@localhost:5440/bench_source?sslmode=disable"
+    table: "public.bench_data_{size}"
+    docker: bench-pg-source
+    seed: true
+
+  local_mysql:
+    type: mysql
+    uri: "mysql://bench_user:bench_pass@localhost:3307/bench_source"
+    table: "bench_source.bench_data_{size}"
+    docker: bench-mysql-source
+    seed: true
+    database: bench_source
+
+  local_duckdb:
+    type: duckdb
+    uri: "duckdb:///{bench_dir}/duckdb_files/bench_source.duckdb"
+    table: "main.bench_data_{size}"
+    seed: true
+
+destinations:
+  local_postgres:
+    type: postgres
+    uri: "postgres://bench_user:bench_pass@localhost:5441/bench_dest?sslmode=disable"
+    table: "public.bench_data"
+    docker: bench-pg-dest
+
+  local_duckdb:
+    type: duckdb
+    uri: "duckdb:///{bench_dir}/duckdb_files/bench_dest.duckdb"
+    table: "main.bench_data"
+
+  remote_postgres:
+    type: postgres
+    uri_from_env: BENCH_REMOTE_PG_URI
+    table: "public.bench_data"
+
+  bigquery:
+    type: bigquery
+    uri_from_env: BENCH_BQ_URI
+    table: bench_data
+
+scenarios:
+  # Local (self-contained, no external dependencies)
+  - source: local_postgres
+    destination: local_postgres
+
+  - source: local_postgres
+    destination: local_duckdb
+
+  - source: local_duckdb
+    destination: local_duckdb
+
+  - source: local_duckdb
+    destination: local_postgres
+
+  - source: local_mysql
+    destination: local_postgres
+
+  # Remote Postgres (requires BENCH_REMOTE_PG_URI env var)
+  - source: local_postgres
+    destination: remote_postgres
+
+  - source: local_mysql
+    destination: remote_postgres
+
+  - source: local_duckdb
+    destination: remote_postgres
+
+  # BigQuery (requires BENCH_BQ_URI and GOOGLE_APPLICATION_CREDENTIALS env vars)
+  - source: local_postgres
+    destination: bigquery
+
+  - source: local_mysql
+    destination: bigquery
+
+  - source: local_duckdb
+    destination: bigquery
+
+tools:
+  gong:
+    binary: /Users/burak/conductor/workspaces/gongestr/colombo/bin/gong
+
+  ingestr:
+    command_prefix: "uv tool run --python 3.11 ingestr@0.14.141 ingest"
+    requires: uv
+    uri_scheme_overrides:
+      postgres: postgresql
+    extra_args_by_source:
+      mysql: "--columns float_val:double"
+
+  sling:
+    requires: sling
+
+  dlt:
+    script: scripts/bench_dlt.py
+    requires: uv
+
+  airbyte:
+    script: scripts/bench_airbyte.py
+    requires: uv
+    skip:
+      - source_type: duckdb
+      - destination_type: duckdb
+      - destination_type: bigquery

@@ -1,0 +1,10 @@
+package phantombuster
+
+import "github.com/bruin-data/gong/internal/registry"
+
+func init() {
+	registry.RegisterSource(
+		[]string{"phantombuster"},
+		func() interface{} { return NewPhantombusterSource() },
+	)
+}

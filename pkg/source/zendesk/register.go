@@ -1,0 +1,10 @@
+package zendesk
+
+import "github.com/bruin-data/gong/internal/registry"
+
+func init() {
+	registry.RegisterSource(
+		[]string{"zendesk"},
+		func() interface{} { return NewZendeskSource() },
+	)
+}

@@ -1,0 +1,5 @@
+{"id":1,"name":"alice","status":"active","score":100}
+{"id":2,"name":"bob","status":"active","score":200}
+{"id":3,"name":"charlie","status":"active","score":300}
+{"id":4,"name":"diana","status":"inactive","score":400}
+{"id":5,"name":"eve","status":"active","score":500}

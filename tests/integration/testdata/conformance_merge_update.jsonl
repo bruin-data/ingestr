@@ -1,0 +1,6 @@
+{"id":1,"name":"alpha-updated","active":true,"score":11.0}
+{"id":2,"name":"bravo-updated","active":false,"score":21.0}
+{"id":3,"name":"charlie","active":true,"score":30.25}
+{"id":4,"name":"delta","active":true,"score":40.75}
+{"id":5,"name":"echo","active":false,"score":50.0}
+{"id":6,"name":"foxtrot-new","active":true,"score":60.0}

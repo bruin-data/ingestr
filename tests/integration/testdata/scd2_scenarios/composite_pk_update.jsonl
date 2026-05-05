@@ -1,0 +1,3 @@
+{"dept":"sales","emp_id":1,"name":"alice","salary":55000}
+{"dept":"sales","emp_id":2,"name":"bob","salary":60000}
+{"dept":"eng","emp_id":2,"name":"diana","salary":75000}

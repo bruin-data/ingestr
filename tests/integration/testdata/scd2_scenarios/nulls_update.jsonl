@@ -1,0 +1,3 @@
+{"id":1,"name":"alice","notes":"now has notes","score":100}
+{"id":2,"name":"bob","notes":null,"score":200}
+{"id":3,"name":"charlie","notes":null,"score":null}

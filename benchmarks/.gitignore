@@ -1,0 +1,6 @@
+results/*.json
+results/*.md
+results/*_summary*
+!results/.gitkeep
+duckdb_files/
+*.csv
