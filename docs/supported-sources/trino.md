@@ -37,6 +37,58 @@ Trino supports various authentication methods:
 
 3. **Other Methods**: For Kerberos, JWT, or certificate-based authentication, consult your Trino administrator for the appropriate connection parameters.
 
+### Optional URI query parameters
+Additional connection options can be passed as query parameters appended to the URI. These are forwarded to the underlying SQLAlchemy Trino dialect.
+
+**String parameters** (passed as plain URL-encoded strings):
+
+| Parameter | Description |
+| --- | --- |
+| `access_token` | JWT access token for authentication |
+| `cert` | Path to a TLS client certificate (used together with `key`) |
+| `key` | Path to a TLS client private key (used together with `cert`) |
+| `source` | Client source name reported to Trino (default: `trino-sqlalchemy`) |
+
+**Flag parameter** (any value enables it; the parameter just needs to be present):
+
+| Parameter | Description |
+| --- | --- |
+| `externalAuthentication` | Enables OAuth2 external authentication |
+
+**JSON parameters** (value must be URL-encoded JSON):
+
+| Parameter | Description | Example value (before URL-encoding) |
+| --- | --- | --- |
+| `session_properties` | Session properties | `{"query_max_run_time":"1h"}` |
+| `http_headers` | Extra HTTP headers | `{"X-Custom":"abc"}` |
+| `extra_credential` | List of extra credential tuples | `[["user","alice"]]` |
+| `client_tags` | List of client tags | `["etl","prod"]` |
+| `legacy_primitive_types` | Use legacy primitive types | `true` |
+| `legacy_prepared_statements` | Use legacy prepared statements | `true` |
+| `verify` | TLS certificate verification: `true`, `false`, or a JSON-quoted path to a CA bundle (`"/path/to/ca.pem"`) | `true` |
+| `roles` | Mapping of catalog → role | `{"hive":"admin"}` |
+
+Examples:
+
+```bash
+# JWT authentication
+ingestr ingest \
+    --source-uri 'trino://user@trino-server:443/iceberg?access_token=eyJhbGciOi...' \
+    --source-table 'default.events' \
+    --dest-uri 'duckdb:///output.db' \
+    --dest-table 'main.events'
+
+# Session properties (URL-encoded JSON)
+ingestr ingest \
+    --source-uri 'trino://user@host:443/iceberg?session_properties=%7B%22query_max_run_time%22%3A%221h%22%7D' \
+    --source-table 'default.events' \
+    --dest-uri 'duckdb:///output.db' \
+    --dest-table 'main.events'
+```
+
+> [!NOTE]
+> Trino's HTTP client speaks plain HTTP by default and only auto-switches to HTTPS when the port is `443`. To connect to an HTTPS Trino server on a non-standard port, use port `443` in the URI.
+
 ## Table naming
 When specifying tables for Trino (both source and destination), use the format:
 
