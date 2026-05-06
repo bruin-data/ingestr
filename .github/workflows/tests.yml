@@ -32,7 +32,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: bruin-data/gong
+  IMAGE_NAME: bruin-data/ingestr
 
 jobs:
   test:
