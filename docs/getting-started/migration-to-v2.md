@@ -353,7 +353,7 @@ This is faster and what you actually want for a recurring schedule. But on the *
 **What you need to do:** on the first run, add `--full-refresh` to pull everything. After that, run normally:
 
 ```bash
-ingestr ingest --source-uri=stripe://... --source-table=customer --dest-uri=... --full-refresh
+ingestr ingest --use-gong --source-uri=stripe://... --source-table=customer --dest-uri=... --full-refresh
 ```
 
 If you need to backfill more than 30 days at any point, set `--interval-start` to a date older than 30 days and v2 will fall back to the regular Stripe API.
@@ -378,7 +378,7 @@ Two changes:
 - **`users`** — now uses `replace` instead of `merge` by default.
 - **`participants`** — no longer uses `join_time` as the incremental key. Still uses `merge` strategy.
 
-## What's new 
+## What's new
 
 These don't affect existing pipelines — they're just things v2 can do that v1 couldn't.
 
