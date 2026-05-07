@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  source_postgres:
+    image: postgres:16
+    container_name: cdc_source_postgres
+    environment:
+      POSTGRES_USER: source_user
+      POSTGRES_PASSWORD: source_pass
+      POSTGRES_DB: source_db
+    ports:
+      - "5433:5432"
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U source_user -d source_db"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  dest_postgres:
+    image: postgres:16
+    container_name: cdc_dest_postgres
+    environment:
+      POSTGRES_USER: dest_user
+      POSTGRES_PASSWORD: dest_pass
+      POSTGRES_DB: dest_db
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dest_user -d dest_db"]
+      interval: 2s
+      timeout: 5s
+      retries: 10

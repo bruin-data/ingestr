@@ -343,6 +343,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 Some components are licensed under Apache 2.0 - see the NOTICE file for details.
 
-## Acknowledgements
-
-This project would not have been possible without the amazing work done by the [SQLAlchemy](https://www.sqlalchemy.org/) and [dlt](https://dlthub.com/) teams. We relied on their work to connect to various sources and destinations, and built `ingestr` as a simple, opinionated wrapper around their work.

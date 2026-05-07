@@ -1,0 +1,72 @@
+services:
+  bench-pg-source:
+    image: postgres:16
+    container_name: bench-pg-source
+    environment:
+      POSTGRES_USER: bench_user
+      POSTGRES_PASSWORD: bench_pass
+      POSTGRES_DB: bench_source
+    ports:
+      - "5440:5432"
+    command: >
+      postgres
+      -c shared_buffers=512MB
+      -c work_mem=256MB
+      -c maintenance_work_mem=512MB
+      -c max_wal_size=2GB
+      -c checkpoint_completion_target=0.9
+      -c wal_level=minimal
+      -c max_wal_senders=0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench_user -d bench_source"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    shm_size: '1g'
+
+  bench-pg-dest:
+    image: postgres:16
+    container_name: bench-pg-dest
+    environment:
+      POSTGRES_USER: bench_user
+      POSTGRES_PASSWORD: bench_pass
+      POSTGRES_DB: bench_dest
+    ports:
+      - "5441:5432"
+    command: >
+      postgres
+      -c shared_buffers=512MB
+      -c work_mem=256MB
+      -c maintenance_work_mem=512MB
+      -c max_wal_size=2GB
+      -c checkpoint_completion_target=0.9
+      -c wal_level=minimal
+      -c max_wal_senders=0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench_user -d bench_dest"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    shm_size: '1g'
+
+  bench-mysql-source:
+    image: mysql:8.0
+    container_name: bench-mysql-source
+    environment:
+      MYSQL_ROOT_PASSWORD: root_pass
+      MYSQL_USER: bench_user
+      MYSQL_PASSWORD: bench_pass
+      MYSQL_DATABASE: bench_source
+    ports:
+      - "3307:3306"
+    command: >
+      --innodb-buffer-pool-size=512M
+      --innodb-log-file-size=256M
+      --innodb-flush-log-at-trx-commit=0
+      --innodb-doublewrite=0
+      --local-infile=1
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_pass"]
+      interval: 3s
+      timeout: 3s
+      retries: 15

@@ -1,151 +1,247 @@
-# WARN: this is used as a notification filter in our slack.
-# When updating this, make sure to update the workflow subscription as well.
-name: "Release ingestr on pip and ghcr.io"
+name: Release
 
 on:
   push:
     tags:
-      - "v*.*.*"
-  
-env:
-  REGISTRY: ghcr.io
-  IMAGE: ghcr.io/${{ github.repository }}
+      - '*'
+
+permissions:
+  contents: write
+
+# env:
+#     INSTALL_URL: https://raw.githubusercontent.com/bruin-data/ingestr/refs/heads/main/install.sh
 
 jobs:
-  tests:
-    uses: ./.github/workflows/tests.yml
-  pip-release:
-    runs-on: ubuntu-latest
-    needs: tests
-    env:
-      TWINE_PASSWORD: ${{ secrets.PYPI_INGESTR_TOKEN }}
-    steps:
-      - name: checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: setup python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-        
-        # github actions invoke a fresh shell
-        # for each step. This causes us to lose our
-        # venv context. So we run all our build commands
-        # in a single step to simplify our pipeline.
-      - name: build and release
-        run: |
-          pip install uv
-          uv venv
-          source .venv/bin/activate
-          uv pip install -r requirements-dev.txt
-          make build
-          make upload-release
-
-  docker-build:
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-24.04-arm
+  integration-tests:
     strategy:
-      fail-fast: false
       matrix:
         platform:
-          - linux/amd64
-          - linux/arm64
+          - depot-ubuntu-latest
+          - macos-15
+        suite: ["test", "test-integration"]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
 
-    permissions:
-      contents: read
-      packages: write
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - name: Run test suite
+        run: make ${{ matrix.suite }}
+
+  prepare-darwin:
+    runs-on: depot-ubuntu-latest-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: "go.sum"
+      - shell: bash
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      - name: cache darwin
+        uses: actions/cache@v4
+        with:
+          path: dist/darwin
+          key: darwin-${{ env.sha_short }}
+      - name: Run GoReleaser
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          docker run --privileged   -v /var/run/docker.sock:/var/run/docker.sock -e GGOOS=darwin -e GORELEASER_KEY=${{ secrets.GORELEASER_KEY }} -e COMMIT_SHA=${{ github.sha }} -e VERSION=${{ github.ref_name }} -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} -v $(pwd):/src -w /src goreleaser/goreleaser-cross-pro:v1.23 release --clean --split --verbose
+
+
+  prepare-linux:
+    runs-on: depot-ubuntu-latest-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: "go.sum"
+      - shell: bash
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      - name: cache linux
+        uses: actions/cache@v4
+        with:
+          path: dist/linux
+          key: linux-${{ env.sha_short }}
+      - name: Run GoReleaser
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          docker run --privileged   -v /var/run/docker.sock:/var/run/docker.sock -e GGOOS=linux -e GORELEASER_KEY=${{ secrets.GORELEASER_KEY }} -e COMMIT_SHA=${{ github.sha }} -e VERSION=${{ github.ref_name }} -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} -v $(pwd):/src -w /src goreleaser/goreleaser-cross-pro:v1.23 release --clean --split --verbose
+
+
+  release-unix:
+    runs-on: depot-ubuntu-latest
+    needs: [prepare-linux, prepare-darwin, integration-tests]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - shell: bash
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      - uses: actions/cache@v4
+        with:
+          path: dist/linux
+          key: linux-${{ env.sha_short }}
+      - uses: actions/cache@v4
+        with:
+          path: dist/darwin
+          key: darwin-${{ env.sha_short }}
+      - uses: goreleaser/goreleaser-action@v3
+        with:
+          distribution: goreleaser-pro
+          version: v2.3.2
+          args: continue --merge
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+
+  release-windows:
+    runs-on: depot-windows-latest
+    needs: [prepare-linux, prepare-darwin, integration-tests]
+    defaults:
+      run:
+        shell: msys2 {0}
 
     steps:
-      - name: Prepare
-        run: |
-          platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+      - uses: actions/checkout@v4
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Log in to the Container registry
-        uses: docker/login-action@v3
+      - uses: msys2/setup-msys2@v2
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          msystem: UCRT64
+          update: true
+          install: >
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-libs
+            mingw-w64-ucrt-x86_64-winpthreads
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Setup Go
+        uses: actions/setup-go@v6
         with:
-          images: ${{ env.IMAGE }}
+          go-version-file: 'go.mod'
+          cache-dependency-path: "go.sum"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        id: build
+      - name: Release
+        uses: goreleaser/goreleaser-action@v6
         with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          tags: ${{ env.IMAGE }}
-          labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
-      
-      - name: Export digest
-        run: |
-          mkdir -p ${{ runner.temp }}/digests
-          digest="${{ steps.build.outputs.digest }}"
-          # The following strips the 'sha256:' prefix from the digest using bash parameter expansion.
-          touch "${{ runner.temp }}/digests/${digest#sha256:}"
-    
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
+          version: v2.3.2
+          distribution: goreleaser-pro
+          args: release --clean --split
+        env:
+          # existing env
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+          VERSION: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          GGOOS: windows
+
+          # ✅ make Windows CGO use MinGW-UCRT and link runtime statically
+          CGO_ENABLED: 1
+          CC: x86_64-w64-mingw32-gcc
+          CGO_LDFLAGS: "-static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic"
+
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: digests-${{ env.PLATFORM_PAIR }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: dist/windows/bruin_Windows_x86_64.zip
+          asset_name: bruin_Windows_x86_64.zip
+          tag: ${{ github.ref }}
+          overwrite: false
+          make_latest: false
+          prerelease: false
 
-  docker-publish:
-    permissions:
-      contents: read
-      packages: write
+#   install-windows:
+#     runs-on: depot-windows-latest
+#     name: Installer Script on Windows
+#     needs: [release-windows, release-unix]
+#     steps:
+#       - uses: actions/checkout@v4
+#       - name: Show directories
+#         shell: bash
+#         run: pwd && cd && pwd
+#       - name: Use install script
+#         shell: bash
+#         run: |
+#           set -euo pipefail
+#           max_attempts=3
+#           for attempt in $(seq 1 "${max_attempts}"); do
+#             echo "Installer script test attempt ${attempt}/${max_attempts} (Windows)"
+#             rm -rf test-pipeline
+#             if curl -LsSf https://getbruin.com/install/cli | sh -s -- -d "${GITHUB_REF##*/}" \
+#               && ~/.local/bin/bruin.exe init chess test-pipeline \
+#               && (cd test-pipeline && ~/.local/bin/bruin.exe run .); then
+#               exit 0
+#             fi
 
-    runs-on: ubuntu-latest
-    needs:
-      - docker-build
-      - tests
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: ${{ runner.temp }}/digests
-          pattern: digests-*
-          merge-multiple: true
+#             if [ "${attempt}" -lt "${max_attempts}" ]; then
+#               backoff_seconds=$((attempt * 15))
+#               echo "Attempt ${attempt} failed, retrying in ${backoff_seconds}s..."
+#               sleep "${backoff_seconds}"
+#             fi
+#           done
 
-      - name: Log in to the Container registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+#           echo "Installer script tests failed after ${max_attempts} attempts on Windows." >&2
+#           exit 1
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+#   install-unix:
+#     runs-on: ubuntu-latest
+#     name: Installer Script on Linux
+#     needs: [release-windows, release-unix]
+#     steps:
+#       - uses: actions/checkout@v4
+#       - name: Extract tag from ref
+#         id: extract_tag
+#         run: |
+#           ref_name="${GITHUB_REF##*/}"
+#           echo "tag=${ref_name}" >> $GITHUB_ENV
+#       - name: Use install script
+#         run: |
+#           set -euo pipefail
+#           max_attempts=3
+#           for attempt in $(seq 1 "${max_attempts}"); do
+#             echo "Installer script test attempt ${attempt}/${max_attempts} (Linux)"
+#             rm -rf test-pipeline
+#             if curl -LsSf https://getbruin.com/install/cli | sh -s -- -d "${{ env.tag }}" \
+#               && bruin init chess test-pipeline \
+#               && (cd test-pipeline && bruin run .); then
+#               exit 0
+#             fi
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
-          tags: |
-            type=ref,event=tag
-            type=semver,pattern={{raw}}
+#             if [ "${attempt}" -lt "${max_attempts}" ]; then
+#               backoff_seconds=$((attempt * 15))
+#               echo "Attempt ${attempt} failed, retrying in ${backoff_seconds}s..."
+#               sleep "${backoff_seconds}"
+#             fi
+#           done
 
-      - name: Create manifest list and push
-        working-directory: ${{ runner.temp }}/digests
-        run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+#           echo "Installer script tests failed after ${max_attempts} attempts on Linux." >&2
+#           exit 1
 
-
+#   release:
+#     runs-on: ubuntu-latest
+#     needs: [install-unix, install-windows]
+#     steps:
+#       - uses: actions/checkout@v4
+#       - name: Extract tag from ref
+#         id: extract_tag
+#         run: |
+#           ref_name="${GITHUB_REF##*/}"
+#           echo "tag=${ref_name}" >> $GITHUB_ENV
+#       - name: Release promote to latest
+#         uses: softprops/action-gh-release@v2
+#         if: startsWith(github.ref, 'refs/tags/')
+#         with:
+#           token: ${{ secrets.GITHUB_TOKEN }}
+#           tag_name: ${{ env.tag }}
+#           prerelease: false
+#           make_latest: true
+#           clear_attachments: false

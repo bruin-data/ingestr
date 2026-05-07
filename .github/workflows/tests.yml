@@ -1,93 +1,123 @@
+name: CI Checks
+
 on:
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
-  workflow_dispatch: {}
-  workflow_call: {}
+    branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+      - 'examples/**'
+      - 'resources/**'
+      - 'templates/**'
+      - 'install.sh'
+      - 'README.md'
+      - 'package.json'
+      - 'package-lock.json'
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+      - 'examples/**'
+      - 'resources/**'
+      - 'templates/**'
+      - 'install.sh'
+      - 'README.md'
+      - 'package.json'
+      - 'package-lock.json'
+
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (github.ref == 'refs/heads/main' && github.sha || github.ref) }}
   cancel-in-progress: true
 
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: bruin-data/ingestr
+
 jobs:
-  check-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      code-changes: ${{ steps.filter.outputs.code-changes }}
+  test:
+    runs-on: depot-ubuntu-24.04-4
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            code-changes:
-              - '**'
-              - '!**/*.md'
-              - '!docs/**'
 
-  tests:
-    needs: check-changes
-    if: github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || needs.check-changes.outputs.code-changes == 'true' || startsWith(github.ref, 'refs/tags/')
-    strategy:
-      matrix:
-        # I tried running stuff on macOS but it was too slow and unreliable.
-        # I also tried windows runners but couldn't get Docker to work there, so I gave up.
-        os: [ubuntu-latest]
-        python-version: [
-          '3.10',
-          '3.11',
-          '3.12',
-          '3.13',
-        ]
-    runs-on: ${{ matrix.os }}
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: "go.sum"
+      - run: make test
+
+  end2end:
+    runs-on: depot-ubuntu-24.04-4
+    env:
+      # Skip the testcontainers reaper (ryuk) container. Safe on ephemeral CI
+      # runners — they're destroyed after the job, no orphan-container risk.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@v4
-      - name: install Microsoft ODBC
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install msodbcsql18 -y
-      - name: install Microsoft ODBC
-        if: matrix.os == 'macos-13'
-        run: |
-          brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
-          brew update
-          HOMEBREW_ACCEPT_EULA=Y brew install msodbcsql18
-      - name: Install Docker on macOS
-        if: matrix.os == 'macos-13'
-        run: |
-          brew install docker
-          brew install docker-compose
-          brew install colima
-          colima start
-          # Wait for Docker daemon to be ready
-          while ! docker system info > /dev/null 2>&1; do sleep 1; done
-      - name: install Microsoft ODBC
-        if: matrix.os == 'windows-latest'
-        run: |
-          Invoke-WebRequest -Uri https://go.microsoft.com/fwlink/?linkid=2249006 -OutFile msodbcsql.msi
-          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i msodbcsql.msi /qn /norestart IACCEPTMSODBCSQLLICENSETERMS=YES" -Wait
-      - uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: install uv
-        uses: astral-sh/setup-uv@v3
-      - name: Install pip dependencies
-        run: make deps-ci
 
-      - name: run tests (macOS)
-        if: matrix.os == 'macos-13'
-        run: make test-ci
-        env:
-          TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: /var/run/docker.sock
-          DOCKER_HOST: unix:///Users/runner/.colima/docker.sock
-      - name: run tests (other OS)
-        if: matrix.os != 'macos-13'
-        run: make test-ci
-      - name: check the formatting
+      - name: Pre-pull testcontainer images (background)
+        run: |
+          # Pull in parallel with go-test compilation; testcontainers will
+          # find the image already cached and skip its own pull.
+          for img in mongo:7 postgres:16-alpine mysql:8.0 mcr.microsoft.com/mssql/server:2022-latest clickhouse/clickhouse-server:24.3 amazon/dynamodb-local:latest crate:latest minio/minio:latest rabbitmq:3-management-alpine; do
+            docker pull "$img" >/dev/null 2>&1 &
+          done
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: "go.sum"
+      - name: Run integration tests
+        run: make test-integration
+
+  dockerBuild:
+    runs-on: depot-ubuntu-latest
+    name: Docker Build
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: bruin-data
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Set up Depot
+        uses: depot/setup-action@v1
+
+      - name: Build Docker image
+        uses: depot/build-push-action@v1
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+            BRANCH_NAME=${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+
+  lint:
+    runs-on: depot-ubuntu-24.04-4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: "go.sum"
+      - name: Install linting tools
+        run: make setup
+      - name: Check the formatting and linting
         run: make lint-ci

@@ -1,68 +1,94 @@
-SHELL := /bin/bash
-.ONESHELL:
-.PHONY: test lint format test-ci lint-ci build upload-release setup docker-shell write-build-info remove-build-info
+NAME=gong$(shell if [ "$(shell go env GOOS)" = "windows" ]; then echo .exe; fi)
+BUILD_DIR ?= bin
+BUILD_SRC=.
+VERSION ?= dev
 
-BUILDINFO=ingestr/src/buildinfo.py
+NO_COLOR=\033[0m
+OK_COLOR=\033[32;01m
+ERROR_COLOR=\033[31;01m
 
-venv: venv/touchfile
+.PHONY: all clean test build deps generate lint format lint-ci format-ci test-ci setup
 
-venv/touchfile: requirements-dev.txt requirements.txt
-	test -d venv || python3 -m venv venv
-	. venv/bin/activate; pip install --disable-pip-version-check uv; $(MAKE) deps
-	touch venv/touchfile
+all: clean deps test build
 
-lock-deps:
-	@uv pip compile requirements.in --quiet -o requirements.txt 
-	@uv pip compile requirements.in --quiet -o requirements_arm64.txt --python-platform aarch64-unknown-linux-gnu
-
-deps: lock-deps
-	uv pip install -r requirements-dev.txt
-
-deps-ci:
-	uv pip install --system -r requirements-dev.txt
-
-test-ci:
-	set -a; [ -f test.env ] && source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto -x -rP -vv --tb=short --durations=10 --cov=ingestr --no-cov-on-fail
-
-test : venv lock-deps
-	. venv/bin/activate; $(MAKE) test-ci
-
-test-specific: venv lock-deps
-	. venv/bin/activate; set -a; [ -f test.env ] && source test.env; set +a; TESTCONTAINERS_RYUK_DISABLED=true pytest -n auto  -rP -vv --tb=short --capture=no -k $(test)
-
-lint-ci:
-	@ruff format --diff ingestr && ruff check ingestr && mypy --config-file pyproject.toml --explicit-package-bases ingestr
-
-format:
-	@ruff format ingestr && ruff check ingestr --fix
-	@mypy --config-file pyproject.toml --explicit-package-bases ingestr
-
-lint: venv lock-deps
-	. venv/bin/activate; $(MAKE) format
-
-lint-docs:
-	vale docs --glob='!**/.vitepress/**'
-
-tl: test lint
-
-build: lock-deps
-	$(MAKE) write-build-info
-	rm -rf dist && python3 -m build
-	$(MAKE) remove-build-info
-
-write-build-info:
-	cat > ${BUILDINFO} <<< "version = \"$$(git describe --tags --abbrev=0)\""
-
-remove-build-info:
-	rm -f ${BUILDINFO}
-
-upload-release:
-	twine upload --verbose dist/*
+deps:
+	@printf "$(OK_COLOR)==> Installing dependencies$(NO_COLOR)\n"
+	@go mod tidy
 
 setup:
-	@echo "installing git hooks ..."
-	@install -m 755 .githooks/pre-commit-hook.sh .git/hooks/pre-commit
+	@printf "$(OK_COLOR)==> Installing development tools$(NO_COLOR)\n"
+	@command -v gci >/dev/null 2>&1 || go install github.com/daixiang0/gci@latest
+	@command -v gofumpt >/dev/null 2>&1 || go install mvdan.cc/gofumpt@latest
+	@command -v golangci-lint >/dev/null 2>&1 || go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 
-docker-shell:
-	# run a docker container to build and run ingestr
-	@docker run -v $(PWD):/root/code -w /root/code -it --rm --entrypoint /bin/bash python:3.11
+tools-update:
+	@printf "$(OK_COLOR)==> Installing development tools$(NO_COLOR)\n"
+	go install github.com/daixiang0/gci@latest
+	go install mvdan.cc/gofumpt@latest
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+	
+
+generate:
+	@echo "$(OK_COLOR)==> Generating registry imports$(NO_COLOR)"
+	@go run ./cmd/genregistry
+
+
+build: generate deps
+	@echo "$(OK_COLOR)==> Building the application...$(NO_COLOR)"
+	@mkdir -p $(BUILD_DIR)
+	@go build -v -ldflags="-s -w -X github.com/bruin-data/gong/cmd.Version=$(VERSION)" -o "$(BUILD_DIR)/$(NAME)" "$(BUILD_SRC)"
+
+clean:
+	@rm -rf ./bin
+
+run: build
+	@./$(BUILD_DIR)/$(NAME) $(ARGS)
+
+
+test: generate
+	@echo "$(OK_COLOR)==> Running unit tests$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi && go test -short -race -cover -timeout 5m ./...
+
+test-integration: generate
+	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi && go test -v -p 64 -parallel 64 -timeout 10m ./tests/integration/...
+
+test-conformance:
+	@echo "$(OK_COLOR)==> Running destination standards tests$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi && go test -v -timeout 10m ./tests/integration -run TestDestinations_
+
+
+# Format code and run linters (for local development)
+format: generate
+	@echo "$(OK_COLOR)==> Formatting code$(NO_COLOR)"
+	@gci write cmd pkg internal tests main.go
+	@gofumpt -w cmd pkg internal tests main.go
+	@echo "$(OK_COLOR)==> Running linters$(NO_COLOR)"
+	@go vet ./...
+	@golangci-lint run --timeout 10m ./...
+	wait
+
+# Just run linters without formatting
+lint: generate
+	@echo "$(OK_COLOR)==> Running linters$(NO_COLOR)"
+	@go vet ./...
+	@golangci-lint run --timeout 10m ./...
+
+# CI: Check formatting without modifying files (fails if changes needed)
+format-ci: generate
+	@echo "$(OK_COLOR)==> Checking code formatting$(NO_COLOR)"
+	@DIFF=$$(gofumpt -d cmd pkg internal tests main.go 2>&1); \
+	if [ -n "$$DIFF" ]; then \
+		echo "$(ERROR_COLOR)Files need formatting:$(NO_COLOR)"; \
+		echo "$$DIFF"; \
+		echo "$(ERROR_COLOR)Run 'make format' locally and commit.$(NO_COLOR)"; \
+		exit 1; \
+	fi
+	@echo "$(OK_COLOR)All files are properly formatted$(NO_COLOR)"
+
+# CI: Full lint check (format check + linters)
+lint-ci: format-ci generate
+	@echo "$(OK_COLOR)==> Running linters (CI)$(NO_COLOR)"
+	@go vet ./...
+	@golangci-lint run --timeout 10m ./...
+	@echo "$(OK_COLOR)All checks passed$(NO_COLOR)"

@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ingestr</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['IBM Plex Sans', 'system-ui', 'sans-serif'],
+            mono: ['IBM Plex Mono', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    [v-cloak] { display: none; }
+    body { font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+    .font-mono { font-family: 'IBM Plex Mono', monospace; }
+    input, select, textarea { font-size: 0.8125rem; }
+    input:focus, select:focus { outline: none; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen text-gray-700">
+  <div id="app" v-cloak>
+    <div class="container mx-auto px-4 py-6 max-w-5xl">
+      <h1 class="text-xl font-semibold text-gray-800 mb-5 tracking-tight">ingestr</h1>
+
+      <!-- Tab Navigation -->
+      <div class="border-b border-gray-200 mb-5">
+        <nav class="flex space-x-6">
+          <button @click="activeTab = 'connections'" :class="{'border-gray-800 text-gray-800': activeTab === 'connections', 'border-transparent text-gray-400 hover:text-gray-600 hover:border-gray-300': activeTab !== 'connections'}" class="py-1.5 px-0.5 border-b-2 font-medium text-xs tracking-wide uppercase transition-colors">
+            Connections
+          </button>
+          <button @click="activeTab = 'newrun'" :class="{'border-gray-800 text-gray-800': activeTab === 'newrun', 'border-transparent text-gray-400 hover:text-gray-600 hover:border-gray-300': activeTab !== 'newrun'}" class="py-1.5 px-0.5 border-b-2 font-medium text-xs tracking-wide uppercase transition-colors">
+            New Run
+          </button>
+          <button @click="activeTab = 'history'" :class="{'border-gray-800 text-gray-800': activeTab === 'history', 'border-transparent text-gray-400 hover:text-gray-600 hover:border-gray-300': activeTab !== 'history'}" class="py-1.5 px-0.5 border-b-2 font-medium text-xs tracking-wide uppercase transition-colors">
+            Run History
+          </button>
+        </nav>
+      </div>
+
+      <!-- Connections Tab -->
+      <div v-if="activeTab === 'connections'">
+        <div class="bg-white rounded-md border border-gray-200 p-5 mb-5">
+          <h2 class="text-sm font-semibold mb-4 text-gray-700 uppercase tracking-wide">Add Connection</h2>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs font-medium text-gray-500 mb-1">Connector Type</label>
+              <select v-model="newConnConnector" @change="resetNewConnFields" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
+                <option v-for="c in connectors" :key="c.id" :value="c.id">{{ c.name }}</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-500 mb-1">Connection Name</label>
+              <input type="text" v-model="newConnName" placeholder="My Connection" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+            </div>
+          </div>
+          <div v-if="currentNewConnConnector" class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div v-for="field in currentNewConnConnector.fields" :key="field.name">
+              <label class="block text-xs font-medium text-gray-500 mb-1">{{ field.label }}<span v-if="field.required" class="text-red-400 ml-0.5">*</span></label>
+              <select v-if="field.type === 'select'" v-model="newConnFields[field.name]" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
+                <option v-for="opt in field.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+              </select>
+              <input v-else-if="field.type === 'checkbox'" type="checkbox" v-model="newConnFields[field.name]" class="rounded border-gray-300 text-gray-700 focus:ring-gray-300 h-3.5 w-3.5">
+              <input v-else :type="field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'" v-model="newConnFields[field.name]" :placeholder="field.placeholder" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+            </div>
+          </div>
+          <div class="mt-4">
+            <button @click="saveNewConnection" class="bg-gray-800 text-white px-3 py-1.5 rounded text-xs font-medium hover:bg-gray-700 transition-colors">Save Connection</button>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-md border border-gray-200 p-5">
+          <h2 class="text-sm font-semibold mb-4 text-gray-700 uppercase tracking-wide">Saved Connections</h2>
+          <div v-if="credentials.length === 0" class="text-gray-400 text-sm">No saved connections yet.</div>
+          <div v-else class="space-y-2">
+            <div v-for="cred in credentials" :key="cred.id" class="flex items-center justify-between py-2 px-3 bg-gray-50 rounded border border-gray-100">
+              <div class="text-sm">
+                <span class="font-medium text-gray-700">{{ cred.name }}</span>
+                <span class="text-gray-400 ml-1.5 text-xs">({{ getConnectorName(cred.connectorId) }})</span>
+              </div>
+              <button @click="deleteConnection(cred.id)" class="text-red-400 hover:text-red-600 text-xs font-medium transition-colors">Delete</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- New Run Tab -->
+      <div v-if="activeTab === 'newrun'">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+          <!-- Source Panel -->
+          <div class="bg-white rounded-md border border-gray-200 p-4">
+            <h2 class="text-sm font-semibold mb-3 text-gray-700 uppercase tracking-wide">Source</h2>
+            <div class="mb-3">
+              <label class="block text-xs font-medium text-gray-500 mb-1">Connection</label>
+              <select v-model="selectedSourceCred" @change="loadSourceCred" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
+                <option value="">-- Select Connection --</option>
+                <option v-for="cred in sourceCredentials" :key="cred.id" :value="cred.id">{{ cred.name }} ({{ getConnectorName(cred.connectorId) }})</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-500 mb-1">Table Name<span class="text-red-400 ml-0.5">*</span></label>
+              <input type="text" v-model="sourceTable" placeholder="schema.table_name" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+            </div>
+          </div>
+
+          <!-- Destination Panel -->
+          <div class="bg-white rounded-md border border-gray-200 p-4">
+            <h2 class="text-sm font-semibold mb-3 text-gray-700 uppercase tracking-wide">Destination</h2>
+            <div class="mb-3">
+              <label class="block text-xs font-medium text-gray-500 mb-1">Connection</label>
+              <select v-model="selectedDestCred" @change="loadDestCred" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
+                <option value="">-- Select Connection --</option>
+                <option v-for="cred in destCredentials" :key="cred.id" :value="cred.id">{{ cred.name }} ({{ getConnectorName(cred.connectorId) }})</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-500 mb-1">Table Name <span class="text-gray-300 font-normal">(optional)</span></label>
+              <input type="text" v-model="destTable" placeholder="defaults to source table" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+            </div>
+          </div>
+        </div>
+
+        <!-- Options -->
+        <div class="bg-white rounded-md border border-gray-200 p-4 mb-4">
+          <h2 class="text-sm font-semibold mb-3 text-gray-700 uppercase tracking-wide">Options</h2>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-500 mb-1">Strategy</label>
+              <select v-model="strategy" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
+                <option value="replace">Replace</option>
+                <option value="append">Append</option>
+                <option value="merge">Merge</option>
+                <option value="delete+insert">Delete + Insert</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-500 mb-1">Primary Keys</label>
+              <input type="text" v-model="primaryKeys" placeholder="id, user_id" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-500 mb-1">Incremental Key</label>
+              <input type="text" v-model="incrementalKey" placeholder="updated_at" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+            </div>
+          </div>
+        </div>
+
+        <!-- Run Button -->
+        <div class="flex justify-center mb-4">
+          <button @click="runJob" :disabled="isRunning || !canRun" class="bg-gray-800 text-white px-5 py-2 rounded text-sm font-medium hover:bg-gray-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors">
+            {{ isRunning ? 'Running...' : 'Run Ingestion' }}
+          </button>
+        </div>
+
+        <!-- Logs -->
+        <div v-if="logs.length > 0 || isRunning" class="bg-gray-900 rounded-md border border-gray-800 p-4">
+          <div class="flex justify-between items-center mb-3">
+            <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Logs</h2>
+            <span v-if="jobStatus" :class="statusClass" class="px-2 py-0.5 rounded text-xs font-medium">{{ jobStatus }}</span>
+          </div>
+          <div ref="logContainer" class="bg-black/50 rounded p-3 h-64 overflow-y-auto font-mono text-xs leading-relaxed">
+            <div v-for="(log, i) in logs" :key="i" :class="logClass(log.level)" class="mb-0.5">
+              <span class="text-gray-600">{{ formatTime(log.timestamp) }}</span>
+              <span class="ml-2">{{ log.message }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Run History Tab -->
+      <div v-if="activeTab === 'history'">
+        <div class="bg-white rounded-md border border-gray-200 p-4">
+          <div class="flex justify-between items-center mb-3">
+            <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Run History</h2>
+            <button @click="loadRuns" class="text-gray-400 hover:text-gray-600 text-xs font-medium transition-colors">Refresh</button>
+          </div>
+          <div v-if="runs.length === 0" class="text-gray-400 text-sm">No runs yet.</div>
+          <div v-else>
+            <div class="overflow-x-auto">
+              <table class="min-w-full">
+                <thead>
+                  <tr class="border-b border-gray-100">
+                    <th class="px-3 py-2 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Status</th>
+                    <th class="px-3 py-2 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Source</th>
+                    <th class="px-3 py-2 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Destination</th>
+                    <th class="px-3 py-2 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Started</th>
+                    <th class="px-3 py-2 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template v-for="run in runs" :key="run.id">
+                    <tr :class="{'bg-gray-50': expandedRunId === run.id}" class="hover:bg-gray-50 transition-colors border-b border-gray-50">
+                      <td class="px-3 py-2 whitespace-nowrap">
+                        <span :class="{
+                          'bg-green-50 text-green-600 border-green-200': run.status === 'completed',
+                          'bg-red-50 text-red-600 border-red-200': run.status === 'failed',
+                          'bg-amber-50 text-amber-600 border-amber-200': run.status === 'running'
+                        }" class="px-1.5 py-0.5 text-[10px] rounded border font-medium">{{ run.status }}</span>
+                      </td>
+                      <td class="px-3 py-2 text-xs text-gray-600 font-mono">{{ run.sourceTable }}</td>
+                      <td class="px-3 py-2 text-xs text-gray-600 font-mono">{{ run.destTable }}</td>
+                      <td class="px-3 py-2 text-xs text-gray-400">{{ formatDateTime(run.startedAt) }}</td>
+                      <td class="px-3 py-2">
+                        <button @click="toggleRunLogs(run)" class="text-gray-400 hover:text-gray-600 text-xs font-medium transition-colors">
+                          {{ expandedRunId === run.id ? 'Hide' : 'View' }} Logs
+                        </button>
+                      </td>
+                    </tr>
+                    <tr v-if="expandedRunId === run.id">
+                      <td colspan="5" class="p-0">
+                        <div class="bg-gray-900 m-2 mt-0 rounded-md border border-gray-800 p-3">
+                          <div v-if="run.error" class="bg-red-900/30 text-red-300 p-2 rounded text-xs mb-2 border border-red-800/50">
+                            {{ run.error }}
+                          </div>
+                          <div class="bg-black/50 rounded p-2.5 max-h-48 overflow-y-auto font-mono text-xs leading-relaxed">
+                            <div v-for="(log, i) in selectedRunLogs" :key="i" :class="logClass(log.level)" class="mb-0.5">
+                              <span class="text-gray-600">{{ formatTime(log.timestamp) }}</span>
+                              <span class="ml-2">{{ log.message }}</span>
+                            </div>
+                            <div v-if="selectedRunLogs.length === 0" class="text-gray-600">No logs available.</div>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <!-- Pagination -->
+            <div v-if="totalRuns > runsPerPage" class="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
+              <div class="text-[11px] text-gray-400">
+                Showing {{ runsOffset + 1 }} to {{ Math.min(runsOffset + runs.length, totalRuns) }} of {{ totalRuns }}
+              </div>
+              <div class="flex space-x-1.5">
+                <button @click="prevPage" :disabled="runsOffset === 0" class="px-2 py-1 border border-gray-200 rounded text-[11px] text-gray-500 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors">
+                  Previous
+                </button>
+                <button @click="nextPage" :disabled="runsOffset + runsPerPage >= totalRuns" class="px-2 py-1 border border-gray-200 rounded text-[11px] text-gray-500 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors">
+                  Next
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, computed, watch, nextTick, onMounted } = Vue;
+
+    createApp({
+      setup() {
+        const activeTab = ref('newrun');
+        const connectors = ref([]);
+        const credentials = ref([]);
+        const runs = ref([]);
+
+        // New connection form
+        const newConnConnector = ref('postgres');
+        const newConnName = ref('');
+        const newConnFields = ref({});
+
+        // Run form
+        const selectedSourceCred = ref('');
+        const selectedDestCred = ref('');
+        const sourceFields = ref({});
+        const destFields = ref({});
+        const sourceTable = ref('');
+        const destTable = ref('');
+        const strategy = ref('replace');
+        const primaryKeys = ref('');
+        const incrementalKey = ref('');
+
+        // Job state
+        const isRunning = ref(false);
+        const jobId = ref(null);
+        const jobStatus = ref(null);
+        const logs = ref([]);
+        const logContainer = ref(null);
+
+        // History state
+        const expandedRunId = ref(null);
+        const selectedRunLogs = ref([]);
+        const totalRuns = ref(0);
+        const runsOffset = ref(0);
+        const runsPerPage = ref(20);
+
+        const currentNewConnConnector = computed(() => connectors.value.find(c => c.id === newConnConnector.value));
+        const sourceConnectors = computed(() => connectors.value.filter(c => c.isSource));
+        const destConnectors = computed(() => connectors.value.filter(c => c.isDestination));
+        const sourceCredentials = computed(() => {
+          const ids = new Set(sourceConnectors.value.map(c => c.id));
+          return credentials.value.filter(c => ids.has(c.connectorId));
+        });
+        const destCredentials = computed(() => {
+          const ids = new Set(destConnectors.value.map(c => c.id));
+          return credentials.value.filter(c => ids.has(c.connectorId));
+        });
+
+        const canRun = computed(() => sourceTable.value.trim() !== '' && selectedSourceCred.value && selectedDestCred.value);
+        const statusClass = computed(() => ({
+          'bg-amber-500/20 text-amber-400': jobStatus.value === 'running',
+          'bg-green-500/20 text-green-400': jobStatus.value === 'completed',
+          'bg-red-500/20 text-red-400': jobStatus.value === 'failed'
+        }));
+
+        const getConnectorName = (connectorId) => {
+          const conn = connectors.value.find(c => c.id === connectorId);
+          return conn ? conn.name : connectorId;
+        };
+
+        async function loadData() {
+          const [connRes, credRes] = await Promise.all([
+            fetch('/api/connectors').then(r => r.json()),
+            fetch('/api/credentials').then(r => r.json())
+          ]);
+          connectors.value = connRes;
+          credentials.value = credRes || [];
+          resetNewConnFields();
+        }
+
+        async function loadRuns() {
+          const res = await fetch(`/api/runs?limit=${runsPerPage.value}&offset=${runsOffset.value}`).then(r => r.json());
+          runs.value = res.runs || [];
+          totalRuns.value = res.total || 0;
+        }
+
+        function prevPage() {
+          if (runsOffset.value > 0) {
+            runsOffset.value = Math.max(0, runsOffset.value - runsPerPage.value);
+            loadRuns();
+          }
+        }
+
+        function nextPage() {
+          if (runsOffset.value + runsPerPage.value < totalRuns.value) {
+            runsOffset.value += runsPerPage.value;
+            loadRuns();
+          }
+        }
+
+        function resetNewConnFields() {
+          newConnFields.value = {};
+          const conn = currentNewConnConnector.value;
+          if (conn) {
+            conn.fields.forEach(f => {
+              newConnFields.value[f.name] = f.default || '';
+            });
+          }
+        }
+
+        async function saveNewConnection() {
+          if (!newConnName.value.trim()) {
+            alert('Please enter a connection name');
+            return;
+          }
+          const cred = {
+            name: newConnName.value,
+            connectorId: newConnConnector.value,
+            fields: { ...newConnFields.value }
+          };
+          await fetch('/api/credentials', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cred)
+          });
+          newConnName.value = '';
+          resetNewConnFields();
+          await loadData();
+          alert('Connection saved!');
+        }
+
+        async function deleteConnection(id) {
+          if (!confirm('Delete this connection?')) return;
+          await fetch(`/api/credentials/${id}`, { method: 'DELETE' });
+          await loadData();
+        }
+
+        function loadSourceCred() {
+          const cred = credentials.value.find(c => c.id === selectedSourceCred.value);
+          if (cred) {
+            sourceFields.value = { ...cred.fields };
+          }
+        }
+
+        function loadDestCred() {
+          const cred = credentials.value.find(c => c.id === selectedDestCred.value);
+          if (cred) {
+            destFields.value = { ...cred.fields };
+          }
+        }
+
+        function buildURI(connectorId, fields) {
+          const f = fields;
+          switch (connectorId) {
+            case 'postgres':
+              return `postgres://${f.user}:${f.password}@${f.host}:${f.port || '5432'}/${f.database}${f.sslmode ? '?sslmode=' + f.sslmode : ''}`;
+            case 'mysql':
+              return `mysql://${f.user}:${f.password}@${f.host}:${f.port || '3306'}/${f.database}`;
+            case 'mssql':
+              return `mssql://${f.user}:${f.password}@${f.host}:${f.port || '1433'}/${f.database}`;
+            case 'mongodb':
+              const scheme = f.srv === 'true' || f.srv === true ? 'mongodb+srv' : 'mongodb';
+              return `${scheme}://${f.user}:${f.password}@${f.host}:${f.port || '27017'}/${f.database}`;
+            case 'duckdb':
+              return `duckdb:///${f.path}`;
+            case 'sqlite':
+              return `sqlite:///${f.path}`;
+            case 'csv':
+              return `csv://${f.path}`;
+            case 'parquet':
+              return `parquet://${f.path}`;
+            case 'jsonl':
+              return `jsonl://${f.path}`;
+            case 'bigquery':
+              let uri = `bigquery://${f.project}/${f.dataset}`;
+              const params = [];
+              if (f.credentials_path) params.push(`credentials_path=${f.credentials_path}`);
+              if (f.location) params.push(`location=${f.location}`);
+              if (params.length) uri += '?' + params.join('&');
+              return uri;
+            case 'snowflake':
+              let sfUri = `snowflake://${f.user}:${f.password}@${f.account}/${f.database}`;
+              if (f.schema) sfUri += '/' + f.schema;
+              if (f.warehouse) sfUri += '?warehouse=' + f.warehouse;
+              return sfUri;
+            default:
+              return '';
+          }
+        }
+
+        async function runJob() {
+          logs.value = [];
+          jobStatus.value = 'running';
+          isRunning.value = true;
+
+          const sourceCred = credentials.value.find(c => c.id === selectedSourceCred.value);
+          const destCred = credentials.value.find(c => c.id === selectedDestCred.value);
+          const sourceUri = buildURI(sourceCred.connectorId, sourceCred.fields);
+          const destUri = buildURI(destCred.connectorId, destCred.fields);
+
+          const req = {
+            sourceUri,
+            destUri,
+            sourceTable: sourceTable.value,
+            destTable: destTable.value || sourceTable.value,
+            strategy: strategy.value,
+            primaryKeys: primaryKeys.value ? primaryKeys.value.split(',').map(s => s.trim()) : [],
+            incrementalKey: incrementalKey.value
+          };
+
+          try {
+            const res = await fetch('/api/run', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(req)
+            });
+
+            if (!res.ok) {
+              const err = await res.text();
+              logs.value.push({ timestamp: new Date().toISOString(), level: 'error', message: err });
+              jobStatus.value = 'failed';
+              isRunning.value = false;
+              return;
+            }
+
+            const data = await res.json();
+            jobId.value = data.jobId;
+
+            const ws = new WebSocket(`ws://${location.host}/api/ws/logs/${data.jobId}`);
+            ws.onmessage = (e) => {
+              const log = JSON.parse(e.data);
+              logs.value.push(log);
+              nextTick(() => {
+                if (logContainer.value) {
+                  logContainer.value.scrollTop = logContainer.value.scrollHeight;
+                }
+              });
+            };
+            ws.onclose = async () => {
+              const jobRes = await fetch(`/api/jobs/${data.jobId}`).then(r => r.json());
+              jobStatus.value = jobRes.status;
+              isRunning.value = false;
+              loadRuns();
+            };
+            ws.onerror = () => {
+              jobStatus.value = 'failed';
+              isRunning.value = false;
+            };
+          } catch (err) {
+            logs.value.push({ timestamp: new Date().toISOString(), level: 'error', message: err.message });
+            jobStatus.value = 'failed';
+            isRunning.value = false;
+          }
+        }
+
+        async function toggleRunLogs(run) {
+          if (expandedRunId.value === run.id) {
+            expandedRunId.value = null;
+            selectedRunLogs.value = [];
+            return;
+          }
+          expandedRunId.value = run.id;
+          const res = await fetch(`/api/runs/${run.id}/logs`).then(r => r.json());
+          selectedRunLogs.value = res || [];
+        }
+
+        function formatTime(ts) {
+          const d = new Date(ts);
+          return d.toLocaleTimeString();
+        }
+
+        function formatDateTime(ts) {
+          const d = new Date(ts);
+          return d.toLocaleString();
+        }
+
+        function logClass(level) {
+          return {
+            'text-red-400': level === 'error',
+            'text-amber-400': level === 'warning',
+            'text-emerald-400': level === 'info',
+            'text-gray-500': level === 'debug'
+          };
+        }
+
+        watch(activeTab, (newTab) => {
+          if (newTab === 'history') {
+            loadRuns();
+          }
+        });
+
+        onMounted(() => {
+          loadData();
+        });
+
+        return {
+          activeTab, connectors, credentials, runs,
+          newConnConnector, newConnName, newConnFields, currentNewConnConnector,
+          selectedSourceCred, selectedDestCred, sourceFields, destFields,
+          sourceTable, destTable, strategy, primaryKeys, incrementalKey,
+          isRunning, jobId, jobStatus, logs, logContainer,
+          expandedRunId, selectedRunLogs, totalRuns, runsOffset, runsPerPage,
+          sourceConnectors, destConnectors, sourceCredentials, destCredentials,
+          canRun, statusClass,
+          getConnectorName, resetNewConnFields, saveNewConnection, deleteConnection,
+          loadSourceCred, loadDestCred, runJob, toggleRunLogs, loadRuns,
+          prevPage, nextPage, formatTime, formatDateTime, logClass
+        };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>
