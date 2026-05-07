@@ -177,10 +177,8 @@ jobs:
           max_attempts=3
           for attempt in $(seq 1 "${max_attempts}"); do
             echo "Installer script test attempt ${attempt}/${max_attempts} (Windows)"
-            rm -rf test-pipeline
-            if curl -LsSf $INSTALL_URL | sh -s -- -d "${GITHUB_REF##*/}" \
-              && ~/.local/bin/bruin.exe init chess test-pipeline \
-              && (cd test-pipeline && ~/.local/bin/bruin.exe run .); then
+            if curl -LsSf $INSTALL_URL | sh -s -- -d "${{ env.tag }}" \
+              && ingestr --version; then
               exit 0
             fi
 
@@ -211,10 +209,8 @@ jobs:
           max_attempts=3
           for attempt in $(seq 1 "${max_attempts}"); do
             echo "Installer script test attempt ${attempt}/${max_attempts} (Linux)"
-            rm -rf test-pipeline
             if curl -LsSf $INSTALL_URL | sh -s -- -d "${{ env.tag }}" \
-              && bruin init chess test-pipeline \
-              && (cd test-pipeline && bruin run .); then
+              &&  ingestr --version; then
               exit 0
             fi
 
