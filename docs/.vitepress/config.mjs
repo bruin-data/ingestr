@@ -66,6 +66,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
             link: "/getting-started/incremental-loading.md",
           },
           { text: "Data Masking", link: "/getting-started/data-masking.md" },
+          { text: "Migration to v2", link: "/getting-started/migration-to-v2.md" },
           { text: "Telemetry", link: "/getting-started/telemetry.md" },
         ],
       },
