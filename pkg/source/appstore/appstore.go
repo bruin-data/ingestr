@@ -823,7 +823,9 @@ func (s *AppStoreSource) downloadAndParseReport(ctx context.Context, downloadURL
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 	}
-	defer gzReader.Close()
+	defer func() {
+		_ = gzReader.Close()
+	}()
 
 	delimiter := '\t'
 	if reportName == "App Crashes Expanded" {
