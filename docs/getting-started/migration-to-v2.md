@@ -378,6 +378,8 @@ Two changes:
 - **`users`** — now uses `replace` instead of `merge` by default.
 - **`participants`** — no longer uses `join_time` as the incremental key. Strategy is still `merge` by `id`, but with no incremental key — every run does a full fetch and upserts by `id`.
 
+**What you need to do:** if you were relying on `merge` for the `users` table to accumulate history, your destination table will be completely overwritten on the first v2 run. To preserve the v1 behavior, pass `--incremental-strategy merge` explicitly.
+
 ## What's new
 
 These don't affect existing pipelines — they're just things v2 can do that v1 couldn't.
