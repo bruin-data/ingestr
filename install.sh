@@ -300,12 +300,16 @@ fi
 
 _bruin_banner() {
   printf "\n"
-  printf "  %s\n" "${CORAL}  _               _${RESET}"
-  printf "  %s\n" "${CORAL} | |__  _ __ _   _ _ _ __${RESET}"
-  printf "  %s\n" "${CORAL} | '_ \\| '__| | | | | '_ \\${RESET}"
-  printf "  %s\n" "${CORAL} | |_) | |  | |_| | | | | |${RESET}"
-  printf "  %s\n" "${CORAL} |_.__/|_|   \\__,_|_|_| |_|${RESET}"
+  printf "  %s\n" "${CORAL}  _                       _        ${RESET}"
+  printf "  %s\n" "${CORAL} (_)                     | |       ${RESET}"
+  printf "  %s\n" "${CORAL}  _ _ __   __ _  ___  ___| |_ _ __ ${RESET}"
+  printf "  %s\n" "${CORAL} | | '_ \\ / _\` |/ _ \/ __| __| '__|${RESET}"
+  printf "  %s\n" "${CORAL} | | | | | (_| |  __/\__ \ |_| |   ${RESET}"
+  printf "  %s\n" "${CORAL} |_|_| |_|\__, |\___||___/\__|_|   ${RESET}"
+  printf "  %s\n" "${CORAL}           __/ |                   ${RESET}"
+  printf "  %s\n" "${CORAL}          |___/                    ${RESET}"
   printf "\n"
+
 }
 
 _print_header() {
