@@ -3,8 +3,8 @@ package redshift
 import (
 	"context"
 
-	intredshift "github.com/bruin-data/gong/internal/redshift"
-	"github.com/bruin-data/gong/pkg/source/postgres"
+	intredshift "github.com/bruin-data/ingestr/internal/redshift"
+	"github.com/bruin-data/ingestr/pkg/source/postgres"
 )
 
 type RedshiftSource struct {

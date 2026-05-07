@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/destination"
-	"github.com/bruin-data/gong/pkg/progress"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/schemaevolution"
-	"github.com/bruin-data/gong/pkg/source"
-	"github.com/bruin-data/gong/pkg/transformer"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/progress"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
+	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
 type IngestionJob struct {

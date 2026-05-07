@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/arrowconv"
-	ingestrhttp "github.com/bruin-data/gong/pkg/http"
-	"github.com/bruin-data/gong/pkg/progress"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
+	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
+	"github.com/bruin-data/ingestr/pkg/progress"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 const (

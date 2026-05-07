@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	pgdest "github.com/bruin-data/gong/pkg/destination/postgres"
+	pgdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/stretchr/testify/require"
 )
 

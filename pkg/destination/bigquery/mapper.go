@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 // MapDataTypeToBigQuery maps internal DataType to BigQuery FieldType.

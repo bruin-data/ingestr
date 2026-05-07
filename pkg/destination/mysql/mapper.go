@@ -3,7 +3,7 @@ package mysql
 import (
 	"fmt"
 
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 func MapDataTypeToMySQL(col schema.Column) string {

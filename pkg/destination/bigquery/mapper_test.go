@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 func TestMapDataTypeToBigQuery(t *testing.T) {

@@ -3,7 +3,7 @@ package mysql
 import (
 	"testing"
 
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/assert"
 )
 

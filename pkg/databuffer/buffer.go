@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 // DataBuffer accumulates record batches and allows replay.

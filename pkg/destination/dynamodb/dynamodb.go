@@ -15,12 +15,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/bruin-data/gong/internal/arrowutil"
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/internal/dynamodbutil"
-	"github.com/bruin-data/gong/pkg/destination"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/internal/arrowutil"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/dynamodbutil"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 const maxBatchWriteItems = 25

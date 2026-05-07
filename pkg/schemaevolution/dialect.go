@@ -1,7 +1,7 @@
 package schemaevolution
 
 import (
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 // Dialect defines the interface for database-specific SQL generation.

@@ -13,10 +13,10 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	gcsstorage "cloud.google.com/go/storage"
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/destination"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )

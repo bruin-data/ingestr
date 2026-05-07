@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
-	"github.com/bruin-data/gong/pkg/destination"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 type stubStorageArrowAppender struct {

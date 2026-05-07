@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/arrowconv"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	elasticsearch "github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 )

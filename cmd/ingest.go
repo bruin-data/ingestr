@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/naming"
-	"github.com/bruin-data/gong/pkg/pipeline"
-	"github.com/bruin-data/gong/pkg/strategy"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/naming"
+	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/fatih/color"
 	"github.com/urfave/cli/v3"
 )

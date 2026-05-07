@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/pipeline"
-	_ "github.com/bruin-data/gong/pkg/source/rabbitmq"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/pipeline"
+	_ "github.com/bruin-data/ingestr/pkg/source/rabbitmq"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -2,7 +2,7 @@ package transformer
 
 import (
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 // RecordTransformer transforms Arrow record batches.

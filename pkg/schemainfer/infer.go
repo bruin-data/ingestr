@@ -11,8 +11,8 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/araddon/dateparse"
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 // FieldInfo tracks information about a field observed during schema inference.

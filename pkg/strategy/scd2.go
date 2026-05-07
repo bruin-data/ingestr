@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/destination"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/source"
-	"github.com/bruin-data/gong/pkg/transformer"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
 type SCD2Strategy struct{}

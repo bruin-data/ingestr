@@ -1,4 +1,4 @@
-module github.com/bruin-data/gong
+module github.com/bruin-data/ingestr
 
 go 1.25.0
 

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

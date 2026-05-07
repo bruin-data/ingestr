@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bruin-data/gong/internal/testutil"
+	"github.com/bruin-data/ingestr/internal/testutil"
 	"github.com/testcontainers/testcontainers-go"
 )
 

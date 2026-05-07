@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 // DynamicSourceTable is a SourceTable implementation for sources

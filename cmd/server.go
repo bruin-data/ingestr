@@ -3,7 +3,7 @@ package cmd
 import (
 	"context"
 
-	"github.com/bruin-data/gong/internal/server"
+	"github.com/bruin-data/ingestr/internal/server"
 	"github.com/urfave/cli/v3"
 )
 

@@ -12,10 +12,10 @@ import (
 	"sync"
 
 	"cloud.google.com/go/bigquery"
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/source/adbc"
-	"github.com/bruin-data/gong/pkg/uv"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source/adbc"
+	"github.com/bruin-data/ingestr/pkg/uv"
 	"google.golang.org/api/option"
 )
 

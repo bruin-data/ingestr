@@ -17,12 +17,12 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/internal/uri"
-	"github.com/bruin-data/gong/pkg/pipeline"
-	"github.com/bruin-data/gong/pkg/snowflake"
-	_ "github.com/bruin-data/gong/pkg/source/adbc" // Register ADBC driver
-	"github.com/bruin-data/gong/pkg/strategy"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/uri"
+	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/snowflake"
+	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
+	"github.com/bruin-data/ingestr/pkg/strategy"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/mattn/go-sqlite3"

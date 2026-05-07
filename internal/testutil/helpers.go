@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/pipeline"
-	"github.com/bruin-data/gong/pkg/schema"
-	_ "github.com/bruin-data/gong/pkg/source/adbc"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/bruin-data/gong/internal/config"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/olekukonko/tablewriter"
 	"github.com/olekukonko/tablewriter/tw"
 )

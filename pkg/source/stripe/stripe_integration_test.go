@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bruin-data/gong/internal/testutil"
-	_ "github.com/bruin-data/gong/pkg/source/stripe"
+	"github.com/bruin-data/ingestr/internal/testutil"
+	_ "github.com/bruin-data/ingestr/pkg/source/stripe"
 	"github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/coupon"
 	"github.com/stripe/stripe-go/v81/customer"

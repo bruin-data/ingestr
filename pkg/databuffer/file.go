@@ -12,10 +12,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/bruin-data/gong/pkg/arrowconv"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/schemainfer"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemainfer"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 // FileBuffer is a file-backed implementation of DataBuffer.
