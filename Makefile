@@ -1,4 +1,4 @@
-NAME=gong$(shell if [ "$(shell go env GOOS)" = "windows" ]; then echo .exe; fi)
+NAME=ingestr$(shell if [ "$(shell go env GOOS)" = "windows" ]; then echo .exe; fi)
 BUILD_DIR ?= bin
 BUILD_SRC=.
 VERSION ?= dev
