@@ -8,8 +8,8 @@ on:
 permissions:
   contents: write
 
-# env:
-#     INSTALL_URL: https://raw.githubusercontent.com/bruin-data/ingestr/refs/heads/main/install.sh
+env:
+    INSTALL_URL: https://raw.githubusercontent.com/bruin-data/ingestr/refs/heads/main/install.sh
 
 jobs:
   # integration-tests:
@@ -161,77 +161,76 @@ jobs:
           make_latest: false
           prerelease: false
 
-#   install-windows:
-#     runs-on: depot-windows-latest
-#     name: Installer Script on Windows
-#     needs: [release-windows, release-unix]
-#     steps:
-#       - uses: actions/checkout@v4
-#       - name: Show directories
-#         shell: bash
-#         run: pwd && cd && pwd
-#       - name: Use install script
-#         shell: bash
-#         run: |
-#           set -euo pipefail
-#           max_attempts=3
-#           for attempt in $(seq 1 "${max_attempts}"); do
-#             echo "Installer script test attempt ${attempt}/${max_attempts} (Windows)"
-#             rm -rf test-pipeline
-#             if curl -LsSf https://getbruin.com/install/cli | sh -s -- -d "${GITHUB_REF##*/}" \
-#               && ~/.local/bin/bruin.exe init chess test-pipeline \
-#               && (cd test-pipeline && ~/.local/bin/bruin.exe run .); then
-#               exit 0
-#             fi
+  install-windows:
+    runs-on: depot-windows-latest
+    name: Installer Script on Windows
+    needs: [release-windows, release-unix]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show directories
+        shell: bash
+        run: pwd && cd && pwd
+      - name: Use install script
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_attempts=3
+          for attempt in $(seq 1 "${max_attempts}"); do
+            echo "Installer script test attempt ${attempt}/${max_attempts} (Windows)"
+            rm -rf test-pipeline
+            if curl -LsSf $INSTALL_URL | sh -s -- -d "${GITHUB_REF##*/}" \
+              && ~/.local/bin/bruin.exe init chess test-pipeline \
+              && (cd test-pipeline && ~/.local/bin/bruin.exe run .); then
+              exit 0
+            fi
 
-#             if [ "${attempt}" -lt "${max_attempts}" ]; then
-#               backoff_seconds=$((attempt * 15))
-#               echo "Attempt ${attempt} failed, retrying in ${backoff_seconds}s..."
-#               sleep "${backoff_seconds}"
-#             fi
-#           done
+            if [ "${attempt}" -lt "${max_attempts}" ]; then
+              backoff_seconds=$((attempt * 15))
+              echo "Attempt ${attempt} failed, retrying in ${backoff_seconds}s..."
+              sleep "${backoff_seconds}"
+            fi
+          done
 
-#           echo "Installer script tests failed after ${max_attempts} attempts on Windows." >&2
-#           exit 1
+          echo "Installer script tests failed after ${max_attempts} attempts on Windows." >&2
+          exit 1
 
-#   install-unix:
-#     runs-on: ubuntu-latest
-#     name: Installer Script on Linux
-#     needs: [release-windows, release-unix]
-#     steps:
-#       - uses: actions/checkout@v4
-#       - name: Extract tag from ref
-#         id: extract_tag
-#         run: |
-#           ref_name="${GITHUB_REF##*/}"
-#           echo "tag=${ref_name}" >> $GITHUB_ENV
-#       - name: Use install script
-#         run: |
-#           set -euo pipefail
-#           max_attempts=3
-#           for attempt in $(seq 1 "${max_attempts}"); do
-#             echo "Installer script test attempt ${attempt}/${max_attempts} (Linux)"
-#             rm -rf test-pipeline
-#             if curl -LsSf https://getbruin.com/install/cli | sh -s -- -d "${{ env.tag }}" \
-#               && bruin init chess test-pipeline \
-#               && (cd test-pipeline && bruin run .); then
-#               exit 0
-#             fi
+  install-unix:
+    runs-on: ubuntu-latest
+    name: Installer Script on Linux
+    needs: [release-windows, release-unix]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract tag from ref
+        id: extract_tag
+        run: |
+          ref_name="${GITHUB_REF##*/}"
+          echo "tag=${ref_name}" >> $GITHUB_ENV
+      - name: Use install script
+        run: |
+          set -euo pipefail
+          max_attempts=3
+          for attempt in $(seq 1 "${max_attempts}"); do
+            echo "Installer script test attempt ${attempt}/${max_attempts} (Linux)"
+            rm -rf test-pipeline
+            if curl -LsSf $INSTALL_URL | sh -s -- -d "${{ env.tag }}" \
+              && bruin init chess test-pipeline \
+              && (cd test-pipeline && bruin run .); then
+              exit 0
+            fi
 
-#             if [ "${attempt}" -lt "${max_attempts}" ]; then
-#               backoff_seconds=$((attempt * 15))
-#               echo "Attempt ${attempt} failed, retrying in ${backoff_seconds}s..."
-#               sleep "${backoff_seconds}"
-#             fi
-#           done
+            if [ "${attempt}" -lt "${max_attempts}" ]; then
+              backoff_seconds=$((attempt * 15))
+              echo "Attempt ${attempt} failed, retrying in ${backoff_seconds}s..."
+              sleep "${backoff_seconds}"
+            fi
+          done
 
-#           echo "Installer script tests failed after ${max_attempts} attempts on Linux." >&2
-#           exit 1
+          echo "Installer script tests failed after ${max_attempts} attempts on Linux." >&2
+          exit 1
 
   release:
     runs-on: ubuntu-latest
-    # needs: [install-unix, install-windows]
-    needs: [release-unix, release-windows]
+    needs: [install-unix, install-windows]
     steps:
       - uses: actions/checkout@v4
       - name: Extract tag from ref
