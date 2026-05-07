@@ -226,22 +226,23 @@ jobs:
 #           echo "Installer script tests failed after ${max_attempts} attempts on Linux." >&2
 #           exit 1
 
-#   release:
-#     runs-on: ubuntu-latest
-#     needs: [install-unix, install-windows]
-#     steps:
-#       - uses: actions/checkout@v4
-#       - name: Extract tag from ref
-#         id: extract_tag
-#         run: |
-#           ref_name="${GITHUB_REF##*/}"
-#           echo "tag=${ref_name}" >> $GITHUB_ENV
-#       - name: Release promote to latest
-#         uses: softprops/action-gh-release@v2
-#         if: startsWith(github.ref, 'refs/tags/')
-#         with:
-#           token: ${{ secrets.GITHUB_TOKEN }}
-#           tag_name: ${{ env.tag }}
-#           prerelease: false
-#           make_latest: true
-#           clear_attachments: false
+  release:
+    runs-on: ubuntu-latest
+    # needs: [install-unix, install-windows]
+    needs: [release-unix, release-windows]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract tag from ref
+        id: extract_tag
+        run: |
+          ref_name="${GITHUB_REF##*/}"
+          echo "tag=${ref_name}" >> $GITHUB_ENV
+      - name: Release promote to latest
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ env.tag }}
+          prerelease: false
+          make_latest: true
+          clear_attachments: false
