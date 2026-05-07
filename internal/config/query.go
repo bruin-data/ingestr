@@ -58,7 +58,7 @@ func PrintFailedQuery() {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "\n")
-	errorPrinter.Fprintf(os.Stderr, "Failed SQL query:\n")
+	_, _ = errorPrinter.Fprintf(os.Stderr, "Failed SQL query:\n")
 	fmt.Fprintf(os.Stderr, "%s\n", highlightSQL(*failedQuery))
 	failedQuery = nil
 }
