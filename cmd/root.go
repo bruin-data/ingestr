@@ -10,7 +10,7 @@ var Version = "dev"
 
 func NewApp() *cli.Command {
 	return &cli.Command{
-		Name:    "gong",
+		Name:    "ingestr",
 		Usage:   "A CLI tool for data ingestion between databases",
 		Version: Version,
 		Commands: []*cli.Command{
