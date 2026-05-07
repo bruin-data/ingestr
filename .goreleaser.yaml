@@ -4,10 +4,10 @@ before:
   hooks:
     - make generate
 builds:
-  - id: gong-darwin-amd64
-    binary: gong
+  - id: ingestr-darwin-amd64
+    binary: ingestr
     ldflags:
-      - -s -w -X github.com/bruin-data/gong/cmd.Version={{ .Env.VERSION }} -X main.commit={{ .Env.COMMIT_SHA }}
+      - -s -w -X github.com/bruin-data/ingestr/cmd.Version={{ .Env.VERSION }} -X main.commit={{ .Env.COMMIT_SHA }}
     main: ./
     goarch:
       - amd64
@@ -21,10 +21,10 @@ builds:
     flags:
       - -trimpath
 
-  - id: gong-darwin-arm64
-    binary: gong
+  - id: ingestr-darwin-arm64
+    binary: ingestr
     ldflags:
-      - -s -w -X github.com/bruin-data/gong/cmd.Version={{ .Env.VERSION }} -X main.commit={{ .Env.COMMIT_SHA }}
+      - -s -w -X github.com/bruin-data/ingestr/cmd.Version={{ .Env.VERSION }} -X main.commit={{ .Env.COMMIT_SHA }}
     main: ./
     goarch:
       - arm64
@@ -38,8 +38,8 @@ builds:
     flags:
       - -trimpath
  
-  - id: gong-linux-amd64
-    binary: gong
+  - id: ingestr-linux-amd64
+    binary: ingestr
     main: ./
     env:
       - CC=x86_64-linux-gnu-gcc
@@ -52,9 +52,9 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X github.com/bruin-data/gong/cmd.Version={{ .Env.VERSION }} -X main.commit={{ .Env.COMMIT_SHA }}
-  - id: gong-linux-arm64
-    binary: gong
+      - -s -w -X github.com/bruin-data/ingestr/cmd.Version={{ .Env.VERSION }} -X main.commit={{ .Env.COMMIT_SHA }}
+  - id: ingestr-linux-arm64
+    binary: ingestr
     main: ./
     goarch:
       - arm64
@@ -67,9 +67,9 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X github.com/bruin-data/gong/cmd.Version={{ .Env.VERSION }} -X main.commit={{ .Env.COMMIT_SHA }}
-  - id: gong-windows-amd64
-    binary: gong
+      - -s -w -X github.com/bruin-data/ingestr/cmd.Version={{ .Env.VERSION }} -X main.commit={{ .Env.COMMIT_SHA }}
+  - id: ingestr-windows-amd64
+    binary: ingestr
     main: ./
     goarch:
       - amd64
@@ -81,7 +81,7 @@ builds:
       - CGO_ENABLED=1
       - CGO_LDFLAGS=-static-libgcc -static-libstdc++ -Wl,-Bstatic -lstdc++ -lwinpthread -Wl,-Bdynamic
     ldflags:
-      - -s -w -X github.com/bruin-data/gong/cmd.Version={{ .Env.VERSION }} -X main.commit={{ .Env.COMMIT_SHA }} -extldflags=-static
+      - -s -w -X github.com/bruin-data/ingestr/cmd.Version={{ .Env.VERSION }} -X main.commit={{ .Env.COMMIT_SHA }} -extldflags=-static
     flags:
       - -trimpath
       - -buildmode=exe
@@ -93,13 +93,13 @@ release:
 archives:
   - format: tar.gz
     builds:
-      - "gong-linux-arm64"
-      - "gong-linux-amd64"
-      - "gong-darwin-amd64"
-      - "gong-darwin-arm64"
-      - "gong-windows-amd64"
+      - "ingestr-linux-arm64"
+      - "ingestr-linux-amd64"
+      - "ingestr-darwin-amd64"
+      - "ingestr-darwin-arm64"
+      - "ingestr-windows-amd64"
     name_template: >-
-      gong_
+      ingestr_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else }}{{ .Arch }}{{ end }}
