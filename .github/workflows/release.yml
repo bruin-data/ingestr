@@ -177,8 +177,8 @@ jobs:
           max_attempts=3
           for attempt in $(seq 1 "${max_attempts}"); do
             echo "Installer script test attempt ${attempt}/${max_attempts} (Windows)"
-            if curl -LsSf $INSTALL_URL | sh -s -- -d "${{ env.tag }}" \
-              && ingestr --version; then
+            if curl -LsSf $INSTALL_URL | sh -s -- -d "${GITHUB_REF##*/}" \
+              &&  ingestr --version; then
               exit 0
             fi
 
