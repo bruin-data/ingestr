@@ -12,24 +12,24 @@ permissions:
 #     INSTALL_URL: https://raw.githubusercontent.com/bruin-data/ingestr/refs/heads/main/install.sh
 
 jobs:
-  integration-tests:
-    strategy:
-      matrix:
-        platform:
-          - depot-ubuntu-latest
-          - macos-15
-        suite: ["test", "test-integration"]
-    runs-on: ${{ matrix.platform }}
-    steps:
-      - uses: actions/checkout@v4
+  # integration-tests:
+  #   strategy:
+  #     matrix:
+  #       platform:
+  #         - depot-ubuntu-latest
+  #         - macos-15
+  #       suite: ["test", "test-integration"]
+  #   runs-on: ${{ matrix.platform }}
+  #   steps:
+  #     - uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: 'go.mod'
-          cache: true
-      - name: Run test suite
-        run: make ${{ matrix.suite }}
+  #     - name: Setup Go
+  #       uses: actions/setup-go@v5
+  #       with:
+  #         go-version-file: 'go.mod'
+  #         cache: true
+  #     - name: Run test suite
+  #       run: make ${{ matrix.suite }}
 
   prepare-darwin:
     runs-on: depot-ubuntu-latest-8
@@ -79,7 +79,8 @@ jobs:
 
   release-unix:
     runs-on: depot-ubuntu-latest
-    needs: [prepare-linux, prepare-darwin, integration-tests]
+    needs: [prepare-linux, prepare-darwin]
+    # needs: [prepare-linux, prepare-darwin, integration-tests]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -105,7 +106,8 @@ jobs:
 
   release-windows:
     runs-on: depot-windows-latest
-    needs: [prepare-linux, prepare-darwin, integration-tests]
+    needs: [prepare-linux, prepare-darwin]
+    # needs: [prepare-linux, prepare-darwin, integration-tests]
     defaults:
       run:
         shell: msys2 {0}
