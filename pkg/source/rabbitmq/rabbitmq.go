@@ -268,7 +268,7 @@ func generateMsgID(msg amqp.Delivery) string {
 	h.Write([]byte(msg.Exchange))
 	h.Write([]byte(msg.RoutingKey))
 	h.Write(msg.Body)
-	fmt.Fprintf(h, "%d", msg.DeliveryTag)
+	_, _ = fmt.Fprintf(h, "%d", msg.DeliveryTag)
 	sum := h.Sum(nil)
 	return strings.TrimRight(base64.StdEncoding.EncodeToString(sum[:15]), "=")
 }

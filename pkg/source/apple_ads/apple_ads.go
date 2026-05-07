@@ -196,7 +196,9 @@ func (s *AppleAdsSource) refreshAccessToken(ctx context.Context) error {
 	form.Set("scope", oauthScope)
 
 	client := resty.New().SetTimeout(60 * time.Second)
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	resp, err := client.R().
 		SetContext(ctx).

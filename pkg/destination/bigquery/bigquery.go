@@ -180,7 +180,7 @@ func (d *BigQueryDestination) Connect(ctx context.Context, uri string) error {
 		var storageErr error
 		storageArrowClient, storageErr = NewStorageWriteArrowClient(ctx, d.projectID, clientOpts...)
 		if storageErr != nil {
-			client.Close()
+			_ = client.Close()
 			return fmt.Errorf("failed to create Storage Write Arrow client: %w", storageErr)
 		}
 	}

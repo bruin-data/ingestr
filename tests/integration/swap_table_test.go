@@ -66,7 +66,9 @@ func TestSwapTable_FailedRenameAbortsTransaction(t *testing.T) {
 	dest := pgdest.NewPostgresDestination()
 	err = dest.Connect(ctx, uri)
 	require.NoError(t, err)
-	defer dest.Close(ctx)
+	defer func() {
+		_ = dest.Close(ctx)
+	}()
 
 	err = dest.SwapTable(ctx, stagingTable, targetTable)
 	require.Error(t, err, "SwapTable should fail when the target table has dependent objects")
