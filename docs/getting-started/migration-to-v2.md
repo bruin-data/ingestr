@@ -376,7 +376,7 @@ If you need to backfill more than 30 days at any point, set `--interval-start` t
 Two changes:
 
 - **`users`** — now uses `replace` instead of `merge` by default.
-- **`participants`** — no longer uses `join_time` as the incremental key. Still uses `merge` strategy.
+- **`participants`** — no longer uses `join_time` as the incremental key. Strategy is still `merge` by `id`, but with no incremental key — every run does a full fetch and upserts by `id`.
 
 ## What's new
 
