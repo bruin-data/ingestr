@@ -100,7 +100,7 @@ These are the changes that can make your downstream queries break or your number
 
 ### Nested JSON is no longer flattened
 
-**Affected sources:** Asana, Pipedrive, Jira, Notion, Couchbase.
+**Most visibly affected sources:** Asana, Pipedrive, Jira, Notion, Couchbase. These are the highest-impact cases — but the change applies to **any** source where nested objects exist (see [Sources where nothing changed](#sources-where-nothing-changed) for the general note).
 
 ingestr v1 flattens nested JSON fields into separate columns. ingestr v2 keeps them as a single JSON column.
 
