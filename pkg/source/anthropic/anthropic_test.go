@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 func TestParseAPIKeyFromURI(t *testing.T) {

@@ -3,7 +3,7 @@ package snowflake
 import (
 	"fmt"
 
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 func MapDataTypeToSnowflake(col schema.Column) string {

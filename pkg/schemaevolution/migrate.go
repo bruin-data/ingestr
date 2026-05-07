@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 // SQLExecutor is an interface for executing SQL statements.

@@ -3,8 +3,8 @@ package progress
 import (
 	"context"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 // DefaultTracker is the default implementation of the Tracker interface.

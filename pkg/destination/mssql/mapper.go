@@ -3,7 +3,7 @@ package mssql
 import (
 	"fmt"
 
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 func MapDataTypeToMSSQL(col schema.Column) string {

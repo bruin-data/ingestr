@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bruin-data/gong/pkg/destination"
-	"github.com/bruin-data/gong/pkg/destination/duckdb"
-	"github.com/bruin-data/gong/pkg/source"
-	_ "github.com/bruin-data/gong/pkg/source/adbc"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
+	"github.com/bruin-data/ingestr/pkg/source"
+	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

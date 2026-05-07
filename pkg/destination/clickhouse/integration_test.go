@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/internal/testutil"
-	"github.com/bruin-data/gong/pkg/pipeline"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/testutil"
+	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"

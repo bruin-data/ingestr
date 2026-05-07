@@ -3,8 +3,8 @@ package schemaevolution
 import (
 	"strings"
 
-	"github.com/bruin-data/gong/pkg/naming"
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/naming"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 // CompareOptions contains optional parameters for schema comparison.

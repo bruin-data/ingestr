@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bruin-data/gong/pkg/arrowconv"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

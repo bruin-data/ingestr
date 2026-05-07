@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/internal/uri"
-	"github.com/bruin-data/gong/pkg/naming"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/uri"
+	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/fatih/color"
 )
 

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	gonghttp "github.com/bruin-data/gong/pkg/http"
-	"github.com/bruin-data/gong/pkg/source"
+	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

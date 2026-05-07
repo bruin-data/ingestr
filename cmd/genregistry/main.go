@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	modulePrefix = "github.com/bruin-data/gong"
+	modulePrefix = "github.com/bruin-data/ingestr"
 	outputFile   = "internal/registry/imports/imports.gen.go"
 )
 

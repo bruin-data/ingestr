@@ -9,11 +9,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/internal/dynamodbutil"
-	"github.com/bruin-data/gong/pkg/arrowconv"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/dynamodbutil"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 const batchSize = 10000

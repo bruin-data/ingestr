@@ -3,10 +3,10 @@ package uri
 import (
 	"fmt"
 
-	"github.com/bruin-data/gong/internal/registry"
-	_ "github.com/bruin-data/gong/internal/registry/imports"
-	"github.com/bruin-data/gong/pkg/destination"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/internal/registry"
+	_ "github.com/bruin-data/ingestr/internal/registry/imports"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 // DefaultRegistry provides access to registered sources and destinations.

@@ -2,7 +2,7 @@ package transformer
 
 import (
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/bruin-data/gong/pkg/databuffer"
+	"github.com/bruin-data/ingestr/pkg/databuffer"
 )
 
 // TypeCaster casts record batch columns to match a target Arrow schema.

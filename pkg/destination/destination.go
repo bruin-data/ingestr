@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 const ManagedStagingTTL = 24 * time.Hour

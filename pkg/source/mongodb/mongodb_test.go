@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bruin-data/gong/internal/arrowutil"
+	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )

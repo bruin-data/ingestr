@@ -2,7 +2,7 @@ package spanner
 
 import (
 	sppb "cloud.google.com/go/spanner/apiv1/spannerpb"
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 func MapSpannerCodeToDataType(colType *sppb.Type) (schema.DataType, int, int, schema.DataType) {

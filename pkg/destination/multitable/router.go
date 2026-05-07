@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 // Router distributes batches from a single input channel to per-table channels.

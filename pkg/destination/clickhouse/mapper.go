@@ -3,7 +3,7 @@ package clickhouse
 import (
 	"fmt"
 
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 func MapDataTypeToClickHouse(col schema.Column) string {

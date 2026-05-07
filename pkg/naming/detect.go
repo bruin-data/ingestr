@@ -3,7 +3,7 @@ package naming
 import (
 	"strings"
 
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 // Ingestr metadata column prefixes

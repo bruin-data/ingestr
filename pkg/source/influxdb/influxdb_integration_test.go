@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bruin-data/gong/internal/testutil"
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/internal/testutil"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 func TestInfluxDBPipeline_V2Flux(t *testing.T) {

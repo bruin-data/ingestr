@@ -1,8 +1,8 @@
 package snowflake
 
 import (
-	"github.com/bruin-data/gong/internal/registry"
-	"github.com/bruin-data/gong/pkg/source/adbc"
+	"github.com/bruin-data/ingestr/internal/registry"
+	"github.com/bruin-data/ingestr/pkg/source/adbc"
 )
 
 func init() {

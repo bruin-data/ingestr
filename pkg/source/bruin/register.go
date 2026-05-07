@@ -1,6 +1,6 @@
 package bruin
 
-import "github.com/bruin-data/gong/internal/registry"
+import "github.com/bruin-data/ingestr/internal/registry"
 
 func init() {
 	registry.RegisterSource(

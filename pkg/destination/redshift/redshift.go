@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/bruin-data/gong/internal/arrowutil"
-	"github.com/bruin-data/gong/internal/config"
-	intredshift "github.com/bruin-data/gong/internal/redshift"
-	"github.com/bruin-data/gong/pkg/destination"
-	"github.com/bruin-data/gong/pkg/destination/postgres"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/internal/arrowutil"
+	"github.com/bruin-data/ingestr/internal/config"
+	intredshift "github.com/bruin-data/ingestr/internal/redshift"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/destination/postgres"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 type RedshiftDestination struct {

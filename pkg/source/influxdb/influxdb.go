@@ -9,10 +9,10 @@ import (
 	"time"
 
 	influxdb3 "github.com/InfluxCommunity/influxdb3-go/v2/influxdb3"
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/arrowconv"
-	"github.com/bruin-data/gong/pkg/schema"
-	"github.com/bruin-data/gong/pkg/source"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 )
 

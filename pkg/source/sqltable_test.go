@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bruin-data/gong/internal/config"
+	"github.com/bruin-data/ingestr/internal/config"
 )
 
 func TestIsCustomQuery(t *testing.T) {

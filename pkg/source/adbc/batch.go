@@ -7,7 +7,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/bruin-data/gong/pkg/arrowconv"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
 )
 
 // CopyValue creates a copy of values to avoid ADBC Arrow buffer lifetime issues.

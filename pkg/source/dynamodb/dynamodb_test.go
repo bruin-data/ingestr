@@ -3,7 +3,7 @@ package dynamodb
 import (
 	"testing"
 
-	"github.com/bruin-data/gong/internal/dynamodbutil"
+	"github.com/bruin-data/ingestr/internal/dynamodbutil"
 )
 
 func TestParseURI(t *testing.T) {

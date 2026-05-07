@@ -9,11 +9,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/schema"
-	sfauth "github.com/bruin-data/gong/pkg/snowflake"
-	"github.com/bruin-data/gong/pkg/source/adbc"
-	"github.com/bruin-data/gong/pkg/uv"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
+	"github.com/bruin-data/ingestr/pkg/source/adbc"
+	"github.com/bruin-data/ingestr/pkg/uv"
 )
 
 // SQL templates for Snowflake
