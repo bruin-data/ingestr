@@ -113,6 +113,7 @@ All endpoints support the standard async loading mode. The following endpoints a
 | `payment_link` | id | created | merge | Contains information about payment links created for collecting payments. |
 | `payment_method` | id | created | merge | Stores payment method information such as cards, bank accounts, and other payment instruments. |
 | `payment_method_domain` | id | created | merge | Represents domains verified for payment method collection. |
+| `payment_record` | id | created | merge | Contains detailed payment records, including amount breakdowns, card issuer (bank), BIN, brand, and last4 for each payment. Retrieved per PaymentIntent in the requested window; intents without an associated record (e.g., orchestration not enabled) are skipped. |
 | `payout` | id | created | merge | Records payouts made from Stripe accounts to bank accounts or debit cards. |
 | `plan` | id | created | merge | Contains subscription plan information including pricing and billing intervals. |
 | `price` | id | created | merge | Contains pricing information for products, including currency, amount, and billing intervals. |
