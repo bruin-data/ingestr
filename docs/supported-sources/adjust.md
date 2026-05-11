@@ -202,7 +202,7 @@ Several metrics look near-identical at a glance. The distinctions:
 | Installs (Network) | `network_installs` | Installs reported by the network. | — | No |
 | Installs Diff (Network) | `network_installs_diff` | Absolute gap between Network and Adjust installs. | `\|network_installs - installs\|` | No |
 | Installs Diff (Network) (Signed) | `network_installs_diff_signed` | Signed gap between Network and Adjust installs. | `network_installs - installs` | No |
-| Installs per Mile (IPM) | `installs_per_mile` | Installs per 1,000 impressions. | `1000 * impression_conversion_rate` | No |
+| Installs per Mile (IPM) | `installs_per_mile` | Installs per 1,000 impressions. | `(Installs / Impressions) * 1000` | No |
 | Limit Ad Tracking Installs | `limit_ad_tracking_installs` | Installs from devices with LAT enabled. | — | No |
 | Limit Ad Tracking Rate | `limit_ad_tracking_install_rate` | Share of installs from LAT-enabled devices. | `limit_ad_tracking_installs / installs` | No |
 | Limit Ad Tracking Reattributions | `limit_ad_tracking_reattributions` | Reattributions from LAT-enabled devices. | — | No |
