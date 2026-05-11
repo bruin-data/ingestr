@@ -226,8 +226,8 @@ Several metrics look near-identical at a glance. The distinctions:
 | Metric | API ID | Definition | Formula | Cohorted |
 |---|---|---|---|---|
 | Ad Spend | `cost` | Total ad spend. | `click_cost + impression_cost + install_cost + event_cost` | No |
-| Ad Spend (Attribution) | `adjust_cost` | Ad spend captured via Adjust's engagement method. | `click_cost + impression_cost + install_cost + event_cost` | No |
-| Ad Spend (Network) | `network_cost` | Ad spend pulled from the network API. | `click_cost + impression_cost + install_cost + event_cost` | No |
+| Ad Spend (Attribution) | `adjust_cost` | Ad spend captured via Adjust's engagement method. | `click_cost + impression_cost + install_cost + event_cost` (attribution source) | No |
+| Ad Spend (Network) | `network_cost` | Ad spend pulled from the network API. | `click_cost + impression_cost + install_cost + event_cost` (network source — values may differ from attribution) | No |
 | Ad Spend Diff (Network) | `network_cost_diff` | Gap between Attribution and Network ad spend. | `adjust_cost - network_cost` | No |
 | Click Cost | `click_cost` | Cost of clicks. | — | No |
 | Clicks (Paid) | `paid_clicks` | Clicks that have ad-spend data attached. | — | No |
