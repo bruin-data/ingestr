@@ -169,12 +169,7 @@ func (s *ParquetSource) read(ctx context.Context, opts source.ReadOptions) (<-ch
 			rec := rr.RecordBatch()
 
 			if limit > 0 && totalRows+rec.NumRows() > limit {
-				remaining := limit - totalRows
-				if remaining <= 0 {
-					return
-				}
-				trimmed := rec.NewSlice(0, remaining)
-				rec = trimmed
+				rec = rec.NewSlice(0, limit-totalRows)
 			} else {
 				rec.Retain()
 			}

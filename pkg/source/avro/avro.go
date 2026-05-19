@@ -169,11 +169,7 @@ func (s *AvroSource) read(ctx context.Context, opts source.ReadOptions) (<-chan 
 			rec := rr.RecordBatch()
 
 			if limit > 0 && totalRows+rec.NumRows() > limit {
-				remaining := limit - totalRows
-				if remaining <= 0 {
-					return
-				}
-				rec = rec.NewSlice(0, remaining)
+				rec = rec.NewSlice(0, limit-totalRows)
 			} else {
 				rec.Retain()
 			}
