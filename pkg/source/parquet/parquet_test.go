@@ -47,7 +47,7 @@ func TestReadParquet(t *testing.T) {
 
 	src := NewParquetSource()
 	require.NoError(t, src.Connect(context.Background(), "parquet://"+path))
-	defer src.Close(context.Background())
+	defer func() { _ = src.Close(context.Background()) }()
 
 	tbl, err := src.GetTable(context.Background(), source.TableRequest{Name: "items"})
 	require.NoError(t, err)
@@ -82,7 +82,7 @@ func TestReadParquetWithLimit(t *testing.T) {
 
 	src := NewParquetSource()
 	require.NoError(t, src.Connect(context.Background(), "parquet://"+path))
-	defer src.Close(context.Background())
+	defer func() { _ = src.Close(context.Background()) }()
 
 	tbl, err := src.GetTable(context.Background(), source.TableRequest{Name: "items"})
 	require.NoError(t, err)
@@ -106,7 +106,7 @@ func TestReadParquetExcludeColumns(t *testing.T) {
 
 	src := NewParquetSource()
 	require.NoError(t, src.Connect(context.Background(), "parquet://"+path))
-	defer src.Close(context.Background())
+	defer func() { _ = src.Close(context.Background()) }()
 
 	tbl, err := src.GetTable(context.Background(), source.TableRequest{Name: "items"})
 	require.NoError(t, err)
@@ -149,7 +149,7 @@ func writeParquet(t *testing.T, path string) {
 		[]bool{true, true, true, true, true},
 	)
 
-	rec := b.NewRecord()
+	rec := b.NewRecordBatch()
 	defer rec.Release()
 
 	props := parquet.NewWriterProperties(
@@ -158,7 +158,7 @@ func writeParquet(t *testing.T, path string) {
 
 	f, err := os.Create(path)
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	w, err := pqarrow.NewFileWriter(arrowSchema, f, props, pqarrow.DefaultWriterProps())
 	require.NoError(t, err)

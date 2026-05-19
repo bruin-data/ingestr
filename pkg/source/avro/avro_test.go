@@ -26,10 +26,10 @@ const testSchema = `{
 
 func TestExtractFilePath(t *testing.T) {
 	cases := map[string]string{
-		"avro:///tmp/data.avro":   "/tmp/data.avro",
-		"avro:/tmp/data.avro":     "/tmp/data.avro",
-		"avro://./relative.avro":  "./relative.avro",
-		"avro:relative.avro":      "relative.avro",
+		"avro:///tmp/data.avro":    "/tmp/data.avro",
+		"avro:/tmp/data.avro":      "/tmp/data.avro",
+		"avro://./relative.avro":   "./relative.avro",
+		"avro:relative.avro":       "relative.avro",
 		"https://example.com/x.av": "",
 	}
 	for input, want := range cases {
@@ -52,7 +52,7 @@ func TestReadAvro(t *testing.T) {
 
 	src := NewAvroSource()
 	require.NoError(t, src.Connect(context.Background(), "avro://"+path))
-	defer src.Close(context.Background())
+	defer func() { _ = src.Close(context.Background()) }()
 
 	tbl, err := src.GetTable(context.Background(), source.TableRequest{Name: "items"})
 	require.NoError(t, err)
@@ -87,7 +87,7 @@ func TestReadAvroWithLimit(t *testing.T) {
 
 	src := NewAvroSource()
 	require.NoError(t, src.Connect(context.Background(), "avro://"+path))
-	defer src.Close(context.Background())
+	defer func() { _ = src.Close(context.Background()) }()
 
 	tbl, err := src.GetTable(context.Background(), source.TableRequest{Name: "items"})
 	require.NoError(t, err)
@@ -111,7 +111,7 @@ func TestReadAvroExcludeColumns(t *testing.T) {
 
 	src := NewAvroSource()
 	require.NoError(t, src.Connect(context.Background(), "avro://"+path))
-	defer src.Close(context.Background())
+	defer func() { _ = src.Close(context.Background()) }()
 
 	tbl, err := src.GetTable(context.Background(), source.TableRequest{Name: "items"})
 	require.NoError(t, err)
@@ -139,11 +139,11 @@ func writeAvro(t *testing.T, path string, n int) {
 
 	f, err := os.Create(path)
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	enc, err := ocf.NewEncoder(schema.String(), f)
 	require.NoError(t, err)
-	defer enc.Close()
+	defer func() { _ = enc.Close() }()
 
 	for i := 0; i < n; i++ {
 		row := map[string]any{
