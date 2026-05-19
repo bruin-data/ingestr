@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-    INSTALL_URL: https://raw.githubusercontent.com/bruin-data/ingestr/refs/heads/main/install.sh
+  INSTALL_URL: https://getbruin.com/install/ingestr
 
 jobs:
   integration-tests:
