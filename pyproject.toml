@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,9 +7,9 @@ name = "ingestr"
 authors = [
   { name="Burak Karakan", email="burak.karakan@getbruin.com" },
 ]
+dynamic = ["version"]
 description = "ingestr is a command-line application that ingests data from various sources and stores them in any database."
 readme = "README.md"
-dynamic = ["dependencies", "version"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -24,6 +24,9 @@ classifiers = [
 Homepage = "https://github.com/bruin-data/ingestr"
 Issues = "https://github.com/bruin-data/ingestr/issues"
 
+[tool.hatch.build.targets.wheel]
+shared-scripts = { "bin/ingestr" = "ingestr" }
+packages = ["bin"]
 
-[project.scripts]
-spam-cli = "spam:main_cli"
+[tool.hatch.version]
+source = "vcs"
