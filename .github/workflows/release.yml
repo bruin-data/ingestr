@@ -168,13 +168,10 @@ jobs:
         id: fetch
         uses: robinraju/release-downloader@v1
         with:
-          tag: ${{ github.ref }}
+          tag: ${{ github.ref_name }}
           fileName: ingestr_*
           out-file-path: artifacts
       
-      - name: list binaries
-        run: find artifacts -type f
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
