@@ -121,3 +121,16 @@ jobs:
         run: make setup
       - name: Check the formatting and linting
         run: make lint-ci
+  
+  # This will be part of release pipeline. Put here for testing.
+  release-pip:
+    runs-on: depot-ubuntu-latest
+    name: Release binary wheels on pip
+    steps:
+      - name: fetch-bin
+        uses: robinraju/release-downloader@v1
+        with:
+          tag: v0.15.5
+      
+      - name: list binaries
+        run: echo ${{steps.fetch-bin.outputs.downloaded_files}}
