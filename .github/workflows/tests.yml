@@ -133,6 +133,7 @@ jobs:
           tag: v0.15.5
           tarBall: true
           zipBall: true
+          extract: true
       
       - name: list binaries
-        run: echo ${{steps.fetch.outputs.downloaded_files}}
+        run: ls .
