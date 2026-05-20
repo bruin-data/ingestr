@@ -184,7 +184,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          VERSION=${{ github.ref }}
+          VERSION=${{ github.ref_name }}
           export SETUPTOOLS_SCM_PRETEND_VERSION="$VERSION"
           echo "building wheels for ingestr $VERSION"
 
