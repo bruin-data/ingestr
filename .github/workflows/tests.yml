@@ -126,7 +126,8 @@ jobs:
   release-pip:
     runs-on: depot-ubuntu-latest
     steps:
-      - name: fetch
+      - name: download binaries
+        id: fetch
         uses: robinraju/release-downloader@v1
         with:
           tag: v0.15.5
@@ -134,4 +135,4 @@ jobs:
           zipBall: true
       
       - name: list binaries
-        run: echo ${{ steps.fetch.outputs.downloaded_files }}
+        run: echo ${{steps.fetch.outputs.downloaded_files}}
