@@ -136,4 +136,4 @@ jobs:
           extract: true
       
       - name: list binaries
-        run: ls .
+        run: echo $PWD && ls -l /home/runner/work/ingestr/ingestr
