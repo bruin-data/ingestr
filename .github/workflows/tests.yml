@@ -131,7 +131,6 @@ jobs:
         uses: robinraju/release-downloader@v1
         with:
           tag: v0.15.5
-          extract: true
           fileName: ingestr_*
       
       - name: list binaries
