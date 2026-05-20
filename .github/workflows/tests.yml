@@ -137,3 +137,57 @@ jobs:
       
       - name: list binaries
         run: find artifacts -type f
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tooling
+        run: pip install --quiet build wheel
+
+      - name: Build pip wheels
+        run: |
+          set -euo pipefail
+
+          VERSION=$(ls artifacts/ingestr_*_checksums.txt | head -1 \
+            | xargs -n1 basename | sed -E 's/^ingestr_(.+)_checksums\.txt$/\1/')
+          export SETUPTOOLS_SCM_PRETEND_VERSION="$VERSION"
+          echo "building wheels for ingestr $VERSION"
+
+          mkdir -p dist
+          cp pyproject.toml pyproject.toml.orig
+
+          build_one() {
+            local archive=$1 bin_name=$2 platform_tag=$3
+            rm -rf bin build
+            mkdir -p bin
+            case "$archive" in
+              *.tar.gz) tar -xzf "$archive" -C bin "$bin_name" ;;
+              *.zip)    unzip -qoj "$archive" "$bin_name" -d bin ;;
+            esac
+            chmod +x "bin/$bin_name"
+
+            cp pyproject.toml.orig pyproject.toml
+            sed -i "s|\"bin/ingestr\" = \"ingestr\"|\"bin/$bin_name\" = \"$bin_name\"|" pyproject.toml
+
+            python -m build --wheel --outdir dist >/dev/null
+            local wheel
+            wheel=$(ls -t dist/ingestr-"$VERSION"-py*-none-any.whl | head -1)
+            python -m wheel tags --remove --platform-tag="$platform_tag" "$wheel" >/dev/null
+          }
+
+          build_one artifacts/ingestr_Linux_x86_64.tar.gz   ingestr     manylinux2014_x86_64
+          build_one artifacts/ingestr_Linux_arm64.tar.gz    ingestr     manylinux2014_aarch64
+          build_one artifacts/ingestr_Darwin_x86_64.tar.gz  ingestr     macosx_10_15_x86_64
+          build_one artifacts/ingestr_Darwin_arm64.tar.gz   ingestr     macosx_11_0_arm64
+          build_one artifacts/ingestr_Windows_x86_64.zip    ingestr.exe win_amd64
+
+          mv pyproject.toml.orig pyproject.toml
+          ls -la dist/
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-wheels
+          path: dist/*.whl
