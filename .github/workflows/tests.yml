@@ -126,12 +126,14 @@ jobs:
   release-pip:
     runs-on: depot-ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: download binaries
         id: fetch
         uses: robinraju/release-downloader@v1
         with:
           tag: v0.15.5
           fileName: ingestr_*
+          out-file-path: artifacts
       
       - name: list binaries
-        run: find . -type f
+        run: find artifacts -type f
