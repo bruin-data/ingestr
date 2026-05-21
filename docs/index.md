@@ -14,19 +14,17 @@ ingestr takes away the complexity of managing any backend or writing any code fo
 
 ## Installation
 
-We recommend using [uv](https://github.com/astral-sh/uv) to run `ingestr`.
+You can install `ingestr` using the install script:
 
-```
-pip install uv
-uvx ingestr
-```
+```sh
+curl -LsSf https://getbruin.com/install/ingestr | sh
+````
 
-Alternatively, if you'd like to install it globally:
-```
-uv pip install --system ingestr
-```
+Alternatively, you can install it with pip:
 
-While installation with vanilla `pip` is possible, it's an order of magnitude slower.
+```sh
+pip install ingestr
+```
 
 ## Next Steps
 
