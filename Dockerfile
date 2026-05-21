@@ -31,7 +31,7 @@ RUN go run ./cmd/genregistry
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=1 go build -v \
-    -ldflags="-s -w -X github.com/bruin-data/gong/cmd.Version=${VERSION} -X main.commit=${BRANCH_NAME}" \
+    -ldflags="-s -w -X github.com/bruin-data/ingestr/cmd.Version=${VERSION} -X main.commit=${BRANCH_NAME}" \
     -o /src/bin/gong .
 
 FROM debian:bookworm-slim

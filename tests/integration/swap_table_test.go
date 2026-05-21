@@ -7,13 +7,9 @@ import (
 	"strings"
 	"testing"
 
-<<<<<<< ours
+	"github.com/bruin-data/ingestr/pkg/destination"
+	mysqldest "github.com/bruin-data/ingestr/pkg/destination/mysql"
 	pgdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
-=======
-	"github.com/bruin-data/gong/pkg/destination"
-	mysqldest "github.com/bruin-data/gong/pkg/destination/mysql"
-	pgdest "github.com/bruin-data/gong/pkg/destination/postgres"
->>>>>>> theirs
 	"github.com/stretchr/testify/require"
 )
 

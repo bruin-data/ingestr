@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bruin-data/gong/internal/config"
-	"github.com/bruin-data/gong/pkg/pipeline"
-	_ "github.com/bruin-data/gong/pkg/source/adbc"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/pipeline"
+	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

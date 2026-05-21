@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
-	"github.com/bruin-data/gong/pkg/destination"
-	bqdest "github.com/bruin-data/gong/pkg/destination/bigquery"
-	"github.com/bruin-data/gong/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	bqdest "github.com/bruin-data/ingestr/pkg/destination/bigquery"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/iterator"
 )

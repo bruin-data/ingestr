@@ -1,21 +1,21 @@
 package destination_test
 
 import (
-	"github.com/bruin-data/gong/pkg/destination"
-	"github.com/bruin-data/gong/pkg/destination/athena"
-	"github.com/bruin-data/gong/pkg/destination/bigquery"
-	"github.com/bruin-data/gong/pkg/destination/clickhouse"
-	"github.com/bruin-data/gong/pkg/destination/cratedb"
-	"github.com/bruin-data/gong/pkg/destination/databricks"
-	"github.com/bruin-data/gong/pkg/destination/duckdb"
-	"github.com/bruin-data/gong/pkg/destination/mssql"
-	"github.com/bruin-data/gong/pkg/destination/mysql"
-	"github.com/bruin-data/gong/pkg/destination/postgres"
-	"github.com/bruin-data/gong/pkg/destination/redshift"
-	"github.com/bruin-data/gong/pkg/destination/snowflake"
-	"github.com/bruin-data/gong/pkg/destination/sqlite"
-	"github.com/bruin-data/gong/pkg/destination/synapse"
-	"github.com/bruin-data/gong/pkg/destination/trino"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/destination/athena"
+	"github.com/bruin-data/ingestr/pkg/destination/bigquery"
+	"github.com/bruin-data/ingestr/pkg/destination/clickhouse"
+	"github.com/bruin-data/ingestr/pkg/destination/cratedb"
+	"github.com/bruin-data/ingestr/pkg/destination/databricks"
+	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
+	"github.com/bruin-data/ingestr/pkg/destination/mssql"
+	"github.com/bruin-data/ingestr/pkg/destination/mysql"
+	"github.com/bruin-data/ingestr/pkg/destination/postgres"
+	"github.com/bruin-data/ingestr/pkg/destination/redshift"
+	"github.com/bruin-data/ingestr/pkg/destination/snowflake"
+	"github.com/bruin-data/ingestr/pkg/destination/sqlite"
+	"github.com/bruin-data/ingestr/pkg/destination/synapse"
+	"github.com/bruin-data/ingestr/pkg/destination/trino"
 )
 
 var (
