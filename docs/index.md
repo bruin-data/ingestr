@@ -18,7 +18,7 @@ You can install `ingestr` using the install script:
 
 ```sh
 curl -LsSf https://getbruin.com/install/ingestr | sh
-````
+```
 
 Alternatively, you can install it with pip:
 
