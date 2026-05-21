@@ -21,7 +21,7 @@ type ParsedURI struct {
 // fileBasedSchemes are schemes that use file paths instead of network URIs
 var fileBasedSchemes = map[string]bool{
 	"jsonl": true, "ndjson": true, "json": true,
-	"csv": true, "parquet": true,
+	"csv": true, "parquet": true, "avro": true,
 	"sqlite": true, "duckdb": true, "motherduck": true, "md": true, "mmap": true,
 }
 

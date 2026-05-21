@@ -2106,6 +2106,129 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 	return count
 }
 
+// hasPrimaryKey returns true if the given table has a PRIMARY KEY constraint on the
+// given column. Used to verify that swap-based replace preserves the PK constraint
+// (it can be silently lost if the swap path uses CTAS without a recorded schema).
+func hasPrimaryKey(t *testing.T, backend *sqlBackend, uri, table, column string) bool {
+	t.Helper()
+
+	db, err := backend.openDB(uri)
+	if err != nil {
+		t.Skipf("Could not open SQL backend: %v", err)
+		return false
+	}
+	defer func() { _ = db.Close() }()
+
+	schemaName, tableName := splitSchemaTable(table, "")
+	var query string
+
+	switch {
+	case strings.Contains(uri, "duckdb"):
+		if schemaName == "" {
+			schemaName = "main"
+		}
+		query = fmt.Sprintf(`
+			SELECT COUNT(*) FROM duckdb_constraints()
+			WHERE schema_name = '%s' AND table_name = '%s'
+			  AND constraint_type = 'PRIMARY KEY'
+			  AND list_contains(constraint_column_names, '%s')
+		`, schemaName, tableName, column)
+	case strings.Contains(uri, "postgres"):
+		if schemaName == "" {
+			schemaName = "public"
+		}
+		query = fmt.Sprintf(`
+			SELECT COUNT(*) FROM information_schema.table_constraints tc
+			JOIN information_schema.key_column_usage kcu
+			  ON tc.constraint_name = kcu.constraint_name
+			 AND tc.table_schema = kcu.table_schema
+			WHERE tc.table_schema = '%s'
+			  AND tc.table_name = '%s'
+			  AND tc.constraint_type = 'PRIMARY KEY'
+			  AND kcu.column_name = '%s'
+		`, schemaName, tableName, column)
+	case strings.Contains(uri, "mssql") || strings.Contains(uri, "sqlserver"):
+		if schemaName == "" {
+			schemaName = "dbo"
+		}
+		query = fmt.Sprintf(`
+			SELECT COUNT(*) FROM information_schema.table_constraints tc
+			JOIN information_schema.key_column_usage kcu
+			  ON tc.constraint_name = kcu.constraint_name
+			 AND tc.table_schema = kcu.table_schema
+			WHERE tc.table_schema = '%s'
+			  AND tc.table_name = '%s'
+			  AND tc.constraint_type = 'PRIMARY KEY'
+			  AND kcu.column_name = '%s'
+		`, schemaName, tableName, column)
+	case strings.Contains(uri, "sqlite"):
+		// SQLite: PRAGMA table_info reports pk > 0 for primary-key columns.
+		query = fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE pk > 0 AND name = '%s'`, tableName, column)
+	default:
+		t.Skipf("hasPrimaryKey not implemented for this backend")
+		return false
+	}
+
+	var count int
+	if err := db.QueryRow(query).Scan(&count); err != nil {
+		t.Logf("Warning: failed to query primary key: %v", err)
+		return false
+	}
+	return count > 0
+}
+
+// TestDestinations_Replace_PreservesConstraints verifies that the replace strategy
+// preserves the target's PRIMARY KEY after the staging-to-target swap. This regressed
+// during PR development when the cross-schema swap path used a plain CTAS that drops
+// constraints; the per-table-schema-map fix recreates the target with full constraints.
+// This test locks that fix in place.
+func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceURI := jsonlURI(t, "testdata/conformance.jsonl")
+
+	swapCapableCases := []destCase{}
+	for _, tc := range destinationCases() {
+		if tc.sqlBackend == nil {
+			continue
+		}
+		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "sqlite" || tc.name == "mssql" {
+			swapCapableCases = append(swapCapableCases, tc)
+		}
+	}
+
+	for _, tc := range swapCapableCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			destURI, destTable, cleanup := tc.setup(t, ctx)
+			defer cleanup()
+
+			cfg := &config.IngestConfig{
+				SourceURI:           sourceURI,
+				SourceTable:         "preserves_constraints_test",
+				DestURI:             destURI,
+				DestTable:           destTable,
+				PrimaryKeys:         []string{"id"},
+				IncrementalStrategy: config.StrategyReplace,
+			}
+
+			require.NoError(t, pipeline.New(cfg).Run(ctx), "First replace should succeed")
+			assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
+				"PRIMARY KEY on id should be present after first replace")
+
+			// Second run exercises the cross-schema swap path again — the staging table is
+			// in _bruin_staging while the existing target is in the target schema. This is
+			// where the CTAS regression manifested.
+			require.NoError(t, pipeline.New(cfg).Run(ctx), "Second replace should succeed")
+			assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
+				"PRIMARY KEY on id should still be present after second replace (cross-schema swap)")
+		})
+	}
+}
+
 // TestDestinations_LongColumnNames validates that destinations handle column names
 // exceeding the database identifier length limit (e.g., PostgreSQL's 63-byte limit).
 // Two columns that differ only after byte 63 must not collide.

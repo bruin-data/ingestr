@@ -374,10 +374,10 @@ func (d *BigQueryDestination) swapTableWithCopyJob(
 
 	status, err := job.Wait(ctx)
 	if err != nil {
-		return fmt.Errorf("copy job failed: %w", err)
+		return fmt.Errorf("copy job failed (job %s): %w", jobRef(job), err)
 	}
 	if err := status.Err(); err != nil {
-		return fmt.Errorf("copy job error: %w", err)
+		return fmt.Errorf("copy job error (job %s): %w", jobRef(job), err)
 	}
 
 	return nil
@@ -631,10 +631,10 @@ func (d *BigQueryDestination) runCombinedGCSLoadJob(
 
 	status, err := job.Wait(ctx)
 	if err != nil {
-		return fmt.Errorf("combined load job failed: %w", err)
+		return fmt.Errorf("combined load job failed (job %s): %w", jobRef(job), err)
 	}
 	if err := status.Err(); err != nil {
-		return fmt.Errorf("combined load job error: %w", err)
+		return fmt.Errorf("combined load job error (job %s): %w", jobRef(job), err)
 	}
 
 	config.Debug("[DEST] Combined load job finished for %s.%s", dataset, table)
@@ -697,7 +697,7 @@ func (d *BigQueryDestination) runSingleLoadJob(
 				}
 				continue
 			}
-			return fmt.Errorf("load job failed for chunk %d: %w", chunk.index+1, err)
+			return fmt.Errorf("load job failed for chunk %d (job %s): %w", chunk.index+1, jobRef(job), err)
 		}
 		if err := status.Err(); err != nil {
 			if attempt < maxAttempts && isRetryableLoadJobError(err) {
@@ -708,7 +708,7 @@ func (d *BigQueryDestination) runSingleLoadJob(
 				}
 				continue
 			}
-			return fmt.Errorf("load job error for chunk %d: %w", chunk.index+1, err)
+			return fmt.Errorf("load job error for chunk %d (job %s): %w", chunk.index+1, jobRef(job), err)
 		}
 
 		config.Debug("[DEST] Load job finished for chunk %d into %s.%s", chunk.index+1, dataset, table)
@@ -754,16 +754,20 @@ func isRetryableLoadJobError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "ratelimitexceeded") ||
 		strings.Contains(msg, "quotaexceeded") ||
-		strings.Contains(msg, "exceeded rate limits")
+		strings.Contains(msg, "exceeded rate limits") ||
+		strings.Contains(msg, "jobbackenderror") ||
+		strings.Contains(msg, "backenderror")
 }
 
 func isRetryableLoadJobReason(reason string, message string) bool {
 	switch strings.ToLower(reason) {
-	case "ratelimitexceeded", "quotaexceeded":
+	case "ratelimitexceeded", "quotaexceeded", "backenderror", "jobbackenderror":
 		return true
 	}
 
-	return strings.Contains(strings.ToLower(message), "exceeded rate limits")
+	msg := strings.ToLower(message)
+	return strings.Contains(msg, "exceeded rate limits") ||
+		strings.Contains(msg, "retrying the job may solve the problem")
 }
 
 func sleepWithContextForLoadJob(ctx context.Context, d time.Duration) error {

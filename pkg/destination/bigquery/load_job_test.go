@@ -488,8 +488,33 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "bigquery backend error reason",
+			err:  gcbq.Error{Reason: "backendError", Message: "The job encountered an error during execution."},
+			want: true,
+		},
+		{
+			name: "bigquery job backend error reason variant",
+			err:  gcbq.Error{Reason: "jobBackendError", Message: "boom"},
+			want: true,
+		},
+		{
+			name: "bigquery backend error message hint",
+			err:  gcbq.Error{Reason: "", Message: "The job encountered an error during execution. Retrying the job may solve the problem."},
+			want: true,
+		},
+		{
+			name: "wrapped backend error pointer",
+			err:  fmt.Errorf("wrapped: %w", &gcbq.Error{Reason: "backendError", Message: "boom"}),
+			want: true,
+		},
+		{
 			name: "non retryable invalid error",
 			err:  gcbq.Error{Reason: "invalid", Message: "bad request"},
+			want: false,
+		},
+		{
+			name: "non retryable internal error (deterministic)",
+			err:  gcbq.Error{Reason: "internalError", Message: "internal"},
 			want: false,
 		},
 	}

@@ -49,8 +49,8 @@ func TestMergeStrategy_Execute_HappyPath(t *testing.T) {
 	}
 
 	staging := dest.prepareCalls[1].Table
-	if !strings.HasPrefix(staging, "ds.tbl_merge_") {
-		t.Fatalf("staging table = %q, expected prefix %q", staging, "ds.tbl_merge_")
+	if !strings.HasPrefix(staging, "_bruin_staging.ds__tbl_merge_") {
+		t.Fatalf("staging table = %q, expected prefix %q", staging, "_bruin_staging.ds__tbl_merge_")
 	}
 	if !dest.prepareCalls[1].DropFirst {
 		t.Fatalf("staging table PrepareTable should set DropFirst=true")

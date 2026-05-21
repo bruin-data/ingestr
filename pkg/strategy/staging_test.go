@@ -13,19 +13,19 @@ func TestGenerateStagingTableName(t *testing.T) {
 		stagingDataset string
 		wantPrefix     string
 	}{
-		{"schema with no staging dataset", "analytics.users", "merge", "", "analytics.users_merge_"},
-		{"schema with staging dataset", "analytics.users", "merge", "my_staging", "my_staging.users_merge_"},
-		{"no schema no staging dataset", "users", "merge", "", "users_merge_"},
+		{"schema with no staging dataset", "analytics.users", "merge", "", "_bruin_staging.analytics__users_merge_"},
+		{"schema with staging dataset", "analytics.users", "merge", "my_staging", "my_staging.analytics__users_merge_"},
+		{"no schema no staging dataset", "users", "merge", "", "_bruin_staging.users_merge_"},
 		{"no schema with staging dataset", "users", "merge", "my_staging", "my_staging.users_merge_"},
 
-		{"staging suffix", "analytics.users", "staging", "", "analytics.users_staging_"},
-		{"staging suffix with dataset", "analytics.users", "staging", "stg", "stg.users_staging_"},
+		{"staging suffix", "analytics.users", "staging", "", "_bruin_staging.analytics__users_staging_"},
+		{"staging suffix with dataset", "analytics.users", "staging", "stg", "stg.analytics__users_staging_"},
 
-		{"di suffix", "ds.tbl", "di", "", "ds.tbl_di_"},
-		{"di suffix with dataset", "ds.tbl", "di", "staging_ds", "staging_ds.tbl_di_"},
+		{"di suffix", "ds.tbl", "di", "", "_bruin_staging.ds__tbl_di_"},
+		{"di suffix with dataset", "ds.tbl", "di", "staging_ds", "staging_ds.ds__tbl_di_"},
 
-		{"scd2 suffix", "ds.tbl", "scd2", "", "ds.tbl_scd2_"},
-		{"scd2 suffix with dataset", "ds.tbl", "scd2", "staging_ds", "staging_ds.tbl_scd2_"},
+		{"scd2 suffix", "ds.tbl", "scd2", "", "_bruin_staging.ds__tbl_scd2_"},
+		{"scd2 suffix with dataset", "ds.tbl", "scd2", "staging_ds", "staging_ds.ds__tbl_scd2_"},
 	}
 
 	for _, tt := range tests {

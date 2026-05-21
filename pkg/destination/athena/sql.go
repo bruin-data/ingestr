@@ -28,6 +28,8 @@ func validateIdent(ident string) error {
 	return nil
 }
 
+// formatQualifiedTable returns a Trino-style double-quoted identifier (used for CTAS,
+// SELECT, INSERT, DROP TABLE — anything that goes through Athena's DML/Trino parser).
 func formatQualifiedTable(database, table string) (string, error) {
 	if err := validateIdent(database); err != nil {
 		return "", fmt.Errorf("invalid database name: %w", err)
@@ -35,7 +37,20 @@ func formatQualifiedTable(database, table string) (string, error) {
 	if err := validateIdent(table); err != nil {
 		return "", fmt.Errorf("invalid table name: %w", err)
 	}
-	return database + "." + table, nil
+	return fmt.Sprintf(`"%s"."%s"`, database, table), nil
+}
+
+// formatQualifiedTableHive returns a Hive-style backtick identifier (used for SHOW
+// CREATE TABLE, ALTER TABLE RENAME, CREATE DATABASE — anything that goes through
+// Athena's DDL/Hive parser, which rejects double quotes).
+func formatQualifiedTableHive(database, table string) (string, error) {
+	if err := validateIdent(database); err != nil {
+		return "", fmt.Errorf("invalid database name: %w", err)
+	}
+	if err := validateIdent(table); err != nil {
+		return "", fmt.Errorf("invalid table name: %w", err)
+	}
+	return fmt.Sprintf("`%s`.`%s`", database, table), nil
 }
 
 func escapeSQLString(s string) string {
@@ -59,7 +74,7 @@ func buildCreateIcebergTableSQL(database, table string, columns []schema.Column,
 	// For Iceberg tables, Athena uses CTAS with table properties. `is_external=false` is required
 	// in some environments (managed Iceberg). We create an empty table by selecting NULLs.
 	return fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS %s WITH (table_type='ICEBERG', format='PARQUET', is_external=false, location='%s', write_compression='SNAPPY') AS SELECT %s WHERE 1=0",
+		"CREATE TABLE IF NOT EXISTS %s WITH (table_type='ICEBERG', format='PARQUET', is_external=false, location='%s', write_compression='SNAPPY') AS SELECT %s WITH NO DATA",
 		qualified,
 		escapeSQLString(location),
 		strings.Join(selectCols, ", "),

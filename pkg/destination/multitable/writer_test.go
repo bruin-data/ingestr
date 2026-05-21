@@ -39,7 +39,7 @@ func (d *fakeDestination) WriteParallel(ctx context.Context, records <-chan sour
 	return nil
 }
 
-func (d *fakeDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *fakeDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	return nil
 }
 

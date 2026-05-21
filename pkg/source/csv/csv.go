@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -14,12 +15,19 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/htmlindex"
+	"golang.org/x/text/encoding/ianaindex"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/encoding/unicode/utf32"
+	"golang.org/x/text/transform"
 )
 
 const defaultBatchSize = 10000
 
 type CSVSource struct {
 	filePath string
+	encoding string
 }
 
 func NewCSVSource() *CSVSource {
@@ -31,7 +39,7 @@ func (s *CSVSource) Schemes() []string {
 }
 
 func (s *CSVSource) Connect(ctx context.Context, uri string) error {
-	filePath := extractFilePath(uri)
+	filePath, enc := extractFilePath(uri)
 	if filePath == "" {
 		return fmt.Errorf("invalid CSV URI: %s", uri)
 	}
@@ -45,19 +53,30 @@ func (s *CSVSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.filePath = filePath
-	config.Debug("[CSV] Connected to file: %s", filePath)
+	s.encoding = enc
+	config.Debug("[CSV] Connected to file: %s (encoding=%q)", filePath, enc)
 	return nil
 }
 
-func extractFilePath(uri string) string {
-	for _, prefix := range []string{"csv://", "csv:"} {
-		if strings.HasPrefix(uri, prefix) {
-			path := strings.TrimPrefix(uri, prefix)
-			path = strings.TrimPrefix(path, "//")
-			return path
-		}
+func extractFilePath(uri string) (path, encoding string) {
+	if !strings.HasPrefix(uri, "csv:") {
+		return "", ""
 	}
-	return ""
+	rest := strings.TrimPrefix(uri, "csv:")
+	rest = strings.TrimPrefix(rest, "//")
+
+	if i := strings.Index(rest, "?"); i >= 0 {
+		if q, err := url.ParseQuery(rest[i+1:]); err == nil {
+			encoding = q.Get("encoding")
+		}
+		rest = rest[:i]
+	}
+
+	if decoded, err := url.PathUnescape(rest); err == nil {
+		rest = decoded
+	}
+
+	return rest, encoding
 }
 
 func (s *CSVSource) Close(ctx context.Context) error {
@@ -105,11 +124,17 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 
 	results := make(chan source.RecordBatchResult, 8)
 
+	decoded, decodeErr := Decode(f, s.encoding)
+	if decodeErr != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("failed to set up CSV decoder: %w", decodeErr)
+	}
+
 	go func() {
 		defer close(results)
 		defer func() { _ = f.Close() }()
 
-		csvReader := csv.NewReader(f)
+		csvReader := csv.NewReader(decoded)
 		csvReader.FieldsPerRecord = -1
 
 		headers, err := csvReader.Read()
@@ -250,3 +275,38 @@ func containsHeader(headers []string, key string) bool {
 }
 
 var _ source.Source = (*CSVSource)(nil)
+
+func Decode(r io.Reader, encName string) (io.Reader, error) {
+	if encName != "" {
+		enc, err := resolveEncoding(encName)
+		if err != nil {
+			return nil, err
+		}
+		return transform.NewReader(r, enc.NewDecoder()), nil
+	}
+	return transform.NewReader(r, unicode.BOMOverride(transform.Nop)), nil
+}
+
+func resolveEncoding(name string) (encoding.Encoding, error) {
+	switch strings.ToLower(strings.ReplaceAll(name, "_", "-")) {
+	case "utf-16le", "utf-16-le":
+		return unicode.UTF16(unicode.LittleEndian, unicode.UseBOM), nil
+	case "utf-16be", "utf-16-be":
+		return unicode.UTF16(unicode.BigEndian, unicode.UseBOM), nil
+	case "utf-16":
+		return unicode.UTF16(unicode.LittleEndian, unicode.UseBOM), nil
+	case "utf-32le", "utf-32-le":
+		return utf32.UTF32(utf32.LittleEndian, utf32.UseBOM), nil
+	case "utf-32be", "utf-32-be":
+		return utf32.UTF32(utf32.BigEndian, utf32.UseBOM), nil
+	case "utf-32":
+		return utf32.UTF32(utf32.BigEndian, utf32.UseBOM), nil
+	}
+	if enc, err := htmlindex.Get(name); err == nil && enc != nil {
+		return enc, nil
+	}
+	if enc, err := ianaindex.IANA.Encoding(name); err == nil && enc != nil {
+		return enc, nil
+	}
+	return nil, fmt.Errorf("unsupported encoding: %s", name)
+}

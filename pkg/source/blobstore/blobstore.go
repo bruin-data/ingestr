@@ -30,6 +30,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	csvsource "github.com/bruin-data/ingestr/pkg/source/csv"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/api/iterator"
@@ -254,13 +255,14 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 
 	var bucket, pattern string
 	var formatHint FileFormat
+	var tableEncoding string
 
 	if s.provider == ProviderSFTP {
-		bucket, pattern, formatHint = parseSFTPTablePattern(table)
-		config.Debug("[BLOBSTORE-SRC] Reading from SFTP pattern=%s, formatHint=%s", pattern, formatHint)
+		bucket, pattern, formatHint, tableEncoding = parseSFTPTablePattern(table)
+		config.Debug("[BLOBSTORE-SRC] Reading from SFTP pattern=%s, formatHint=%s, encoding=%q", pattern, formatHint, tableEncoding)
 	} else {
-		bucket, pattern, formatHint = parseTablePattern(table)
-		config.Debug("[BLOBSTORE-SRC] Reading from bucket=%s, pattern=%s, formatHint=%s", bucket, pattern, formatHint)
+		bucket, pattern, formatHint, tableEncoding = parseTablePattern(table)
+		config.Debug("[BLOBSTORE-SRC] Reading from bucket=%s, pattern=%s, formatHint=%s, encoding=%q", bucket, pattern, formatHint, tableEncoding)
 	}
 
 	batchSize := opts.PageSize
@@ -289,7 +291,7 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 					return
 				default:
 				}
-				s.processFile(ctx, bucket, fileKey, formatHint, batchSize, opts, results)
+				s.processFile(ctx, bucket, fileKey, formatHint, tableEncoding, batchSize, opts, results)
 			}
 		}()
 	}
@@ -319,7 +321,7 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 	return results, nil
 }
 
-func (s *BlobstoreSource) processFile(ctx context.Context, bucket, fileKey string, formatHint FileFormat, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) {
+func (s *BlobstoreSource) processFile(ctx context.Context, bucket, fileKey string, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) {
 	startFile := time.Now()
 	format := detectFileFormat(fileKey, formatHint)
 	if format == FormatUnknown {
@@ -365,7 +367,7 @@ func (s *BlobstoreSource) processFile(ctx context.Context, bucket, fileKey strin
 	case FormatJSONL:
 		err = s.readJSONLFile(ctx, dataReader, results, &totalRows, &batchNum, batchSize, opts)
 	case FormatCSV:
-		err = s.readCSVFile(ctx, dataReader, results, &totalRows, &batchNum, batchSize, opts)
+		err = s.readCSVFile(ctx, dataReader, tableEncoding, results, &totalRows, &batchNum, batchSize, opts)
 	}
 
 	if err != nil {
@@ -598,8 +600,12 @@ func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, r
 	return nil
 }
 
-func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
-	csvReader := csv.NewReader(reader)
+func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tableEncoding string, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
+	decoded, err := csvsource.Decode(reader, tableEncoding)
+	if err != nil {
+		return fmt.Errorf("failed to set up CSV decoder: %w", err)
+	}
+	csvReader := csv.NewReader(decoded)
 	csvReader.FieldsPerRecord = -1
 
 	headers, err := csvReader.Read()
@@ -751,13 +757,23 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 	return parsed, nil
 }
 
-func parseSFTPTablePattern(table string) (bucket, pattern string, formatHint FileFormat) {
-	formatHint = FormatUnknown
-
-	if idx := strings.Index(table, "#"); idx != -1 {
-		hint := strings.ToLower(table[idx+1:])
-		table = table[:idx]
-		switch hint {
+func parseTableHints(s string) (FileFormat, string) {
+	formatHint := FormatUnknown
+	encoding := ""
+	for _, hint := range strings.Split(s, ",") {
+		hint = strings.TrimSpace(hint)
+		if hint == "" {
+			continue
+		}
+		if eq := strings.Index(hint, "="); eq > 0 {
+			key := strings.ToLower(hint[:eq])
+			val := hint[eq+1:]
+			if key == "encoding" {
+				encoding = val
+			}
+			continue
+		}
+		switch strings.ToLower(hint) {
 		case "csv":
 			formatHint = FormatCSV
 		case "jsonl", "ndjson":
@@ -765,6 +781,16 @@ func parseSFTPTablePattern(table string) (bucket, pattern string, formatHint Fil
 		case "parquet":
 			formatHint = FormatParquet
 		}
+	}
+	return formatHint, encoding
+}
+
+func parseSFTPTablePattern(table string) (bucket, pattern string, formatHint FileFormat, encoding string) {
+	formatHint = FormatUnknown
+
+	if idx := strings.Index(table, "#"); idx != -1 {
+		formatHint, encoding = parseTableHints(table[idx+1:])
+		table = table[:idx]
 	}
 
 	if !strings.HasPrefix(table, "/") {
@@ -772,30 +798,22 @@ func parseSFTPTablePattern(table string) (bucket, pattern string, formatHint Fil
 	}
 
 	pattern = strings.TrimPrefix(table, "/")
-	return "", pattern, formatHint
+	return "", pattern, formatHint, encoding
 }
 
-func parseTablePattern(table string) (bucket, pattern string, formatHint FileFormat) {
+func parseTablePattern(table string) (bucket, pattern string, formatHint FileFormat, encoding string) {
 	formatHint = FormatUnknown
 
 	if idx := strings.Index(table, "#"); idx != -1 {
-		hint := strings.ToLower(table[idx+1:])
+		formatHint, encoding = parseTableHints(table[idx+1:])
 		table = table[:idx]
-		switch hint {
-		case "csv":
-			formatHint = FormatCSV
-		case "jsonl", "ndjson":
-			formatHint = FormatJSONL
-		case "parquet":
-			formatHint = FormatParquet
-		}
 	}
 
 	parts := strings.SplitN(table, "/", 2)
 	if len(parts) == 1 {
-		return parts[0], "*", formatHint
+		return parts[0], "*", formatHint, encoding
 	}
-	return parts[0], parts[1], formatHint
+	return parts[0], parts[1], formatHint, encoding
 }
 
 func extractPrefix(pattern string) string {

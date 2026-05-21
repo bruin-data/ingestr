@@ -9,6 +9,9 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
+// bigQueryMaxPKColumns is BigQuery's hard limit on PRIMARY KEY column count.
+const bigQueryMaxPKColumns = 16
+
 // MapDataTypeToBigQuery maps internal DataType to BigQuery FieldType.
 func MapDataTypeToBigQuery(col schema.Column) bigquery.FieldType {
 	switch col.DataType {
@@ -98,10 +101,19 @@ func BuildTableMetadata(tableSchema *schema.TableSchema, primaryKeys []string, l
 	}
 
 	if len(primaryKeys) > 0 {
-		metadata.TableConstraints = &bigquery.TableConstraints{
-			PrimaryKey: &bigquery.PrimaryKey{
-				Columns: primaryKeys,
-			},
+		// BigQuery rejects PRIMARY KEY constraints with more than 16 columns.
+		// The constraint is NOT ENFORCED (informational only), and MERGE SQL
+		// keys on the in-memory PK list independently, so skipping it here is safe.
+		if len(primaryKeys) > bigQueryMaxPKColumns {
+			fmt.Printf("[WARNING] BigQuery supports at most %d primary key columns; "+
+				"creating table without PRIMARY KEY constraint (got %d cols)\n",
+				bigQueryMaxPKColumns, len(primaryKeys))
+		} else {
+			metadata.TableConstraints = &bigquery.TableConstraints{
+				PrimaryKey: &bigquery.PrimaryKey{
+					Columns: primaryKeys,
+				},
+			}
 		}
 	}
 

@@ -194,29 +194,40 @@ func (d *TrinoDestination) writeBatch(ctx context.Context, records <-chan source
 	return nil
 }
 
-func (d *TrinoDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
-	stagingCatalog, stagingSchema, stagingName := d.parseTableName(stagingTable)
-	targetCatalog, targetSchema, targetName := d.parseTableName(targetTable)
+	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
+	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
-	oldName := targetName + "_old_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	stagingFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", stagingCatalog, stagingSchema, stagingName)
+	targetFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", targetCatalog, targetSchema, targetName)
+	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
+	oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("trino"))
+	oldFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", targetCatalog, targetSchema, oldName)
 
-	renameOldSQL := fmt.Sprintf("ALTER TABLE \"%s\".\"%s\".\"%s\" RENAME TO \"%s\"",
-		targetCatalog, targetSchema, targetName, oldName)
+	// Replace only PrepareTables the staging side, so the target schema may
+	// not exist yet on first run with the _bruin_staging design.
+	if err := d.ensureSchemaExists(ctx, targetCatalog, targetSchema); err != nil {
+		return fmt.Errorf("failed to ensure target schema exists: %w", err)
+	}
+
+	// Rename the existing target out of the way (within its own schema).
+	renameOldSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", targetFQN, oldFQN)
 	if _, err := d.db.ExecContext(ctx, renameOldSQL); err != nil {
 		config.Debug("[TRINO] No existing table to rename (this is OK for first run): %v", err)
 	}
 
-	renameNewSQL := fmt.Sprintf("ALTER TABLE \"%s\".\"%s\".\"%s\" RENAME TO \"%s\"",
-		stagingCatalog, stagingSchema, stagingName, targetName)
+	// Cross-schema move: Trino requires the new name to be fully qualified when
+	// renaming across schemas; a bare identifier renames in-place within the
+	// staging schema and the table never reaches the target schema.
+	renameNewSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingFQN, targetFQN)
 	if _, err := d.db.ExecContext(ctx, renameNewSQL); err != nil {
 		config.LogFailedQuery(renameNewSQL, err)
 		return fmt.Errorf("failed to rename staging to target: %w", err)
 	}
 
-	dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS \"%s\".\"%s\".\"%s\"",
-		targetCatalog, targetSchema, oldName)
+	dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", oldFQN)
 	_, _ = d.db.ExecContext(ctx, dropOldSQL)
 
 	config.Debug("[TRINO] Table swap completed in %v", time.Since(startSwap))
@@ -497,8 +508,11 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 	}
 
 	username := ""
+	password := ""
+	hasPassword := false
 	if parsed.User != nil {
 		username = parsed.User.Username()
+		password, hasPassword = parsed.User.Password()
 	}
 	if username == "" {
 		username = "trino"
@@ -506,18 +520,24 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 
 	scheme := "http"
 	query := parsed.Query()
-	if query.Get("secure") == "true" || query.Get("SSL") == "true" {
+	if query.Get("secure") == "true" || query.Get("SSL") == "true" || strings.EqualFold(query.Get("http_scheme"), "https") {
 		scheme = "https"
 	}
 
+	userinfo := url.PathEscape(username)
+	if hasPassword {
+		userinfo = url.PathEscape(username) + ":" + url.PathEscape(password)
+	}
+
 	dsn = fmt.Sprintf("%s://%s@%s:%s?catalog=%s&schema=%s",
-		scheme, username, host, port, catalog, schemaName)
+		scheme, userinfo, host, port, catalog, schemaName)
 
 	for key, values := range query {
-		if key != "secure" && key != "SSL" {
-			for _, v := range values {
-				dsn += fmt.Sprintf("&%s=%s", key, url.QueryEscape(v))
-			}
+		if key == "secure" || key == "SSL" || key == "http_scheme" {
+			continue
+		}
+		for _, v := range values {
+			dsn += fmt.Sprintf("&%s=%s", url.QueryEscape(key), url.QueryEscape(v))
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -235,6 +236,7 @@ var tables = map[string]tableConfig{
 	"invoice_item":          {eventTypeFilter: "invoiceitem.*", objectType: "invoiceitem"},
 	"payment_intent":        {eventTypeFilter: "payment_intent.*", objectType: "payment_intent"},
 	"payment_link":          {noDateFilter: true, eventTypeFilter: "payment_link.*", objectType: "payment_link"},
+	"payment_record":        {},
 	"payment_method":        {noDateFilter: true, eventTypeFilter: "payment_method.*", objectType: "payment_method"},
 	"payout":                {eventTypeFilter: "payout.*", objectType: "payout"},
 	"plan":                  {eventTypeFilter: "plan.*", objectType: "plan"},
@@ -332,6 +334,8 @@ func (s *StripeSource) hasRecordsInRange(tableName string, start, end time.Time)
 	case "invoice_item":
 		it = invoiceitem.List(&stripe.InvoiceItemListParams{ListParams: lp, CreatedRange: cr})
 	case "payment_intent":
+		it = paymentintent.List(&stripe.PaymentIntentListParams{ListParams: lp, CreatedRange: cr})
+	case "payment_record":
 		it = paymentintent.List(&stripe.PaymentIntentListParams{ListParams: lp, CreatedRange: cr})
 	case "payout":
 		it = payout.List(&stripe.PayoutListParams{ListParams: lp, CreatedRange: cr})
@@ -910,6 +914,8 @@ func (s *StripeSource) readTable(ctx context.Context, tableName string, opts sou
 		return s.readInvoiceItems(ctx, opts, batchSize, intervalStart, intervalEnd, results)
 	case "payment_intent":
 		return s.readPaymentIntents(ctx, opts, batchSize, intervalStart, intervalEnd, results)
+	case "payment_record":
+		return s.readPaymentRecords(ctx, opts, batchSize, intervalStart, intervalEnd, results)
 	case "payment_link":
 		return s.readPaymentLinks(ctx, opts, batchSize, intervalStart, intervalEnd, results)
 	case "payment_method":
@@ -1343,6 +1349,145 @@ func (s *StripeSource) readPaymentIntents(ctx context.Context, opts source.ReadO
 		}
 		return extractRawListItems(iter.PaymentIntentList().LastResponse.RawJSON)
 	})
+}
+
+// readPaymentRecords lists PaymentIntents in the interval and concurrently
+// fetches the corresponding PaymentRecord via /v1/payment_records/{id} for
+// each one. PaymentIntents without an associated PaymentRecord (e.g.,
+// orchestration not enabled) are skipped.
+func (s *StripeSource) readPaymentRecords(ctx context.Context, opts source.ReadOptions, batchSize int, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {
+	config.Debug("[STRIPE] Fetching payment records via payment intents")
+
+	fetchCtx, cancelFetch := context.WithCancel(ctx)
+	defer cancelFetch()
+
+	piParams := &stripe.PaymentIntentListParams{}
+	piParams.Context = fetchCtx
+	piParams.Limit = stripe.Int64(int64(batchSize))
+
+	if intervalStart != nil || intervalEnd != nil {
+		piParams.CreatedRange = &stripe.RangeQueryParams{}
+		if intervalStart != nil {
+			piParams.CreatedRange.GreaterThanOrEqual = intervalStart.Unix()
+		}
+		if intervalEnd != nil {
+			piParams.CreatedRange.LesserThanOrEqual = intervalEnd.Unix()
+		}
+	}
+
+	const fetchWorkers = 5
+	objChan := make(chan map[string]interface{}, fetchWorkers)
+	sem := make(chan struct{}, fetchWorkers)
+	errChan := make(chan error, 1)
+	var wg sync.WaitGroup
+
+	go func() {
+		defer func() {
+			wg.Wait()
+			close(objChan)
+		}()
+
+		iter := paymentintent.List(piParams)
+		for iter.Next() {
+			select {
+			case <-fetchCtx.Done():
+				return
+			case sem <- struct{}{}:
+			}
+
+			pi := iter.PaymentIntent()
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				pr, err := fetchPaymentRecord(fetchCtx, id)
+				if err != nil {
+					if fetchCtx.Err() == nil {
+						config.Debug("[STRIPE] Skipping payment_record for payment_intent %s: %v", id, err)
+					}
+					return
+				}
+
+				select {
+				case objChan <- pr:
+				case <-fetchCtx.Done():
+				}
+			}(pi.ID)
+		}
+
+		if err := iter.Err(); err != nil && fetchCtx.Err() == nil {
+			select {
+			case errChan <- fmt.Errorf("failed to list payment_intents for payment_record: %w", err):
+			default:
+			}
+		}
+	}()
+
+	var items []map[string]interface{}
+	batchNum := 0
+	totalSent := 0
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert payment_record to Arrow: %w", err)
+		}
+		batchNum++
+		totalSent += len(items)
+		config.Debug("[STRIPE] Sending batch %d with %d payment_record (total sent: %d)", batchNum, len(items), totalSent)
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		return nil
+	}
+
+	for obj := range objChan {
+		items = append(items, obj)
+
+		if len(items) >= batchSize {
+			if err := flush(); err != nil {
+				cancelFetch()
+				return err
+			}
+			if opts.Limit > 0 && totalSent >= opts.Limit {
+				config.Debug("[STRIPE] Reached limit of %d payment_record", opts.Limit)
+				cancelFetch()
+				return nil
+			}
+		}
+	}
+
+	if err := flush(); err != nil {
+		return err
+	}
+
+	select {
+	case err := <-errChan:
+		return err
+	default:
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	if totalSent == 0 {
+		config.Debug("[STRIPE] No payment_record found")
+	}
+	return nil
+}
+
+func fetchPaymentRecord(ctx context.Context, id string) (map[string]interface{}, error) {
+	path := fmt.Sprintf("/v1/payment_records/%s", id)
+	params := &stripe.RawParams{Params: stripe.Params{Context: ctx}}
+	resp, err := stripe.RawRequest(http.MethodGet, path, "", params)
+	if err != nil {
+		return nil, err
+	}
+	return parseRawResponse(resp.RawJSON)
 }
 
 func (s *StripeSource) readPaymentLinks(ctx context.Context, opts source.ReadOptions, batchSize int, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {

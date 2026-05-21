@@ -142,6 +142,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		IntervalStart:      intervalStart,
 		IntervalEnd:        intervalEnd,
 		Columns:            job.Schema.ColumnNames(),
+		PrimaryKeys:        job.Config.PrimaryKeys,
 	}); err != nil {
 		return fmt.Errorf("failed to delete+insert data: %w", err)
 	}

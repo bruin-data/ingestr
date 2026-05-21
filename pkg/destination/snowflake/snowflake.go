@@ -317,20 +317,29 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 	return nil
 }
 
-func (d *SnowflakeDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *SnowflakeDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
 	stagingSchema, stagingName := parseSchemaTable(stagingTable)
 	targetSchema, targetName := parseSchemaTable(targetTable)
 
 	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
 	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
 
+	// Replace only PrepareTables the staging side, so the target schema may
+	// not exist yet. Both SWAP WITH and the rename fallback require it.
+	if err := d.ensureSchemaExists(ctx, targetSchema); err != nil {
+		return fmt.Errorf("failed to ensure target schema exists: %w", err)
+	}
+
 	swapSQL := fmt.Sprintf("ALTER TABLE %s SWAP WITH %s", stagingFull, targetFull)
 	if _, err := d.db.ExecContext(ctx, swapSQL); err != nil {
 		config.Debug("[DEST] SWAP WITH failed (target may not exist yet): %v, falling back to rename", err)
 
-		tempName := targetName + "_OLD_" + fmt.Sprintf("%d", time.Now().UnixNano())
+		tempNameCandidate := fmt.Sprintf("%s_OLD_%d", targetName, time.Now().UnixNano())
+		tempName := destination.ShortenIdentifier(tempNameCandidate, tempNameCandidate, destination.MaxIdentifierLength("snowflake"))
 		tempFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(tempName)
 		targetFullNew := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
 

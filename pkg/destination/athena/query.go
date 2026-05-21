@@ -69,7 +69,7 @@ func (d *AthenaDestination) queryAll(ctx context.Context, query, database string
 }
 
 func (d *AthenaDestination) ensureIcebergTable(ctx context.Context, database, table string) error {
-	qualified, err := formatQualifiedTable(database, table)
+	qualified, err := formatQualifiedTableHive(database, table)
 	if err != nil {
 		return err
 	}

@@ -66,10 +66,11 @@ func TestMapTrinoToDataType(t *testing.T) {
 
 func TestParseTrinoURI(t *testing.T) {
 	tests := []struct {
-		uri         string
-		wantCatalog string
-		wantSchema  string
-		wantInDSN   []string
+		uri          string
+		wantCatalog  string
+		wantSchema   string
+		wantInDSN    []string
+		wantNotInDSN []string
 	}{
 		{
 			uri:         "trino://user@localhost:8080/mycat/myschema",
@@ -96,16 +97,25 @@ func TestParseTrinoURI(t *testing.T) {
 			wantInDSN:   []string{"http://", "user:secret@host:8443"},
 		},
 		{
-			uri:         "trino://user:secret@host:8443/cat?http_scheme=https",
-			wantCatalog: "cat",
-			wantSchema:  "default",
-			wantInDSN:   []string{"https://", "user:secret@host:8443"},
+			uri:          "trino://user:secret@host:8443/cat?http_scheme=https",
+			wantCatalog:  "cat",
+			wantSchema:   "default",
+			wantInDSN:    []string{"https://", "user:secret@host:8443"},
+			wantNotInDSN: []string{"http_scheme"},
 		},
 		{
-			uri:         "trino://user@host:443/cat/sch?secure=true",
-			wantCatalog: "cat",
-			wantSchema:  "sch",
-			wantInDSN:   []string{"https://", "user@host:443", "catalog=cat", "schema=sch"},
+			uri:          "trino://user@host:443/cat/sch?secure=true",
+			wantCatalog:  "cat",
+			wantSchema:   "sch",
+			wantInDSN:    []string{"https://", "user@host:443", "catalog=cat", "schema=sch"},
+			wantNotInDSN: []string{"secure=", "SSL="},
+		},
+		{
+			uri:          "trino://user@host:443/cat?SSL=true",
+			wantCatalog:  "cat",
+			wantSchema:   "default",
+			wantInDSN:    []string{"https://", "user@host:443"},
+			wantNotInDSN: []string{"SSL=", "secure="},
 		},
 	}
 
@@ -124,6 +134,11 @@ func TestParseTrinoURI(t *testing.T) {
 			for _, want := range tt.wantInDSN {
 				if !strings.Contains(dsn, want) {
 					t.Errorf("dsn %q missing %q", dsn, want)
+				}
+			}
+			for _, notWant := range tt.wantNotInDSN {
+				if strings.Contains(dsn, notWant) {
+					t.Errorf("dsn %q should not contain %q", dsn, notWant)
 				}
 			}
 		})

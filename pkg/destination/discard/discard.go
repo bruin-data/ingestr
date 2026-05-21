@@ -93,8 +93,8 @@ func (d *DiscardDestination) GetSchema(ctx context.Context, table string) (*sche
 	}, nil
 }
 
-func (d *DiscardDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
-	config.Debug("[DISCARD] SwapTable called: %s -> %s (no-op)", stagingTable, targetTable)
+func (d *DiscardDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	config.Debug("[DISCARD] SwapTable called: %s -> %s (no-op)", opts.StagingTable, opts.TargetTable)
 	return nil
 }
 

@@ -363,7 +363,7 @@ func (d *ElasticsearchDestination) flushBulk(ctx context.Context, buf *bytes.Buf
 	return int64(len(bulkRes.Items)), nil
 }
 
-func (d *ElasticsearchDestination) SwapTable(_ context.Context, _, _ string) error {
+func (d *ElasticsearchDestination) SwapTable(_ context.Context, _ destination.SwapOptions) error {
 	return errors.New("elasticsearch destination does not support atomic swap")
 }
 

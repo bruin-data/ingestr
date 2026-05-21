@@ -109,6 +109,12 @@ func (d *MySQLDestination) Close(ctx context.Context) error {
 }
 
 func (d *MySQLDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if database, _ := splitDatabaseTable(opts.Table); database != "" {
+		if err := d.ensureDatabaseExists(ctx, database); err != nil {
+			return err
+		}
+	}
+
 	if opts.DropFirst {
 		startDrop := time.Now()
 		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTable(opts.Table))
@@ -130,6 +136,40 @@ func (d *MySQLDestination) PrepareTable(ctx context.Context, opts destination.Pr
 	}
 
 	return nil
+}
+
+func (d *MySQLDestination) ensureDatabaseExists(ctx context.Context, database string) error {
+	if database == "" || database == d.database {
+		return nil
+	}
+	// CREATE DATABASE IF NOT EXISTS still requires the global CREATE privilege
+	// even when the database already exists. Check first so a pre-created DB
+	// with table-level grants works without granting CREATE globally.
+	var exists bool
+	if err := d.db.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = ?)",
+		database).Scan(&exists); err != nil {
+		return fmt.Errorf("failed to check if database %s exists: %w", database, err)
+	}
+	if exists {
+		return nil
+	}
+	escaped := strings.ReplaceAll(database, "`", "``")
+	createSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", escaped)
+	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+		config.LogFailedQuery(createSQL, err)
+		return fmt.Errorf("failed to create database %s: %w", database, err)
+	}
+	config.Debug("[MYSQL] Ensured database exists: %s", database)
+	return nil
+}
+
+func splitDatabaseTable(table string) (string, string) {
+	parts := strings.SplitN(table, ".", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "", table
 }
 
 func (d *MySQLDestination) DropTable(ctx context.Context, table string) error {
@@ -244,10 +284,29 @@ func (d *MySQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 	return numRows, nil
 }
 
-func (d *MySQLDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *MySQLDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
-	oldTable := targetTable + "_old_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
+
+	targetDB, targetTableName := splitDatabaseTable(targetTable)
+	if targetDB == "" {
+		targetDB = d.database
+	}
+
+	// Replace only PrepareTables the staging side, so the target database may
+	// not exist yet. RENAME TABLE doesn't auto-create databases.
+	if err := d.ensureDatabaseExists(ctx, targetDB); err != nil {
+		return fmt.Errorf("failed to ensure target database exists: %w", err)
+	}
+
+	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetTableName, time.Now().UnixNano())
+	oldTableName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("mysql"))
+	oldTable := oldTableName
+	if targetDB != "" {
+		oldTable = targetDB + "." + oldTableName
+	}
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -256,8 +315,9 @@ func (d *MySQLDestination) SwapTable(ctx context.Context, stagingTable, targetTa
 
 	var exists int
 	err = tx.QueryRowContext(ctx, fmt.Sprintf(
-		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '%s'",
-		extractTableName(targetTable),
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '%s' AND table_name = '%s'",
+		strings.ReplaceAll(targetDB, "'", "''"),
+		strings.ReplaceAll(targetTableName, "'", "''"),
 	)).Scan(&exists)
 	if err != nil {
 		_ = tx.Rollback()

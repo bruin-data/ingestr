@@ -197,17 +197,27 @@ func (d *ClickHouseDestination) writeBatch(ctx context.Context, records <-chan s
 	return nil
 }
 
-func (d *ClickHouseDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
+
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
 
 	stagingDB, stagingName := d.parseTableName(stagingTable)
 	targetDB, targetName := d.parseTableName(targetTable)
+
+	// Replace only PrepareTables the staging side, so the target database may
+	// not exist yet. Both EXCHANGE TABLES and RENAME TABLE require it.
+	if err := d.ensureDatabaseExists(ctx, targetDB); err != nil {
+		return fmt.Errorf("failed to ensure target database exists: %w", err)
+	}
 
 	exchangeSQL := fmt.Sprintf("EXCHANGE TABLES `%s`.`%s` AND `%s`.`%s`", stagingDB, stagingName, targetDB, targetName)
 	if err := d.conn.Exec(ctx, exchangeSQL); err != nil {
 		config.Debug("[CLICKHOUSE] EXCHANGE TABLES failed, falling back to RENAME: %v", err)
 
-		oldName := targetName + "_old_" + fmt.Sprintf("%d", time.Now().UnixNano())
+		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
+		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("clickhouse"))
 
 		renameOldSQL := fmt.Sprintf("RENAME TABLE `%s`.`%s` TO `%s`.`%s`", targetDB, targetName, targetDB, oldName)
 		if err := d.conn.Exec(ctx, renameOldSQL); err != nil {

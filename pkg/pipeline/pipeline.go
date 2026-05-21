@@ -170,6 +170,26 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			if fallback, err := table.GetSchema(ctx); err == nil && fallback != nil && len(fallback.Columns) > 0 {
 				tableSchema = fallback
 				config.Debug("[PIPELINE] Using source-provided schema (%d columns) for empty extract", len(fallback.Columns))
+			} else if synthetic, err := schemainfer.TableSchemaFromColumnOverrides(p.config.Columns, table.Name(), p.config.SchemaNaming); err != nil {
+				return fmt.Errorf("failed to build schema from column overrides: %w", err)
+			} else if synthetic != nil {
+				pks := p.config.PrimaryKeys
+				if len(pks) == 0 {
+					pks = table.PrimaryKeys()
+				}
+				ik := p.config.IncrementalKey
+				if ik == "" {
+					ik = table.IncrementalKey()
+				}
+				partitionCol := resolvePartitionBy(p.config, table)
+				if err := schemainfer.AddKeyColumnsIfMissing(synthetic, pks, ik, partitionCol, p.config.SchemaNaming); err != nil {
+					return fmt.Errorf("failed to add key columns to synthetic schema: %w", err)
+				}
+
+				tableSchema = synthetic
+				bufferedRecords = emptyRecordChannel()
+				fmt.Printf("Warning: table %q produced no rows; creating destination table from --columns\n", table.Name())
+				config.Debug("[PIPELINE] Built synthetic schema with %d columns from --columns", len(synthetic.Columns))
 			} else {
 				fmt.Printf("Warning: table %q has no inferred columns; skipping ingestion\n", table.Name())
 				return nil
@@ -305,6 +325,21 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		jobTracker = tracker
 	}
 
+	var columnMasker *transformer.ColumnMasker
+	if len(p.config.Mask) > 0 {
+		m, err := transformer.NewColumnMasker(p.config.Mask)
+		if err != nil {
+			return fmt.Errorf("invalid mask configuration: %w", err)
+		}
+		if m.HasMasks() {
+			if err := m.ValidateColumns(destSchema); err != nil {
+				return fmt.Errorf("invalid mask configuration: %w", err)
+			}
+			m.ApplyToSchema(destSchema)
+			columnMasker = m
+		}
+	}
+
 	job := &strategy.IngestionJob{
 		Config:              &resolvedConfig,
 		Table:               table,
@@ -317,6 +352,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		DestinationSchema:   p.destinationSchema,
 		ColumnRenamer:       p.columnRenamer,
 		IngestrColumnFiller: p.ingestrColumnFiller,
+		ColumnMasker:        columnMasker,
 	}
 
 	// For known-schema sources with column type overrides, add a type caster
@@ -473,10 +509,13 @@ func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceT
 	}
 
 	// Protect columns specified via --columns from being dropped as all-null
-	if p.config.Columns != "" {
-		if overrides, err := schemaevolution.ParseColumnOverrides(p.config.Columns); err == nil && len(overrides) > 0 {
-			inferrer.ProtectColumns(overrides.Names())
-		}
+	if err := inferrer.ProtectColumnOverrides(p.config.Columns); err != nil {
+		_ = buffer.Close()
+		return nil, nil, err
+	}
+
+	if partitionCol := resolvePartitionBy(p.config, table); partitionCol != "" {
+		inferrer.ProtectColumns([]string{partitionCol})
 	}
 
 	// Infer schema
@@ -501,6 +540,13 @@ func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceT
 	if err := p.applyColumnOverrides(tableSchema); err != nil {
 		_ = buffer.Close()
 		return nil, nil, fmt.Errorf("failed to apply column overrides: %w", err)
+	}
+
+	// For schema-less sources, also append override columns that were never seen
+	// in the data — the buffer reader will fill them with nulls.
+	if err := schemainfer.AppendMissingOverrideColumns(tableSchema, p.config.Columns, p.config.SchemaNaming); err != nil {
+		_ = buffer.Close()
+		return nil, nil, fmt.Errorf("failed to append missing override columns: %w", err)
 	}
 
 	bufferedRecords, err := buffer.Reader(ctx, tableSchema.ToArrowSchema())
@@ -973,8 +1019,13 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 
 	applied := 0
 	for i, col := range sourceSchema.Columns {
-		if override, ok := overrides.Get(col.Name); ok {
-			sourceSchema.Columns[i] = override.ApplyToColumn(col)
+		if override, ok := overrides.GetForColumn(col.Name, p.config.SchemaNaming); ok {
+			newCol := override.ApplyToColumn(col)
+			if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale {
+				fmt.Printf("Column override: %q type changed from %v(p=%v,s=%v) to %v(p=%v,s=%v)\n",
+					col.Name, col.DataType, col.Precision, col.Scale, newCol.DataType, newCol.Precision, newCol.Scale)
+			}
+			sourceSchema.Columns[i] = newCol
 			config.Debug("[PIPELINE] Column override applied: %s -> %v", col.Name, override.DataType)
 			applied++
 		}
@@ -1061,4 +1112,10 @@ func isCDCSource(uri string) bool {
 func cdcSlotSuffix(destURI string) string {
 	h := sha256.Sum256([]byte(destURI))
 	return fmt.Sprintf("%x", h[:3])
+}
+
+func emptyRecordChannel() <-chan source.RecordBatchResult {
+	ch := make(chan source.RecordBatchResult)
+	close(ch)
+	return ch
 }

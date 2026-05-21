@@ -429,7 +429,7 @@ func (d *DynamoDBDestination) batchWrite(ctx context.Context, table string, item
 	return 0, fmt.Errorf("failed to write all items after retries, %d unprocessed", len(input.RequestItems[table]))
 }
 
-func (d *DynamoDBDestination) SwapTable(_ context.Context, _, _ string) error {
+func (d *DynamoDBDestination) SwapTable(_ context.Context, _ destination.SwapOptions) error {
 	return errors.New("dynamodb destination does not support atomic swap")
 }
 

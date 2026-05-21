@@ -112,27 +112,146 @@ func TestParseBlobstoreURI_GCS(t *testing.T) {
 
 func TestParseTablePattern(t *testing.T) {
 	tests := []struct {
-		table       string
-		wantBucket  string
-		wantPattern string
-		wantFormat  FileFormat
+		name         string
+		table        string
+		wantBucket   string
+		wantPattern  string
+		wantFormat   FileFormat
+		wantEncoding string
 	}{
-		{"my_bucket/data/*.csv", "my_bucket", "data/*.csv", FormatUnknown},
-		{"my_bucket/**/*.jsonl", "my_bucket", "**/*.jsonl", FormatUnknown},
-		{"bucket/path/file.parquet", "bucket", "path/file.parquet", FormatUnknown},
-		{"bucket", "bucket", "*", FormatUnknown},
-		{"bucket/logs/event-data#jsonl", "bucket", "logs/event-data", FormatJSONL},
-		{"bucket/data.dat#csv", "bucket", "data.dat", FormatCSV},
-		{"bucket/file#parquet", "bucket", "file", FormatParquet},
-		{"bucket/logs/**/*.log#jsonl", "bucket", "logs/**/*.log", FormatJSONL},
+		// Plain glob/path cases (no hints)
+		{"glob in path", "my_bucket/data/*.csv", "my_bucket", "data/*.csv", FormatUnknown, ""},
+		{"recursive glob", "my_bucket/**/*.jsonl", "my_bucket", "**/*.jsonl", FormatUnknown, ""},
+		{"single file", "bucket/path/file.parquet", "bucket", "path/file.parquet", FormatUnknown, ""},
+		{"bucket only defaults to *", "bucket", "bucket", "*", FormatUnknown, ""},
+		{"deep recursive glob", "bucket/a/b/c/**/*.csv", "bucket", "a/b/c/**/*.csv", FormatUnknown, ""},
+
+		// Format hints alone
+		{"format jsonl", "bucket/logs/event-data#jsonl", "bucket", "logs/event-data", FormatJSONL, ""},
+		{"format ndjson alias", "bucket/data#ndjson", "bucket", "data", FormatJSONL, ""},
+		{"format csv", "bucket/data.dat#csv", "bucket", "data.dat", FormatCSV, ""},
+		{"format parquet", "bucket/file#parquet", "bucket", "file", FormatParquet, ""},
+		{"format hint case-insensitive", "bucket/file#CSV", "bucket", "file", FormatCSV, ""},
+		{"format hint with glob", "bucket/logs/**/*.log#jsonl", "bucket", "logs/**/*.log", FormatJSONL, ""},
+		{"unknown format hint silently ignored", "bucket/file#xml", "bucket", "file", FormatUnknown, ""},
+
+		// Encoding hints alone
+		{"encoding only", "bucket/file.csv#encoding=windows-1252", "bucket", "file.csv", FormatUnknown, "windows-1252"},
+		{"encoding cp1252 alias", "bucket/file.csv#encoding=cp1252", "bucket", "file.csv", FormatUnknown, "cp1252"},
+		{"encoding utf-16le", "bucket/file.csv#encoding=utf-16le", "bucket", "file.csv", FormatUnknown, "utf-16le"},
+		{"encoding utf-32le", "bucket/file.csv#encoding=utf-32le", "bucket", "file.csv", FormatUnknown, "utf-32le"},
+		{"encoding latin1", "bucket/file.csv#encoding=latin1", "bucket", "file.csv", FormatUnknown, "latin1"},
+		{"encoding shift_jis underscore", "bucket/file.csv#encoding=shift_jis", "bucket", "file.csv", FormatUnknown, "shift_jis"},
+		{"encoding key case-insensitive", "bucket/file.csv#ENCODING=windows-1252", "bucket", "file.csv", FormatUnknown, "windows-1252"},
+
+		// Combined hints, both orders
+		{"format then encoding", "bucket/file.dat#csv,encoding=windows-1252", "bucket", "file.dat", FormatCSV, "windows-1252"},
+		{"encoding then format", "bucket/file.dat#encoding=cp1252,csv", "bucket", "file.dat", FormatCSV, "cp1252"},
+		{"format and encoding with whitespace", "bucket/file.dat# csv , encoding=windows-1252 ", "bucket", "file.dat", FormatCSV, "windows-1252"},
+
+		// Edge cases for the hint string
+		{"empty hint after #", "bucket/file.csv#", "bucket", "file.csv", FormatUnknown, ""},
+		{"trailing comma", "bucket/file.csv#csv,", "bucket", "file.csv", FormatCSV, ""},
+		{"unknown key with =", "bucket/file.csv#delim=;", "bucket", "file.csv", FormatUnknown, ""},
+		{"encoding with empty value", "bucket/file.csv#encoding=", "bucket", "file.csv", FormatUnknown, ""},
+		{"three hints, last wins for encoding", "bucket/f#csv,encoding=cp1252,encoding=utf-8", "bucket", "f", FormatCSV, "utf-8"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.table, func(t *testing.T) {
-			bucket, pattern, format := parseTablePattern(tt.table)
-			assert.Equal(t, tt.wantBucket, bucket)
-			assert.Equal(t, tt.wantPattern, pattern)
-			assert.Equal(t, tt.wantFormat, format)
+		t.Run(tt.name, func(t *testing.T) {
+			bucket, pattern, format, encoding := parseTablePattern(tt.table)
+			assert.Equal(t, tt.wantBucket, bucket, "bucket")
+			assert.Equal(t, tt.wantPattern, pattern, "pattern")
+			assert.Equal(t, tt.wantFormat, format, "format")
+			assert.Equal(t, tt.wantEncoding, encoding, "encoding")
+		})
+	}
+}
+
+func TestParseSFTPTablePattern(t *testing.T) {
+	tests := []struct {
+		name         string
+		table        string
+		wantPattern  string
+		wantFormat   FileFormat
+		wantEncoding string
+	}{
+		// Path normalization (leading slash)
+		{"absolute path with slash", "/exports/data.csv", "exports/data.csv", FormatUnknown, ""},
+		{"relative path gets leading slash added then trimmed", "exports/data.csv", "exports/data.csv", FormatUnknown, ""},
+		{"single file no slash", "data.csv", "data.csv", FormatUnknown, ""},
+
+		// Globs
+		{"glob in path", "/exports/*.csv", "exports/*.csv", FormatUnknown, ""},
+		{"recursive glob", "/exports/**/*.jsonl", "exports/**/*.jsonl", FormatUnknown, ""},
+		{"deep recursive glob", "/var/data/a/b/**/*.parquet", "var/data/a/b/**/*.parquet", FormatUnknown, ""},
+
+		// Format hints
+		{"format csv", "/exports/data.dat#csv", "exports/data.dat", FormatCSV, ""},
+		{"format jsonl", "/logs/events#jsonl", "logs/events", FormatJSONL, ""},
+		{"format ndjson alias", "/logs/events#ndjson", "logs/events", FormatJSONL, ""},
+		{"format parquet", "/data/file#parquet", "data/file", FormatParquet, ""},
+		{"format hint case-insensitive", "/data/file#CSV", "data/file", FormatCSV, ""},
+
+		// Encoding hints
+		{"encoding only", "/exports/data.csv#encoding=windows-1252", "exports/data.csv", FormatUnknown, "windows-1252"},
+		{"encoding utf-16le", "/data/file.csv#encoding=utf-16le", "data/file.csv", FormatUnknown, "utf-16le"},
+
+		// Combined hints
+		{"format then encoding", "/exports/data.dat#csv,encoding=windows-1252", "exports/data.dat", FormatCSV, "windows-1252"},
+		{"encoding then format", "/exports/data.dat#encoding=cp1252,csv", "exports/data.dat", FormatCSV, "cp1252"},
+		{"with whitespace", "/exports/data.dat# csv , encoding=cp1252 ", "exports/data.dat", FormatCSV, "cp1252"},
+
+		// Edge cases
+		{"empty hint", "/exports/data.csv#", "exports/data.csv", FormatUnknown, ""},
+		{"unknown format silently ignored", "/exports/data#xml", "exports/data", FormatUnknown, ""},
+		{"unknown key silently ignored", "/exports/data#delim=;", "exports/data", FormatUnknown, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bucket, pattern, format, encoding := parseSFTPTablePattern(tt.table)
+			assert.Equal(t, "", bucket, "SFTP bucket should always be empty")
+			assert.Equal(t, tt.wantPattern, pattern, "pattern")
+			assert.Equal(t, tt.wantFormat, format, "format")
+			assert.Equal(t, tt.wantEncoding, encoding, "encoding")
+		})
+	}
+}
+
+func TestParseTableHints(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantFormat   FileFormat
+		wantEncoding string
+	}{
+		{"empty string", "", FormatUnknown, ""},
+		{"only commas", ",,,", FormatUnknown, ""},
+		{"format csv", "csv", FormatCSV, ""},
+		{"format jsonl", "jsonl", FormatJSONL, ""},
+		{"format ndjson alias maps to jsonl", "ndjson", FormatJSONL, ""},
+		{"format parquet", "parquet", FormatParquet, ""},
+		{"unknown bare hint silently ignored", "yaml", FormatUnknown, ""},
+
+		{"encoding only", "encoding=windows-1252", FormatUnknown, "windows-1252"},
+		{"encoding empty value", "encoding=", FormatUnknown, ""},
+		{"encoding key uppercase", "ENCODING=cp1252", FormatUnknown, "cp1252"},
+		{"encoding value preserves case", "encoding=Windows-1252", FormatUnknown, "Windows-1252"},
+
+		{"format then encoding", "csv,encoding=cp1252", FormatCSV, "cp1252"},
+		{"encoding then format", "encoding=cp1252,csv", FormatCSV, "cp1252"},
+		{"whitespace tolerated", " csv , encoding=cp1252 ", FormatCSV, "cp1252"},
+		{"later encoding wins", "encoding=cp1252,encoding=utf-8", FormatUnknown, "utf-8"},
+		{"unknown key=value silently ignored", "delim=;", FormatUnknown, ""},
+		{"mix of known/unknown", "csv,delim=;,encoding=cp1252", FormatCSV, "cp1252"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			format, encoding := parseTableHints(tt.input)
+			assert.Equal(t, tt.wantFormat, format, "format")
+			assert.Equal(t, tt.wantEncoding, encoding, "encoding")
 		})
 	}
 }

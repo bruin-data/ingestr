@@ -152,7 +152,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringSliceFlag{
 				Name:    "mask",
-				Usage:   "Column masking configuration in format 'column:algorithm'",
+				Usage:   "Column masking configuration in format 'column:algorithm[:param]'. Algorithms: hash, sha256, md5, hmac, email, phone, credit_card, ssn, redact, stars, fixed, random, partial, first_letter, uuid, sequential, round, range, noise, date_shift, year_only, month_year.",
 				Sources: cli.EnvVars("MASK", "GONG_MASK"),
 			},
 			&cli.StringFlag{

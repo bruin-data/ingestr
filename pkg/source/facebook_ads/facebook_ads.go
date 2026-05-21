@@ -1105,6 +1105,24 @@ func (s *FacebookAdsSource) pollAsyncJob(ctx context.Context, reportRunID string
 	}
 }
 
+// isTransientInsightsError reports whether a 400 response body indicates that
+// the async insights job has not finished materializing results yet
+// (error_subcode 1815107 / code 2637 with is_transient: true). Facebook can
+// return this for a short window even after async_status="Job Completed".
+func isTransientInsightsError(body []byte) bool {
+	var env struct {
+		Error struct {
+			Code         int  `json:"code"`
+			ErrorSubcode int  `json:"error_subcode"`
+			IsTransient  bool `json:"is_transient"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return false
+	}
+	return env.Error.ErrorSubcode == 1815107 || (env.Error.Code == 2637 && env.Error.IsTransient)
+}
+
 func (s *FacebookAdsSource) fetchAsyncResults(ctx context.Context, reportRunID, timeRange string, opts source.ReadOptions, totalSent *int, results chan<- source.RecordBatchResult) error {
 	var afterCursor string
 	batchNum := 0
@@ -1116,22 +1134,54 @@ func (s *FacebookAdsSource) fetchAsyncResults(ctx context.Context, reportRunID, 
 		default:
 		}
 
-		req := s.client.R(ctx).
-			SetQueryParam("limit", strconv.Itoa(maxIDPageSize))
+		var resp *gonghttp.Response
+		// Facebook sometimes reports async_status="Job Completed" but the
+		// /insights endpoint still returns 400 with error_subcode 1815107
+		// (is_transient: true) for a brief window. Retry with backoff.
+		backoff := 5 * time.Second
+		const maxFetchAttempts = 8
+		var lastErr error
+		for attempt := 1; attempt <= maxFetchAttempts; attempt++ {
+			req := s.client.R(ctx).
+				SetQueryParam("limit", strconv.Itoa(maxIDPageSize))
 
-		if afterCursor != "" {
-			req.SetQueryParam("after", afterCursor)
+			if afterCursor != "" {
+				req.SetQueryParam("after", afterCursor)
+			}
+
+			r, err := req.Get(baseURL + "/" + reportRunID + "/insights")
+			if err != nil {
+				return fmt.Errorf("failed to fetch insights results: %w", err)
+			}
+
+			logUsageHeaders(r)
+
+			if r.IsSuccess() {
+				resp = r
+				break
+			}
+
+			if r.StatusCode() == 400 && isTransientInsightsError(r.Body()) {
+				lastErr = fmt.Errorf("status %d: %s", r.StatusCode(), r.String())
+				if attempt == maxFetchAttempts {
+					break
+				}
+				config.Debug("[FACEBOOK_ADS] transient insights error on job %s (attempt %d/%d), retrying in %s", reportRunID, attempt, maxFetchAttempts, backoff)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(backoff):
+				}
+				if backoff < 60*time.Second {
+					backoff *= 2
+				}
+				continue
+			}
+
+			return fmt.Errorf("failed to fetch insights results with status %d: %s", r.StatusCode(), r.String())
 		}
-
-		resp, err := req.Get(baseURL + "/" + reportRunID + "/insights")
-		if err != nil {
-			return fmt.Errorf("failed to fetch insights results: %w", err)
-		}
-
-		logUsageHeaders(resp)
-
-		if !resp.IsSuccess() {
-			return fmt.Errorf("failed to fetch insights results with status %d: %s", resp.StatusCode(), resp.String())
+		if resp == nil {
+			return fmt.Errorf("failed to fetch insights results after %d attempts: %v", maxFetchAttempts, lastErr)
 		}
 
 		var page facebookPageResponse
