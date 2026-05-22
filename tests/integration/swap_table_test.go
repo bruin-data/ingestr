@@ -119,7 +119,9 @@ func TestMySQLSwapTable_LongTargetName(t *testing.T) {
 			"SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_name LIKE ?",
 			mysqlDB, targetTable[:20]+"%_old_%")
 		if err == nil && rows != nil {
-			defer rows.Close()
+			defer func() {
+				_ = rows.Close()
+			}()
 			for rows.Next() {
 				var name string
 				_ = rows.Scan(&name)
