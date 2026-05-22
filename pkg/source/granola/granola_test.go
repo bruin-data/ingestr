@@ -308,7 +308,7 @@ func TestNotesRecordContainsOwnerJSON(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func columnIndex(record arrow.Record, name string) int {
+func columnIndex(record arrow.RecordBatch, name string) int {
 	for i, field := range record.Schema().Fields() {
 		if field.Name == name {
 			return i
