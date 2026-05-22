@@ -148,9 +148,11 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return fmt.Errorf("failed to perform SCD2 merge: %w", err)
 	}
 
-	// Drop staging table
-	if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-		config.Debug("[SCD2] Warning: failed to drop staging table: %v", err)
+	// Drop staging table (skip when KeepStaging is set for test inspection).
+	if !job.Config.KeepStaging {
+		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
+			config.Debug("[SCD2] Warning: failed to drop staging table: %v", err)
+		}
 	}
 
 	return nil

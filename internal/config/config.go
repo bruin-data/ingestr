@@ -69,6 +69,7 @@ type IngestConfig struct {
 	PipelinesDir   string
 	StagingBucket  string
 	StagingDataset string
+	KeepStaging    bool // testing only: skip final DropTable so tests can inspect staging
 
 	CDCResumeLSN  string // For CDC sources: resume from this LSN (auto-detected from destination)
 	CDCSlotSuffix string // For CDC sources: suffix appended to auto-generated slot names (derived from dest URI)
