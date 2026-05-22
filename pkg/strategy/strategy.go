@@ -46,6 +46,9 @@ type IngestionJob struct {
 
 	// ColumnMasker replaces values in user-specified columns (e.g. passwords).
 	ColumnMasker *transformer.ColumnMasker
+
+	// EvolutionPlan holds the deferred schema evolution to apply on the destination.
+	EvolutionPlan *schemaevolution.EvolutionPlan
 }
 
 // GetRecords returns either buffered records (for schema-unknown sources)
@@ -55,6 +58,14 @@ func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) 
 		return j.BufferedRecords, nil
 	}
 	return j.Table.Read(ctx, opts)
+}
+
+// ApplyEvolution applies the pending schema evolution plan to the destination.
+func (j *IngestionJob) ApplyEvolution(ctx context.Context) error {
+	if j.EvolutionPlan == nil || !j.EvolutionPlan.HasMigration() {
+		return nil
+	}
+	return j.EvolutionPlan.Apply(ctx, j.Destination)
 }
 
 type WriteStrategy interface {

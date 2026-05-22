@@ -118,6 +118,10 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}
 
+	if err := job.ApplyEvolution(ctx); err != nil {
+		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	}
+
 	// Perform merge: UPDATE existing + INSERT new
 	// Note: We only use source columns here. Destination-only columns (removed columns)
 	// will naturally receive NULL for new rows and remain unchanged for existing rows.

@@ -134,6 +134,10 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		intervalEnd = toDateOnly(intervalEnd)
 	}
 
+	if err := job.ApplyEvolution(ctx); err != nil {
+		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	}
+
 	if err := job.Destination.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
 		StagingTable:       stagingTable,
 		TargetTable:        job.Config.DestTable,

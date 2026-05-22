@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
 type mockDestination struct {
@@ -1020,4 +1022,222 @@ func TestDroppedColumnsPKFiltering(t *testing.T) {
 			}
 		})
 	}
+}
+
+func tcol(name string, dt schema.DataType) schema.Column {
+	return schema.Column{Name: name, DataType: dt, Nullable: true}
+}
+
+func tschema(name string, cols ...schema.Column) *schema.TableSchema {
+	return &schema.TableSchema{Name: name, Columns: cols}
+}
+
+func arrowFieldNames(s *arrow.Schema) []string {
+	out := make([]string, s.NumFields())
+	for i, f := range s.Fields() {
+		out[i] = f.Name
+	}
+	return out
+}
+
+// Case 1: identical source and dest schemas, target equals dest's order,
+// types come from dest.
+func TestBuildBufferReaderTarget_NoDriftIdenticalOrder(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+		tcol("age", schema.TypeInt32),
+	)
+	dest := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+		tcol("age", schema.TypeInt32),
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name", "age"})
+	if got.Field(0).Type.ID() != arrow.PrimitiveTypes.Int64.ID() {
+		t.Errorf("field 0 type = %s, want int64", got.Field(0).Type)
+	}
+	if got.Field(1).Type.ID() != arrow.BinaryTypes.String.ID() {
+		t.Errorf("field 1 type = %s, want string", got.Field(1).Type)
+	}
+	if got.Field(2).Type.ID() != arrow.PrimitiveTypes.Int32.ID() {
+		t.Errorf("field 2 type = %s, want int32", got.Field(2).Type)
+	}
+}
+
+// source-only columns reach destSchema via the evolve phase (ChangeAddColumn);
+// when destSchema doesn't carry them, this function drops them.
+func TestBuildBufferReaderTarget_SourceOnlyColumnIsDropped(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+		tcol("email", schema.TypeString),
+	)
+	dest := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
+}
+
+func TestBuildBufferReaderTarget_OrderFollowsDest(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"users",
+		tcol("email", schema.TypeString),
+		tcol("age", schema.TypeInt32),
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+	)
+	dest := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+		tcol("age", schema.TypeInt32),
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name", "age"})
+}
+
+// Case 4a: dest has an ingestr metadata column NOT in source. It must be
+// SKIPPED in the target. IngestrColumnFiller adds it downstream; including
+// it here would cause a duplicate.
+func TestBuildBufferReaderTarget_SkipsIngestrMetadataColumn(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+	)
+	dest := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+		tcol("_dlt_load_id", schema.TypeString),
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
+}
+
+// Case 4b: dest has a NON-ingestr column NOT in source (soft-removed under
+// evolve mode). It MUST be included in the target so the buffer reader
+// null-fills it; staging then gets the column with NULLs, MERGE inserts NULL
+// into the dest column for new rows.
+func TestBuildBufferReaderTarget_IncludesSoftRemovedColumn(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+	)
+	dest := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+		tcol("email", schema.TypeString), // soft-removed from source
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name", "email"})
+	if !got.Field(2).Nullable {
+		t.Errorf("soft-removed column must be nullable")
+	}
+}
+
+// Case 5: dest type differs from source type. Target uses dest's type so the
+// buffer reader casts batches to the staging-table column type.
+func TestBuildBufferReaderTarget_UsesDestTypes(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"events",
+		tcol("id", schema.TypeInt64),
+		tcol("created_at", schema.TypeTimestamp), // source: TIMESTAMP
+	)
+	dest := tschema(
+		"events",
+		tcol("id", schema.TypeInt64),
+		tcol("created_at", schema.TypeString), // dest: STRING
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	if got.Field(1).Name != "created_at" {
+		t.Errorf("field 1 name = %q, want created_at", got.Field(1).Name)
+	}
+	if got.Field(1).Type.ID() != arrow.BinaryTypes.String.ID() {
+		t.Errorf("field 1 type = %s, want string", got.Field(1).Type)
+	}
+}
+
+// Case 6: a ColumnRenamer bridges source camelCase names to dest snake_case.
+// Field names in the target stay as SOURCE names (to match buffer files), but
+// type lookup goes through the rename map to find the dest column.
+func TestBuildBufferReaderTarget_HonorsRenamer(t *testing.T) {
+	p := &Pipeline{
+		columnRenamer: transformer.NewColumnRenamer(map[string]string{
+			"userId":    "user_id",
+			"createdAt": "created_at",
+		}),
+	}
+	src := tschema(
+		"users",
+		tcol("userId", schema.TypeInt64),
+		tcol("createdAt", schema.TypeTimestamp),
+	)
+	dest := tschema(
+		"users",
+		tcol("user_id", schema.TypeInt64),
+		tcol("created_at", schema.TypeString), // wider dest type
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"userId", "createdAt"})
+	if got.Field(1).Type.ID() != arrow.BinaryTypes.String.ID() {
+		t.Errorf("field 1 type = %s, want string", got.Field(1).Type)
+	}
+}
+
+// Case 7: realistic evolve scenario.
+func TestBuildBufferReaderTarget_EvolveScenario(t *testing.T) {
+	p := &Pipeline{}
+	// Source order can be anything — we only care about names.
+	src := tschema(
+		"orders",
+		tcol("age", schema.TypeInt64),
+		tcol("email", schema.TypeString), // new
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+		tcol("score", schema.TypeInt64),
+	)
+
+	dest := tschema(
+		"orders",
+		tcol("age", schema.TypeInt64),
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+		tcol("score", schema.TypeInt64),
+		tcol("email", schema.TypeString), // added by Compare.ChangeAddColumn
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"age", "id", "name", "score", "email"})
 }

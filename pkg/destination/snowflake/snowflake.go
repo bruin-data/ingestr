@@ -521,7 +521,7 @@ func (d *SnowflakeDestination) SCD2Table(ctx context.Context, opts destination.S
 	defer func() { _ = tx.Rollback() }()
 
 	// Build column comparison for change detection (excluding SCD columns and PKs)
-	nonPKColumns := filterColumns(opts.Columns, opts.PrimaryKeys)
+	nonPKColumns := filterColumns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
 	changeConditions := buildChangeConditionsSnowflake(nonPKColumns, "target", "source")
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 
@@ -569,7 +569,7 @@ func (d *SnowflakeDestination) SCD2Table(ctx context.Context, opts destination.S
 	}
 
 	// Step 3: Insert new versions + net-new records
-	allColumns := append(opts.Columns, "_scd_valid_from", "_scd_valid_to", "_scd_is_current")
+	allColumns := destination.AppendSCD2Columns(opts.Columns)
 	quotedCols := make([]string, len(allColumns))
 	for i, col := range allColumns {
 		quotedCols[i] = quoteIdentifier(col)

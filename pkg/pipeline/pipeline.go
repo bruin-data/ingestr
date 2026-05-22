@@ -150,6 +150,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// Check if source has known schema or needs inference
 	var tableSchema *schema.TableSchema
 	var bufferedRecords <-chan source.RecordBatchResult
+	var inferBuffer *databuffer.FileBuffer
 
 	if table.HasKnownSchema() {
 		tableSchema, err = table.GetSchema(ctx)
@@ -157,12 +158,17 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to get schema: %w", err)
 		}
 	} else {
-		// Schema inference path: read all data first
+		// Schema inference path: read all data first. Buffer is opened later
 		config.Debug("[PIPELINE] Source has unknown schema, inferring from data...")
-		tableSchema, bufferedRecords, err = p.inferSchemaFromData(ctx, table, tracker)
+		tableSchema, inferBuffer, err = p.inferSchemaFromData(ctx, table, tracker)
 		if err != nil {
 			return fmt.Errorf("failed to infer schema: %w", err)
 		}
+		defer func() {
+			if inferBuffer != nil {
+				_ = inferBuffer.Close()
+			}
+		}()
 		if tableSchema != nil {
 			config.Debug("[PIPELINE] Inferred schema with %d columns", len(tableSchema.Columns))
 		} else {
@@ -279,10 +285,25 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	// Schema contract handling: evolve destination schema if needed (skip for replace strategy)
+	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
+	var evolutionPlan *schemaevolution.EvolutionPlan
 	if resolvedStrategy != config.StrategyReplace {
-		if err := p.evolveSchemaIfNeeded(ctx, destSchema); err != nil {
+		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, destSchema)
+		if err != nil {
 			return fmt.Errorf("schema evolution failed: %w", err)
 		}
+		if evolutionPlan != nil && evolutionPlan.FinalSchema != nil {
+			destSchema = evolutionPlan.FinalSchema
+		}
+	}
+
+	if inferBuffer != nil {
+		bufferTarget := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
+		bufferedRecords, err = inferBuffer.Reader(ctx, bufferTarget)
+		if err != nil {
+			return fmt.Errorf("failed to open buffer reader: %w", err)
+		}
+		inferBuffer = nil
 	}
 
 	strat, err := strategy.Get(resolvedStrategy)
@@ -353,6 +374,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		ColumnRenamer:       p.columnRenamer,
 		IngestrColumnFiller: p.ingestrColumnFiller,
 		ColumnMasker:        columnMasker,
+		EvolutionPlan:       evolutionPlan,
 	}
 
 	// For known-schema sources with column type overrides, add a type caster
@@ -438,7 +460,7 @@ func (p *Pipeline) createTracker(ctx context.Context) (progress.Tracker, error) 
 	return tracker, nil
 }
 
-func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceTable, tracker progress.Tracker) (*schema.TableSchema, <-chan source.RecordBatchResult, error) {
+func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceTable, tracker progress.Tracker) (*schema.TableSchema, *databuffer.FileBuffer, error) {
 	// Create schema inferrer and file-backed data buffer
 	inferrer := schemainfer.NewSchemaInferrer()
 	buffer, err := databuffer.NewFileBuffer()
@@ -549,13 +571,55 @@ func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceT
 		return nil, nil, fmt.Errorf("failed to append missing override columns: %w", err)
 	}
 
-	bufferedRecords, err := buffer.Reader(ctx, tableSchema.ToArrowSchema())
-	if err != nil {
-		_ = buffer.Close()
-		return nil, nil, fmt.Errorf("failed to create buffer reader: %w", err)
+	return tableSchema, buffer, nil
+}
+
+// buildBufferReaderTarget builds the Arrow schema for buffer.Reader:
+// dest order, source names (for buffer file match), dest types (for staging
+// match). Ingestr/SCD2 metadata cols are skipped and dest-only cols get null-fill.
+func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.TableSchema) *arrow.Schema {
+	var renameMap map[string]string
+	if p.columnRenamer != nil && p.columnRenamer.HasRenames() {
+		renameMap = p.columnRenamer.Mapping()
 	}
 
-	return tableSchema, bufferedRecords, nil
+	srcByDestName := make(map[string]schema.Column, len(sourceSchema.Columns))
+	for _, c := range sourceSchema.Columns {
+		key := c.Name
+		if r, ok := renameMap[key]; ok {
+			key = r
+		}
+		srcByDestName[key] = c
+	}
+
+	fields := make([]arrow.Field, 0, len(destSchema.Columns))
+	for _, dc := range destSchema.Columns {
+		if naming.IsIngestrColumn(dc.Name) || isSCD2MetadataColumn(dc.Name) {
+			continue
+		}
+		if sc, ok := srcByDestName[dc.Name]; ok {
+			m := sc
+			m.DataType, m.Precision, m.Scale, m.ArrayType = dc.DataType, dc.Precision, dc.Scale, dc.ArrayType
+			fields = append(fields, arrowField(sc.Name, m, m.Nullable || dc.Nullable)) // add columns using dest types but source names
+			continue
+		}
+		fields = append(fields, arrowField(dc.Name, dc, true)) // add soft deleted columns using dest names
+	}
+
+	return arrow.NewSchema(fields, nil)
+}
+
+func arrowField(name string, col schema.Column, nullable bool) arrow.Field {
+	return arrow.Field{Name: name, Type: schema.DataTypeToArrowType(col), Nullable: nullable}
+}
+
+func isSCD2MetadataColumn(name string) bool {
+	for _, scd := range destination.SCD2MetadataColumns() {
+		if scd == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Pipeline) filterDroppedPKs(pks []string) []string {
@@ -724,15 +788,17 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	return nil
 }
 
-func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schema.TableSchema) error {
+// evolveSchemaIfNeeded inspects the destination's current schema and builds an
+// EvolutionPlan describing how it should change to accommodate sourceSchema.
+func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
 	// Get destination table schema (nil if table doesn't exist)
 	destSchema, err := p.dest.GetTableSchema(ctx, p.config.DestTable)
 	if err != nil {
-		return fmt.Errorf("failed to get destination schema: %w", err)
+		return nil, fmt.Errorf("failed to get destination schema: %w", err)
 	}
 	if destSchema == nil {
 		config.Debug("[SCHEMA EVOLUTION] Destination table doesn't exist yet, skipping evolution")
-		return nil
+		return nil, nil
 	}
 
 	// Store destination schema for use by strategies
@@ -741,7 +807,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 	// Parse schema contract mode
 	contractMode, err := schemaevolution.ParseContractMode(p.config.SchemaContract)
 	if err != nil {
-		return fmt.Errorf("failed to parse schema contract: %w", err)
+		return nil, fmt.Errorf("failed to parse schema contract: %w", err)
 	}
 	contract := schemaevolution.SchemaContract{Mode: contractMode}
 	config.Debug("[SCHEMA EVOLUTION] Using schema contract mode: %s", contractMode)
@@ -749,7 +815,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 	// Parse column overrides from config
 	overrides, err := schemaevolution.ParseColumnOverrides(p.config.Columns)
 	if err != nil {
-		return fmt.Errorf("failed to parse column overrides: %w", err)
+		return nil, fmt.Errorf("failed to parse column overrides: %w", err)
 	}
 	if len(overrides) > 0 {
 		config.Debug("[SCHEMA EVOLUTION] Applying %d column type overrides", len(overrides))
@@ -759,11 +825,14 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 	opts := &schemaevolution.CompareOptions{Overrides: overrides}
 	comparison, err := schemaevolution.Compare(sourceSchema, destSchema, opts)
 	if err != nil {
-		return fmt.Errorf("failed to compare schemas: %w", err)
+		return nil, fmt.Errorf("failed to compare schemas: %w", err)
 	}
 	if !comparison.HasChanges {
 		config.Debug("[SCHEMA EVOLUTION] No schema changes detected")
-		return nil
+		return &schemaevolution.EvolutionPlan{
+			FinalSchema: schemaevolution.BuildFinalSchema(destSchema, nil),
+			Migration:   nil,
+		}, nil
 	}
 
 	config.Debug("[SCHEMA EVOLUTION] Detected %d schema changes", len(comparison.Changes))
@@ -786,10 +855,13 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 	switch contract.Mode {
 	case schemaevolution.ContractFreeze:
 		if contractResult.HasViolations() {
-			return contractResult.ViolationError()
+			return nil, contractResult.ViolationError()
 		}
 		p.filteredSchemaComparison = comparison
-		return nil
+		return &schemaevolution.EvolutionPlan{
+			FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
+			Migration:   nil,
+		}, nil
 
 	case schemaevolution.ContractDiscardRow:
 		if contractResult.HasViolations() {
@@ -831,7 +903,10 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 				Changes:    []schemaevolution.SchemaChange{},
 				HasChanges: false,
 			}
-			return nil
+			return &schemaevolution.EvolutionPlan{
+				FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
+				Migration:   nil,
+			}, nil
 		}
 		// For migration, only apply allowed changes (new columns) for discard_value mode
 		// Type changes are NOT applied, but they ARE captured for runtime transformation
@@ -848,14 +923,17 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 	dialect := schemaevolution.GetDialect(p.dest.GetScheme())
 	if dialect == nil {
 		config.Debug("[SCHEMA EVOLUTION] No dialect registered for scheme %s, skipping", p.dest.GetScheme())
-		return nil
+		return &schemaevolution.EvolutionPlan{
+			FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
+			Migration:   nil,
+		}, nil
 	}
 
 	// Generate migration using the FILTERED schema comparison (after contract filtering)
 	// This ensures we only apply allowed changes (e.g., new columns in discard_value mode)
 	migration, err := schemaevolution.GenerateMigration(p.filteredSchemaComparison, dialect, p.config.DestTable)
 	if err != nil {
-		return fmt.Errorf("failed to generate migration: %w", err)
+		return nil, fmt.Errorf("failed to generate migration: %w", err)
 	}
 
 	// Log warnings
@@ -868,13 +946,13 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 		config.Debug("[SCHEMA EVOLUTION] %s", sql)
 	}
 
-	// Apply migration
-	if err := schemaevolution.ApplyMigration(ctx, p.dest, migration); err != nil {
-		return fmt.Errorf("failed to apply migration: %w", err)
+	// Build the plan; migration is NOT applied here.
+	plan := &schemaevolution.EvolutionPlan{
+		FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
+		Migration:   migration,
 	}
-
-	config.Debug("[SCHEMA EVOLUTION] Successfully applied %d schema changes", len(migration.Statements))
-	return nil
+	config.Debug("[SCHEMA EVOLUTION] Built plan with %d statements (deferred apply)", len(migration.Statements))
+	return plan, nil
 }
 
 func (p *Pipeline) setupIngestrColumns(ctx context.Context, sourceSchema *schema.TableSchema) (*schema.TableSchema, error) {

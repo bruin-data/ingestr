@@ -475,7 +475,7 @@ func (d *MySQLDestination) SCD2Table(ctx context.Context, opts destination.SCD2O
 	defer func() { _ = tx.Rollback() }()
 
 	// Build column comparison for change detection (excluding SCD columns and PKs)
-	nonPKColumns := filterColumns(opts.Columns, opts.PrimaryKeys)
+	nonPKColumns := filterColumns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
 	changeConditions := buildChangeConditionsMySQL(nonPKColumns, "target", "source")
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 
@@ -524,7 +524,7 @@ func (d *MySQLDestination) SCD2Table(ctx context.Context, opts destination.SCD2O
 	}
 
 	// Step 3: Insert new versions + net-new records
-	allColumns := append(opts.Columns, "_scd_valid_from", "_scd_valid_to", "_scd_is_current")
+	allColumns := destination.AppendSCD2Columns(opts.Columns)
 	quotedColumns := quoteColumns(allColumns)
 
 	insertSQL := fmt.Sprintf(
@@ -642,7 +642,7 @@ func (d *MySQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 		if numScale != nil {
 			col.Scale = *numScale
 		}
-		if charMaxLen != nil {
+		if charMaxLen != nil && !isMySQLTextFamily(dataType) {
 			col.MaxLength = *charMaxLen
 		}
 
@@ -662,6 +662,17 @@ func (d *MySQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 		Schema:  d.database,
 		Columns: columns,
 	}, nil
+}
+
+// isMySQLTextFamily reports whether dataType is a TEXT-family column.
+// Their character_maximum_length is the type's intrinsic engine cap, not a
+// user constraint. So must not roundtrip back into CREATE TABLE as VARCHAR(N).
+func isMySQLTextFamily(dataType string) bool {
+	switch strings.ToLower(dataType) {
+	case "text", "tinytext", "mediumtext", "longtext":
+		return true
+	}
+	return false
 }
 
 func mapMySQLTypeToSchema(dataType, columnType string) schema.DataType {
