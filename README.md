@@ -258,6 +258,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
         <td>-</td>
     </tr>
+    <tr>
+        <td>Granola</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
      <tr>
         <td>Klaviyo</td>
         <td>✅</td>
