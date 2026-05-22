@@ -11,7 +11,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -22,7 +22,7 @@ const (
 )
 
 type AttioSource struct {
-	client *gonghttp.Client
+	client *httpclient.Client
 	apiKey string
 }
 
@@ -42,13 +42,13 @@ func (s *AttioSource) Connect(ctx context.Context, uri string) error {
 
 	s.apiKey = apiKey
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(100, 10),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(apiKey)),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("Accept", "application/json"),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(100, 10),
+		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("Accept", "application/json"),
 	)
 
 	config.Debug("[ATTIO] Connected successfully")
@@ -181,7 +181,7 @@ func (s *AttioSource) getPages(ctx context.Context, method string, endpoint stri
 		default:
 		}
 
-		var resp *gonghttp.Response
+		var resp *httpclient.Response
 		var err error
 
 		switch method {

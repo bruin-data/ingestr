@@ -69,7 +69,7 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 
 	// Auto-create publication if not specified
 	if cdcConfig.Publication == "" {
-		cdcConfig.Publication = "gong_publication"
+		cdcConfig.Publication = "ingestr_publication"
 		if err := ensurePublicationExists(ctx, queryPool, cdcConfig.Publication); err != nil {
 			queryPool.Close()
 			return fmt.Errorf("failed to create publication: %w", err)

@@ -11,7 +11,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -58,7 +58,7 @@ var tableConfigs = map[string]tableConfig{
 }
 
 type FundraiseUpSource struct {
-	client *gonghttp.Client
+	client *httpclient.Client
 }
 
 func NewFundraiseUpSource() *FundraiseUpSource {
@@ -100,12 +100,12 @@ func (s *FundraiseUpSource) Connect(ctx context.Context, uri string) error {
 		return err
 	}
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(apiKey)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
 	)
 
 	config.Debug("[FUNDRAISEUP] Connected successfully")

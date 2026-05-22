@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -137,13 +137,13 @@ func newTestSource(serverURL string) *PlusVibeAI {
 		apiKey:      "test-api-key",
 		workspaceID: "test-workspace",
 	}
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(serverURL),
-		gonghttp.WithTimeout(10*time.Second),
-		gonghttp.WithHeader("x-api-key", s.apiKey),
-		gonghttp.WithHeader("Accept", "application/json"),
-		gonghttp.WithHeader("Content-Type", "application/json"),
-		gonghttp.WithDisableRetry(),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(serverURL),
+		httpclient.WithTimeout(10*time.Second),
+		httpclient.WithHeader("x-api-key", s.apiKey),
+		httpclient.WithHeader("Accept", "application/json"),
+		httpclient.WithHeader("Content-Type", "application/json"),
+		httpclient.WithDisableRetry(),
 	)
 	return s
 }

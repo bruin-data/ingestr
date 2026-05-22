@@ -46,7 +46,7 @@ func NewSnapshot(src *PostgresCDCSource, tableName string, tableSchema *schema.T
 // generateSlotName creates a stable, deterministic slot name based on table, publication, and an optional suffix.
 func generateSlotName(tableName, publication, suffix string) string {
 	normalizedTable := strings.ReplaceAll(tableName, ".", "_")
-	name := fmt.Sprintf("gong_%s_%s", normalizedTable, publication)
+	name := fmt.Sprintf("ingestr_%s_%s", normalizedTable, publication)
 	if suffix != "" {
 		name = fmt.Sprintf("%s_%s", name, suffix)
 	}

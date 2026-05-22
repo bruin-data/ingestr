@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -292,8 +292,8 @@ type ShopifySource struct {
 	apiKey       string
 	clientID     string
 	clientSecret string
-	client       *gonghttp.Client
-	restClient   *gonghttp.Client
+	client       *httpclient.Client
+	restClient   *httpclient.Client
 	baseURL      string
 	restBaseURL  string
 }
@@ -332,20 +332,20 @@ func (s *ShopifySource) Connect(ctx context.Context, uri string) error {
 	s.baseURL = fmt.Sprintf("https://%s/admin/api/%s/graphql.json", s.store, apiVersion)
 	s.restBaseURL = fmt.Sprintf("https://%s/admin/api/%s", s.store, apiVersion)
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(s.baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewAPIKeyAuth("X-Shopify-Access-Token", s.apiKey, true)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(s.baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewAPIKeyAuth("X-Shopify-Access-Token", s.apiKey, true)),
 	)
 
-	s.restClient = gonghttp.New(
-		gonghttp.WithBaseURL(s.restBaseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewAPIKeyAuth("X-Shopify-Access-Token", s.apiKey, true)),
+	s.restClient = httpclient.New(
+		httpclient.WithBaseURL(s.restBaseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewAPIKeyAuth("X-Shopify-Access-Token", s.apiKey, true)),
 	)
 
 	config.Debug("[SHOPIFY] Connected to store: %s", s.store)
@@ -355,8 +355,8 @@ func (s *ShopifySource) Connect(ctx context.Context, uri string) error {
 func (s *ShopifySource) getShopifyAccessToken(ctx context.Context, store, clientID, clientSecret string) (string, error) {
 	tokenURL := fmt.Sprintf(tokenURLFormat, store)
 
-	client := gonghttp.New(
-		gonghttp.WithTimeout(30 * time.Second),
+	client := httpclient.New(
+		httpclient.WithTimeout(30 * time.Second),
 	)
 	defer func() { _ = client.Close() }()
 
@@ -636,7 +636,7 @@ func (s *ShopifySource) readOrders(ctx context.Context, opts source.ReadOptions,
 		endpoint += "&updated_at_max=" + url.QueryEscape(opts.IntervalEnd.Format(time.RFC3339))
 	}
 
-	paginator := gonghttp.NewLinkHeaderPaginator(endpoint)
+	paginator := httpclient.NewLinkHeaderPaginator(endpoint)
 	totalSent := 0
 	batchNum := 0
 
@@ -811,7 +811,7 @@ func (s *ShopifySource) readCustomers(ctx context.Context, opts source.ReadOptio
 		endpoint += "&updated_at_max=" + url.QueryEscape(opts.IntervalEnd.Format(time.RFC3339))
 	}
 
-	paginator := gonghttp.NewLinkHeaderPaginator(endpoint)
+	paginator := httpclient.NewLinkHeaderPaginator(endpoint)
 	totalSent := 0
 	batchNum := 0
 
@@ -1376,7 +1376,7 @@ func (s *ShopifySource) readEvents(ctx context.Context, opts source.ReadOptions,
 		endpoint += "&created_at_max=" + url.QueryEscape(opts.IntervalEnd.Format(time.RFC3339))
 	}
 
-	paginator := gonghttp.NewLinkHeaderPaginator(endpoint)
+	paginator := httpclient.NewLinkHeaderPaginator(endpoint)
 	totalSent := 0
 	batchNum := 0
 
@@ -1461,7 +1461,7 @@ func (s *ShopifySource) readTransactions(ctx context.Context, opts source.ReadOp
 
 	endpoint := fmt.Sprintf("/shopify_payments/balance/transactions.json?limit=%d", pageSize)
 
-	paginator := gonghttp.NewLinkHeaderPaginator(endpoint)
+	paginator := httpclient.NewLinkHeaderPaginator(endpoint)
 	totalSent := 0
 	batchNum := 0
 	stop := false
@@ -1950,7 +1950,7 @@ func (s *ShopifySource) readPriceRules(ctx context.Context, opts source.ReadOpti
 		endpoint += "&updated_at_max=" + url.QueryEscape(opts.IntervalEnd.Format(time.RFC3339))
 	}
 
-	paginator := gonghttp.NewLinkHeaderPaginator(endpoint)
+	paginator := httpclient.NewLinkHeaderPaginator(endpoint)
 	totalSent := 0
 	batchNum := 0
 

@@ -195,7 +195,7 @@ func (d *BigQueryDestination) stageLoadJobFiles(
 		return d.stageLoadJobFilesToGCS(ctx, table, records, stagingBucket, format, maxRowsPerFile)
 	}
 
-	tempDir, err := os.MkdirTemp("", "gong-bq-load-*")
+	tempDir, err := os.MkdirTemp("", "ingestr-bq-load-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp dir for load job: %w", err)
 	}
@@ -441,7 +441,7 @@ func resolveLoadJobRowsPerFile(requested int) int64 {
 }
 
 func buildGCSLoadObjectPrefix(prefix string, table string) string {
-	objectName := fmt.Sprintf("gong-load/%d/%s", time.Now().UnixNano(), sanitizeLoadObjectName(table))
+	objectName := fmt.Sprintf("ingestr-load/%d/%s", time.Now().UnixNano(), sanitizeLoadObjectName(table))
 	if prefix == "" {
 		return objectName
 	}
@@ -532,8 +532,8 @@ func buildStagingGCSObjectAttrs(format loadJobFileFormat) gcsstorage.ObjectAttrs
 		CacheControl: "no-store",
 		CustomTime:   now,
 		Metadata: map[string]string{
-			"gong-staging-object": "true",
-			"gong-expires-at":     now.Add(destination.ManagedStagingTTL).Format(time.RFC3339),
+			"ingestr-staging-object": "true",
+			"ingestr-expires-at":     now.Add(destination.ManagedStagingTTL).Format(time.RFC3339),
 		},
 	}
 }

@@ -26,7 +26,7 @@ import (
 const (
 	defaultCatalog   = "main"
 	defaultSchema    = "default"
-	stagingSchema    = "gong_staging"
+	stagingSchema    = "ingestr_staging"
 	statementTimeout = "50s"
 )
 
@@ -111,7 +111,7 @@ func (d *DatabricksDestination) PrepareTable(ctx context.Context, opts destinati
 
 	_, tableName := d.parseTableName(opts.Table)
 
-	// Use dedicated gong_staging schema for staging tables
+	// Use dedicated ingestr_staging schema for staging tables
 	fullTable := d.quoteFullTable(stagingSchema, tableName)
 
 	startPrep := time.Now()
@@ -195,10 +195,10 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 	startTotal := time.Now()
 
 	_, tableName := d.parseTableName(opts.Table)
-	// Use dedicated gong_staging schema for staging tables
+	// Use dedicated ingestr_staging schema for staging tables
 	fullTable := d.quoteFullTable(stagingSchema, tableName)
 
-	tempFile, err := os.CreateTemp("", "gong-databricks-*.parquet")
+	tempFile, err := os.CreateTemp("", "ingestr-databricks-*.parquet")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -276,7 +276,7 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 	config.Debug("[DATABRICKS] Parquet file written: %d rows in %v (%.0f rows/sec)", totalRows, writeTime, float64(totalRows)/writeTime.Seconds())
 
 	uploadStart := time.Now()
-	fileName := fmt.Sprintf("gong_%s_%d.parquet", tableName, time.Now().UnixNano())
+	fileName := fmt.Sprintf("ingestr_%s_%d.parquet", tableName, time.Now().UnixNano())
 	volumePath := fmt.Sprintf("/Volumes/%s/%s/files/%s", d.catalog, stagingSchema, fileName)
 
 	localFile, err := os.Open(tempPath)
@@ -323,7 +323,7 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
-	// Staging table is always in gong_staging schema
+	// Staging table is always in ingestr_staging schema
 	_, stagingName := d.parseTableName(opts.StagingTable)
 	targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
@@ -364,7 +364,7 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 		return errors.New("merge requires at least one primary key")
 	}
 
-	// Staging table is always in gong_staging schema
+	// Staging table is always in ingestr_staging schema
 	_, stagingName := d.parseTableName(opts.StagingTable)
 	targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
@@ -437,7 +437,7 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
 	startOp := time.Now()
 
-	// Staging table is always in gong_staging schema
+	// Staging table is always in ingestr_staging schema
 	_, stagingName := d.parseTableName(opts.StagingTable)
 	targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
@@ -486,7 +486,7 @@ func (d *DatabricksDestination) SCD2Table(ctx context.Context, opts destination.
 }
 
 func (d *DatabricksDestination) DropTable(ctx context.Context, table string) error {
-	// Staging tables are always in gong_staging schema
+	// Staging tables are always in ingestr_staging schema
 	_, tableName := d.parseTableName(table)
 	fullTable := d.quoteFullTable(stagingSchema, tableName)
 

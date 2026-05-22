@@ -82,13 +82,13 @@ func TestBuildStagingGCSObjectAttrs(t *testing.T) {
 		t.Fatalf("custom time %v outside expected window", attrs.CustomTime)
 	}
 
-	expiresAtRaw := attrs.Metadata["gong-expires-at"]
+	expiresAtRaw := attrs.Metadata["ingestr-expires-at"]
 	if expiresAtRaw == "" {
-		t.Fatal("gong-expires-at metadata missing")
+		t.Fatal("ingestr-expires-at metadata missing")
 	}
 	expiresAt, err := time.Parse(time.RFC3339, expiresAtRaw)
 	if err != nil {
-		t.Fatalf("failed to parse gong-expires-at: %v", err)
+		t.Fatalf("failed to parse ingestr-expires-at: %v", err)
 	}
 	if expiresAt.Before(before.Add(destination.ManagedStagingTTL - time.Minute)) {
 		t.Fatalf("expires-at %v too early", expiresAt)
@@ -107,7 +107,7 @@ func TestBuildGCSLoadObjectNameUsesSanitizedTable(t *testing.T) {
 	objectPrefix := buildGCSLoadObjectPrefix("prefix/path", "orders.daily/report")
 	objectName := buildGCSLoadObjectName(objectPrefix, loadJobFormatParquet, 0)
 
-	if !strings.HasPrefix(objectName, "prefix/path/gong-load/") {
+	if !strings.HasPrefix(objectName, "prefix/path/ingestr-load/") {
 		t.Fatalf("object name %q missing prefix", objectName)
 	}
 	if !strings.HasSuffix(objectName, "/orders_daily_report/part-000001.parquet") {

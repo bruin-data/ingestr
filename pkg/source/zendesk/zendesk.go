@@ -9,7 +9,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -61,8 +61,8 @@ const (
 )
 
 type ZendeskSource struct {
-	client     *gonghttp.Client
-	chatClient *gonghttp.Client // separate client for chat API (zopim.com)
+	client     *httpclient.Client
+	chatClient *httpclient.Client // separate client for chat API (zopim.com)
 }
 
 func NewZendeskSource() *ZendeskSource {
@@ -85,32 +85,32 @@ func (s *ZendeskSource) Connect(ctx context.Context, uri string) error {
 
 	baseURL := fmt.Sprintf("https://%s.zendesk.com", creds.subdomain)
 
-	var auth gonghttp.Authenticator
+	var auth httpclient.Authenticator
 	switch creds.authType {
 	case authOAuth:
-		auth = gonghttp.NewBearerAuth(creds.oauthToken)
+		auth = httpclient.NewBearerAuth(creds.oauthToken)
 		config.Debug("[ZENDESK] Using OAuth token auth")
 	case authAPIToken:
-		auth = gonghttp.NewBasicAuth(creds.email+"/token", creds.apiToken)
+		auth = httpclient.NewBasicAuth(creds.email+"/token", creds.apiToken)
 		config.Debug("[ZENDESK] Using API token auth with email: %s", creds.email)
 	}
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(auth),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(auth),
 	)
 
 	// Chat API uses a different base URL (zopim.com) and requires OAuth
 	if creds.authType == authOAuth {
-		s.chatClient = gonghttp.New(
-			gonghttp.WithBaseURL("https://www.zopim.com"),
-			gonghttp.WithTimeout(60*time.Second),
-			gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-			gonghttp.WithDebug(config.DebugMode),
-			gonghttp.WithAuth(auth),
+		s.chatClient = httpclient.New(
+			httpclient.WithBaseURL("https://www.zopim.com"),
+			httpclient.WithTimeout(60*time.Second),
+			httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+			httpclient.WithDebug(config.DebugMode),
+			httpclient.WithAuth(auth),
 		)
 	}
 
@@ -606,7 +606,7 @@ func (s *ZendeskSource) readTalkIncremental(ctx context.Context, endpoint, key s
 		default:
 		}
 
-		var resp *gonghttp.Response
+		var resp *httpclient.Response
 		var err error
 
 		if nextURL != "" {
@@ -923,7 +923,7 @@ func (s *ZendeskSource) readChats(ctx context.Context, opts source.ReadOptions, 
 		default:
 		}
 
-		var resp *gonghttp.Response
+		var resp *httpclient.Response
 		var err error
 
 		if nextURL != "" {

@@ -10,7 +10,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -18,7 +18,7 @@ import (
 const smartsheetBaseURL = "https://api.smartsheet.com/2.0"
 
 type SmartsheetSource struct {
-	client       *gonghttp.Client
+	client       *httpclient.Client
 	accessToken  string
 	smartsheetID string
 }
@@ -62,10 +62,10 @@ func (s *SmartsheetSource) Connect(ctx context.Context, uri string) error {
 	s.accessToken = accessToken
 	s.smartsheetID = smartsheetID
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(smartsheetBaseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(smartsheetBaseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithDebug(config.DebugMode),
 	)
 
 	config.Debug("[SMARTSHEET] Connected successfully")

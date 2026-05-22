@@ -10,7 +10,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -32,8 +32,8 @@ const (
 )
 
 type Hubspotsource struct {
-	client       *gonghttp.Client
-	searchClient *gonghttp.Client
+	client       *httpclient.Client
+	searchClient *httpclient.Client
 	apiKey       string
 }
 
@@ -53,24 +53,24 @@ func (s *Hubspotsource) Connect(ctx context.Context, uri string) error {
 
 	s.apiKey = apiKey
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(5*time.Minute),
-		gonghttp.WithRateLimiter(crmRateLimit, crmRateLimitBurst),
-		gonghttp.WithRetry(retryCount, retryWait, retryMaxWait),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(apiKey)),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("Accept", "application/json"),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(5*time.Minute),
+		httpclient.WithRateLimiter(crmRateLimit, crmRateLimitBurst),
+		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
+		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("Accept", "application/json"),
 	)
 
-	s.searchClient = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(5*time.Minute),
-		gonghttp.WithRateLimiter(searchRateLimit, searchRateLimitBurst),
-		gonghttp.WithRetry(retryCount, retryWait, retryMaxWait),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(apiKey)),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("Accept", "application/json"),
+	s.searchClient = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(5*time.Minute),
+		httpclient.WithRateLimiter(searchRateLimit, searchRateLimitBurst),
+		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
+		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("Accept", "application/json"),
 	)
 
 	config.Debug("[HUBSPOT] Connected successfully")

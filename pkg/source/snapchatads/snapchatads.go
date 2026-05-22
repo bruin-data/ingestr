@@ -11,7 +11,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -33,7 +33,7 @@ const (
 )
 
 type SnapchatAdsSource struct {
-	client       *gonghttp.Client
+	client       *httpclient.Client
 	refreshToken string
 	clientID     string
 	clientSecret string
@@ -134,14 +134,14 @@ func (s *SnapchatAdsSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to obtain access token: %w", err)
 	}
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(10, 10),
-		gonghttp.WithRetry(12, 2*time.Second, 120*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(accessToken)),
-		gonghttp.WithHeader("Accept", "application/json"),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(10, 10),
+		httpclient.WithRetry(12, 2*time.Second, 120*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(accessToken)),
+		httpclient.WithHeader("Accept", "application/json"),
 	)
 
 	config.Debug("[SnapchatAds] Connected successfully")
@@ -149,9 +149,9 @@ func (s *SnapchatAdsSource) Connect(ctx context.Context, uri string) error {
 }
 
 func (s *SnapchatAdsSource) exchangeToken(ctx context.Context) (string, error) {
-	tokenClient := gonghttp.New(
-		gonghttp.WithTimeout(30*time.Second),
-		gonghttp.WithRetry(3, 1*time.Second, 10*time.Second),
+	tokenClient := httpclient.New(
+		httpclient.WithTimeout(30*time.Second),
+		httpclient.WithRetry(3, 1*time.Second, 10*time.Second),
 	)
 	defer func() { _ = tokenClient.Close() }()
 

@@ -33,7 +33,7 @@ type FileBuffer struct {
 
 // NewFileBuffer creates a new file-backed buffer using a temporary directory.
 func NewFileBuffer() (*FileBuffer, error) {
-	tmpDir, err := os.MkdirTemp("", "gong-buffer-*")
+	tmpDir, err := os.MkdirTemp("", "ingestr-buffer-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}

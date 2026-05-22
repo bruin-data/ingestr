@@ -12,7 +12,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -446,11 +446,11 @@ func TestShopifySource_InvalidTable(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported table")
 }
 
-func createTestClient(baseURL, apiKey string) *gonghttp.Client {
-	return gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(10*time.Second),
-		gonghttp.WithAuth(gonghttp.NewAPIKeyAuth("X-Shopify-Access-Token", apiKey, true)),
+func createTestClient(baseURL, apiKey string) *httpclient.Client {
+	return httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(10*time.Second),
+		httpclient.WithAuth(httpclient.NewAPIKeyAuth("X-Shopify-Access-Token", apiKey, true)),
 	)
 }
 

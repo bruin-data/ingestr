@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -28,7 +28,7 @@ const (
 	defaultBurst         = 2
 )
 
-func doceboRetryCondition(resp *gonghttp.Response, err error) bool {
+func doceboRetryCondition(resp *httpclient.Response, err error) bool {
 	if resp == nil {
 		return false
 	}
@@ -38,7 +38,7 @@ func doceboRetryCondition(resp *gonghttp.Response, err error) bool {
 }
 
 type DoceboSource struct {
-	client       *gonghttp.Client
+	client       *httpclient.Client
 	baseURL      string
 	clientID     string
 	clientSecret string
@@ -67,13 +67,13 @@ func (s *DoceboSource) Connect(ctx context.Context, uri string) error {
 	s.username = username
 	s.password = password
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(s.baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRetry(doceboRetryAttempts, doceboRetryBackoff, doceboRetryMaxWait),
-		gonghttp.WithRetryCondition(doceboRetryCondition),
-		gonghttp.WithRateLimiter(defaultRateLimit, defaultBurst),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(s.baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRetry(doceboRetryAttempts, doceboRetryBackoff, doceboRetryMaxWait),
+		httpclient.WithRetryCondition(doceboRetryCondition),
+		httpclient.WithRateLimiter(defaultRateLimit, defaultBurst),
+		httpclient.WithDebug(config.DebugMode),
 	)
 
 	config.Debug("[DOCEBO] Connected to: %s (base URL: %s)", uri, s.baseURL)

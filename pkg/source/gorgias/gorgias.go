@@ -11,7 +11,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -134,7 +134,7 @@ var satisfactionSurveyFields = []schema.Column{
 }
 
 type GorgiasSource struct {
-	client  *gonghttp.Client
+	client  *httpclient.Client
 	domain  string
 	apiKey  string
 	email   string
@@ -160,13 +160,13 @@ func (s *GorgiasSource) Connect(ctx context.Context, uri string) error {
 	s.email = email
 	s.baseURL = fmt.Sprintf("https://%s.gorgias.com/api", s.domain)
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(s.baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(2, 4),
-		gonghttp.WithRetry(5, 5*time.Second, 60*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBasicAuth(s.email, s.apiKey)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(s.baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(2, 4),
+		httpclient.WithRetry(5, 5*time.Second, 60*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBasicAuth(s.email, s.apiKey)),
 	)
 
 	config.Debug("[GORGIAS] Connected to domain: %s", s.domain)

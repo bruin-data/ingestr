@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -55,10 +55,10 @@ var supportedTables = []string{
 
 type KlaviyoSource struct {
 	apiKey   string
-	clientXL *gonghttp.Client // events, catalog-variants, catalog-categories, catalog-items
-	clientL  *gonghttp.Client // profiles, coupons, lists, segments, templates
-	clientM  *gonghttp.Client // campaigns, metrics, images
-	clientS  *gonghttp.Client // tags, flows, forms
+	clientXL *httpclient.Client // events, catalog-variants, catalog-categories, catalog-items
+	clientL  *httpclient.Client // profiles, coupons, lists, segments, templates
+	clientM  *httpclient.Client // campaigns, metrics, images
+	clientS  *httpclient.Client // tags, flows, forms
 }
 
 func NewKlaviyoSource() *KlaviyoSource {
@@ -73,15 +73,15 @@ func (s *KlaviyoSource) Schemes() []string {
 	return []string{"klaviyo"}
 }
 
-func (s *KlaviyoSource) newClient(rl float64, burst int) *gonghttp.Client {
-	return gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rl, burst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("Authorization", fmt.Sprintf("Klaviyo-API-Key %s", s.apiKey)),
-		gonghttp.WithHeader("Accept", "application/json"),
-		gonghttp.WithHeader("revision", apiRevision),
+func (s *KlaviyoSource) newClient(rl float64, burst int) *httpclient.Client {
+	return httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rl, burst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("Authorization", fmt.Sprintf("Klaviyo-API-Key %s", s.apiKey)),
+		httpclient.WithHeader("Accept", "application/json"),
+		httpclient.WithHeader("revision", apiRevision),
 	)
 }
 
@@ -103,7 +103,7 @@ func (s *KlaviyoSource) Connect(ctx context.Context, uri string) error {
 
 func (s *KlaviyoSource) Close(ctx context.Context) error {
 	var closeErr error
-	for _, c := range []*gonghttp.Client{s.clientXL, s.clientL, s.clientM, s.clientS} {
+	for _, c := range []*httpclient.Client{s.clientXL, s.clientL, s.clientM, s.clientS} {
 		if c != nil {
 			if err := c.Close(); err != nil && closeErr == nil {
 				closeErr = err
@@ -258,7 +258,7 @@ func flattenAttributes(items []map[string]interface{}) []map[string]interface{} 
 	return items
 }
 
-func paginateAndSend(ctx context.Context, client *gonghttp.Client, initialURL, label string, flat bool, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func paginateAndSend(ctx context.Context, client *httpclient.Client, initialURL, label string, flat bool, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	currentURL := initialURL
 	totalProcessed := 0
 
@@ -318,7 +318,7 @@ func paginateAndSend(ctx context.Context, client *gonghttp.Client, initialURL, l
 	return nil
 }
 
-func paginateWithClientFilter(ctx context.Context, client *gonghttp.Client, endpoint, label, dateField string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func paginateWithClientFilter(ctx context.Context, client *httpclient.Client, endpoint, label, dateField string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	currentURL := endpoint
 	totalProcessed := 0
 
@@ -414,7 +414,7 @@ func buildFilterURL(endpoint string, params map[string]string) string {
 	return endpoint + "?" + values.Encode()
 }
 
-func paginateWithServerFilter(ctx context.Context, client *gonghttp.Client, endpoint, label, dateField, startOp, sortField string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func paginateWithServerFilter(ctx context.Context, client *httpclient.Client, endpoint, label, dateField, startOp, sortField string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	params := map[string]string{"sort": sortField}
 
 	var filters []string

@@ -769,8 +769,8 @@ func TestSwapTable_CrossSchema_TargetSchemaMissing(t *testing.T) {
 
 	// Stage only — never touch the target schema. This mirrors what the
 	// replace strategy does on a fresh deployment.
-	stagingTable := "_bruin_staging.public__bootstrap_gong_staging_1"
-	targetTable := "public.bootstrap_gong"
+	stagingTable := "_bruin_staging.public__bootstrap_ingestr_staging_1"
+	targetTable := "public.bootstrap_ingestr"
 
 	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:     stagingTable,
@@ -779,7 +779,7 @@ func TestSwapTable_CrossSchema_TargetSchemaMissing(t *testing.T) {
 	}))
 
 	require.NoError(t, dest.Exec(ctx,
-		`INSERT INTO "_bruin_staging"."public__bootstrap_gong_staging_1" VALUES (1, 'a'), (2, 'b')`))
+		`INSERT INTO "_bruin_staging"."public__bootstrap_ingestr_staging_1" VALUES (1, 'a'), (2, 'b')`))
 
 	require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
 		StagingTable: stagingTable,
@@ -795,7 +795,7 @@ func TestSwapTable_CrossSchema_TargetSchemaMissing(t *testing.T) {
 	rows, err := dest.conn.NewStatement()
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
-	require.NoError(t, rows.SetSqlQuery(`SELECT COUNT(*) FROM "public"."bootstrap_gong"`))
+	require.NoError(t, rows.SetSqlQuery(`SELECT COUNT(*) FROM "public"."bootstrap_ingestr"`))
 	reader, _, err := rows.ExecuteQuery(ctx)
 	require.NoError(t, err)
 	defer reader.Release()

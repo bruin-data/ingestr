@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -120,7 +120,7 @@ type dateFetchResult struct {
 
 type AppLovinSource struct {
 	apiKey string
-	client *gonghttp.Client
+	client *httpclient.Client
 	tables map[string]source.SourceTable
 }
 
@@ -139,11 +139,11 @@ func (s *AppLovinSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.apiKey = apiKey
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(5*time.Minute),
-		gonghttp.WithRateLimiter(5, 2),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(5*time.Minute),
+		httpclient.WithRateLimiter(5, 2),
+		httpclient.WithDebug(config.DebugMode),
 	)
 
 	s.tables = s.getTables()

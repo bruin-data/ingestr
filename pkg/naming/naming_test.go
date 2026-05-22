@@ -358,7 +358,7 @@ func TestDetectConventionSnowflakeUppercase(t *testing.T) {
 	})
 
 	t.Run("SpaceSourceToSpaceDestDirect", func(t *testing.T) {
-		// Source "APP ID" → dest "APP ID" (gong direct preserved spaces)
+		// Source "APP ID" → dest "APP ID" (ingestr direct preserved spaces)
 		sourceSchema := &schema.TableSchema{
 			Columns: []schema.Column{
 				{Name: "date"},

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -307,11 +307,11 @@ func TestCursorSource_ReadDailyUsageData_Chunking(t *testing.T) {
 func newTestSource(baseURL string) *CursorSource {
 	s := NewCursorSource()
 	s.apiKey = "test-api-key"
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(10*time.Second),
-		gonghttp.WithAuth(gonghttp.NewBasicAuth("test-api-key", "")),
-		gonghttp.WithDisableRetry(),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(10*time.Second),
+		httpclient.WithAuth(httpclient.NewBasicAuth("test-api-key", "")),
+		httpclient.WithDisableRetry(),
 	)
 	return s
 }

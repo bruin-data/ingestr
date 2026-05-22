@@ -347,7 +347,7 @@ func (r *MultiTableCDCReader) getCurrentWALLSN(ctx context.Context) (pglogrepl.L
 
 // generateMultiTableSlotName creates a slot name for multi-table CDC.
 func generateMultiTableSlotName(publication, suffix string) string {
-	name := fmt.Sprintf("gong_mt_%s", publication)
+	name := fmt.Sprintf("ingestr_mt_%s", publication)
 	if suffix != "" {
 		name = fmt.Sprintf("%s_%s", name, suffix)
 	}

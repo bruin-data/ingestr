@@ -10,7 +10,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -23,7 +23,7 @@ const (
 )
 
 type TrustpilotSource struct {
-	client         *gonghttp.Client
+	client         *httpclient.Client
 	businessUnitID string
 	apiKey         string
 }
@@ -45,11 +45,11 @@ func (s *TrustpilotSource) Connect(ctx context.Context, uri string) error {
 	s.businessUnitID = businessUnitID
 	s.apiKey = apiKey
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(defaultRateLimit, defaultBurst),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(defaultRateLimit, defaultBurst),
+		httpclient.WithDebug(config.DebugMode),
 	)
 
 	config.Debug("[TRUSTPILOT] Connected successfully")

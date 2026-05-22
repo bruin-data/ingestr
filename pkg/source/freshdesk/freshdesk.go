@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -37,7 +37,7 @@ var supportedTables = []string{
 }
 
 type FreshdeskSource struct {
-	client *gonghttp.Client
+	client *httpclient.Client
 }
 
 func NewFreshdeskSource() *FreshdeskSource {
@@ -60,12 +60,12 @@ func (s *FreshdeskSource) Connect(ctx context.Context, uri string) error {
 
 	baseURL := fmt.Sprintf("https://%s.freshdesk.com", creds.subdomain)
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBasicAuth(creds.apiKey, "X")),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBasicAuth(creds.apiKey, "X")),
 	)
 
 	config.Debug("[FRESHDESK] Connected to subdomain: %s", creds.subdomain)

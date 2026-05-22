@@ -14,7 +14,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -52,7 +52,7 @@ type IndeedSource struct {
 	clientID     string
 	clientSecret string
 	employerID   string
-	client       *gonghttp.Client
+	client       *httpclient.Client
 }
 
 func NewIndeedSource() *IndeedSource {
@@ -101,8 +101,8 @@ func parseURI(uri string) (clientID, clientSecret, employerID string, err error)
 }
 
 func (s *IndeedSource) getAccessToken(ctx context.Context) (string, error) {
-	client := gonghttp.New(
-		gonghttp.WithTimeout(30 * time.Second),
+	client := httpclient.New(
+		httpclient.WithTimeout(30 * time.Second),
 	)
 	defer func() { _ = client.Close() }()
 
@@ -151,12 +151,12 @@ func (s *IndeedSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to get Indeed access token: %w", err)
 	}
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(token)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(token)),
 	)
 
 	config.Debug("[INDEED] Connected successfully")

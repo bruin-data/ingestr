@@ -15,7 +15,7 @@ const (
 	DefaultRetryCount   = 3
 	DefaultRetryWait    = 1 * time.Second
 	DefaultRetryMaxWait = 30 * time.Second
-	DefaultUserAgent    = "gong/1.0 (https://github.com/bruin-data/ingestr)"
+	DefaultUserAgent    = "ingestr/1.0 (https://github.com/bruin-data/ingestr)"
 )
 
 type Client struct {

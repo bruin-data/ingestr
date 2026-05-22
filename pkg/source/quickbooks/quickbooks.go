@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -48,7 +48,7 @@ var tableMapping = map[string]string{
 }
 
 type QuickBooksSource struct {
-	client       *gonghttp.Client
+	client       *httpclient.Client
 	companyID    string
 	minorVersion string
 }
@@ -92,13 +92,13 @@ func (s *QuickBooksSource) Connect(ctx context.Context, uri string) error {
 	s.companyID = creds.companyID
 	s.minorVersion = creds.minorVersion
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(accessToken)),
-		gonghttp.WithHeader("Accept", "application/json"),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(accessToken)),
+		httpclient.WithHeader("Accept", "application/json"),
 	)
 
 	config.Debug("[QUICKBOOKS] Connected to company: %s (env: %s)", creds.companyID, creds.environment)
@@ -240,9 +240,9 @@ func jsonUseNumber(data []byte, v any) error {
 
 // refreshAccessToken exchanges a refresh token for a new access token.
 func refreshAccessToken(ctx context.Context, clientID, clientSecret, refreshToken string) (string, error) {
-	client := gonghttp.New(
-		gonghttp.WithTimeout(30*time.Second),
-		gonghttp.WithAuth(gonghttp.NewBasicAuth(clientID, clientSecret)),
+	client := httpclient.New(
+		httpclient.WithTimeout(30*time.Second),
+		httpclient.WithAuth(httpclient.NewBasicAuth(clientID, clientSecret)),
 	)
 	defer func() { _ = client.Close() }()
 

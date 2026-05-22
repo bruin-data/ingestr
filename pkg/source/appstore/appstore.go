@@ -18,7 +18,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/golang-jwt/jwt/v5"
@@ -156,7 +156,7 @@ var resMeta = map[string]resourceConfig{
 }
 
 type AppStoreSource struct {
-	client   *gonghttp.Client
+	client   *httpclient.Client
 	key      string
 	keyID    string
 	issuerID string
@@ -187,12 +187,12 @@ func (s *AppStoreSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to generate JWT: %w", err)
 	}
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(apiBaseURL),
-		gonghttp.WithTimeout(120*time.Second),
-		gonghttp.WithRateLimiter(1, 1),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(token)),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(apiBaseURL),
+		httpclient.WithTimeout(120*time.Second),
+		httpclient.WithRateLimiter(1, 1),
+		httpclient.WithAuth(httpclient.NewBearerAuth(token)),
+		httpclient.WithDebug(config.DebugMode),
 	)
 
 	config.Debug("[APPSTORE] Connected successfully")
@@ -539,7 +539,7 @@ func (s *AppStoreSource) findReportRequest(ctx context.Context, appID string) (s
 			} `json:"links"`
 		}
 
-		var resp *gonghttp.Response
+		var resp *httpclient.Response
 		var err error
 
 		if !firstRequest && nextURL != "" {
@@ -610,7 +610,7 @@ func (s *AppStoreSource) findReports(ctx context.Context, requestID, reportName 
 			} `json:"links"`
 		}
 
-		var resp *gonghttp.Response
+		var resp *httpclient.Response
 		var err error
 
 		if !firstRequest && nextURL != "" {
@@ -683,7 +683,7 @@ func (s *AppStoreSource) getReportInstances(ctx context.Context, reportID string
 			} `json:"links"`
 		}
 
-		var resp *gonghttp.Response
+		var resp *httpclient.Response
 		var err error
 
 		if !firstRequest && nextURL != "" {
@@ -757,7 +757,7 @@ func (s *AppStoreSource) getSegments(ctx context.Context, instanceID string) ([]
 			} `json:"links"`
 		}
 
-		var resp *gonghttp.Response
+		var resp *httpclient.Response
 		var err error
 
 		if !firstRequest && nextURL != "" {
@@ -895,12 +895,12 @@ func (s *AppStoreSource) refreshToken() error {
 		return err
 	}
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(apiBaseURL),
-		gonghttp.WithTimeout(120*time.Second),
-		gonghttp.WithRateLimiter(1, 1),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(token)),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(apiBaseURL),
+		httpclient.WithTimeout(120*time.Second),
+		httpclient.WithRateLimiter(1, 1),
+		httpclient.WithAuth(httpclient.NewBearerAuth(token)),
+		httpclient.WithDebug(config.DebugMode),
 	)
 	return nil
 }

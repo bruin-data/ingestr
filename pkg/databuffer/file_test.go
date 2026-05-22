@@ -105,7 +105,7 @@ func TestNewFileBuffer(t *testing.T) {
 		defer func() { _ = buf.Close() }()
 
 		assert.DirExists(t, buf.baseDir)
-		assert.Contains(t, buf.baseDir, "gong-buffer-")
+		assert.Contains(t, buf.baseDir, "ingestr-buffer-")
 	})
 
 	t.Run("initializes empty state", func(t *testing.T) {

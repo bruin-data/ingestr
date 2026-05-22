@@ -15,7 +15,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -309,7 +309,7 @@ func supportedTableNames() string {
 }
 
 type CustomerIOSource struct {
-	client  *gonghttp.Client
+	client  *httpclient.Client
 	baseURL string
 }
 
@@ -332,12 +332,12 @@ func (s *CustomerIOSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.baseURL = baseURL
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(apiKey)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
 	)
 
 	config.Debug("[CUSTOMERIO] Connected to %s", baseURL)

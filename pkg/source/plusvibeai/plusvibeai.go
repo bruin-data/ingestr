@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -229,7 +229,7 @@ var supportedTables = map[string]tableMeta{
 }
 
 type PlusVibeAI struct {
-	client      *gonghttp.Client
+	client      *httpclient.Client
 	apiKey      string
 	workspaceID string
 }
@@ -255,14 +255,14 @@ func (s *PlusVibeAI) Connect(ctx context.Context, uri string) error {
 	s.apiKey = apiKey
 	s.workspaceID = workspaceId
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(requestTimeout),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("x-api-key", apiKey),
-		gonghttp.WithHeader("Accept", "application/json"),
-		gonghttp.WithHeader("Content-Type", "application/json"),
-		gonghttp.WithRateLimiter(5, 1),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(requestTimeout),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("x-api-key", apiKey),
+		httpclient.WithHeader("Accept", "application/json"),
+		httpclient.WithHeader("Content-Type", "application/json"),
+		httpclient.WithRateLimiter(5, 1),
 	)
 
 	config.Debug("[PLUSVIBEAI] Connected successfully")

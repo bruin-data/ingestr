@@ -11,7 +11,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -197,7 +197,7 @@ var tagsFields = []schema.Column{
 
 type MondaySource struct {
 	apiKey string
-	client *gonghttp.Client
+	client *httpclient.Client
 }
 
 func NewMondaySource() *MondaySource {
@@ -219,13 +219,13 @@ func (s *MondaySource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.apiKey = apiKey
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(graphqlBaseUrl),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("Authorization", s.apiKey),
-		gonghttp.WithHeader("Content-Type", "application/json"),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(graphqlBaseUrl),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("Authorization", s.apiKey),
+		httpclient.WithHeader("Content-Type", "application/json"),
 	)
 
 	config.Debug("[MONDAY] Connected successfully")

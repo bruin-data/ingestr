@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -120,9 +120,9 @@ func TestChessSource_ReadProfiles(t *testing.T) {
 	require.NoError(t, err)
 	// Replace the client with one pointing to our test server
 	_ = s.client.Close()
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(server.URL),
-		gonghttp.WithDisableRetry(),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(server.URL),
+		httpclient.WithDisableRetry(),
 	)
 	defer func() { _ = s.client.Close() }()
 

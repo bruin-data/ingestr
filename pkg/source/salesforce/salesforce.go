@@ -12,7 +12,7 @@ import (
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/simpleforce/simpleforce"
@@ -24,7 +24,7 @@ const (
 
 type salesforceSource struct {
 	client      *simpleforce.Client
-	httpClient  *gonghttp.Client
+	httpClient  *httpclient.Client
 	instanceURL string
 	sessionID   string
 	useBulkAPI  bool
@@ -65,11 +65,11 @@ func (s *salesforceSource) Connect(ctx context.Context, uri string) error {
 	s.sessionID = s.client.GetSid()
 	s.instanceURL = s.client.GetLoc()
 	s.useBulkAPI = true
-	s.httpClient = gonghttp.New(
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewAPIKeyAuth("X-SFDC-Session", s.sessionID, true)),
-		gonghttp.WithRateLimiter(5, 1),
+	s.httpClient = httpclient.New(
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewAPIKeyAuth("X-SFDC-Session", s.sessionID, true)),
+		httpclient.WithRateLimiter(5, 1),
 	)
 
 	config.Debug("[SALESFORCE] Connected successfully")

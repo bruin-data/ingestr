@@ -13,7 +13,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -34,17 +34,17 @@ var gameColumns = []schema.Column{
 
 type ChessSource struct {
 	players []string
-	client  *gonghttp.Client
+	client  *httpclient.Client
 	tables  map[string]source.SourceTable
 }
 
 func NewChessSource() *ChessSource {
 	return &ChessSource{
-		client: gonghttp.New(
-			gonghttp.WithBaseURL(baseURL),
-			gonghttp.WithTimeout(30*time.Second),
-			gonghttp.WithRateLimiter(5, 2),
-			gonghttp.WithDebug(config.DebugMode),
+		client: httpclient.New(
+			httpclient.WithBaseURL(baseURL),
+			httpclient.WithTimeout(30*time.Second),
+			httpclient.WithRateLimiter(5, 2),
+			httpclient.WithDebug(config.DebugMode),
 		),
 	}
 }

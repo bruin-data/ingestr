@@ -11,7 +11,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -30,7 +30,7 @@ var supportedTables = []string{
 }
 
 type DuneSource struct {
-	client      *gonghttp.Client
+	client      *httpclient.Client
 	apiKey      string
 	performance string
 }
@@ -56,13 +56,13 @@ func (s *DuneSource) Connect(ctx context.Context, uri string) error {
 	s.apiKey = apiKey
 	s.performance = performance
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(120*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithRetry(5, 5*time.Second, 60*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewAPIKeyAuth("X-DUNE-API-KEY", s.apiKey, true)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(120*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithRetry(5, 5*time.Second, 60*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewAPIKeyAuth("X-DUNE-API-KEY", s.apiKey, true)),
 	)
 
 	config.Debug("[DUNE] Connected with performance=%s", s.performance)
