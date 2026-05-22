@@ -14,7 +14,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/golang-jwt/jwt/v5"
@@ -51,7 +51,7 @@ type AppleAdsSource struct {
 	keyID       string
 	orgIDs      []string
 	privateKey  string
-	client      *gonghttp.Client
+	client      *httpclient.Client
 	accessToken string
 	tokenExpiry time.Time
 }
@@ -83,12 +83,12 @@ func (s *AppleAdsSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to obtain access token: %w", err)
 	}
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(apiBaseURL),
-		gonghttp.WithTimeout(120*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(s.accessToken)),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(apiBaseURL),
+		httpclient.WithTimeout(120*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithAuth(httpclient.NewBearerAuth(s.accessToken)),
+		httpclient.WithDebug(config.DebugMode),
 	)
 	config.Debug("[APPLEADS] Connected successfully (orgIds=%v)", s.orgIDs)
 	return nil
@@ -245,12 +245,12 @@ func (s *AppleAdsSource) ensureAccessToken(ctx context.Context) error {
 	if s.client != nil {
 		_ = s.client.Close()
 	}
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(apiBaseURL),
-		gonghttp.WithTimeout(120*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(s.accessToken)),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(apiBaseURL),
+		httpclient.WithTimeout(120*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithAuth(httpclient.NewBearerAuth(s.accessToken)),
+		httpclient.WithDebug(config.DebugMode),
 	)
 	return nil
 }

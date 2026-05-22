@@ -11,7 +11,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -27,7 +27,7 @@ const (
 type AirtableSource struct {
 	accessToken string
 	baseID      string
-	client      *gonghttp.Client
+	client      *httpclient.Client
 }
 
 func NewAirtableSource() *AirtableSource {
@@ -50,12 +50,12 @@ func (s *AirtableSource) Connect(ctx context.Context, uri string) error {
 	s.accessToken = token
 	s.baseID = baseID
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("Authorization", "Bearer "+s.accessToken),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("Authorization", "Bearer "+s.accessToken),
 	)
 	config.Debug("[AIRTABLE] Connected successfully")
 	return nil

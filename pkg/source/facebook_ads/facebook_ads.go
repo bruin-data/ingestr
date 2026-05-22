@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -52,7 +52,7 @@ var retryableErrorCodes = map[int]bool{
 	800008: true, 800009: true, 80014: true,
 }
 
-func facebookRetryCondition(resp *gonghttp.Response, err error) bool {
+func facebookRetryCondition(resp *httpclient.Response, err error) bool {
 	if resp == nil {
 		return false
 	}
@@ -87,7 +87,7 @@ var supportedTables = []string{
 type FacebookAdsSource struct {
 	accessToken string
 	accountID   string
-	client      *gonghttp.Client
+	client      *httpclient.Client
 }
 
 func NewFacebookAdsSource() *FacebookAdsSource {
@@ -111,14 +111,14 @@ func (s *FacebookAdsSource) Connect(ctx context.Context, uri string) error {
 	s.accessToken = accessToken
 	s.accountID = accountID
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRetry(retryAttempts, retryBackoff, retryMaxWait),
-		gonghttp.WithRetryCondition(facebookRetryCondition),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(s.accessToken)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRetry(retryAttempts, retryBackoff, retryMaxWait),
+		httpclient.WithRetryCondition(facebookRetryCondition),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(s.accessToken)),
 	)
 
 	config.Debug("[FACEBOOK_ADS] Connected to account: %s", s.accountID)
@@ -1134,7 +1134,7 @@ func (s *FacebookAdsSource) fetchAsyncResults(ctx context.Context, reportRunID, 
 		default:
 		}
 
-		var resp *gonghttp.Response
+		var resp *httpclient.Response
 		// Facebook sometimes reports async_status="Job Completed" but the
 		// /insights endpoint still returns 400 with error_subcode 1815107
 		// (is_transient: true) for a brief window. Retry with backoff.
@@ -1511,7 +1511,7 @@ func filterInvalidInsightsFields(fields []string) []string {
 	return result
 }
 
-func logUsageHeaders(resp *gonghttp.Response) {
+func logUsageHeaders(resp *httpclient.Response) {
 	if h := resp.Header().Get("X-App-Usage"); h != "" {
 		config.Debug("[FACEBOOK_ADS] X-App-Usage: %s", h)
 	}

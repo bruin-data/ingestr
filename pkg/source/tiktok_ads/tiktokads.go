@@ -14,7 +14,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -60,7 +60,7 @@ var typeHints = map[string]schema.DataType{
 }
 
 type TiktokAdsSource struct {
-	client        *gonghttp.Client
+	client        *httpclient.Client
 	accessToken   string
 	advertiserIDs []string
 	timezone      string
@@ -84,13 +84,13 @@ func (s *TiktokAdsSource) Connect(ctx context.Context, uri string) error {
 	s.advertiserIDs = advertiserIDs
 	s.timezone = timezone
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRetry(12, 2*time.Second, 4096*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("Access-Token", accessToken),
-		gonghttp.WithHeader("Content-Type", "application/json"),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRetry(12, 2*time.Second, 4096*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("Access-Token", accessToken),
+		httpclient.WithHeader("Content-Type", "application/json"),
 	)
 
 	config.Debug("[TIKTOK] Connected with %d advertiser(s), timezone=%s", len(s.advertiserIDs), s.timezone)

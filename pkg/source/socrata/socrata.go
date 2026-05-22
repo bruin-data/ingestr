@@ -9,7 +9,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -17,7 +17,7 @@ import (
 const defaultPageSize = 50000
 
 type SocrataSource struct {
-	client   *gonghttp.Client
+	client   *httpclient.Client
 	Domain   string
 	AppToken string
 	Username string
@@ -42,18 +42,18 @@ func (s *SocrataSource) Connect(ctx context.Context, uri string) error {
 	s.Username = username
 	s.Password = password
 
-	opts := []gonghttp.Option{
-		gonghttp.WithBaseURL("https://" + domain + "/resource"),
-		gonghttp.WithTimeout(60 * time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("X-App-Token", appToken),
+	opts := []httpclient.Option{
+		httpclient.WithBaseURL("https://" + domain + "/resource"),
+		httpclient.WithTimeout(60 * time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("X-App-Token", appToken),
 	}
 
 	if username != "" && password != "" {
-		opts = append(opts, gonghttp.WithAuth(gonghttp.NewBasicAuth(username, password)))
+		opts = append(opts, httpclient.WithAuth(httpclient.NewBasicAuth(username, password)))
 	}
 
-	s.client = gonghttp.New(opts...)
+	s.client = httpclient.New(opts...)
 
 	config.Debug("[SOCRATA] Connected successfully to %s", domain)
 	return nil

@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -24,7 +24,7 @@ const (
 )
 
 type PersonioSource struct {
-	client       *gonghttp.Client
+	client       *httpclient.Client
 	clientID     string
 	clientSecret string
 	token        string
@@ -52,11 +52,11 @@ func (s *PersonioSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to authenticate with Personio: %w", err)
 	}
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(s.token)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(s.token)),
 	)
 
 	config.Debug("[PERSONIO] Connected successfully")
@@ -94,9 +94,9 @@ func parsePersonioURI(uri string) (string, string, error) {
 }
 
 func (s *PersonioSource) getToken(ctx context.Context, clientID, clientSecret string) (string, error) {
-	authClient := gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(30*time.Second),
+	authClient := httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(30*time.Second),
 	)
 	defer func() { _ = authClient.Close() }()
 

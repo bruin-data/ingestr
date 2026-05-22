@@ -10,7 +10,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -22,7 +22,7 @@ const (
 
 type AnthropicSource struct {
 	apiKey string
-	client *gonghttp.Client
+	client *httpclient.Client
 }
 
 func NewAnthropicSource() *AnthropicSource {
@@ -40,12 +40,12 @@ func (s *AnthropicSource) Connect(ctx context.Context, uri string) error {
 	}
 	s.apiKey = apiKey
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("x-api-key", s.apiKey),
-		gonghttp.WithHeader("anthropic-version", anthropicAPIVer),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("x-api-key", s.apiKey),
+		httpclient.WithHeader("anthropic-version", anthropicAPIVer),
 	)
 
 	config.Debug("[ANTHROPIC] Connected successfully")

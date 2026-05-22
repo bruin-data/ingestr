@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -49,7 +49,7 @@ var noOptionMetrics = map[string]bool{
 
 type IsocPulseSource struct {
 	token  string
-	client *gonghttp.Client
+	client *httpclient.Client
 }
 
 func NewIsocPulseSource() *IsocPulseSource {
@@ -71,12 +71,12 @@ func (s *IsocPulseSource) Connect(ctx context.Context, uri string) error {
 	}
 	s.token = token
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("Authorization", "Bearer "+s.token),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("Authorization", "Bearer "+s.token),
 	)
 	config.Debug("[ISOC-PULSE] Connected successfully")
 	return nil

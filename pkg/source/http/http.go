@@ -19,7 +19,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -40,7 +40,7 @@ const (
 
 type HTTPSource struct {
 	url    string
-	client *gonghttp.Client
+	client *httpclient.Client
 }
 
 func NewHTTPSource() *HTTPSource {
@@ -57,9 +57,9 @@ func (s *HTTPSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.url = uri
-	s.client = gonghttp.New(
-		gonghttp.WithTimeout(120*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithTimeout(120*time.Second),
+		httpclient.WithDebug(config.DebugMode),
 	)
 
 	config.Debug("[HTTP] Connected to URL: %s", s.url)

@@ -14,7 +14,7 @@ import (
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -27,7 +27,7 @@ const (
 type PostHogSource struct {
 	baseURL   string
 	projectID string
-	client    *gonghttp.Client
+	client    *httpclient.Client
 }
 
 type posthogCredentials struct {
@@ -121,11 +121,11 @@ func (s *PostHogSource) Connect(ctx context.Context, uri string) error {
 
 	s.baseURL = creds.baseURL
 	s.projectID = creds.projectID
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(s.baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(creds.personalAPIKey)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(s.baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(creds.personalAPIKey)),
 	)
 
 	config.Debug("[POSTHOG] Connected to %s for project %s", s.baseURL, s.projectID)

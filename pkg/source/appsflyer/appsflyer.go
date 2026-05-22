@@ -10,7 +10,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -81,7 +81,7 @@ var (
 )
 
 type AppsflyerSource struct {
-	client *gonghttp.Client
+	client *httpclient.Client
 	apiKey string
 }
 
@@ -101,14 +101,14 @@ func (s *AppsflyerSource) Connect(ctx context.Context, uri string) error {
 
 	s.apiKey = apiKey
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(apiBaseURL),
-		gonghttp.WithTimeout(120*time.Second),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(apiBaseURL),
+		httpclient.WithTimeout(120*time.Second),
 		// Master API limit: 1 call/min per app (short ranges), 120 calls/day (long ranges)
-		gonghttp.WithRateLimiter(0.8, 1),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("accept", "application/json"),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(apiKey)),
+		httpclient.WithRateLimiter(0.8, 1),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("accept", "application/json"),
+		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
 	)
 
 	config.Debug("[APPSFLYER] Connected successfully")

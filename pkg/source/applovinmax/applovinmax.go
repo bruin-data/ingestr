@@ -15,7 +15,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -36,7 +36,7 @@ var platforms = []string{"ios", "android", "fireos"}
 type AppLovinMaxSource struct {
 	apiKey       string
 	applications []string
-	client       *gonghttp.Client
+	client       *httpclient.Client
 }
 
 func NewAppLovinMaxSource() *AppLovinMaxSource {
@@ -58,11 +58,11 @@ func (s *AppLovinMaxSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.apiKey = apiKey
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
 	)
 
 	config.Debug("[APPLOVINMAX] Connected successfully")

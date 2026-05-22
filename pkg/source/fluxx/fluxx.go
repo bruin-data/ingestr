@@ -13,7 +13,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"golang.org/x/net/publicsuffix"
@@ -25,7 +25,7 @@ const (
 )
 
 type FluxxSource struct {
-	client       *gonghttp.Client
+	client       *httpclient.Client
 	instance     string
 	clientID     string
 	clientSecret string
@@ -61,10 +61,10 @@ func (s *FluxxSource) Connect(ctx context.Context, uri string) error {
 	s.clientID = clientID
 	s.clientSecret = clientSecret
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(s.baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(s.baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithDebug(config.DebugMode),
 	)
 
 	config.Debug("[FLUXX] Connected to: %s (base URL: %s)", uri, s.baseURL)
@@ -519,7 +519,7 @@ func (s *FluxxSource) fluxxAPIRequest(ctx context.Context, endpoint, method stri
 		req.SetBody(data)
 	}
 
-	var resp *gonghttp.Response
+	var resp *httpclient.Response
 	var err error
 
 	// Since method is GET by default, we can use the Get method directly

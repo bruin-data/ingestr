@@ -14,7 +14,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -48,7 +48,7 @@ var supportedTables = []string{
 }
 
 type G2Source struct {
-	client   *gonghttp.Client
+	client   *httpclient.Client
 	apiToken string
 }
 
@@ -71,13 +71,13 @@ func (s *G2Source) Connect(ctx context.Context, uri string) error {
 	}
 	s.apiToken = creds.apiToken
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(s.apiToken)),
-		gonghttp.WithHeader("Content-Type", "application/vnd.api+json"),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(s.apiToken)),
+		httpclient.WithHeader("Content-Type", "application/vnd.api+json"),
 	)
 
 	config.Debug("[G2] Connected successfully")

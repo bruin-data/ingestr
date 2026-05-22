@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,12 +71,12 @@ func newTestSource(serverURL string) *PrimerSource {
 	s := &PrimerSource{
 		apiKey: "test-api-key",
 	}
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(serverURL),
-		gonghttp.WithTimeout(10*time.Second),
-		gonghttp.WithAuth(gonghttp.NewAPIKeyAuth("X-API-KEY", s.apiKey, true)),
-		gonghttp.WithHeader("X-API-VERSION", apiVersion),
-		gonghttp.WithDisableRetry(),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(serverURL),
+		httpclient.WithTimeout(10*time.Second),
+		httpclient.WithAuth(httpclient.NewAPIKeyAuth("X-API-KEY", s.apiKey, true)),
+		httpclient.WithHeader("X-API-VERSION", apiVersion),
+		httpclient.WithDisableRetry(),
 	)
 	return s
 }

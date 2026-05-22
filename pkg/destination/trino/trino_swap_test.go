@@ -15,7 +15,7 @@ import (
 )
 
 // TestSwapTable_CrossSchema reproduces and locks in the fix for the bug where
-// gong's SwapTable used a bare new-name in ALTER TABLE RENAME TO, which Trino
+// ingestr's SwapTable used a bare new-name in ALTER TABLE RENAME TO, which Trino
 // interprets as an in-place rename within the staging schema. With the
 // _bruin_staging design every swap is cross-schema, so the staging table
 // silently never reached the target schema.

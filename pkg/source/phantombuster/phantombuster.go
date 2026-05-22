@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -23,7 +23,7 @@ const (
 )
 
 type PhantombusterSource struct {
-	client *gonghttp.Client
+	client *httpclient.Client
 	apiKey string
 }
 
@@ -43,11 +43,11 @@ func (s *PhantombusterSource) Connect(ctx context.Context, uri string) error {
 
 	s.apiKey = apiKey
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithRetryCondition(func(resp *gonghttp.Response, err error) bool {
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithRetryCondition(func(resp *httpclient.Response, err error) bool {
 			return resp != nil && resp.StatusCode() == retryStatusCode
 		}),
 	)

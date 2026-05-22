@@ -10,7 +10,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -35,7 +35,7 @@ var monthlyDateColumns = []schema.Column{
 type LinkedInAdsSource struct {
 	accessToken string
 	accountIDs  []string
-	client      *gonghttp.Client
+	client      *httpclient.Client
 	tables      map[string]source.SourceTable
 }
 
@@ -70,14 +70,14 @@ func (s *LinkedInAdsSource) Connect(ctx context.Context, uri string) error {
 	s.accessToken = accessToken
 	s.accountIDs = accountIDs
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(5, 2),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("Authorization", fmt.Sprintf("Bearer %s", s.accessToken)),
-		gonghttp.WithHeader("Linkedin-Version", linkedInAPIVersion),
-		gonghttp.WithHeader("X-Restli-Protocol-Version", restliProtocolVersion),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(5, 2),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("Authorization", fmt.Sprintf("Bearer %s", s.accessToken)),
+		httpclient.WithHeader("Linkedin-Version", linkedInAPIVersion),
+		httpclient.WithHeader("X-Restli-Protocol-Version", restliProtocolVersion),
 	)
 
 	s.tables = s.getTables()

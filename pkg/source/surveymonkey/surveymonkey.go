@@ -13,7 +13,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -42,7 +42,7 @@ var supportedTables = []string{
 
 type SurveyMonkeySource struct {
 	accessToken string
-	client      *gonghttp.Client
+	client      *httpclient.Client
 }
 
 func NewSurveyMonkeySource() *SurveyMonkeySource {
@@ -64,12 +64,12 @@ func (s *SurveyMonkeySource) Connect(ctx context.Context, uri string) error {
 	}
 	s.accessToken = creds.accessToken
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(creds.apiURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(s.accessToken)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(creds.apiURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(s.accessToken)),
 	)
 	config.Debug("[SURVEYMONKEY] Connected successfully")
 	return nil

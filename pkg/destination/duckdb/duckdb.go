@@ -120,9 +120,9 @@ func (d *DuckDBDestination) Connect(ctx context.Context, uri string) error {
 		_ = opt.SetOption(adbc.OptionKeyAutoCommit, adbc.OptionValueEnabled)
 	}
 
-	if limit := os.Getenv("GONG_DUCKDB_MEMORY_LIMIT"); limit != "" {
+	if limit := os.Getenv("INGESTR_DUCKDB_MEMORY_LIMIT"); limit != "" {
 		if strings.ContainsAny(limit, "';\n") {
-			config.Debug("[DUCKDB] Ignoring invalid GONG_DUCKDB_MEMORY_LIMIT=%q", limit)
+			config.Debug("[DUCKDB] Ignoring invalid INGESTR_DUCKDB_MEMORY_LIMIT=%q", limit)
 		} else if err := d.exec(ctx, fmt.Sprintf("SET memory_limit='%s'", limit)); err != nil {
 			config.Debug("[DUCKDB] Failed to set memory_limit=%s: %v", limit, err)
 		}
@@ -233,14 +233,14 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 	}
 
 	// Optional periodic CHECKPOINT to bound DuckDB's WAL/buffer pool growth
-	// during large ingests. Off by default. Set GONG_DUCKDB_CHECKPOINT_ROWS=<n>
+	// during large ingests. Off by default. Set INGESTR_DUCKDB_CHECKPOINT_ROWS=<n>
 	// to checkpoint after every n rows (-1 = after every batch).
 	var checkpointEvery int64
-	if v := os.Getenv("GONG_DUCKDB_CHECKPOINT_ROWS"); v != "" {
+	if v := os.Getenv("INGESTR_DUCKDB_CHECKPOINT_ROWS"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			checkpointEvery = n
 		} else {
-			config.Debug("[DUCKDB] Invalid GONG_DUCKDB_CHECKPOINT_ROWS=%q, checkpointing disabled: %v", v, err)
+			config.Debug("[DUCKDB] Invalid INGESTR_DUCKDB_CHECKPOINT_ROWS=%q, checkpointing disabled: %v", v, err)
 		}
 	}
 

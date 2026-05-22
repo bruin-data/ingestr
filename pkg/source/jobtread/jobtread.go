@@ -11,7 +11,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -52,7 +52,7 @@ type jobTreadCredentials struct {
 }
 
 type JobTreadSource struct {
-	client *gonghttp.Client
+	client *httpclient.Client
 	creds  jobTreadCredentials
 }
 
@@ -75,12 +75,12 @@ func (s *JobTreadSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.creds = creds
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithHeader("Content-Type", "application/json"),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithHeader("Content-Type", "application/json"),
 	)
 
 	config.Debug("[JOBTREAD] Connected with organization ID: %s", s.creds.organizationID)

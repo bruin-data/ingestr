@@ -12,7 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -48,7 +48,7 @@ var supportedTables = []string{
 }
 
 type AsanaSource struct {
-	client      *gonghttp.Client
+	client      *httpclient.Client
 	workspaceID string
 }
 
@@ -97,12 +97,12 @@ func (s *AsanaSource) Connect(ctx context.Context, uri string) error {
 	}
 	s.workspaceID = workspaceID
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(token)),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(token)),
 	)
 
 	config.Debug("[ASANA] Connected successfully")

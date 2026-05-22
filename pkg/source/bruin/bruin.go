@@ -10,7 +10,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -35,7 +35,7 @@ var assetFields = []string{
 }
 
 type BruinSource struct {
-	client *gonghttp.Client
+	client *httpclient.Client
 	apiKey string
 }
 
@@ -58,12 +58,12 @@ func (s *BruinSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.apiKey = apiKey
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(30*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBearerAuth(s.apiKey)),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(30*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBearerAuth(s.apiKey)),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
 	)
 
 	config.Debug("[BRUIN] Connected")

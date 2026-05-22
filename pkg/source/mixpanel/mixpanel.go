@@ -14,7 +14,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -40,8 +40,8 @@ var validServers = map[string]bool{
 }
 
 type MixpanelSource struct {
-	exportClient    *gonghttp.Client
-	engageClient    *gonghttp.Client
+	exportClient    *httpclient.Client
+	engageClient    *httpclient.Client
 	projectID       string
 	nullWarningOnce sync.Once
 }
@@ -69,20 +69,20 @@ func (s *MixpanelSource) Connect(ctx context.Context, uri string) error {
 	exportBaseURL := exportBaseURL(creds.server)
 	engageBaseURL := engageBaseURL(creds.server)
 
-	s.exportClient = gonghttp.New(
-		gonghttp.WithBaseURL(exportBaseURL),
-		gonghttp.WithTimeout(120*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBasicAuth(creds.username, creds.password)),
+	s.exportClient = httpclient.New(
+		httpclient.WithBaseURL(exportBaseURL),
+		httpclient.WithTimeout(120*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBasicAuth(creds.username, creds.password)),
 	)
 
-	s.engageClient = gonghttp.New(
-		gonghttp.WithBaseURL(engageBaseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBasicAuth(creds.username, creds.password)),
+	s.engageClient = httpclient.New(
+		httpclient.WithBaseURL(engageBaseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBasicAuth(creds.username, creds.password)),
 	)
 
 	config.Debug("[MIXPANEL] Connected to project %s (server: %s)", creds.projectID, creds.server)

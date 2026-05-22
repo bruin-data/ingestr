@@ -14,7 +14,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -88,7 +88,7 @@ type customFieldInfo struct {
 
 type PipedriveSource struct {
 	apiToken         string
-	client           *gonghttp.Client
+	client           *httpclient.Client
 	customFields     map[string]map[string]customFieldInfo // entity -> hash_key -> info
 	customFieldsOnce sync.Once
 	customFieldsErr  error
@@ -113,11 +113,11 @@ func (s *PipedriveSource) Connect(ctx context.Context, uri string) error {
 	}
 	s.apiToken = apiToken
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
 	)
 
 	config.Debug("[PIPEDRIVE] Connected successfully")

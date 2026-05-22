@@ -12,7 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -39,7 +39,7 @@ var messagesMeta = tableMeta{
 }
 
 type SlackSource struct {
-	client *gonghttp.Client
+	client *httpclient.Client
 	apiKey string
 }
 
@@ -59,11 +59,11 @@ func (s *SlackSource) Connect(ctx context.Context, uri string) error {
 
 	s.apiKey = apiKey
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(60*time.Second),
-		gonghttp.WithRateLimiter(0.33, 1),
-		gonghttp.WithDebug(config.DebugMode),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(0.33, 1),
+		httpclient.WithDebug(config.DebugMode),
 	)
 
 	config.Debug("[SLACK] Connected successfully")

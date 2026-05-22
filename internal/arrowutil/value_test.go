@@ -21,7 +21,7 @@ type testExtType struct {
 }
 
 func (t *testExtType) ArrayType() reflect.Type { return reflect.TypeOf(testExtArray{}) }
-func (t *testExtType) ExtensionName() string   { return "gong.test.ext" }
+func (t *testExtType) ExtensionName() string   { return "ingestr.test.ext" }
 func (t *testExtType) ExtensionEquals(o arrow.ExtensionType) bool {
 	_, ok := o.(*testExtType)
 	return ok

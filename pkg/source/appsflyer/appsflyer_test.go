@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
@@ -274,9 +274,9 @@ func TestReadWithMockServer(t *testing.T) {
 
 	s := &AppsflyerSource{
 		apiKey: "test_key",
-		client: gonghttp.New(
-			gonghttp.WithBaseURL(server.URL),
-			gonghttp.WithTimeout(10*time.Second),
+		client: httpclient.New(
+			httpclient.WithBaseURL(server.URL),
+			httpclient.WithTimeout(10*time.Second),
 		),
 	}
 
@@ -314,9 +314,9 @@ func TestReadWithMockServerError(t *testing.T) {
 
 	s := &AppsflyerSource{
 		apiKey: "test_key",
-		client: gonghttp.New(
-			gonghttp.WithBaseURL(server.URL),
-			gonghttp.WithTimeout(10*time.Second),
+		client: httpclient.New(
+			httpclient.WithBaseURL(server.URL),
+			httpclient.WithTimeout(10*time.Second),
 		),
 	}
 
@@ -346,9 +346,9 @@ func TestReadWithMockServerRateLimit(t *testing.T) {
 
 	s := &AppsflyerSource{
 		apiKey: "test_key",
-		client: gonghttp.New(
-			gonghttp.WithBaseURL(server.URL),
-			gonghttp.WithTimeout(10*time.Second),
+		client: httpclient.New(
+			httpclient.WithBaseURL(server.URL),
+			httpclient.WithTimeout(10*time.Second),
 		),
 	}
 

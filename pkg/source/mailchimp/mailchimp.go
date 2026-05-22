@@ -14,7 +14,7 @@ import (
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	gonghttp "github.com/bruin-data/ingestr/pkg/http"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -296,7 +296,7 @@ type mailchimpCredentials struct {
 }
 
 type MailchimpSource struct {
-	client *gonghttp.Client
+	client *httpclient.Client
 	apiKey string
 	server string
 }
@@ -324,12 +324,12 @@ func (s *MailchimpSource) Connect(ctx context.Context, uri string) error {
 
 	baseURL := fmt.Sprintf("https://%s.api.mailchimp.com/3.0", s.server)
 
-	s.client = gonghttp.New(
-		gonghttp.WithBaseURL(baseURL),
-		gonghttp.WithTimeout(120*time.Second),
-		gonghttp.WithDebug(config.DebugMode),
-		gonghttp.WithAuth(gonghttp.NewBasicAuth("anystring", s.apiKey)),
-		gonghttp.WithRateLimiter(rateLimit, rateLimitBurst),
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(120*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBasicAuth("anystring", s.apiKey)),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
 	)
 
 	return nil
