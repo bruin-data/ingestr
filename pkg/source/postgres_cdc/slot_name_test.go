@@ -18,21 +18,21 @@ func TestGenerateSlotName(t *testing.T) {
 			tableName:   "users",
 			publication: "gong_publication",
 			suffix:      "",
-			want:        "gong_users_gong_publication",
+			want:        "ingestr_users_gong_publication",
 		},
 		{
 			name:        "with suffix",
 			tableName:   "users",
 			publication: "gong_publication",
 			suffix:      "abc123",
-			want:        "gong_users_gong_publication_abc123",
+			want:        "ingestr_users_gong_publication_abc123",
 		},
 		{
 			name:        "schema-qualified table",
 			tableName:   "public.users",
 			publication: "pub1",
 			suffix:      "def456",
-			want:        "gong_public_users_pub1_def456",
+			want:        "ingestr_public_users_pub1_def456",
 		},
 	}
 
@@ -65,13 +65,13 @@ func TestGenerateMultiTableSlotName(t *testing.T) {
 			name:        "without suffix",
 			publication: "gong_publication",
 			suffix:      "",
-			want:        "gong_mt_gong_publication",
+			want:        "ingestr_mt_gong_publication",
 		},
 		{
 			name:        "with suffix",
 			publication: "gong_publication",
 			suffix:      "abc123",
-			want:        "gong_mt_gong_publication_abc123",
+			want:        "ingestr_mt_gong_publication_abc123",
 		},
 	}
 
