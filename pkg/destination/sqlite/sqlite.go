@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -19,13 +20,49 @@ import (
 )
 
 type SQLiteDestination struct {
-	db       *sql.DB
-	filePath string
-	schema   *schema.TableSchema
+	db              *sql.DB
+	filePath        string
+	attachedSchemas map[string]string
+	attachMu        sync.Mutex
+
+	// schemas captures the schema each prepared table was created with, keyed by
+	// opts.Table. The cross-attached-database swap branch uses it to recreate the
+	// target with full constraints. Per-key writes are safe under parallel
+	// PrepareTable calls in multi-table runs.
+	schemas   map[string]*schema.TableSchema
+	schemasMu sync.Mutex
 }
 
 func NewSQLiteDestination() *SQLiteDestination {
 	return &SQLiteDestination{}
+}
+
+func (d *SQLiteDestination) recordSchema(table string, sch *schema.TableSchema, pks []string) {
+	if sch == nil {
+		return
+	}
+	clone := *sch
+	if len(pks) > 0 {
+		clone.PrimaryKeys = pks
+	}
+	d.schemasMu.Lock()
+	defer d.schemasMu.Unlock()
+	if d.schemas == nil {
+		d.schemas = map[string]*schema.TableSchema{}
+	}
+	d.schemas[table] = &clone
+}
+
+func (d *SQLiteDestination) lookupSchema(table string) *schema.TableSchema {
+	d.schemasMu.Lock()
+	defer d.schemasMu.Unlock()
+	return d.schemas[table]
+}
+
+func (d *SQLiteDestination) forgetSchema(table string) {
+	d.schemasMu.Lock()
+	defer d.schemasMu.Unlock()
+	delete(d.schemas, table)
 }
 
 func (d *SQLiteDestination) Schemes() []string {
@@ -55,6 +92,9 @@ func (d *SQLiteDestination) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to open SQLite database: %w", err)
 	}
 
+	// Pin to one connection: ATTACH state and PRAGMAs are per-connection.
+	db.SetMaxOpenConns(1)
+
 	// Configure for better write performance
 	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 		_ = db.Close()
@@ -70,7 +110,52 @@ func (d *SQLiteDestination) Connect(ctx context.Context, uri string) error {
 	}
 
 	d.db = db
+	d.attachedSchemas = map[string]string{}
 	return nil
+}
+
+func (d *SQLiteDestination) ensureSchemaAttached(ctx context.Context, schemaName string) error {
+	if schemaName == "" || schemaName == "main" || schemaName == "temp" {
+		return nil
+	}
+	d.attachMu.Lock()
+	defer d.attachMu.Unlock()
+	if _, ok := d.attachedSchemas[schemaName]; ok {
+		return nil
+	}
+	stagingPath := stagingFilePath(d.filePath, schemaName)
+	attachSQL := fmt.Sprintf("ATTACH DATABASE '%s' AS %s",
+		strings.ReplaceAll(stagingPath, "'", "''"),
+		destination.QuoteIdentifier(schemaName))
+	if _, err := d.db.ExecContext(ctx, attachSQL); err != nil {
+		config.LogFailedQuery(attachSQL, err)
+		return fmt.Errorf("failed to attach schema %s: %w", schemaName, err)
+	}
+
+	walSQL := fmt.Sprintf("PRAGMA %s.journal_mode=WAL", destination.QuoteIdentifier(schemaName))
+	if _, err := d.db.ExecContext(ctx, walSQL); err != nil {
+		config.LogFailedQuery(walSQL, err)
+		return fmt.Errorf("failed to set WAL on attached schema %s: %w", schemaName, err)
+	}
+	d.attachedSchemas[schemaName] = stagingPath
+	config.Debug("[SQLITE] Attached schema %q at %s", schemaName, stagingPath)
+	return nil
+}
+
+// Leading underscores in the schema are stripped to keep the filename readable
+// (e.g. _bruin_staging → foo__bruin_staging.db, not foo___bruin_staging.db).
+func stagingFilePath(targetFile, schemaName string) string {
+	ext := filepath.Ext(targetFile)
+	base := strings.TrimSuffix(targetFile, ext)
+	return fmt.Sprintf("%s__%s%s", base, strings.TrimLeft(schemaName, "_"), ext)
+}
+
+func schemaOf(table string) string {
+	parts := strings.SplitN(table, ".", 2)
+	if len(parts) == 2 {
+		return parts[0]
+	}
+	return ""
 }
 
 func (d *SQLiteDestination) Close(ctx context.Context) error {
@@ -81,7 +166,11 @@ func (d *SQLiteDestination) Close(ctx context.Context) error {
 }
 
 func (d *SQLiteDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
-	d.schema = opts.Schema
+	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
+
+	if err := d.ensureSchemaAttached(ctx, schemaOf(opts.Table)); err != nil {
+		return err
+	}
 
 	if opts.DropFirst {
 		startDrop := time.Now()
@@ -200,15 +289,33 @@ func (d *SQLiteDestination) writeRecordBatch(ctx context.Context, record arrow.R
 	return numRows, nil
 }
 
-func (d *SQLiteDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *SQLiteDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
+
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
+
+	if err := d.ensureSchemaAttached(ctx, schemaOf(stagingTable)); err != nil {
+		return err
+	}
+	if err := d.ensureSchemaAttached(ctx, schemaOf(targetTable)); err != nil {
+		return err
+	}
+
+	stagingDB := schemaOf(stagingTable)
+	if stagingDB == "" {
+		stagingDB = "main"
+	}
+	targetDB := schemaOf(targetTable)
+	if targetDB == "" {
+		targetDB = "main"
+	}
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 
-	// Drop old target table
 	dropTargetSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(targetTable))
 	if _, err := tx.ExecContext(ctx, dropTargetSQL); err != nil {
 		config.LogFailedQuery(dropTargetSQL, err)
@@ -216,12 +323,54 @@ func (d *SQLiteDestination) SwapTable(ctx context.Context, stagingTable, targetT
 		return fmt.Errorf("failed to drop target table: %w", err)
 	}
 
-	// Rename staging to target
-	renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", destination.QuoteTableName(stagingTable), destination.QuoteIdentifier(extractTableName(targetTable)))
-	if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
-		config.LogFailedQuery(renameSQL, err)
-		_ = tx.Rollback()
-		return fmt.Errorf("failed to rename staging table: %w", err)
+	if stagingDB == targetDB {
+		// Same database — RENAME is supported.
+		renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", destination.QuoteTableName(stagingTable), destination.QuoteIdentifier(extractTableName(targetTable)))
+		if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
+			config.LogFailedQuery(renameSQL, err)
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to rename staging table: %w", err)
+		}
+	} else {
+		// Cross-attached-database swap: SQLite forbids RENAME across databases.
+		// Recreate target with the staging's recorded schema (NOT NULL, PK preserved)
+		// and copy rows. Schema is keyed by staging table name to avoid the multi-table
+		// race that affected single-field cached schemas.
+		sch := d.lookupSchema(stagingTable)
+		if sch == nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("cannot swap %s -> %s: no recorded schema for staging table", stagingTable, targetTable)
+		}
+
+		createSQL := buildCreateTableSQL(destination.QuoteTableName(targetTable), sch.Columns, sch.PrimaryKeys)
+		if _, err := tx.ExecContext(ctx, createSQL); err != nil {
+			config.LogFailedQuery(createSQL, err)
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to recreate target table: %w", err)
+		}
+
+		quotedCols := make([]string, len(sch.Columns))
+		for i, c := range sch.Columns {
+			quotedCols[i] = destination.QuoteIdentifier(c.Name)
+		}
+		colList := strings.Join(quotedCols, ", ")
+		copySQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
+			destination.QuoteTableName(targetTable),
+			colList, colList,
+			destination.QuoteTableName(stagingTable))
+		if _, err := tx.ExecContext(ctx, copySQL); err != nil {
+			config.LogFailedQuery(copySQL, err)
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to copy staging rows into target: %w", err)
+		}
+
+		dropStagingSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(stagingTable))
+		if _, err := tx.ExecContext(ctx, dropStagingSQL); err != nil {
+			config.LogFailedQuery(dropStagingSQL, err)
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to drop staging table after copy: %w", err)
+		}
+		d.forgetSchema(stagingTable)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -485,6 +634,9 @@ func (d *SQLiteDestination) SCD2Table(ctx context.Context, opts destination.SCD2
 
 // DropTable drops a table if it exists.
 func (d *SQLiteDestination) DropTable(ctx context.Context, table string) error {
+	if err := d.ensureSchemaAttached(ctx, schemaOf(table)); err != nil {
+		return err
+	}
 	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(table))
 	_, err := d.db.ExecContext(ctx, dropSQL)
 	if err != nil {

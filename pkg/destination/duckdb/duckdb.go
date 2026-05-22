@@ -29,10 +29,46 @@ type DuckDBDestination struct {
 
 	db   adbc.Database
 	conn adbc.Connection
+
+	// schemas captures the schema each prepared table was created with, keyed by the
+	// fully-qualified opts.Table name. SwapTable's cross-schema branch reads this to
+	// recreate the target with full constraints (NOT NULL, PK) instead of losing them
+	// via plain CTAS. Per-key writes mean parallel PrepareTable calls in multi-table
+	// runs don't clobber each other.
+	schemas   map[string]*schema.TableSchema
+	schemasMu sync.Mutex
 }
 
 func NewDuckDBDestination() *DuckDBDestination {
 	return &DuckDBDestination{}
+}
+
+func (d *DuckDBDestination) recordSchema(table string, sch *schema.TableSchema, pks []string) {
+	if sch == nil {
+		return
+	}
+	clone := *sch
+	if len(pks) > 0 {
+		clone.PrimaryKeys = pks
+	}
+	d.schemasMu.Lock()
+	defer d.schemasMu.Unlock()
+	if d.schemas == nil {
+		d.schemas = map[string]*schema.TableSchema{}
+	}
+	d.schemas[table] = &clone
+}
+
+func (d *DuckDBDestination) lookupSchema(table string) *schema.TableSchema {
+	d.schemasMu.Lock()
+	defer d.schemasMu.Unlock()
+	return d.schemas[table]
+}
+
+func (d *DuckDBDestination) forgetSchema(table string) {
+	d.schemasMu.Lock()
+	defer d.schemasMu.Unlock()
+	delete(d.schemas, table)
 }
 
 func (d *DuckDBDestination) Schemes() []string {
@@ -124,6 +160,8 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 	if opts.Schema == nil {
 		return fmt.Errorf("schema is required")
 	}
+
+	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -255,17 +293,13 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 	return nil
 }
 
-func (d *DuckDBDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
-	_, targetName := parseSchemaTable(targetTable)
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
+	targetSchema, targetName := parseSchemaTable(targetTable)
 	stagingSchema, _ := parseSchemaTable(stagingTable)
-
-	oldName := targetName + "_old_" + fmt.Sprintf("%d", time.Now().UnixNano())
-	oldTable := oldName
-	if stagingSchema != "" {
-		oldTable = stagingSchema + "." + oldName
-	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -280,15 +314,67 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, stagingTable, targetT
 		}
 	}()
 
-	if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", destination.QuoteTableName(targetTable), destination.QuoteIdentifier(oldName))); err != nil {
-		config.Debug("[DUCKDB] No existing table to rename (this is OK for first run)")
-	}
+	if stagingSchema == targetSchema {
+		// Same schema: cheap rename swap.
+		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
+		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("duckdb"))
+		oldTable := oldName
+		if stagingSchema != "" {
+			oldTable = stagingSchema + "." + oldName
+		}
 
-	if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", destination.QuoteTableName(stagingTable), destination.QuoteIdentifier(targetName))); err != nil {
-		return fmt.Errorf("failed to rename staging to target: %w", err)
-	}
+		if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", destination.QuoteTableName(targetTable), destination.QuoteIdentifier(oldName))); err != nil {
+			config.Debug("[DUCKDB] No existing table to rename (this is OK for first run)")
+		}
 
-	_ = d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(oldTable)))
+		if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", destination.QuoteTableName(stagingTable), destination.QuoteIdentifier(targetName))); err != nil {
+			return fmt.Errorf("failed to rename staging to target: %w", err)
+		}
+
+		_ = d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(oldTable)))
+	} else {
+		// Cross-schema swap: DuckDB's ALTER TABLE RENAME doesn't support cross-schema.
+		// Recreate the target with the staging table's recorded schema (preserving
+		// NOT NULL / PK constraints) and copy rows. The schema is looked up by the
+		// staging table name so parallel multi-table PrepareTable calls don't race.
+		sch := d.lookupSchema(stagingTable)
+		if sch == nil {
+			return fmt.Errorf("cannot swap %s -> %s: no recorded schema for staging table", stagingTable, targetTable)
+		}
+
+		// Replace only PrepareTables the staging side, so the target schema may
+		// not exist yet (DuckDB doesn't auto-create "public" for fresh DBs).
+		if err := d.ensureSchemaExistsLocked(ctx, targetSchema); err != nil {
+			return fmt.Errorf("failed to ensure target schema exists: %w", err)
+		}
+
+		if err := d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(targetTable))); err != nil {
+			return fmt.Errorf("failed to drop target table: %w", err)
+		}
+
+		createSQL := buildCreateTableSQL(destination.QuoteTableName(targetTable), sch.Columns, sch.PrimaryKeys)
+		if err := d.exec(ctx, createSQL); err != nil {
+			return fmt.Errorf("failed to recreate target table: %w", err)
+		}
+
+		quotedCols := make([]string, len(sch.Columns))
+		for i, c := range sch.Columns {
+			quotedCols[i] = destination.QuoteIdentifier(c.Name)
+		}
+		colList := strings.Join(quotedCols, ", ")
+		copySQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
+			destination.QuoteTableName(targetTable),
+			colList, colList,
+			destination.QuoteTableName(stagingTable))
+		if err := d.exec(ctx, copySQL); err != nil {
+			return fmt.Errorf("failed to copy staging rows into target: %w", err)
+		}
+
+		if err := d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(stagingTable))); err != nil {
+			return fmt.Errorf("failed to drop staging table: %w", err)
+		}
+		d.forgetSchema(stagingTable)
+	}
 
 	if err := d.exec(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("failed to commit swap: %w", err)

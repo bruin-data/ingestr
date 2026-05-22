@@ -320,12 +320,12 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 	return nil
 }
 
-func (d *DatabricksDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
 	// Staging table is always in gong_staging schema
-	_, stagingName := d.parseTableName(stagingTable)
-	targetSchema, targetName := d.parseTableName(targetTable)
+	_, stagingName := d.parseTableName(opts.StagingTable)
+	targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
 	stagingFull := d.quoteFullTable(stagingSchema, stagingName)
 	targetFull := d.quoteFullTable(targetSchema, targetName)
@@ -335,7 +335,8 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, stagingTable, tar
 		return fmt.Errorf("failed to ensure target schema exists: %w", err)
 	}
 
-	tempName := targetName + "_OLD_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	tempNameCandidate := fmt.Sprintf("%s_OLD_%d", targetName, time.Now().UnixNano())
+	tempName := destination.ShortenIdentifier(tempNameCandidate, tempNameCandidate, destination.MaxIdentifierLength("databricks"))
 	tempFull := d.quoteFullTable(targetSchema, tempName)
 
 	renameOldSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", targetFull, tempFull)

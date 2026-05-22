@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -181,7 +182,7 @@ func (d *CSVDestination) writeRecordBatch(record arrow.RecordBatch) (int64, erro
 	return numRows, nil
 }
 
-func (d *CSVDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *CSVDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	// For CSV, swap means rename the staging file to target file
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -273,20 +274,25 @@ func (d *CSVDestination) GetTableSchema(ctx context.Context, table string) (*sch
 
 // parseCSVPath extracts the file path from a csv:// URI
 func parseCSVPath(uri string) (string, error) {
-	u, err := url.Parse(uri)
-	if err != nil {
-		return "", err
+	if !strings.HasPrefix(uri, "csv:") {
+		return "", fmt.Errorf("invalid csv URI: %s", uri)
+	}
+	rest := strings.TrimPrefix(uri, "csv:")
+	rest = strings.TrimPrefix(rest, "//")
+
+	if i := strings.Index(rest, "?"); i >= 0 {
+		rest = rest[:i]
 	}
 
-	// csv:///path/to/file.csv -> /path/to/file.csv
-	// csv://./relative/path.csv -> ./relative/path.csv
-	path := u.Host + u.Path
+	if decoded, err := url.PathUnescape(rest); err == nil {
+		rest = decoded
+	}
 
-	if path == "" {
+	if rest == "" {
 		return "", fmt.Errorf("empty file path in URI")
 	}
 
-	return path, nil
+	return rest, nil
 }
 
 // formatValue converts an Arrow array value at a given index to a string

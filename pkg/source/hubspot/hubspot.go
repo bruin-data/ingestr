@@ -1355,7 +1355,29 @@ func (s *Hubspotsource) fetchAssociationsBatch(ctx context.Context, fromType str
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch associations %s->%s: %w", fromType, toType, err)
 		}
+		if resp.StatusCode() == 400 && len(inputs) > 1 {
+			// HubSpot returns 400 for the whole batch if even one input id is
+			// invalid (deleted/archived). Split and recurse so the other ids
+			// in the chunk don't silently lose their associations.
+			mid := len(inputs) / 2
+			left, err := s.fetchAssociationsBatch(ctx, fromType, toType, objectIDs[i:i+mid])
+			if err != nil {
+				return nil, err
+			}
+			right, err := s.fetchAssociationsBatch(ctx, fromType, toType, objectIDs[i+mid:end])
+			if err != nil {
+				return nil, err
+			}
+			for k, v := range left {
+				result[k] = append(result[k], v...)
+			}
+			for k, v := range right {
+				result[k] = append(result[k], v...)
+			}
+			continue
+		}
 		if resp.StatusCode() == 400 || resp.StatusCode() == 404 {
+			config.Debug("[HUBSPOT] association %s->%s skipped id=%v status=%d: %s", fromType, toType, objectIDs[i:end], resp.StatusCode(), resp.String())
 			continue
 		}
 		if !resp.IsSuccess() {
@@ -1527,7 +1549,7 @@ func (s *Hubspotsource) searchCRMObjectsHistory(ctx context.Context, cfg tableCo
 
 const (
 	batchReadLimit        = 100
-	historyBatchReadLimit = 50
+	historyBatchReadLimit = 25
 )
 
 func (s *Hubspotsource) batchReadHistory(ctx context.Context, objectType string, ids []string, properties []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) (int, error) {

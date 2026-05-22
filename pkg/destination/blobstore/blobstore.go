@@ -375,7 +375,7 @@ func (d *BlobstoreDestination) renderLayout(loadID string, fileID int) string {
 	return result
 }
 
-func (d *BlobstoreDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *BlobstoreDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	config.Debug("[BLOBSTORE] SwapTable called (no-op for blobstore)")
 	return nil
 }

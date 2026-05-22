@@ -1024,7 +1024,7 @@ func (s *JiraSource) readCustomFieldContexts(ctx context.Context, opts source.Re
 				row["fieldId"] = fieldID
 			}
 			return sendBatch(ctx, rows, "issue_custom_field_contexts", opts, results)
-		})
+		}, 404)
 	})
 	if err != nil {
 		return err
@@ -1066,7 +1066,7 @@ func (s *JiraSource) readCustomFieldOptions(ctx context.Context, opts source.Rea
 			pairs = append(pairs, local...)
 			mu.Unlock()
 			return nil
-		})
+		}, 404)
 	})
 	if err != nil {
 		return err

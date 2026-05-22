@@ -18,8 +18,9 @@ import (
 const smartsheetBaseURL = "https://api.smartsheet.com/2.0"
 
 type SmartsheetSource struct {
-	client      *gonghttp.Client
-	accessToken string
+	client       *gonghttp.Client
+	accessToken  string
+	smartsheetID string
 }
 
 type sheetResponse struct {
@@ -53,12 +54,13 @@ func (s *SmartsheetSource) Schemes() []string {
 }
 
 func (s *SmartsheetSource) Connect(ctx context.Context, uri string) error {
-	accessToken, err := parseSmartsheetURI(uri)
+	accessToken, smartsheetID, err := parseSmartsheetURI(uri)
 	if err != nil {
 		return err
 	}
 
 	s.accessToken = accessToken
+	s.smartsheetID = smartsheetID
 
 	s.client = gonghttp.New(
 		gonghttp.WithBaseURL(smartsheetBaseURL),
@@ -70,22 +72,29 @@ func (s *SmartsheetSource) Connect(ctx context.Context, uri string) error {
 	return nil
 }
 
-func parseSmartsheetURI(uri string) (string, error) {
+func parseSmartsheetURI(uri string) (string, string, error) {
 	if !strings.HasPrefix(uri, "smartsheet://") {
-		return "", fmt.Errorf("invalid smartsheet URI: must start with smartsheet://")
+		return "", "", fmt.Errorf("invalid smartsheet URI: must start with smartsheet://")
 	}
 
 	parsed, err := url.Parse(uri)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse smartsheet URI: %w", err)
+		return "", "", fmt.Errorf("failed to parse smartsheet URI: %w", err)
 	}
 
 	accessToken := parsed.Query().Get("access_token")
 	if accessToken == "" {
-		return "", fmt.Errorf("access_token is required to connect to Smartsheet")
+		return "", "", fmt.Errorf("access_token is required to connect to Smartsheet")
 	}
 
-	return accessToken, nil
+	smartsheetID := parsed.Query().Get("smartsheet_id")
+	if smartsheetID != "" {
+		if _, err := strconv.ParseInt(smartsheetID, 10, 64); err != nil {
+			return "", "", fmt.Errorf("invalid smartsheet_id %q: must be a numeric sheet ID", smartsheetID)
+		}
+	}
+
+	return accessToken, smartsheetID, nil
 }
 
 func (s *SmartsheetSource) Close(ctx context.Context) error {
@@ -99,14 +108,45 @@ func (s *SmartsheetSource) HandlesIncrementality() bool {
 	return false
 }
 
+// resolveSheetID interprets the value passed as --source-table and returns the
+// numeric sheet ID to ingest. Three forms are accepted:
+//
+//   - "sheet"           — fall back to the smartsheet_id URI parameter
+//   - "sheet:<id>"      — use the part after the colon
+//   - "<id>"            — use the value directly
+func (s *SmartsheetSource) resolveSheetID(sourceTable string) (string, error) {
+	if sourceTable == "" {
+		if s.smartsheetID != "" {
+			return s.smartsheetID, nil
+		}
+		return "", fmt.Errorf("sheet ID is required: pass it as --source-table or via the smartsheet_id URI parameter")
+	}
+
+	if sourceTable == "sheet" {
+		if s.smartsheetID == "" {
+			return "", fmt.Errorf("--source-table=sheet requires the smartsheet_id URI parameter to be set")
+		}
+		return s.smartsheetID, nil
+	}
+
+	if id, ok := strings.CutPrefix(sourceTable, "sheet:"); ok {
+		if id == "" {
+			return "", fmt.Errorf("invalid --source-table %q: missing sheet ID after \"sheet:\"", sourceTable)
+		}
+		return id, nil
+	}
+
+	return sourceTable, nil
+}
+
 func (s *SmartsheetSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
 	if req.IncrementalKey != "" {
 		return nil, fmt.Errorf("incremental loads are not yet supported for Smartsheet")
 	}
 
-	sheetID := req.Name
-	if sheetID == "" {
-		return nil, fmt.Errorf("sheet ID is required as --source-table for smartsheet source")
+	sheetID, err := s.resolveSheetID(req.Name)
+	if err != nil {
+		return nil, err
 	}
 
 	return &source.DynamicSourceTable{

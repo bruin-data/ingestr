@@ -1,27 +1,57 @@
 package strategy
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
 )
 
+const DefaultStagingSchema = "_bruin_staging"
+
+// maxStagingTableNameLen caps the unqualified staging table name. MySQL's
+// identifier limit is 64; Postgres truncates silently at 63. Stay under both so
+// identifiers don't collide via silent truncation and don't fail on MySQL.
+const maxStagingTableNameLen = 60
+
 func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string {
 	parts := strings.SplitN(targetTable, ".", 2)
+	originSchema := ""
 	tableName := targetTable
-	schemaPrefix := ""
 
 	if len(parts) == 2 {
-		schemaPrefix = parts[0]
+		originSchema = parts[0]
 		tableName = parts[1]
 	}
 
-	if stagingDataset != "" {
-		schemaPrefix = stagingDataset
+	stagingSchema := stagingDataset
+	if stagingSchema == "" {
+		stagingSchema = DefaultStagingSchema
 	}
 
-	if schemaPrefix != "" {
-		return fmt.Sprintf("%s.%s_%s_%d", schemaPrefix, tableName, suffix, time.Now().UnixNano())
+	embeddedName := tableName
+	if originSchema != "" {
+		embeddedName = fmt.Sprintf("%s__%s", originSchema, tableName)
 	}
-	return fmt.Sprintf("%s_%s_%d", tableName, suffix, time.Now().UnixNano())
+
+	nano := fmt.Sprintf("%d", time.Now().UnixNano())
+	tail := fmt.Sprintf("_%s_%s", suffix, nano)
+	// If the name would exceed the per-engine identifier limit, hash the
+	// embedded portion so the suffix and unique timestamp still fit. We keep a
+	// readable prefix plus an 8-char hash of the original embedded name.
+	if len(embeddedName)+len(tail) > maxStagingTableNameLen {
+		sum := sha1.Sum([]byte(embeddedName))
+		shortHash := hex.EncodeToString(sum[:])[:8]
+		keep := maxStagingTableNameLen - len(tail) - 1 - len(shortHash) // -1 for underscore
+		if keep < 1 {
+			keep = 1
+		}
+		if keep > len(embeddedName) {
+			keep = len(embeddedName)
+		}
+		embeddedName = embeddedName[:keep] + "_" + shortHash
+	}
+
+	return fmt.Sprintf("%s.%s%s", stagingSchema, embeddedName, tail)
 }

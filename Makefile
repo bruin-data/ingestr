@@ -36,7 +36,7 @@ generate:
 build: generate deps
 	@echo "$(OK_COLOR)==> Building the application...$(NO_COLOR)"
 	@mkdir -p $(BUILD_DIR)
-	@go build -v -ldflags="-s -w -X github.com/bruin-data/gong/cmd.Version=$(VERSION)" -o "$(BUILD_DIR)/$(NAME)" "$(BUILD_SRC)"
+	@go build -v -ldflags="-s -w -X github.com/bruin-data/ingestr/cmd.Version=$(VERSION)" -o "$(BUILD_DIR)/$(NAME)" "$(BUILD_SRC)"
 
 clean:
 	@rm -rf ./bin

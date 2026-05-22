@@ -1,6 +1,7 @@
 package destination
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -67,6 +68,21 @@ func TestShortenIdentifier(t *testing.T) {
 		r1 := ShortenIdentifier(name, name, 63)
 		r2 := ShortenIdentifier(name, name, 63)
 		assert.Equal(t, r1, r2, "same input should always produce same output")
+	})
+
+	// Regression guard for the orphan-cleanup LIKE pattern in
+	// tests/integration/swap_table_test.go::TestMySQLSwapTable_LongTargetName.
+	// That test relies on ShortenIdentifier preserving at least the first 20
+	// chars of the input verbatim at MySQL's 64-char limit so that
+	// `targetTable[:20]+"%_old_%"` matches both shortened and unshortened orphans.
+	// If the algorithm changes and the literal prefix shrinks below 20, this
+	// test breaks before the integration cleanup silently misses tables.
+	t.Run("preserves first 20 chars verbatim at mysql 64-char limit", func(t *testing.T) {
+		name := strings.Repeat("a", 80)
+		result := ShortenIdentifier(name, name, 64)
+		require.LessOrEqual(t, len(result), 64)
+		assert.Equal(t, name[:20], result[:20],
+			"first 20 chars must survive shortening for orphan-cleanup LIKE pattern")
 	})
 
 	t.Run("hash uses hashSource not name", func(t *testing.T) {

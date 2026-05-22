@@ -1,6 +1,7 @@
 package bigquery
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -274,6 +275,33 @@ func TestBuildTableMetadata(t *testing.T) {
 		}
 		if metadata.TableConstraints != nil {
 			t.Error("table constraints should be nil when no primary keys")
+		}
+	})
+
+	t.Run("primary_key_over_bigquery_limit_is_skipped", func(t *testing.T) {
+		pks := make([]string, bigQueryMaxPKColumns+1)
+		for i := range pks {
+			pks[i] = fmt.Sprintf("pk_%d", i)
+		}
+		metadata := BuildTableMetadata(tableSchema, pks, "", "", nil, 0)
+
+		if metadata.TableConstraints != nil {
+			t.Errorf("table constraints should be nil when PK count exceeds BigQuery limit; got %+v", metadata.TableConstraints)
+		}
+	})
+
+	t.Run("primary_key_at_bigquery_limit_is_kept", func(t *testing.T) {
+		pks := make([]string, bigQueryMaxPKColumns)
+		for i := range pks {
+			pks[i] = fmt.Sprintf("pk_%d", i)
+		}
+		metadata := BuildTableMetadata(tableSchema, pks, "", "", nil, 0)
+
+		if metadata.TableConstraints == nil || metadata.TableConstraints.PrimaryKey == nil {
+			t.Fatal("PK constraint should be present at the 16-column limit")
+		}
+		if len(metadata.TableConstraints.PrimaryKey.Columns) != bigQueryMaxPKColumns {
+			t.Errorf("expected %d PK cols, got %d", bigQueryMaxPKColumns, len(metadata.TableConstraints.PrimaryKey.Columns))
 		}
 	})
 

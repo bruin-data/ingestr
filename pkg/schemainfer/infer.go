@@ -186,18 +186,6 @@ func (i *SchemaInferrer) ToTableSchema(tableName string) (*schema.TableSchema, e
 	}, nil
 }
 
-func (i *SchemaInferrer) ProtectColumns(names []string) {
-	if len(names) == 0 {
-		return
-	}
-	if i.protectedColumns == nil {
-		i.protectedColumns = make(map[string]bool, len(names))
-	}
-	for _, n := range names {
-		i.protectedColumns[strings.ToLower(n)] = true
-	}
-}
-
 // DroppedColumns returns columns that were dropped during inference (all-null nullable columns).
 func (i *SchemaInferrer) DroppedColumns() map[string]bool {
 	return i.droppedColumns

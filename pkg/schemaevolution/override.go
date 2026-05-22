@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -238,6 +239,28 @@ func (o ColumnOverrides) Get(columnName string) (ColumnOverride, bool) {
 	}
 	override, ok := o[strings.ToLower(columnName)]
 	return override, ok
+}
+
+func (o ColumnOverrides) GetForColumn(columnName, schemaNaming string) (ColumnOverride, bool) {
+	if o == nil {
+		return ColumnOverride{}, false
+	}
+	conv := overrideMatchConvention(schemaNaming)
+	key := strings.ToLower(conv.Normalize(columnName))
+	for _, ov := range o {
+		if strings.ToLower(conv.Normalize(ov.Name)) == key {
+			return ov, true
+		}
+	}
+	return ColumnOverride{}, false
+}
+
+func overrideMatchConvention(schemaNaming string) naming.NamingConvention {
+	parsed, err := naming.ParseConvention(schemaNaming)
+	if err != nil || parsed != naming.Direct {
+		return naming.Get(naming.SnakeCase)
+	}
+	return naming.Get(naming.Direct)
 }
 
 // ApplyToColumn applies the override to a column, returning the modified column.

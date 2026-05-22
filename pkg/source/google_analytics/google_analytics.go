@@ -118,10 +118,7 @@ func (s *GoogleAnalyticsSource) GetTable(ctx context.Context, req source.TableRe
 		return nil, fmt.Errorf("unsupported report type %q (supported: custom, realtime)", cfg.reportType)
 	}
 
-	pks := append([]string{"property_id"}, meta.mergeKey...)
-	if cfg.reportType == "custom" {
-		pks = []string{"property_id", cfg.datetime}
-	}
+	pks := reportPrimaryKeys(cfg, meta)
 
 	return &source.DynamicSourceTable{
 		TableName:        req.Name,
@@ -135,6 +132,33 @@ func (s *GoogleAnalyticsSource) GetTable(ctx context.Context, req source.TableRe
 			return s.fetchReport(ctx, cfg, opts)
 		},
 	}, nil
+}
+
+func reportPrimaryKeys(cfg *reportConfig, meta tableMeta) []string {
+	pks := make([]string, 0, 1+len(cfg.dimensions)+len(meta.mergeKey)+1)
+	pks = appendPrimaryKey(pks, "property_id")
+	for _, dim := range cfg.dimensions {
+		pks = appendPrimaryKey(pks, dim)
+	}
+	if cfg.reportType == "realtime" && len(cfg.minuteRanges) > 1 {
+		pks = appendPrimaryKey(pks, "date_range")
+	}
+	for _, key := range meta.mergeKey {
+		pks = appendPrimaryKey(pks, key)
+	}
+	return pks
+}
+
+func appendPrimaryKey(pks []string, key string) []string {
+	if key == "" {
+		return pks
+	}
+	for _, existing := range pks {
+		if existing == key {
+			return pks
+		}
+	}
+	return append(pks, key)
 }
 
 type reportConfig struct {

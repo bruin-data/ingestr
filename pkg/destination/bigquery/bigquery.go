@@ -323,6 +323,16 @@ func (d *BigQueryDestination) takePendingTableErr(tableKey string) chan error {
 	return errCh
 }
 
+func jobRef(job *bigquery.Job) string {
+	if job == nil {
+		return ""
+	}
+	if loc := job.Location(); loc != "" {
+		return fmt.Sprintf("%s (location %s)", job.ID(), loc)
+	}
+	return job.ID()
+}
+
 // PrepareTable creates or recreates a table with the given schema.
 func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
 	dataset, table, tableKey, err := d.resolveTable(opts.Table)
@@ -364,7 +374,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 			for {
 				status, err := job.Status(ctx)
 				if err != nil {
-					errCh <- fmt.Errorf("truncate status check failed: %w", err)
+					errCh <- fmt.Errorf("truncate status check failed (job %s): %w", jobRef(job), err)
 					return
 				}
 				if status.Done() {
@@ -373,7 +383,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 							errCh <- d.createTableFresh(ctx, tableRef, dataset, metadata)
 							return
 						}
-						errCh <- fmt.Errorf("truncate error: %w", status.Err())
+						errCh <- fmt.Errorf("truncate error (job %s): %w", jobRef(job), status.Err())
 						return
 					}
 					break
@@ -791,7 +801,9 @@ func (d *BigQueryDestination) queryTableRowCount(ctx context.Context, dataset, t
 }
 
 // SwapTable swaps a staging table with the target table.
-func (d *BigQueryDestination) SwapTable(ctx context.Context, stagingTable string, targetTable string) error {
+func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
 	stagingDataset, stagingTableName, err := ParseTableName(stagingTable)
 	if err != nil {
 		return fmt.Errorf("invalid staging table name: %w", err)
@@ -802,11 +814,19 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, stagingTable string
 		return fmt.Errorf("invalid target table name: %w", err)
 	}
 
+	// Replace only PrepareTables the staging side, so the target dataset may
+	// not exist yet. BigQuery's CREATE OR REPLACE TABLE and Copy jobs do NOT
+	// auto-create the dataset — they fail with "Not found: Dataset ...".
+	if err := d.ensureDatasetExists(ctx, targetDataset); err != nil {
+		return fmt.Errorf("failed to ensure target dataset exists: %w", err)
+	}
+
 	stagingRef := d.client.Dataset(stagingDataset).Table(stagingTableName)
 
 	config.Debug("[DEST] Swapping tables: %s → %s", stagingTable, targetTable)
 
-	if d.effectiveLoadMethod() == loadMethodLoadJob {
+	// Copy jobs can't dedup.
+	if d.effectiveLoadMethod() == loadMethodLoadJob && len(opts.PrimaryKeys) == 0 {
 		if err := d.swapTableWithCopyJob(ctx, stagingDataset, stagingTableName, targetDataset, targetTableName); err != nil {
 			return err
 		}
@@ -818,6 +838,9 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, stagingTable string
 		}
 		return nil
 	}
+
+	stagingFQN := fmt.Sprintf("`%s`.`%s`.`%s`", d.projectID, stagingDataset, stagingTableName)
+	selectClause := buildBigQueryDedupSelect(stagingFQN, opts.PrimaryKeys, opts.IncrementalKey)
 
 	if d.partitionBy != "" || len(d.clusterBy) > 0 {
 		// For partitioned/clustered tables, must use SQL to apply partitioning
@@ -835,64 +858,31 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, stagingTable string
 			sql += fmt.Sprintf("CLUSTER BY %s\n", strings.Join(clusterCols, ", "))
 		}
 
-		sql += fmt.Sprintf("AS SELECT * FROM `%s`.`%s`.`%s`", d.projectID, stagingDataset, stagingTableName)
+		sql += "AS " + selectClause
 
 		config.Debug("[DEST] Executing SQL copy (partitioned): %s", sql)
 
-		query := d.client.Query(sql)
-		if d.location != "" {
-			query.Location = d.location
-		}
-
-		job, err := query.Run(ctx)
+		job, err := d.runQueryJobWithRetry(ctx, sql, "SQL copy")
 		if err != nil {
-			return fmt.Errorf("failed to start SQL copy job: %w", err)
-		}
-
-		for {
-			status, err := job.Status(ctx)
-			if err != nil {
-				return fmt.Errorf("SQL copy job status check failed: %w", err)
+			if job == nil {
+				return fmt.Errorf("failed to start SQL copy job: %w", err)
 			}
-			if status.Done() {
-				if status.Err() != nil {
-					return fmt.Errorf("SQL copy job error: %w", status.Err())
-				}
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
+			return fmt.Errorf("SQL copy job error (job %s): %w", jobRef(job), err)
 		}
 	} else {
 		// Use SQL CREATE OR REPLACE TABLE AS SELECT * — Copy Jobs don't read
 		// from the streaming buffer, so they'd copy 0 rows after Storage Write API writes.
-		sql := fmt.Sprintf("CREATE OR REPLACE TABLE `%s`.`%s`.`%s` AS SELECT * FROM `%s`.`%s`.`%s`",
-			d.projectID, targetDataset, targetTableName,
-			d.projectID, stagingDataset, stagingTableName)
+		sql := fmt.Sprintf("CREATE OR REPLACE TABLE `%s`.`%s`.`%s` AS %s",
+			d.projectID, targetDataset, targetTableName, selectClause)
 
 		config.Debug("[DEST] Executing SQL swap: %s", sql)
 
-		query := d.client.Query(sql)
-		if d.location != "" {
-			query.Location = d.location
-		}
-
-		job, err := query.Run(ctx)
+		job, err := d.runQueryJobWithRetry(ctx, sql, "SQL swap")
 		if err != nil {
-			return fmt.Errorf("failed to start SQL swap job: %w", err)
-		}
-
-		for {
-			status, err := job.Status(ctx)
-			if err != nil {
-				return fmt.Errorf("SQL swap job status check failed: %w", err)
+			if job == nil {
+				return fmt.Errorf("failed to start SQL swap job: %w", err)
 			}
-			if status.Done() {
-				if status.Err() != nil {
-					return fmt.Errorf("SQL swap job error: %w", status.Err())
-				}
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
+			return fmt.Errorf("SQL swap job error (job %s): %w", jobRef(job), err)
 		}
 	}
 
@@ -908,42 +898,86 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, stagingTable string
 
 // Exec executes a SQL query.
 func (d *BigQueryDestination) Exec(ctx context.Context, sql string, args ...interface{}) error {
-	query := d.client.Query(sql)
-	if d.location != "" {
-		query.Location = d.location
-	}
-
-	job, err := query.Run(ctx)
-	if err != nil {
-		config.LogFailedQuery(sql, err)
-		return fmt.Errorf("failed to run query: %w", err)
-	}
-
-	status, err := job.Wait(ctx)
+	job, err := d.runQueryJobWithRetry(ctx, sql, "query")
 	if err != nil {
 		config.LogFailedQuery(sql, err)
 		if isBigQueryAlterTypeRewriteCandidate(sql, err) {
 			if rewriteErr := d.execAlterColumnTypeWithRewrite(ctx, sql); rewriteErr == nil {
 				return nil
 			} else {
-				return fmt.Errorf("query job failed: %w (rewrite fallback failed: %v)", err, rewriteErr)
+				return fmt.Errorf("query job failed (job %s): %w (rewrite fallback failed: %v)", jobRef(job), err, rewriteErr)
 			}
 		}
-		return fmt.Errorf("query job failed: %w", err)
-	}
-	if err := status.Err(); err != nil {
-		config.LogFailedQuery(sql, err)
-		if isBigQueryAlterTypeRewriteCandidate(sql, err) {
-			if rewriteErr := d.execAlterColumnTypeWithRewrite(ctx, sql); rewriteErr == nil {
-				return nil
-			} else {
-				return fmt.Errorf("query job error: %w (rewrite fallback failed: %v)", err, rewriteErr)
-			}
+		if job == nil {
+			return fmt.Errorf("failed to run query: %w", err)
 		}
-		return fmt.Errorf("query job error: %w", err)
+		return fmt.Errorf("query job failed (job %s): %w", jobRef(job), err)
 	}
-
 	return nil
+}
+
+// BigQuery jobs are atomic — failed jobs do not commit partial work — so
+// retrying on the reasons checked by isRetryableLoadJobError is safe.
+func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opLabel string) (*bigquery.Job, error) {
+	const maxAttempts = 4
+	var (
+		lastJob *bigquery.Job
+		lastErr error
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		query := d.client.Query(sql)
+		if d.location != "" {
+			query.Location = d.location
+		}
+
+		job, err := query.Run(ctx)
+		if err != nil {
+			if attempt < maxAttempts && isRetryableLoadJobError(err) {
+				lastErr = err
+				config.Debug("[%s] Retrying after start error: %v", opLabel, err)
+				if sleepErr := sleepWithContextForLoadJob(ctx, time.Duration(attempt)*time.Second); sleepErr != nil {
+					return nil, sleepErr
+				}
+				continue
+			}
+			return nil, err
+		}
+		lastJob = job
+
+		status, err := job.Wait(ctx)
+		if err != nil {
+			if attempt < maxAttempts && isRetryableLoadJobError(err) {
+				lastErr = err
+				config.Debug("[%s] Retrying after wait error: %v", opLabel, err)
+				if sleepErr := sleepWithContextForLoadJob(ctx, time.Duration(attempt)*time.Second); sleepErr != nil {
+					return job, sleepErr
+				}
+				continue
+			}
+			return job, err
+		}
+		if err := status.Err(); err != nil {
+			if attempt < maxAttempts && isRetryableLoadJobError(err) {
+				lastErr = err
+				config.Debug("[%s] Retrying after job error: %v", opLabel, err)
+				if sleepErr := sleepWithContextForLoadJob(ctx, time.Duration(attempt)*time.Second); sleepErr != nil {
+					return job, sleepErr
+				}
+				continue
+			}
+			return job, err
+		}
+
+		return job, nil
+	}
+
+	// Unreachable in practice: the final attempt's branches all return
+	// unconditionally. Preserved as a defensive return that surfaces the last
+	// retried error if the loop is ever restructured.
+	if lastErr != nil {
+		return lastJob, lastErr
+	}
+	return lastJob, fmt.Errorf("%s job exhausted retries", opLabel)
 }
 
 func isBigQueryAlterTypeRewriteCandidate(sql string, err error) bool {
@@ -1031,10 +1065,10 @@ func (d *BigQueryDestination) execAlterColumnTypeWithRewrite(ctx context.Context
 
 	status, err := job.Wait(ctx)
 	if err != nil {
-		return fmt.Errorf("rewrite query failed: %w", err)
+		return fmt.Errorf("rewrite query failed (job %s): %w", jobRef(job), err)
 	}
 	if err := status.Err(); err != nil {
-		return fmt.Errorf("rewrite query error: %w", err)
+		return fmt.Errorf("rewrite query error (job %s): %w", jobRef(job), err)
 	}
 
 	return nil
@@ -1121,30 +1155,16 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	config.Debug("[MERGE] Executing MERGE statement")
 	config.Debug("[MERGE] SQL: %s", mergeSQL)
 
-	query := d.client.Query(mergeSQL)
-	if d.location != "" {
-		query.Location = d.location
-	}
-
-	job, err := query.Run(ctx)
+	job, err := d.runQueryJobWithRetry(ctx, mergeSQL, "MERGE")
 	if err != nil {
 		config.LogFailedQuery(mergeSQL, err)
-		return fmt.Errorf("failed to start merge job: %w", err)
-	}
-	config.Debug("[MERGE] Merge job started: %s", job.ID())
-
-	status, err := job.Wait(ctx)
-	if err != nil {
-		config.LogFailedQuery(mergeSQL, err)
-		return fmt.Errorf("merge job failed: %w", err)
-	}
-	if err := status.Err(); err != nil {
-		config.LogFailedQuery(mergeSQL, err)
-		return fmt.Errorf("merge job error: %w", err)
+		if job == nil {
+			return fmt.Errorf("failed to start merge job: %w", err)
+		}
+		return fmt.Errorf("merge job failed (job %s): %w", jobRef(job), err)
 	}
 
-	config.Debug("[MERGE] Merge completed successfully")
-
+	config.Debug("[MERGE] Merge completed successfully (job %s)", jobRef(job))
 	return nil
 }
 
@@ -1181,12 +1201,24 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 		quotedCols[i] = fmt.Sprintf("`%s`", col)
 	}
 
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO `%s`.`%s`.`%s` (%s) SELECT %s FROM `%s`.`%s`.`%s`",
-		d.projectID, targetDataset, targetTableName,
-		strings.Join(quotedCols, ", "),
+	selectClause := fmt.Sprintf(
+		"SELECT %s FROM `%s`.`%s`.`%s`",
 		strings.Join(quotedCols, ", "),
 		d.projectID, stagingDataset, stagingTableName,
+	)
+	if len(opts.PrimaryKeys) > 0 {
+		pkCols := make([]string, len(opts.PrimaryKeys))
+		for i, pk := range opts.PrimaryKeys {
+			pkCols[i] = fmt.Sprintf("`%s`", pk)
+		}
+		selectClause += fmt.Sprintf(" QUALIFY ROW_NUMBER() OVER (PARTITION BY %s) = 1", strings.Join(pkCols, ", "))
+	}
+
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO `%s`.`%s`.`%s` (%s) %s",
+		d.projectID, targetDataset, targetTableName,
+		strings.Join(quotedCols, ", "),
+		selectClause,
 	)
 
 	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
@@ -1414,6 +1446,24 @@ func castSourceCol(col string, castMap map[string]string) string {
 	return fmt.Sprintf("s.`%s`", col)
 }
 
+func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, orderByCol string) string {
+	if len(primaryKeys) == 0 {
+		return fmt.Sprintf("SELECT * FROM %s", qualifiedTable)
+	}
+	pkCols := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		pkCols[i] = fmt.Sprintf("`%s`", pk)
+	}
+	orderClause := ""
+	if orderByCol != "" {
+		orderClause = fmt.Sprintf(" ORDER BY `%s` DESC", orderByCol)
+	}
+	return fmt.Sprintf(
+		"SELECT * FROM %s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s%s) = 1",
+		qualifiedTable, strings.Join(pkCols, ", "), orderClause,
+	)
+}
+
 // buildMergeSQL constructs a BigQuery MERGE statement
 func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string) string {
 	onConditions := make([]string, len(primaryKeys))
@@ -1564,10 +1614,10 @@ func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) e
 	}
 	status, err := job.Wait(ctx)
 	if err != nil {
-		return fmt.Errorf("truncate wait failed for %s: %w", table, err)
+		return fmt.Errorf("truncate wait failed for %s (job %s): %w", table, jobRef(job), err)
 	}
 	if err := status.Err(); err != nil {
-		return fmt.Errorf("failed to truncate table %s: %w", table, err)
+		return fmt.Errorf("failed to truncate table %s (job %s): %w", table, jobRef(job), err)
 	}
 	config.Debug("[DEST] Truncated table: %s", table)
 	return nil

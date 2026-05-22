@@ -139,6 +139,19 @@ func (d *PostgresDestination) ensureSchemaExists(ctx context.Context, schemaName
 		return nil
 	}
 
+	// CREATE SCHEMA IF NOT EXISTS still requires CREATE on the database, so a
+	// pre-created schema with table-level grants would get rejected. Check first
+	// and only attempt CREATE when truly missing.
+	var exists bool
+	if err := d.pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)",
+		schemaName).Scan(&exists); err != nil {
+		return fmt.Errorf("failed to check if schema %s exists: %w", schemaName, err)
+	}
+	if exists {
+		return nil
+	}
+
 	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", destination.QuoteIdentifier(schemaName))
 	if _, err := d.pool.Exec(ctx, createSchemaSQL); err != nil {
 		config.LogFailedQuery(createSchemaSQL, err)
@@ -320,16 +333,20 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 	return nil
 }
 
-func (d *PostgresDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
-	_, targetName := parseSchemaTable(targetTable)
-	stagingSchema, _ := parseSchemaTable(stagingTable)
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
 
-	oldName := targetName + "_old_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	targetSchema, targetName := parseSchemaTable(targetTable)
+	stagingSchema, stagingName := parseSchemaTable(stagingTable)
+
+	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
+	oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("postgres"))
 	oldTable := oldName
-	if stagingSchema != "" {
-		oldTable = stagingSchema + "." + oldName
+	if targetSchema != "" {
+		oldTable = targetSchema + "." + oldName
 	}
 
 	tx, err := d.pool.Begin(ctx)
@@ -338,14 +355,33 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, stagingTable, targe
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Postgres' ALTER TABLE … RENAME TO … is same-schema only. If staging lives in a
+	// different schema (the new _bruin_staging design), move it into the target's
+	// schema first via ALTER TABLE … SET SCHEMA (metadata-only, no data copy), then
+	// continue with the existing same-schema rename pattern.
+	if stagingSchema != targetSchema {
+		// Replace strategy only PrepareTables the staging side, so the target
+		// schema may not exist yet. Ensure it before SET SCHEMA.
+		if err := d.ensureSchemaExists(ctx, targetSchema); err != nil {
+			return fmt.Errorf("failed to ensure target schema exists: %w", err)
+		}
+		setSchemaSQL := fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s",
+			destination.QuoteTableName(stagingTable),
+			destination.QuoteIdentifier(targetSchema))
+		if _, err = tx.Exec(ctx, setSchemaSQL); err != nil {
+			config.LogFailedQuery(setSchemaSQL, err)
+			return fmt.Errorf("failed to move staging table to target schema: %w", err)
+		}
+		stagingTable = targetSchema + "." + stagingName
+	}
+
 	_, err = tx.Exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", destination.QuoteTableName(targetTable), destination.QuoteIdentifier(oldName)))
 	if err != nil {
 		return fmt.Errorf("failed to rename existing target table %s: %w", targetTable, err)
 	}
 
 	renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", destination.QuoteTableName(stagingTable), destination.QuoteIdentifier(targetName))
-	_, err = tx.Exec(ctx, renameSQL)
-	if err != nil {
+	if _, err = tx.Exec(ctx, renameSQL); err != nil {
 		config.LogFailedQuery(renameSQL, err)
 		return fmt.Errorf("failed to rename staging to target: %w", err)
 	}

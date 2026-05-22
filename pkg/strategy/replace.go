@@ -49,6 +49,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		Table:       writeTable,
 		Schema:      job.Schema,
 		DropFirst:   true,
+		PrimaryKeys: job.Config.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
 		ClusterBy:   job.Config.ClusterBy,
 	}
@@ -135,7 +136,12 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 				}
 			}
 		}
-		if err := job.Destination.SwapTable(ctx, writeTable, targetTable); err != nil {
+		if err := job.Destination.SwapTable(ctx, destination.SwapOptions{
+			StagingTable:   writeTable,
+			TargetTable:    targetTable,
+			PrimaryKeys:    job.Config.PrimaryKeys,
+			IncrementalKey: job.Config.IncrementalKey,
+		}); err != nil {
 			if dropErr := job.Destination.DropTable(ctx, writeTable); dropErr != nil {
 				config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
 			}
@@ -259,7 +265,11 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 		for _, tableInfo := range job.Tables {
 			destTable := job.GetDestTableName(tableInfo.Name)
 			stagingTable := stagingTables[tableInfo.Name]
-			if err := job.Destination.SwapTable(ctx, stagingTable, destTable); err != nil {
+			if err := job.Destination.SwapTable(ctx, destination.SwapOptions{
+				StagingTable: stagingTable,
+				TargetTable:  destTable,
+				PrimaryKeys:  tableInfo.PrimaryKeys,
+			}); err != nil {
 				return fmt.Errorf("failed to swap table %s: %w", tableInfo.Name, err)
 			}
 		}

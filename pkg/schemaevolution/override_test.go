@@ -322,3 +322,34 @@ func TestCompare_DecimalOverrideWithPrecision(t *testing.T) {
 	assert.Equal(t, 18, change.NewColumn.Precision)
 	assert.Equal(t, 4, change.NewColumn.Scale)
 }
+
+func TestColumnOverrides_GetForColumn_SnakeCase(t *testing.T) {
+	overrides, err := ParseColumnOverrides("ad_format:string")
+	require.NoError(t, err)
+
+	// Override declared as "ad_format" must match a source column emitted as
+	// "Ad Format" / "AdFormat" under snake_case naming. Plain Get fails this
+	// because it only lowercases.
+	for _, name := range []string{"Ad Format", "AdFormat", "ad_format", "AD_FORMAT"} {
+		got, ok := overrides.GetForColumn(name, "snake_case")
+		if !ok {
+			t.Errorf("GetForColumn(%q, snake_case) found no match; want override applied", name)
+			continue
+		}
+		assert.Equal(t, schema.TypeString, got.DataType, "name=%q", name)
+	}
+}
+
+func TestColumnOverrides_GetForColumn_DirectKeepsDistinctNames(t *testing.T) {
+	overrides, err := ParseColumnOverrides("ad_format:string")
+	require.NoError(t, err)
+
+	// Under direct naming "Ad Format" and "ad_format" are different columns.
+	// Get should match the exact (case-insensitive) name only.
+	if _, ok := overrides.GetForColumn("Ad Format", "direct"); ok {
+		t.Error(`GetForColumn("Ad Format", direct) should not match "ad_format"`)
+	}
+	if _, ok := overrides.GetForColumn("ad_format", "direct"); !ok {
+		t.Error(`GetForColumn("ad_format", direct) should match "ad_format"`)
+	}
+}

@@ -275,14 +275,42 @@ func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 	return numRows, nil
 }
 
-func (d *MSSQLDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
-	oldTable := targetTable + "_old_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
+
+	targetSchema, targetTableOnly := parseTableName(targetTable)
+	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetTableOnly, time.Now().UnixNano())
+	oldTableName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("mssql"))
+	oldTable := oldTableName
+	if strings.Contains(targetTable, ".") {
+		oldTable = targetSchema + "." + oldTableName
+	}
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	stagingSchema, stagingName := parseTableName(stagingTable)
+	if stagingSchema != targetSchema {
+		// The replace strategy only PrepareTables the staging side, so the target
+		// schema may not exist yet (e.g. user supplies a brand-new schema in
+		// --dest-table). Ensure it exists before TRANSFER, otherwise the ALTER
+		// fails with "Cannot alter the schema 'X' because it does not exist".
+		if err := d.ensureSchemaExists(ctx, targetSchema); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to ensure target schema exists: %w", err)
+		}
+		transferSQL := fmt.Sprintf("ALTER SCHEMA [%s] TRANSFER %s", targetSchema, quoteTable(stagingTable))
+		if _, err := tx.ExecContext(ctx, transferSQL); err != nil {
+			config.LogFailedQuery(transferSQL, err)
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to transfer staging table to target schema: %w", err)
+		}
+		stagingTable = targetSchema + "." + stagingName
 	}
 
 	var exists int

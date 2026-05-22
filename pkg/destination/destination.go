@@ -55,6 +55,14 @@ type DeleteInsertOptions struct {
 	IntervalStart      interface{}
 	IntervalEnd        interface{}
 	Columns            []string
+	PrimaryKeys        []string
+}
+
+type SwapOptions struct {
+	StagingTable   string
+	TargetTable    string
+	PrimaryKeys    []string
+	IncrementalKey string
 }
 
 // SCD2Options contains parameters for SCD2 (Slowly Changing Dimensions Type 2) operations.
@@ -74,7 +82,7 @@ type Destination interface {
 	PrepareTable(ctx context.Context, opts PrepareOptions) error
 	Write(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error
 	WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error
-	SwapTable(ctx context.Context, stagingTable, targetTable string) error
+	SwapTable(ctx context.Context, opts SwapOptions) error
 	MergeTable(ctx context.Context, opts MergeOptions) error
 	DeleteInsertTable(ctx context.Context, opts DeleteInsertOptions) error
 	SCD2Table(ctx context.Context, opts SCD2Options) error

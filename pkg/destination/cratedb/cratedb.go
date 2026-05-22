@@ -239,7 +239,7 @@ func (d *CrateDBDestination) writeRecordBatch(ctx context.Context, record arrow.
 	return written, nil
 }
 
-func (d *CrateDBDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *CrateDBDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	return fmt.Errorf("cratedb does not support atomic table swap")
 }
 

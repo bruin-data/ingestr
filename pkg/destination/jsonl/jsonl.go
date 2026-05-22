@@ -159,7 +159,7 @@ func (d *JSONLDestination) writeRecordBatch(record arrow.RecordBatch) (int64, er
 	return numRows, nil
 }
 
-func (d *JSONLDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *JSONLDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 

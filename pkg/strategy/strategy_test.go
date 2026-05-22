@@ -147,10 +147,10 @@ func (d *fakeDestination) WriteParallel(ctx context.Context, records <-chan sour
 	return writeErr
 }
 
-func (d *fakeDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *fakeDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	d.mu.Lock()
 	d.calls = append(d.calls, "SwapTable")
-	d.swapCalls = append(d.swapCalls, [2]string{stagingTable, targetTable})
+	d.swapCalls = append(d.swapCalls, [2]string{opts.StagingTable, opts.TargetTable})
 	swapErr := d.swapErr
 	d.mu.Unlock()
 	return swapErr

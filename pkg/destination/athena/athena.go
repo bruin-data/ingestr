@@ -22,6 +22,14 @@ import (
 type AthenaDestination struct {
 	client *athena.Client
 	cfg    athenaConfig
+
+	// schemas captures the schema each prepared table was created with, keyed by
+	// opts.Table. The cross-database swap branch uses it to recreate the target
+	// Iceberg table with the right column types when ALTER TABLE RENAME isn't
+	// available across Glue databases. Per-key writes are race-safe under parallel
+	// PrepareTable calls in multi-table runs.
+	schemas   map[string]*schema.TableSchema
+	schemasMu sync.Mutex
 }
 
 type athenaConfig struct {
@@ -38,6 +46,34 @@ type athenaConfig struct {
 
 func NewAthenaDestination() *AthenaDestination {
 	return &AthenaDestination{}
+}
+
+func (d *AthenaDestination) recordSchema(table string, sch *schema.TableSchema, pks []string) {
+	if sch == nil {
+		return
+	}
+	clone := *sch
+	if len(pks) > 0 {
+		clone.PrimaryKeys = pks
+	}
+	d.schemasMu.Lock()
+	defer d.schemasMu.Unlock()
+	if d.schemas == nil {
+		d.schemas = map[string]*schema.TableSchema{}
+	}
+	d.schemas[table] = &clone
+}
+
+func (d *AthenaDestination) lookupSchema(table string) *schema.TableSchema {
+	d.schemasMu.Lock()
+	defer d.schemasMu.Unlock()
+	return d.schemas[table]
+}
+
+func (d *AthenaDestination) forgetSchema(table string) {
+	d.schemasMu.Lock()
+	defer d.schemasMu.Unlock()
+	delete(d.schemas, table)
 }
 
 func (d *AthenaDestination) Schemes() []string { return []string{"athena"} }
@@ -85,8 +121,14 @@ func (d *AthenaDestination) PrepareTable(ctx context.Context, opts destination.P
 		return errors.New("schema is required")
 	}
 
+	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
+
 	db, tbl, err := d.parseQualifiedTable(opts.Table)
 	if err != nil {
+		return err
+	}
+
+	if err := d.ensureDatabaseExists(ctx, db); err != nil {
 		return err
 	}
 
@@ -259,7 +301,9 @@ func (d *AthenaDestination) WriteParallel(ctx context.Context, records <-chan so
 	return nil
 }
 
-func (d *AthenaDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *AthenaDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
 	stagingDB, stagingName, err := d.parseQualifiedTable(stagingTable)
 	if err != nil {
 		return err
@@ -268,21 +312,73 @@ func (d *AthenaDestination) SwapTable(ctx context.Context, stagingTable, targetT
 	if err != nil {
 		return err
 	}
-	if stagingDB != targetDB {
-		return errors.New("athena swap requires staging and target in same database")
-	}
 
 	if err := d.DropTable(ctx, targetTable); err != nil {
 		return err
 	}
+
+	if stagingDB == targetDB {
+		// ALTER TABLE RENAME goes through Athena's Hive DDL parser → backticks.
+		stagingQualified, err := formatQualifiedTableHive(stagingDB, stagingName)
+		if err != nil {
+			return err
+		}
+		if err := validateIdent(targetName); err != nil {
+			return err
+		}
+		return d.Exec(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingQualified, targetName))
+	}
+
+	// Cross-database swap: Athena's ALTER TABLE RENAME TO is same-database only.
+	// Recreate the target Iceberg table with the staging's recorded schema (preserves
+	// the column types we originally declared), then copy rows. The schema is keyed by
+	// the staging table name so parallel multi-table PrepareTable calls don't race.
+	sch := d.lookupSchema(stagingTable)
+	if sch == nil {
+		return fmt.Errorf("cannot swap %s -> %s: no recorded schema for staging table", stagingTable, targetTable)
+	}
+
+	// Replace only PrepareTables the staging side, so the target database may
+	// not exist yet on first run with the _bruin_staging design.
+	if err := d.ensureDatabaseExists(ctx, targetDB); err != nil {
+		return fmt.Errorf("failed to ensure target database exists: %w", err)
+	}
+
+	createSQL, err := buildCreateIcebergTableSQL(targetDB, targetName, sch.Columns, d.tableLocation(targetDB, targetName))
+	if err != nil {
+		return err
+	}
+	if err := d.Exec(ctx, createSQL); err != nil {
+		return fmt.Errorf("failed to recreate target table: %w", err)
+	}
+
 	stagingQualified, err := formatQualifiedTable(stagingDB, stagingName)
 	if err != nil {
 		return err
 	}
-	if err := validateIdent(targetName); err != nil {
+	targetQualified, err := formatQualifiedTable(targetDB, targetName)
+	if err != nil {
 		return err
 	}
-	return d.Exec(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingQualified, targetName))
+	quotedCols := make([]string, len(sch.Columns))
+	for i, c := range sch.Columns {
+		if err := validateIdent(c.Name); err != nil {
+			return fmt.Errorf("invalid column name %q: %w", c.Name, err)
+		}
+		quotedCols[i] = fmt.Sprintf(`"%s"`, c.Name)
+	}
+	colList := strings.Join(quotedCols, ", ")
+	copySQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
+		targetQualified, colList, colList, stagingQualified)
+	if err := d.Exec(ctx, copySQL); err != nil {
+		return fmt.Errorf("failed to copy staging rows into target: %w", err)
+	}
+
+	if err := d.DropTable(ctx, stagingTable); err != nil {
+		return fmt.Errorf("failed to drop staging table after copy: %w", err)
+	}
+	d.forgetSchema(stagingTable)
+	return nil
 }
 
 func (d *AthenaDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
@@ -302,7 +398,8 @@ func (d *AthenaDestination) DropTable(ctx context.Context, table string) error {
 	if err != nil {
 		return err
 	}
-	qualified, err := formatQualifiedTable(db, tbl)
+	// DROP TABLE goes through Athena's Hive DDL parser → backticks.
+	qualified, err := formatQualifiedTableHive(db, tbl)
 	if err != nil {
 		return err
 	}
@@ -344,6 +441,22 @@ func (d *AthenaDestination) GetScheme() string { return "athena" }
 
 func (d *AthenaDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	return nil, nil
+}
+
+func (d *AthenaDestination) ensureDatabaseExists(ctx context.Context, database string) error {
+	if database == "" {
+		return nil
+	}
+	if err := validateIdent(database); err != nil {
+		return fmt.Errorf("invalid database name: %w", err)
+	}
+	createSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", database)
+	start := time.Now()
+	if err := d.Exec(ctx, createSQL); err != nil {
+		return fmt.Errorf("failed to create database %s: %w", database, err)
+	}
+	config.Debug("[DEST] Ensured database exists: %s (took %v)", database, time.Since(start))
+	return nil
 }
 
 func (d *AthenaDestination) parseQualifiedTable(table string) (database, tbl string, err error) {

@@ -211,7 +211,7 @@ func (d *MongoDBDestination) WriteParallel(ctx context.Context, records <-chan s
 	return nil
 }
 
-func (d *MongoDBDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *MongoDBDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	return errors.New("mongo destination does not support atomic swap")
 }
 

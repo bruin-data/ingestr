@@ -737,7 +737,7 @@ func TestSwapTable(t *testing.T) {
 	require.NoError(t, err)
 
 	// Swap tables
-	err = dest.SwapTable(ctx, "staging_table", "target_table")
+	err = dest.SwapTable(ctx, destination.SwapOptions{StagingTable: "staging_table", TargetTable: "target_table"})
 	require.NoError(t, err)
 
 	// Verify target now has staging data
@@ -748,6 +748,61 @@ func TestSwapTable(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), id)
 	assert.Equal(t, "New", string(append([]byte(nil), nameRaw...)))
+}
+
+// TestSwapTable_CrossSchema_TargetSchemaMissing reproduces the regression
+// reported against gong v0.1.101: on a fresh DuckDB the replace strategy only
+// PrepareTables the staging side (in `_bruin_staging`), so the target schema
+// (e.g. `public`) may not exist yet when SwapTable runs. The cross-schema
+// branch must auto-create the target schema before recreating the target
+// table, otherwise it fails with "Schema with name public does not exist!".
+func TestSwapTable_CrossSchema_TargetSchemaMissing(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString},
+		},
+	}
+
+	// Stage only — never touch the target schema. This mirrors what the
+	// replace strategy does on a fresh deployment.
+	stagingTable := "_bruin_staging.public__bootstrap_gong_staging_1"
+	targetTable := "public.bootstrap_gong"
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:     stagingTable,
+		Schema:    tableSchema,
+		DropFirst: true,
+	}))
+
+	require.NoError(t, dest.Exec(ctx,
+		`INSERT INTO "_bruin_staging"."public__bootstrap_gong_staging_1" VALUES (1, 'a'), (2, 'b')`))
+
+	require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
+		StagingTable: stagingTable,
+		TargetTable:  targetTable,
+	}))
+
+	// Re-open via the same dest path to read post-swap state. We use the
+	// dest's own connection so we see committed state without a second
+	// reader-cache snapshot.
+	_ = path
+
+	var rowCount int64
+	rows, err := dest.conn.NewStatement()
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	require.NoError(t, rows.SetSqlQuery(`SELECT COUNT(*) FROM "public"."bootstrap_gong"`))
+	reader, _, err := rows.ExecuteQuery(ctx)
+	require.NoError(t, err)
+	defer reader.Release()
+	require.True(t, reader.Next())
+	rec := reader.RecordBatch()
+	rowCount = rec.Column(0).(*array.Int64).Value(0)
+	assert.Equal(t, int64(2), rowCount)
 }
 
 // TestSwapTableCleansUpOldTables verifies that SwapTable properly cleans up
@@ -773,7 +828,7 @@ func TestSwapTableCleansUpOldTables(t *testing.T) {
 	require.NoError(t, err)
 
 	// Swap tables - this should rename target to _old_ and then drop the _old_ table
-	err = dest.SwapTable(ctx, "swap_cleanup_staging", "swap_cleanup_target")
+	err = dest.SwapTable(ctx, destination.SwapOptions{StagingTable: "swap_cleanup_staging", TargetTable: "swap_cleanup_target"})
 	require.NoError(t, err)
 
 	// Verify no _old_ tables are left behind

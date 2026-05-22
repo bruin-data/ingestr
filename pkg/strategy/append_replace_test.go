@@ -120,8 +120,8 @@ func TestReplaceStrategy_Execute_HappyPath(t *testing.T) {
 		t.Fatalf("expected 1 PrepareTable call, got %d", len(dest.prepareCalls))
 	}
 	stagingTable := dest.prepareCalls[0].Table
-	if !strings.HasPrefix(stagingTable, "ds.tbl_staging_") {
-		t.Fatalf("staging table = %q, expected prefix %q", stagingTable, "ds.tbl_staging_")
+	if !strings.HasPrefix(stagingTable, "_bruin_staging.ds__tbl_staging_") {
+		t.Fatalf("staging table = %q, expected prefix %q", stagingTable, "_bruin_staging.ds__tbl_staging_")
 	}
 	if !dest.prepareCalls[0].DropFirst {
 		t.Fatalf("PrepareTable.DropFirst = false, want true")

@@ -295,12 +295,47 @@ func (d *SynapseDestination) writeRecordBatch(ctx context.Context, record arrow.
 	return numRows, nil
 }
 
-func (d *SynapseDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *SynapseDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
+
 	schemaName, _ := parseTableName(targetTable)
-	oldTableName := extractTableName(targetTable) + "_old_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	oldNameCandidate := fmt.Sprintf("%s_old_%d", extractTableName(targetTable), time.Now().UnixNano())
+	oldTableName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("synapse"))
 	oldTable := schemaName + "." + oldTableName
+
+	stagingSchema, stagingName := parseTableName(stagingTable)
+	stagingMoved := false
+	if stagingSchema != schemaName {
+		// Replace strategy only PrepareTables the staging side, so the target
+		// schema may not exist yet (e.g. brand-new schema in --dest-table).
+		if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
+			return fmt.Errorf("failed to ensure target schema exists: %w", err)
+		}
+		transferSQL := fmt.Sprintf("ALTER SCHEMA [%s] TRANSFER %s", schemaName, quoteTable(stagingTable))
+		if _, err := d.db.ExecContext(ctx, transferSQL); err != nil {
+			config.LogFailedQuery(transferSQL, err)
+			return fmt.Errorf("failed to transfer staging table to target schema: %w", err)
+		}
+		stagingMoved = true
+		// Synapse DDL is non-transactional. If a later step fails before the staging
+		// table is renamed onto the target name, transfer it back so it doesn't get
+		// stranded in the target schema under its staging name.
+		defer func() {
+			if !stagingMoved {
+				return
+			}
+			currentLocation := schemaName + "." + stagingName
+			reverseSQL := fmt.Sprintf("ALTER SCHEMA [%s] TRANSFER %s",
+				stagingSchema, quoteTable(currentLocation))
+			if _, rbErr := d.db.ExecContext(ctx, reverseSQL); rbErr != nil {
+				config.Debug("[Synapse] Failed to reverse-transfer staging back to %s: %v", stagingSchema, rbErr)
+			}
+		}()
+		stagingTable = schemaName + "." + stagingName
+	}
 
 	var exists int
 	err := d.db.QueryRowContext(ctx, fmt.Sprintf(
@@ -331,6 +366,8 @@ func (d *SynapseDestination) SwapTable(ctx context.Context, stagingTable, target
 			}
 			return fmt.Errorf("failed to rename staging table: %w", err)
 		}
+		// Staging table is now the target; reverse-transfer is no longer applicable.
+		stagingMoved = false
 
 		dropSQL := fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s",
 			escapeTableName(oldTable), quoteTable(oldTable))
@@ -345,6 +382,8 @@ func (d *SynapseDestination) SwapTable(ctx context.Context, stagingTable, target
 			config.LogFailedQuery(renameSQL, err)
 			return fmt.Errorf("failed to rename staging table: %w", err)
 		}
+		// Staging table is now the target; reverse-transfer is no longer applicable.
+		stagingMoved = false
 	}
 
 	config.Debug("[Synapse] Table swap completed in %v", time.Since(startSwap))

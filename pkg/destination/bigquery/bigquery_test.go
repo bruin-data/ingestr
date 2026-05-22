@@ -2,15 +2,48 @@ package bigquery
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/bigquery"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	duckdbdest "github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
 )
+
+func duckdbCompatible(sql string) string {
+	return strings.ReplaceAll(sql, "`", `"`)
+}
+
+func connectTestDuckDBDest(t *testing.T, ctx context.Context) (*duckdbdest.DuckDBDestination, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.duckdb")
+
+	dest := duckdbdest.NewDuckDBDestination()
+	if err := dest.Connect(ctx, fmt.Sprintf("duckdb:///%s", path)); err != nil {
+		t.Skipf("DuckDB unavailable: %v", err)
+	}
+	// No t.Cleanup for dest.Close — caller must close before opening sql.DB.
+
+	return dest, path
+}
+
+func openTestDuckDBQuery(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", path))
+	if err != nil {
+		t.Skipf("DuckDB sql driver unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
 
 type stubStorageArrowAppender struct {
 	tablePath          string
@@ -842,6 +875,120 @@ func TestBuildMergeSQL(t *testing.T) {
 		}
 		if !contains(sql, "t.`id` = s.`id`") {
 			t.Fatalf("sql should not cast non-mismatched pk:\n%s", sql)
+		}
+	})
+}
+
+func TestBuildBigQueryDedupSelect_StringShape(t *testing.T) {
+	t.Run("no_primary_keys_returns_plain_select", func(t *testing.T) {
+		sql := buildBigQueryDedupSelect("`my-project`.`staging_ds`.`staging_tbl`", nil, "")
+		want := "SELECT * FROM `my-project`.`staging_ds`.`staging_tbl`"
+		if sql != want {
+			t.Fatalf("expected plain select, got:\n%s", sql)
+		}
+		if contains(sql, "QUALIFY") {
+			t.Fatalf("did not expect QUALIFY without primary keys:\n%s", sql)
+		}
+	})
+
+	t.Run("single_primary_key_adds_qualify_row_number", func(t *testing.T) {
+		sql := buildBigQueryDedupSelect("`my-project`.`staging_ds`.`staging_tbl`", []string{"id"}, "")
+		want := "SELECT * FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `id`) = 1"
+		if sql != want {
+			t.Fatalf("expected single-PK dedup select, got:\n%s", sql)
+		}
+	})
+
+	t.Run("composite_primary_keys_partition_in_order", func(t *testing.T) {
+		sql := buildBigQueryDedupSelect("`p`.`d`.`t`", []string{"tenant_id", "user_id"}, "")
+		if !contains(sql, "PARTITION BY `tenant_id`, `user_id`") {
+			t.Fatalf("expected composite PARTITION BY in declared order:\n%s", sql)
+		}
+	})
+}
+
+func TestBuildBigQueryDedupSelect_DuckDBBehavior(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDBDest(t, ctx)
+
+	// All DDL/DML up front through the destination (ADBC native). DuckDB only
+	// allows one connection to a file, so we close before opening sql.DB for
+	// reads below.
+	if err := dest.Exec(ctx, `CREATE TABLE staging (id BIGINT, name VARCHAR, score DOUBLE)`); err != nil {
+		t.Fatalf("create staging: %v", err)
+	}
+	if err := dest.Exec(ctx, `INSERT INTO staging VALUES
+		(1, 'A',     10.0),
+		(1, 'A-dup', 11.0),
+		(2, 'B',     20.0),
+		(2, 'B-dup', 21.0),
+		(3, 'C',     30.0)`); err != nil {
+		t.Fatalf("insert staging: %v", err)
+	}
+	if err := dest.Exec(ctx, `CREATE TABLE staging_composite (tenant_id INT, user_id INT, payload VARCHAR)`); err != nil {
+		t.Fatalf("create staging_composite: %v", err)
+	}
+	if err := dest.Exec(ctx, `INSERT INTO staging_composite VALUES
+		(1, 100, 'a'), (1, 100, 'a-dup'),
+		(1, 200, 'b'),
+		(2, 100, 'c'), (2, 100, 'c-dup')`); err != nil {
+		t.Fatalf("insert staging_composite: %v", err)
+	}
+	if err := dest.Close(ctx); err != nil {
+		t.Fatalf("close destination: %v", err)
+	}
+
+	db := openTestDuckDBQuery(t, path)
+
+	t.Run("no_pks_returns_all_rows", func(t *testing.T) {
+		sql := buildBigQueryDedupSelect("staging", nil, "")
+		var n int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM ("+sql+")").Scan(&n); err != nil {
+			t.Fatalf("execute generated SQL: %v\nSQL: %s", err, sql)
+		}
+		if n != 5 {
+			t.Fatalf("expected all 5 rows returned without dedup, got %d", n)
+		}
+	})
+
+	t.Run("single_pk_dedups_to_one_row_per_id", func(t *testing.T) {
+		sql := duckdbCompatible(buildBigQueryDedupSelect("staging", []string{"id"}, ""))
+		rows, err := db.QueryContext(ctx, sql)
+		if err != nil {
+			t.Fatalf("execute generated SQL: %v\nSQL: %s", err, sql)
+		}
+		defer func() { _ = rows.Close() }()
+
+		seen := map[int64]bool{}
+		for rows.Next() {
+			var id int64
+			var name string
+			var score float64
+			if err := rows.Scan(&id, &name, &score); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			if seen[id] {
+				t.Fatalf("dedup failed: id %d returned more than once", id)
+			}
+			seen[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows.Err: %v", err)
+		}
+		if len(seen) != 3 {
+			t.Fatalf("expected 3 distinct ids after dedup, got %d", len(seen))
+		}
+	})
+
+	t.Run("composite_pk_dedups_by_combined_key", func(t *testing.T) {
+		sql := duckdbCompatible(buildBigQueryDedupSelect("staging_composite", []string{"tenant_id", "user_id"}, ""))
+		var n int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM ("+sql+")").Scan(&n); err != nil {
+			t.Fatalf("execute generated SQL: %v\nSQL: %s", err, sql)
+		}
+		// Three distinct (tenant_id, user_id) groups: (1,100), (1,200), (2,100).
+		if n != 3 {
+			t.Fatalf("expected 3 rows after composite-PK dedup, got %d", n)
 		}
 	})
 }

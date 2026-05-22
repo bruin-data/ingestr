@@ -538,9 +538,9 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 		scheme = "https"
 	}
 
-	userinfo := url.QueryEscape(username)
+	userinfo := url.PathEscape(username)
 	if hasPassword {
-		userinfo = url.QueryEscape(username) + ":" + url.QueryEscape(password)
+		userinfo = url.PathEscape(username) + ":" + url.PathEscape(password)
 	}
 
 	dsn = fmt.Sprintf("%s://%s@%s:%s?catalog=%s&schema=%s",

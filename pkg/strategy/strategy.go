@@ -43,6 +43,9 @@ type IngestionJob struct {
 	// TypeCaster casts record batch columns to match destination types when
 	// --columns specifies type overrides for known-schema sources.
 	TypeCaster *transformer.TypeCaster
+
+	// ColumnMasker replaces values in user-specified columns (e.g. passwords).
+	ColumnMasker *transformer.ColumnMasker
 }
 
 // GetRecords returns either buffered records (for schema-unknown sources)
@@ -114,6 +117,11 @@ func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-c
 	// Apply column renaming (if configured)
 	if j.ColumnRenamer != nil && j.ColumnRenamer.HasRenames() {
 		records = transformer.Wrap(records, j.ColumnRenamer)
+	}
+
+	// Apply column masking
+	if j.ColumnMasker != nil && j.ColumnMasker.HasMasks() {
+		records = transformer.Wrap(records, j.ColumnMasker)
 	}
 
 	// Determine if schema contract transformation is needed

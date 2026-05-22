@@ -398,7 +398,7 @@ func normalizeRecordToSchema(rec arrow.RecordBatch, target *arrow.Schema) (arrow
 	return out, nil
 }
 
-func (d *ParquetDestination) SwapTable(ctx context.Context, stagingTable, targetTable string) error {
+func (d *ParquetDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	config.Debug("[PARQUET] SwapTable called (no-op for Parquet)")
 	return nil
 }
