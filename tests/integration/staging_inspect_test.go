@@ -218,9 +218,11 @@ func TestStaging_SoftRemovedColumnNullFilled(t *testing.T) {
 
 	var nullCount, totalCount int
 	require.NoError(t, db.QueryRow(fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s WHERE deprecated_note IS NULL", staging)).Scan(&nullCount))
+		"SELECT COUNT(*) FROM %s WHERE deprecated_note IS NULL", staging,
+	)).Scan(&nullCount))
 	require.NoError(t, db.QueryRow(fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s", staging)).Scan(&totalCount))
+		"SELECT COUNT(*) FROM %s", staging,
+	)).Scan(&totalCount))
 	assert.Equal(t, totalCount, nullCount,
 		"every row in staging must have NULL for the soft-removed column")
 }
@@ -315,11 +317,14 @@ func TestStaging_SCD2HasMetadataColumns(t *testing.T) {
 
 	var nullFrom, notCurrent, total int
 	require.NoError(t, db.QueryRow(fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s", staging)).Scan(&total))
+		"SELECT COUNT(*) FROM %s", staging,
+	)).Scan(&total))
 	require.NoError(t, db.QueryRow(fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s WHERE _scd_valid_from IS NULL", staging)).Scan(&nullFrom))
+		"SELECT COUNT(*) FROM %s WHERE _scd_valid_from IS NULL", staging,
+	)).Scan(&nullFrom))
 	require.NoError(t, db.QueryRow(fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s WHERE _scd_is_current = false", staging)).Scan(&notCurrent))
+		"SELECT COUNT(*) FROM %s WHERE _scd_is_current = false", staging,
+	)).Scan(&notCurrent))
 
 	assert.Greater(t, total, 0, "staging should have rows")
 	assert.Equal(t, 0, nullFrom, "every staging row must have _scd_valid_from set")
@@ -387,10 +392,10 @@ func TestStaging_MixedDrift_AddWidenSoftRemove(t *testing.T) {
 	destURI, destPath, destTable := newDuckDBDest(t)
 
 	preCreateDest(t, ctx, destURI, destTable, []schema.Column{
-		nullCol("id", schema.TypeInt32),     // source BIGINT (wider) → ALTER fires
-		nullCol("name", schema.TypeString),  // matches
-		nullCol("active", schema.TypeString), // source BOOLEAN (narrower) → no ALTER
-		nullCol("score", schema.TypeFloat64), // matches
+		nullCol("id", schema.TypeInt32),          // source BIGINT (wider) → ALTER fires
+		nullCol("name", schema.TypeString),       // matches
+		nullCol("active", schema.TypeString),     // source BOOLEAN (narrower) → no ALTER
+		nullCol("score", schema.TypeFloat64),     // matches
 		nullCol("deprecated", schema.TypeString), // soft-removed
 	})
 
@@ -428,9 +433,11 @@ func TestStaging_MixedDrift_AddWidenSoftRemove(t *testing.T) {
 
 	var nullDep, total int
 	require.NoError(t, db.QueryRow(fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s", staging)).Scan(&total))
+		"SELECT COUNT(*) FROM %s", staging,
+	)).Scan(&total))
 	require.NoError(t, db.QueryRow(fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s WHERE deprecated IS NULL", staging)).Scan(&nullDep))
+		"SELECT COUNT(*) FROM %s WHERE deprecated IS NULL", staging,
+	)).Scan(&nullDep))
 	assert.Equal(t, total, nullDep, "deprecated column must be NULL for every staging row")
 	assert.Equal(t, mergeInitialRows, total, "staging should contain all source rows")
 }
