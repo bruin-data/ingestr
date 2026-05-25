@@ -43,6 +43,10 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return fmt.Errorf("failed to prepare table: %w", err)
 	}
 
+	if err := job.ApplyEvolution(ctx); err != nil {
+		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	}
+
 	parallelism := job.Config.ExtractParallelism
 	if parallelism <= 0 {
 		parallelism = 4

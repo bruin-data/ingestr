@@ -345,7 +345,7 @@ func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD
 	// 2. Soft-delete rows missing from staging
 	// 3. Insert only changed + new rows from staging
 
-	nonPKColumns := filterColumns(opts.Columns, opts.PrimaryKeys)
+	nonPKColumns := filterColumns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
 
 	// Build change detection: compare non-PK columns between staging and target
 	// We identify PKs where at least one non-PK column differs
@@ -417,9 +417,7 @@ func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD
 	d.refreshTable(ctx, opts.TargetTable)
 
 	// Step 3: Insert rows from staging that don't have a matching current row in target
-	allColumns := make([]string, len(opts.Columns), len(opts.Columns)+3)
-	copy(allColumns, opts.Columns)
-	allColumns = append(allColumns, "_scd_valid_from", "_scd_valid_to", "_scd_is_current")
+	allColumns := destination.AppendSCD2Columns(opts.Columns)
 	quotedColumns := quoteColumns(allColumns)
 
 	// Only insert where no current row exists (changed rows were closed in step 1, new rows never existed)

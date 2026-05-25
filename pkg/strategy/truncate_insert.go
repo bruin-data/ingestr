@@ -58,6 +58,10 @@ func (s *TruncateInsertStrategy) Execute(ctx context.Context, job *IngestionJob)
 		return fmt.Errorf("failed to prepare table: %w", err)
 	}
 
+	if err := job.ApplyEvolution(ctx); err != nil {
+		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	}
+
 	if err := truncator.TruncateTable(ctx, targetTable); err != nil {
 		return fmt.Errorf("failed to truncate table: %w", err)
 	}

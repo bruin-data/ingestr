@@ -118,6 +118,10 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}
 
+	if err := job.ApplyEvolution(ctx); err != nil {
+		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	}
+
 	// Perform merge: UPDATE existing + INSERT new
 	// Note: We only use source columns here. Destination-only columns (removed columns)
 	// will naturally receive NULL for new rows and remain unchanged for existing rows.
@@ -131,9 +135,11 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
 
-	// Drop staging table
-	if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-		config.Debug("[MERGE] Warning: failed to drop staging table: %v", err)
+	// Drop staging table (skip when KeepStaging is set for test inspection).
+	if !job.Config.KeepStaging {
+		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
+			config.Debug("[MERGE] Warning: failed to drop staging table: %v", err)
+		}
 	}
 
 	return nil
@@ -276,8 +282,10 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				return
 			}
 
-			if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-				config.Debug("[MERGE] Warning: failed to drop staging table %s: %v", stagingTable, err)
+			if !job.Config.KeepStaging {
+				if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
+					config.Debug("[MERGE] Warning: failed to drop staging table %s: %v", stagingTable, err)
+				}
 			}
 		}(tableInfo)
 	}

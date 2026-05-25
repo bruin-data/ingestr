@@ -110,8 +110,10 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 
 	if intervalStart == nil || intervalEnd == nil {
 		config.Debug("[DELETE+INSERT] No interval detected (empty data?), skipping delete+insert")
-		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-			config.Debug("[DELETE+INSERT] Warning: failed to drop staging table: %v", err)
+		if !job.Config.KeepStaging {
+			if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
+				config.Debug("[DELETE+INSERT] Warning: failed to drop staging table: %v", err)
+			}
 		}
 		return nil
 	}
@@ -134,6 +136,10 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		intervalEnd = toDateOnly(intervalEnd)
 	}
 
+	if err := job.ApplyEvolution(ctx); err != nil {
+		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	}
+
 	if err := job.Destination.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
 		StagingTable:       stagingTable,
 		TargetTable:        job.Config.DestTable,
@@ -147,8 +153,10 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		return fmt.Errorf("failed to delete+insert data: %w", err)
 	}
 
-	if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-		config.Debug("[DELETE+INSERT] Warning: failed to drop staging table: %v", err)
+	if !job.Config.KeepStaging {
+		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
+			config.Debug("[DELETE+INSERT] Warning: failed to drop staging table: %v", err)
+		}
 	}
 
 	return nil

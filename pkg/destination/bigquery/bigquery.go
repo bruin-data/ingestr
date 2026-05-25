@@ -1246,7 +1246,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	}
 
 	// Build column comparison for change detection (excluding SCD columns and PKs)
-	nonPKColumns := filterColumns(opts.Columns, opts.PrimaryKeys)
+	nonPKColumns := filterColumns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
 	changeConditions := buildChangeConditionsBigQuery(nonPKColumns, "t", "s")
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
@@ -1305,7 +1305,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	}
 
 	// Step 3: Insert new versions + net-new records
-	allColumns := append(opts.Columns, "_scd_valid_from", "_scd_valid_to", "_scd_is_current")
+	allColumns := destination.AppendSCD2Columns(opts.Columns)
 	quotedColumns := make([]string, len(allColumns))
 	for i, col := range allColumns {
 		quotedColumns[i] = fmt.Sprintf("`%s`", col)

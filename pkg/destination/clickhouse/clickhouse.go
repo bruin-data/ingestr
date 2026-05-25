@@ -340,7 +340,7 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	targetDB, targetName := d.parseTableName(opts.TargetTable)
 
 	// Build column comparison for change detection (excluding SCD columns and PKs)
-	nonPKColumns := filterColumns(opts.Columns, opts.PrimaryKeys)
+	nonPKColumns := filterColumns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
 	changeConditions := buildChangeConditionsClickHouse(nonPKColumns, "target", "source")
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 	// Format timestamp as ClickHouse DateTime64 literal
@@ -408,7 +408,7 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	}
 
 	// Step 3: Insert new versions + net-new records
-	allColumns := append(opts.Columns, "_scd_valid_from", "_scd_valid_to", "_scd_is_current")
+	allColumns := destination.AppendSCD2Columns(opts.Columns)
 	quotedColumns := quoteColumns(allColumns)
 
 	insertSQL := fmt.Sprintf(

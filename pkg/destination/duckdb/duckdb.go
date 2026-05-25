@@ -528,7 +528,7 @@ func (d *DuckDBDestination) SCD2Table(ctx context.Context, opts destination.SCD2
 	}()
 
 	// Build column comparison for change detection (excluding SCD columns and PKs)
-	nonPKColumns := filterColumns(opts.Columns, opts.PrimaryKeys)
+	nonPKColumns := filterColumns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
 	changeConditions := buildChangeConditions(nonPKColumns, "target", "source")
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 
@@ -580,7 +580,7 @@ func (d *DuckDBDestination) SCD2Table(ctx context.Context, opts destination.SCD2
 	// Insert records that either:
 	// - Don't exist at all (net-new)
 	// - Exist but have changed (new version - the old version was closed in step 1)
-	allColumns := append(opts.Columns, "_scd_valid_from", "_scd_valid_to", "_scd_is_current")
+	allColumns := destination.AppendSCD2Columns(opts.Columns)
 	quotedColumns := quoteColumns(allColumns)
 
 	insertSQL := fmt.Sprintf(

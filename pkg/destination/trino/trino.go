@@ -401,7 +401,7 @@ func (d *TrinoDestination) SCD2Table(ctx context.Context, opts destination.SCD2O
 	}
 
 	// Step 3: Insert new versions + net-new records
-	allColumns := append(opts.Columns, "_scd_valid_from", "_scd_valid_to", "_scd_is_current")
+	allColumns := destination.AppendSCD2Columns(opts.Columns)
 	quotedCols := quoteColumns(allColumns)
 
 	// Build NOT EXISTS condition for insert

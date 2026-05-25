@@ -131,6 +131,10 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}
 
+	if err := job.ApplyEvolution(ctx); err != nil {
+		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	}
+
 	// Perform SCD2 merge
 	config.Debug("[SCD2] Executing SCD2 merge operation")
 	if err := job.Destination.SCD2Table(ctx, destination.SCD2Options{
@@ -144,9 +148,11 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return fmt.Errorf("failed to perform SCD2 merge: %w", err)
 	}
 
-	// Drop staging table
-	if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-		config.Debug("[SCD2] Warning: failed to drop staging table: %v", err)
+	// Drop staging table (skip when KeepStaging is set for test inspection).
+	if !job.Config.KeepStaging {
+		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
+			config.Debug("[SCD2] Warning: failed to drop staging table: %v", err)
+		}
 	}
 
 	return nil
@@ -159,15 +165,27 @@ func extendSchemaWithSCDColumns(original *schema.TableSchema) *schema.TableSchem
 		{Name: "_scd_is_current", DataType: schema.TypeBoolean, Nullable: false},
 	}
 
+	// Skip SCD columns that already exist.
+	existing := make(map[string]bool, len(original.Columns))
+	for _, c := range original.Columns {
+		existing[c.Name] = true
+	}
+	toAdd := make([]schema.Column, 0, len(scdColumns))
+	for _, c := range scdColumns {
+		if !existing[c.Name] {
+			toAdd = append(toAdd, c)
+		}
+	}
+
 	extended := &schema.TableSchema{
 		Name:        original.Name,
 		Schema:      original.Schema,
-		Columns:     make([]schema.Column, len(original.Columns)+len(scdColumns)),
+		Columns:     make([]schema.Column, len(original.Columns)+len(toAdd)),
 		PrimaryKeys: nil, // SCD2 tables don't have primary keys
 	}
 
 	copy(extended.Columns, original.Columns)
-	copy(extended.Columns[len(original.Columns):], scdColumns)
+	copy(extended.Columns[len(original.Columns):], toAdd)
 
 	return extended
 }

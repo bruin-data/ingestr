@@ -509,7 +509,7 @@ func (d *SynapseDestination) SCD2Table(ctx context.Context, opts destination.SCD
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	nonPKColumns := filterColumns(opts.Columns, opts.PrimaryKeys)
+	nonPKColumns := filterColumns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
 	changeConditions := buildChangeConditions(nonPKColumns, "target", "source")
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 
@@ -555,7 +555,7 @@ func (d *SynapseDestination) SCD2Table(ctx context.Context, opts destination.SCD
 		}
 	}
 
-	allColumns := append(opts.Columns, "_scd_valid_from", "_scd_valid_to", "_scd_is_current")
+	allColumns := destination.AppendSCD2Columns(opts.Columns)
 	quotedColumns := quoteColumns(allColumns)
 
 	insertSQL := fmt.Sprintf(
