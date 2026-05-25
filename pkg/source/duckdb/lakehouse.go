@@ -239,7 +239,7 @@ func (l *LakehouseAttacher) getRequiredExtensions(cfg LakehouseConfig) []string 
 
 func deduplicateExtensions(xs []string) []string {
 	seen := make(map[string]bool, len(xs))
-	out := xs[:0]
+	out := make([]string, 0, len(xs))
 	for _, x := range xs {
 		if !seen[x] {
 			seen[x] = true
@@ -454,7 +454,7 @@ func (d *DuckLakeDialect) SetConnection(db *sql.DB) {
 			if IsStorageProbe(stmt) {
 				config.Debug("[DUCKLAKE] %v", TranslateProbeError(d.cfg.Storage.Path, err))
 			} else {
-				config.Debug("[DUCKLAKE] bootstrap failed at %q: %v", firstLine(stmt), err)
+				config.Debug("[DUCKLAKE] bootstrap failed at %q: %v", FirstLine(stmt), err)
 			}
 			return
 		}
@@ -469,7 +469,7 @@ func execStmt(db *sql.DB, stmt string) error {
 	return rows.Close()
 }
 
-func firstLine(s string) string {
+func FirstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return s[:i]
 	}

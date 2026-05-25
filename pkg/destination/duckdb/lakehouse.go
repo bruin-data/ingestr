@@ -39,7 +39,7 @@ func (d *DuckLakeDestination) Connect(ctx context.Context, uri string) error {
 			if srcduckdb.IsStorageProbe(stmt) {
 				return srcduckdb.TranslateProbeError(cfg.Storage.Path, err)
 			}
-			return fmt.Errorf("ducklake: bootstrap failed at %q: %w", firstLine(stmt), err)
+			return fmt.Errorf("ducklake: bootstrap failed at %q: %w", srcduckdb.FirstLine(stmt), err)
 		}
 	}
 	return nil
@@ -50,13 +50,4 @@ func redactIfSecret(sql string) string {
 		return "CREATE OR REPLACE SECRET (redacted)"
 	}
 	return sql
-}
-
-func firstLine(s string) string {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			return s[:i]
-		}
-	}
-	return s
 }
