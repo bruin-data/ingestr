@@ -56,6 +56,13 @@ func (r *Response) Duration() time.Duration {
 	return r.resty.Duration()
 }
 
+func (r *Response) Attempt() int {
+	if r.resty == nil || r.resty.Request == nil {
+		return 0
+	}
+	return r.resty.Request.Attempt
+}
+
 func (r *Response) JSON(v interface{}) error {
 	return json.Unmarshal(r.Body(), v)
 }
