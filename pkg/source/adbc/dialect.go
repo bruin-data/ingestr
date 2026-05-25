@@ -22,7 +22,7 @@ type Dialect interface {
 	DriverName() string
 
 	// EnsureDriver ensures the ADBC driver is installed and available.
-	// Uses the dbc tool pattern: uv tool run dbc install <driver>
+	// Uses the native dbc client to install missing drivers.
 	EnsureDriver(ctx context.Context) error
 
 	// BuildConnectionString converts a URI to an ADBC connection string.

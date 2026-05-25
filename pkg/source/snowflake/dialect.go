@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"sync"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
 	"github.com/bruin-data/ingestr/pkg/source/adbc"
-	"github.com/bruin-data/ingestr/pkg/uv"
 )
 
 // SQL templates for Snowflake
@@ -35,7 +33,6 @@ const (
 var (
 	driverOnce sync.Once
 	driverErr  error
-	uvChecker  = &uv.Checker{}
 )
 
 // Dialect implements the adbc.Dialect interface for Snowflake.
@@ -82,25 +79,8 @@ func ensureDriverInstalled(ctx context.Context) error {
 
 	config.Debug("[SNOWFLAKE] ADBC driver not found, installing...")
 
-	uvPath, err := uvChecker.EnsureUvInstalled(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to ensure uv is installed: %w", err)
-	}
-
-	// Install DBC tool
-	config.Debug("[SNOWFLAKE] Installing dbc tool via uv...")
-	cmd := exec.CommandContext(ctx, uvPath, "tool", "install", "--quiet", "--no-config", "dbc")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	_ = cmd.Run() // Ignore error if already installed
-
-	// Install Snowflake driver via DBC
-	config.Debug("[SNOWFLAKE] Installing Snowflake ADBC driver via dbc...")
-	cmd = exec.CommandContext(ctx, uvPath, "tool", "run", "--no-config", "dbc", "install", "snowflake")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("dbc install snowflake failed: %w", err)
+	if err := adbc.InstallDriver(ctx, "snowflake"); err != nil {
+		return err
 	}
 
 	// Verify driver is now available

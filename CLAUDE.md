@@ -145,7 +145,7 @@ This convention exists because:
 3. BigQuery's Storage Write API expects microseconds regardless of Arrow schema unit metadata
 
 ### ADBC Driver Management
-ADBC drivers are installed via `uv tool run dbc install <driver>`. The `pkg/source/adbc/driver.go` handles this automatically. Drivers are cached and only installed once.
+ADBC drivers are installed via the native `github.com/columnar-tech/dbc` client. The `pkg/source/adbc` package handles this automatically. Drivers are cached and only installed once.
 
 ### Integration Tests
 Located in `tests/integration/integration_test.go`. Tests use testcontainers for PostgreSQL and create temporary files for SQLite/DuckDB. Integration tests are skipped in short mode (`go test -short`).
