@@ -79,6 +79,9 @@ func WithRetryCondition(condition func(resp *Response, err error) bool) Option {
 func WithRetryStrategy(strategy func(resp *Response, err error) (time.Duration, error)) Option {
 	return func(c *Client) {
 		c.resty.SetRetryStrategy(func(r *resty.Response, err error) (time.Duration, error) {
+			if r == nil {
+				return strategy(nil, err)
+			}
 			return strategy(wrapResponse(r), err)
 		})
 	}

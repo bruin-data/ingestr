@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,9 +34,15 @@ const (
 	retryMaxWait = 2 * time.Minute
 )
 
-// hubspotRetryStrategy honors the `retry_after` field HubSpot/Cloudflare returns in JSON error bodies
+// hubspotRetryStrategy honors the standard Retry-After HTTP header or the
+// `retry_after` field HubSpot/Cloudflare returns in JSON error bodies.
 func hubspotRetryStrategy(resp *httpclient.Response, _ error) (time.Duration, error) {
 	if resp != nil {
+		if v := resp.Header().Get("Retry-After"); v != "" {
+			if secs, parseErr := strconv.Atoi(v); parseErr == nil && secs > 0 {
+				return time.Duration(secs) * time.Second, nil
+			}
+		}
 		var body struct {
 			RetryAfter int `json:"retry_after"`
 		}
