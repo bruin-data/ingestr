@@ -33,7 +33,7 @@ const (
 	retryMaxWait = 2 * time.Minute
 )
 
-// hubspotRetryStrategy honors the `retry_after` field HubSpot/Cloudflare returns in JSON error bodies 
+// hubspotRetryStrategy honors the `retry_after` field HubSpot/Cloudflare returns in JSON error bodies
 func hubspotRetryStrategy(resp *httpclient.Response, _ error) (time.Duration, error) {
 	if resp != nil {
 		var body struct {
