@@ -121,4 +121,3 @@ func TestAppendSCD2Columns(t *testing.T) {
 		})
 	}
 }
-
