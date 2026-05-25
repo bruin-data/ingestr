@@ -8,11 +8,15 @@ import (
 
 var Version = "dev"
 
+func versionFlagValue() string {
+	return Version
+}
+
 func NewApp() *cli.Command {
 	return &cli.Command{
 		Name:    "ingestr",
 		Usage:   "A CLI tool for data ingestion between databases",
-		Version: Version,
+		Version: versionFlagValue(),
 		Commands: []*cli.Command{
 			IngestCommand(),
 			ServerCommand(),

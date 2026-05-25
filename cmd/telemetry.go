@@ -9,32 +9,35 @@ import (
 )
 
 func trackCommandTriggered(ctx context.Context, command string) {
-	telemetry.Track(ctx, "command_triggered", map[string]any{
-		"command": command,
-	}, Version)
+	telemetry.Track(ctx, "command_triggered", commandTelemetryProperties(command, nil), versionFlagValue())
 }
 
 func trackCommandRunning(ctx context.Context, command string, properties map[string]any) {
-	eventProperties := map[string]any{
-		"command": command,
-	}
-	for key, value := range properties {
-		eventProperties[key] = value
-	}
-	telemetry.Track(ctx, "command_running", eventProperties, Version)
+	telemetry.Track(ctx, "command_running", commandTelemetryProperties(command, properties), versionFlagValue())
 }
 
 func trackCommandFinished(ctx context.Context, command string, err error) {
-	properties := map[string]any{
-		"command": command,
-		"status":  "success",
-	}
+	properties := commandTelemetryProperties(command, map[string]any{
+		"status": "success",
+	})
 	if err != nil {
 		properties["status"] = "failed"
 		properties["error"] = commandTelemetryError(err)
 	}
 
-	telemetry.Track(context.WithoutCancel(ctx), "command_finished", properties, Version)
+	telemetry.Track(context.WithoutCancel(ctx), "command_finished", properties, versionFlagValue())
+}
+
+func commandTelemetryProperties(command string, properties map[string]any) map[string]any {
+	eventProperties := map[string]any{
+		"command": command,
+		"version": versionFlagValue(),
+	}
+	for key, value := range properties {
+		eventProperties[key] = value
+	}
+	eventProperties["version"] = versionFlagValue()
+	return eventProperties
 }
 
 func commandTelemetryError(err error) string {
