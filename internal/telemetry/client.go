@@ -106,7 +106,9 @@ func (c *Client) Track(ctx context.Context, event string, properties map[string]
 	if err != nil {
 		return fmt.Errorf("send telemetry event: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
