@@ -86,10 +86,10 @@ scenarios:
 
 tools:
   gong:
-    binary: /Users/burak/conductor/workspaces/gongestr/colombo/bin/gong
+    binary: bin/ingestr
 
   ingestr:
-    command_prefix: "uv tool run --python 3.11 ingestr@0.14.141 ingest"
+    command_prefix: "uv tool run --python 3.11 ingestr@0.14.155 ingest"
     requires: uv
     uri_scheme_overrides:
       postgres: postgresql

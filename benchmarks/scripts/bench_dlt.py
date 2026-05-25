@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#     "dlt[postgres,duckdb,bigquery]==1.23.0",
+#     "dlt[postgres,duckdb,bigquery]==1.27.0",
 #     "pymysql",
 #     "sqlalchemy>=1.4,<2",
 #     "duckdb-engine",
