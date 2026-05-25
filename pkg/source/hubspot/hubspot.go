@@ -2,8 +2,11 @@ package hubspot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +33,37 @@ const (
 	retryWait    = 1 * time.Second
 	retryMaxWait = 2 * time.Minute
 )
+
+// hubspotRetryStrategy honors the standard Retry-After HTTP header or the
+// `retry_after` field HubSpot/Cloudflare returns in JSON error bodies.
+func hubspotRetryStrategy(resp *httpclient.Response, _ error) (time.Duration, error) {
+	if resp != nil {
+		if v := resp.Header().Get("Retry-After"); v != "" {
+			if secs, parseErr := strconv.Atoi(v); parseErr == nil && secs > 0 {
+				return time.Duration(secs) * time.Second, nil
+			}
+		}
+		var body struct {
+			RetryAfter int `json:"retry_after"`
+		}
+		if jsonErr := json.Unmarshal(resp.Body(), &body); jsonErr == nil && body.RetryAfter > 0 {
+			return time.Duration(body.RetryAfter) * time.Second, nil
+		}
+	}
+
+	// Fallback to exponential backoff capped at retryMaxWait when the field is absent.
+	attempt := 1
+	if resp != nil {
+		if a := resp.Attempt(); a > 0 {
+			attempt = a
+		}
+	}
+	delay := time.Duration(math.Min(
+		float64(retryMaxWait),
+		float64(retryWait)*math.Exp2(float64(attempt)),
+	))
+	return delay, nil
+}
 
 type Hubspotsource struct {
 	client       *httpclient.Client
@@ -58,6 +92,7 @@ func (s *Hubspotsource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithTimeout(5*time.Minute),
 		httpclient.WithRateLimiter(crmRateLimit, crmRateLimitBurst),
 		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
+		httpclient.WithRetryStrategy(hubspotRetryStrategy),
 		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithHeader("Accept", "application/json"),
@@ -68,6 +103,7 @@ func (s *Hubspotsource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithTimeout(5*time.Minute),
 		httpclient.WithRateLimiter(searchRateLimit, searchRateLimitBurst),
 		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
+		httpclient.WithRetryStrategy(hubspotRetryStrategy),
 		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithHeader("Accept", "application/json"),
