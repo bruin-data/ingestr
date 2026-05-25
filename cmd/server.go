@@ -41,11 +41,18 @@ func ServerCommand() *cli.Command {
 	}
 }
 
-func runServer(ctx context.Context, c *cli.Command) error {
+func runServer(ctx context.Context, c *cli.Command) (err error) {
+	trackCommandTriggered(ctx, "server")
+	defer func() {
+		trackCommandFinished(ctx, "server", err)
+	}()
+
 	port := int(c.Int("port"))
 	credsFile := c.String("creds-file")
 	logsDir := c.String("logs-dir")
 	dbPath := c.String("db")
+
+	trackCommandRunning(ctx, "server", nil)
 
 	s, err := server.New(port, credsFile, logsDir, dbPath)
 	if err != nil {

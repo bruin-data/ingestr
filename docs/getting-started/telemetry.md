@@ -8,7 +8,7 @@ ingestr uses a very basic form of **anonymous telemetry** to be able to keep tra
 - It sends the following information:
   - ingestr version
   - machine ID
-  - OS information: OS, architecture, Python version
+  - OS information: OS, architecture, Go version
   - command executed
   - success/failure
 
@@ -24,3 +24,4 @@ The questions we answer by these simple events are:
 
 ## Disabling telemetry
 If you'd like to turn off the telemetry, simply set the `INGESTR_DISABLE_TELEMETRY` environment variable to `true`.
+The legacy `DISABLE_TELEMETRY` environment variable is also supported.

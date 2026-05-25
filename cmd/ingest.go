@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/strategy"
@@ -180,7 +181,12 @@ func IngestCommand() *cli.Command {
 	}
 }
 
-func runIngest(ctx context.Context, c *cli.Command) error {
+func runIngest(ctx context.Context, c *cli.Command) (err error) {
+	trackCommandTriggered(ctx, "ingest")
+	defer func() {
+		trackCommandFinished(ctx, "ingest", err)
+	}()
+
 	config.DebugMode = c.Bool("debug")
 	cfg := config.DefaultConfig()
 
@@ -245,6 +251,8 @@ func runIngest(ctx context.Context, c *cli.Command) error {
 		return err
 	}
 
+	trackCommandRunning(ctx, "ingest", ingestTelemetryProperties(cfg))
+
 	p := pipeline.New(cfg)
 	if err := p.Run(ctx); err != nil {
 		return err
@@ -256,6 +264,25 @@ func runIngest(ctx context.Context, c *cli.Command) error {
 
 	color.Green("Ingestion completed successfully!")
 	return nil
+}
+
+func ingestTelemetryProperties(cfg *config.IngestConfig) map[string]any {
+	properties := map[string]any{}
+	if sourceType := telemetryScheme(cfg.SourceURI); sourceType != "" {
+		properties["source_type"] = sourceType
+	}
+	if destinationType := telemetryScheme(cfg.DestURI); destinationType != "" {
+		properties["destination_type"] = destinationType
+	}
+	return properties
+}
+
+func telemetryScheme(rawURI string) string {
+	parsed, err := uri.Parse(rawURI)
+	if err != nil {
+		return ""
+	}
+	return parsed.Scheme
 }
 
 func parseDateTime(s string) (time.Time, error) {
