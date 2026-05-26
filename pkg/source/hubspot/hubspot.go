@@ -34,9 +34,9 @@ const (
 	searchRateLimitBurst = 1
 	searchMinRate        = 0.5
 
-	retryCount   = 8
+	retryCount   = 15
 	retryWait    = 1 * time.Second
-	retryMaxWait = 2 * time.Minute
+	retryMaxWait = 5 * time.Minute
 )
 
 // makeRetryStrategy returns a resty retry-delay function that honors the
