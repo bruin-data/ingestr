@@ -13,6 +13,7 @@ import (
 
 var dbcInstallMu sync.Mutex
 
+// InstallDriver installs an ADBC driver using the native dbc client library.
 func InstallDriver(ctx context.Context, driverName string) error {
 	dbcInstallMu.Lock()
 	defer dbcInstallMu.Unlock()
