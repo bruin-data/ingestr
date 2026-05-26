@@ -1,4 +1,5 @@
 ingestr/src/telemetry/event.py:generic-api-key:17
+internal/telemetry/client.go:generic-api-key:26
 ingestr/src/testdata/fakebqcredentials.json:private-key:5
 docs/supported-sources/shopify.md:generic-api-key:26
 docs/supported-sources/smartsheets.md:generic-api-key:38

@@ -28,6 +28,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.9.2
 	github.com/couchbase/gocb/v2 v2.12.1
 	github.com/databricks/databricks-sdk-go v0.95.0
+	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/elastic/go-elasticsearch/v9 v9.3.1
 	github.com/fatih/color v1.18.0
 	github.com/go-chi/chi/v5 v5.2.3
