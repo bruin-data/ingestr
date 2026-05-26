@@ -3,6 +3,7 @@ package adbc
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -37,8 +38,14 @@ func InstallDriver(ctx context.Context, driverName string) error {
 
 func dbcInstallConfig() dbcconfig.Config {
 	configs := dbcconfig.Get()
-	if cfg := configs[dbcconfig.ConfigEnv]; cfg.Location != "" {
-		return cfg
+	// dbc's env-level location also picks up $VIRTUAL_ENV and $CONDA_PREFIX,
+	// but the ADBC driver manager only searches ADBC_DRIVER_PATH and the
+	// user/system config dirs — so only honor env-level when ADBC_DRIVER_PATH
+	// is explicitly set.
+	if os.Getenv("ADBC_DRIVER_PATH") != "" {
+		if cfg := configs[dbcconfig.ConfigEnv]; cfg.Location != "" {
+			return cfg
+		}
 	}
 	return configs[dbcconfig.ConfigUser]
 }
