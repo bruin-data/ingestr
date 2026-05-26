@@ -56,6 +56,12 @@ func WithRateLimiter(rps float64, burst int) Option {
 	}
 }
 
+func WithRateLimiterInstance(rl *RateLimiter) Option {
+	return func(c *Client) {
+		c.rateLimiter = rl
+	}
+}
+
 func WithHeader(key, value string) Option {
 	return func(c *Client) {
 		c.resty.SetHeader(key, value)
