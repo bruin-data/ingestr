@@ -621,6 +621,59 @@ func TestDestinations_TruncateInsert(t *testing.T) {
 	}
 }
 
+// TestDestinations_TruncateInsert_Dedup validates that truncate+insert
+// deduplicates source rows by primary key. The fixture contains 10 rows with
+// only 5 distinct ids (each id appearing twice). After the run, the target
+// must contain exactly 5 rows.
+func TestDestinations_TruncateInsert_Dedup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	if _, err := strategy.Get(config.StrategyTruncateInsert); err != nil {
+		t.Skip("truncate+insert strategy not implemented yet")
+	}
+
+	ctx := context.Background()
+	dupesURI := jsonlURI(t, "testdata/conformance_truncate_dupes.jsonl")
+
+	for _, tc := range destinationCases() {
+		tc := tc
+		if tc.sqlBackend == nil || !tc.truncateInsertCapable {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Skip("destination does not support truncate+insert")
+			})
+			continue
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			destURI, destTable, cleanup := tc.setup(t, ctx)
+			defer cleanup()
+
+			cfg := &config.IngestConfig{
+				SourceURI:           dupesURI,
+				SourceTable:         "truncate_dupes",
+				DestURI:             destURI,
+				DestTable:           destTable,
+				IncrementalStrategy: config.StrategyTruncateInsert,
+				PrimaryKeys:         []string{"id"},
+			}
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+			db, err := tc.sqlBackend.openDB(destURI)
+			if err != nil {
+				t.Skipf("Could not open SQL backend for truncate+insert dedup validation: %v", err)
+				return
+			}
+			defer func() { _ = db.Close() }()
+
+			var count int
+			require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(destTable)).Scan(&count))
+			assert.Equal(t, 5, count, "expected 5 distinct ids after dedup")
+		})
+	}
+}
+
 // TestDestinations_SCD2 validates SCD2 (Slowly Changing Dimensions Type 2) semantics:
 // - Initial load: 5 records inserted as current rows with _scd_valid_from, _scd_valid_to=NULL, _scd_is_current=true
 // - Update load:SCD2Table

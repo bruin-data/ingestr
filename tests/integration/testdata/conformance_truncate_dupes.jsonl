@@ -1,0 +1,10 @@
+{"id":1,"name":"alpha","active":true,"score":10.5}
+{"id":1,"name":"alpha-dup","active":false,"score":11.0}
+{"id":2,"name":"bravo","active":false,"score":20.0}
+{"id":2,"name":"bravo-dup","active":true,"score":21.0}
+{"id":3,"name":"charlie","active":true,"score":30.25}
+{"id":3,"name":"charlie-dup","active":false,"score":31.0}
+{"id":4,"name":"delta","active":true,"score":40.75}
+{"id":4,"name":"delta-dup","active":false,"score":41.0}
+{"id":5,"name":"echo","active":false,"score":50.0}
+{"id":5,"name":"echo-dup","active":true,"score":51.0}
