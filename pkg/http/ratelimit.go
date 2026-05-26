@@ -23,3 +23,11 @@ func (r *RateLimiter) Wait(ctx context.Context) error {
 func (r *RateLimiter) Allow() bool {
 	return r.limiter.Allow()
 }
+
+func (r *RateLimiter) SetLimit(rps float64) {
+	r.limiter.SetLimit(rate.Limit(rps))
+}
+
+func (r *RateLimiter) Limit() float64 {
+	return float64(r.limiter.Limit())
+}
