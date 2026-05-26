@@ -120,6 +120,7 @@ Temporary Items
 
 # Local scripts
 /scripts/
+/helper_scripts/
 
 # End of https://www.toptal.com/developers/gitignore/api/goland,go,macos
 
