@@ -108,7 +108,7 @@ func (r *ColumnRenamer) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, e
 
 	newBatch := array.NewRecordBatch(arrow.NewSchema(fields, nil), cols, batch.NumRows())
 	// Release our references to the columns
- 	for _, col := range cols {
+	for _, col := range cols {
 		col.Release()
 	}
 

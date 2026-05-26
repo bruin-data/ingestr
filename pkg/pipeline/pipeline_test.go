@@ -198,6 +198,7 @@ func TestSetupNamingConvention(t *testing.T) {
 		}
 	})
 }
+
 func TestSetupNamingConventionCollisionMerge(t *testing.T) {
 	src := schema.TableSchema{
 		Columns: []schema.Column{
