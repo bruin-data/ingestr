@@ -182,6 +182,10 @@ func coalesceColumns(batch arrow.RecordBatch, sources []string) (arrow.Array, er
 	pool := memory.NewGoAllocator()
 	numRows := int(batch.NumRows())
 
+	if numRows == 0 {
+		return array.NewSlice(columns[len(columns)-1], 0, 0), nil
+	}
+
 	winners := make([]int, numRows)
 	for row := 0; row < numRows; row++ {
 		winners[row] = -1

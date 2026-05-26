@@ -233,6 +233,38 @@ func TestColumnRenamerCoalesce(t *testing.T) {
 		assert.Equal(t, "target", out.Field(0).Name)
 	})
 
+	t.Run("ZeroRowBatchReturnsEmptyArray", func(t *testing.T) {
+		fields := []arrow.Field{
+			{Name: "a", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: "b", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		}
+		inputSchema := arrow.NewSchema(fields, nil)
+
+		aB := array.NewInt64Builder(pool)
+		defer aB.Release()
+		bB := array.NewInt64Builder(pool)
+		defer bB.Release()
+
+		cols := []arrow.Array{aB.NewArray(), bB.NewArray()}
+		batch := array.NewRecordBatch(inputSchema, cols, 0)
+		for _, c := range cols {
+			c.Release()
+		}
+		defer batch.Release()
+
+		renamer := NewColumnRenamerWithMerges(nil, map[string][]string{
+			"merged": {"a", "b"},
+		})
+
+		out, err := renamer.Transform(batch)
+		require.NoError(t, err)
+		defer out.Release()
+
+		require.Equal(t, int64(1), out.NumCols())
+		assert.Equal(t, "merged", out.Schema().Field(0).Name)
+		assert.Equal(t, int64(0), out.NumRows())
+	})
+
 	t.Run("CoalesceWorksForFixedSizeBinary", func(t *testing.T) {
 		fsbType := &arrow.FixedSizeBinaryType{ByteWidth: 4}
 		fields := []arrow.Field{
