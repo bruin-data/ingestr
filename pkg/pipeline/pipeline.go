@@ -1027,20 +1027,25 @@ func (p *Pipeline) setupNamingConvention(ctx context.Context, sourceSchema *sche
 	config.Debug("[NAMING] Using %s naming convention", namingConv.Name())
 
 	// Build column mapping
-	columnMapping := naming.BuildColumnMapping(sourceSchema, namingConv)
-	if len(columnMapping) == 0 {
+	renames, drops := naming.BuildColumnMapping(sourceSchema, namingConv)
+	if len(renames) == 0 && len(drops) == 0 {
 		config.Debug("[NAMING] No column renames needed")
 		return nil
 	}
-
 	// Log the column mappings
-	for src, dest := range columnMapping {
+	for src, dest := range renames {
 		config.Debug("[NAMING] Column rename: %s -> %s", src, dest)
 	}
-	fmt.Printf("Naming convention: %s (%d columns will be renamed)\n", namingConv.Name(), len(columnMapping))
+	for src := range drops {
+		config.Debug("[NAMING] Column drop (collides with later column): %s", src)
+		fmt.Printf("Naming collision: dropping column %q (a later column normalizes to the same name)\n", src)
+	}
+	if len(renames) > 0 {
+		fmt.Printf("Naming convention: %s (%d columns will be renamed)\n", namingConv.Name(), len(renames))
+	}
 
-	p.namingMapping = columnMapping
-	p.applyColumnMapping(sourceSchema, columnMapping)
+	p.namingMapping = renames
+	p.applyColumnMapping(sourceSchema, renames, drops)
 	return nil
 }
 
@@ -1051,39 +1056,69 @@ func (p *Pipeline) shortenLongIdentifiers(sourceSchema *schema.TableSchema) {
 		return
 	}
 	fmt.Printf("Identifier shortening: %d column(s) shortened to fit %d-byte limit\n", len(mapping), maxLen)
-	p.applyColumnMapping(sourceSchema, mapping)
+	p.applyColumnMapping(sourceSchema, mapping, nil)
 }
 
-// applyColumnMapping renames schema columns/PKs/incremental key and updates the column renamer.
-func (p *Pipeline) applyColumnMapping(s *schema.TableSchema, mapping map[string]string) {
+// applyColumnMapping mutates the schema to drop columns in `drops` and rename
+// the rest per `renames`. PKs, incremental key, and partition key follow the
+// same rules. The pipeline's columnRenamer is updated to compose this step
+// with any prior rename/drop steps so incoming batches are transformed in one
+// pass.
+func (p *Pipeline) applyColumnMapping(s *schema.TableSchema, renames map[string]string, drops map[string]bool) {
+	if len(drops) > 0 {
+		kept := make([]schema.Column, 0, len(s.Columns))
+		for _, col := range s.Columns {
+			if drops[col.Name] {
+				continue
+			}
+			kept = append(kept, col)
+		}
+		s.Columns = kept
+	}
+
 	for i := range s.Columns {
-		if newName, ok := mapping[s.Columns[i].Name]; ok {
+		if newName, ok := renames[s.Columns[i].Name]; ok {
 			s.Columns[i].Name = newName
 		}
 	}
 	for i, pk := range s.PrimaryKeys {
-		if newName, ok := mapping[pk]; ok {
+		if newName, ok := renames[pk]; ok {
 			s.PrimaryKeys[i] = newName
 		}
 	}
-	if newName, ok := mapping[s.IncrementalKey]; ok {
+	if newName, ok := renames[s.IncrementalKey]; ok {
 		s.IncrementalKey = newName
 	}
-	if newName, ok := mapping[s.PartitionBy]; ok {
+	if newName, ok := renames[s.PartitionBy]; ok {
 		s.PartitionBy = newName
 	}
 
-	// Compose with existing renamer: if A→B already exists and B→C is new, result is A→C.
+	// Compose with existing renamer. Assumes follow-on steps only rename and
+	// don't drop (true for shortenLongIdentifiers, the only current second-stage
+	// caller). With no new drops to translate, the composition reduces to:
+	//   - If old renamed A→B and this step renames B→C, then A → C.
+	//   - Otherwise old's rename A→B carries forward.
+	//   - Old's drops persist unchanged.
 	if p.columnRenamer != nil && p.columnRenamer.HasRenames() {
+		composedRenames := make(map[string]string, len(renames))
+		for k, v := range renames {
+			composedRenames[k] = v
+		}
 		for src, dst := range p.columnRenamer.Mapping() {
-			if newDst, ok := mapping[dst]; ok {
-				mapping[src] = newDst
+			if newDst, ok := composedRenames[dst]; ok {
+				composedRenames[src] = newDst
 			} else {
-				mapping[src] = dst
+				composedRenames[src] = dst
 			}
 		}
+		composedDrops := make(map[string]bool, len(p.columnRenamer.Drops()))
+		for d := range p.columnRenamer.Drops() {
+			composedDrops[d] = true
+		}
+		renames = composedRenames
+		drops = composedDrops
 	}
-	p.columnRenamer = transformer.NewColumnRenamer(mapping)
+	p.columnRenamer = transformer.NewColumnRenamerWithDrops(renames, drops)
 }
 
 func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error {

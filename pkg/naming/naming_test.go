@@ -243,20 +243,89 @@ func TestBuildColumnMapping(t *testing.T) {
 
 	t.Run("DirectReturnsEmptyMapping", func(t *testing.T) {
 		conv := Get(Direct)
-		mapping := BuildColumnMapping(sourceSchema, conv)
-		assert.Empty(t, mapping)
+		renames, drops := BuildColumnMapping(sourceSchema, conv)
+		assert.Empty(t, renames)
+		assert.Empty(t, drops)
 	})
 
 	t.Run("SnakeCaseReturnsMapping", func(t *testing.T) {
 		conv := Get(SnakeCase)
-		mapping := BuildColumnMapping(sourceSchema, conv)
+		renames, drops := BuildColumnMapping(sourceSchema, conv)
 
-		assert.Len(t, mapping, 2)
-		assert.Equal(t, "user_id", mapping["userId"])
-		assert.Equal(t, "created_at", mapping["createdAt"])
-		// user_name is already snake_case, so no mapping needed
-		_, exists := mapping["user_name"]
+		assert.Empty(t, drops)
+		assert.Len(t, renames, 2)
+		assert.Equal(t, "user_id", renames["userId"])
+		assert.Equal(t, "created_at", renames["createdAt"])
+		_, exists := renames["user_name"]
 		assert.False(t, exists)
+	})
+}
+
+func TestBuildColumnMappingCollisions(t *testing.T) {
+	conv := Get(SnakeCase)
+
+	t.Run("LastWinsEarlierDropped", func(t *testing.T) {
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "id"},
+				{Name: "created_at"},
+				{Name: "createdAt"},
+			},
+		}
+		renames, drops := BuildColumnMapping(sourceSchema, conv)
+		assert.Equal(t, "created_at", renames["createdAt"])
+		assert.True(t, drops["created_at"])
+		assert.False(t, drops["createdAt"])
+		_, ok := renames["id"]
+		assert.False(t, ok)
+		_, ok = renames["created_at"]
+		assert.False(t, ok, "dropped column shouldn't appear in renames")
+	})
+
+	t.Run("MultipleColumnsAllDroppedExceptLast", func(t *testing.T) {
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "FirstName"},
+				{Name: "FirstNAME"},
+				{Name: "First_Name"},
+				{Name: "first_name"},
+			},
+		}
+		renames, drops := BuildColumnMapping(sourceSchema, conv)
+		// `first_name` (last) is already snake_case → no rename entry, not dropped.
+		_, hasLast := renames["first_name"]
+		assert.False(t, hasLast)
+		assert.False(t, drops["first_name"])
+		assert.True(t, drops["FirstName"])
+		assert.True(t, drops["FirstNAME"])
+		assert.True(t, drops["First_Name"])
+	})
+
+	t.Run("LastIsCamelStillRenamedTargetSnakeCase", func(t *testing.T) {
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "created_at"},
+				{Name: "createdAt"},
+				{Name: "CreatedAt"},
+			},
+		}
+		renames, drops := BuildColumnMapping(sourceSchema, conv)
+		assert.Equal(t, "created_at", renames["CreatedAt"])
+		assert.True(t, drops["created_at"])
+		assert.True(t, drops["createdAt"])
+	})
+
+	t.Run("NoCollision", func(t *testing.T) {
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "userId"},
+				{Name: "createdAt"},
+			},
+		}
+		renames, drops := BuildColumnMapping(sourceSchema, conv)
+		assert.Empty(t, drops)
+		assert.Equal(t, "user_id", renames["userId"])
+		assert.Equal(t, "created_at", renames["createdAt"])
 	})
 }
 

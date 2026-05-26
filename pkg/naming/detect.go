@@ -119,15 +119,35 @@ func normalizeForDetection(name string) string {
 	return strings.ToLower(name)
 }
 
-// BuildColumnMapping creates a mapping from source column names to destination column names
-// based on the naming convention.
-func BuildColumnMapping(sourceSchema *schema.TableSchema, convention NamingConvention) map[string]string {
-	mapping := make(map[string]string)
-	for _, col := range sourceSchema.Columns {
+// BuildColumnMapping computes how source columns should be renamed and which
+// should be dropped to honor the naming convention.
+//
+// Returned values:
+//   - renames: source column name → destination column name. Only contains
+//     entries where the destination differs from the source.
+//   - drops: set of source column names to remove entirely. Populated when
+//     multiple source columns normalize to the same destination name: the LAST
+//     source column (in source order) keeps the normalized name, all earlier
+//     colliding columns are added to drops.
+func BuildColumnMapping(sourceSchema *schema.TableSchema, convention NamingConvention) (renames map[string]string, drops map[string]bool) {
+	renames = make(map[string]string)
+	drops = make(map[string]bool)
+	if sourceSchema == nil {
+		return renames, drops
+	}
+
+	claimed := make(map[string]bool)
+	for i := len(sourceSchema.Columns) - 1; i >= 0; i-- {
+		col := sourceSchema.Columns[i]
 		destName := convention.Normalize(col.Name)
+		if claimed[destName] {
+			drops[col.Name] = true
+			continue
+		}
+		claimed[destName] = true
 		if destName != col.Name {
-			mapping[col.Name] = destName
+			renames[col.Name] = destName
 		}
 	}
-	return mapping
+	return renames, drops
 }

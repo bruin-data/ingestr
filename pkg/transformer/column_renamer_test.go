@@ -99,6 +99,63 @@ func TestColumnRenamer(t *testing.T) {
 		assert.Equal(t, mapping, renamer.Mapping())
 	})
 
+	t.Run("DropsColumnsViaExplicitDropSet", func(t *testing.T) {
+		// Drops are passed as a separate set, not encoded as empty-string targets.
+		mapping := map[string]string{
+			"createdAt": "created_at", // collide winner, renamed
+		}
+		drops := map[string]bool{
+			"created_at": true, // collide loser, dropped
+		}
+		renamer := NewColumnRenamerWithDrops(mapping, drops)
+
+		fields := []arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+			{Name: "created_at", Type: arrow.BinaryTypes.String, Nullable: true},
+			{Name: "createdAt", Type: arrow.BinaryTypes.String, Nullable: true},
+		}
+		inputSchema := arrow.NewSchema(fields, nil)
+
+		idBuilder := array.NewInt64Builder(pool)
+		defer idBuilder.Release()
+		idBuilder.AppendValues([]int64{1, 2}, nil)
+
+		dropBuilder := array.NewStringBuilder(pool)
+		defer dropBuilder.Release()
+		dropBuilder.AppendValues([]string{"drop1", "drop2"}, nil)
+
+		keepBuilder := array.NewStringBuilder(pool)
+		defer keepBuilder.Release()
+		keepBuilder.AppendValues([]string{"keep1", "keep2"}, nil)
+
+		cols := []arrow.Array{idBuilder.NewArray(), dropBuilder.NewArray(), keepBuilder.NewArray()}
+		batch := array.NewRecordBatch(inputSchema, cols, 2)
+		for _, col := range cols {
+			col.Release()
+		}
+		defer batch.Release()
+
+		transformed, err := renamer.Transform(batch)
+		require.NoError(t, err)
+		defer transformed.Release()
+
+		assert.Equal(t, int64(2), transformed.NumCols())
+		assert.Equal(t, "id", transformed.Schema().Field(0).Name)
+		assert.Equal(t, "created_at", transformed.Schema().Field(1).Name)
+
+		// Verify the surviving created_at carries the *renamed* column's data,
+		// not the dropped column's.
+		strCol, ok := transformed.Column(1).(*array.String)
+		require.True(t, ok)
+		assert.Equal(t, "keep1", strCol.Value(0))
+		assert.Equal(t, "keep2", strCol.Value(1))
+
+		outSchema := renamer.OutputSchema(inputSchema)
+		require.Equal(t, 2, len(outSchema.Fields()))
+		assert.Equal(t, "id", outSchema.Field(0).Name)
+		assert.Equal(t, "created_at", outSchema.Field(1).Name)
+	})
+
 	t.Run("OutputSchema", func(t *testing.T) {
 		mapping := map[string]string{"userId": "user_id"}
 		renamer := NewColumnRenamer(mapping)
