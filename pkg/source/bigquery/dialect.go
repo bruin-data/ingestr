@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"strings"
 	"sync"
 
@@ -15,14 +14,12 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source/adbc"
-	"github.com/bruin-data/ingestr/pkg/uv"
 	"google.golang.org/api/option"
 )
 
 var (
 	driverOnce sync.Once
 	driverErr  error
-	uvChecker  = &uv.Checker{}
 )
 
 // Dialect implements the adbc.Dialect interface for BigQuery.
@@ -67,25 +64,8 @@ func ensureDriverInstalled(ctx context.Context) error {
 
 	config.Debug("[BIGQUERY] ADBC driver not found, installing...")
 
-	uvPath, err := uvChecker.EnsureUvInstalled(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to ensure uv is installed: %w", err)
-	}
-
-	// Install DBC tool
-	config.Debug("[BIGQUERY] Installing dbc tool via uv...")
-	cmd := exec.CommandContext(ctx, uvPath, "tool", "install", "--quiet", "--no-config", "dbc")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	_ = cmd.Run() // Ignore error if already installed
-
-	// Install BigQuery driver via DBC
-	config.Debug("[BIGQUERY] Installing BigQuery ADBC driver via dbc...")
-	cmd = exec.CommandContext(ctx, uvPath, "tool", "run", "--no-config", "dbc", "install", "bigquery")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("dbc install bigquery failed: %w", err)
+	if err := adbc.InstallDriver(ctx, "bigquery"); err != nil {
+		return err
 	}
 
 	// Verify driver is now available

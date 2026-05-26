@@ -6,14 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"strings"
 	"sync"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source/adbc"
-	"github.com/bruin-data/ingestr/pkg/uv"
 )
 
 // SQL templates for DuckDB
@@ -41,7 +39,6 @@ const (
 var (
 	driverOnce sync.Once
 	driverErr  error
-	uvChecker  = &uv.Checker{}
 )
 
 // Dialect implements the adbc.Dialect interface for DuckDB.
@@ -81,25 +78,8 @@ func ensureDriverInstalled(ctx context.Context) error {
 
 	config.Debug("[DUCKDB] ADBC driver not found, installing...")
 
-	uvPath, err := uvChecker.EnsureUvInstalled(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to ensure uv is installed: %w", err)
-	}
-
-	// Install DBC tool
-	config.Debug("[DUCKDB] Installing dbc tool via uv...")
-	cmd := exec.CommandContext(ctx, uvPath, "tool", "install", "--quiet", "--no-config", "dbc")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	_ = cmd.Run() // Ignore error if already installed
-
-	// Install DuckDB driver via DBC
-	config.Debug("[DUCKDB] Installing DuckDB ADBC driver via dbc...")
-	cmd = exec.CommandContext(ctx, uvPath, "tool", "run", "--no-config", "dbc", "install", "duckdb")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("dbc install duckdb failed: %w", err)
+	if err := adbc.InstallDriver(ctx, "duckdb"); err != nil {
+		return err
 	}
 
 	// Verify driver is now available
