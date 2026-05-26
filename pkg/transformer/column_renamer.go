@@ -180,76 +180,56 @@ func coalesceColumns(batch arrow.RecordBatch, sources []string) (arrow.Array, er
 	}
 
 	pool := memory.NewGoAllocator()
-	builder := array.NewBuilder(pool, baseType)
-	defer builder.Release()
-
 	numRows := int(batch.NumRows())
+
+	winners := make([]int, numRows)
 	for row := 0; row < numRows; row++ {
-		var picked arrow.Array
+		winners[row] = -1
 		for i := len(columns) - 1; i >= 0; i-- {
 			c := columns[i]
 			if row < c.Len() && !c.IsNull(row) {
-				picked = c
+				winners[row] = i
 				break
 			}
 		}
-		if picked == nil {
-			builder.AppendNull()
-			continue
-		}
-		if err := appendArrayValue(builder, picked, row); err != nil {
-			return nil, err
-		}
 	}
-	return builder.NewArray(), nil
-}
 
-// appendArrayValue copies the value at `idx` from `src` into `dst`. Caller
-// must ensure src.DataType() == dst.Type().
-func appendArrayValue(dst array.Builder, src arrow.Array, idx int) error {
-	switch b := dst.(type) {
-	case *array.Int64Builder:
-		b.Append(src.(*array.Int64).Value(idx))
-	case *array.Int32Builder:
-		b.Append(src.(*array.Int32).Value(idx))
-	case *array.Int16Builder:
-		b.Append(src.(*array.Int16).Value(idx))
-	case *array.Int8Builder:
-		b.Append(src.(*array.Int8).Value(idx))
-	case *array.Uint64Builder:
-		b.Append(src.(*array.Uint64).Value(idx))
-	case *array.Uint32Builder:
-		b.Append(src.(*array.Uint32).Value(idx))
-	case *array.Uint16Builder:
-		b.Append(src.(*array.Uint16).Value(idx))
-	case *array.Uint8Builder:
-		b.Append(src.(*array.Uint8).Value(idx))
-	case *array.Float64Builder:
-		b.Append(src.(*array.Float64).Value(idx))
-	case *array.Float32Builder:
-		b.Append(src.(*array.Float32).Value(idx))
-	case *array.BooleanBuilder:
-		b.Append(src.(*array.Boolean).Value(idx))
-	case *array.StringBuilder:
-		b.Append(src.(*array.String).Value(idx))
-	case *array.LargeStringBuilder:
-		b.Append(src.(*array.LargeString).Value(idx))
-	case *array.BinaryBuilder:
-		b.Append(src.(*array.Binary).Value(idx))
-	case *array.TimestampBuilder:
-		b.Append(src.(*array.Timestamp).Value(idx))
-	case *array.Date32Builder:
-		b.Append(src.(*array.Date32).Value(idx))
-	case *array.Date64Builder:
-		b.Append(src.(*array.Date64).Value(idx))
-	case *array.Time32Builder:
-		b.Append(src.(*array.Time32).Value(idx))
-	case *array.Time64Builder:
-		b.Append(src.(*array.Time64).Value(idx))
-	case *array.Decimal128Builder:
-		b.Append(src.(*array.Decimal128).Value(idx))
-	default:
-		return fmt.Errorf("unsupported arrow type for coalesce: %s", dst.Type())
+	buildNullRun := func(n int) arrow.Array {
+		b := array.NewBuilder(pool, baseType)
+		defer b.Release()
+		for j := 0; j < n; j++ {
+			b.AppendNull()
+		}
+		return b.NewArray()
 	}
-	return nil
+
+	var slices []arrow.Array
+	releaseSlices := func() {
+		for _, s := range slices {
+			s.Release()
+		}
+	}
+
+	for i := 0; i < numRows; {
+		w := winners[i]
+		j := i + 1
+		for j < numRows && winners[j] == w {
+			j++
+		}
+		var s arrow.Array
+		if w == -1 {
+			s = buildNullRun(j - i)
+		} else {
+			s = array.NewSlice(columns[w], int64(i), int64(j))
+		}
+		slices = append(slices, s)
+		i = j
+	}
+
+	out, err := array.Concatenate(slices, pool)
+	releaseSlices()
+	if err != nil {
+		return nil, fmt.Errorf("concatenate coalesce slices: %w", err)
+	}
+	return out, nil
 }

@@ -232,4 +232,42 @@ func TestColumnRenamerCoalesce(t *testing.T) {
 		require.Equal(t, 1, out.NumFields())
 		assert.Equal(t, "target", out.Field(0).Name)
 	})
+
+	t.Run("CoalesceWorksForFixedSizeBinary", func(t *testing.T) {
+		fsbType := &arrow.FixedSizeBinaryType{ByteWidth: 4}
+		fields := []arrow.Field{
+			{Name: "a", Type: fsbType, Nullable: true},
+			{Name: "b", Type: fsbType, Nullable: true},
+		}
+		inputSchema := arrow.NewSchema(fields, nil)
+
+		aB := array.NewFixedSizeBinaryBuilder(pool, fsbType)
+		defer aB.Release()
+		aB.AppendValues([][]byte{{0x01, 0x02, 0x03, 0x04}, nil}, []bool{true, false})
+
+		bB := array.NewFixedSizeBinaryBuilder(pool, fsbType)
+		defer bB.Release()
+		bB.AppendValues([][]byte{nil, {0xAA, 0xBB, 0xCC, 0xDD}}, []bool{false, true})
+
+		cols := []arrow.Array{aB.NewArray(), bB.NewArray()}
+		batch := array.NewRecordBatch(inputSchema, cols, 2)
+		for _, c := range cols {
+			c.Release()
+		}
+		defer batch.Release()
+
+		renamer := NewColumnRenamerWithMerges(nil, map[string][]string{
+			"merged": {"a", "b"},
+		})
+
+		out, err := renamer.Transform(batch)
+		require.NoError(t, err)
+		defer out.Release()
+
+		require.Equal(t, int64(1), out.NumCols())
+		got := out.Column(0).(*array.FixedSizeBinary)
+		require.Equal(t, 2, got.Len())
+		assert.Equal(t, []byte{0x01, 0x02, 0x03, 0x04}, got.Value(0))
+		assert.Equal(t, []byte{0xAA, 0xBB, 0xCC, 0xDD}, got.Value(1))
+	})
 }
