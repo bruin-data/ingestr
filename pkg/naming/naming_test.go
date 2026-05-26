@@ -278,8 +278,7 @@ func TestBuildColumnMappingCollisions(t *testing.T) {
 		assert.False(t, drops["createdAt"])
 		_, ok := renames["id"]
 		assert.False(t, ok)
-		_, ok = renames["created_at"]
-		assert.False(t, ok, "dropped column shouldn't appear in renames")
+		assert.Equal(t, "created_at", renames["created_at"])
 	})
 
 	t.Run("MultipleColumnsAllDroppedExceptLast", func(t *testing.T) {
@@ -299,6 +298,9 @@ func TestBuildColumnMappingCollisions(t *testing.T) {
 		assert.True(t, drops["FirstName"])
 		assert.True(t, drops["FirstNAME"])
 		assert.True(t, drops["First_Name"])
+		assert.Equal(t, "first_name", renames["FirstName"])
+		assert.Equal(t, "first_name", renames["FirstNAME"])
+		assert.Equal(t, "first_name", renames["First_Name"])
 	})
 
 	t.Run("LastIsCamelStillRenamedTargetSnakeCase", func(t *testing.T) {
@@ -313,6 +315,25 @@ func TestBuildColumnMappingCollisions(t *testing.T) {
 		assert.Equal(t, "created_at", renames["CreatedAt"])
 		assert.True(t, drops["created_at"])
 		assert.True(t, drops["createdAt"])
+		// Losers also have rename entries pointing at the winner's normalized name.
+		assert.Equal(t, "created_at", renames["created_at"])
+		assert.Equal(t, "created_at", renames["createdAt"])
+	})
+
+	t.Run("LoserHasRenameEntryWhenWinnerIsAlreadySnakeCase", func(t *testing.T) {
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "userId"},
+				{Name: "user_id"},
+			},
+		}
+		renames, drops := BuildColumnMapping(sourceSchema, conv)
+		assert.True(t, drops["userId"])
+		assert.False(t, drops["user_id"])
+		assert.Equal(t, "user_id", renames["userId"],
+			"dropped loser must have rename entry to winner's name")
+		_, hasWinner := renames["user_id"]
+		assert.False(t, hasWinner, "winner (already snake_case) needs no rename")
 	})
 
 	t.Run("NoCollision", func(t *testing.T) {

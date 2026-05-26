@@ -1394,12 +1394,12 @@ func TestApplyColumnMappingComposition(t *testing.T) {
 
 // TestEndToEndRenamingWithCollisions exercises the full naming pipeline on a
 // realistic Arrow batch:
-//   1. setupNamingConvention with snake_case + collisions → renames last,
-//      drops earlier.
-//   2. shortenLongIdentifiers if any name exceeds the destination's limit →
-//      composed with naming's renamer.
-//   3. Renamer.Transform applied to a batch carrying ORIGINAL source column
-//      names → produces the expected output schema and data.
+//  1. setupNamingConvention with snake_case + collisions → renames last,
+//     drops earlier.
+//  2. shortenLongIdentifiers if any name exceeds the destination's limit →
+//     composed with naming's renamer.
+//  3. Renamer.Transform applied to a batch carrying ORIGINAL source column
+//     names → produces the expected output schema and data.
 //
 // This is the real downstream consumer's view: whatever the destination
 // receives is whatever this batch ends up looking like.
@@ -1463,10 +1463,10 @@ func TestEndToEndRenamingWithCollisions(t *testing.T) {
 		}
 		cols := []arrow.Array{
 			idB.NewArray(),
-			mkStr("A1", "A2"),       // userID — should be dropped
-			mkStr("B1", "B2"),       // userId — should be dropped
-			mkStr("C1", "C2"),       // user_ID — should be renamed to user_id, data preserved
-			mkStr("t1", "t2"),       // createdAt — should be renamed to created_at
+			mkStr("A1", "A2"), // userID — should be dropped
+			mkStr("B1", "B2"), // userId — should be dropped
+			mkStr("C1", "C2"), // user_ID — should be renamed to user_id, data preserved
+			mkStr("t1", "t2"), // createdAt — should be renamed to created_at
 		}
 		batch := array.NewRecordBatch(inputSchema, cols, 2)
 		for _, c := range cols {
@@ -1607,5 +1607,46 @@ func TestEndToEndRenamingWithCollisions(t *testing.T) {
 		// Renamer correctly drops original `created_at` and renames `createdAt`.
 		assert.True(t, p.columnRenamer.Drops()["created_at"])
 		assert.Equal(t, "created_at", p.columnRenamer.Mapping()["createdAt"])
+	})
+
+	t.Run("KeyReferencesRewrittenWhenWinnerIsAlreadySnakeCase", func(t *testing.T) {
+		src := schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeInt64},
+				{Name: "userId", DataType: schema.TypeString},
+				{Name: "user_id", DataType: schema.TypeString},
+			},
+			PrimaryKeys:    []string{"userId"},
+			IncrementalKey: "userId",
+			PartitionBy:    "userId",
+		}
+
+		p := &Pipeline{
+			config: &config.IngestConfig{
+				DestTable:    "users",
+				SchemaNaming: "snake_case",
+			},
+			dest: &mockDestination{scheme: "postgres"},
+		}
+
+		require.NoError(t, p.setupNamingConvention(context.Background(), &src))
+
+		// Schema: id + the surviving user_id (winner needed no rename).
+		gotCols := make([]string, len(src.Columns))
+		for i, c := range src.Columns {
+			gotCols[i] = c.Name
+		}
+		assert.Equal(t, []string{"id", "user_id"}, gotCols)
+
+		// All three key references rewritten from "userId" to "user_id" so
+		// they keep pointing at a column that actually exists.
+		assert.Equal(t, []string{"user_id"}, src.PrimaryKeys)
+		assert.Equal(t, "user_id", src.IncrementalKey)
+		assert.Equal(t, "user_id", src.PartitionBy)
+
+		// userId is dropped from batches; the rename entry is present so the
+		// PK/IK rewrite above can resolve it
+		assert.True(t, p.columnRenamer.Drops()["userId"])
+		assert.Equal(t, "user_id", p.columnRenamer.Mapping()["userId"])
 	})
 }

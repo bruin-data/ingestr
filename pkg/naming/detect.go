@@ -142,6 +142,7 @@ func BuildColumnMapping(sourceSchema *schema.TableSchema, convention NamingConve
 		destName := convention.Normalize(col.Name)
 		if claimed[destName] {
 			drops[col.Name] = true
+			renames[col.Name] = destName
 			continue
 		}
 		claimed[destName] = true
