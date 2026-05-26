@@ -243,20 +243,86 @@ func TestBuildColumnMapping(t *testing.T) {
 
 	t.Run("DirectReturnsEmptyMapping", func(t *testing.T) {
 		conv := Get(Direct)
-		mapping := BuildColumnMapping(sourceSchema, conv)
-		assert.Empty(t, mapping)
+		renames, merges := BuildColumnMapping(sourceSchema, conv)
+		assert.Empty(t, renames)
+		assert.Empty(t, merges)
 	})
 
 	t.Run("SnakeCaseReturnsMapping", func(t *testing.T) {
 		conv := Get(SnakeCase)
-		mapping := BuildColumnMapping(sourceSchema, conv)
+		renames, merges := BuildColumnMapping(sourceSchema, conv)
 
-		assert.Len(t, mapping, 2)
-		assert.Equal(t, "user_id", mapping["userId"])
-		assert.Equal(t, "created_at", mapping["createdAt"])
+		assert.Empty(t, merges)
+		assert.Len(t, renames, 2)
+		assert.Equal(t, "user_id", renames["userId"])
+		assert.Equal(t, "created_at", renames["createdAt"])
 		// user_name is already snake_case, so no mapping needed
-		_, exists := mapping["user_name"]
+		_, exists := renames["user_name"]
 		assert.False(t, exists)
+	})
+}
+
+func TestBuildColumnMappingCollisions(t *testing.T) {
+	conv := Get(SnakeCase)
+
+	t.Run("MultipleVariantsBecomeMergeGroup", func(t *testing.T) {
+		// userId, user_id, UserID all normalize to user_id → must coalesce per
+		// row rather than dropping data.
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "_id"},
+				{Name: "userId"},
+				{Name: "user_id"},
+				{Name: "UserID"},
+			},
+		}
+		renames, merges := BuildColumnMapping(sourceSchema, conv)
+
+		// Variants do not produce per-variant rename entries — merge is authoritative.
+		_, hasUserId := renames["userId"]
+		_, hasUserUnderscoreId := renames["user_id"]
+		_, hasUserID := renames["UserID"]
+		assert.False(t, hasUserId)
+		assert.False(t, hasUserUnderscoreId)
+		assert.False(t, hasUserID)
+
+		// _id has no collision and is already snake_case → no entry.
+		_, hasId := renames["_id"]
+		assert.False(t, hasId)
+
+		// Merge group preserves source order; last variant (UserID) wins ties.
+		assert.Equal(t, []string{"userId", "user_id", "UserID"}, merges["user_id"])
+	})
+
+	t.Run("SourceOrderPreserved", func(t *testing.T) {
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "CreatedAt"},
+				{Name: "createdAt"},
+				{Name: "created_at"},
+			},
+		}
+		_, merges := BuildColumnMapping(sourceSchema, conv)
+		assert.Equal(t, []string{"CreatedAt", "createdAt", "created_at"}, merges["created_at"])
+	})
+
+	t.Run("NoCollisionsProducesNoMerges", func(t *testing.T) {
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "userId"},
+				{Name: "createdAt"},
+			},
+		}
+		renames, merges := BuildColumnMapping(sourceSchema, conv)
+		assert.Empty(t, merges)
+		assert.Equal(t, "user_id", renames["userId"])
+		assert.Equal(t, "created_at", renames["createdAt"])
+	})
+
+	t.Run("NilSchemaReturnsEmptyMaps", func(t *testing.T) {
+		renames, merges := BuildColumnMapping(nil, conv)
+		assert.Empty(t, renames)
+		assert.Empty(t, merges)
 	})
 }
 

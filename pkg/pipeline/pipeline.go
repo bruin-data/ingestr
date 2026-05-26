@@ -579,8 +579,15 @@ func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceT
 // match). Ingestr/SCD2 metadata cols are skipped and dest-only cols get null-fill.
 func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.TableSchema) *arrow.Schema {
 	var renameMap map[string]string
+	var mergeMap map[string][]string
 	if p.columnRenamer != nil && p.columnRenamer.HasRenames() {
 		renameMap = p.columnRenamer.Mapping()
+		mergeMap = p.columnRenamer.Merges()
+	}
+
+	srcByOrigName := make(map[string]schema.Column, len(sourceSchema.Columns))
+	for _, c := range sourceSchema.Columns {
+		srcByOrigName[c.Name] = c
 	}
 
 	srcByDestName := make(map[string]schema.Column, len(sourceSchema.Columns))
@@ -595,6 +602,18 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 	fields := make([]arrow.Field, 0, len(destSchema.Columns))
 	for _, dc := range destSchema.Columns {
 		if naming.IsIngestrColumn(dc.Name) || isSCD2MetadataColumn(dc.Name) {
+			continue
+		}
+		if variants, ok := mergeMap[dc.Name]; ok {
+			for _, sname := range variants {
+				sc, ok := srcByOrigName[sname]
+				if !ok {
+					continue
+				}
+				m := sc
+				m.DataType, m.Precision, m.Scale, m.ArrayType = dc.DataType, dc.Precision, dc.Scale, dc.ArrayType
+				fields = append(fields, arrowField(sname, m, true))
+			}
 			continue
 		}
 		if sc, ok := srcByDestName[dc.Name]; ok {
@@ -1026,21 +1045,27 @@ func (p *Pipeline) setupNamingConvention(ctx context.Context, sourceSchema *sche
 	namingConv := naming.Get(convention)
 	config.Debug("[NAMING] Using %s naming convention", namingConv.Name())
 
-	// Build column mapping
-	columnMapping := naming.BuildColumnMapping(sourceSchema, namingConv)
-	if len(columnMapping) == 0 {
+	// Build column mapping. When multiple source columns normalize to the same
+	// target name, they enter `merges` and are coalesced per row downstream.
+	renames, merges := naming.BuildColumnMapping(sourceSchema, namingConv)
+	if len(renames) == 0 && len(merges) == 0 {
 		config.Debug("[NAMING] No column renames needed")
 		return nil
 	}
 
-	// Log the column mappings
-	for src, dest := range columnMapping {
+	for src, dest := range renames {
 		config.Debug("[NAMING] Column rename: %s -> %s", src, dest)
 	}
-	fmt.Printf("Naming convention: %s (%d columns will be renamed)\n", namingConv.Name(), len(columnMapping))
+	for target, sources := range merges {
+		config.Debug("[NAMING] Column merge: %v -> %s (last-non-null wins per row)", sources, target)
+		fmt.Printf("Naming collision: merging %d variants into %q (last-non-null wins per row): %v\n", len(sources), target, sources)
+	}
+	if len(renames) > 0 {
+		fmt.Printf("Naming convention: %s (%d columns will be renamed)\n", namingConv.Name(), len(renames))
+	}
 
-	p.namingMapping = columnMapping
-	p.applyColumnMapping(sourceSchema, columnMapping)
+	p.namingMapping = renames
+	p.applyColumnMapping(sourceSchema, renames, merges)
 	return nil
 }
 
@@ -1051,39 +1076,96 @@ func (p *Pipeline) shortenLongIdentifiers(sourceSchema *schema.TableSchema) {
 		return
 	}
 	fmt.Printf("Identifier shortening: %d column(s) shortened to fit %d-byte limit\n", len(mapping), maxLen)
-	p.applyColumnMapping(sourceSchema, mapping)
+	p.applyColumnMapping(sourceSchema, mapping, nil)
 }
 
 // applyColumnMapping renames schema columns/PKs/incremental key and updates the column renamer.
-func (p *Pipeline) applyColumnMapping(s *schema.TableSchema, mapping map[string]string) {
+func (p *Pipeline) applyColumnMapping(s *schema.TableSchema, renames map[string]string, merges map[string][]string) {
+	if len(merges) > 0 {
+		// For each merge group, the LAST source variant wins: it takes the target
+		// name and stays in the schema; earlier variants are dropped here (their
+		// data is coalesced into the winner at runtime by the renamer).
+		targetOf := make(map[string]string)
+		isWinner := make(map[string]bool)
+		for target, sources := range merges {
+			if len(sources) == 0 {
+				continue
+			}
+			for _, src := range sources {
+				targetOf[src] = target
+			}
+			isWinner[sources[len(sources)-1]] = true
+		}
+
+		kept := s.Columns[:0]
+		for _, c := range s.Columns {
+			target, isVariant := targetOf[c.Name]
+			if isVariant && !isWinner[c.Name] {
+				continue
+			}
+			if isVariant {
+				c.Name = target
+			}
+			kept = append(kept, c)
+		}
+		s.Columns = kept
+
+		rewrite := func(name string) string {
+			if t, ok := targetOf[name]; ok {
+				return t
+			}
+			return name
+		}
+		for i, pk := range s.PrimaryKeys {
+			s.PrimaryKeys[i] = rewrite(pk)
+		}
+		s.IncrementalKey = rewrite(s.IncrementalKey)
+		s.PartitionBy = rewrite(s.PartitionBy)
+
+		if len(s.PrimaryKeys) > 1 {
+			seen := make(map[string]bool, len(s.PrimaryKeys))
+			deduped := s.PrimaryKeys[:0]
+			for _, pk := range s.PrimaryKeys {
+				if !seen[pk] {
+					seen[pk] = true
+					deduped = append(deduped, pk)
+				}
+			}
+			s.PrimaryKeys = deduped
+		}
+	}
+
 	for i := range s.Columns {
-		if newName, ok := mapping[s.Columns[i].Name]; ok {
+		if newName, ok := renames[s.Columns[i].Name]; ok {
 			s.Columns[i].Name = newName
 		}
 	}
 	for i, pk := range s.PrimaryKeys {
-		if newName, ok := mapping[pk]; ok {
+		if newName, ok := renames[pk]; ok {
 			s.PrimaryKeys[i] = newName
 		}
 	}
-	if newName, ok := mapping[s.IncrementalKey]; ok {
+	if newName, ok := renames[s.IncrementalKey]; ok {
 		s.IncrementalKey = newName
 	}
-	if newName, ok := mapping[s.PartitionBy]; ok {
+	if newName, ok := renames[s.PartitionBy]; ok {
 		s.PartitionBy = newName
 	}
 
 	// Compose with existing renamer: if A→B already exists and B→C is new, result is A→C.
 	if p.columnRenamer != nil && p.columnRenamer.HasRenames() {
 		for src, dst := range p.columnRenamer.Mapping() {
-			if newDst, ok := mapping[dst]; ok {
-				mapping[src] = newDst
+			if newDst, ok := renames[dst]; ok {
+				renames[src] = newDst
 			} else {
-				mapping[src] = dst
+				renames[src] = dst
 			}
 		}
+		if existing := p.columnRenamer.Merges(); len(existing) > 0 && len(merges) == 0 {
+			merges = existing
+		}
 	}
-	p.columnRenamer = transformer.NewColumnRenamer(mapping)
+	p.columnRenamer = transformer.NewColumnRenamerWithMerges(renames, merges)
 }
 
 func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error {

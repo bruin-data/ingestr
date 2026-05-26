@@ -198,6 +198,55 @@ func TestSetupNamingConvention(t *testing.T) {
 		}
 	})
 }
+func TestSetupNamingConventionCollisionMerge(t *testing.T) {
+	src := schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "_id", DataType: schema.TypeInt64},
+			{Name: "userId", DataType: schema.TypeInt64},
+			{Name: "user_id", DataType: schema.TypeInt64},
+			{Name: "UserID", DataType: schema.TypeInt64},
+		},
+	}
+
+	p := &Pipeline{
+		config: &config.IngestConfig{
+			DestTable:    "users",
+			SchemaNaming: "snake_case",
+		},
+		dest: &mockDestination{tableSchema: nil},
+	}
+
+	if err := p.setupNamingConvention(context.Background(), &src); err != nil {
+		t.Fatalf("setupNamingConvention() error = %v", err)
+	}
+
+	// Schema collapses to two columns: _id and user_id.
+	gotCols := src.ColumnNames()
+	wantCols := []string{"_id", "user_id"}
+	if len(gotCols) != len(wantCols) {
+		t.Fatalf("columns = %v, want %v", gotCols, wantCols)
+	}
+	for i, w := range wantCols {
+		if gotCols[i] != w {
+			t.Errorf("column[%d] = %q, want %q", i, gotCols[i], w)
+		}
+	}
+
+	// Renamer holds a merge group with all three variants in source order.
+	if p.columnRenamer == nil || !p.columnRenamer.HasRenames() {
+		t.Fatalf("expected column renamer with merges")
+	}
+	got := p.columnRenamer.Merges()["user_id"]
+	want := []string{"userId", "user_id", "UserID"}
+	if len(got) != len(want) {
+		t.Fatalf("merges[user_id] = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("merges[user_id][%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
 
 func TestApplyColumnOverrides(t *testing.T) {
 	tests := []struct {
