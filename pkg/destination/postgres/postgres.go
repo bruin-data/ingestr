@@ -523,14 +523,21 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			return fmt.Errorf("failed to update deleted records: %w", err)
 		}
 	} else {
-		// Non-CDC mode: efficient upsert using INSERT ... ON CONFLICT
+		// Non-CDC mode: efficient upsert using INSERT ... ON CONFLICT.
+		// DISTINCT ON dedupes staging by PK so the same target row isn't
+		// affected twice in one statement, which Postgres rejects with
+		// SQLSTATE 21000. No deterministic recency column exists outside
+		// CDC mode, so the winner per PK is arbitrary.
+		pkList := strings.Join(quotedPKs, ", ")
 		upsertSQL := fmt.Sprintf(
-			`INSERT INTO %s (%s) SELECT %s FROM %s ON CONFLICT (%s) DO UPDATE SET %s`,
+			`INSERT INTO %s (%s) SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s ON CONFLICT (%s) DO UPDATE SET %s`,
 			quotedTargetTable,
 			strings.Join(quotedColumns, ", "),
+			pkList,
 			strings.Join(quotedColumns, ", "),
 			quotedStagingTable,
-			strings.Join(quotedPKs, ", "),
+			pkList,
+			pkList,
 			buildConflictUpdateSet(nonPKColumns),
 		)
 		config.Debug("[MERGE] Executing upsert: %s", upsertSQL)
