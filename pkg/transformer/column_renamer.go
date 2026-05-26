@@ -6,7 +6,7 @@ import (
 )
 
 // ColumnRenamer renames columns in record batches, optionally dropping a
-// specified set of columns. 
+// specified set of columns.
 type ColumnRenamer struct {
 	mapping map[string]string // source name -> destination name
 	drops   map[string]bool   // source names to remove from each batch
