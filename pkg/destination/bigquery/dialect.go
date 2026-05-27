@@ -20,7 +20,10 @@ func (d *Dialect) Name() string {
 }
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
-	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+	// IF NOT EXISTS makes this idempotent: BigQuery's own PrepareTable also
+	// adds missing columns via the table-metadata API, so by the time this
+	// SQL runs the column may already exist.
+	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s",
 		table,
 		d.QuoteIdentifier(col.Name),
 		d.TypeName(col))
@@ -29,7 +32,7 @@ func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
 func (d *Dialect) BatchAddColumnsSQL(table string, cols []schema.Column) string {
 	clauses := make([]string, 0, len(cols))
 	for _, col := range cols {
-		clauses = append(clauses, fmt.Sprintf("ADD COLUMN %s %s", d.QuoteIdentifier(col.Name), d.TypeName(col)))
+		clauses = append(clauses, fmt.Sprintf("ADD COLUMN IF NOT EXISTS %s %s", d.QuoteIdentifier(col.Name), d.TypeName(col)))
 	}
 	return fmt.Sprintf("ALTER TABLE %s %s", table, strings.Join(clauses, ", "))
 }
