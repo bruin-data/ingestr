@@ -517,6 +517,21 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 			err:  gcbq.Error{Reason: "internalError", Message: "internal"},
 			want: false,
 		},
+		{
+			name: "dataset not found (eventual consistency after staging dataset create)",
+			err:  gcbq.Error{Reason: "notFound", Message: "Not found: Dataset my-project:_bruin_staging"},
+			want: true,
+		},
+		{
+			name: "wrapped dataset not found",
+			err:  fmt.Errorf("wrapped: %w", &gcbq.Error{Reason: "notFound", Message: "Not found: Dataset my-project:_bruin_staging, notFound"}),
+			want: true,
+		},
+		{
+			name: "table not found stays non-retryable (real bug, not propagation)",
+			err:  gcbq.Error{Reason: "notFound", Message: "Not found: Table my-project:_bruin_staging.orders"},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
