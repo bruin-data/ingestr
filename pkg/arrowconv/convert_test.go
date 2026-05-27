@@ -283,12 +283,6 @@ func TestAppendValue_TimestampBuilder(t *testing.T) {
 	}
 }
 
-// Regression: Decimal128Builder was the only numeric builder in this file
-// missing a json.Number branch. Schema-inferred sources (JSONL, MongoDB)
-// decode JSON numbers as json.Number via UseNumber(); any DECIMAL/NUMERIC
-// destination column silently received NULL through that path. The
-// delegation to the existing string branch must also inherit the
-// big.Float fallback for scientific notation.
 func TestAppendValue_Decimal128_JSONNumber(t *testing.T) {
 	dt := &arrow.Decimal128Type{Precision: 38, Scale: 0}
 
@@ -296,12 +290,12 @@ func TestAppendValue_Decimal128_JSONNumber(t *testing.T) {
 		name     string
 		val      json.Number
 		wantNull bool
-		wantBigI string // decimal representation expected via BigInt()
+		wantBigI string
 	}{
 		{name: "simple integer", val: json.Number("1"), wantBigI: "1"},
 		{name: "large positive", val: json.Number("42"), wantBigI: "42"},
 		{name: "negative", val: json.Number("-7"), wantBigI: "-7"},
-		{name: "scientific notation (uses big.Float fallback)", val: json.Number("1.5e10"), wantBigI: "15000000000"},
+		{name: "scientific notation", val: json.Number("1.5e10"), wantBigI: "15000000000"},
 		{name: "empty string", val: json.Number(""), wantNull: true},
 		{name: "garbage", val: json.Number("xyz"), wantNull: true},
 	}

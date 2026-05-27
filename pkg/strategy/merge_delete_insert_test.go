@@ -314,11 +314,6 @@ func TestIsNilInterface(t *testing.T) {
 	}
 }
 
-// Regression: when the buffer-reader types an incremental-key column as
-// Decimal128 (because the destination column is e.g. Snowflake NUMBER),
-// IntervalTracker must extract a comparable value. Without the Decimal128
-// case it returned nil → Min/Max stayed nil → the delete+insert strategy
-// hit its "no interval detected, skip" branch and never issued DELETE.
 func TestIntervalTracker_Decimal128_MinMax(t *testing.T) {
 	pool := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	t.Cleanup(func() { pool.AssertSize(t, 0) })

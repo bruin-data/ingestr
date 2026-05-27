@@ -111,9 +111,7 @@ func TestAppendSCD2Columns(t *testing.T) {
 			expected: []string{"_scd_is_current", "id", "_scd_valid_to", "_scd_valid_from"},
 		},
 		{
-			// Case-folding destinations (Snowflake) report SCD columns
-			// uppercased — must not get duplicated by appending lowercase.
-			name:     "scd columns present but uppercased (case-folding destination)",
+			name:     "scd columns present but uppercased",
 			input:    []string{"id", "_SCD_VALID_FROM", "_SCD_VALID_TO", "_SCD_IS_CURRENT"},
 			expected: []string{"id", "_SCD_VALID_FROM", "_SCD_VALID_TO", "_SCD_IS_CURRENT"},
 		},

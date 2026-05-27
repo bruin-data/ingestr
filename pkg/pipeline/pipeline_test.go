@@ -1305,6 +1305,5 @@ func TestBuildBufferReaderTarget_CaseInsensitiveMatch(t *testing.T) {
 
 	got := p.buildBufferReaderTarget(src, dest)
 
-	// Source-case names so CastRecordToSchema can find them in the buffer file.
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
