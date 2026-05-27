@@ -124,3 +124,33 @@ func TestSCD2Strategy_ExtendSchemaWithSCDColumns(t *testing.T) {
 		}
 	}
 }
+
+// Regression: when the destination already contains SCD metadata columns
+// but reports them in a different case (Snowflake stores unquoted
+// identifiers as UPPERCASE), the dedup must skip them — otherwise the
+// staging CREATE TABLE ends up with both "_SCD_VALID_FROM" and
+// "_scd_valid_from" and the database rejects it as a duplicate column.
+func TestSCD2Strategy_ExtendSchemaWithSCDColumns_CaseInsensitive(t *testing.T) {
+	original := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+			{Name: "_SCD_VALID_FROM", DataType: schema.TypeTimestampTZ, Nullable: false},
+			{Name: "_SCD_VALID_TO", DataType: schema.TypeTimestampTZ, Nullable: true},
+			{Name: "_SCD_IS_CURRENT", DataType: schema.TypeBoolean, Nullable: false},
+		},
+		PrimaryKeys: []string{"id"},
+	}
+
+	extended := extendSchemaWithSCDColumns(original)
+
+	// No new columns should be appended; the existing uppercase ones cover all three.
+	assert.Equal(t, 5, len(extended.Columns), "uppercase SCD cols must dedup against lowercase constants")
+
+	colNames := make([]string, len(extended.Columns))
+	for i, col := range extended.Columns {
+		colNames[i] = col.Name
+	}
+	// Exact column set is preserved — no lowercase duplicates added.
+	assert.Equal(t, []string{"id", "name", "_SCD_VALID_FROM", "_SCD_VALID_TO", "_SCD_IS_CURRENT"}, colNames)
+}

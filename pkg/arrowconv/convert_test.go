@@ -7,6 +7,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/assert"
@@ -278,6 +279,48 @@ func TestAppendValue_TimestampBuilder(t *testing.T) {
 					time.UnixMicro(got).UTC().Format(time.RFC3339Nano),
 					time.UnixMicro(tt.wantUsec).UTC().Format(time.RFC3339Nano))
 			}
+		})
+	}
+}
+
+// Regression: Decimal128Builder was the only numeric builder in this file
+// missing a json.Number branch. Schema-inferred sources (JSONL, MongoDB)
+// decode JSON numbers as json.Number via UseNumber(); any DECIMAL/NUMERIC
+// destination column silently received NULL through that path. The
+// delegation to the existing string branch must also inherit the
+// big.Float fallback for scientific notation.
+func TestAppendValue_Decimal128_JSONNumber(t *testing.T) {
+	dt := &arrow.Decimal128Type{Precision: 38, Scale: 0}
+
+	tests := []struct {
+		name     string
+		val      json.Number
+		wantNull bool
+		wantBigI string // decimal representation expected via BigInt()
+	}{
+		{name: "simple integer", val: json.Number("1"), wantBigI: "1"},
+		{name: "large positive", val: json.Number("42"), wantBigI: "42"},
+		{name: "negative", val: json.Number("-7"), wantBigI: "-7"},
+		{name: "scientific notation (uses big.Float fallback)", val: json.Number("1.5e10"), wantBigI: "15000000000"},
+		{name: "empty string", val: json.Number(""), wantNull: true},
+		{name: "garbage", val: json.Number("xyz"), wantNull: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := array.NewDecimal128Builder(memory.NewGoAllocator(), dt)
+			AppendValue(b, tt.val)
+			arr := b.NewArray().(*array.Decimal128)
+			defer arr.Release()
+
+			require.Equal(t, 1, arr.Len())
+			if tt.wantNull {
+				assert.True(t, arr.IsNull(0), "expected null for input %q", string(tt.val))
+				return
+			}
+			assert.False(t, arr.IsNull(0), "got null for input %q", string(tt.val))
+			gotBigI := decimal128.Num(arr.Value(0)).BigInt().String()
+			assert.Equal(t, tt.wantBigI, gotBigI)
 		})
 	}
 }

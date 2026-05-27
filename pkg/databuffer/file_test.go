@@ -662,6 +662,49 @@ func TestCastRecordToSchema(t *testing.T) {
 		nameCol := casted.Column(1).(*array.String)
 		assert.Equal(t, "alice", nameCol.Value(0))
 	})
+
+	t.Run("matches case-insensitively (uppercase target → lowercase source)", func(t *testing.T) {
+		// Snowflake's GetTableSchema returns column names uppercased.
+		// The buffer file holds records written with the source's casing
+		// (lowercase from JSONL inference). Without case-insensitive
+		// matching every column would miss the lookup and be null-filled.
+		sourceSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+		}, nil)
+
+		targetSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "ID", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: "NAME", Type: arrow.BinaryTypes.String, Nullable: true},
+		}, nil)
+
+		idBuilder := array.NewInt64Builder(mem)
+		idBuilder.AppendValues([]int64{1, 2, 3}, nil)
+		idArr := idBuilder.NewArray()
+		idBuilder.Release()
+
+		nameBuilder := array.NewStringBuilder(mem)
+		nameBuilder.AppendValues([]string{"alice", "bob", "carol"}, nil)
+		nameArr := nameBuilder.NewArray()
+		nameBuilder.Release()
+
+		record := array.NewRecordBatch(sourceSchema, []arrow.Array{idArr, nameArr}, 3)
+		idArr.Release()
+		nameArr.Release()
+		defer record.Release()
+
+		casted, err := CastRecordToSchema(record, targetSchema, true)
+		require.NoError(t, err)
+		defer casted.Release()
+
+		idCol := casted.Column(0).(*array.Int64)
+		assert.Equal(t, int64(1), idCol.Value(0), "id values must be preserved across case-insensitive match")
+		assert.Equal(t, 0, idCol.NullN(), "no nulls expected — case-sensitive lookup would have produced all-null array")
+
+		nameCol := casted.Column(1).(*array.String)
+		assert.Equal(t, "alice", nameCol.Value(0))
+		assert.Equal(t, 0, nameCol.NullN())
+	})
 }
 
 // ============================================================================

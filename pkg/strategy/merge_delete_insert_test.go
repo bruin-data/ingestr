@@ -9,6 +9,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -310,5 +311,53 @@ func TestIsNilInterface(t *testing.T) {
 	}
 	if isNilInterface(0) {
 		t.Fatalf("expected int(0) not to be nil")
+	}
+}
+
+// Regression: when the buffer-reader types an incremental-key column as
+// Decimal128 (because the destination column is e.g. Snowflake NUMBER),
+// IntervalTracker must extract a comparable value. Without the Decimal128
+// case it returned nil → Min/Max stayed nil → the delete+insert strategy
+// hit its "no interval detected, skip" branch and never issued DELETE.
+func TestIntervalTracker_Decimal128_MinMax(t *testing.T) {
+	pool := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	t.Cleanup(func() { pool.AssertSize(t, 0) })
+
+	dt := &arrow.Decimal128Type{Precision: 38, Scale: 0}
+	fields := []arrow.Field{{Name: "id", Type: dt, Nullable: true}}
+	schema := arrow.NewSchema(fields, nil)
+
+	b := array.NewDecimal128Builder(pool, dt)
+	defer b.Release()
+
+	b.Append(decimal128.FromI64(3))
+	b.Append(decimal128.FromI64(1))
+	b.AppendNull()
+	b.Append(decimal128.FromI64(7))
+	b.Append(decimal128.FromI64(5))
+	arr := b.NewArray()
+	defer arr.Release()
+
+	rec := array.NewRecordBatch(schema, []arrow.Array{arr}, 5)
+
+	tk := NewIntervalTracker("id")
+	in := mustClosedRecords(source.RecordBatchResult{Batch: rec})
+	out := tk.Wrap(in)
+	for res := range out {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+	}
+
+	if tk.Min == nil || tk.Max == nil {
+		t.Fatalf("Min/Max should be set for Decimal128 column, got %v/%v", tk.Min, tk.Max)
+	}
+	minF, okMin := tk.Min.(float64)
+	maxF, okMax := tk.Max.(float64)
+	if !okMin || !okMax {
+		t.Fatalf("expected float64 bounds for Decimal128, got %T/%T", tk.Min, tk.Max)
+	}
+	if minF != 1 || maxF != 7 {
+		t.Fatalf("Min/Max = %v/%v, want 1/7", minF, maxF)
 	}
 }
