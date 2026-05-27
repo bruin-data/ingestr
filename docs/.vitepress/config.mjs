@@ -111,6 +111,10 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Kafka", link: "/supported-sources/kafka.md" },
               { text: "Local CSV Files", link: "/supported-sources/csv.md" },
               {
+                text: "Microsoft Fabric",
+                link: "/supported-sources/fabric.md",
+              },
+              {
                 text: "Microsoft SQL Server",
                 link: "/supported-sources/mssql.md",
               },
