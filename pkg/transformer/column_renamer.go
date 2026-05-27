@@ -1,11 +1,14 @@
 package transformer
 
 import (
+	"fmt"
+
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
+	"github.com/bruin-data/ingestr/pkg/databuffer"
 	"github.com/bruin-data/ingestr/pkg/schemainfer"
 )
 
@@ -40,23 +43,35 @@ func (r *ColumnRenamer) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, e
 			continue
 		}
 
-		builder := array.NewBuilder(memory.DefaultAllocator, group.field.Type)
-		for row := 0; row < int(batch.NumRows()); row++ {
-			var val any
-			for _, colIdx := range group.indices {
-				col := batch.Column(colIdx)
-				if !col.IsNull(row) {
-					val = arrowutil.Value(col, row)
+		castedCols, err := castGroupColumns(batch, group)
+		if err != nil {
+			for _, col := range cols[:i] {
+				if col != nil {
+					col.Release()
 				}
 			}
-			if val == nil {
+			return nil, err
+		}
+
+		builder := array.NewBuilder(memory.DefaultAllocator, group.field.Type)
+		for row := 0; row < int(batch.NumRows()); row++ {
+			var selected arrow.Array
+			for _, col := range castedCols {
+				if !col.IsNull(row) {
+					selected = col
+				}
+			}
+			if selected == nil {
 				builder.AppendNull()
 			} else {
-				arrowconv.AppendValue(builder, val)
+				appendArrayValue(builder, selected, row)
 			}
 		}
 		cols[i] = builder.NewArray()
 		builder.Release()
+		for _, col := range castedCols {
+			col.Release()
+		}
 	}
 
 	newBatch := array.NewRecordBatch(newSchema, cols, batch.NumRows())
@@ -137,6 +152,60 @@ func mergeArrowFields(existing, next arrow.Field) arrow.Field {
 		Nullable: existing.Nullable || next.Nullable,
 		Metadata: existing.Metadata,
 	}
+}
+
+func appendArrayValue(builder array.Builder, col arrow.Array, row int) {
+	if err := builder.AppendValueFromString(col.ValueStr(row)); err == nil {
+		return
+	}
+	arrowconv.AppendValue(builder, arrowutil.Value(col, row))
+}
+
+func castGroupColumns(batch arrow.RecordBatch, group columnRenameGroup) ([]arrow.Array, error) {
+	castedCols := make([]arrow.Array, len(group.indices))
+	for i, colIdx := range group.indices {
+		col := batch.Column(colIdx)
+		if arrow.TypeEqual(col.DataType(), group.field.Type) {
+			col.Retain()
+			castedCols[i] = col
+			continue
+		}
+
+		casted, err := castColumnToField(batch, colIdx, group.field)
+		if err != nil {
+			for _, c := range castedCols {
+				if c != nil {
+					c.Release()
+				}
+			}
+			return nil, err
+		}
+		castedCols[i] = casted
+	}
+
+	return castedCols, nil
+}
+
+func castColumnToField(batch arrow.RecordBatch, colIdx int, field arrow.Field) (arrow.Array, error) {
+	sourceField := field
+	sourceField.Name = batch.Schema().Field(colIdx).Name
+	sourceField.Type = batch.Column(colIdx).DataType()
+	sourceSchema := arrow.NewSchema([]arrow.Field{sourceField}, nil)
+	sourceBatch := array.NewRecordBatch(sourceSchema, []arrow.Array{batch.Column(colIdx)}, batch.NumRows())
+	defer sourceBatch.Release()
+
+	targetField := field
+	targetField.Name = sourceField.Name
+	targetSchema := arrow.NewSchema([]arrow.Field{targetField}, nil)
+	castedBatch, err := databuffer.CastRecordToSchema(sourceBatch, targetSchema, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to cast duplicate column %s to %s: %w", sourceField.Name, field.Type, err)
+	}
+	defer castedBatch.Release()
+
+	casted := castedBatch.Column(0)
+	casted.Retain()
+	return casted, nil
 }
 
 func schemaFromGroups(groups []columnRenameGroup) *arrow.Schema {

@@ -5,6 +5,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/stretchr/testify/assert"
@@ -174,5 +175,48 @@ func TestColumnRenamer(t *testing.T) {
 		outputSchema := renamer.OutputSchema(inputSchema)
 		require.Equal(t, 1, outputSchema.NumFields())
 		assert.Equal(t, "user_id", outputSchema.Field(0).Name)
+	})
+
+	t.Run("CoalescesMixedNumericCanonicalNames", func(t *testing.T) {
+		mapping := map[string]string{
+			"totalCents": "total_cents",
+		}
+		renamer := NewColumnRenamer(mapping)
+
+		decimalType := &arrow.Decimal128Type{Precision: 38, Scale: 9}
+		fields := []arrow.Field{
+			{Name: "total_cents", Type: decimalType, Nullable: true},
+			{Name: "totalCents", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		}
+		inputSchema := arrow.NewSchema(fields, nil)
+
+		decimalBuilder := array.NewDecimal128Builder(pool, decimalType)
+		defer decimalBuilder.Release()
+		decimalBuilder.Append(decimal128.FromI64(1250000000))
+		decimalBuilder.AppendNull()
+
+		intBuilder := array.NewInt32Builder(pool)
+		defer intBuilder.Release()
+		intBuilder.AppendNull()
+		intBuilder.Append(250)
+
+		cols := []arrow.Array{
+			decimalBuilder.NewArray(),
+			intBuilder.NewArray(),
+		}
+		batch := array.NewRecordBatch(inputSchema, cols, 2)
+		for _, col := range cols {
+			col.Release()
+		}
+		defer batch.Release()
+
+		transformed, err := renamer.Transform(batch)
+		require.NoError(t, err)
+		defer transformed.Release()
+
+		require.Equal(t, int64(1), transformed.NumCols())
+		assert.Equal(t, decimalType, transformed.Schema().Field(0).Type)
+		assert.InDelta(t, 1.25, arrowutil.Value(transformed.Column(0), 0), 0.000001)
+		assert.InDelta(t, 250.0, arrowutil.Value(transformed.Column(0), 1), 0.000001)
 	})
 }
