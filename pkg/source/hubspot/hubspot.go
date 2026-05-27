@@ -39,43 +39,37 @@ const (
 	retryMaxWait = 5 * time.Minute
 )
 
-// makeRetryStrategy returns a resty retry-delay function that honors the
-// standard Retry-After HTTP header or the `retry_after` field HubSpot/Cloudflare
-// returns in JSON error bodies, falling back to exponential backoff with
-// equal jitter. When a 429 is observed it signals the adaptive limiter to
-// shrink before the next attempt fires.
-func makeRetryStrategy(adaptive *adaptiveLimiter) func(*httpclient.Response, error) (time.Duration, error) {
-	return func(resp *httpclient.Response, _ error) (time.Duration, error) {
-		if resp != nil && resp.StatusCode() == http.StatusTooManyRequests && adaptive != nil {
-			adaptive.onThrottle()
-		}
-
-		if resp != nil {
-			if v := resp.Header().Get("Retry-After"); v != "" {
-				if secs, parseErr := strconv.Atoi(v); parseErr == nil && secs > 0 {
-					return jitter(time.Duration(secs) * time.Second), nil
-				}
-			}
-			var body struct {
-				RetryAfter int `json:"retry_after"`
-			}
-			if jsonErr := json.Unmarshal(resp.Body(), &body); jsonErr == nil && body.RetryAfter > 0 {
-				return jitter(time.Duration(body.RetryAfter) * time.Second), nil
+// hubspotRetryStrategy honors the standard Retry-After HTTP header or the
+// `retry_after` field HubSpot/Cloudflare returns in JSON error bodies, falling
+// back to exponential backoff with equal jitter. Limiter adjustment is handled
+// by the response middleware (see attachAdaptiveHooks), not here, so that 429s
+// are observed even when no retry is scheduled.
+func hubspotRetryStrategy(resp *httpclient.Response, _ error) (time.Duration, error) {
+	if resp != nil {
+		if v := resp.Header().Get("Retry-After"); v != "" {
+			if secs, parseErr := strconv.Atoi(v); parseErr == nil && secs > 0 {
+				return jitter(time.Duration(secs) * time.Second), nil
 			}
 		}
-
-		attempt := 1
-		if resp != nil {
-			if a := resp.Attempt(); a > 0 {
-				attempt = a
-			}
+		var body struct {
+			RetryAfter int `json:"retry_after"`
 		}
-		delay := time.Duration(math.Min(
-			float64(retryMaxWait),
-			float64(retryWait)*math.Exp2(float64(attempt)),
-		))
-		return jitter(delay), nil
+		if jsonErr := json.Unmarshal(resp.Body(), &body); jsonErr == nil && body.RetryAfter > 0 {
+			return jitter(time.Duration(body.RetryAfter) * time.Second), nil
+		}
 	}
+
+	attempt := 1
+	if resp != nil {
+		if a := resp.Attempt(); a > 0 {
+			attempt = a
+		}
+	}
+	delay := time.Duration(math.Min(
+		float64(retryMaxWait),
+		float64(retryWait)*math.Exp2(float64(attempt)),
+	))
+	return jitter(delay), nil
 }
 
 // jitter applies equal-jitter (delay/2 fixed + delay/2 random) to break
@@ -126,32 +120,41 @@ func (s *Hubspotsource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithTimeout(5*time.Minute),
 		httpclient.WithRateLimiterInstance(crmLimiter),
 		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
-		httpclient.WithRetryStrategy(makeRetryStrategy(s.crmAdaptive)),
+		httpclient.WithRetryStrategy(hubspotRetryStrategy),
 		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithHeader("Accept", "application/json"),
 	)
-	attachSuccessHook(s.client, s.crmAdaptive)
+	attachAdaptiveHooks(s.client, s.crmAdaptive)
 
 	s.searchClient = httpclient.New(
 		httpclient.WithBaseURL(baseURL),
 		httpclient.WithTimeout(5*time.Minute),
 		httpclient.WithRateLimiterInstance(searchLimiter),
 		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
-		httpclient.WithRetryStrategy(makeRetryStrategy(s.searchAdaptive)),
+		// HubSpot search endpoints are POST but semantically read-only; without
+		// this resty treats them as non-idempotent and skips retries entirely.
+		httpclient.WithAllowNonIdempotentRetry(),
+		httpclient.WithRetryStrategy(hubspotRetryStrategy),
 		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithHeader("Accept", "application/json"),
 	)
-	attachSuccessHook(s.searchClient, s.searchAdaptive)
+	attachAdaptiveHooks(s.searchClient, s.searchAdaptive)
 
 	config.Debug("[HUBSPOT] Connected successfully")
 	return nil
 }
 
-func attachSuccessHook(client *httpclient.Client, adaptive *adaptiveLimiter) {
+// attachAdaptiveHooks drives the adaptive limiter from every response, not just
+// retried ones: a 429 shrinks the rate (even on the final attempt or when no
+// retry is scheduled), and a 2xx counts toward growing it back.
+func attachAdaptiveHooks(client *httpclient.Client, adaptive *adaptiveLimiter) {
 	client.Resty().AddResponseMiddleware(func(_ *resty.Client, resp *resty.Response) error {
-		if resp.StatusCode() >= 200 && resp.StatusCode() < 300 {
+		switch {
+		case resp.StatusCode() == http.StatusTooManyRequests:
+			adaptive.onThrottle()
+		case resp.StatusCode() >= 200 && resp.StatusCode() < 300:
 			adaptive.onSuccess()
 		}
 		return nil
