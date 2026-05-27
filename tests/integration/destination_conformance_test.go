@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/mattn/go-sqlite3"
 	_ "github.com/microsoft/go-mssqldb"
+	_ "github.com/microsoft/go-mssqldb/azuread" // registers the "azuresql" driver for Fabric
 	_ "github.com/snowflakedb/gosnowflake"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -259,6 +261,30 @@ func destinationCases() []destCase {
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
+		},
+		{
+			name: "fabric",
+			setup: func(t *testing.T, ctx context.Context) (string, string, func()) {
+				fabricURI := os.Getenv("GONG_TEST_FABRIC_URI")
+				if fabricURI == "" {
+					t.Skip("Set GONG_TEST_FABRIC_URI to run Fabric destination conformance, e.g. fabric://<clientid>:<secret>@<guid>.datawarehouse.fabric.microsoft.com/<warehouse>?tenant_id=<tid>")
+				}
+
+				table := fmt.Sprintf("dbo.conformance_%s", uniqueSuffix())
+				cleanup := func() {
+					db, err := sql.Open("azuresql", fabricConnString(fabricURI))
+					if err == nil {
+						_, _ = db.ExecContext(ctx, fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s", table, quoteTableMSSQL(table)))
+						_ = db.Close()
+					}
+				}
+				return fabricURI, table, cleanup
+			},
+			sqlBackend:            fabricBackend(),
+			mergeCapable:          true,
+			deleteInsertCapable:   true,
+			truncateInsertCapable: true,
+			scd2Capable:           true,
 		},
 		{
 			name: "cratedb",
@@ -1747,6 +1773,132 @@ func normalizeMSSQLType(mssqlType string) string {
 		return "float"
 	default:
 		return mssqlType
+	}
+}
+
+// fabricConnString converts a fabric:// URI into the sqlserver:// DSN understood
+// by the azuread ("azuresql") driver, mirroring fabric.uriToConnString.
+func fabricConnString(uri string) string {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return uri
+	}
+
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "1433"
+	}
+
+	var clientID, secret string
+	if u.User != nil {
+		clientID = u.User.Username()
+		secret, _ = u.User.Password()
+	}
+
+	database := strings.TrimPrefix(u.Path, "/")
+
+	query := u.Query()
+	query.Del("driver")
+	tenantID := query.Get("tenant_id")
+	query.Del("tenant_id")
+	if query.Get("fedauth") == "" {
+		if clientID != "" {
+			query.Set("fedauth", "ActiveDirectoryServicePrincipal")
+		} else {
+			query.Set("fedauth", "ActiveDirectoryDefault")
+		}
+	}
+	if database != "" {
+		query.Set("database", database)
+	}
+	if query.Get("encrypt") == "" {
+		query.Set("encrypt", "true")
+	}
+
+	connURL := &url.URL{Scheme: "sqlserver", Host: fmt.Sprintf("%s:%s", host, port)}
+	if clientID != "" {
+		userID := clientID
+		if tenantID != "" {
+			userID = clientID + "@" + tenantID
+		}
+		if secret != "" {
+			connURL.User = url.UserPassword(userID, secret)
+		} else {
+			connURL.User = url.User(userID)
+		}
+	}
+	connURL.RawQuery = query.Encode()
+	return connURL.String()
+}
+
+func fabricBackend() *sqlBackend {
+	return &sqlBackend{
+		openDB: func(uri string) (*sql.DB, error) {
+			return sql.Open("azuresql", fabricConnString(uri))
+		},
+		schemaTypes: func(db *sql.DB, table string) (map[string]string, error) {
+			schemaName, tableName := splitSchemaTable(table, "dbo")
+			rows, err := db.Query(`
+				SELECT COLUMN_NAME, DATA_TYPE
+				FROM INFORMATION_SCHEMA.COLUMNS
+				WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
+				ORDER BY ORDINAL_POSITION
+			`, schemaName, tableName)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = rows.Close() }()
+			out := map[string]string{}
+			for rows.Next() {
+				var name, dt string
+				if err := rows.Scan(&name, &dt); err != nil {
+					return nil, err
+				}
+				out[strings.ToLower(name)] = normalizeFabricType(dt)
+			}
+			return out, rows.Err()
+		},
+		expectedTypes: map[string]string{
+			"id":     "bigint",
+			"name":   "varchar",
+			"active": "bit",
+			"score":  "float",
+		},
+		countQuery: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s", quoteTableMSSQL(table))
+		},
+		nameByIDQuery: func(table string, id int) string {
+			return fmt.Sprintf("SELECT name FROM %s WHERE id=%d", quoteTableMSSQL(table), id)
+		},
+		ageByIDQuery: func(table string, id int) string {
+			return fmt.Sprintf("SELECT age FROM %s WHERE id=%d", quoteTableMSSQL(table), id)
+		},
+		scd2CountCurrent: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE _scd_is_current = 1", quoteTableMSSQL(table))
+		},
+		scd2CountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = %d", quoteTableMSSQL(table), id)
+		},
+		scd2HistNoValidTo: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE _scd_is_current = 0 AND _scd_valid_to IS NULL", quoteTableMSSQL(table))
+		},
+	}
+}
+
+func normalizeFabricType(fabricType string) string {
+	fabricType = strings.ToLower(strings.TrimSpace(fabricType))
+	switch fabricType {
+	case "int", "integer", "bigint":
+		return "bigint"
+	case "varchar", "char":
+		return "varchar"
+	case "bit", "boolean", "bool":
+		return "bit"
+	case "float", "real", "double":
+		return "float"
+	default:
+		return fabricType
 	}
 }
 
