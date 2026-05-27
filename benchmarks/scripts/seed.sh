@@ -5,6 +5,20 @@ source "$(dirname "$0")/../config.sh"
 SEED_SIZES="${BENCH_SEED_SIZES:-$BENCH_ROWS}"
 echo "==> Seeding sizes: $SEED_SIZES"
 
+mongo_count() {
+    local collection="$1"
+    docker exec "$MONGO_SRC_CONTAINER" mongosh --quiet \
+        --eval "db.getSiblingDB('$MONGO_SRC_DB').getCollection('$collection').countDocuments()" \
+        2>/dev/null || echo "0"
+}
+
+mongo_id_type() {
+    local collection="$1"
+    docker exec "$MONGO_SRC_CONTAINER" mongosh --quiet \
+        --eval "const doc = db.getSiblingDB('$MONGO_SRC_DB').getCollection('$collection').findOne({}, {_id: 1}); doc ? typeof doc._id : ''" \
+        2>/dev/null || echo ""
+}
+
 for rows in $SEED_SIZES; do
     suffix="$(bench_size_suffix "$rows")"
     table_name="bench_data_${suffix}"
@@ -26,6 +40,7 @@ for rows in $SEED_SIZES; do
     # --- Export CSV from DuckDB (used by both Postgres and MySQL) ---
     PG_CSV_PATH="$DUCKDB_DIR/seed_pg_${suffix}.csv"
     MYSQL_CSV_PATH="$DUCKDB_DIR/seed_mysql_${suffix}.csv"
+    MONGO_JSON_PATH="$DUCKDB_DIR/seed_mongo_${suffix}.jsonl"
 
     pg_needs_seed=false
     existing=$(psql "$PG_SRC_URI" -t -A -c "SELECT count(*) FROM public.${table_name}" 2>/dev/null || echo "0")
@@ -35,6 +50,11 @@ for rows in $SEED_SIZES; do
     existing=$(mysql --protocol=tcp -h "$MYSQL_SRC_HOST" -P "$MYSQL_SRC_PORT" -u root -proot_pass \
         -N -e "SELECT count(*) FROM ${table_name}" "$MYSQL_SRC_DB" 2>/dev/null || echo "0")
     [[ "$existing" != "$rows" ]] && mysql_needs_seed=true
+
+    mongo_needs_seed=false
+    existing=$(mongo_count "$table_name")
+    id_type=$(mongo_id_type "$table_name")
+    [[ "$existing" != "$rows" || "$id_type" != "string" ]] && mongo_needs_seed=true
 
     # --- Postgres (via COPY from DuckDB CSV) ---
     if [[ "$pg_needs_seed" == "true" ]]; then
@@ -88,6 +108,38 @@ COPY (
         echo "  MySQL: done ($(mysql --protocol=tcp -h "$MYSQL_SRC_HOST" -P "$MYSQL_SRC_PORT" -u root -proot_pass -N -e "SELECT count(*) FROM ${table_name}" "$MYSQL_SRC_DB") rows)"
     else
         echo "  MySQL: already seeded, skipping"
+    fi
+
+    # --- MongoDB (via JSONL from DuckDB) ---
+    if [[ "$mongo_needs_seed" == "true" ]]; then
+        echo "  MongoDB: exporting JSONL from DuckDB..."
+        duckdb "$DUCKDB_SRC_PATH" -c "
+COPY (
+    SELECT
+        'id_' || CAST(id AS VARCHAR) AS _id,
+        id, small_str, medium_str, large_str, tiny_int,
+        regular_int, big_int, float_val,
+        decimal_val::DOUBLE AS decimal_val,
+        bool_val,
+        CAST(date_val AS VARCHAR) AS date_val,
+        strftime(ts_val, '%Y-%m-%d %H:%M:%S.%g') AS ts_val,
+        strftime(ts_tz_val, '%Y-%m-%d %H:%M:%S.%g') AS ts_tz_val,
+        json_val, extra_text
+    FROM ${table_name}
+) TO '${MONGO_JSON_PATH}' (FORMAT json, ARRAY false);
+"
+        echo "  MongoDB: loading JSONL via mongoimport..."
+        docker exec -i "$MONGO_SRC_CONTAINER" mongoimport \
+            --db "$MONGO_SRC_DB" \
+            --collection "$table_name" \
+            --drop \
+            --type json < "$MONGO_JSON_PATH" >/dev/null
+        docker exec "$MONGO_SRC_CONTAINER" mongosh --quiet \
+            --eval "db.getSiblingDB('$MONGO_SRC_DB').getCollection('$table_name').createIndex({id: 1})" >/dev/null
+        rm -f "$MONGO_JSON_PATH"
+        echo "  MongoDB: done ($(mongo_count "$table_name") rows)"
+    else
+        echo "  MongoDB: already seeded, skipping"
     fi
 done
 
