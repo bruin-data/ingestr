@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/display"
 	"github.com/bruin-data/ingestr/internal/uri"
@@ -51,6 +52,15 @@ func (p *Pipeline) SetLogWriter(w io.Writer) {
 }
 
 func (p *Pipeline) Run(ctx context.Context) error {
+	// Parse query annotations once and carry the base payload on the context.
+	// Destinations read it (plus a per-operation step) to annotate queries for
+	// cost attribution. Empty/absent annotations make this a no-op.
+	annotations, err := annotation.Parse(p.config.QueryAnnotations)
+	if err != nil {
+		return err
+	}
+	ctx = annotation.WithPayload(ctx, annotations)
+
 	src, err := uri.DefaultRegistry.GetSource(p.config.SourceURI)
 	if err != nil {
 		return fmt.Errorf("failed to get source: %w", err)

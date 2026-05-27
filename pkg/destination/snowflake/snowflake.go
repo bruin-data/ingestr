@@ -15,6 +15,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -89,6 +90,7 @@ func (d *SnowflakeDestination) Close(ctx context.Context) error {
 }
 
 func (d *SnowflakeDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	ctx = d.annotate(ctx, annotation.StepDDL)
 	if opts.Schema == nil {
 		return fmt.Errorf("schema is required")
 	}
@@ -152,6 +154,7 @@ func (d *SnowflakeDestination) Write(ctx context.Context, records <-chan source.
 }
 
 func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	ctx = d.annotate(ctx, annotation.StepLoad)
 	parallelism := opts.Parallelism
 	if parallelism <= 0 {
 		parallelism = 4
@@ -318,6 +321,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 }
 
 func (d *SnowflakeDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	ctx = d.annotate(ctx, annotation.StepSwap)
 	startSwap := time.Now()
 
 	stagingTable := opts.StagingTable
@@ -373,6 +377,7 @@ func (d *SnowflakeDestination) SwapTable(ctx context.Context, opts destination.S
 }
 
 func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	ctx = d.annotate(ctx, annotation.StepMerge)
 	startMerge := time.Now()
 
 	if len(opts.PrimaryKeys) == 0 {
@@ -449,6 +454,7 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 }
 
 func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
+	ctx = d.annotate(ctx, annotation.StepDeleteInsert)
 	startOp := time.Now()
 
 	stagingSchema, stagingName := parseSchemaTable(opts.StagingTable)
@@ -506,6 +512,7 @@ func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts desti
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
 func (d *SnowflakeDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
+	ctx = d.annotate(ctx, annotation.StepSCD2)
 	startOp := time.Now()
 
 	stagingSchema, stagingName := parseSchemaTable(opts.StagingTable)
@@ -607,6 +614,7 @@ func (d *SnowflakeDestination) SCD2Table(ctx context.Context, opts destination.S
 }
 
 func (d *SnowflakeDestination) DropTable(ctx context.Context, table string) error {
+	ctx = d.annotate(ctx, annotation.StepCleanup)
 	schemaName, tableName := parseSchemaTable(table)
 	fullTable := quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName)
 
@@ -621,6 +629,7 @@ func (d *SnowflakeDestination) DropTable(ctx context.Context, table string) erro
 }
 
 func (d *SnowflakeDestination) TruncateTable(ctx context.Context, table string) error {
+	ctx = d.annotate(ctx, annotation.StepTruncate)
 	schemaName, tableName := parseSchemaTable(table)
 	fullTable := quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName)
 
@@ -633,7 +642,23 @@ func (d *SnowflakeDestination) TruncateTable(ctx context.Context, table string) 
 	return nil
 }
 
+// annotate tags the context with the current operation's step and, when query
+// annotations are enabled, attaches the annotation payload to the session via
+// Snowflake's native QUERY_TAG. Snowflake strips leading SQL comments, so the
+// annotation rides on QUERY_TAG rather than a "-- @bruin.config" comment. The
+// returned context must be used for the operation's queries.
+func (d *SnowflakeDestination) annotate(ctx context.Context, step string) context.Context {
+	ctx = annotation.WithStep(ctx, step)
+	if tag, ok := annotation.QueryTag(ctx); ok {
+		ctx = sf.WithQueryTag(ctx, tag)
+	}
+	return ctx
+}
+
 func (d *SnowflakeDestination) Exec(ctx context.Context, sql string, args ...interface{}) error {
+	if tag, ok := annotation.QueryTag(ctx); ok {
+		ctx = sf.WithQueryTag(ctx, tag)
+	}
 	_, err := d.db.ExecContext(ctx, sql, args...)
 	if err != nil {
 		config.LogFailedQuery(sql, err)
@@ -654,6 +679,9 @@ type snowflakeTransaction struct {
 }
 
 func (t *snowflakeTransaction) Exec(ctx context.Context, sql string, args ...interface{}) error {
+	if tag, ok := annotation.QueryTag(ctx); ok {
+		ctx = sf.WithQueryTag(ctx, tag)
+	}
 	_, err := t.tx.ExecContext(ctx, sql, args...)
 	if err != nil {
 		config.LogFailedQuery(sql, err)

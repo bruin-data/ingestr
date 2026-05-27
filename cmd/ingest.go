@@ -176,6 +176,11 @@ func IngestCommand() *cli.Command {
 				Usage:   "Enable debug logging",
 				Sources: cli.EnvVars("DEBUG", "INGESTR_DEBUG"),
 			},
+			&cli.StringFlag{
+				Name:    "query-annotations",
+				Usage:   "JSON object of annotation keys (e.g. {\"pipeline\":\"p\",\"asset\":\"a\"}) added as a '-- @bruin.config' comment to destination queries (QUERY_TAG on Snowflake) for cost attribution. Empty disables annotations.",
+				Sources: cli.EnvVars("INGESTR_QUERY_ANNOTATIONS"),
+			},
 		},
 		Action: runIngest,
 	}
@@ -214,6 +219,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.PipelinesDir = c.String("pipelines-dir")
 	cfg.StagingBucket = c.String("staging-bucket")
 	cfg.StagingDataset = c.String("staging-dataset")
+	cfg.QueryAnnotations = c.String("query-annotations")
 
 	if clusterBy := c.String("cluster-by"); clusterBy != "" {
 		// Split by comma to support multiple clustering columns
