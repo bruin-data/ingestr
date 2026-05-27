@@ -6,6 +6,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,5 +119,60 @@ func TestColumnRenamer(t *testing.T) {
 		assert.Equal(t, "other", outputSchema.Field(1).Name)
 		assert.Equal(t, arrow.BinaryTypes.String, outputSchema.Field(1).Type)
 		assert.False(t, outputSchema.Field(1).Nullable)
+	})
+
+	t.Run("CoalescesDuplicateCanonicalNames", func(t *testing.T) {
+		mapping := map[string]string{
+			"userId": "user_id",
+			"UserID": "user_id",
+		}
+		renamer := NewColumnRenamer(mapping)
+
+		fields := []arrow.Field{
+			{Name: "userId", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: "user_id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: "UserID", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		}
+		inputSchema := arrow.NewSchema(fields, nil)
+
+		userIDBuilder := array.NewInt64Builder(pool)
+		defer userIDBuilder.Release()
+		userIDBuilder.AppendValues([]int64{101, 0, 0, 401}, []bool{true, false, false, true})
+
+		userIDSnakeBuilder := array.NewInt64Builder(pool)
+		defer userIDSnakeBuilder.Release()
+		userIDSnakeBuilder.AppendValues([]int64{0, 202, 0, 402}, []bool{false, true, false, true})
+
+		userIDUpperBuilder := array.NewInt64Builder(pool)
+		defer userIDUpperBuilder.Release()
+		userIDUpperBuilder.AppendValues([]int64{0, 0, 303, 403}, []bool{false, false, true, true})
+
+		cols := []arrow.Array{
+			userIDBuilder.NewArray(),
+			userIDSnakeBuilder.NewArray(),
+			userIDUpperBuilder.NewArray(),
+		}
+		batch := array.NewRecordBatch(inputSchema, cols, 4)
+		for _, col := range cols {
+			col.Release()
+		}
+		defer batch.Release()
+
+		transformed, err := renamer.Transform(batch)
+		require.NoError(t, err)
+		defer transformed.Release()
+
+		require.Equal(t, int64(1), transformed.NumCols())
+		assert.Equal(t, "user_id", transformed.Schema().Field(0).Name)
+		assert.Equal(t, []any{int64(101), int64(202), int64(303), int64(403)}, []any{
+			arrowutil.Value(transformed.Column(0), 0),
+			arrowutil.Value(transformed.Column(0), 1),
+			arrowutil.Value(transformed.Column(0), 2),
+			arrowutil.Value(transformed.Column(0), 3),
+		})
+
+		outputSchema := renamer.OutputSchema(inputSchema)
+		require.Equal(t, 1, outputSchema.NumFields())
+		assert.Equal(t, "user_id", outputSchema.Field(0).Name)
 	})
 }

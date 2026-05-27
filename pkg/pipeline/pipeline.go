@@ -583,13 +583,13 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 		renameMap = p.columnRenamer.Mapping()
 	}
 
-	srcByDestName := make(map[string]schema.Column, len(sourceSchema.Columns))
+	srcByDestName := make(map[string][]schema.Column, len(sourceSchema.Columns))
 	for _, c := range sourceSchema.Columns {
 		key := c.Name
 		if r, ok := renameMap[key]; ok {
 			key = r
 		}
-		srcByDestName[key] = c
+		srcByDestName[key] = append(srcByDestName[key], c)
 	}
 
 	fields := make([]arrow.Field, 0, len(destSchema.Columns))
@@ -597,10 +597,12 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 		if naming.IsIngestrColumn(dc.Name) || isSCD2MetadataColumn(dc.Name) {
 			continue
 		}
-		if sc, ok := srcByDestName[dc.Name]; ok {
-			m := sc
-			m.DataType, m.Precision, m.Scale, m.ArrayType = dc.DataType, dc.Precision, dc.Scale, dc.ArrayType
-			fields = append(fields, arrowField(sc.Name, m, m.Nullable || dc.Nullable)) // add columns using dest types but source names
+		if sourceCols, ok := srcByDestName[dc.Name]; ok {
+			for _, sc := range sourceCols {
+				m := sc
+				m.DataType, m.Precision, m.Scale, m.ArrayType = dc.DataType, dc.Precision, dc.Scale, dc.ArrayType
+				fields = append(fields, arrowField(sc.Name, m, m.Nullable || dc.Nullable)) // add columns using dest types but source names
+			}
 			continue
 		}
 		fields = append(fields, arrowField(dc.Name, dc, true)) // add soft deleted columns using dest names
@@ -1061,11 +1063,15 @@ func (p *Pipeline) applyColumnMapping(s *schema.TableSchema, mapping map[string]
 			s.Columns[i].Name = newName
 		}
 	}
+	s.Columns = dedupeMappedColumns(s.Columns)
+
 	for i, pk := range s.PrimaryKeys {
 		if newName, ok := mapping[pk]; ok {
 			s.PrimaryKeys[i] = newName
 		}
 	}
+	s.PrimaryKeys = dedupeStringsPreserveOrder(s.PrimaryKeys)
+
 	if newName, ok := mapping[s.IncrementalKey]; ok {
 		s.IncrementalKey = newName
 	}
@@ -1084,6 +1090,79 @@ func (p *Pipeline) applyColumnMapping(s *schema.TableSchema, mapping map[string]
 		}
 	}
 	p.columnRenamer = transformer.NewColumnRenamer(mapping)
+}
+
+func dedupeMappedColumns(columns []schema.Column) []schema.Column {
+	if len(columns) < 2 {
+		return columns
+	}
+
+	merged := make([]schema.Column, 0, len(columns))
+	indexByName := make(map[string]int, len(columns))
+	for _, col := range columns {
+		if idx, ok := indexByName[col.Name]; ok {
+			merged[idx] = mergeSchemaColumns(merged[idx], col)
+			continue
+		}
+		indexByName[col.Name] = len(merged)
+		merged = append(merged, col)
+	}
+
+	return merged
+}
+
+func mergeSchemaColumns(existing, next schema.Column) schema.Column {
+	merged := existing
+	merged.Nullable = existing.Nullable || next.Nullable
+	merged.IsPrimaryKey = existing.IsPrimaryKey || next.IsPrimaryKey
+	if next.MaxLength > merged.MaxLength {
+		merged.MaxLength = next.MaxLength
+	}
+
+	switch {
+	case existing.DataType == schema.TypeUnknown:
+		merged.DataType = next.DataType
+	case next.DataType == schema.TypeUnknown:
+		merged.DataType = existing.DataType
+	default:
+		merged.DataType, _ = schemaevolution.GetWidenedType(existing.DataType, next.DataType)
+	}
+
+	if merged.DataType == schema.TypeDecimal {
+		merged.Precision, merged.Scale = schemaevolution.MergeDecimalPrecision(existing, next)
+	} else {
+		merged.Precision = 0
+		merged.Scale = 0
+	}
+
+	if merged.DataType == schema.TypeArray {
+		if existing.ArrayType == next.ArrayType {
+			merged.ArrayType = existing.ArrayType
+		} else {
+			merged.ArrayType, _ = schemaevolution.GetWidenedType(existing.ArrayType, next.ArrayType)
+		}
+	} else {
+		merged.ArrayType = schema.TypeUnknown
+	}
+
+	return merged
+}
+
+func dedupeStringsPreserveOrder(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+
+	seen := make(map[string]bool, len(values))
+	deduped := values[:0]
+	for _, value := range values {
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		deduped = append(deduped, value)
+	}
+	return deduped
 }
 
 func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error {
