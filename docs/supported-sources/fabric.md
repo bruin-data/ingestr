@@ -2,7 +2,7 @@
 
 [Microsoft Fabric](https://learn.microsoft.com/en-us/fabric/data-warehouse/) Data Warehouse is a lake-centric, SQL-based data warehouse that speaks the SQL Server (TDS) protocol.
 
-ingestr supports Microsoft Fabric Warehouse as a destination.
+ingestr supports Microsoft Fabric Warehouse as both a source and a destination.
 
 ## URI format
 
@@ -32,9 +32,9 @@ You can select any workflow explicitly with the `fedauth` query parameter, for e
 - `fedauth=ActiveDirectoryServicePrincipalAccessToken` — pass a pre-fetched access token as the password
 - `fedauth=ActiveDirectoryManagedIdentity` — authenticate with a managed identity
 
-## Example
+## Examples
 
-Copy a table from a local SQLite database into a Fabric Warehouse:
+Load a table **into** a Fabric Warehouse (Fabric as destination):
 
 ```bash
 ingestr ingest \
@@ -44,9 +44,19 @@ ingestr ingest \
     --dest-table "dbo.users"
 ```
 
+Read a table **from** a Fabric Warehouse (Fabric as source):
+
+```bash
+ingestr ingest \
+    --source-uri "fabric://$CLIENT_ID:$CLIENT_SECRET@myworkspace.datawarehouse.fabric.microsoft.com/MyWarehouse?tenant_id=$TENANT_ID" \
+    --source-table "dbo.users" \
+    --dest-uri "duckdb:///local.db" \
+    --dest-table "main.users"
+```
+
 ## Notes & limitations
 
-- **Type mapping**: Fabric does not support a number of SQL Server types. Strings are written as `VARCHAR` (UTF-8) and timestamps as `DATETIME2(6)`; timezone-aware timestamps are stored as their UTC instant (Fabric has no `DATETIMEOFFSET`).
+- **Type mapping (destination)**: Fabric does not support a number of SQL Server types. Strings are written as `VARCHAR` (UTF-8) and timestamps as `DATETIME2(6)`; timezone-aware timestamps are stored as their UTC instant (Fabric has no `DATETIMEOFFSET`).
 - **Primary keys** are created as `NONCLUSTERED ... NOT ENFORCED`, as required by Fabric.
 - **Replace strategy** writes directly to the target table (drop and recreate) rather than performing an atomic staging-table swap, since the warehouse stages data in a separate schema.
 - **Schema evolution** can add new (nullable) columns; changing an existing column's type is not performed.
