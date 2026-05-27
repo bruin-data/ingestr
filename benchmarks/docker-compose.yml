@@ -72,7 +72,7 @@ services:
       retries: 15
 
   bench-mongo-source:
-    image: mongo:7
+    image: mongo:8.2.7
     container_name: bench-mongo-source
     ports:
       - "27018:27017"
