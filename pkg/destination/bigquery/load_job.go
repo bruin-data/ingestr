@@ -30,7 +30,7 @@ const (
 	stagedGCSObjectChunkSize   = 32 * 1024 * 1024
 	stagedGCSBufferSize        = 1 * 1024 * 1024
 	maxLocalLoadJobParallelism = 4
-	localLoadJobMaxAttempts    = 4
+	loadJobMaxAttempts         = 4
 )
 
 type loadJobFileFormat string
@@ -648,10 +648,7 @@ func (d *BigQueryDestination) runSingleLoadJob(
 	format loadJobFileFormat,
 	chunk stagedLoadChunk,
 ) error {
-	maxAttempts := 1
-	if chunk.localPath != "" {
-		maxAttempts = localLoadJobMaxAttempts
-	}
+	maxAttempts := loadJobMaxAttempts
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		config.Debug(
@@ -756,7 +753,8 @@ func isRetryableLoadJobError(err error) bool {
 		strings.Contains(msg, "quotaexceeded") ||
 		strings.Contains(msg, "exceeded rate limits") ||
 		strings.Contains(msg, "jobbackenderror") ||
-		strings.Contains(msg, "backenderror")
+		strings.Contains(msg, "backenderror") ||
+		strings.Contains(msg, "not found: dataset")
 }
 
 func isRetryableLoadJobReason(reason string, message string) bool {
@@ -766,6 +764,9 @@ func isRetryableLoadJobReason(reason string, message string) bool {
 	}
 
 	msg := strings.ToLower(message)
+	if strings.Contains(msg, "not found: dataset") {
+		return true
+	}
 	return strings.Contains(msg, "exceeded rate limits") ||
 		strings.Contains(msg, "retrying the job may solve the problem")
 }
