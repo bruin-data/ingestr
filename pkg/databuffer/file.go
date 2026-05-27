@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -194,13 +195,13 @@ func CastRecordToSchema(record arrow.RecordBatch, targetSchema *arrow.Schema, sa
 
 	existingCols := make(map[string]arrow.Array)
 	for i := 0; i < int(record.NumCols()); i++ {
-		existingCols[record.Schema().Field(i).Name] = record.Column(i)
+		existingCols[strings.ToLower(record.Schema().Field(i).Name)] = record.Column(i)
 	}
 
 	cols := make([]arrow.Array, targetSchema.NumFields())
 	for i := 0; i < targetSchema.NumFields(); i++ {
 		field := targetSchema.Field(i)
-		existingCol, ok := existingCols[field.Name]
+		existingCol, ok := existingCols[strings.ToLower(field.Name)]
 		if !ok {
 			nullArray, err := makeNullArray(mem, field.Type, int(numRows))
 			if err != nil {
