@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -379,47 +380,71 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 		return errors.New("merge requires at least one primary key")
 	}
 
-	stagingSchema, stagingName := parseSchemaTable(opts.StagingTable)
-	targetSchema, targetName := parseSchemaTable(opts.TargetTable)
+	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns)
+
+	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
+
+	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
+		config.LogFailedQuery(mergeSQL, err)
+		return fmt.Errorf("failed to execute merge: %w", err)
+	}
+
+	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+	return nil
+}
+
+func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
+	stagingSchema, stagingName := parseSchemaTable(stagingTable)
+	targetSchema, targetName := parseSchemaTable(targetTable)
 
 	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
 	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
 
-	onConditions := make([]string, len(opts.PrimaryKeys))
-	for i, pk := range opts.PrimaryKeys {
+	onConditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteIdentifier(pk), quoteIdentifier(pk))
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
 	pkMap := make(map[string]bool)
-	for _, pk := range opts.PrimaryKeys {
+	for _, pk := range primaryKeys {
 		pkMap[strings.ToLower(pk)] = true
 	}
 
 	var updateSets []string
-	for _, col := range opts.Columns {
+	for _, col := range allColumns {
 		if !pkMap[strings.ToLower(col)] {
 			updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", quoteIdentifier(col), quoteIdentifier(col)))
 		}
 	}
 
-	quotedCols := make([]string, len(opts.Columns))
-	sourceCols := make([]string, len(opts.Columns))
-	for i, col := range opts.Columns {
+	quotedCols := make([]string, len(allColumns))
+	sourceCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
 		quotedCols[i] = quoteIdentifier(col)
 		sourceCols[i] = "source." + quoteIdentifier(col)
 	}
 
-	// Build dedup subquery to handle duplicate PKs in staging
-	quotedPKList := make([]string, len(opts.PrimaryKeys))
-	for i, pk := range opts.PrimaryKeys {
+	quotedPKList := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
 		quotedPKList[i] = quoteIdentifier(pk)
 	}
+
+	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+
+	dedupOrderBy := "(SELECT NULL)"
+	if hasCDCDeleted {
+		dedupOrderBy = fmt.Sprintf("%s DESC, %s DESC",
+			quoteIdentifier("_cdc_lsn"),
+			quoteIdentifier("_cdc_deleted"))
+	}
+
 	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
 		strings.Join(quotedCols, ", "),
 		strings.Join(quotedCols, ", "),
 		strings.Join(quotedPKList, ", "),
+		dedupOrderBy,
 		stagingFull,
 	)
 
@@ -428,24 +453,33 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 	fmt.Fprintf(&mergeSQL, "USING %s AS source\n", dedupSource)
 	fmt.Fprintf(&mergeSQL, "ON %s\n", onClause)
 
-	if len(updateSets) > 0 {
-		mergeSQL.WriteString("WHEN MATCHED THEN\n")
-		fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+	if hasCDCDeleted {
+		if len(updateSets) > 0 {
+			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = false THEN\n", quoteIdentifier("_cdc_deleted"))
+			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+		}
+
+		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = true THEN\n", quoteIdentifier("_cdc_deleted"))
+		fmt.Fprintf(&mergeSQL, "  UPDATE SET target.%s = true, target.%s = source.%s, target.%s = source.%s\n",
+			quoteIdentifier("_cdc_deleted"),
+			quoteIdentifier("_cdc_lsn"), quoteIdentifier("_cdc_lsn"),
+			quoteIdentifier("_cdc_synced_at"), quoteIdentifier("_cdc_synced_at"))
+
+		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND source.%s = false THEN\n", quoteIdentifier("_cdc_deleted"))
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	} else {
+		if len(updateSets) > 0 {
+			mergeSQL.WriteString("WHEN MATCHED THEN\n")
+			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+		}
+
+		mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
 	}
 
-	mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
-	fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-	fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
-
-	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL.String())
-
-	if _, err := d.db.ExecContext(ctx, mergeSQL.String()); err != nil {
-		config.LogFailedQuery(mergeSQL.String(), err)
-		return fmt.Errorf("failed to execute merge: %w", err)
-	}
-
-	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
-	return nil
+	return mergeSQL.String()
 }
 
 func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
@@ -677,6 +711,30 @@ func (d *SnowflakeDestination) SupportsSCD2Strategy() bool         { return true
 func (d *SnowflakeDestination) SupportsAtomicSwap() bool           { return true }
 
 func (d *SnowflakeDestination) GetScheme() string { return "snowflake" }
+
+func (d *SnowflakeDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	schemaName, tableName := parseSchemaTable(table)
+	fullTable := quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName)
+	query := fmt.Sprintf("SELECT MAX(%s) FROM %s", quoteIdentifier("_cdc_lsn"), fullTable)
+
+	var maxLSN sql.NullString
+	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") ||
+			strings.Contains(err.Error(), "invalid identifier") ||
+			strings.Contains(err.Error(), "not authorized") {
+			return "", nil
+		}
+		config.LogFailedQuery(query, err)
+		return "", err
+	}
+	if !maxLSN.Valid {
+		return "", nil
+	}
+	return maxLSN.String, nil
+}
+
+func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
 
 func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseSchemaTable(table)
