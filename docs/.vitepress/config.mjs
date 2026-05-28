@@ -74,6 +74,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
         text: "Commands",
         items: [
           { text: "ingest", link: "/commands/ingest.md" },
+          { text: "server", link: "/commands/server.md" },
           { text: "example-uris", link: "/commands/example-uris.md" },
         ],
       },
