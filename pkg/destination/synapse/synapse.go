@@ -228,7 +228,9 @@ func (d *SynapseDestination) WriteParallel(ctx context.Context, records <-chan s
 	return nil
 }
 
-// maxParamLimit is the go-mssqldb driver parameter limit.
+// maxParamLimit is the go-mssqldb driver parameter limit. The server documents
+// 2100 as the maximum but rejects requests at exactly 2100, so we batch to stay
+// strictly below it.
 const maxParamLimit = 2100
 
 func (d *SynapseDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
@@ -245,7 +247,7 @@ func (d *SynapseDestination) writeRecordBatch(ctx context.Context, record arrow.
 	}
 	colList := strings.Join(colNames, ", ")
 
-	maxRowsPerBatch := maxParamLimit / numCols
+	maxRowsPerBatch := (maxParamLimit - 1) / numCols
 	if maxRowsPerBatch > 1000 {
 		maxRowsPerBatch = 1000
 	}

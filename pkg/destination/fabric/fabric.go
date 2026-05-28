@@ -19,7 +19,8 @@ import (
 )
 
 // maxParamLimit is the go-mssqldb driver parameter limit, shared with Fabric's
-// TDS endpoint. Multi-row INSERTs are batched to stay under it.
+// TDS endpoint. The server documents 2100 as the maximum but rejects requests
+// at exactly 2100, so we batch to stay strictly below it.
 const maxParamLimit = 2100
 
 type FabricDestination struct {
@@ -280,7 +281,7 @@ func (d *FabricDestination) writeRecordBatch(ctx context.Context, record arrow.R
 	}
 	colList := strings.Join(colNames, ", ")
 
-	maxRowsPerBatch := maxParamLimit / numCols
+	maxRowsPerBatch := (maxParamLimit - 1) / numCols
 	if maxRowsPerBatch > 1000 {
 		maxRowsPerBatch = 1000
 	}
