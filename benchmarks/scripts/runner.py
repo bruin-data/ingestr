@@ -212,7 +212,7 @@ def build_tool_command(
     if tool_name == "gong":
         binary = PROJECT_ROOT / tool_cfg.get("binary", "bin/gong")
         return (
-            f"'{binary}' ingest"
+            f"INGESTR_DISABLE_TELEMETRY=1 DISABLE_TELEMETRY=1 '{binary}' ingest"
             f" --source-uri '{src_uri}'"
             f" --source-table '{src_table}'"
             f" --dest-uri '{dst_uri}'"
@@ -225,6 +225,7 @@ def build_tool_command(
             "command_prefix",
             "uv tool run --python 3.11 ingestr@0.14.141 ingest",
         )
+        prefix = f"INGESTR_DISABLE_TELEMETRY=1 DISABLE_TELEMETRY=1 {prefix}"
         tsrc = translate_uri(src_uri, tool_cfg)
         tdst = translate_uri(dst_uri, tool_cfg)
         extra = tool_cfg.get("extra_args_by_source", {}).get(src_type, "")
@@ -243,19 +244,28 @@ def build_tool_command(
     if tool_name == "sling":
         src_env = sling_env_name("SRC", src_cfg_name)
         dst_env = sling_env_name("DST", dst_cfg_name)
-        return (
-            f"sling run"
-            f" --src-conn {src_env}"
-            f" --src-stream '{src_table}'"
-            f" --tgt-conn {dst_env}"
-            f" --tgt-object '{dst_table}'"
-            f" --mode full-refresh"
-        )
+        env = ["SLING_DISABLE_TELEMETRY=true"]
+        if src_type == "mongodb":
+            env.append("SLING_SAMPLE_SIZE=3000")
+        prefix = " ".join(env) + " "
+        parts = [
+            f"{prefix}sling run"
+            f" --src-conn {src_env}",
+            f" --src-stream '{src_table}'",
+        ]
+        if src_type == "mongodb":
+            parts.append(" --src-options '{flatten: true}'")
+        parts += [
+            f" --tgt-conn {dst_env}",
+            f" --tgt-object '{dst_table}'",
+            f" --mode full-refresh",
+        ]
+        return "".join(parts)
 
     if tool_name == "dlt":
         script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_dlt.py")
         return (
-            f"uv run '{script}'"
+            f"RUNTIME__DLTHUB_TELEMETRY=false uv run '{script}'"
             f" --source-uri '{src_uri}'"
             f" --source-table '{src_table}'"
             f" --dest-uri '{dst_uri}'"
@@ -265,7 +275,7 @@ def build_tool_command(
     if tool_name == "airbyte":
         script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_airbyte.py")
         return (
-            f"uv run '{script}'"
+            f"AIRBYTE_ANALYTICS_DISABLED=1 DO_NOT_TRACK=1 uv run '{script}'"
             f" --source-uri '{src_uri}'"
             f" --source-table '{src_table}'"
             f" --dest-uri '{dst_uri}'"
@@ -454,46 +464,109 @@ def query_destination(dst_type: str, dst_uri: str, table: str, schema: str, quer
             schema = schema or "public"
             if query_type == "count":
                 sql = f'SELECT count(*) FROM "{schema}".{table}'
+                result = subprocess.run(
+                    ["psql", dst_uri, "-t", "-A", "-c", sql],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    return None
+                return result.stdout.strip()
             elif query_type == "sum_id":
-                sql = f'SELECT COALESCE(SUM(id), 0) FROM "{schema}".{table}'
+                queries = [
+                    f'SELECT COALESCE(SUM(id), 0) FROM "{schema}".{table}',
+                    f"""SELECT COALESCE(SUM((data->>'id')::bigint), 0) FROM "{schema}".{table}""",
+                ]
+                for sql in queries:
+                    result = subprocess.run(
+                        ["psql", dst_uri, "-t", "-A", "-c", sql],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if result.returncode == 0:
+                        return result.stdout.strip()
+                return None
             elif query_type == "columns":
                 sql = (f"SELECT column_name FROM information_schema.columns "
                        f"WHERE table_schema='{schema}' AND table_name='{table}' "
                        f"ORDER BY ordinal_position")
+                result = subprocess.run(
+                    ["psql", dst_uri, "-t", "-A", "-c", sql],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    return None
+                columns = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
+                if "data" in columns:
+                    json_sql = (
+                        f"""SELECT DISTINCT key FROM "{schema}".{table}, """
+                        f"""LATERAL jsonb_object_keys(data) AS key ORDER BY key"""
+                    )
+                    json_result = subprocess.run(
+                        ["psql", dst_uri, "-t", "-A", "-c", json_sql],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if json_result.returncode == 0:
+                        json_columns = [
+                            line.strip()
+                            for line in json_result.stdout.strip().split("\n")
+                            if line.strip()
+                        ]
+                        columns = list(dict.fromkeys(columns + json_columns))
+                return columns
             else:
                 return None
-            result = subprocess.run(
-                ["psql", dst_uri, "-t", "-A", "-c", sql],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                return None
-            if query_type == "columns":
-                return [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
-            return result.stdout.strip()
 
         elif dst_type == "duckdb":
             path = duckdb_path_from_uri(dst_uri)
             schema = schema or "main"
             if query_type == "count":
                 sql = f'SELECT count(*) FROM "{schema}".{table}'
+                result = subprocess.run(
+                    ["duckdb", path, "-noheader", "-csv", "-c", sql],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    return None
+                return result.stdout.strip()
             elif query_type == "sum_id":
-                sql = f'SELECT COALESCE(SUM(id), 0) FROM "{schema}".{table}'
+                queries = [
+                    f'SELECT COALESCE(SUM(id), 0) FROM "{schema}".{table}',
+                    f"""SELECT COALESCE(SUM(CAST(json_extract_string(data, '$.id') AS BIGINT)), 0) FROM "{schema}".{table}""",
+                ]
+                for sql in queries:
+                    result = subprocess.run(
+                        ["duckdb", path, "-noheader", "-csv", "-c", sql],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if result.returncode == 0:
+                        return result.stdout.strip()
+                return None
             elif query_type == "columns":
                 sql = (f"SELECT column_name FROM information_schema.columns "
                        f"WHERE table_schema='{schema}' AND table_name='{table}' "
                        f"ORDER BY ordinal_position")
+                result = subprocess.run(
+                    ["duckdb", path, "-noheader", "-csv", "-c", sql],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    return None
+                columns = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
+                if "data" in columns:
+                    json_sql = f"""SELECT DISTINCT unnest(json_keys(data)) AS key FROM "{schema}".{table} ORDER BY key"""
+                    json_result = subprocess.run(
+                        ["duckdb", path, "-noheader", "-csv", "-c", json_sql],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if json_result.returncode == 0:
+                        json_columns = [
+                            line.strip()
+                            for line in json_result.stdout.strip().split("\n")
+                            if line.strip()
+                        ]
+                        columns = list(dict.fromkeys(columns + json_columns))
+                return columns
             else:
                 return None
-            result = subprocess.run(
-                ["duckdb", path, "-noheader", "-csv", "-c", sql],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                return None
-            if query_type == "columns":
-                return [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
-            return result.stdout.strip()
 
         elif dst_type == "bigquery":
             project, ds = bq_parts_from_uri(dst_uri)
@@ -650,7 +723,7 @@ def run_validation(
 
             if tool_name == "airbyte":
                 check_table = src_table_bare
-                check_schema = src.get("database", "") if src["type"] == "mysql" else dst_schema
+                check_schema = src.get("database", "") if src["type"] in ("mysql", "mongodb") else dst_schema
             else:
                 check_table = dst_table_name
                 check_schema = dst_schema

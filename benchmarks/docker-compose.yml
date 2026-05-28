@@ -70,3 +70,21 @@ services:
       interval: 3s
       timeout: 3s
       retries: 15
+
+  bench-mongo-source:
+    image: mongo:8.2.7
+    container_name: bench-mongo-source
+    ports:
+      - "27018:27017"
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--wiredTigerCacheSizeGB", "1"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({_id:\"rs0\",members:[{_id:0,host:\"host.docker.internal:27018\"}]}).ok }' | grep 1",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 30

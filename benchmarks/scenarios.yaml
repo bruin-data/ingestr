@@ -19,6 +19,14 @@ sources:
     seed: true
     database: bench_source
 
+  local_mongodb:
+    type: mongodb
+    uri: "mongodb://localhost:27018/?directConnection=true&replicaSet=rs0"
+    table: "bench_source.bench_data_{size}"
+    docker: bench-mongo-source
+    seed: true
+    database: bench_source
+
   local_duckdb:
     type: duckdb
     uri: "duckdb:///{bench_dir}/duckdb_files/bench_source.duckdb"
@@ -64,11 +72,20 @@ scenarios:
   - source: local_mysql
     destination: local_postgres
 
+  - source: local_mongodb
+    destination: local_postgres
+
+  - source: local_mongodb
+    destination: local_duckdb
+
   # Remote Postgres (requires BENCH_REMOTE_PG_URI env var)
   - source: local_postgres
     destination: remote_postgres
 
   - source: local_mysql
+    destination: remote_postgres
+
+  - source: local_mongodb
     destination: remote_postgres
 
   - source: local_duckdb
@@ -79,6 +96,9 @@ scenarios:
     destination: bigquery
 
   - source: local_mysql
+    destination: bigquery
+
+  - source: local_mongodb
     destination: bigquery
 
   - source: local_duckdb
