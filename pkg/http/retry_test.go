@@ -36,7 +36,9 @@ func TestPostNotRetriedByDefault(t *testing.T) {
 		WithRetry(5, time.Millisecond, time.Millisecond),
 		WithRetryStrategy(zeroDelayStrategy),
 	)
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	resp, err := client.R(context.Background()).Post("/")
 	if err != nil {
@@ -60,7 +62,9 @@ func TestPostRetriedWithAllowNonIdempotent(t *testing.T) {
 		WithAllowNonIdempotentRetry(),
 		WithRetryStrategy(zeroDelayStrategy),
 	)
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	resp, err := client.R(context.Background()).Post("/")
 	if err != nil {
@@ -83,7 +87,9 @@ func TestGetRetriedByDefault(t *testing.T) {
 		WithRetry(5, time.Millisecond, time.Millisecond),
 		WithRetryStrategy(zeroDelayStrategy),
 	)
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	resp, err := client.R(context.Background()).Get("/")
 	if err != nil {
