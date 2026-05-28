@@ -99,6 +99,12 @@ func WithDisableRetry() Option {
 	}
 }
 
+func WithAllowNonIdempotentRetry() Option {
+	return func(c *Client) {
+		c.resty.SetAllowNonIdempotentRetry(true)
+	}
+}
+
 func WithInsecureSkipVerify() Option {
 	return func(c *Client) {
 		c.resty.SetTransport(&http.Transport{
