@@ -721,8 +721,7 @@ func (d *SnowflakeDestination) GetMaxCDCLSN(ctx context.Context, table string) (
 	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") ||
-			strings.Contains(err.Error(), "invalid identifier") ||
-			strings.Contains(err.Error(), "not authorized") {
+			strings.Contains(err.Error(), "invalid identifier") {
 			return "", nil
 		}
 		config.LogFailedQuery(query, err)
