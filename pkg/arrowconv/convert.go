@@ -580,6 +580,8 @@ func AppendValue(builder array.Builder, val interface{}) {
 			}
 		case *big.Int:
 			b.Append(decimal128.FromBigInt(v))
+		case json.Number:
+			AppendValue(b, string(v))
 		default:
 			b.AppendNull()
 		}

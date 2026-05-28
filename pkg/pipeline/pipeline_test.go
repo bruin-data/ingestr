@@ -1289,3 +1289,21 @@ func TestBuildBufferReaderTarget_EvolveScenario(t *testing.T) {
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"age", "id", "name", "score", "email"})
 }
+
+func TestBuildBufferReaderTarget_CaseInsensitiveMatch(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"orders",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+	)
+	dest := tschema(
+		"orders",
+		tcol("ID", schema.TypeInt64),
+		tcol("NAME", schema.TypeString),
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
+}

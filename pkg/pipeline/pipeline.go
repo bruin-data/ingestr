@@ -589,6 +589,7 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 		if r, ok := renameMap[key]; ok {
 			key = r
 		}
+		key = strings.ToLower(key)
 		srcByDestName[key] = append(srcByDestName[key], c)
 	}
 
@@ -597,7 +598,7 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 		if naming.IsIngestrColumn(dc.Name) || isSCD2MetadataColumn(dc.Name) {
 			continue
 		}
-		if sourceCols, ok := srcByDestName[dc.Name]; ok {
+		if sourceCols, ok := srcByDestName[strings.ToLower(dc.Name)]; ok {
 			for _, sc := range sourceCols {
 				m := sc
 				m.DataType, m.Precision, m.Scale, m.ArrayType = dc.DataType, dc.Precision, dc.Scale, dc.ArrayType
