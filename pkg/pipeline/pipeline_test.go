@@ -1215,6 +1215,54 @@ func TestBuildBufferReaderTarget_HonorsRenamer(t *testing.T) {
 	}
 }
 
+func TestBuildBufferReaderTarget_KeepsAliasesForCanonicalDuplicate(t *testing.T) {
+	p := &Pipeline{
+		columnRenamer: transformer.NewColumnRenamer(map[string]string{
+			"userId": "user_id",
+			"UserID": "user_id",
+		}),
+	}
+	src := tschema(
+		"users",
+		tcol("_id", schema.TypeInt64),
+		tcol("userId", schema.TypeInt64),
+		tcol("user_id", schema.TypeInt64),
+		tcol("UserID", schema.TypeInt64),
+	)
+	dest := tschema(
+		"users",
+		tcol("_id", schema.TypeInt64),
+		tcol("user_id", schema.TypeInt64),
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"_id", "userId", "user_id", "UserID"})
+}
+
+func TestApplyColumnMapping_DedupesCanonicalColumns(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"users",
+		tcol("_id", schema.TypeInt64),
+		tcol("userId", schema.TypeInt32),
+		tcol("user_id", schema.TypeInt64),
+		tcol("UserID", schema.TypeInt64),
+	)
+	src.PrimaryKeys = []string{"userId", "UserID"}
+
+	p.applyColumnMapping(src, map[string]string{
+		"userId": "user_id",
+		"UserID": "user_id",
+	})
+
+	assertColumns(t, "columns", src.ColumnNames(), []string{"_id", "user_id"})
+	assertColumns(t, "primary keys", src.PrimaryKeys, []string{"user_id"})
+	if got := src.Columns[1].DataType; got != schema.TypeInt64 {
+		t.Fatalf("user_id type = %v, want %v", got, schema.TypeInt64)
+	}
+}
+
 // Case 7: realistic evolve scenario.
 func TestBuildBufferReaderTarget_EvolveScenario(t *testing.T) {
 	p := &Pipeline{}
