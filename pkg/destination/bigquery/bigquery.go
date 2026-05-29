@@ -1250,7 +1250,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	changeConditions := buildChangeConditionsBigQuery(nonPKColumns, "t", "s")
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		onConditions[i] = fmt.Sprintf("t.`%s` = s.`%s`", pk, pk)
+		onConditions[i] = fmt.Sprintf("(t.`%s` = s.`%s` OR (t.`%s` IS NULL AND s.`%s` IS NULL))", pk, pk, pk, pk)
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -1468,7 +1468,8 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
-		onConditions[i] = fmt.Sprintf("t.`%s` = %s", pk, castSourceCol(pk, castMap))
+		sourceCol := castSourceCol(pk, castMap)
+		onConditions[i] = fmt.Sprintf("(t.`%s` = %s OR (t.`%s` IS NULL AND %s IS NULL))", pk, sourceCol, pk, sourceCol)
 	}
 	onClause := strings.Join(onConditions, " AND ")
 

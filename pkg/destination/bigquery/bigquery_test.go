@@ -830,7 +830,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		if !contains(sql, "USING (SELECT * FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `id`) = 1) AS s\n") {
 			t.Fatalf("sql missing using clause with dedup:\n%s", sql)
 		}
-		if !contains(sql, "ON t.`id` = s.`id`\n") {
+		if !contains(sql, "ON (t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))\n") {
 			t.Fatalf("sql missing on clause:\n%s", sql)
 		}
 		if !contains(sql, "WHEN MATCHED THEN\n") || !contains(sql, "UPDATE SET") {
@@ -860,11 +860,34 @@ func TestBuildMergeSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("on_clause_is_null_safe_single_pk", func(t *testing.T) {
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name"}, nil)
+
+		if !contains(sql, "ON (t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))\n") {
+			t.Fatalf("sql missing null-safe on clause:\n%s", sql)
+		}
+		if contains(sql, "ON t.`id` = s.`id`\n") {
+			t.Fatalf("sql should not use bare equality ON clause:\n%s", sql)
+		}
+	})
+
+	t.Run("on_clause_is_null_safe_composite_pk", func(t *testing.T) {
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"tenant_id", "user_id"}, []string{"tenant_id", "user_id", "value"}, nil)
+
+		expected := "ON (t.`tenant_id` = s.`tenant_id` OR (t.`tenant_id` IS NULL AND s.`tenant_id` IS NULL)) AND (t.`user_id` = s.`user_id` OR (t.`user_id` IS NULL AND s.`user_id` IS NULL))\n"
+		if !contains(sql, expected) {
+			t.Fatalf("sql missing null-safe composite on clause:\n%s", sql)
+		}
+		if contains(sql, "ON t.`tenant_id` = s.`tenant_id` AND t.`user_id` = s.`user_id`\n") {
+			t.Fatalf("sql should not use bare equality composite ON clause:\n%s", sql)
+		}
+	})
+
 	t.Run("with_cast_map", func(t *testing.T) {
 		castMap := map[string]string{"day": "STRING"}
 		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id", "day"}, []string{"id", "day", "amount"}, castMap)
 
-		if !contains(sql, "t.`day` = CAST(s.`day` AS STRING)") {
+		if !contains(sql, "(t.`day` = CAST(s.`day` AS STRING) OR (t.`day` IS NULL AND CAST(s.`day` AS STRING) IS NULL))") {
 			t.Fatalf("sql missing cast in ON clause:\n%s", sql)
 		}
 		if !contains(sql, "t.`amount` = s.`amount`") {
@@ -873,8 +896,8 @@ func TestBuildMergeSQL(t *testing.T) {
 		if !contains(sql, "CAST(s.`day` AS STRING)") {
 			t.Fatalf("sql missing cast in INSERT values:\n%s", sql)
 		}
-		if !contains(sql, "t.`id` = s.`id`") {
-			t.Fatalf("sql should not cast non-mismatched pk:\n%s", sql)
+		if !contains(sql, "(t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))") {
+			t.Fatalf("sql missing null-safe on clause for non-cast pk:\n%s", sql)
 		}
 	})
 }
