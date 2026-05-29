@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
@@ -26,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -40,10 +43,11 @@ import (
 type Provider string
 
 const (
-	ProviderS3    Provider = "s3"
-	ProviderGCS   Provider = "gcs"
-	ProviderAzure Provider = "azure"
-	ProviderSFTP  Provider = "sftp"
+	ProviderS3            Provider = "s3"
+	ProviderGCS           Provider = "gcs"
+	ProviderAzure         Provider = "azure"
+	ProviderAzureDatalake Provider = "adls"
+	ProviderSFTP          Provider = "sftp"
 
 	defaultParallelism = 5
 )
@@ -61,6 +65,7 @@ type BlobstoreSource struct {
 	provider   Provider
 	s3Client   *s3.Client
 	gcsClient  *storage.Client
+	adlsClient *azureDatalakeSourceClient
 	sftpClient *sftp.Client
 	sshClient  *ssh.Client
 	parsedURI  *parsedBlobstoreURI
@@ -71,7 +76,7 @@ func NewBlobstoreSource() *BlobstoreSource {
 }
 
 func (s *BlobstoreSource) Schemes() []string {
-	return []string{"s3", "gs", "gcs", "az", "azure", "sftp"}
+	return []string{"s3", "gs", "gcs", "az", "azure", "adls", "adlsgen2", "azdatalake", "abfs", "abfss", "sftp"}
 }
 
 func (s *BlobstoreSource) Connect(ctx context.Context, uri string) error {
@@ -108,6 +113,14 @@ func (s *BlobstoreSource) Connect(ctx context.Context, uri string) error {
 		s.sshClient = sshConn
 		s.sftpClient = sftpConn
 		config.Debug("[BLOBSTORE-SRC] Connected to SFTP %s:%s", parsed.sftpHost, parsed.sftpPort)
+
+	case ProviderAzureDatalake:
+		client, err := createAzureDatalakeSourceClient(parsed)
+		if err != nil {
+			return fmt.Errorf("failed to create Azure Data Lake Storage Gen2 client: %w", err)
+		}
+		s.adlsClient = client
+		config.Debug("[BLOBSTORE-SRC] Connected to Azure Data Lake Storage Gen2")
 
 	case ProviderAzure:
 		return fmt.Errorf("azure Blob Storage source is not yet implemented")
@@ -160,6 +173,49 @@ func createGCSClient(ctx context.Context, parsed *parsedBlobstoreURI) (*storage.
 	}
 
 	return storage.NewClient(ctx, opts...)
+}
+
+type azureDatalakeSourceClient struct {
+	accountName         string
+	newFilesystemClient func(string) (*filesystem.Client, error)
+}
+
+func createAzureDatalakeSourceClient(parsed *parsedBlobstoreURI) (*azureDatalakeSourceClient, error) {
+	if parsed.accountName == "" {
+		return nil, fmt.Errorf("account_name is required for Azure Data Lake Storage Gen2")
+	}
+
+	client := &azureDatalakeSourceClient{
+		accountName: parsed.accountName,
+	}
+
+	if parsed.accountKey != "" {
+		cred, err := azdatalake.NewSharedKeyCredential(parsed.accountName, parsed.accountKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create shared key credential: %w", err)
+		}
+		client.newFilesystemClient = func(fileSystemURL string) (*filesystem.Client, error) {
+			return filesystem.NewClientWithSharedKeyCredential(fileSystemURL, cred, nil)
+		}
+		return client, nil
+	}
+
+	if parsed.sasToken != "" {
+		sasToken := strings.TrimPrefix(parsed.sasToken, "?")
+		client.newFilesystemClient = func(fileSystemURL string) (*filesystem.Client, error) {
+			return filesystem.NewClientWithNoCredential(adlsutil.AppendSASToken(fileSystemURL, sasToken), nil)
+		}
+		return client, nil
+	}
+
+	cred, err := parsed.clientCredentials.NewTokenCredential()
+	if err != nil {
+		return nil, err
+	}
+	client.newFilesystemClient = func(fileSystemURL string) (*filesystem.Client, error) {
+		return filesystem.NewClient(fileSystemURL, cred, nil)
+	}
+	return client, nil
 }
 
 func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, error) {
@@ -428,6 +484,50 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 			}
 		}
 
+	case ProviderAzureDatalake:
+		if s.adlsClient == nil {
+			return count, fmt.Errorf("azure Data Lake Storage Gen2 client is not initialized")
+		}
+
+		fsClient, err := s.adlsClient.newFilesystemClient(buildAzureDatalakeFilesystemURL(s.adlsClient.accountName, bucket))
+		if err != nil {
+			return count, fmt.Errorf("failed to create ADLS filesystem client: %w", err)
+		}
+
+		opts := &filesystem.ListPathsOptions{}
+		// The Azure SDK maps Prefix to the ADLS "directory" query parameter,
+		// so exact file paths must list their parent directory.
+		listDirectory := azureDatalakeListDirectory(pattern)
+		if listDirectory != "" {
+			opts.Prefix = &listDirectory
+		}
+		pager := fsClient.NewListPathsPager(true, opts)
+		for pager.More() {
+			resp, err := pager.NextPage(ctx)
+			if err != nil {
+				return count, fmt.Errorf("failed to list ADLS paths: %w", err)
+			}
+
+			for _, item := range resp.Paths {
+				if item == nil || item.Name == nil {
+					continue
+				}
+				if item.IsDirectory != nil && *item.IsDirectory {
+					continue
+				}
+
+				key := *item.Name
+				if matchesGlobPattern(key, pattern) {
+					select {
+					case fileChan <- key:
+						count++
+					case <-ctx.Done():
+						return count, ctx.Err()
+					}
+				}
+			}
+		}
+
 	case ProviderSFTP:
 		baseDir := "/"
 		if prefix != "" {
@@ -481,6 +581,24 @@ func (s *BlobstoreSource) downloadFile(ctx context.Context, bucket, key string) 
 		}
 		defer func() { _ = reader.Close() }()
 		return io.ReadAll(reader)
+
+	case ProviderAzureDatalake:
+		if s.adlsClient == nil {
+			return nil, fmt.Errorf("azure Data Lake Storage Gen2 client is not initialized")
+		}
+
+		fsClient, err := s.adlsClient.newFilesystemClient(buildAzureDatalakeFilesystemURL(s.adlsClient.accountName, bucket))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ADLS filesystem client: %w", err)
+		}
+
+		fileClient := fsClient.NewFileClient(key)
+		resp, err := fileClient.DownloadStream(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return io.ReadAll(resp.Body)
 
 	case ProviderSFTP:
 		f, err := s.sftpClient.Open(key)
@@ -708,6 +826,7 @@ type parsedBlobstoreURI struct {
 	accountName       string
 	accountKey        string
 	sasToken          string
+	clientCredentials adlsutil.ClientCredentials
 	sftpHost          string
 	sftpPort          string
 	sftpUsername      string
@@ -739,6 +858,13 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		parsed.accountName = u.Query().Get("account_name")
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
+		parsed.clientCredentials = adlsutil.ParseClientCredentials(u.Query())
+	case "adls", "adlsgen2", "azdatalake", "abfs", "abfss":
+		parsed.provider = ProviderAzureDatalake
+		parsed.accountName = adlsutil.ParseAccountName(u)
+		parsed.accountKey = u.Query().Get("account_key")
+		parsed.sasToken = u.Query().Get("sas_token")
+		parsed.clientCredentials = adlsutil.ParseClientCredentials(u.Query())
 	case "sftp":
 		parsed.provider = ProviderSFTP
 		parsed.sftpHost = u.Hostname()
@@ -755,6 +881,10 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 	}
 
 	return parsed, nil
+}
+
+func buildAzureDatalakeFilesystemURL(accountName, fileSystem string) string {
+	return adlsutil.FilesystemURL(accountName, fileSystem)
 }
 
 func parseTableHints(s string) (FileFormat, string) {
@@ -826,6 +956,23 @@ func extractPrefix(pattern string) string {
 		return ""
 	}
 	return pattern[:lastSlash+1]
+}
+
+func azureDatalakeListDirectory(pattern string) string {
+	prefix := extractPrefix(pattern)
+	if prefix == "" {
+		return ""
+	}
+
+	if !strings.ContainsAny(pattern, "*?[") {
+		pattern = strings.Trim(pattern, "/")
+		if idx := strings.LastIndex(pattern, "/"); idx != -1 {
+			return pattern[:idx]
+		}
+		return ""
+	}
+
+	return strings.Trim(prefix, "/")
 }
 
 func matchesGlobPattern(key, pattern string) bool {

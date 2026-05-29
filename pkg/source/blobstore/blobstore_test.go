@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
@@ -106,6 +107,81 @@ func TestParseBlobstoreURI_GCS(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.want.provider, got.provider)
 			assert.Equal(t, tt.want.credentialsFile, got.credentialsFile)
+		})
+	}
+}
+
+func TestParseBlobstoreURI_AzureDatalake(t *testing.T) {
+	tests := []struct {
+		name    string
+		uri     string
+		want    *parsedBlobstoreURI
+		wantErr bool
+	}{
+		{
+			name: "ADLS Gen2 with account key",
+			uri:  "adls://?account_name=myaccount&account_key=mykey",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				accountKey:  "mykey",
+			},
+		},
+		{
+			name: "ADLS Gen2 alias",
+			uri:  "azdatalake://?account_name=myaccount&account_key=mykey",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				accountKey:  "mykey",
+			},
+		},
+		{
+			name: "ADLS Gen2 with SAS token",
+			uri:  "adlsgen2://?account_name=myaccount&sas_token=sv=2020-08-04",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				sasToken:    "sv=2020-08-04",
+			},
+		},
+		{
+			name: "ADLS Gen2 with service principal credentials",
+			uri:  "adls://?account_name=myaccount&tenant_id=tenant&client_id=client&client_secret=secret",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				clientCredentials: adlsutil.ClientCredentials{
+					TenantID:     "tenant",
+					ClientID:     "client",
+					ClientSecret: "secret",
+				},
+			},
+		},
+		{
+			name: "ABFSS with account in host",
+			uri:  "abfss://filesystem@myaccount.dfs.core.windows.net?account_key=mykey",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				accountKey:  "mykey",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseBlobstoreURI(tt.uri)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want.provider, got.provider)
+			assert.Equal(t, tt.want.accountName, got.accountName)
+			assert.Equal(t, tt.want.accountKey, got.accountKey)
+			assert.Equal(t, tt.want.sasToken, got.sasToken)
+			assert.Equal(t, tt.want.clientCredentials, got.clientCredentials)
 		})
 	}
 }
@@ -277,6 +353,26 @@ func TestExtractPrefix(t *testing.T) {
 	}
 }
 
+func TestAzureDatalakeListDirectory(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		{"data/*.csv", "data"},
+		{"data/logs/**/*.jsonl", "data/logs"},
+		{"data/users.csv", "data"},
+		{"users.csv", ""},
+		{"**/*.parquet", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			got := azureDatalakeListDirectory(tt.pattern)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestMatchesGlobPattern(t *testing.T) {
 	tests := []struct {
 		key     string
@@ -359,6 +455,17 @@ func TestSchemes(t *testing.T) {
 	assert.Contains(t, schemes, "gcs")
 	assert.Contains(t, schemes, "az")
 	assert.Contains(t, schemes, "azure")
+	assert.Contains(t, schemes, "adls")
+	assert.Contains(t, schemes, "adlsgen2")
+	assert.Contains(t, schemes, "azdatalake")
+	assert.Contains(t, schemes, "abfs")
+	assert.Contains(t, schemes, "abfss")
+	assert.Contains(t, schemes, "sftp")
+}
+
+func TestBuildAzureDatalakeFilesystemURL(t *testing.T) {
+	got := buildAzureDatalakeFilesystemURL("myaccount", "filesystem")
+	assert.Equal(t, "https://myaccount.dfs.core.windows.net/filesystem", got)
 }
 
 func TestGetTable(t *testing.T) {
