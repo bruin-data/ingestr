@@ -993,7 +993,7 @@ func azureDatalakeListDirectory(pattern string) string {
 		return ""
 	}
 
-	if strings.IndexAny(pattern, "*?[") == -1 {
+	if !strings.ContainsAny(pattern, "*?[") {
 		pattern = strings.Trim(pattern, "/")
 		if idx := strings.LastIndex(pattern, "/"); idx != -1 {
 			return pattern[:idx]
