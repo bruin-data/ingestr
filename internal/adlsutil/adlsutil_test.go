@@ -8,6 +8,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestParseClientCredentials(t *testing.T) {
+	values := url.Values{
+		"tenant_id":     {"tenant"},
+		"client_id":     {"client"},
+		"client_secret": {"secret"},
+	}
+
+	got := ParseClientCredentials(values)
+	assert.Equal(t, ClientCredentials{
+		TenantID:     "tenant",
+		ClientID:     "client",
+		ClientSecret: "secret",
+	}, got)
+	assert.True(t, got.IsSet())
+}
+
+func TestClientCredentialsNewTokenCredentialRequiresCompleteConfig(t *testing.T) {
+	_, err := ClientCredentials{TenantID: "tenant", ClientID: "client"}.NewTokenCredential()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "client_secret")
+}
+
+func TestClientCredentialsNewTokenCredential(t *testing.T) {
+	cred, err := ClientCredentials{
+		TenantID:     "tenant",
+		ClientID:     "client",
+		ClientSecret: "secret",
+	}.NewTokenCredential()
+	require.NoError(t, err)
+	assert.NotNil(t, cred)
+}
+
 func TestAppendSASToken(t *testing.T) {
 	assert.Equal(t, "https://account.dfs.core.windows.net/fs?sig=abc", AppendSASToken("https://account.dfs.core.windows.net/fs", "sig=abc"))
 	assert.Equal(t, "https://account.dfs.core.windows.net/fs?existing=1&sig=abc", AppendSASToken("https://account.dfs.core.windows.net/fs?existing=1", "sig=abc"))

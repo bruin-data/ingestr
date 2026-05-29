@@ -3,6 +3,7 @@ package blobstore
 import (
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -152,6 +153,19 @@ func TestParseBlobstoreURI_Azure(t *testing.T) {
 				sasToken:    "sv=2020-08-04",
 			},
 		},
+		{
+			name: "Azure with service principal credentials",
+			uri:  "az://?account_name=myaccount&tenant_id=tenant&client_id=client&client_secret=secret",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzure,
+				accountName: "myaccount",
+				clientCredentials: adlsutil.ClientCredentials{
+					TenantID:     "tenant",
+					ClientID:     "client",
+					ClientSecret: "secret",
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -166,6 +180,7 @@ func TestParseBlobstoreURI_Azure(t *testing.T) {
 			assert.Equal(t, tt.want.accountName, got.accountName)
 			assert.Equal(t, tt.want.accountKey, got.accountKey)
 			assert.Equal(t, tt.want.sasToken, got.sasToken)
+			assert.Equal(t, tt.want.clientCredentials, got.clientCredentials)
 		})
 	}
 }
@@ -205,6 +220,19 @@ func TestParseBlobstoreURI_AzureDatalake(t *testing.T) {
 			},
 		},
 		{
+			name: "ADLS Gen2 with service principal credentials",
+			uri:  "adls://?account_name=myaccount&tenant_id=tenant&client_id=client&client_secret=secret",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				clientCredentials: adlsutil.ClientCredentials{
+					TenantID:     "tenant",
+					ClientID:     "client",
+					ClientSecret: "secret",
+				},
+			},
+		},
+		{
 			name: "ABFSS with account in host",
 			uri:  "abfss://filesystem@myaccount.dfs.core.windows.net?account_key=mykey",
 			want: &parsedBlobstoreURI{
@@ -227,6 +255,7 @@ func TestParseBlobstoreURI_AzureDatalake(t *testing.T) {
 			assert.Equal(t, tt.want.accountName, got.accountName)
 			assert.Equal(t, tt.want.accountKey, got.accountKey)
 			assert.Equal(t, tt.want.sasToken, got.sasToken)
+			assert.Equal(t, tt.want.clientCredentials, got.clientCredentials)
 		})
 	}
 }

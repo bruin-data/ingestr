@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -209,9 +208,9 @@ func createAzureDatalakeSourceClient(parsed *parsedBlobstoreURI) (*azureDatalake
 		return client, nil
 	}
 
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	cred, err := parsed.clientCredentials.NewTokenCredential()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create default Azure credential: %w", err)
+		return nil, err
 	}
 	client.newFilesystemClient = func(fileSystemURL string) (*filesystem.Client, error) {
 		return filesystem.NewClient(fileSystemURL, cred, nil)
@@ -827,6 +826,7 @@ type parsedBlobstoreURI struct {
 	accountName       string
 	accountKey        string
 	sasToken          string
+	clientCredentials adlsutil.ClientCredentials
 	sftpHost          string
 	sftpPort          string
 	sftpUsername      string
@@ -858,11 +858,13 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		parsed.accountName = u.Query().Get("account_name")
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
+		parsed.clientCredentials = adlsutil.ParseClientCredentials(u.Query())
 	case "adls", "adlsgen2", "azdatalake", "abfs", "abfss":
 		parsed.provider = ProviderAzureDatalake
 		parsed.accountName = adlsutil.ParseAccountName(u)
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
+		parsed.clientCredentials = adlsutil.ParseClientCredentials(u.Query())
 	case "sftp":
 		parsed.provider = ProviderSFTP
 		parsed.sftpHost = u.Hostname()

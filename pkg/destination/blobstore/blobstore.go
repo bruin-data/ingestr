@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/datalakeerror"
@@ -176,9 +175,9 @@ func createAzureClient(ctx context.Context, parsed *parsedBlobstoreURI) (*azblob
 		return azblob.NewClientWithNoCredential(serviceURL+"?"+parsed.sasToken, nil)
 	}
 
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	cred, err := parsed.clientCredentials.NewTokenCredential()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create default Azure credential: %w", err)
+		return nil, err
 	}
 	return azblob.NewClient(serviceURL, cred, nil)
 }
@@ -223,9 +222,9 @@ func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient
 		return client, nil
 	}
 
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	cred, err := parsed.clientCredentials.NewTokenCredential()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create default Azure credential: %w", err)
+		return nil, err
 	}
 	client.newFileClient = func(pathURL string) (*datalakefile.Client, error) {
 		return datalakefile.NewClient(pathURL, cred, nil)
@@ -607,16 +606,17 @@ func (d *BlobstoreDestination) GetTableSchema(ctx context.Context, table string)
 }
 
 type parsedBlobstoreURI struct {
-	provider        Provider
-	accessKeyID     string
-	secretAccessKey string
-	region          string
-	endpointURL     string
-	credentialsFile string
-	accountName     string
-	accountKey      string
-	sasToken        string
-	layout          string
+	provider          Provider
+	accessKeyID       string
+	secretAccessKey   string
+	region            string
+	endpointURL       string
+	credentialsFile   string
+	accountName       string
+	accountKey        string
+	sasToken          string
+	clientCredentials adlsutil.ClientCredentials
+	layout            string
 }
 
 func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
@@ -642,11 +642,13 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		parsed.accountName = u.Query().Get("account_name")
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
+		parsed.clientCredentials = adlsutil.ParseClientCredentials(u.Query())
 	case "adls", "adlsgen2", "azdatalake", "abfs", "abfss":
 		parsed.provider = ProviderAzureDatalake
 		parsed.accountName = adlsutil.ParseAccountName(u)
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
+		parsed.clientCredentials = adlsutil.ParseClientCredentials(u.Query())
 	default:
 		return nil, fmt.Errorf("unsupported blobstore scheme: %s", u.Scheme)
 	}
