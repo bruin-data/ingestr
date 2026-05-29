@@ -897,7 +897,7 @@ func TestBuildMergeSQL(t *testing.T) {
 			t.Fatalf("sql missing cast in INSERT values:\n%s", sql)
 		}
 		if !contains(sql, "(t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))") {
-			t.Fatalf("sql should not cast non-mismatched pk:\n%s", sql)
+			t.Fatalf("sql missing null-safe on clause for non-cast pk:\n%s", sql)
 		}
 	})
 }
