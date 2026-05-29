@@ -13,6 +13,10 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/datalakeerror"
+	datalakedirectory "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/directory"
+	datalakefile "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -33,9 +37,11 @@ import (
 type Provider string
 
 const (
-	ProviderS3    Provider = "s3"
-	ProviderGCS   Provider = "gcs"
-	ProviderAzure Provider = "azure"
+	ProviderS3             Provider = "s3"
+	ProviderGCS            Provider = "gcs"
+	ProviderAzure          Provider = "azure"
+	ProviderAzureDatalake  Provider = "adls"
+	azureDatalakeDNSSuffix          = ".dfs.core.windows.net"
 )
 
 type BlobstoreDestination struct {
@@ -43,6 +49,7 @@ type BlobstoreDestination struct {
 	s3Client    *s3.Client
 	gcsClient   *storage.Client
 	azureClient *azblob.Client
+	adlsClient  *azureDatalakeClient
 	bucketName  string
 	basePath    string
 	layout      string
@@ -57,7 +64,7 @@ func NewBlobstoreDestination() *BlobstoreDestination {
 }
 
 func (d *BlobstoreDestination) Schemes() []string {
-	return []string{"s3", "gs", "gcs", "az", "azure"}
+	return []string{"s3", "gs", "gcs", "az", "azure", "adls", "adlsgen2", "azdatalake", "abfs", "abfss"}
 }
 
 func (d *BlobstoreDestination) Connect(ctx context.Context, uri string) error {
@@ -96,6 +103,14 @@ func (d *BlobstoreDestination) Connect(ctx context.Context, uri string) error {
 		}
 		d.azureClient = client
 		config.Debug("[BLOBSTORE] Connected to Azure Blob Storage with layout %s", d.layout)
+
+	case ProviderAzureDatalake:
+		client, err := createAzureDatalakeClient(parsed)
+		if err != nil {
+			return fmt.Errorf("failed to create Azure Data Lake Storage Gen2 client: %w", err)
+		}
+		d.adlsClient = client
+		config.Debug("[BLOBSTORE] Connected to Azure Data Lake Storage Gen2 with layout %s", d.layout)
 	}
 
 	return nil
@@ -166,6 +181,69 @@ func createAzureClient(ctx context.Context, parsed *parsedBlobstoreURI) (*azblob
 		return nil, fmt.Errorf("failed to create default Azure credential: %w", err)
 	}
 	return azblob.NewClient(serviceURL, cred, nil)
+}
+
+type azureDatalakeClient struct {
+	accountName        string
+	newFileClient      func(string) (*datalakefile.Client, error)
+	newDirectoryClient func(string) (*datalakedirectory.Client, error)
+}
+
+func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient, error) {
+	if parsed.accountName == "" {
+		return nil, fmt.Errorf("account_name is required for Azure Data Lake Storage Gen2")
+	}
+
+	client := &azureDatalakeClient{
+		accountName: parsed.accountName,
+	}
+
+	if parsed.accountKey != "" {
+		cred, err := azdatalake.NewSharedKeyCredential(parsed.accountName, parsed.accountKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create shared key credential: %w", err)
+		}
+		client.newFileClient = func(pathURL string) (*datalakefile.Client, error) {
+			return datalakefile.NewClientWithSharedKeyCredential(pathURL, cred, nil)
+		}
+		client.newDirectoryClient = func(pathURL string) (*datalakedirectory.Client, error) {
+			return datalakedirectory.NewClientWithSharedKeyCredential(pathURL, cred, nil)
+		}
+		return client, nil
+	}
+
+	if parsed.sasToken != "" {
+		sasToken := strings.TrimPrefix(parsed.sasToken, "?")
+		client.newFileClient = func(pathURL string) (*datalakefile.Client, error) {
+			return datalakefile.NewClientWithNoCredential(appendSASToken(pathURL, sasToken), nil)
+		}
+		client.newDirectoryClient = func(pathURL string) (*datalakedirectory.Client, error) {
+			return datalakedirectory.NewClientWithNoCredential(appendSASToken(pathURL, sasToken), nil)
+		}
+		return client, nil
+	}
+
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create default Azure credential: %w", err)
+	}
+	client.newFileClient = func(pathURL string) (*datalakefile.Client, error) {
+		return datalakefile.NewClient(pathURL, cred, nil)
+	}
+	client.newDirectoryClient = func(pathURL string) (*datalakedirectory.Client, error) {
+		return datalakedirectory.NewClient(pathURL, cred, nil)
+	}
+	return client, nil
+}
+
+func appendSASToken(rawURL, sasToken string) string {
+	if sasToken == "" {
+		return rawURL
+	}
+	if strings.Contains(rawURL, "?") {
+		return rawURL + "&" + sasToken
+	}
+	return rawURL + "?" + sasToken
 }
 
 func (d *BlobstoreDestination) Close(ctx context.Context) error {
@@ -349,9 +427,114 @@ func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data 
 	case ProviderAzure:
 		_, err := d.azureClient.UploadBuffer(ctx, d.bucketName, fullPath, data, nil)
 		return err
+
+	case ProviderAzureDatalake:
+		if d.adlsClient == nil {
+			return fmt.Errorf("azure Data Lake Storage Gen2 client is not initialized")
+		}
+		return d.adlsClient.uploadBuffer(ctx, d.bucketName, fullPath, data)
 	}
 
 	return fmt.Errorf("unsupported provider: %s", d.provider)
+}
+
+func (c *azureDatalakeClient) uploadBuffer(ctx context.Context, fileSystem, path string, data []byte) error {
+	if err := c.ensureDirectories(ctx, fileSystem, parentDirectory(path)); err != nil {
+		return err
+	}
+
+	pathURL, err := buildAzureDatalakePathURL(c.accountName, fileSystem, path)
+	if err != nil {
+		return err
+	}
+
+	fileClient, err := c.newFileClient(pathURL)
+	if err != nil {
+		return fmt.Errorf("failed to create file client: %w", err)
+	}
+
+	if _, err := fileClient.Create(ctx, nil); err != nil && !isAzureDatalakeAlreadyExists(err) {
+		return fmt.Errorf("failed to create file %s: %w", path, err)
+	}
+
+	if err := fileClient.UploadBuffer(ctx, data, nil); err != nil {
+		return fmt.Errorf("failed to upload file %s: %w", path, err)
+	}
+	return nil
+}
+
+func (c *azureDatalakeClient) ensureDirectories(ctx context.Context, fileSystem, dirPath string) error {
+	dirPath = strings.Trim(dirPath, "/")
+	if dirPath == "" {
+		return nil
+	}
+
+	var current string
+	for _, part := range strings.Split(dirPath, "/") {
+		if part == "" {
+			continue
+		}
+		if current == "" {
+			current = part
+		} else {
+			current += "/" + part
+		}
+
+		pathURL, err := buildAzureDatalakePathURL(c.accountName, fileSystem, current)
+		if err != nil {
+			return err
+		}
+
+		dirClient, err := c.newDirectoryClient(pathURL)
+		if err != nil {
+			return fmt.Errorf("failed to create directory client for %s: %w", current, err)
+		}
+
+		if _, err := dirClient.Create(ctx, nil); err != nil && !isAzureDatalakeAlreadyExists(err) {
+			return fmt.Errorf("failed to create directory %s: %w", current, err)
+		}
+	}
+
+	return nil
+}
+
+func buildAzureDatalakePathURL(accountName, fileSystem, path string) (string, error) {
+	accountName = strings.TrimSpace(accountName)
+	fileSystem = strings.Trim(fileSystem, "/")
+	path = strings.Trim(path, "/")
+
+	if accountName == "" {
+		return "", fmt.Errorf("account_name is required for Azure Data Lake Storage Gen2")
+	}
+	if fileSystem == "" {
+		return "", fmt.Errorf("file system is required for Azure Data Lake Storage Gen2")
+	}
+	if path == "" {
+		return "", fmt.Errorf("path is required for Azure Data Lake Storage Gen2")
+	}
+
+	u := &url.URL{
+		Scheme: "https",
+		Host:   accountName + azureDatalakeDNSSuffix,
+		Path:   "/" + fileSystem + "/" + path,
+	}
+	return u.String(), nil
+}
+
+func parentDirectory(path string) string {
+	path = strings.Trim(path, "/")
+	if idx := strings.LastIndex(path, "/"); idx != -1 {
+		return path[:idx]
+	}
+	return ""
+}
+
+func isAzureDatalakeAlreadyExists(err error) bool {
+	return datalakeerror.HasCode(
+		err,
+		datalakeerror.PathAlreadyExists,
+		datalakeerror.ResourceAlreadyExists,
+	)
 }
 
 func (d *BlobstoreDestination) renderLayout(loadID string, fileID int) string {
@@ -425,7 +608,12 @@ func (d *BlobstoreDestination) SupportsDeleteInsertStrategy() bool { return fals
 func (d *BlobstoreDestination) SupportsSCD2Strategy() bool         { return false }
 func (d *BlobstoreDestination) SupportsAtomicSwap() bool           { return false }
 
-func (d *BlobstoreDestination) GetScheme() string { return "s3" }
+func (d *BlobstoreDestination) GetScheme() string {
+	if d.provider == "" {
+		return string(ProviderS3)
+	}
+	return string(d.provider)
+}
 
 func (d *BlobstoreDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	return nil, nil
@@ -467,6 +655,11 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		parsed.accountName = u.Query().Get("account_name")
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
+	case "adls", "adlsgen2", "azdatalake", "abfs", "abfss":
+		parsed.provider = ProviderAzureDatalake
+		parsed.accountName = parseAzureDatalakeAccountName(u)
+		parsed.accountKey = u.Query().Get("account_key")
+		parsed.sasToken = u.Query().Get("sas_token")
 	default:
 		return nil, fmt.Errorf("unsupported blobstore scheme: %s", u.Scheme)
 	}
@@ -474,6 +667,22 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 	parsed.layout = u.Query().Get("layout")
 
 	return parsed, nil
+}
+
+func parseAzureDatalakeAccountName(u *url.URL) string {
+	if accountName := u.Query().Get("account_name"); accountName != "" {
+		return accountName
+	}
+
+	host := u.Hostname()
+	if strings.HasSuffix(host, azureDatalakeDNSSuffix) {
+		return strings.TrimSuffix(host, azureDatalakeDNSSuffix)
+	}
+	if host != "" && !strings.Contains(host, ".") {
+		return host
+	}
+
+	return ""
 }
 
 func schemaEqualIgnoringMetadata(a, b *arrow.Schema) bool {

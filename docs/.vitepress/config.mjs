@@ -153,6 +153,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Applovin Max", link: "/supported-sources/applovin_max.md"},
               { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Attio", link: "/supported-sources/attio.md" },
+              { text: "Azure Data Lake Storage Gen2", link: "/supported-sources/adls.md" },
               { text: "Bruin", link: "/supported-sources/bruin.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               { text: "ClickUp", link: "/supported-sources/clickup.md" },

@@ -299,6 +299,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
      <tr>
+        <td>Azure Data Lake Storage Gen2</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+     <tr>
         <td>S3</td>
         <td>✅</td>
         <td>-</td>
@@ -352,4 +357,3 @@ Feel free to create an issue if you'd like to see support for another source or 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
 Some components are licensed under Apache 2.0 - see the NOTICE file for details.
-

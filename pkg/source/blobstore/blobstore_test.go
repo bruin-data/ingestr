@@ -110,6 +110,67 @@ func TestParseBlobstoreURI_GCS(t *testing.T) {
 	}
 }
 
+func TestParseBlobstoreURI_AzureDatalake(t *testing.T) {
+	tests := []struct {
+		name    string
+		uri     string
+		want    *parsedBlobstoreURI
+		wantErr bool
+	}{
+		{
+			name: "ADLS Gen2 with account key",
+			uri:  "adls://?account_name=myaccount&account_key=mykey",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				accountKey:  "mykey",
+			},
+		},
+		{
+			name: "ADLS Gen2 alias",
+			uri:  "azdatalake://?account_name=myaccount&account_key=mykey",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				accountKey:  "mykey",
+			},
+		},
+		{
+			name: "ADLS Gen2 with SAS token",
+			uri:  "adlsgen2://?account_name=myaccount&sas_token=sv=2020-08-04",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				sasToken:    "sv=2020-08-04",
+			},
+		},
+		{
+			name: "ABFSS with account in host",
+			uri:  "abfss://filesystem@myaccount.dfs.core.windows.net?account_key=mykey",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				accountKey:  "mykey",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseBlobstoreURI(tt.uri)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want.provider, got.provider)
+			assert.Equal(t, tt.want.accountName, got.accountName)
+			assert.Equal(t, tt.want.accountKey, got.accountKey)
+			assert.Equal(t, tt.want.sasToken, got.sasToken)
+		})
+	}
+}
+
 func TestParseTablePattern(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -359,6 +420,17 @@ func TestSchemes(t *testing.T) {
 	assert.Contains(t, schemes, "gcs")
 	assert.Contains(t, schemes, "az")
 	assert.Contains(t, schemes, "azure")
+	assert.Contains(t, schemes, "adls")
+	assert.Contains(t, schemes, "adlsgen2")
+	assert.Contains(t, schemes, "azdatalake")
+	assert.Contains(t, schemes, "abfs")
+	assert.Contains(t, schemes, "abfss")
+	assert.Contains(t, schemes, "sftp")
+}
+
+func TestBuildAzureDatalakeFilesystemURL(t *testing.T) {
+	got := buildAzureDatalakeFilesystemURL("myaccount", "filesystem")
+	assert.Equal(t, "https://myaccount.dfs.core.windows.net/filesystem", got)
 }
 
 func TestGetTable(t *testing.T) {
