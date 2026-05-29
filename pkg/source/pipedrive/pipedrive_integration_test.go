@@ -1,3 +1,5 @@
+//go:build integration
+
 package pipedrive_test
 
 import (

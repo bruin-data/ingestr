@@ -1,3 +1,5 @@
+//go:build integration
+
 package frankfurter_test
 
 import (

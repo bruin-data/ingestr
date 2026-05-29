@@ -1,3 +1,5 @@
+//go:build integration
+
 package allium_test
 
 import (

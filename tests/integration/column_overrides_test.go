@@ -1,3 +1,5 @@
+//go:build integration
+
 // CSV → DuckDB end-to-end tests for the --columns flag. DuckDB is in-process
 // (no container needed), but these tests still live in package integration
 // so they share fixtures with the Postgres variant in

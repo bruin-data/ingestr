@@ -1,3 +1,5 @@
+//go:build integration
+
 package asana_test
 
 import (

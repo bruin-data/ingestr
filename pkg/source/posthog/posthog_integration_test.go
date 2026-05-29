@@ -1,3 +1,5 @@
+//go:build integration
+
 package posthog_test
 
 import (

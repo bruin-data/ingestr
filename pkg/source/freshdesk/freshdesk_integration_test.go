@@ -1,3 +1,5 @@
+//go:build integration
+
 package freshdesk_test
 
 import (
