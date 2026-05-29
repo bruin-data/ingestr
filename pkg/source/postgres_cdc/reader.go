@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -120,6 +121,21 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 
 	accum := newBatchAccumulator(batchSize)
 
+	return streamLoop(ctx, repl, r.cdcConfig.Mode, targetLSN, batchSize, accum, results)
+}
+
+// batchReplicator is the subset of *Replicator that streamLoop depends on,
+// allowing the accumulation loop to be tested without a live connection.
+type batchReplicator interface {
+	NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, bool, error)
+	CurrentLSN() pglogrepl.LSN
+}
+
+// streamLoop pulls batches from repl and feeds them through the accumulator,
+// flushing only when the replicator reports a genuine idle period. Treating
+// every batch-less call as idle would flush after every transaction and defeat
+// accumulation entirely (see hadActivity in Replicator.NextBatch).
+func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetLSN pglogrepl.LSN, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -129,7 +145,7 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 		default:
 		}
 
-		batch, err := repl.NextBatch(ctx, batchSize)
+		batch, hadActivity, err := repl.NextBatch(ctx, batchSize)
 		if err != nil {
 			accum.flushAll(results)
 			return fmt.Errorf("failed to get next batch: %w", err)
@@ -142,7 +158,7 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 		accum.flushReady(results)
 
 		// For batch mode, check if we've caught up to the target LSN
-		if r.cdcConfig.Mode == ModeBatch && targetLSN > 0 {
+		if mode == ModeBatch && targetLSN > 0 {
 			currentLSN := repl.CurrentLSN()
 			if currentLSN >= targetLSN {
 				config.Debug("[CDC] Batch mode: reached target LSN %s (current: %s)", targetLSN, currentLSN)
@@ -151,8 +167,10 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 			}
 		}
 
-		// When idle (no data from WAL), flush any pending batches
-		if batch == nil || batch.NumRows() == 0 {
+		// When idle (no WAL activity), flush any pending batches. Buffered
+		// non-commit messages and keepalives count as activity, so we keep
+		// accumulating across transactions instead of flushing each one.
+		if !hadActivity {
 			accum.flushAll(results)
 			time.Sleep(100 * time.Millisecond)
 		}
