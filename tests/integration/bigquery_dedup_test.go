@@ -339,14 +339,16 @@ func TestBigQuery_MergeTable_NullSafeCompositePrimaryKey(t *testing.T) {
 		)))
 	}
 
-	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO `+"`%s.%s.%s`"+` VALUES
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO `+"`%s.%s.%s`"+` VALUES
 		(NULL, 100, 'target-null-tenant'),
 		(1,    NULL, 'target-null-user'),
 		(1,    100,  'target-both-set')`,
 		project, dataset, targetTbl,
 	)))
 
-	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO `+"`%s.%s.%s`"+` VALUES
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO `+"`%s.%s.%s`"+` VALUES
 		(NULL, 100, 'staging-null-tenant-updated'),
 		(1,    NULL, 'staging-null-user-updated'),
 		(1,    100,  'staging-both-set-updated'),
