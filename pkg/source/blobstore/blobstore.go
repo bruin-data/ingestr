@@ -506,8 +506,11 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 		}
 
 		opts := &filesystem.ListPathsOptions{}
-		if prefix != "" {
-			opts.Prefix = &prefix
+		// The Azure SDK maps Prefix to the ADLS "directory" query parameter,
+		// so exact file paths must list their parent directory.
+		listDirectory := azureDatalakeListDirectory(pattern)
+		if listDirectory != "" {
+			opts.Prefix = &listDirectory
 		}
 		pager := fsClient.NewListPathsPager(true, opts)
 		for pager.More() {
@@ -982,6 +985,23 @@ func extractPrefix(pattern string) string {
 		return ""
 	}
 	return pattern[:lastSlash+1]
+}
+
+func azureDatalakeListDirectory(pattern string) string {
+	prefix := extractPrefix(pattern)
+	if prefix == "" {
+		return ""
+	}
+
+	if strings.IndexAny(pattern, "*?[") == -1 {
+		pattern = strings.Trim(pattern, "/")
+		if idx := strings.LastIndex(pattern, "/"); idx != -1 {
+			return pattern[:idx]
+		}
+		return ""
+	}
+
+	return strings.Trim(prefix, "/")
 }
 
 func matchesGlobPattern(key, pattern string) bool {

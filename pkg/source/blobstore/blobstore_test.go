@@ -338,6 +338,26 @@ func TestExtractPrefix(t *testing.T) {
 	}
 }
 
+func TestAzureDatalakeListDirectory(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		{"data/*.csv", "data"},
+		{"data/logs/**/*.jsonl", "data/logs"},
+		{"data/users.csv", "data"},
+		{"users.csv", ""},
+		{"**/*.parquet", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			got := azureDatalakeListDirectory(tt.pattern)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestMatchesGlobPattern(t *testing.T) {
 	tests := []struct {
 		key     string

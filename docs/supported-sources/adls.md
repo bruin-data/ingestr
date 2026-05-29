@@ -97,7 +97,7 @@ This writes:
 ```plaintext
 lakehouse/
 `-- records
-    `-- users
+    `-- records
         `-- <load_id>.<file_id>.parquet
 ```
 
