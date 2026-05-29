@@ -26,6 +26,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -37,11 +38,10 @@ import (
 type Provider string
 
 const (
-	ProviderS3             Provider = "s3"
-	ProviderGCS            Provider = "gcs"
-	ProviderAzure          Provider = "azure"
-	ProviderAzureDatalake  Provider = "adls"
-	azureDatalakeDNSSuffix          = ".dfs.core.windows.net"
+	ProviderS3            Provider = "s3"
+	ProviderGCS           Provider = "gcs"
+	ProviderAzure         Provider = "azure"
+	ProviderAzureDatalake Provider = "adls"
 )
 
 type BlobstoreDestination struct {
@@ -215,10 +215,10 @@ func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient
 	if parsed.sasToken != "" {
 		sasToken := strings.TrimPrefix(parsed.sasToken, "?")
 		client.newFileClient = func(pathURL string) (*datalakefile.Client, error) {
-			return datalakefile.NewClientWithNoCredential(appendSASToken(pathURL, sasToken), nil)
+			return datalakefile.NewClientWithNoCredential(adlsutil.AppendSASToken(pathURL, sasToken), nil)
 		}
 		client.newDirectoryClient = func(pathURL string) (*datalakedirectory.Client, error) {
-			return datalakedirectory.NewClientWithNoCredential(appendSASToken(pathURL, sasToken), nil)
+			return datalakedirectory.NewClientWithNoCredential(adlsutil.AppendSASToken(pathURL, sasToken), nil)
 		}
 		return client, nil
 	}
@@ -234,16 +234,6 @@ func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient
 		return datalakedirectory.NewClient(pathURL, cred, nil)
 	}
 	return client, nil
-}
-
-func appendSASToken(rawURL, sasToken string) string {
-	if sasToken == "" {
-		return rawURL
-	}
-	if strings.Contains(rawURL, "?") {
-		return rawURL + "&" + sasToken
-	}
-	return rawURL + "?" + sasToken
 }
 
 func (d *BlobstoreDestination) Close(ctx context.Context) error {
@@ -453,12 +443,28 @@ func (c *azureDatalakeClient) uploadBuffer(ctx context.Context, fileSystem, path
 		return fmt.Errorf("failed to create file client: %w", err)
 	}
 
-	if _, err := fileClient.Create(ctx, nil); err != nil && !isAzureDatalakeAlreadyExists(err) {
-		return fmt.Errorf("failed to create file %s: %w", path, err)
+	if err := recreateAzureDatalakeFile(ctx, fileClient, path); err != nil {
+		return err
 	}
 
 	if err := fileClient.UploadBuffer(ctx, data, nil); err != nil {
 		return fmt.Errorf("failed to upload file %s: %w", path, err)
+	}
+	return nil
+}
+
+func recreateAzureDatalakeFile(ctx context.Context, fileClient *datalakefile.Client, path string) error {
+	if _, err := fileClient.Create(ctx, nil); err == nil {
+		return nil
+	} else if !isAzureDatalakeAlreadyExists(err) {
+		return fmt.Errorf("failed to create file %s: %w", path, err)
+	}
+
+	if _, err := fileClient.Delete(ctx, nil); err != nil {
+		return fmt.Errorf("failed to delete existing file %s before upload: %w", path, err)
+	}
+	if _, err := fileClient.Create(ctx, nil); err != nil {
+		return fmt.Errorf("failed to recreate file %s: %w", path, err)
 	}
 	return nil
 }
@@ -499,26 +505,7 @@ func (c *azureDatalakeClient) ensureDirectories(ctx context.Context, fileSystem,
 }
 
 func buildAzureDatalakePathURL(accountName, fileSystem, path string) (string, error) {
-	accountName = strings.TrimSpace(accountName)
-	fileSystem = strings.Trim(fileSystem, "/")
-	path = strings.Trim(path, "/")
-
-	if accountName == "" {
-		return "", fmt.Errorf("account_name is required for Azure Data Lake Storage Gen2")
-	}
-	if fileSystem == "" {
-		return "", fmt.Errorf("file system is required for Azure Data Lake Storage Gen2")
-	}
-	if path == "" {
-		return "", fmt.Errorf("path is required for Azure Data Lake Storage Gen2")
-	}
-
-	u := &url.URL{
-		Scheme: "https",
-		Host:   accountName + azureDatalakeDNSSuffix,
-		Path:   "/" + fileSystem + "/" + path,
-	}
-	return u.String(), nil
+	return adlsutil.PathURL(accountName, fileSystem, path)
 }
 
 func parentDirectory(path string) string {
@@ -657,7 +644,7 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		parsed.sasToken = u.Query().Get("sas_token")
 	case "adls", "adlsgen2", "azdatalake", "abfs", "abfss":
 		parsed.provider = ProviderAzureDatalake
-		parsed.accountName = parseAzureDatalakeAccountName(u)
+		parsed.accountName = adlsutil.ParseAccountName(u)
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
 	default:
@@ -667,22 +654,6 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 	parsed.layout = u.Query().Get("layout")
 
 	return parsed, nil
-}
-
-func parseAzureDatalakeAccountName(u *url.URL) string {
-	if accountName := u.Query().Get("account_name"); accountName != "" {
-		return accountName
-	}
-
-	host := u.Hostname()
-	if strings.HasSuffix(host, azureDatalakeDNSSuffix) {
-		return strings.TrimSuffix(host, azureDatalakeDNSSuffix)
-	}
-	if host != "" && !strings.Contains(host, ".") {
-		return host
-	}
-
-	return ""
 }
 
 func schemaEqualIgnoringMetadata(a, b *arrow.Schema) bool {

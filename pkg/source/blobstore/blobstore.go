@@ -29,6 +29,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -49,8 +50,7 @@ const (
 	ProviderAzureDatalake Provider = "adls"
 	ProviderSFTP          Provider = "sftp"
 
-	azureDatalakeDNSSuffix = ".dfs.core.windows.net"
-	defaultParallelism     = 5
+	defaultParallelism = 5
 )
 
 type FileFormat string
@@ -204,7 +204,7 @@ func createAzureDatalakeSourceClient(parsed *parsedBlobstoreURI) (*azureDatalake
 	if parsed.sasToken != "" {
 		sasToken := strings.TrimPrefix(parsed.sasToken, "?")
 		client.newFilesystemClient = func(fileSystemURL string) (*filesystem.Client, error) {
-			return filesystem.NewClientWithNoCredential(appendSASToken(fileSystemURL, sasToken), nil)
+			return filesystem.NewClientWithNoCredential(adlsutil.AppendSASToken(fileSystemURL, sasToken), nil)
 		}
 		return client, nil
 	}
@@ -217,16 +217,6 @@ func createAzureDatalakeSourceClient(parsed *parsedBlobstoreURI) (*azureDatalake
 		return filesystem.NewClient(fileSystemURL, cred, nil)
 	}
 	return client, nil
-}
-
-func appendSASToken(rawURL, sasToken string) string {
-	if sasToken == "" {
-		return rawURL
-	}
-	if strings.Contains(rawURL, "?") {
-		return rawURL + "&" + sasToken
-	}
-	return rawURL + "?" + sasToken
 }
 
 func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, error) {
@@ -870,7 +860,7 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		parsed.sasToken = u.Query().Get("sas_token")
 	case "adls", "adlsgen2", "azdatalake", "abfs", "abfss":
 		parsed.provider = ProviderAzureDatalake
-		parsed.accountName = parseAzureDatalakeAccountName(u)
+		parsed.accountName = adlsutil.ParseAccountName(u)
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
 	case "sftp":
@@ -891,29 +881,8 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 	return parsed, nil
 }
 
-func parseAzureDatalakeAccountName(u *url.URL) string {
-	if accountName := u.Query().Get("account_name"); accountName != "" {
-		return accountName
-	}
-
-	host := u.Hostname()
-	if strings.HasSuffix(host, azureDatalakeDNSSuffix) {
-		return strings.TrimSuffix(host, azureDatalakeDNSSuffix)
-	}
-	if host != "" && !strings.Contains(host, ".") {
-		return host
-	}
-
-	return ""
-}
-
 func buildAzureDatalakeFilesystemURL(accountName, fileSystem string) string {
-	u := &url.URL{
-		Scheme: "https",
-		Host:   accountName + azureDatalakeDNSSuffix,
-		Path:   "/" + strings.Trim(fileSystem, "/"),
-	}
-	return u.String()
+	return adlsutil.FilesystemURL(accountName, fileSystem)
 }
 
 func parseTableHints(s string) (FileFormat, string) {
