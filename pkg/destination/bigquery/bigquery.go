@@ -1250,7 +1250,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	changeConditions := buildChangeConditionsBigQuery(nonPKColumns, "t", "s")
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		onConditions[i] = fmt.Sprintf("t.`%s` = s.`%s`", pk, pk)
+		onConditions[i] = fmt.Sprintf("(t.`%s` = s.`%s` OR (t.`%s` IS NULL AND s.`%s` IS NULL))", pk, pk, pk, pk)
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
