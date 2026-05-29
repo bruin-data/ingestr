@@ -72,7 +72,8 @@ func buildSingleRowTxnStream(n int) (steps []replStep, targetLSN pglogrepl.LSN) 
 		return replStep{batch: batch, hadActivity: true, lsn: lsn}
 	}
 	for i := range n {
-		steps = append(steps,
+		steps = append(
+			steps,
 			next(nil),                    // Begin
 			next(nil),                    // Insert
 			next(makeRowBatch(int64(i))), // Commit
