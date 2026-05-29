@@ -32,7 +32,7 @@ jobs:
         run: make ${{ matrix.suite }}
 
   prepare-darwin:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest-8
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,7 +55,7 @@ jobs:
 
 
   prepare-linux:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest-8
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,7 +78,7 @@ jobs:
 
 
   release-unix:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     needs: [prepare-linux, prepare-darwin, integration-tests]
     steps:
       - uses: actions/checkout@v4
@@ -104,7 +104,7 @@ jobs:
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
 
   release-windows:
-    runs-on: windows-latest
+    runs-on: depot-windows-latest
     needs: [prepare-linux, prepare-darwin, integration-tests]
     defaults:
       run:
