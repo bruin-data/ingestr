@@ -2,6 +2,7 @@
 # requires-python = ">=3.9"
 # dependencies = [
 #     "dlt[postgres,duckdb,bigquery]==1.27.0",
+#     "dlt-verified-sources @ git+https://github.com/dlt-hub/verified-sources.git@75b3ec17eab99d0079d9f61b7f47fc8b899a5738",
 #     "pymysql",
 #     "pymongo",
 #     "sqlalchemy>=1.4,<2",
@@ -21,8 +22,8 @@ os.environ.setdefault("RUNTIME__LOG_LEVEL", "ERROR")
 os.environ.setdefault("RUNTIME__DLTHUB_TELEMETRY", "false")
 
 import dlt
-from bson import Decimal128, ObjectId
 from dlt.sources.sql_database import sql_table
+from sources.mongodb import mongodb
 from sqlalchemy import Float
 
 
@@ -38,50 +39,31 @@ def duckdb_path_from_uri(uri: str) -> str:
     return uri.split("duckdb:///", 1)[1]
 
 
-def parse_mongodb_table(table: str) -> tuple[str, str, list[dict] | None]:
-    collection_part, _, query_json = table.partition(":")
+def parse_mongodb_table(table: str) -> tuple[str, str, dict | None]:
+    collection_part, _, filter_json = table.partition(":")
     if "." not in collection_part:
         raise ValueError(f"MongoDB source table must be database.collection, got: {table}")
     database, collection = collection_part.split(".", 1)
-    pipeline = json.loads(query_json) if query_json else None
-    return database, collection, pipeline
+    if not filter_json:
+        return database, collection, None
+
+    filter_ = json.loads(filter_json)
+    if not isinstance(filter_, dict):
+        raise ValueError(
+            "The official dlt MongoDB source supports a JSON object filter after "
+            "the ':' suffix; aggregation pipelines are not supported."
+        )
+    return database, collection, filter_
 
 
-def normalize_bson(value):
-    if isinstance(value, ObjectId):
-        return str(value)
-    if isinstance(value, Decimal128):
-        return float(value.to_decimal())
-    if isinstance(value, dict):
-        return {k: normalize_bson(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [normalize_bson(v) for v in value]
-    return value
-
-
-def mongodb_resource(uri: str, table: str):
-    from pymongo import MongoClient
-
-    database, collection, pipeline = parse_mongodb_table(table)
-
-    @dlt.resource(name=collection)
-    def read_collection():
-        client = MongoClient(uri)
-        try:
-            coll = client[database][collection]
-            if pipeline:
-                cursor = coll.aggregate(pipeline, allowDiskUse=True)
-            else:
-                cursor = coll.find({}, no_cursor_timeout=True).batch_size(10000)
-            try:
-                for doc in cursor:
-                    yield normalize_bson(doc)
-            finally:
-                cursor.close()
-        finally:
-            client.close()
-
-    return read_collection
+def mongodb_source(uri: str, table: str):
+    database, collection, filter_ = parse_mongodb_table(table)
+    return mongodb(
+        connection_url=uri,
+        database=database,
+        collection_names=[collection],
+        filter_=filter_ or {},
+    )
 
 
 def main():
@@ -105,7 +87,7 @@ def main():
     source_uri = normalize_source_uri(args.source_uri)
 
     if source_uri.startswith(("mongodb://", "mongodb+srv://")):
-        source = mongodb_resource(source_uri, args.source_table)
+        source = mongodb_source(source_uri, args.source_table)
     else:
         def cast_doubles(table):
             for col in table.columns:
