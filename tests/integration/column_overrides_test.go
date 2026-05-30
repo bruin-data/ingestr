@@ -6,7 +6,9 @@ package integration
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +34,11 @@ const csvSparseRows = `id,name,email,age
 1,User 1,,25
 2,User 2,,30
 3,User 3,,35
+`
+
+const csvMaskRows = `id,name,email,ssn,age,notes
+1,Alice Smith,alice@example.com,123-45-6789,34,keep
+2,Bob Jones,bob@example.com,987-65-4321,37,keep2
 `
 
 func TestColumnOverrides_CSVToDuckDB(t *testing.T) {
@@ -92,6 +99,83 @@ func TestColumnOverrides_CSVToDuckDB_AppliesTypes(t *testing.T) {
 	assert.Equal(t, "VARCHAR", types["name"], "name should default to VARCHAR")
 	assert.Equal(t, "VARCHAR", types["email"], "email should default to VARCHAR")
 	assert.Equal(t, 3, readDuckDBRowCount(t, duckDBPath, "main.users"))
+}
+
+func TestColumnMasking_CSVToDuckDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	csvPath := filepath.Join(tmpDir, "users.csv")
+	require.NoError(t, os.WriteFile(csvPath, []byte(csvMaskRows), 0o644))
+
+	duckDBPath := filepath.Join(tmpDir, "out.duckdb")
+	cfg := &config.IngestConfig{
+		SourceURI:           fmt.Sprintf("csv://%s", csvPath),
+		SourceTable:         "users",
+		DestURI:             fmt.Sprintf("duckdb:///%s", duckDBPath),
+		DestTable:           "main.users",
+		IncrementalStrategy: config.StrategyReplace,
+		Mask: []string{
+			"email:hash",
+			"name:partial:1",
+			"ssn:redact",
+			"age:round:10",
+		},
+	}
+	require.NoError(t, cfg.Validate())
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	assert.Equal(t, 2, readDuckDBRowCount(t, duckDBPath, "main.users"))
+
+	types := readDuckDBColumnTypes(t, duckDBPath, "main.users")
+	assert.Equal(t, "VARCHAR", types["name"])
+	assert.Equal(t, "VARCHAR", types["email"])
+	assert.Equal(t, "VARCHAR", types["ssn"])
+	assert.Equal(t, "BIGINT", types["age"])
+
+	db := openDuckDBForTest(t, duckDBPath)
+	defer func() { _ = db.Close() }()
+
+	rows, err := db.Query("SELECT name, email, ssn, age, notes FROM main.users ORDER BY CAST(id AS INTEGER)")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	type maskedRow struct {
+		name  string
+		email string
+		ssn   string
+		age   int64
+		notes string
+	}
+
+	var got []maskedRow
+	for rows.Next() {
+		var r maskedRow
+		var name, email, ssn, notes []byte
+		require.NoError(t, rows.Scan(&name, &email, &ssn, &r.age, &notes))
+		r.name = string(name)
+		r.email = string(email)
+		r.ssn = string(ssn)
+		r.notes = string(notes)
+		got = append(got, r)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, got, 2)
+
+	assert.Equal(t, "A*********h", got[0].name)
+	assert.Equal(t, sha256Hex("alice@example.com"), got[0].email)
+	assert.Equal(t, "REDACTED", got[0].ssn)
+	assert.Equal(t, int64(30), got[0].age)
+	assert.Equal(t, "keep", got[0].notes)
+
+	assert.Equal(t, "B*******s", got[1].name)
+	assert.Equal(t, sha256Hex("bob@example.com"), got[1].email)
+	assert.Equal(t, "REDACTED", got[1].ssn)
+	assert.Equal(t, int64(40), got[1].age)
+	assert.Equal(t, "keep2", got[1].notes)
 }
 
 func TestColumnOverrides_EmptyCSV_NoOverrides_TableNotCreated(t *testing.T) {
@@ -371,4 +455,9 @@ func duckDBTableExists(t *testing.T, dbPath, schemaName, tableName string) bool 
 	).Scan(&count)
 	require.NoError(t, err)
 	return count > 0
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
