@@ -51,11 +51,11 @@ test: generate
 
 test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && go test -v -p 64 -parallel 64 -timeout 10m ./tests/integration/...
+	@if [ -f test.env ]; then . ./test.env; fi && go test -tags integration -v -p 64 -parallel 64 -timeout 10m ./tests/integration/...
 
 test-conformance:
 	@echo "$(OK_COLOR)==> Running destination standards tests$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && go test -v -timeout 10m ./tests/integration -run TestDestinations_
+	@if [ -f test.env ]; then . ./test.env; fi && go test -tags integration -v -timeout 10m ./tests/integration -run TestDestinations_
 
 
 # Format code and run linters (for local development)
