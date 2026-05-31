@@ -55,6 +55,11 @@ destinations:
     uri_from_env: BENCH_BQ_URI
     table: bench_data
 
+  snowflake:
+    type: snowflake
+    uri_from_env: BENCH_SNOWFLAKE_URI
+    table: public.bench_data
+
 scenarios:
   # Local (self-contained, no external dependencies)
   - source: local_postgres
@@ -104,6 +109,10 @@ scenarios:
   - source: local_duckdb
     destination: bigquery
 
+  # Snowflake (requires BENCH_SNOWFLAKE_URI env var)
+  - source: local_duckdb
+    destination: snowflake
+
 tools:
   gong:
     binary: bin/ingestr
@@ -130,3 +139,4 @@ tools:
       - source_type: duckdb
       - destination_type: duckdb
       - destination_type: bigquery
+      - destination_type: snowflake
