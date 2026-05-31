@@ -20,9 +20,11 @@ import fnmatch
 import glob
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+from urllib.parse import parse_qs, unquote, urlparse
 from datetime import datetime
 from pathlib import Path
 
@@ -109,6 +111,82 @@ def bq_parts_from_uri(uri: str) -> tuple[str, str]:
     return project, dataset
 
 
+def snowflake_connection_from_uri(uri: str) -> dict:
+    parsed = urlparse(uri)
+    path_parts = [unquote(p) for p in parsed.path.strip("/").split("/") if p]
+    query = {k: v[-1] for k, v in parse_qs(parsed.query).items() if v}
+
+    cfg = {
+        "type": "snowflake",
+        "account": parsed.hostname or "",
+    }
+    if parsed.username:
+        cfg["user"] = unquote(parsed.username)
+    if parsed.password:
+        cfg["password"] = unquote(parsed.password)
+    if path_parts:
+        cfg["database"] = path_parts[0]
+    if len(path_parts) > 1:
+        cfg["schema"] = path_parts[1]
+
+    for key in (
+        "warehouse", "role", "authenticator", "token",
+        "private_key", "private_key_passphrase",
+    ):
+        if query.get(key):
+            cfg[key] = query[key]
+
+    return cfg
+
+
+def snowflake_name(name: str) -> str:
+    """Return Snowflake's stored identifier name for unquoted benchmark config."""
+    if name.startswith('"') and name.endswith('"'):
+        return name[1:-1].replace('""', '"')
+    return name.upper()
+
+
+def quote_snowflake_identifier(name: str) -> str:
+    stored = snowflake_name(name)
+    return f'"{stored.replace(chr(34), chr(34) + chr(34))}"'
+
+
+def snowflake_full_table(schema: str, table: str) -> str:
+    schema = schema or "PUBLIC"
+    return f"{quote_snowflake_identifier(schema)}.{quote_snowflake_identifier(table)}"
+
+
+def snowflake_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def snowflake_sql_command(uri: str, sql: str, mode: str = "exec") -> str:
+    helper = "./benchmarks/scripts/snowflake_sql.go"
+    env_name = env_name_for_uri(uri)
+    if env_name:
+        return (
+            f"cd {shlex.quote(str(PROJECT_ROOT))} && "
+            f"go run {shlex.quote(helper)} -mode {shlex.quote(mode)} "
+            f"-uri-env {shlex.quote(env_name)} {shlex.quote(sql)}"
+        )
+    return (
+        f"cd {shlex.quote(str(PROJECT_ROOT))} && "
+        f"go run {shlex.quote(helper)} -mode {shlex.quote(mode)} "
+        f"{shlex.quote(uri)} {shlex.quote(sql)}"
+    )
+
+
+def run_snowflake_sql(uri: str, sql: str, mode: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "_BENCH_SNOWFLAKE_SQL_URI": uri}
+    return subprocess.run(
+        ["go", "run", "./benchmarks/scripts/snowflake_sql.go",
+         "-mode", mode, "-uri-env", "_BENCH_SNOWFLAKE_SQL_URI", sql],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True, text=True, timeout=120,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
@@ -187,6 +265,33 @@ def translate_uri(uri: str, tool_cfg: dict) -> str:
     return uri
 
 
+def env_name_for_uri(uri: str) -> str | None:
+    for name, value in os.environ.items():
+        if value == uri and (
+            name.startswith("BENCH_")
+            or name.startswith("SNOWFLAKE_")
+            or name.endswith("_URI")
+        ):
+            return name
+    return None
+
+
+def shell_uri_arg(uri: str, tool_cfg: dict | None = None) -> str:
+    env_name = env_name_for_uri(uri)
+    if env_name and not (tool_cfg or {}).get("uri_scheme_overrides"):
+        return f'"${env_name}"'
+    if tool_cfg:
+        uri = translate_uri(uri, tool_cfg)
+    return shlex.quote(uri)
+
+
+def uri_option(flag: str, uri: str, tool_cfg: dict | None = None) -> str:
+    env_name = env_name_for_uri(uri)
+    if env_name and not (tool_cfg or {}).get("uri_scheme_overrides"):
+        return f"{flag}-env {shlex.quote(env_name)}"
+    return f"{flag} {shell_uri_arg(uri, tool_cfg)}"
+
+
 def sling_env_name(role: str, name: str) -> str:
     return f"SLING_{role}_{name.upper()}"
 
@@ -199,6 +304,8 @@ def sling_connection_value(uri: str, db_type: str) -> str:
         if creds:
             cfg["gc_key_file"] = creds
         return json.dumps(cfg)
+    if db_type == "snowflake":
+        return json.dumps(snowflake_connection_from_uri(uri))
     return uri
 
 
@@ -213,9 +320,9 @@ def build_tool_command(
         binary = PROJECT_ROOT / tool_cfg.get("binary", "bin/gong")
         return (
             f"INGESTR_DISABLE_TELEMETRY=1 DISABLE_TELEMETRY=1 '{binary}' ingest"
-            f" --source-uri '{src_uri}'"
+            f" --source-uri {shell_uri_arg(src_uri)}"
             f" --source-table '{src_table}'"
-            f" --dest-uri '{dst_uri}'"
+            f" --dest-uri {shell_uri_arg(dst_uri)}"
             f" --dest-table '{dst_table}'"
             f" --incremental-strategy replace --progress log --yes"
         )
@@ -226,14 +333,12 @@ def build_tool_command(
             "uv tool run --python 3.11 ingestr@0.14.141 ingest",
         )
         prefix = f"INGESTR_DISABLE_TELEMETRY=1 DISABLE_TELEMETRY=1 {prefix}"
-        tsrc = translate_uri(src_uri, tool_cfg)
-        tdst = translate_uri(dst_uri, tool_cfg)
         extra = tool_cfg.get("extra_args_by_source", {}).get(src_type, "")
         parts = [
             prefix,
-            f"--source-uri '{tsrc}'",
+            f"--source-uri {shell_uri_arg(src_uri, tool_cfg)}",
             f"--source-table '{src_table}'",
-            f"--dest-uri '{tdst}'",
+            f"--dest-uri {shell_uri_arg(dst_uri, tool_cfg)}",
             f"--dest-table '{dst_table}'",
             "--yes --full-refresh",
         ]
@@ -266,9 +371,9 @@ def build_tool_command(
         script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_dlt.py")
         return (
             f"RUNTIME__DLTHUB_TELEMETRY=false uv run '{script}'"
-            f" --source-uri '{src_uri}'"
+            f" {uri_option('--source-uri', src_uri)}"
             f" --source-table '{src_table}'"
-            f" --dest-uri '{dst_uri}'"
+            f" {uri_option('--dest-uri', dst_uri)}"
             f" --dest-table '{dst_table}'"
         )
 
@@ -276,9 +381,9 @@ def build_tool_command(
         script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_airbyte.py")
         return (
             f"AIRBYTE_ANALYTICS_DISABLED=1 DO_NOT_TRACK=1 uv run '{script}'"
-            f" --source-uri '{src_uri}'"
+            f" --source-uri {shell_uri_arg(src_uri)}"
             f" --source-table '{src_table}'"
-            f" --dest-uri '{dst_uri}'"
+            f" --dest-uri {shell_uri_arg(dst_uri)}"
             f" --dest-table '{dst_table}'"
         )
 
@@ -323,6 +428,15 @@ def build_prepare_command(
             for t in tables
         ]
         return "; ".join(cmds) + "; true"
+
+    if dst_type == "snowflake":
+        schema, table = parse_table_parts(dst_table)
+        tables = [table, "_dlt_loads", "_dlt_version", "_dlt_pipeline_state"]
+        drops = [
+            f"DROP TABLE IF EXISTS {snowflake_full_table(schema, t)}"
+            for t in tables
+        ]
+        return snowflake_sql_command(dst_uri, "; ".join(drops), mode="exec")
 
     raise ValueError(f"Unknown destination type: {dst_type}")
 
@@ -591,6 +705,34 @@ def query_destination(dst_type: str, dst_uri: str, table: str, schema: str, quer
             lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
             if query_type == "columns":
                 return lines[1:] if len(lines) > 1 else []
+            return lines[-1] if lines else None
+
+        elif dst_type == "snowflake":
+            schema = schema or "PUBLIC"
+            full_table = snowflake_full_table(schema, table)
+            if query_type == "count":
+                sql = f"SELECT COUNT(*) FROM {full_table}"
+            elif query_type == "sum_id":
+                sql = f"SELECT COALESCE(SUM(ID), 0) FROM {full_table}"
+            elif query_type == "columns":
+                schema_name = snowflake_name(schema)
+                table_name = snowflake_name(table)
+                sql = (
+                    "SELECT LOWER(COLUMN_NAME) FROM INFORMATION_SCHEMA.COLUMNS "
+                    f"WHERE TABLE_SCHEMA = {snowflake_literal(schema_name)} "
+                    f"AND TABLE_NAME = {snowflake_literal(table_name)} "
+                    "ORDER BY ORDINAL_POSITION"
+                )
+            else:
+                return None
+
+            mode = "list" if query_type == "columns" else "scalar"
+            result = run_snowflake_sql(dst_uri, sql, mode)
+            if result.returncode != 0:
+                return None
+            lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+            if query_type == "columns":
+                return lines
             return lines[-1] if lines else None
 
     except Exception:

@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#     "dlt[postgres,duckdb,bigquery]==1.27.0",
+#     "dlt[postgres,duckdb,bigquery,snowflake]==1.27.0",
 #     "dlt-verified-sources @ git+https://github.com/dlt-hub/verified-sources.git@75b3ec17eab99d0079d9f61b7f47fc8b899a5738",
 #     "pymysql",
 #     "pymongo",
@@ -68,11 +68,22 @@ def mongodb_source(uri: str, table: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source-uri", required=True)
+    parser.add_argument("--source-uri")
+    parser.add_argument("--source-uri-env")
     parser.add_argument("--source-table", required=True)
-    parser.add_argument("--dest-uri", required=True)
+    parser.add_argument("--dest-uri")
+    parser.add_argument("--dest-uri-env")
     parser.add_argument("--dest-table", required=True)
     args = parser.parse_args()
+
+    if args.source_uri_env:
+        args.source_uri = os.environ.get(args.source_uri_env)
+    if args.dest_uri_env:
+        args.dest_uri = os.environ.get(args.dest_uri_env)
+    if not args.source_uri:
+        raise ValueError("--source-uri or --source-uri-env is required")
+    if not args.dest_uri:
+        raise ValueError("--dest-uri or --dest-uri-env is required")
 
     if "." in args.source_table:
         src_schema, src_table = args.source_table.split(".", 1)
@@ -118,6 +129,8 @@ def main():
         if creds:
             bq_kwargs["credentials"] = creds
         destination = dlt.destinations.bigquery(**bq_kwargs)
+    elif dest_uri.startswith("snowflake://"):
+        destination = dlt.destinations.snowflake(credentials=dest_uri)
     else:
         raise ValueError(f"Unsupported destination: {dest_uri}")
 
