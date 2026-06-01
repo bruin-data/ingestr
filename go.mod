@@ -8,6 +8,7 @@ require (
 	cloud.google.com/go/bigquery v1.72.0
 	cloud.google.com/go/spanner v1.87.0
 	cloud.google.com/go/storage v1.56.0
+	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.3
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake v1.4.4
@@ -15,6 +16,7 @@ require (
 	github.com/InfluxCommunity/influxdb3-go/v2 v2.13.0
 	github.com/SAP/go-hdb v1.16.2
 	github.com/alecthomas/chroma/v2 v2.23.1
+	github.com/aliyun/aliyun-odps-go-sdk v0.4.22
 	github.com/apache/arrow-adbc/go/adbc v1.9.0
 	github.com/apache/arrow-go/v18 v18.5.1
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
@@ -96,7 +98,6 @@ require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 // indirect
 	github.com/99designs/keyring v1.2.2 // indirect
-	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0 // indirect
@@ -110,6 +111,9 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/ProtonMail/gopenpgp/v3 v3.3.0 // indirect
+	github.com/alibabacloud-go/debug v1.0.1 // indirect
+	github.com/alibabacloud-go/tea v1.2.2 // indirect
+	github.com/aliyun/credentials-go v1.3.10 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/apache/arrow/go/v15 v15.0.2 // indirect
 	github.com/apache/thrift v0.22.0 // indirect

@@ -37,6 +37,10 @@ env:
 jobs:
   test:
     runs-on: depot-ubuntu-24.04-4
+    env:
+      # DuckDB's ADBC driver can crash when several package test binaries load it
+      # at the same time under race builds.
+      GOFLAGS: "-p=1"
     steps:
       - uses: actions/checkout@v4
 
