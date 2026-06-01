@@ -121,4 +121,14 @@ jobs:
         run: make setup
       - name: Check the formatting and linting
         run: make lint-ci
-  
+
+  licenses:
+    runs-on: depot-ubuntu-24.04-4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: "go.sum"
+      - name: Check third-party license notices
+        run: make licenses-check

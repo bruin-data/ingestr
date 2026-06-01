@@ -2,12 +2,14 @@ NAME=ingestr$(shell if [ "$(shell go env GOOS)" = "windows" ]; then echo .exe; f
 BUILD_DIR ?= bin
 BUILD_SRC=.
 VERSION ?= dev
+GO_LICENSES_MODULE ?= github.com/google/go-licenses@v1.6.0
+LICENSE_DISALLOWED_TYPES ?= forbidden,restricted,unknown
 
 NO_COLOR=\033[0m
 OK_COLOR=\033[32;01m
 ERROR_COLOR=\033[31;01m
 
-.PHONY: all clean test build deps generate lint format lint-ci format-ci test-ci setup
+.PHONY: all clean test build deps generate licenses licenses-check lint format lint-ci format-ci test-ci setup
 
 all: clean deps test build
 
@@ -31,6 +33,14 @@ tools-update:
 generate:
 	@echo "$(OK_COLOR)==> Generating registry imports$(NO_COLOR)"
 	@go run ./cmd/genregistry
+
+licenses: generate
+	@echo "$(OK_COLOR)==> Updating third-party license notices$(NO_COLOR)"
+	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" ./hack/update-third-party-licenses.sh
+
+licenses-check: generate
+	@echo "$(OK_COLOR)==> Checking third-party license notices$(NO_COLOR)"
+	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" ./hack/update-third-party-licenses.sh --check
 
 
 build: generate deps
