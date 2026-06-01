@@ -20,7 +20,8 @@ func (d *Dialect) Name() string {
 }
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
-	return fmt.Sprintf("ALTER TABLE %s ADD %s %s",
+	return fmt.Sprintf(
+		"ALTER TABLE %s ADD %s %s",
 		quoteTableLiteral(table),
 		cassandrautil.QuoteIdentifier(col.Name),
 		MapDataTypeToCassandra(col),

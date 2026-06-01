@@ -173,7 +173,8 @@ func formatPrimaryKey(primaryKeys []string) string {
 	for _, pk := range primaryKeys[1:] {
 		clustering = append(clustering, cassandrautil.QuoteIdentifier(pk))
 	}
-	return fmt.Sprintf("PRIMARY KEY ((%s), %s)",
+	return fmt.Sprintf(
+		"PRIMARY KEY ((%s), %s)",
 		cassandrautil.QuoteIdentifier(primaryKeys[0]),
 		strings.Join(clustering, ", "),
 	)
@@ -274,7 +275,8 @@ func (d *CassandraDestination) writeRecordBatch(ctx context.Context, tableRef st
 		colNames[i] = cassandrautil.QuoteIdentifier(record.ColumnName(i))
 		placeholders[i] = "?"
 	}
-	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) VALUES (%s)",
 		tableRef,
 		strings.Join(colNames, ", "),
 		strings.Join(placeholders, ", "),
@@ -324,7 +326,8 @@ func (d *CassandraDestination) MergeTable(ctx context.Context, opts destination.
 	}
 
 	selectSQL := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), sourceRef)
-	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) VALUES (%s)",
 		targetRef,
 		strings.Join(colNames, ", "),
 		strings.Join(placeholders, ", "),
