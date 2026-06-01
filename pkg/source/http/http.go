@@ -293,7 +293,7 @@ func readCSV(_ context.Context, reader io.Reader, results chan<- source.RecordBa
 }
 
 func buildSchemaColumns(headers []string, overrides schemaevolution.ColumnOverrides, columnsStr string) []schema.Column {
-	pairs := strings.Split(columnsStr, ",")
+	pairs := schemaevolution.SplitColumnPairs(columnsStr)
 	orderedNames := make([]string, 0, len(pairs))
 	for _, pair := range pairs {
 		pair = strings.TrimSpace(pair)
@@ -325,7 +325,7 @@ func buildSchemaColumns(headers []string, overrides schemaevolution.ColumnOverri
 	return cols
 }
 
-// For headerless CSV, the column names in --columns may be in the form "col1:type:read_name" or "col1:type" or just "col1". 
+// For headerless CSV, the column names in --columns may be in the form "col1:type:read_name" or "col1:type" or just "col1".
 // If "read_name" is provided, it is used for matching overrides to the actual column; otherwise the original column name is used.
 func overrideEntryReadName(pair string) string {
 	pair = strings.TrimSpace(pair)
@@ -560,7 +560,7 @@ func excludeArrowColumns(rec arrow.RecordBatch, exclude map[string]struct{}) arr
 func parseColumnNames(columns string, numCols int) []string {
 	headers := make([]string, numCols)
 	if columns != "" {
-		parts := strings.Split(columns, ",")
+		parts := schemaevolution.SplitColumnPairs(columns)
 		for i := 0; i < numCols; i++ {
 			if i < len(parts) {
 				name := overrideEntryReadName(strings.TrimSpace(parts[i]))

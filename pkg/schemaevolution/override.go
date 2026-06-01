@@ -101,7 +101,7 @@ func ParseColumnOverrides(input string) (ColumnOverrides, error) {
 	}
 
 	overrides := make(ColumnOverrides)
-	pairs := splitColumnPairs(input)
+	pairs := SplitColumnPairs(input)
 
 	for _, pair := range pairs {
 		pair = strings.TrimSpace(pair)
@@ -124,9 +124,9 @@ func ParseColumnOverrides(input string) (ColumnOverrides, error) {
 	return overrides, nil
 }
 
-// splitColumnPairs splits the input by commas, but respects parentheses.
+// SplitColumnPairs splits the input by commas, but respects parentheses.
 // E.g., "a:decimal(10,2),b:int" -> ["a:decimal(10,2)", "b:int"]
-func splitColumnPairs(input string) []string {
+func SplitColumnPairs(input string) []string {
 	var pairs []string
 	var current strings.Builder
 	depth := 0
