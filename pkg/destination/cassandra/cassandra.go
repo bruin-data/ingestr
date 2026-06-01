@@ -143,10 +143,10 @@ func (d *CassandraDestination) ensureKeyspace(ctx context.Context, keyspace stri
 
 func buildCreateTableSQL(tableRef string, columns []schema.Column, primaryKeys []string) (string, error) {
 	if len(primaryKeys) == 0 {
-		return "", fmt.Errorf("Cassandra requires at least one primary key; pass --primary-key")
+		return "", fmt.Errorf("cassandra requires at least one primary key; pass --primary-key")
 	}
 	if len(columns) == 0 {
-		return "", fmt.Errorf("Cassandra table requires at least one column")
+		return "", fmt.Errorf("cassandra table requires at least one column")
 	}
 
 	colSet := make(map[string]bool, len(columns))
@@ -508,5 +508,7 @@ func arrowToCassandra(arr arrow.Array, idx int) interface{} {
 	}
 }
 
-var _ destination.Destination = (*CassandraDestination)(nil)
-var _ destination.TruncateCapable = (*CassandraDestination)(nil)
+var (
+	_ destination.Destination     = (*CassandraDestination)(nil)
+	_ destination.TruncateCapable = (*CassandraDestination)(nil)
+)

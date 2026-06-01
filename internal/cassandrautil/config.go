@@ -176,7 +176,7 @@ func NewCluster(cfg *Config) *gocql.ClusterConfig {
 func parseHosts(raw string, defaultPort int) ([]string, int, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil, 0, fmt.Errorf("Cassandra URI must include at least one host")
+		return nil, 0, fmt.Errorf("cassandra URI must include at least one host")
 	}
 
 	port := defaultPort
@@ -199,7 +199,7 @@ func parseHosts(raw string, defaultPort int) ([]string, int, error) {
 		hosts = append(hosts, host)
 	}
 	if len(hosts) == 0 {
-		return nil, 0, fmt.Errorf("Cassandra URI must include at least one host")
+		return nil, 0, fmt.Errorf("cassandra URI must include at least one host")
 	}
 	return hosts, port, nil
 }

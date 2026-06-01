@@ -37,7 +37,7 @@ func startCassandraContainerRaw(ctx context.Context) (testcontainers.Container, 
 			wait.ForAll(
 				wait.ForLog("Startup complete"),
 				wait.ForListeningPort("9042/tcp"),
-			).WithStartupTimeout(3*time.Minute),
+			).WithDeadline(3*time.Minute),
 		),
 	)
 	if err != nil {

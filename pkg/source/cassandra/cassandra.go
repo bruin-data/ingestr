@@ -78,7 +78,7 @@ func (s *CassandraSource) GetTable(ctx context.Context, req source.TableRequest)
 		return nil, err
 	}
 	if tableSchema == nil {
-		return nil, fmt.Errorf("Cassandra table %q not found", req.Name)
+		return nil, fmt.Errorf("cassandra table %q not found", req.Name)
 	}
 
 	pks := req.PrimaryKeys

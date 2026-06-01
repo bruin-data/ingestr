@@ -42,16 +42,16 @@ type cratedbEnv struct {
 }
 
 var (
-	pgSource       postgresEnv
-	pgDest         postgresEnv
-	chDest         clickhouseEnv
-	mysqlDest      mysqlEnv
-	mssqlDest      mssqlEnv
-	cratedbDest    cratedbEnv
-	minioShared    minioEnv
-	dynamoDBDest   dynamoDBEnv
+	pgSource        postgresEnv
+	pgDest          postgresEnv
+	chDest          clickhouseEnv
+	mysqlDest       mysqlEnv
+	mssqlDest       mssqlEnv
+	cratedbDest     cratedbEnv
+	minioShared     minioEnv
+	dynamoDBDest    dynamoDBEnv
 	cassandraShared cassandraEnv
-	rabbitmqShared rabbitmqEnv
+	rabbitmqShared  rabbitmqEnv
 )
 
 func TestMain(m *testing.M) {

@@ -24,7 +24,7 @@ func ResolveTableName(defaultKeyspace, table string) (string, string, error) {
 	keyspace := normalizeIdentifierSegment(defaultKeyspace)
 	tableName := normalizeIdentifierSegment(table)
 	if keyspace == "" {
-		return "", "", fmt.Errorf("Cassandra keyspace is required: include it in the URI path or use keyspace.table")
+		return "", "", fmt.Errorf("cassandra keyspace is required: include it in the URI path or use keyspace.table")
 	}
 	if tableName == "" {
 		return "", "", fmt.Errorf("invalid Cassandra table name %q", table)
