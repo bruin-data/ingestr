@@ -153,10 +153,15 @@ func (s *NetSuiteSource) readQuery(ctx context.Context, query string, opts sourc
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to query NetSuite SuiteAnalytics Connect: %w", err)}
 			return
 		}
-		defer rows.Close()
 
-		if err := streamRows(ctx, rows, pageSize, opts.Limit, opts.ExcludeColumns, results); err != nil {
-			results <- source.RecordBatchResult{Err: err}
+		readErr := streamRows(ctx, rows, pageSize, opts.Limit, opts.ExcludeColumns, results)
+		closeErr := rows.Close()
+		if readErr != nil {
+			results <- source.RecordBatchResult{Err: readErr}
+			return
+		}
+		if closeErr != nil {
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to close NetSuite SuiteAnalytics Connect rows: %w", closeErr)}
 			return
 		}
 		if err := rows.Err(); err != nil {
