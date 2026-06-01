@@ -101,7 +101,7 @@ func readParquetBytes(ctx context.Context, data []byte) ([]arrow.RecordBatch, er
 	if err != nil {
 		return nil, err
 	}
-	defer pr.Close()
+	defer func() { _ = pr.Close() }()
 
 	fr, err := pqarrow.NewFileReader(pr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
 	if err != nil {

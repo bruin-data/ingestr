@@ -152,7 +152,7 @@ func (c *DataLakeClient) Download(ctx context.Context, fileSystem, path string) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to download %s: %w", path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", path, err)
