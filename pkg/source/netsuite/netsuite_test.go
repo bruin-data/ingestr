@@ -2,20 +2,11 @@ package netsuite
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/json"
-	"encoding/pem"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"os"
-	"sync/atomic"
+	"database/sql"
 	"testing"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,34 +14,32 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
-func TestParseURIWithAccessToken(t *testing.T) {
-	cfg, err := parseURI("netsuite://123456?access_token=test-token")
+func TestParseURIWithRawODBCConnectionString(t *testing.T) {
+	cfg, err := parseURI("netsuite+odbc://?odbc_connect_string=DSN%3DNetSuite2%3BUID%3Duser%3BPWD%3Dsecret%3B")
 	require.NoError(t, err)
 
-	assert.Equal(t, "123456", cfg.accountID)
-	assert.Equal(t, "https://123456.suitetalk.api.netsuite.com", cfg.baseURL)
-	assert.Equal(t, "test-token", cfg.accessToken)
+	assert.Equal(t, "DSN=NetSuite2;UID=user;PWD=secret;", cfg.connString)
 }
 
-func TestParseURIWithSandboxAccountID(t *testing.T) {
-	cfg, err := parseURI("netsuite://123456_SB1?access_token=test-token")
+func TestParseURIWithDSN(t *testing.T) {
+	cfg, err := parseURI("netsuite://?dsn=NetSuite2&username=user@example.com&password=secret&account_id=123456_SB1&role_id=57")
 	require.NoError(t, err)
 
-	assert.Equal(t, "123456_SB1", cfg.accountID)
-	assert.Equal(t, "https://123456-sb1.suitetalk.api.netsuite.com", cfg.baseURL)
+	assert.Equal(t, "DSN=NetSuite2;UID=user@example.com;PWD=secret;CustomProperties={AccountID=123456_SB1;RoleID=57};", cfg.connString)
 }
 
-func TestParseURIWithClientCredentials(t *testing.T) {
-	keyPath := writeTestPrivateKey(t)
-
-	cfg, err := parseURI("netsuite://?account_id=123456&client_id=client-1&kid=cert-1&private_key_path=" + url.QueryEscape(keyPath) + "&scope=rest_webservices,restlets")
+func TestParseURIWithDriverConnectionString(t *testing.T) {
+	cfg, err := parseURI("netsuite://123456_SB1?driver=NetSuite+ODBC+Drivers+64bit&role_id=57&username=user@example.com&password=secret&static_schema=true&custom_properties=ApplicationName%3Dingestr")
 	require.NoError(t, err)
 
-	assert.Equal(t, "123456", cfg.accountID)
-	assert.Equal(t, "client-1", cfg.clientID)
-	assert.Equal(t, "cert-1", cfg.certificateID)
-	assert.Equal(t, []string{"rest_webservices", "restlets"}, cfg.scopes)
-	require.NotEmpty(t, cfg.privateKeyPEM)
+	assert.Equal(t, "DRIVER={NetSuite ODBC Drivers 64bit};Host=123456-sb1.connect.api.netsuite.com;Port=1708;Encrypted=1;AllowSinglePacketLogout=1;SDSN=NetSuite2.com;UID=user@example.com;PWD=secret;CustomProperties={AccountID=123456_SB1;RoleID=57;StaticSchema=1;ApplicationName=ingestr};", cfg.connString)
+}
+
+func TestParseURIWithHostOverrideAndUserInfo(t *testing.T) {
+	cfg, err := parseURI("netsuite+odbc://user:secret@example.connect.api.netsuite.com:1709?driver=%7BNetSuite+ODBC+Drivers+64bit%7D&server_data_source=NetSuite.com&account_id=123456&role_id=3&encrypted=ssl")
+	require.NoError(t, err)
+
+	assert.Equal(t, "DRIVER={NetSuite ODBC Drivers 64bit};Host=example.connect.api.netsuite.com;Port=1709;Encrypted=ssl;AllowSinglePacketLogout=1;SDSN=NetSuite.com;UID=user;PWD=secret;CustomProperties={AccountID=123456;RoleID=3};", cfg.connString)
 }
 
 func TestParseURIErrors(t *testing.T) {
@@ -58,12 +47,11 @@ func TestParseURIErrors(t *testing.T) {
 		name string
 		uri  string
 	}{
-		{"wrong scheme", "https://123456?access_token=x"},
-		{"missing account without base URL", "netsuite://?access_token=x"},
-		{"missing auth", "netsuite://123456"},
-		{"missing certificate", "netsuite://123456?client_id=client-1&private_key=key"},
-		{"missing private key", "netsuite://123456?client_id=client-1&certificate_id=cert-1"},
-		{"invalid base URL", "netsuite://?base_url=not-a-url&access_token=x"},
+		{"wrong scheme", "https://123456?username=u&password=p&dsn=x"},
+		{"missing dsn or driver", "netsuite://123456?role_id=57&username=u&password=p"},
+		{"missing account or host", "netsuite://?driver=NetSuite&role_id=57&username=u&password=p"},
+		{"missing role", "netsuite://123456?driver=NetSuite&username=u&password=p"},
+		{"bad port", "netsuite://123456?driver=NetSuite&role_id=57&username=u&password=p&port=abc"},
 	}
 
 	for _, tt := range tests {
@@ -74,17 +62,17 @@ func TestParseURIErrors(t *testing.T) {
 	}
 }
 
-func TestBuildSuiteQL(t *testing.T) {
-	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	end := time.Date(2026, 1, 3, 3, 4, 5, 0, time.UTC)
+func TestBuildSuiteAnalyticsQuery(t *testing.T) {
+	start := time.Date(2026, 1, 2, 3, 4, 5, 123456789, time.UTC)
+	end := time.Date(2026, 1, 3, 3, 4, 5, 987654321, time.UTC)
 
-	got := buildSuiteQL("transaction", source.ReadOptions{
+	got := buildSuiteAnalyticsQuery("transaction", source.ReadOptions{
 		IncrementalKey: "lastmodifieddate",
 		IntervalStart:  &start,
 		IntervalEnd:    &end,
 	})
 
-	assert.Equal(t, `SELECT * FROM transaction WHERE lastmodifieddate >= TO_TIMESTAMP_TZ('2026-01-02T03:04:05.000 +00:00', 'YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM') AND lastmodifieddate < TO_TIMESTAMP_TZ('2026-01-03T03:04:05.000 +00:00', 'YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM') ORDER BY lastmodifieddate ASC`, got)
+	assert.Equal(t, "SELECT * FROM transaction WHERE lastmodifieddate >= TO_TIMESTAMP('2026-01-02 03:04:05.123456789', 'YYYY-MM-DD HH24:MI:SSxFF') AND lastmodifieddate < TO_TIMESTAMP('2026-01-03 03:04:05.987654321', 'YYYY-MM-DD HH24:MI:SSxFF') ORDER BY lastmodifieddate ASC", got)
 }
 
 func TestNetSuiteSourceGetTable(t *testing.T) {
@@ -104,54 +92,18 @@ func TestNetSuiteSourceGetTable(t *testing.T) {
 	assert.False(t, table.HasKnownSchema())
 }
 
-func TestNetSuiteSourceReadUsesSuiteQLPagination(t *testing.T) {
-	var requestCount atomic.Int32
+func TestNetSuiteSourceReadWithODBCDB(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/services/rest/query/v1/suiteql", r.URL.Path)
-		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
-		assert.Equal(t, "transient", r.Header.Get("Prefer"))
-		assert.Equal(t, "2", r.URL.Query().Get("limit"))
+	mockRows := sqlmock.NewRows([]string{"id", "name"}).
+		AddRow("1", "Acme").
+		AddRow("2", "Globex").
+		AddRow("3", "Umbrella")
+	mock.ExpectQuery("SELECT * FROM customer").WillReturnRows(mockRows)
 
-		var body map[string]string
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-		assert.Equal(t, "SELECT * FROM customer", body["q"])
-
-		w.Header().Set("Content-Type", "application/json")
-		call := requestCount.Add(1)
-		if call == 1 {
-			assert.Equal(t, "0", r.URL.Query().Get("offset"))
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"count":        2,
-				"offset":       0,
-				"hasMore":      true,
-				"totalResults": 3,
-				"items": []map[string]interface{}{
-					{"links": []interface{}{}, "id": "1", "name": "Acme"},
-					{"links": []interface{}{}, "id": "2", "name": "Globex"},
-				},
-			})
-			return
-		}
-
-		assert.Equal(t, "2", r.URL.Query().Get("offset"))
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"count":        1,
-			"offset":       2,
-			"hasMore":      false,
-			"totalResults": 3,
-			"items": []map[string]interface{}{
-				{"links": []interface{}{}, "id": "3", "name": "Umbrella"},
-			},
-		})
-	}))
-	defer server.Close()
-
-	s := &NetSuiteSource{
-		client: NewClient(server.URL, NewStaticTokenProvider("test-token")),
-	}
-	defer func() { _ = s.Close(context.Background()) }()
-
+	s := &NetSuiteSource{db: db}
 	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "customer"})
 	require.NoError(t, err)
 
@@ -164,135 +116,27 @@ func TestNetSuiteSourceReadUsesSuiteQLPagination(t *testing.T) {
 	assert.Equal(t, int64(1), batches[1].Batch.NumRows())
 	assert.True(t, hasColumn(batches[0], "id"))
 	assert.True(t, hasColumn(batches[0], "name"))
-	assert.False(t, hasColumn(batches[0], "links"))
-	assert.Equal(t, int32(2), requestCount.Load())
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestNetSuiteSourceReadHonorsLimit(t *testing.T) {
-	var requestCount atomic.Int32
+func TestNetSuiteSourceReadQueryError(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount.Add(1)
-		assert.Equal(t, "2", r.URL.Query().Get("limit"))
-		assert.Equal(t, "0", r.URL.Query().Get("offset"))
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"count":        2,
-			"offset":       0,
-			"hasMore":      true,
-			"totalResults": 10,
-			"items": []map[string]interface{}{
-				{"id": "1"},
-				{"id": "2"},
-			},
-		})
-	}))
-	defer server.Close()
+	mock.ExpectQuery("SELECT * FROM customer").WillReturnError(sql.ErrConnDone)
 
-	s := &NetSuiteSource{
-		client: NewClient(server.URL, NewStaticTokenProvider("test-token")),
+	s := &NetSuiteSource{db: db}
+	ch, err := s.readTable(context.Background(), "customer", source.ReadOptions{})
+	require.NoError(t, err)
+
+	var gotErr error
+	for result := range ch {
+		gotErr = result.Err
 	}
-	defer func() { _ = s.Close(context.Background()) }()
-
-	ch, err := s.readTable(context.Background(), "customer", source.ReadOptions{Limit: 2})
-	require.NoError(t, err)
-
-	batches := collectResults(t, ch)
-	require.Len(t, batches, 1)
-	assert.Equal(t, int64(2), batches[0].Batch.NumRows())
-	assert.Equal(t, int32(1), requestCount.Load())
-}
-
-func TestExecuteCustomQueryTrimsSemicolon(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]string
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-		assert.Equal(t, "SELECT id FROM customer", body["q"])
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"count":        0,
-			"offset":       0,
-			"hasMore":      false,
-			"totalResults": 0,
-			"items":        []map[string]interface{}{},
-		})
-	}))
-	defer server.Close()
-
-	s := &NetSuiteSource{
-		client: NewClient(server.URL, NewStaticTokenProvider("test-token")),
-	}
-	defer func() { _ = s.Close(context.Background()) }()
-
-	ch, err := s.ExecuteCustomQuery(context.Background(), "SELECT id FROM customer;", source.ReadOptions{})
-	require.NoError(t, err)
-	collectResults(t, ch)
-}
-
-func TestClientCredentialsProviderCachesToken(t *testing.T) {
-	keyPath := writeTestPrivateKey(t)
-	privateKeyPEM, err := os.ReadFile(keyPath)
-	require.NoError(t, err)
-
-	var requestCount atomic.Int32
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount.Add(1)
-		require.NoError(t, r.ParseForm())
-		assert.Equal(t, "client_credentials", r.Form.Get("grant_type"))
-		assert.Equal(t, clientAssertionType, r.Form.Get("client_assertion_type"))
-
-		parser := jwt.NewParser()
-		token, _, err := parser.ParseUnverified(r.Form.Get("client_assertion"), jwt.MapClaims{})
-		require.NoError(t, err)
-		assert.Equal(t, "cert-1", token.Header["kid"])
-		claims := token.Claims.(jwt.MapClaims)
-		assert.Equal(t, "client-1", claims["iss"])
-		assert.Equal(t, server.URL+tokenPath, claims["aud"])
-		assert.Equal(t, []interface{}{"rest_webservices"}, claims["scope"])
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token": "generated-token",
-			"expires_in":   "3600",
-			"token_type":   "Bearer",
-		})
-	}))
-	defer server.Close()
-
-	provider, err := NewClientCredentialsProvider(ClientCredentialsConfig{
-		TokenURL:      server.URL + tokenPath,
-		ClientID:      "client-1",
-		CertificateID: "cert-1",
-		PrivateKeyPEM: privateKeyPEM,
-		Scopes:        []string{"rest_webservices"},
-		Algorithm:     "PS256",
-	})
-	require.NoError(t, err)
-	defer func() { _ = provider.Close() }()
-
-	token, err := provider.AccessToken(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, "generated-token", token)
-
-	token, err = provider.AccessToken(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, "generated-token", token)
-	assert.Equal(t, int32(1), requestCount.Load())
-}
-
-func writeTestPrivateKey(t *testing.T) string {
-	t.Helper()
-
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-
-	data := x509.MarshalPKCS1PrivateKey(key)
-	pemData := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: data})
-	path := t.TempDir() + "/netsuite-test-key.pem"
-	require.NoError(t, os.WriteFile(path, pemData, 0o600))
-	return path
+	require.Error(t, gotErr)
+	assert.Contains(t, gotErr.Error(), "failed to query NetSuite SuiteAnalytics Connect")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func collectResults(t *testing.T, ch <-chan source.RecordBatchResult) []source.RecordBatchResult {

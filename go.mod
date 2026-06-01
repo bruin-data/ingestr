@@ -8,13 +8,16 @@ require (
 	cloud.google.com/go/bigquery v1.72.0
 	cloud.google.com/go/spanner v1.87.0
 	cloud.google.com/go/storage v1.56.0
+	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.3
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake v1.4.4
 	github.com/ClickHouse/clickhouse-go/v2 v2.42.0
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/InfluxCommunity/influxdb3-go/v2 v2.13.0
 	github.com/SAP/go-hdb v1.16.2
 	github.com/alecthomas/chroma/v2 v2.23.1
+	github.com/alexbrainman/odbc v0.0.0-20250601004241-49e6b2bc0cf0
 	github.com/apache/arrow-adbc/go/adbc v1.9.0
 	github.com/apache/arrow-go/v18 v18.5.1
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
@@ -96,7 +99,6 @@ require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 // indirect
 	github.com/99designs/keyring v1.2.2 // indirect
-	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0 // indirect
