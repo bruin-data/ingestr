@@ -281,6 +281,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>NetSuite</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Notion</td>
         <td>✅</td>
         <td>-</td>
