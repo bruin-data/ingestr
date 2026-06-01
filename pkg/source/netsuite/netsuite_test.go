@@ -3,10 +3,13 @@ package netsuite
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"fmt"
+	"io"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -93,15 +96,18 @@ func TestNetSuiteSourceGetTable(t *testing.T) {
 }
 
 func TestNetSuiteSourceReadWithODBCDB(t *testing.T) {
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
-	require.NoError(t, err)
-	defer db.Close()
-
-	mockRows := sqlmock.NewRows([]string{"id", "name"}).
-		AddRow("1", "Acme").
-		AddRow("2", "Globex").
-		AddRow("3", "Umbrella")
-	mock.ExpectQuery("SELECT * FROM customer").WillReturnRows(mockRows)
+	db := openNetSuiteTestDB(t, fakeQueryResult{
+		expectedQuery: "SELECT * FROM customer",
+		columns:       []string{"id", "name"},
+		rows: [][]driver.Value{
+			{"1", "Acme"},
+			{"2", "Globex"},
+			{"3", "Umbrella"},
+		},
+	})
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
 
 	s := &NetSuiteSource{db: db}
 	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "customer"})
@@ -116,15 +122,16 @@ func TestNetSuiteSourceReadWithODBCDB(t *testing.T) {
 	assert.Equal(t, int64(1), batches[1].Batch.NumRows())
 	assert.True(t, hasColumn(batches[0], "id"))
 	assert.True(t, hasColumn(batches[0], "name"))
-	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestNetSuiteSourceReadQueryError(t *testing.T) {
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
-	require.NoError(t, err)
-	defer db.Close()
-
-	mock.ExpectQuery("SELECT * FROM customer").WillReturnError(sql.ErrConnDone)
+	db := openNetSuiteTestDB(t, fakeQueryResult{
+		expectedQuery: "SELECT * FROM customer",
+		queryErr:      sql.ErrConnDone,
+	})
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
 
 	s := &NetSuiteSource{db: db}
 	ch, err := s.readTable(context.Background(), "customer", source.ReadOptions{})
@@ -136,7 +143,6 @@ func TestNetSuiteSourceReadQueryError(t *testing.T) {
 	}
 	require.Error(t, gotErr)
 	assert.Contains(t, gotErr.Error(), "failed to query NetSuite SuiteAnalytics Connect")
-	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func collectResults(t *testing.T, ch <-chan source.RecordBatchResult) []source.RecordBatchResult {
@@ -160,3 +166,107 @@ func hasColumn(result source.RecordBatchResult, name string) bool {
 	}
 	return false
 }
+
+const netSuiteTestDriverName = "netsuite_test"
+
+var (
+	registerTestDriver sync.Once
+	testDriverMu       sync.Mutex
+	testDriverCounter  int
+	testDriverResults  = map[string]fakeQueryResult{}
+)
+
+type fakeQueryResult struct {
+	expectedQuery string
+	columns       []string
+	rows          [][]driver.Value
+	queryErr      error
+}
+
+func openNetSuiteTestDB(t *testing.T, result fakeQueryResult) *sql.DB {
+	t.Helper()
+
+	registerTestDriver.Do(func() {
+		sql.Register(netSuiteTestDriverName, fakeDriver{})
+	})
+
+	testDriverMu.Lock()
+	testDriverCounter++
+	dsn := fmt.Sprintf("%s-%d", t.Name(), testDriverCounter)
+	testDriverResults[dsn] = result
+	testDriverMu.Unlock()
+
+	t.Cleanup(func() {
+		testDriverMu.Lock()
+		delete(testDriverResults, dsn)
+		testDriverMu.Unlock()
+	})
+
+	db, err := sql.Open(netSuiteTestDriverName, dsn)
+	require.NoError(t, err)
+	return db
+}
+
+type fakeDriver struct{}
+
+func (fakeDriver) Open(name string) (driver.Conn, error) {
+	testDriverMu.Lock()
+	result, ok := testDriverResults[name]
+	testDriverMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown fake NetSuite test DSN %q", name)
+	}
+	return &fakeConn{result: result}, nil
+}
+
+type fakeConn struct {
+	result fakeQueryResult
+}
+
+func (c *fakeConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("prepare is not supported by the fake NetSuite test driver")
+}
+
+func (c *fakeConn) Close() error {
+	return nil
+}
+
+func (c *fakeConn) Begin() (driver.Tx, error) {
+	return nil, fmt.Errorf("transactions are not supported by the fake NetSuite test driver")
+}
+
+func (c *fakeConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if c.result.expectedQuery != "" && query != c.result.expectedQuery {
+		return nil, fmt.Errorf("unexpected query %q", query)
+	}
+	if c.result.queryErr != nil {
+		return nil, c.result.queryErr
+	}
+	return &fakeRows{columns: c.result.columns, rows: c.result.rows}, nil
+}
+
+type fakeRows struct {
+	columns []string
+	rows    [][]driver.Value
+	index   int
+}
+
+func (r *fakeRows) Columns() []string {
+	return r.columns
+}
+
+func (r *fakeRows) Close() error {
+	return nil
+}
+
+func (r *fakeRows) Next(dest []driver.Value) error {
+	if r.index >= len(r.rows) {
+		return io.EOF
+	}
+
+	copy(dest, r.rows[r.index])
+	r.index++
+	return nil
+}
+
+var _ driver.QueryerContext = (*fakeConn)(nil)
