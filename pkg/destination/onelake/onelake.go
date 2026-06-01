@@ -612,16 +612,11 @@ func writeBatchesToParquet(batches []arrow.RecordBatch) ([]byte, *arrow.Schema, 
 
 func (d *OneLakeDestination) DropTable(ctx context.Context, table string) error {
 	mode, relPath := parseTarget(table)
-	saved := d.relPath
-	d.relPath = relPath
-	defer func() { d.relPath = saved }()
-
-	var dir string
-	if mode == modeTables {
-		dir = d.tableDir()
-	} else {
-		dir = d.filesDir()
+	area := "Tables"
+	if mode == modeFiles {
+		area = "Files"
 	}
+	dir := d.itemPath() + "/" + area + "/" + strings.Trim(relPath, "/")
 	return d.client.DeleteDir(ctx, d.workspace, dir)
 }
 
