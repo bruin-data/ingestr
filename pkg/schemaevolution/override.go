@@ -12,6 +12,7 @@ import (
 // ColumnOverride represents a user-specified column type override.
 type ColumnOverride struct {
 	Name      string
+	RenameTo  string
 	DataType  schema.DataType
 	Precision int
 	Scale     int
@@ -85,8 +86,15 @@ var StandardTypeNames = map[string]schema.DataType{
 	"interval": schema.TypeInterval,
 }
 
-// ParseColumnOverrides parses a comma-separated list of column:type pairs.
-// Format: "col1:type1,col2:type2" or "col1:decimal(10,2),col2:bigint"
+// ParseColumnOverrides parses a comma-separated list of column override
+// entries. Each entry takes one of these shapes:
+//
+//	name:type            — apply type to source column "name"
+//	dest:type:source     — rename source column "source" to "dest" and apply type
+//	dest::source         — rename source column "source" to "dest" (no type change)
+//
+// Examples: "col1:type1,col2:type2", "col1:decimal(10,2),col2:bigint",
+// "first_name:string:fname,email::eml".
 func ParseColumnOverrides(input string) (ColumnOverrides, error) {
 	if input == "" {
 		return nil, nil
@@ -151,22 +159,39 @@ func splitColumnPairs(input string) []string {
 }
 
 func parseColumnOverride(pair string) (ColumnOverride, error) {
-	colonIdx := strings.Index(pair, ":")
-	if colonIdx == -1 {
+	if !strings.Contains(pair, ":") {
 		return ColumnOverride{}, fmt.Errorf("invalid column override format '%s': expected 'column:type'", pair)
 	}
 
-	colName := strings.TrimSpace(pair[:colonIdx])
-	typeSpec := strings.TrimSpace(pair[colonIdx+1:])
+	// Parameterized type names like decimal(10,2) use ',' inside parens, not
+	// ':' — so splitting the entry on ':' is safe.
+	parts := strings.Split(pair, ":")
+
+	var colName, typeSpec, renameTo string
+	switch len(parts) {
+	case 2:
+		colName = strings.TrimSpace(parts[0])
+		typeSpec = strings.TrimSpace(parts[1])
+	case 3:
+		renameTo = strings.TrimSpace(parts[0])
+		typeSpec = strings.TrimSpace(parts[1])
+		colName = strings.TrimSpace(parts[2])
+	default:
+		return ColumnOverride{}, fmt.Errorf("invalid column override format '%s': expected 'col:type', 'dest:type:source', or 'dest::source'", pair)
+	}
 
 	if colName == "" {
 		return ColumnOverride{}, nil
 	}
 	if typeSpec == "" {
-		return ColumnOverride{}, fmt.Errorf("empty type in override '%s'", pair)
+		if renameTo == "" {
+			return ColumnOverride{}, fmt.Errorf("empty type in override '%s'", pair)
+		}
+		// Rename-only override: leave DataType at TypeUnknown.
+		return ColumnOverride{Name: colName, RenameTo: renameTo}, nil
 	}
 
-	override := ColumnOverride{Name: colName}
+	override := ColumnOverride{Name: colName, RenameTo: renameTo}
 
 	// Check for parameterized types like decimal(10,2)
 	if parenIdx := strings.Index(typeSpec, "("); parenIdx != -1 {
@@ -264,8 +289,12 @@ func overrideMatchConvention(schemaNaming string) naming.NamingConvention {
 }
 
 // ApplyToColumn applies the override to a column, returning the modified column.
+// A TypeUnknown override is treated as "no type change" (rename-only override),
+// so the column's existing type is preserved.
 func (o ColumnOverride) ApplyToColumn(col schema.Column) schema.Column {
-	col.DataType = o.DataType
+	if o.DataType != schema.TypeUnknown {
+		col.DataType = o.DataType
+	}
 	if o.Precision > 0 {
 		col.Precision = o.Precision
 	}

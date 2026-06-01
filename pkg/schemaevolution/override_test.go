@@ -145,6 +145,83 @@ func TestParseColumnOverrides_CaseInsensitive(t *testing.T) {
 	assert.Equal(t, schema.TypeInt64, id2.DataType)
 }
 
+func TestParseColumnOverrides_RenameWithType(t *testing.T) {
+	overrides, err := ParseColumnOverrides("first_name:string:fname")
+	require.NoError(t, err)
+	require.Len(t, overrides, 1)
+
+	// Keyed by the SOURCE name (fname), not the destination name.
+	ov, ok := overrides.Get("fname")
+	assert.True(t, ok)
+	assert.Equal(t, "fname", ov.Name)
+	assert.Equal(t, "first_name", ov.RenameTo)
+	assert.Equal(t, schema.TypeString, ov.DataType)
+
+	_, ok = overrides.Get("first_name")
+	assert.False(t, ok, "override should not be keyed by destination name")
+}
+
+func TestParseColumnOverrides_RenameOnly(t *testing.T) {
+	overrides, err := ParseColumnOverrides("first_name::fname")
+	require.NoError(t, err)
+	require.Len(t, overrides, 1)
+
+	ov, ok := overrides.Get("fname")
+	assert.True(t, ok)
+	assert.Equal(t, "fname", ov.Name)
+	assert.Equal(t, "first_name", ov.RenameTo)
+	assert.Equal(t, schema.TypeUnknown, ov.DataType)
+}
+
+func TestParseColumnOverrides_RenameMixed(t *testing.T) {
+	overrides, err := ParseColumnOverrides("id:bigint,first_name:string:fname,email::eml")
+	require.NoError(t, err)
+	require.Len(t, overrides, 3)
+
+	id, ok := overrides.Get("id")
+	require.True(t, ok)
+	assert.Empty(t, id.RenameTo)
+	assert.Equal(t, schema.TypeInt64, id.DataType)
+
+	fname, ok := overrides.Get("fname")
+	require.True(t, ok)
+	assert.Equal(t, "first_name", fname.RenameTo)
+	assert.Equal(t, schema.TypeString, fname.DataType)
+
+	eml, ok := overrides.Get("eml")
+	require.True(t, ok)
+	assert.Equal(t, "email", eml.RenameTo)
+	assert.Equal(t, schema.TypeUnknown, eml.DataType)
+}
+
+func TestParseColumnOverrides_RenameWithDecimal(t *testing.T) {
+	overrides, err := ParseColumnOverrides("amt:decimal(10,2):amount_raw")
+	require.NoError(t, err)
+	require.Len(t, overrides, 1)
+
+	ov, ok := overrides.Get("amount_raw")
+	require.True(t, ok)
+	assert.Equal(t, "amt", ov.RenameTo)
+	assert.Equal(t, schema.TypeDecimal, ov.DataType)
+	assert.Equal(t, 10, ov.Precision)
+	assert.Equal(t, 2, ov.Scale)
+}
+
+func TestColumnOverride_ApplyToColumn_RenameOnly(t *testing.T) {
+	col := schema.Column{
+		Name:     "fname",
+		DataType: schema.TypeString,
+		Nullable: true,
+	}
+	override := ColumnOverride{
+		Name:     "fname",
+		RenameTo: "first_name",
+		// No DataType: TypeUnknown means "don't change type"
+	}
+	result := override.ApplyToColumn(col)
+	assert.Equal(t, schema.TypeString, result.DataType, "type should be preserved on rename-only override")
+}
+
 func TestParseColumnOverrides_Errors(t *testing.T) {
 	tests := []struct {
 		name  string
