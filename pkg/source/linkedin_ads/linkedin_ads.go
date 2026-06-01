@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,45 @@ type accountFetchResult struct {
 }
 
 type accountItemFetcher func(ctx context.Context, accountID string, pageSize int) ([]map[string]interface{}, error)
+
+type analyticsTableConfig struct {
+	tableName string
+	pivot     string
+}
+
+var analyticsTableConfigs = []analyticsTableConfig{
+	{tableName: "ad_campaign_analytics", pivot: "campaign"},
+	{tableName: "ad_creative_analytics", pivot: "creative"},
+	{tableName: "ad_impression_device_analytics", pivot: "impression_device"},
+	{tableName: "ad_member_company_size_analytics", pivot: "member_company_size"},
+	{tableName: "ad_member_country_analytics", pivot: "member_country"},
+	{tableName: "ad_member_job_function_analytics", pivot: "member_job_function"},
+	{tableName: "ad_member_job_title_analytics", pivot: "member_job_title"},
+	{tableName: "ad_member_industry_analytics", pivot: "member_industry"},
+	{tableName: "ad_member_region_analytics", pivot: "member_region"},
+	{tableName: "ad_member_company_analytics", pivot: "member_company"},
+}
+
+var defaultAnalyticsMetrics = []string{
+	"actionClicks",
+	"adUnitClicks",
+	"clicks",
+	"commentLikes",
+	"comments",
+	"companyPageClicks",
+	"costInLocalCurrency",
+	"costInUsd",
+	"follows",
+	"impressions",
+	"landingPageClicks",
+	"likes",
+	"oneClickLeads",
+	"opens",
+	"sends",
+	"shares",
+	"totalEngagements",
+	"videoViews",
+}
 
 func NewLinkedInAdsSource() *LinkedInAdsSource {
 	return &LinkedInAdsSource{}
@@ -103,7 +143,7 @@ func (s *LinkedInAdsSource) GetTable(ctx context.Context, req source.TableReques
 
 	table, ok := s.tables[req.Name]
 	if !ok {
-		return nil, fmt.Errorf("unsupported table: %s (supported: ad_accounts, ad_account_users, campaign_groups, campaigns, creatives, conversions, lead_forms, lead_form_responses, custom:<dimensions>:<metrics>)", req.Name)
+		return nil, fmt.Errorf("unsupported table: %s (supported: ad_accounts, ad_account_users, campaign_groups, campaigns, creatives, conversions, lead_forms, lead_form_responses, ad_campaign_analytics, ad_creative_analytics, ad_impression_device_analytics, ad_member_company_size_analytics, ad_member_country_analytics, ad_member_job_function_analytics, ad_member_job_title_analytics, ad_member_industry_analytics, ad_member_region_analytics, ad_member_company_analytics, custom:<dimensions>:<metrics>)", req.Name)
 	}
 	return table, nil
 }
@@ -143,7 +183,7 @@ func (s *LinkedInAdsSource) getTables() map[string]source.SourceTable {
 		return nil, fmt.Errorf("LinkedIn Ads source does not have a predefined schema; schema inference is required")
 	}
 
-	return map[string]source.SourceTable{
+	tables := map[string]source.SourceTable{
 		"ad_accounts": &source.DynamicSourceTable{
 			TableName:           "ad_accounts",
 			TablePrimaryKeys:    []string{"id"},
@@ -233,6 +273,25 @@ func (s *LinkedInAdsSource) getTables() map[string]source.SourceTable {
 			},
 		},
 	}
+
+	for _, analyticsCfg := range analyticsTableConfigs {
+		cfg := analyticsCfg
+		tables[cfg.tableName] = &source.DynamicSourceTable{
+			TableName:           cfg.tableName,
+			TablePrimaryKeys:    []string{cfg.pivot, "date"},
+			TableIncrementalKey: "date",
+			TableStrategy:       config.StrategyMerge,
+			KnownSchema:         false,
+			SchemaFn:            schemaFn,
+			ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+				return s.readTable(ctx, func(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+					return s.readAnalyticsTable(ctx, cfg, opts, results)
+				}, opts)
+			},
+		}
+	}
+
+	return tables
 }
 
 func normalizePageSize(pageSize int) int {
@@ -353,8 +412,8 @@ func (s *LinkedInAdsSource) runParallelAccountFetch(
 		close(resultChan)
 	}()
 
-	// Collect results
 	var allItems []map[string]interface{}
+	var firstErr error
 	for result := range resultChan {
 		select {
 		case <-ctx.Done():
@@ -362,11 +421,17 @@ func (s *LinkedInAdsSource) runParallelAccountFetch(
 		default:
 		}
 		if result.err != nil {
-			continue // Error already logged
+			if firstErr == nil {
+				firstErr = fmt.Errorf("account %s: %w", result.accountID, result.err)
+			}
+			continue
 		}
 		allItems = append(allItems, result.items...)
 	}
 
+	if firstErr != nil {
+		return nil, fmt.Errorf("failed to fetch %s: %w", tableName, firstErr)
+	}
 	return allItems, nil
 }
 
@@ -748,6 +813,30 @@ func (s *LinkedInAdsSource) readLeadFormResponses(ctx context.Context, opts sour
 // ----------------------------------------------------------------------------
 // Custom Analytics
 
+func (s *LinkedInAdsSource) readAnalyticsTable(ctx context.Context, table analyticsTableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if len(s.accountIDs) == 0 {
+		return fmt.Errorf("account_ids is required in URI for analytics tables")
+	}
+
+	cfg := &customAnalyticsConfig{
+		tableName:       table.tableName,
+		dimensions:      []string{table.pivot, "date"},
+		metrics:         append([]string{}, defaultAnalyticsMetrics...),
+		pivot:           table.pivot,
+		timeGranularity: timeGranularityDaily,
+		primaryKeys:     []string{table.pivot, "date"},
+		incrementalKey:  "date",
+	}
+	if !slices.Contains(cfg.metrics, "dateRange") {
+		cfg.metrics = append(cfg.metrics, "dateRange")
+	}
+	if !slices.Contains(cfg.metrics, "pivotValues") {
+		cfg.metrics = append(cfg.metrics, "pivotValues")
+	}
+
+	return s.readCustomAnalytics(ctx, cfg, opts, results)
+}
+
 func (s *LinkedInAdsSource) getCustomAnalyticsTable(tableName string) (source.SourceTable, error) {
 	cfg, err := parseCustomTableName(tableName)
 	if err != nil {
@@ -828,7 +917,7 @@ func (s *LinkedInAdsSource) readCustomAnalytics(ctx context.Context, cfg *custom
 		dateHints = dailyDateColumns
 	}
 
-	return sendAsArrowRecord(allItems, dateHints, opts.ExcludeColumns, results, "custom_reports")
+	return sendAsArrowRecord(allItems, dateHints, opts.ExcludeColumns, results, cfg.tableName)
 }
 
 var _ source.Source = (*LinkedInAdsSource)(nil)

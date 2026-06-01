@@ -62,9 +62,16 @@ LinkedIn Ads source allows ingesting the following sources into separate tables:
 | [conversions](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/conversion-tracking?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves conversion rules for each ad account. |
 | [lead_forms](https://learn.microsoft.com/en-us/linkedin/marketing/lead-sync/leadsync?view=li-lms-2025-11&viewFallbackFrom=li-lms-2024-06&tabs=http#lead-forms-1) | id | – | replace | Retrieves lead generation forms for each ad account. |
 | [lead_form_responses](https://learn.microsoft.com/en-us/linkedin/marketing/lead-sync/leadsync?view=li-lms-2025-11&viewFallbackFrom=li-lms-2024-06&tabs=http#get-lead-form-responses) | id | date (interval)| merge | Retrieves lead form responses for each ad account. |
-| dmp_segments | id | – | replace | Retrieves matched/retargeting audience segments (sizes, match rates, rules) for each ad account. |
-| insight_tags | id | – | replace | Retrieves Insight Tag configuration and installation status for each ad account. |
-| insight_tag_domains | domainName, account_id | – | replace | Retrieves domains associated with Insight Tags for each ad account. |
+| ad_campaign_analytics | campaign, date | date | merge | Retrieves daily ad analytics by campaign. |
+| ad_creative_analytics | creative, date | date | merge | Retrieves daily ad analytics by creative. |
+| ad_impression_device_analytics | impression_device, date | date | merge | Retrieves daily ad analytics by impression device. |
+| ad_member_company_size_analytics | member_company_size, date | date | merge | Retrieves daily ad analytics by member company size. |
+| ad_member_country_analytics | member_country, date | date | merge | Retrieves daily ad analytics by member country. |
+| ad_member_job_function_analytics | member_job_function, date | date | merge | Retrieves daily ad analytics by member job function. |
+| ad_member_job_title_analytics | member_job_title, date | date | merge | Retrieves daily ad analytics by member job title. |
+| ad_member_industry_analytics | member_industry, date | date | merge | Retrieves daily ad analytics by member industry. |
+| ad_member_region_analytics | member_region, date | date | merge | Retrieves daily ad analytics by member region. |
+| ad_member_company_analytics | member_company, date | date | merge | Retrieves daily ad analytics by member company. |
 | [custom](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder) | [dimension, date] or [dimension, start_date, end_date] | date (daily) or start_date (monthly) | merge | Custom reports allow you to retrieve data based on specific dimensions and metrics. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
@@ -102,11 +109,14 @@ custom:<dimensions>:<metrics>
 ```
 
 **Parameters:**
-- `dimensions`(required): A comma-separated list of dimensions is required. It must include at least one entity dimension and one time-based dimension (`date` or `month`).
-  - Entity dimensions: `campaign`, `account`, `creative`
-  - Demographic dimensions: `member_job_title`, `member_seniority`, `member_industry`, `member_company_size`, `member_company`
-  - `date`: group the data in your report by day
-  - `month`: group the data in your report by month
+- `dimensions`(required): A comma-separated list of dimensions is required. It must include at least one pivot dimension and one time-based dimension (`date` or `month`).
+  - Pivot dimensions (pick one):
+    - Entity: `campaign`, `creative`, `account`
+    - Placement & device: `impression_device`
+    - Demographic: `member_job_title`, `member_job_function`, `member_industry`, `member_company_size`, `member_company`, `member_country`, `member_region`
+  - Time dimensions:
+    - `date`: group the data in your report by day
+    - `month`: group the data in your report by month
 - `metrics`(required): A comma-separated list of [metrics](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#metrics-available) to retrieve.
 
 > [!NOTE]
@@ -163,7 +173,7 @@ ingestr ingest \
     --dest-table 'dest.job_title_report'
 ```
 
-Available demographic dimensions: `member_job_title`, `member_seniority`, `member_industry`, `member_company_size`, `member_company`.
+Available demographic dimensions: `member_job_title`, `member_job_function`, `member_industry`, `member_company_size`, `member_company`, `member_country`, `member_region`.
 
 This command will retrieve data and save it to the destination table in the DuckDB database.
 
