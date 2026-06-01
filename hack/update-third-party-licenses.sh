@@ -58,7 +58,7 @@ append_manual_module_license() {
 	local expected_sha256="$5"
 	local out="$6"
 
-	local module_info version dir selected_sha256
+	local module_info version dir downloaded_dir selected_sha256
 
 	if ! module_info="$(cd "$repo_root" && go list -m -f '{{.Version}}	{{.Dir}}' "$module" 2>/dev/null)"; then
 		return 0
@@ -73,6 +73,14 @@ Manual license audit for $module is pinned to $expected_version, but go.mod sele
 Review $module's license, then update hack/update-third-party-licenses.sh and regenerate THIRD_PARTY_LICENSES.txt.
 EOF
 		return 1
+	fi
+
+	if [[ ! -f "$dir/$license_file" ]]; then
+		# go list -m can return an empty Dir in clean module caches when the
+		# package is ignored above. Download the pinned module before auditing.
+		if downloaded_dir="$(cd "$repo_root" && go mod download -json "$module@$expected_version" | awk -F '"' '$2 == "Dir" { print $4; exit }')" && [[ -n "$downloaded_dir" ]]; then
+			dir="$downloaded_dir"
+		fi
 	fi
 
 	if [[ ! -f "$dir/$license_file" ]]; then
