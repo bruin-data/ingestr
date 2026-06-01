@@ -116,6 +116,10 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
                 link: "/supported-sources/fabric.md",
               },
               {
+                text: "Microsoft OneLake",
+                link: "/supported-sources/onelake.md",
+              },
+              {
                 text: "Microsoft SQL Server",
                 link: "/supported-sources/mssql.md",
               },
