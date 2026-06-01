@@ -17,28 +17,15 @@ fi
 go_licenses_module="${GO_LICENSES_MODULE:-github.com/google/go-licenses@v1.6.0}"
 disallowed_license_types="${LICENSE_DISALLOWED_TYPES:-forbidden,restricted,unknown}"
 packages="${LICENSE_PACKAGES:-./...}"
+license_targets="${LICENSE_TARGETS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64}"
 module_path="$(cd "$repo_root" && go list -m)"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-go_licenses_log="$tmpdir/go-licenses.log"
-go_licenses_out="$tmpdir/go-licenses.out"
+go_licenses_bin="$tmpdir/bin/go-licenses$(go env GOEXE)"
 
-run_go_licenses() {
-	: >"$go_licenses_log"
-	: >"$go_licenses_out"
-
-	if ! (cd "$repo_root" && go run "$go_licenses_module" "$@" >"$go_licenses_out" 2>"$go_licenses_log"); then
-		if [[ -s "$go_licenses_out" ]]; then
-			cat "$go_licenses_out" >&2
-		fi
-		if [[ -s "$go_licenses_log" ]]; then
-			cat "$go_licenses_log" >&2
-		fi
-		return 1
-	fi
-}
+(cd "$repo_root" && GOBIN="$tmpdir/bin" go install "$go_licenses_module")
 
 sha256_file() {
 	if command -v sha256sum >/dev/null 2>&1; then
@@ -115,7 +102,7 @@ EOF
 	} >>"$out"
 }
 
-save_dir="$tmpdir/go-licenses"
+save_root="$tmpdir/go-licenses"
 generated_file="$tmpdir/THIRD_PARTY_LICENSES.txt"
 
 ignore_flags=(
@@ -126,15 +113,62 @@ ignore_flags=(
 	--ignore "modernc.org/mathutil"
 )
 
-run_go_licenses check "$packages" \
-	--include_tests \
-	"${ignore_flags[@]}" \
-	--disallowed_types="$disallowed_license_types"
+run_target() {
+	local target="$1"
+	local goos="${target%/*}"
+	local goarch="${target#*/}"
+	local label="$goos-$goarch"
+	local target_save_dir="$save_root/$label"
+	local target_out="$tmpdir/$label.out"
+	local target_log="$tmpdir/$label.log"
+	local target_failure="$tmpdir/$label.failed"
 
-run_go_licenses save "$packages" \
-	--include_tests \
-	"${ignore_flags[@]}" \
-	--save_path "$save_dir"
+	if ! (cd "$repo_root" && GOOS="$goos" GOARCH="$goarch" "$go_licenses_bin" check "$packages" \
+		--include_tests \
+		"${ignore_flags[@]}" \
+		--disallowed_types="$disallowed_license_types" \
+		>"$target_out" 2>"$target_log"); then
+		{
+			printf 'go-licenses check failed for %s\n' "$target"
+			cat "$target_out"
+			cat "$target_log"
+		} >"$target_failure"
+		return 1
+	fi
+
+	if ! (cd "$repo_root" && GOOS="$goos" GOARCH="$goarch" "$go_licenses_bin" save "$packages" \
+		--include_tests \
+		"${ignore_flags[@]}" \
+		--save_path "$target_save_dir" \
+		>"$target_out" 2>"$target_log"); then
+		{
+			printf 'go-licenses save failed for %s\n' "$target"
+			cat "$target_out"
+			cat "$target_log"
+		} >"$target_failure"
+		return 1
+	fi
+}
+
+pids=()
+for target in $license_targets; do
+	run_target "$target" &
+	pids+=("$!")
+done
+
+failed=0
+for pid in "${pids[@]}"; do
+	if ! wait "$pid"; then
+		failed=1
+	fi
+done
+
+if [[ "$failed" -ne 0 ]]; then
+	while IFS= read -r failure; do
+		cat "$failure" >&2
+	done < <(find "$tmpdir" -maxdepth 1 -type f -name '*.failed' | LC_ALL=C sort)
+	exit 1
+fi
 
 {
 	printf 'Third-Party Licenses\n'
@@ -144,40 +178,50 @@ run_go_licenses save "$packages" \
 	printf '\n'
 	printf 'Generator: %s\n' "$go_licenses_module"
 	printf 'Packages: %s\n' "$packages"
+	printf 'License targets: %s\n' "$license_targets"
 	printf 'Disallowed license types: %s\n' "$disallowed_license_types"
 	printf '\n'
 } >"$generated_file"
 
-while IFS= read -r file; do
-	rel="${file#"$save_dir"/}"
-	copy_notice_file "$rel" "$file" "$generated_file"
-done < <(
-	find "$save_dir" -type f \
-		\( \
-			-iname 'LICENSE*' -o \
-			-iname 'LICENCE*' -o \
-			-iname 'COPYING*' -o \
-			-iname 'NOTICE*' -o \
-			-iname 'AUTHORS' -o \
-			-iname 'PATENTS' \
-		\) \
-		| LC_ALL=C sort
-)
+notice_entries="$tmpdir/notice-entries.tsv"
+: >"$notice_entries"
 
-while IFS= read -r dir; do
-	if ! find "$dir" -maxdepth 1 -type f \
-		\( \
-			-iname 'LICENSE*' -o \
-			-iname 'LICENCE*' -o \
-			-iname 'COPYING*' -o \
-			-iname 'NOTICE*' \
-		\) | grep -q .; then
-		while IFS= read -r readme; do
-			rel="${readme#"$save_dir"/}"
-			copy_notice_file "$rel" "$readme" "$generated_file"
-		done < <(find "$dir" -maxdepth 1 -type f -iname 'README*' | LC_ALL=C sort)
-	fi
-done < <(find "$save_dir" -type d | LC_ALL=C sort)
+while IFS= read -r target_dir; do
+	while IFS= read -r file; do
+		rel="${file#"$target_dir"/}"
+		printf '%s\t%s\n' "$rel" "$file" >>"$notice_entries"
+	done < <(
+		find "$target_dir" -type f \
+			\( \
+				-iname 'LICENSE*' -o \
+				-iname 'LICENCE*' -o \
+				-iname 'COPYING*' -o \
+				-iname 'NOTICE*' -o \
+				-iname 'AUTHORS' -o \
+				-iname 'PATENTS' \
+			\) \
+			| LC_ALL=C sort
+	)
+
+	while IFS= read -r dir; do
+		if ! find "$dir" -maxdepth 1 -type f \
+			\( \
+				-iname 'LICENSE*' -o \
+				-iname 'LICENCE*' -o \
+				-iname 'COPYING*' -o \
+				-iname 'NOTICE*' \
+			\) | grep -q .; then
+			while IFS= read -r readme; do
+				rel="${readme#"$target_dir"/}"
+				printf '%s\t%s\n' "$rel" "$readme" >>"$notice_entries"
+			done < <(find "$dir" -maxdepth 1 -type f -iname 'README*' | LC_ALL=C sort)
+		fi
+	done < <(find "$target_dir" -type d | LC_ALL=C sort)
+done < <(find "$save_root" -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort)
+
+LC_ALL=C sort "$notice_entries" | awk -F '\t' '!seen[$1]++' | while IFS=$'\t' read -r rel file; do
+	copy_notice_file "$rel" "$file" "$generated_file"
+done
 
 append_manual_module_license \
 	"github.com/segmentio/asm" \

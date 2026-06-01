@@ -4,6 +4,7 @@ BUILD_SRC=.
 VERSION ?= dev
 GO_LICENSES_MODULE ?= github.com/google/go-licenses@v1.6.0
 LICENSE_DISALLOWED_TYPES ?= forbidden,restricted,unknown
+LICENSE_TARGETS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
 NO_COLOR=\033[0m
 OK_COLOR=\033[32;01m
@@ -36,11 +37,11 @@ generate:
 
 licenses: generate
 	@echo "$(OK_COLOR)==> Updating third-party license notices$(NO_COLOR)"
-	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" ./hack/update-third-party-licenses.sh
+	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" LICENSE_TARGETS="$(LICENSE_TARGETS)" ./hack/update-third-party-licenses.sh
 
 licenses-check: generate
 	@echo "$(OK_COLOR)==> Checking third-party license notices$(NO_COLOR)"
-	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" ./hack/update-third-party-licenses.sh --check
+	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" LICENSE_TARGETS="$(LICENSE_TARGETS)" ./hack/update-third-party-licenses.sh --check
 
 
 build: generate deps
