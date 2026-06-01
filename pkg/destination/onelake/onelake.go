@@ -390,25 +390,224 @@ func (d *OneLakeDestination) GetTableSchema(ctx context.Context, table string) (
 // Strategy support: OneLake is a direct-write, file-based destination.
 func (d *OneLakeDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *OneLakeDestination) SupportsAppendStrategy() bool       { return true }
-func (d *OneLakeDestination) SupportsMergeStrategy() bool        { return false }
-func (d *OneLakeDestination) SupportsDeleteInsertStrategy() bool { return false }
-func (d *OneLakeDestination) SupportsSCD2Strategy() bool         { return false }
+func (d *OneLakeDestination) SupportsMergeStrategy() bool        { return true }
+func (d *OneLakeDestination) SupportsDeleteInsertStrategy() bool { return true }
+func (d *OneLakeDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *OneLakeDestination) SupportsAtomicSwap() bool           { return false }
 
 func (d *OneLakeDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	return nil
 }
 
+// tableDirForTables resolves a dest-table string to a Delta table directory,
+// rejecting Files-mode targets (the copy-on-write strategies only apply to
+// Delta tables).
+func (d *OneLakeDestination) tableDirForTables(table, op string) (string, error) {
+	mode, rel := parseTarget(table)
+	if mode != modeTables {
+		return "", fmt.Errorf("%s strategy requires a Tables/ destination, got %q", op, table)
+	}
+	if rel == "" {
+		return "", fmt.Errorf("invalid table for %s: %q", op, table)
+	}
+	return d.itemPath() + "/Tables/" + strings.Trim(rel, "/"), nil
+}
+
+// readTable resolves a dest-table string to its Delta directory, returns the log
+// snapshot and (if it exists) its data as Arrow batches owned by the caller.
+func (d *OneLakeDestination) readTable(ctx context.Context, table, op string) (string, *deltaSnapshot, []arrow.RecordBatch, error) {
+	dir, err := d.tableDirForTables(table, op)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	snap, err := readDeltaSnapshot(ctx, d.client, d.workspace, dir)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if !snap.exists {
+		return dir, snap, nil, nil
+	}
+	batches, err := readDeltaData(ctx, d.client, d.workspace, dir, snap.activeFiles)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	return dir, snap, batches, nil
+}
+
 func (d *OneLakeDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
-	return fmt.Errorf("merge strategy is not supported for OneLake destination")
+	tDir, tSnap, tBatches, err := d.readTable(ctx, opts.TargetTable, "merge")
+	if err != nil {
+		return err
+	}
+	defer releaseBatches(tBatches)
+	_, _, sBatches, err := d.readTable(ctx, opts.StagingTable, "merge")
+	if err != nil {
+		return err
+	}
+	defer releaseBatches(sBatches)
+
+	merged, err := mergeBatches(ctx, tBatches, sBatches, opts.PrimaryKeys)
+	if err != nil {
+		return err
+	}
+	defer releaseBatches(merged)
+
+	return d.commitRewrite(ctx, tDir, tSnap, merged, "MERGE")
 }
 
 func (d *OneLakeDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
-	return fmt.Errorf("delete+insert strategy is not supported for OneLake destination")
+	tDir, tSnap, tBatches, err := d.readTable(ctx, opts.TargetTable, "delete+insert")
+	if err != nil {
+		return err
+	}
+	defer releaseBatches(tBatches)
+	_, _, sBatches, err := d.readTable(ctx, opts.StagingTable, "delete+insert")
+	if err != nil {
+		return err
+	}
+	defer releaseBatches(sBatches)
+
+	result, err := deleteInsertBatches(ctx, tBatches, sBatches, opts)
+	if err != nil {
+		return err
+	}
+	defer releaseBatches(result)
+
+	return d.commitRewrite(ctx, tDir, tSnap, result, "DELETE+INSERT")
 }
 
 func (d *OneLakeDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
-	return fmt.Errorf("scd2 strategy is not supported for OneLake destination")
+	tDir, tSnap, tBatches, err := d.readTable(ctx, opts.TargetTable, "scd2")
+	if err != nil {
+		return err
+	}
+	defer releaseBatches(tBatches)
+	_, _, sBatches, err := d.readTable(ctx, opts.StagingTable, "scd2")
+	if err != nil {
+		return err
+	}
+	defer releaseBatches(sBatches)
+
+	result, err := scd2Batches(ctx, tBatches, sBatches, opts)
+	if err != nil {
+		return err
+	}
+	defer releaseBatches(result)
+
+	return d.commitRewrite(ctx, tDir, tSnap, result, "SCD2")
+}
+
+// commitRewrite writes the given batches as a single new Parquet data file and
+// commits a new Delta version that removes the prior data files and adds the new
+// one (copy-on-write). If the table did not exist, it writes version 0.
+func (d *OneLakeDestination) commitRewrite(ctx context.Context, tableDir string, snap *deltaSnapshot, batches []arrow.RecordBatch, operation string) error {
+	if len(batches) == 0 && (snap == nil || !snap.exists) {
+		config.Debug("[ONELAKE] %s produced no rows and table does not exist; nothing to do", operation)
+		return nil
+	}
+
+	logDir := tableDir + "/_delta_log"
+	nowMillis := time.Now().UnixMilli()
+	var removePaths []string
+	if snap != nil && snap.exists {
+		removePaths = snap.activeFiles
+	}
+
+	var adds []deltaAddFile
+	var cols []schema.Column
+	if len(batches) > 0 {
+		data, arrowSchema, err := writeBatchesToParquet(batches)
+		if err != nil {
+			return err
+		}
+		dataFile := fmt.Sprintf("part-00000-%s.c000.snappy.parquet", uuid.New().String())
+		if err := d.client.UploadBuffer(ctx, d.workspace, tableDir+"/"+dataFile, data); err != nil {
+			return fmt.Errorf("failed to upload data file: %w", err)
+		}
+		adds = append(adds, deltaAddFile{Path: dataFile, Size: int64(len(data))})
+		cols = arrowSchemaToColumns(arrowSchema)
+	}
+
+	version := int64(0)
+	if snap != nil && snap.exists {
+		version = snap.version + 1
+	}
+
+	var commit []byte
+	var err error
+	if version == 0 {
+		commit, err = buildInitialCommit(cols, adds, uuid.New().String(), nowMillis)
+	} else {
+		commit, err = buildRewriteCommit(removePaths, adds, operation, nowMillis)
+	}
+	if err != nil {
+		return err
+	}
+
+	if err := d.client.UploadBuffer(ctx, d.workspace, logDir+"/"+commitFileName(version), commit); err != nil {
+		return fmt.Errorf("failed to write delta commit: %w", err)
+	}
+	config.Debug("[ONELAKE] %s committed delta version %d to %s", operation, version, tableDir)
+	return nil
+}
+
+func arrowSchemaToColumns(s *arrow.Schema) []schema.Column {
+	cols := make([]schema.Column, s.NumFields())
+	for i := 0; i < s.NumFields(); i++ {
+		cols[i] = arrowFieldToColumn(s.Field(i))
+	}
+	return cols
+}
+
+// writeBatchesToParquet encodes a set of record batches into a single Parquet
+// file, normalizing each batch to the first batch's schema.
+func writeBatchesToParquet(batches []arrow.RecordBatch) ([]byte, *arrow.Schema, error) {
+	target := stripSchemaMetadata(batches[0].Schema())
+
+	var buffer bytes.Buffer
+	writerProps := parquet.NewWriterProperties(
+		parquet.WithCompression(compress.Codecs.Snappy),
+		parquet.WithDictionaryDefault(true),
+		parquet.WithDataPageSize(1024*1024),
+	)
+	arrowProps := pqarrow.NewArrowWriterProperties(pqarrow.WithStoreSchema())
+	writer, err := pqarrow.NewFileWriter(target, &buffer, writerProps, arrowProps)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create parquet writer: %w", err)
+	}
+
+	for _, b := range batches {
+		rec := b
+		release := false
+		if !b.Schema().Equal(target) {
+			if !schemaEqualIgnoringMetadata(b.Schema(), target) {
+				_ = writer.Close()
+				return nil, nil, fmt.Errorf("incompatible batch schema during rewrite")
+			}
+			normalized, err := normalizeRecordToSchema(b, target)
+			if err != nil {
+				_ = writer.Close()
+				return nil, nil, err
+			}
+			rec = normalized
+			release = true
+		}
+		if err := writer.WriteBuffered(rec); err != nil {
+			if release {
+				rec.Release()
+			}
+			_ = writer.Close()
+			return nil, nil, fmt.Errorf("failed to write batch: %w", err)
+		}
+		if release {
+			rec.Release()
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, nil, fmt.Errorf("failed to close parquet writer: %w", err)
+	}
+	return buffer.Bytes(), target, nil
 }
 
 func (d *OneLakeDestination) DropTable(ctx context.Context, table string) error {

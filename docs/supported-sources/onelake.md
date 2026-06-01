@@ -69,10 +69,38 @@ ingestr ingest \
     --incremental-strategy append
 ```
 
+## Incremental strategies
+
+For **Tables** (Delta) mode, ingestr supports `replace`, `append`, `merge`, `delete+insert` and `scd2`:
+
+| Strategy | Behaviour |
+|----------|-----------|
+| `replace` | Clears the table directory and writes a fresh Delta commit (version 0). |
+| `append` | Reads the current Delta version and writes the next commit with the new rows. |
+| `merge` | Upsert by `primary_key`: existing rows with a matching key are replaced by the incoming rows. |
+| `delete+insert` | Deletes target rows whose `incremental_key` falls in the loaded interval, then inserts the new rows. |
+| `scd2` | Slowly-changing-dimension type 2: maintains `_scd_valid_from`/`_scd_valid_to`/`_scd_is_current`, closing changed rows and inserting new versions. |
+
+The **Files** mode only supports `replace` and `append`.
+
+`merge`, `delete+insert` and `scd2` are **copy-on-write**: because a Delta table has no SQL engine here, ingestr reads the current table back into memory, applies the operation, and rewrites it as a new Delta version. This means each run reads and rewrites the full table — suitable for small-to-medium tables.
+
+Example (merge):
+
+```bash
+ingestr ingest \
+    --source-uri "postgres://user:pass@host:5432/db" \
+    --source-table "public.users" \
+    --dest-uri "onelake://myworkspace/mylakehouse?tenant_id=$TENANT_ID&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET" \
+    --dest-table "Tables/users" \
+    --incremental-strategy merge \
+    --primary-key id
+```
+
 ## Notes & limitations
 
-- **Strategies**: `replace` and `append` are supported. `merge`, `delete+insert` and `scd2` are not.
-- **Replace** rewrites the table from scratch: the target directory is cleared and a fresh Delta commit (version 0) is written. This is not atomic — there is a brief window where the table is empty.
-- **Append** reads the current Delta version and writes the next commit. The incoming schema must match the existing table's schema.
+- **Replace** is not atomic — there is a brief window where the table is empty.
+- **Copy-on-write** strategies load the entire target table into memory and rewrite it on every run.
 - **Partitioning**: Delta tables are written non-partitioned; `partition_by` is ignored in Tables mode for now.
 - **Type mapping**: timestamps are stored as Delta `timestamp` (microseconds, UTC); JSON and UUID columns are stored as `string`; `TIME` columns are carried as microsecond `long` values (Delta has no time type).
+- **CDC-aware merge** (soft-deletes via `_cdc_deleted`) is not implemented; CDC delete markers are merged as regular rows.

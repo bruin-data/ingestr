@@ -106,6 +106,20 @@ func addActions(adds []deltaAddFile, nowMillis int64) []any {
 	return actions
 }
 
+func removeActions(paths []string, nowMillis int64) []any {
+	actions := make([]any, 0, len(paths))
+	for _, p := range paths {
+		actions = append(actions, map[string]any{
+			"remove": map[string]any{
+				"path":              p,
+				"deletionTimestamp": nowMillis,
+				"dataChange":        true,
+			},
+		})
+	}
+	return actions
+}
+
 func commitInfo(mode string, nowMillis int64) any {
 	return map[string]any{
 		"commitInfo": map[string]any{
@@ -170,6 +184,15 @@ func buildInitialCommit(cols []schema.Column, adds []deltaAddFile, tableID strin
 func buildAppendCommit(adds []deltaAddFile, nowMillis int64) ([]byte, error) {
 	actions := addActions(adds, nowMillis)
 	actions = append(actions, commitInfo("Append", nowMillis))
+	return marshalActions(actions)
+}
+
+// buildRewriteCommit produces a commit that removes existing data files and adds
+// new ones — the copy-on-write pattern used by merge, delete+insert and scd2.
+func buildRewriteCommit(removePaths []string, adds []deltaAddFile, operation string, nowMillis int64) ([]byte, error) {
+	actions := removeActions(removePaths, nowMillis)
+	actions = append(actions, addActions(adds, nowMillis)...)
+	actions = append(actions, commitInfo(operation, nowMillis))
 	return marshalActions(actions)
 }
 

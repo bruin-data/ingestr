@@ -3,6 +3,7 @@ package adlsutil
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"slices"
 	"strconv"
@@ -135,6 +136,28 @@ func (c *DataLakeClient) EnsureDirectories(ctx context.Context, fileSystem, dirP
 	}
 
 	return nil
+}
+
+// Download reads the full contents of fileSystem/path into memory.
+func (c *DataLakeClient) Download(ctx context.Context, fileSystem, path string) ([]byte, error) {
+	pathURL, err := c.pathURL(fileSystem, path)
+	if err != nil {
+		return nil, err
+	}
+	fileClient, err := c.newFileClient(pathURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file client: %w", err)
+	}
+	resp, err := fileClient.DownloadStream(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	return data, nil
 }
 
 // DeleteDir recursively removes a directory and its contents. It is a no-op if
