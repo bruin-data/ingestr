@@ -98,7 +98,6 @@ EOF
 		printf '%s/%s (%s, manually audited)\n' "$module" "$license_file" "$license_name"
 		printf '===============================================================================\n\n'
 		cat "$dir/$license_file"
-		printf '\n'
 	} >>"$out"
 }
 
@@ -111,6 +110,9 @@ ignore_flags=(
 	# pinned below so version or license text changes force a manual review.
 	--ignore "github.com/segmentio/asm"
 	--ignore "modernc.org/mathutil"
+	# This Darwin/cgo package is selected differently by host settings. Keep the
+	# required notice deterministic across local machines and CI.
+	--ignore "github.com/99designs/go-keychain"
 )
 
 run_target() {
@@ -220,6 +222,12 @@ while IFS= read -r target_dir; do
 done < <(find "$save_root" -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort)
 
 LC_ALL=C sort "$notice_entries" | awk -F '\t' '!seen[$1]++' | while IFS=$'\t' read -r rel file; do
+	# go-licenses can emit both the historical GitHub casing and the canonical
+	# module casing for go-mssqldb on some hosts. Keep one copy.
+	if [[ "$rel" == github.com/Microsoft/go-mssqldb/* ]]; then
+		continue
+	fi
+
 	copy_notice_file "$rel" "$file" "$generated_file"
 done
 
@@ -237,6 +245,14 @@ append_manual_module_license \
 	"LICENSE" \
 	"BSD-3-Clause" \
 	"bfa9bf72a72ca009fd62a8f84fca3dca67e51d93af96352723646599898b6cf5" \
+	"$generated_file"
+
+append_manual_module_license \
+	"github.com/99designs/go-keychain" \
+	"v0.0.0-20191008050251-8e49817e8af4" \
+	"LICENSE" \
+	"MIT" \
+	"039c69774070226d213bced933176be4ec396c9b101cd9a13e82a2c390c6c90a" \
 	"$generated_file"
 
 if [[ "$check_only" -eq 1 ]]; then
