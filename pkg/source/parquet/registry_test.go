@@ -34,6 +34,9 @@ func TestParquetSource_RegistryLookup(t *testing.T) {
 }
 
 func TestParquetSource_ToDuckDBViaPipeline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping DuckDB pipeline test in short mode")
+	}
 	t.Parallel()
 
 	ctx := context.Background()

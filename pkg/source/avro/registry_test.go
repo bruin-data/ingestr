@@ -40,6 +40,9 @@ func TestAvroSource_RegistryLookup(t *testing.T) {
 }
 
 func TestAvroSource_ToDuckDBViaPipeline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping DuckDB pipeline test in short mode")
+	}
 	t.Parallel()
 
 	ctx := context.Background()

@@ -291,6 +291,9 @@ func TestParquetSource_ConnectErrors(t *testing.T) {
 }
 
 func TestParquetSource_ToDuckDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping DuckDB destination test in short mode")
+	}
 	t.Parallel()
 
 	ctx := context.Background()
