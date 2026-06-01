@@ -46,6 +46,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install ODBC build dependencies
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
@@ -61,6 +64,9 @@ jobs:
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install ODBC build dependencies
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
 
       - name: Pre-pull testcontainer images (background)
         run: |
@@ -119,6 +125,8 @@ jobs:
     runs-on: depot-ubuntu-24.04-4
     steps:
       - uses: actions/checkout@v4
+      - name: Install ODBC build dependencies
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
       - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
@@ -132,6 +140,8 @@ jobs:
     runs-on: depot-ubuntu-24.04-4
     steps:
       - uses: actions/checkout@v4
+      - name: Install ODBC build dependencies
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
       - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
