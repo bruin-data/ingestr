@@ -1006,7 +1006,7 @@ func (s *Hubspotsource) readCustomObject(ctx context.Context, table string, opts
 		startMs = fmt.Sprintf("%d", epochStart.UnixMilli())
 	}
 
-	return s.searchCRMObjects(ctx, objectName, cfg, properties, startMs, opts, results)
+	return s.searchCRMObjects(ctx, cfg, properties, startMs, opts, results)
 }
 
 func (s *Hubspotsource) readCustomObjectHistory(ctx context.Context, table string, historyProps []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -1072,7 +1072,7 @@ func (s *Hubspotsource) readCRMObjects(ctx context.Context, tableName string, hi
 		return s.searchCRMObjectsHistory(ctx, cfg, properties, startMs, opts, results)
 	}
 
-	if err := s.searchCRMObjects(ctx, tableName, cfg, properties, startMs, opts, results); err != nil {
+	if err := s.searchCRMObjects(ctx, cfg, properties, startMs, opts, results); err != nil {
 		return err
 	}
 
@@ -1086,7 +1086,7 @@ func timeToMs(val *time.Time) string {
 	return fmt.Sprintf("%d", val.UnixMilli())
 }
 
-func (s *Hubspotsource) searchCRMObjects(ctx context.Context, pluralType string, cfg tableConfig, properties []string, startDateMs string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *Hubspotsource) searchCRMObjects(ctx context.Context, cfg tableConfig, properties []string, startDateMs string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	endpoint := fmt.Sprintf("crm/v3/objects/%s/search", cfg.ObjectType)
 	totalProcessed := 0
 	endMs := timeToMs(opts.IntervalEnd)
@@ -1186,9 +1186,9 @@ func (s *Hubspotsource) searchCRMObjects(ctx context.Context, pluralType string,
 						wg.Add(1)
 						go func(at string) {
 							defer wg.Done()
-							am, err := s.fetchAssociationsBatch(ctx, pluralType, at, objIDs)
+							am, err := s.fetchAssociationsBatch(ctx, cfg.ObjectType, at, objIDs)
 							if err != nil {
-								config.Debug("[HUBSPOT] Failed to fetch associations %s->%s: %v", pluralType, at, err)
+								config.Debug("[HUBSPOT] Failed to fetch associations %s->%s: %v", cfg.ObjectType, at, err)
 								return
 							}
 							assocCh <- assocResult{assocType: at, assocMap: am}
