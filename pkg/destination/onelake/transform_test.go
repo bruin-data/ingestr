@@ -263,6 +263,45 @@ func TestSCD2NetNewAndSoftDelete(t *testing.T) {
 	assert.Equal(t, true, byID[3][destination.SCD2IsCurrentColumn]) // net-new current
 }
 
+func TestSCD2TargetColumnOrderIndependent(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	ts := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	// Target lists _scd_is_current before _scd_valid_to — the opposite order
+	// from staging. The close logic must resolve indices from each batch's own
+	// schema, not from staging's.
+	targetFields := []arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "val", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: destination.SCD2ValidFromColumn, Type: tsTZType},
+		{Name: destination.SCD2IsCurrentColumn, Type: arrow.FixedWidthTypes.Boolean},
+		{Name: destination.SCD2ValidToColumn, Type: tsTZType, Nullable: true},
+	}
+	target := makeBatch(t, targetFields, [][]any{
+		{int64(1), "a", t0, true, nil},
+	})
+	defer target.Release()
+	staging := makeBatch(t, scd2Fields, [][]any{
+		{int64(1), "b", ts, nil, true},
+	})
+	defer staging.Release()
+
+	out, err := scd2Batches(t.Context(), []arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, scd2Opts("", ts))
+	require.NoError(t, err)
+	defer releaseBatches(out)
+
+	var closed map[string]any
+	for _, r := range collectRows(out) {
+		if !r[destination.SCD2IsCurrentColumn].(bool) {
+			closed = r
+		}
+	}
+	require.NotNil(t, closed, "changed row should be closed")
+	assert.Equal(t, "a", closed["val"])
+	assert.NotNil(t, closed[destination.SCD2ValidToColumn], "valid_to must be stamped, not is_current")
+}
+
 func TestSCD2IncrementalKeySkipsSoftDelete(t *testing.T) {
 	t.Parallel()
 	t0 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)

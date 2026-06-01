@@ -217,15 +217,6 @@ func scd2Batches(ctx context.Context, target, staging []arrow.RecordBatch, opts 
 		}
 	}
 
-	validToIdx, ok := fieldIndex(stagingSchema, destination.SCD2ValidToColumn)
-	if !ok {
-		return nil, fmt.Errorf("%s column missing", destination.SCD2ValidToColumn)
-	}
-	isCurrentIdx, ok := fieldIndex(stagingSchema, destination.SCD2IsCurrentColumn)
-	if !ok {
-		return nil, fmt.Errorf("%s column missing", destination.SCD2IsCurrentColumn)
-	}
-
 	// Tracks which PKs remain current after applying step 1/2 to the target.
 	stillCurrent := make(map[string]struct{})
 	var out []arrow.RecordBatch
@@ -245,6 +236,11 @@ func scd2Batches(ctx context.Context, target, staging []arrow.RecordBatch, opts 
 		if !ok {
 			releaseBatches(out)
 			return nil, fmt.Errorf("%s column missing in target", destination.SCD2IsCurrentColumn)
+		}
+		tValidTo, ok := fieldIndex(tb.Schema(), destination.SCD2ValidToColumn)
+		if !ok {
+			releaseBatches(out)
+			return nil, fmt.Errorf("%s column missing in target", destination.SCD2ValidToColumn)
 		}
 
 		keepAsIs := make([]bool, tb.NumRows()) // unchanged rows, written verbatim
@@ -283,7 +279,7 @@ func scd2Batches(ctx context.Context, target, staging []arrow.RecordBatch, opts 
 			return nil, err
 		}
 		if toClose != nil {
-			closed, err := closeSCD2Rows(toClose, validToIdx, isCurrentIdx, opts.Timestamp)
+			closed, err := closeSCD2Rows(toClose, tValidTo, tIsCurrent, opts.Timestamp)
 			toClose.Release()
 			if err != nil {
 				releaseBatches(out)
