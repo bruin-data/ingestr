@@ -356,6 +356,6 @@ Feel free to create an issue if you'd like to see support for another source or 
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+ingestr is source-available under the [Functional Source License 1.1](https://fsl.software/), with Apache 2.0 as the future license. You can use ingestr freely for internal production use, development, testing, education, research, and professional services. You cannot use ingestr to offer a competing commercial ingestion, ELT, connector, or managed data pipeline product/service.
 
-Some components are licensed under Apache 2.0 - see the NOTICE file for details.
+Each version becomes Apache 2.0 two years after release.

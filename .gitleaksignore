@@ -6,3 +6,6 @@ docs/supported-sources/smartsheets.md:generic-api-key:38
 ingestr/src/google_analytics/helpers_test.py:generic-api-key:45
 ingestr/src/google_analytics/helpers_test.py:generic-api-key:51
 ingestr/src/google_analytics/helpers_test.py:generic-api-key:58
+THIRD_PARTY_LICENSES.txt:sourcegraph-access-token:16318
+THIRD_PARTY_LICENSES.txt:sourcegraph-access-token:16389
+THIRD_PARTY_LICENSES.txt:sourcegraph-access-token:16480
