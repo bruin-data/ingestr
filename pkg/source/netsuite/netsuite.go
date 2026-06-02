@@ -440,6 +440,9 @@ func buildSuiteAnalyticsQuery(tableName string, opts source.ReadOptions) string 
 		query += " WHERE " + strings.Join(conditions, " AND ")
 		query += " ORDER BY " + opts.IncrementalKey + " ASC"
 	}
+	if opts.Limit > 0 {
+		query += fmt.Sprintf(" FETCH FIRST %d ROWS ONLY", opts.Limit)
+	}
 
 	return query
 }
@@ -484,7 +487,13 @@ func uniqueColumnNames(columns []string) []string {
 		count := seen[key]
 		seen[key] = count + 1
 		if count > 0 {
-			name = fmt.Sprintf("%s_%d", name, count+1)
+			candidate := fmt.Sprintf("%s_%d", name, count+1)
+			for seen[strings.ToLower(candidate)] > 0 {
+				count++
+				candidate = fmt.Sprintf("%s_%d", name, count+1)
+			}
+			seen[strings.ToLower(candidate)]++
+			name = candidate
 		}
 		names[i] = name
 	}

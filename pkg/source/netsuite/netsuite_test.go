@@ -78,6 +78,18 @@ func TestBuildSuiteAnalyticsQuery(t *testing.T) {
 	assert.Equal(t, "SELECT * FROM transaction WHERE lastmodifieddate >= TO_TIMESTAMP('2026-01-02 03:04:05.123456789', 'YYYY-MM-DD HH24:MI:SSxFF') AND lastmodifieddate < TO_TIMESTAMP('2026-01-03 03:04:05.987654321', 'YYYY-MM-DD HH24:MI:SSxFF') ORDER BY lastmodifieddate ASC", got)
 }
 
+func TestBuildSuiteAnalyticsQueryWithLimit(t *testing.T) {
+	got := buildSuiteAnalyticsQuery("customer", source.ReadOptions{Limit: 25})
+
+	assert.Equal(t, "SELECT * FROM customer FETCH FIRST 25 ROWS ONLY", got)
+}
+
+func TestUniqueColumnNamesAvoidsGeneratedNameCollisions(t *testing.T) {
+	got := uniqueColumnNames([]string{"name_2", "name", "name"})
+
+	assert.Equal(t, []string{"name_2", "name", "name_3"}, got)
+}
+
 func TestNetSuiteSourceGetTable(t *testing.T) {
 	s := NewNetSuiteSource()
 
