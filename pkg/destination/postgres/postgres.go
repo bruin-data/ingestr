@@ -582,12 +582,19 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
+	colList := strings.Join(quotedColumns, ", ")
+	selectClause := fmt.Sprintf(`SELECT %s FROM %s`, colList, quotedStagingTable)
+	if len(opts.PrimaryKeys) > 0 {
+		// DISTINCT ON dedupes staging by PK so duplicate keys don't reach the
+		// target. No recency column exists here, so the winner per PK is arbitrary.
+		pkList := strings.Join(quoteColumns(opts.PrimaryKeys), ", ")
+		selectClause = fmt.Sprintf(`SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s`, pkList, colList, quotedStagingTable, pkList)
+	}
 	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s`,
+		`INSERT INTO %s (%s) %s`,
 		quotedTargetTable,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		quotedStagingTable,
+		colList,
+		selectClause,
 	)
 	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
 

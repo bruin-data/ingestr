@@ -480,13 +480,17 @@ func (d *SynapseDestination) DeleteInsertTable(ctx context.Context, opts destina
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
-	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s`,
-		quoteTable(opts.TargetTable),
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		quoteTable(opts.StagingTable),
-	)
+	colList := strings.Join(quotedColumns, ", ")
+	stagingTable := quoteTable(opts.StagingTable)
+	// Dedupe staging by primary key so duplicate keys don't produce duplicate rows.
+	selectClause := fmt.Sprintf(`SELECT %s FROM %s`, colList, stagingTable)
+	if len(opts.PrimaryKeys) > 0 {
+		selectClause = fmt.Sprintf(
+			`SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1`,
+			colList, colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingTable,
+		)
+	}
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) %s`, quoteTable(opts.TargetTable), colList, selectClause)
 	config.Debug("[Synapse DELETE+INSERT] Executing INSERT: %s", insertSQL)
 
 	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {

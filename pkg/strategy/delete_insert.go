@@ -52,7 +52,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		Table:        stagingTable,
 		Schema:       job.Schema,
 		DropFirst:    true,
-		PrimaryKeys:  job.Config.PrimaryKeys,
+		PrimaryKeys:  nil,
 		PartitionBy:  job.Config.PartitionBy,
 		ClusterBy:    job.Config.ClusterBy,
 		ExpiresAfter: destination.ManagedStagingTTL,

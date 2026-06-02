@@ -316,13 +316,16 @@ func (d *TrinoDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	}
 
 	quotedColumns := quoteColumns(opts.Columns)
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (%s) SELECT %s FROM %s",
-		targetFQN,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		stagingFQN,
-	)
+	colList := strings.Join(quotedColumns, ", ")
+	// Dedupe staging by primary key so duplicate keys don't produce duplicate rows.
+	selectClause := fmt.Sprintf("SELECT %s FROM %s", colList, stagingFQN)
+	if len(opts.PrimaryKeys) > 0 {
+		selectClause = fmt.Sprintf(
+			"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1",
+			colList, colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingFQN,
+		)
+	}
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetFQN, colList, selectClause)
 	config.Debug("[TRINO DELETE+INSERT] Executing INSERT: %s", insertSQL)
 
 	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {

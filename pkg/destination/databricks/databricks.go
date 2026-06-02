@@ -463,13 +463,20 @@ func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts dest
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (%s) SELECT %s FROM %s",
-		targetFull,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
-		stagingFull,
-	)
+	colList := strings.Join(quotedCols, ", ")
+	// Dedupe staging by primary key so duplicate keys don't produce duplicate rows.
+	selectClause := fmt.Sprintf("SELECT %s FROM %s", colList, stagingFull)
+	if len(opts.PrimaryKeys) > 0 {
+		quotedPKs := make([]string, len(opts.PrimaryKeys))
+		for i, pk := range opts.PrimaryKeys {
+			quotedPKs[i] = fmt.Sprintf("`%s`", pk)
+		}
+		selectClause = fmt.Sprintf(
+			"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1",
+			colList, colList, strings.Join(quotedPKs, ", "), stagingFull,
+		)
+	}
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetFull, colList, selectClause)
 	config.Debug("[DATABRICKS] Executing INSERT: %s", insertSQL)
 
 	if err := d.executeStatement(ctx, insertSQL); err != nil {
