@@ -41,11 +41,17 @@ func TestAnnotatedQueryComment(t *testing.T) {
 		}
 	})
 
-	t.Run("no annotation configured leaves the query untouched", func(t *testing.T) {
+	t.Run("no caller annotation still carries ingestr's own keys", func(t *testing.T) {
 		ctx := annotation.WithStep(context.Background(), annotation.StepMerge)
 		const sql = "MERGE INTO `p`.`raw`.`orders` ..."
-		if got := annotation.Prepend(ctx, sql); got != sql {
-			t.Fatalf("expected query unchanged without annotations, got: %q", got)
+		got := annotation.Prepend(ctx, sql)
+
+		wantComment := `-- @bruin.config: {"ingestr_step":"merge","type":"ingestr"}`
+		if !strings.HasPrefix(got, wantComment+"\n") {
+			t.Fatalf("expected ingestr annotation without caller keys\n got: %q\nwant prefix: %q", got, wantComment)
+		}
+		if !strings.Contains(got, "MERGE INTO") {
+			t.Fatalf("original query body was dropped: %q", got)
 		}
 	})
 }

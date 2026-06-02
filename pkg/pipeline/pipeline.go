@@ -54,7 +54,8 @@ func (p *Pipeline) SetLogWriter(w io.Writer) {
 func (p *Pipeline) Run(ctx context.Context) error {
 	// Parse query annotations once and carry the base payload on the context.
 	// Destinations read it (plus a per-operation step) to annotate queries for
-	// cost attribution. Empty/absent annotations make this a no-op.
+	// cost attribution. Absent caller annotations just means ingestr's own keys
+	// (type, ingestr_step) are emitted without any caller-supplied keys.
 	annotations, err := annotation.Parse(p.config.QueryAnnotations)
 	if err != nil {
 		return err

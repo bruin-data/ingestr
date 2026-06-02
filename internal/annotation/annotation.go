@@ -52,8 +52,10 @@ const (
 	stepKey
 )
 
-// Parse parses the raw --query-annotations flag value, a JSON object. An empty
-// value disables annotations and returns a nil Payload (opt-in behaviour).
+// Parse parses the raw --query-annotations flag value, a JSON object holding the
+// caller-supplied keys (e.g. pipeline, asset). An empty value returns a nil
+// Payload, which simply means no caller keys are added; ingestr still annotates
+// queries with its own keys (type, ingestr_step).
 func Parse(raw string) (Payload, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -66,8 +68,9 @@ func Parse(raw string) (Payload, error) {
 	return p, nil
 }
 
-// WithPayload stores the base payload on the context. A nil/empty payload is a
-// no-op, so downstream Prepend/QueryTag calls become no-ops too.
+// WithPayload stores the caller-supplied base payload on the context. A
+// nil/empty payload simply adds no extra keys; downstream Prepend/QueryTag calls
+// still emit ingestr's own keys (type, ingestr_step).
 func WithPayload(ctx context.Context, p Payload) context.Context {
 	if len(p) == 0 {
 		return ctx
@@ -91,18 +94,19 @@ func stepFrom(ctx context.Context) string {
 	return s
 }
 
-// build returns the merged annotation JSON for the current context, or "" when
-// annotations are disabled. ingestr-owned keys (type, ingestr_step) always win
-// over caller-supplied keys of the same name. encoding/json marshals map keys
-// in sorted order, so the output is deterministic.
+// build returns the merged annotation JSON for the current context. ingestr
+// always annotates its destination queries with its own keys (type, and
+// ingestr_step when a step is set), so build never returns "" in practice; the
+// caller-supplied payload from --query-annotations is merged in on top. ingestr-
+// owned keys (type, ingestr_step) always win over caller-supplied keys of the
+// same name. encoding/json marshals map keys in sorted order, so the output is
+// deterministic.
 func build(ctx context.Context) string {
-	p, ok := payloadFrom(ctx)
-	if !ok {
-		return ""
-	}
-	merged := make(map[string]interface{}, len(p)+2)
-	for k, v := range p {
-		merged[k] = v
+	merged := map[string]interface{}{}
+	if p, ok := payloadFrom(ctx); ok {
+		for k, v := range p {
+			merged[k] = v
+		}
 	}
 	merged["type"] = ingestrType
 	if step := stepFrom(ctx); step != "" {
@@ -115,9 +119,10 @@ func build(ctx context.Context) string {
 	return string(b)
 }
 
-// Prepend returns sql with the @bruin.config comment prepended when annotations
-// are enabled, otherwise sql unchanged. Use for destinations that keep leading
-// SQL comments (everything except Snowflake).
+// Prepend returns sql with the @bruin.config comment prepended. The comment
+// always carries ingestr's own keys (type, ingestr_step) plus any caller-
+// supplied keys. Use for destinations that keep leading SQL comments (everything
+// except Snowflake).
 func Prepend(ctx context.Context, sql string) string {
 	j := build(ctx)
 	if j == "" {
@@ -126,9 +131,10 @@ func Prepend(ctx context.Context, sql string) string {
 	return commentPrefix + j + "\n" + sql
 }
 
-// QueryTag returns the annotation JSON for use as Snowflake's QUERY_TAG and
-// ok=false when annotations are disabled. Snowflake strips leading comments, so
-// it carries the same payload via the session QUERY_TAG instead of a comment.
+// QueryTag returns the annotation JSON for use as Snowflake's QUERY_TAG.
+// Snowflake strips leading comments, so it carries the same payload via the
+// session QUERY_TAG instead of a comment. ok is false only if the JSON fails to
+// build; in practice the tag always carries ingestr's own keys.
 func QueryTag(ctx context.Context) (tag string, ok bool) {
 	j := build(ctx)
 	if j == "" {

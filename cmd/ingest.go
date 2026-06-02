@@ -178,7 +178,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "query-annotations",
-				Usage:   "JSON object of annotation keys (e.g. {\"pipeline\":\"p\",\"asset\":\"a\"}) added as a '-- @bruin.config' comment to destination queries (QUERY_TAG on Snowflake) for cost attribution. Empty disables annotations.",
+				Usage:   "JSON object of caller annotation keys (e.g. {\"pipeline\":\"p\",\"asset\":\"a\"}) merged into the '-- @bruin.config' comment on destination queries (QUERY_TAG on Snowflake) for cost attribution. ingestr always annotates with its own keys (type, ingestr_step); this flag adds the caller's keys on top.",
 				Sources: cli.EnvVars("INGESTR_QUERY_ANNOTATIONS"),
 			},
 		},

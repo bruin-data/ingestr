@@ -15,10 +15,15 @@ import (
 func TestAnnotate(t *testing.T) {
 	d := &SnowflakeDestination{}
 
-	t.Run("disabled when no annotations are configured", func(t *testing.T) {
+	t.Run("carries ingestr's own keys when no caller annotations are configured", func(t *testing.T) {
 		ctx := d.annotate(context.Background(), annotation.StepMerge)
-		if _, ok := annotation.QueryTag(ctx); ok {
-			t.Fatal("expected no query tag when annotations are not configured")
+		tag, ok := annotation.QueryTag(ctx)
+		if !ok {
+			t.Fatal("expected a query tag: ingestr always annotates")
+		}
+		want := `{"ingestr_step":"merge","type":"ingestr"}`
+		if tag != want {
+			t.Fatalf("query tag mismatch\n got: %s\nwant: %s", tag, want)
 		}
 	})
 

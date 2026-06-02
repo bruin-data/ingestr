@@ -6,7 +6,7 @@ import (
 )
 
 func TestParse(t *testing.T) {
-	t.Run("empty disables annotations", func(t *testing.T) {
+	t.Run("empty yields no caller keys", func(t *testing.T) {
 		p, err := Parse("")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -43,16 +43,22 @@ func TestParse(t *testing.T) {
 	})
 }
 
-func TestPrepend_disabledWithoutPayload(t *testing.T) {
-	ctx := context.Background()
+func TestPrepend_emitsIngestrKeysWithoutPayload(t *testing.T) {
 	const sql = "SELECT 1"
-	if got := Prepend(ctx, sql); got != sql {
-		t.Fatalf("expected sql unchanged, got %q", got)
+
+	// With no payload and no step, ingestr still annotates with its own type.
+	got := Prepend(context.Background(), sql)
+	want := `-- @bruin.config: {"type":"ingestr"}` + "\n" + sql
+	if got != want {
+		t.Fatalf("expected ingestr type annotation\n got: %q\nwant: %q", got, want)
 	}
-	// A step alone, without a payload, must not produce a comment.
-	ctx = WithStep(ctx, StepMerge)
-	if got := Prepend(ctx, sql); got != sql {
-		t.Fatalf("expected sql unchanged with step but no payload, got %q", got)
+
+	// A step alone, without a caller payload, carries type + ingestr_step.
+	ctx := WithStep(context.Background(), StepMerge)
+	got = Prepend(ctx, sql)
+	want = `-- @bruin.config: {"ingestr_step":"merge","type":"ingestr"}` + "\n" + sql
+	if got != want {
+		t.Fatalf("expected ingestr_step annotation without payload\n got: %q\nwant: %q", got, want)
 	}
 }
 
@@ -93,9 +99,15 @@ func TestPrepend_noStepOmitsStepKey(t *testing.T) {
 }
 
 func TestQueryTag(t *testing.T) {
-	t.Run("disabled without payload", func(t *testing.T) {
-		if _, ok := QueryTag(context.Background()); ok {
-			t.Fatal("expected ok=false without payload")
+	t.Run("emits ingestr keys without payload", func(t *testing.T) {
+		ctx := WithStep(context.Background(), StepMerge)
+		tag, ok := QueryTag(ctx)
+		if !ok {
+			t.Fatal("expected ok=true: ingestr always annotates")
+		}
+		want := `{"ingestr_step":"merge","type":"ingestr"}`
+		if tag != want {
+			t.Fatalf("tag mismatch\n got: %q\nwant: %q", tag, want)
 		}
 	})
 
