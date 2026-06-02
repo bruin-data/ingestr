@@ -185,7 +185,7 @@ ingestr ingest \
     --dest-table 'dest.job_title_report'
 ```
 
-Available demographic dimensions: `member_job_title`, `member_job_function`, `member_industry`, `member_company_size`, `member_company`, `member_country`, `member_region`.
+Available demographic dimensions: `member_job_title`, `member_job_function`, `member_seniority`, `member_industry`, `member_company_size`, `member_company`, `member_country`, `member_region`.
 
 This command will retrieve data and save it to the destination table in the DuckDB database.
 
