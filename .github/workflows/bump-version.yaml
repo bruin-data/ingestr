@@ -11,6 +11,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: '0'
+      - name: Set branch name
+        id: extract_branch
+        run: echo "::set-output name=branch_name::$(echo ${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}})"
       - name: Bump version and push tag
         id: bump_version
         uses: anothrNick/github-tag-action@1.36.0
@@ -19,4 +22,4 @@ jobs:
           WITH_V: true
           DEFAULT_BUMP: patch
           PRERELEASE: true
-          RELEASE_BRANCHES: ${{ github.ref_name }}
+          RELEASE_BRANCHES: ${{ steps.extract_branch.outputs.branch_name }}
