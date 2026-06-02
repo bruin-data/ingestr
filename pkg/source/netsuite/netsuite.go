@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,15 +21,49 @@ const (
 	defaultServerDataSource  = "NetSuite2.com"
 	defaultConnectBatchSize  = 1000
 	defaultConnectHostSuffix = ".connect.api.netsuite.com"
+
+	// bindableCharWidthLimit mirrors the alexbrainman/odbc wrapper's threshold
+	// (column.go: NewVariableWidthColumn): a character/binary column whose
+	// declared size is 0 (unbounded) or greater than this is fetched via the
+	// chunked SQLGetData "long data" path (NonBindableColumn). That native path
+	// is what segfaults on wide tables; columns at or below this width are bound
+	// and fetched safely in a single SQLFetch. See netsuite_crash_findings.md.
+	bindableCharWidthLimit = 1024
+
+	// defaultWideTextMaxChars is the SUBSTR width used by wide_text=truncate. It
+	// stays under bindableCharWidthLimit so the truncated column is bound rather
+	// than fetched via the crashing chunked path.
+	defaultWideTextMaxChars = 1000
+
+	wideTextKeep     = "keep"
+	wideTextTruncate = "truncate"
+	wideTextExclude  = "exclude"
 )
 
 type NetSuiteSource struct {
-	db         *sql.DB
-	connString string
+	db                 *sql.DB
+	connString         string
+	excludeCLOBColumns bool
+	wideTextMode       string
+	wideTextMaxChars   int
 }
 
 type uriConfig struct {
+	// connString is the full ODBC connection string for password auth, or the
+	// credential-less base string when tba is set (UID/PWD are appended per
+	// connection by tbaConnector).
 	connString string
+	tba        *tbaCredentials
+	// excludeCLOBColumns drops CLOB-typed columns from introspected projections
+	// (legacy knob; superseded by wideTextMode, which covers every column on the
+	// crashing chunked-fetch path, not just CLOBs).
+	excludeCLOBColumns bool
+	// wideTextMode controls how "non-bindable" wide text columns (the chunked
+	// SQLGetData path that segfaults the SuiteAnalytics driver on wide tables)
+	// are projected: keep (default), truncate (SUBSTR to wideTextMaxChars), or
+	// exclude (drop them).
+	wideTextMode     string
+	wideTextMaxChars int
 }
 
 type odbcParam struct {
@@ -53,7 +88,7 @@ func (s *NetSuiteSource) Connect(ctx context.Context, rawURI string) error {
 		return fmt.Errorf("ODBC driver support is not available in this ingestr build; use a Linux or Windows build with the ODBC manager installed")
 	}
 
-	db, err := sql.Open("odbc", cfg.connString)
+	db, err := openConnection(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to open NetSuite ODBC connection: %w", err)
 	}
@@ -69,6 +104,9 @@ func (s *NetSuiteSource) Connect(ctx context.Context, rawURI string) error {
 
 	s.db = db
 	s.connString = cfg.connString
+	s.excludeCLOBColumns = cfg.excludeCLOBColumns
+	s.wideTextMode = cfg.wideTextMode
+	s.wideTextMaxChars = cfg.wideTextMaxChars
 	config.Debug("[NETSUITE] Connected to SuiteAnalytics Connect over ODBC")
 	return nil
 }
@@ -120,8 +158,193 @@ func (s *NetSuiteSource) GetTable(ctx context.Context, req source.TableRequest) 
 }
 
 func (s *NetSuiteSource) readTable(ctx context.Context, tableName string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	query := buildSuiteAnalyticsQuery(tableName, opts)
+	// Project columns explicitly rather than SELECT *. NetSuite tables can be
+	// extremely wide (e.g. `transaction` has ~700 columns), and SELECT * over
+	// such tables crashes the SuiteAnalytics Connect ODBC driver. We discover
+	// the columns from the driver's oa_columns catalog and list them; if that
+	// catalog is unavailable we fall back to SELECT *.
+	columns, err := s.tableColumns(ctx, tableName, opts.ExcludeColumns)
+	if err != nil {
+		config.Debug("[NETSUITE] column introspection failed for %q, falling back to SELECT *: %v", tableName, err)
+		columns = nil
+	}
+
+	query := buildSuiteAnalyticsQuery(tableName, columns, opts)
 	return s.readQuery(ctx, query, opts)
+}
+
+// tableColumns returns the projection expressions for a SuiteAnalytics table,
+// read from the OpenAccess oa_columns catalog and excluding any names in
+// exclude. Columns the alexbrainman/odbc wrapper would fetch via the chunked
+// SQLGetData "long data" path (the path that segfaults the SuiteAnalytics driver
+// on wide tables) are handled per wideTextMode: kept (and ordered last),
+// SUBSTR-truncated to a bindable width, or dropped. It returns a nil slice (so
+// the caller falls back to SELECT *) when the table has no catalog entry.
+func (s *NetSuiteSource) tableColumns(ctx context.Context, tableName string, exclude []string) ([]string, error) {
+	if s.db == nil {
+		return nil, fmt.Errorf("netsuite source is not connected")
+	}
+
+	lookup := unqualifyTableName(tableName)
+	if lookup == "" {
+		return nil, nil
+	}
+
+	query := fmt.Sprintf("SELECT column_name, type_name, data_type, oa_precision FROM oa_columns WHERE table_name = '%s'", strings.ReplaceAll(lookup, "'", "''"))
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read oa_columns for %q: %w", lookup, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	excluded := make(map[string]bool, len(exclude))
+	for _, name := range exclude {
+		excluded[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+
+	type column struct {
+		name        string
+		isCLOB      bool
+		nonBindable bool // fetched via the crashing chunked SQLGetData path
+		isCharType  bool // SUBSTR-truncatable (vs binary long data)
+	}
+	var cols []column
+	skippedCLOB := 0
+	skippedWide := 0
+	truncatedWide := 0
+	for rows.Next() {
+		var name, typeName string
+		var dataType, precision sql.NullInt64
+		if err := rows.Scan(&name, &typeName, &dataType, &precision); err != nil {
+			return nil, fmt.Errorf("failed to scan oa_columns row: %w", err)
+		}
+		name = strings.TrimSpace(name)
+		if name == "" || excluded[strings.ToLower(name)] {
+			continue
+		}
+		isCLOB := strings.EqualFold(strings.TrimSpace(typeName), "CLOB")
+		if isCLOB && s.excludeCLOBColumns {
+			skippedCLOB++
+			continue
+		}
+		cols = append(cols, column{
+			name:        name,
+			isCLOB:      isCLOB,
+			nonBindable: isNonBindable(dataType, precision, isCLOB),
+			isCharType:  isCharDataType(dataType) || isCLOB,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read oa_columns rows: %w", err)
+	}
+
+	// Keep bindable columns first and any kept non-bindable columns last. The
+	// ODBC SQLGetData contract retrieves long/LOB columns after fixed-width ones;
+	// trailing them is the safe order even though it is not, on its own,
+	// sufficient to prevent the driver crash. Within each group, sort for
+	// deterministic, layout-stable projections.
+	sort.SliceStable(cols, func(i, j int) bool {
+		if cols[i].nonBindable != cols[j].nonBindable {
+			return !cols[i].nonBindable
+		}
+		return cols[i].name < cols[j].name
+	})
+
+	projections := make([]string, 0, len(cols))
+	for _, c := range cols {
+		if !c.nonBindable {
+			projections = append(projections, c.name)
+			continue
+		}
+		switch s.wideTextMode {
+		case wideTextExclude:
+			skippedWide++
+		case wideTextTruncate:
+			if c.isCharType {
+				projections = append(projections, fmt.Sprintf("SUBSTR(%s, 1, %d) AS %s", c.name, s.wideTextMaxCharsOrDefault(), c.name))
+				truncatedWide++
+			} else {
+				projections = append(projections, c.name)
+			}
+		default: // wideTextKeep
+			projections = append(projections, c.name)
+		}
+	}
+
+	config.Debug("[NETSUITE] introspected %d columns for %q (mode=%s: skipped %d CLOB, %d wide; truncated %d wide)",
+		len(projections), lookup, s.wideTextModeOrDefault(), skippedCLOB, skippedWide, truncatedWide)
+	return projections, nil
+}
+
+func (s *NetSuiteSource) wideTextModeOrDefault() string {
+	if s.wideTextMode == "" {
+		return wideTextKeep
+	}
+	return s.wideTextMode
+}
+
+func (s *NetSuiteSource) wideTextMaxCharsOrDefault() int {
+	if s.wideTextMaxChars <= 0 || s.wideTextMaxChars > bindableCharWidthLimit {
+		return defaultWideTextMaxChars
+	}
+	return s.wideTextMaxChars
+}
+
+// isNonBindable reports whether the alexbrainman/odbc wrapper would fetch this
+// column via the chunked SQLGetData "long data" path (NonBindableColumn) rather
+// than binding it — the path that segfaults the SuiteAnalytics driver on wide
+// tables. Long types are always non-bindable; bounded char/binary types are
+// non-bindable only when their declared size is unknown (0) or exceeds the
+// wrapper's bindable limit (mirrors column.go: NewVariableWidthColumn). When the
+// catalog lacks a usable data_type, it falls back to the CLOB type name.
+func isNonBindable(dataType, precision sql.NullInt64, isCLOB bool) bool {
+	if !dataType.Valid {
+		return isCLOB
+	}
+	switch dataType.Int64 {
+	case sqlLongVarChar, sqlWLongVarChar, sqlLongVarBinary:
+		return true
+	case sqlChar, sqlVarChar, sqlWChar, sqlWVarChar, sqlBinary, sqlVarBinary:
+		return !precision.Valid || precision.Int64 == 0 || precision.Int64 > bindableCharWidthLimit
+	default:
+		return false
+	}
+}
+
+func isCharDataType(dataType sql.NullInt64) bool {
+	if !dataType.Valid {
+		return false
+	}
+	switch dataType.Int64 {
+	case sqlChar, sqlVarChar, sqlWChar, sqlWVarChar, sqlLongVarChar, sqlWLongVarChar:
+		return true
+	default:
+		return false
+	}
+}
+
+// ODBC SQL type codes (sql.h / sqlext.h / sqlucode.h in the driver headers) used
+// to classify catalog columns by how the ODBC wrapper fetches them.
+const (
+	sqlChar          = 1
+	sqlVarChar       = 12
+	sqlLongVarChar   = -1
+	sqlBinary        = -2
+	sqlVarBinary     = -3
+	sqlLongVarBinary = -4
+	sqlWChar         = -8
+	sqlWVarChar      = -9
+	sqlWLongVarChar  = -10
+)
+
+// unqualifyTableName strips any schema qualifier and surrounding quotes so the
+// bare table name can be matched against oa_columns.table_name.
+func unqualifyTableName(tableName string) string {
+	name := strings.TrimSpace(tableName)
+	if idx := strings.LastIndex(name, "."); idx >= 0 {
+		name = name[idx+1:]
+	}
+	return strings.Trim(name, "\"")
 }
 
 func (s *NetSuiteSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -246,46 +469,115 @@ func parseURI(rawURI string) (uriConfig, error) {
 	}
 
 	values := parsed.Query()
-	connString := firstNonEmpty(values.Get("odbc_connect_string"), values.Get("connection_string"), values.Get("conn_str"))
-	if connString != "" {
-		return uriConfig{connString: connString}, nil
-	}
-
-	if dsn := values.Get("dsn"); dsn != "" {
-		connString, err := buildDSNConnectionString(parsed, values, dsn)
-		if err != nil {
-			return uriConfig{}, err
-		}
-		return uriConfig{connString: connString}, nil
-	}
-
-	connString, err = buildDriverConnectionString(parsed, values)
+	excludeCLOB := parseBool(firstNonEmpty(values.Get("exclude_clob_columns"), values.Get("skip_clob_columns")))
+	wideMode, wideMax, err := parseWideTextOptions(values)
 	if err != nil {
 		return uriConfig{}, err
 	}
-	return uriConfig{connString: connString}, nil
+
+	base := uriConfig{
+		excludeCLOBColumns: excludeCLOB,
+		wideTextMode:       wideMode,
+		wideTextMaxChars:   wideMax,
+	}
+
+	connString := firstNonEmpty(values.Get("odbc_connect_string"), values.Get("connection_string"), values.Get("conn_str"))
+	if connString != "" {
+		base.connString = connString
+		return base, nil
+	}
+
+	dsn := values.Get("dsn")
+	accountID, roleID := resolveAccountAndRole(parsed, values, dsn)
+
+	tba, err := extractTBACredentials(accountID, values)
+	if err != nil {
+		return uriConfig{}, err
+	}
+	base.tba = tba
+
+	if dsn != "" {
+		base.connString = buildDSNConnectionString(parsed, values, dsn, accountID, roleID, tba)
+		return base, nil
+	}
+
+	connString, err = buildDriverConnectionString(parsed, values, accountID, roleID, tba)
+	if err != nil {
+		return uriConfig{}, err
+	}
+	base.connString = connString
+	return base, nil
 }
 
-func buildDSNConnectionString(parsed *url.URL, values url.Values, dsn string) (string, error) {
-	params := []odbcParam{{key: "DSN", value: dsn}}
-	params = appendCredentials(params, parsed, values)
-	customProperties, err := buildCustomProperties(parsed, values)
-	if err != nil {
-		return "", err
+// parseWideTextOptions reads the wide_text strategy and its truncation width.
+// wide_text controls how columns on the SuiteAnalytics driver's crashing
+// chunked-fetch path are projected; see uriConfig.wideTextMode.
+func parseWideTextOptions(values url.Values) (string, int, error) {
+	mode := strings.ToLower(strings.TrimSpace(firstNonEmpty(values.Get("wide_text"), values.Get("wide_text_mode"))))
+	if mode == "" {
+		mode = wideTextKeep
 	}
-	if customProperties != "" {
+	switch mode {
+	case wideTextKeep, wideTextTruncate, wideTextExclude:
+	default:
+		return "", 0, fmt.Errorf("invalid netsuite wide_text %q (expected keep, truncate, or exclude)", mode)
+	}
+
+	maxChars := defaultWideTextMaxChars
+	if raw := firstNonEmpty(values.Get("wide_text_max_chars"), values.Get("wide_text_max_length")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return "", 0, fmt.Errorf("invalid netsuite wide_text_max_chars %q (expected a positive integer)", raw)
+		}
+		maxChars = n
+	}
+	// A SUBSTR wider than the wrapper's bindable limit would land back on the
+	// crashing chunked path, defeating the purpose; clamp to keep it bindable.
+	if maxChars > bindableCharWidthLimit {
+		maxChars = bindableCharWidthLimit
+	}
+	return mode, maxChars, nil
+}
+
+// resolveAccountAndRole determines the effective account ID and role ID. Values
+// supplied on the URI win; otherwise, when a DSN is used, they are read from the
+// DSN's CustomProperties in the ODBC ini (so a configured DSN need not repeat
+// them on the URI).
+func resolveAccountAndRole(parsed *url.URL, values url.Values, dsn string) (string, string) {
+	accountID := accountIDFromURI(parsed, values)
+	roleID := values.Get("role_id")
+	if dsn != "" && (accountID == "" || roleID == "") {
+		props := dsnCustomProperties(dsn)
+		if accountID == "" {
+			accountID = props["AccountID"]
+		}
+		if roleID == "" {
+			roleID = props["RoleID"]
+		}
+	}
+	return accountID, roleID
+}
+
+func buildDSNConnectionString(parsed *url.URL, values url.Values, dsn, accountID, roleID string, tba *tbaCredentials) string {
+	params := []odbcParam{{key: "DSN", value: dsn}}
+	if tba == nil {
+		params = appendCredentials(params, parsed, values)
+	}
+	// Role is not required on the DSN path: a configured DSN already supplies
+	// AccountID/RoleID to the driver. We only emit CustomProperties when we have
+	// values to set (URI overrides or ini-resolved).
+	if customProperties := buildCustomProperties(accountID, roleID, values); customProperties != "" {
 		params = append(params, odbcParam{key: "CustomProperties", value: customProperties})
 	}
-	return formatODBCConnectionString(params), nil
+	return formatODBCConnectionString(params)
 }
 
-func buildDriverConnectionString(parsed *url.URL, values url.Values) (string, error) {
+func buildDriverConnectionString(parsed *url.URL, values url.Values, accountID, roleID string, tba *tbaCredentials) (string, error) {
 	driver := firstNonEmpty(values.Get("driver"), values.Get("driver_name"))
 	if driver == "" {
 		return "", fmt.Errorf("dsn, driver, or odbc_connect_string is required for netsuite SuiteAnalytics Connect over ODBC")
 	}
 
-	accountID := accountIDFromURI(parsed, values)
 	host := values.Get("host")
 	if host == "" && parsed.Hostname() != "" && strings.Contains(parsed.Hostname(), ".") {
 		host = parsed.Hostname()
@@ -314,13 +606,17 @@ func buildDriverConnectionString(parsed *url.URL, values url.Values) (string, er
 	if truststore := values.Get("truststore"); truststore != "" {
 		params = append(params, odbcParam{key: "Truststore", value: truststore})
 	}
-	params = appendCredentials(params, parsed, values)
-
-	customProperties, err := buildCustomProperties(parsed, values)
-	if err != nil {
-		return "", err
+	if tba == nil {
+		params = appendCredentials(params, parsed, values)
 	}
-	if customProperties != "" {
+
+	// On the DSN-less driver path there is no DSN to supply the role, so it must
+	// be provided when an account ID is present.
+	if accountID != "" && roleID == "" && !containsODBCProperty(values.Get("custom_properties"), "RoleID") {
+		return "", fmt.Errorf("role_id is required when account_id is provided for netsuite SuiteAnalytics Connect over ODBC")
+	}
+
+	if customProperties := buildCustomProperties(accountID, roleID, values); customProperties != "" {
 		params = append(params, odbcParam{key: "CustomProperties", value: customProperties})
 	}
 
@@ -345,15 +641,9 @@ func appendCredentials(params []odbcParam, parsed *url.URL, values url.Values) [
 	return params
 }
 
-func buildCustomProperties(parsed *url.URL, values url.Values) (string, error) {
+func buildCustomProperties(accountID, roleID string, values url.Values) string {
 	var properties []string
-	accountID := accountIDFromURI(parsed, values)
-	roleID := values.Get("role_id")
 	extra := strings.Trim(values.Get("custom_properties"), "; ")
-
-	if accountID != "" && roleID == "" && !containsODBCProperty(extra, "RoleID") {
-		return "", fmt.Errorf("role_id is required when account_id is provided for netsuite SuiteAnalytics Connect over ODBC")
-	}
 
 	if accountID != "" {
 		properties = append(properties, "AccountID="+accountID)
@@ -371,7 +661,7 @@ func buildCustomProperties(parsed *url.URL, values url.Values) (string, error) {
 		properties = append(properties, extra)
 	}
 
-	return strings.Join(properties, ";"), nil
+	return strings.Join(properties, ";")
 }
 
 func containsODBCProperty(properties, key string) bool {
@@ -424,8 +714,19 @@ func odbcValue(value string) string {
 	return value
 }
 
-func buildSuiteAnalyticsQuery(tableName string, opts source.ReadOptions) string {
-	query := fmt.Sprintf("SELECT * FROM %s", strings.TrimSpace(tableName))
+func buildSuiteAnalyticsQuery(tableName string, columns []string, opts source.ReadOptions) string {
+	// SuiteAnalytics Connect runs on the OpenAccess SDK SQL engine, which uses
+	// SQL Server-style TOP for row limiting (FETCH FIRST is rejected).
+	projection := "*"
+	if len(columns) > 0 {
+		projection = strings.Join(columns, ", ")
+	}
+
+	selectClause := "SELECT"
+	if opts.Limit > 0 {
+		selectClause = fmt.Sprintf("SELECT TOP %d", opts.Limit)
+	}
+	query := fmt.Sprintf("%s %s FROM %s", selectClause, projection, strings.TrimSpace(tableName))
 
 	var conditions []string
 	if opts.IncrementalKey != "" {
@@ -438,12 +739,13 @@ func buildSuiteAnalyticsQuery(tableName string, opts source.ReadOptions) string 
 	}
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
-		query += " ORDER BY " + opts.IncrementalKey + " ASC"
-	}
-	if opts.Limit > 0 {
-		query += fmt.Sprintf(" FETCH FIRST %d ROWS ONLY", opts.Limit)
 	}
 
+	// Intentionally no ORDER BY: ingestr does not checkpoint mid-stream, so the
+	// interval-bounded merge/delete+insert/replace strategies don't depend on
+	// row order. More importantly, ORDER BY over a wide result set (e.g. the
+	// 685-column `transaction` table) crashes the SuiteAnalytics Connect ODBC
+	// driver and forces a slow server-side sort.
 	return query
 }
 
