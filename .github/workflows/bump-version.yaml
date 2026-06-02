@@ -13,10 +13,10 @@ jobs:
           fetch-depth: '0'
       - name: Set branch name
         id: extract_branch
-        run: echo "::set-output name=branch_name::$(echo ${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}})"
+        run: echo "branch_name=$(echo ${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}})" >> $GITHUB_OUTPUT
       - name: Bump version and push tag
         id: bump_version
-        uses: anothrNick/github-tag-action@1.36.0
+        uses: anothrNick/github-tag-action@ce4b5ffa38e072fa7a901e417253c438fcc2ccce # 1.36.0
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           WITH_V: true
