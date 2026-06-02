@@ -296,38 +296,6 @@ func TestParseCustomTable(t *testing.T) {
 	})
 }
 
-func TestAnalyticsTables(t *testing.T) {
-	s := NewLinkedInAdsSource()
-	tables := s.getTables()
-
-	testCases := []struct {
-		name string
-		pks  []string
-	}{
-		{name: "ad_campaign_analytics", pks: []string{"campaign", "date"}},
-		{name: "ad_creative_analytics", pks: []string{"creative", "date"}},
-		{name: "ad_impression_device_analytics", pks: []string{"impression_device", "date"}},
-		{name: "ad_member_company_size_analytics", pks: []string{"member_company_size", "date"}},
-		{name: "ad_member_country_analytics", pks: []string{"member_country", "date"}},
-		{name: "ad_member_job_function_analytics", pks: []string{"member_job_function", "date"}},
-		{name: "ad_member_job_title_analytics", pks: []string{"member_job_title", "date"}},
-		{name: "ad_member_industry_analytics", pks: []string{"member_industry", "date"}},
-		{name: "ad_member_region_analytics", pks: []string{"member_region", "date"}},
-		{name: "ad_member_company_analytics", pks: []string{"member_company", "date"}},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			table, ok := tables[tc.name]
-
-			assert.True(t, ok)
-			assert.Equal(t, tc.name, table.Name())
-			assert.Equal(t, tc.pks, table.PrimaryKeys())
-			assert.Equal(t, "date", table.IncrementalKey())
-		})
-	}
-}
-
 func TestParseTimeInterval(t *testing.T) {
 	t.Run("error when interval_start is nil", func(t *testing.T) {
 		endTime := time.Date(2024, 12, 31, 0, 0, 0, 0, time.UTC)

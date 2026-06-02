@@ -62,16 +62,9 @@ LinkedIn Ads source allows ingesting the following sources into separate tables:
 | [conversions](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/conversion-tracking?view=li-lms-2024-11&tabs=http) | id | – | replace | Retrieves conversion rules for each ad account. |
 | [lead_forms](https://learn.microsoft.com/en-us/linkedin/marketing/lead-sync/leadsync?view=li-lms-2025-11&viewFallbackFrom=li-lms-2024-06&tabs=http#lead-forms-1) | id | – | replace | Retrieves lead generation forms for each ad account. |
 | [lead_form_responses](https://learn.microsoft.com/en-us/linkedin/marketing/lead-sync/leadsync?view=li-lms-2025-11&viewFallbackFrom=li-lms-2024-06&tabs=http#get-lead-form-responses) | id | date (interval)| merge | Retrieves lead form responses for each ad account. |
-| ad_campaign_analytics | campaign, date | date | merge | Retrieves daily ad analytics by campaign. |
-| ad_creative_analytics | creative, date | date | merge | Retrieves daily ad analytics by creative. |
-| ad_impression_device_analytics | impression_device, date | date | merge | Retrieves daily ad analytics by impression device. |
-| ad_member_company_size_analytics | member_company_size, date | date | merge | Retrieves daily ad analytics by member company size. |
-| ad_member_country_analytics | member_country, date | date | merge | Retrieves daily ad analytics by member country. |
-| ad_member_job_function_analytics | member_job_function, date | date | merge | Retrieves daily ad analytics by member job function. |
-| ad_member_job_title_analytics | member_job_title, date | date | merge | Retrieves daily ad analytics by member job title. |
-| ad_member_industry_analytics | member_industry, date | date | merge | Retrieves daily ad analytics by member industry. |
-| ad_member_region_analytics | member_region, date | date | merge | Retrieves daily ad analytics by member region. |
-| ad_member_company_analytics | member_company, date | date | merge | Retrieves daily ad analytics by member company. |
+| dmp_segments | id | – | replace | Retrieves matched/retargeting audience segments (sizes, match rates, rules) for each ad account. |
+| insight_tags | id | – | replace | Retrieves Insight Tag configuration and installation status for each ad account. |
+| insight_tag_domains | domainName, account_id | – | replace | Retrieves domains associated with Insight Tags for each ad account. |
 | [custom](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#analytics-finder) | [dimension, date] or [dimension, start_date, end_date] | date (daily) or start_date (monthly) | merge | Custom reports allow you to retrieve data based on specific dimensions and metrics. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
@@ -161,6 +154,25 @@ ingestr ingest \
 The applied parameters for the report are:
 - dimensions: `account`, `month`
 - metrics: `totalEngagements`, `impressions`
+
+### Common Ad Analytics Reports
+
+The following common analytics breakdowns are all available through the `custom:` table:
+
+| Report | `--source-table` |
+| ------ | ---------------- |
+| Ad Analytics by Campaign | `custom:campaign,date:<metrics>` |
+| Ad Analytics by Creative | `custom:creative,date:<metrics>` |
+| Ad Analytics by Impression Device | `custom:impression_device,date:<metrics>` |
+| Ad Analytics by Member Company Size | `custom:member_company_size,date:<metrics>` |
+| Ad Analytics by Member Country | `custom:member_country,date:<metrics>` |
+| Ad Analytics by Member Job Function | `custom:member_job_function,date:<metrics>` |
+| Ad Analytics by Member Job Title | `custom:member_job_title,date:<metrics>` |
+| Ad Analytics by Member Industry | `custom:member_industry,date:<metrics>` |
+| Ad Analytics by Member Region | `custom:member_region,date:<metrics>` |
+| Ad Analytics by Member Company | `custom:member_company,date:<metrics>` |
+
+Replace `<metrics>` with the LinkedIn metrics you want (e.g. `impressions,clicks,costInLocalCurrency`). Swap `date` for `month` to switch from daily to monthly granularity.
 
 ### Demographic Reports
 
