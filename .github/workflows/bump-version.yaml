@@ -3,6 +3,9 @@ name: Bump Version
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   bump_version:
     name: Bump Version
