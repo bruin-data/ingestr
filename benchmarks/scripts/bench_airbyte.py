@@ -1,10 +1,4 @@
-# /// script
-# requires-python = ">=3.9"
-# dependencies = [
-#     "airbyte",
-# ]
-# ///
-"""Benchmark script for Airbyte (PyAirbyte). Run via: uv run bench_airbyte.py --source-uri ... --dest-uri ..."""
+"""Benchmark script for Airbyte (PyAirbyte)."""
 
 import argparse
 import os

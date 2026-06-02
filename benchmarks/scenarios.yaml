@@ -22,7 +22,7 @@ sources:
   local_mongodb:
     type: mongodb
     uri: "mongodb://localhost:27018/?directConnection=true&replicaSet=rs0"
-    table: "bench_source.bench_data_{size}"
+    table: "bench_source.bench_data_bson_{size}"
     docker: bench-mongo-source
     seed: true
     database: bench_source
@@ -140,6 +140,15 @@ tools:
   dlt:
     script: scripts/bench_dlt.py
     requires: uv
+    backend: default
+
+  dlt_pyarrow:
+    script: scripts/bench_dlt.py
+    requires: uv
+    backend: pyarrow
+    skip:
+      - source: local_mongodb
+        destination: local_postgres
 
   airbyte:
     script: scripts/bench_airbyte.py

@@ -14,7 +14,7 @@ for rows in $BENCH_ALL_SIZES; do
     echo "############################################################"
     echo "# Benchmarking with $rows rows"
     echo "############################################################"
-    uv run "$SCRIPT_DIR/runner.py" --rows "$rows" "$@"
+    uv run --project "$BENCH_DIR" --locked python "$SCRIPT_DIR/runner.py" --rows "$rows" "$@"
 done
 
 echo ""

@@ -7,4 +7,5 @@ set -euo pipefail
 #   bash benchmarks/scripts/validate.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec uv run "$SCRIPT_DIR/runner.py" --validate "$@"
+BENCH_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+exec uv run --project "$BENCH_DIR" --locked python "$SCRIPT_DIR/runner.py" --validate "$@"

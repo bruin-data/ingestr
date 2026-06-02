@@ -1,18 +1,14 @@
-# /// script
-# requires-python = ">=3.9"
-# dependencies = ["pyyaml", "rich"]
-# ///
 """Benchmark runner for gong vs other data ingestion tools.
 
 Reads scenario definitions from scenarios.yaml and orchestrates hyperfine benchmarks.
 
 Usage:
-    uv run benchmarks/scripts/runner.py                          # Run all scenarios
-    uv run benchmarks/scripts/runner.py --rows 1000 --runs 3     # Quick test
-    uv run benchmarks/scripts/runner.py --tools gong sling       # Specific tools
-    uv run benchmarks/scripts/runner.py --scenarios '*bigquery*'  # Filter scenarios
-    uv run benchmarks/scripts/runner.py --validate               # Validation mode
-    uv run benchmarks/scripts/runner.py --report                 # Report from latest results
+    uv run --project benchmarks python benchmarks/scripts/runner.py
+    uv run --project benchmarks python benchmarks/scripts/runner.py --rows 1000 --runs 3
+    uv run --project benchmarks python benchmarks/scripts/runner.py --tools gong sling
+    uv run --project benchmarks python benchmarks/scripts/runner.py --scenarios '*bigquery*'
+    uv run --project benchmarks python benchmarks/scripts/runner.py --validate
+    uv run --project benchmarks python benchmarks/scripts/runner.py --report
 """
 
 import argparse
@@ -245,11 +241,18 @@ def check_tool_available(name: str, tool_cfg: dict) -> bool:
     return True
 
 
-def should_skip_tool(tool_cfg: dict, src_type: str, dst_type: str) -> bool:
+def should_skip_tool(tool_cfg: dict, src_type: str, dst_type: str, src_name: str, dst_name: str) -> bool:
     for rule in tool_cfg.get("skip", []):
         if "source_type" in rule and rule["source_type"] == src_type:
             return True
         if "destination_type" in rule and rule["destination_type"] == dst_type:
+            return True
+        source_matches = "source" in rule and rule["source"] == src_name
+        destination_matches = "destination" in rule and rule["destination"] == dst_name
+        if "source" in rule and "destination" in rule:
+            if source_matches and destination_matches:
+                return True
+        elif source_matches or destination_matches:
             return True
     return False
 
@@ -290,6 +293,13 @@ def uri_option(flag: str, uri: str, tool_cfg: dict | None = None) -> str:
     if env_name and not (tool_cfg or {}).get("uri_scheme_overrides"):
         return f"{flag}-env {shlex.quote(env_name)}"
     return f"{flag} {shell_uri_arg(uri, tool_cfg)}"
+
+
+def uv_python_command(script: Path) -> str:
+    return (
+        f"uv run --project {shlex.quote(str(BENCH_DIR))} --locked "
+        f"python {shlex.quote(str(script))}"
+    )
 
 
 def sling_env_name(role: str, name: str) -> str:
@@ -367,20 +377,23 @@ def build_tool_command(
         ]
         return "".join(parts)
 
-    if tool_name == "dlt":
+    if tool_name in ("dlt", "dlt_pyarrow"):
         script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_dlt.py")
+        backend = tool_cfg.get("backend")
+        backend_arg = f" --backend {shlex.quote(backend)}" if backend else ""
         return (
-            f"RUNTIME__DLTHUB_TELEMETRY=false uv run '{script}'"
+            f"RUNTIME__DLTHUB_TELEMETRY=false {uv_python_command(script)}"
             f" {uri_option('--source-uri', src_uri)}"
             f" --source-table '{src_table}'"
             f" {uri_option('--dest-uri', dst_uri)}"
             f" --dest-table '{dst_table}'"
+            f"{backend_arg}"
         )
 
     if tool_name == "airbyte":
         script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_airbyte.py")
         return (
-            f"AIRBYTE_ANALYTICS_DISABLED=1 DO_NOT_TRACK=1 uv run '{script}'"
+            f"AIRBYTE_ANALYTICS_DISABLED=1 DO_NOT_TRACK=1 {uv_python_command(script)}"
             f" --source-uri {shell_uri_arg(src_uri)}"
             f" --source-table '{src_table}'"
             f" --dest-uri {shell_uri_arg(dst_uri)}"
@@ -526,7 +539,7 @@ def run_benchmarks(
         for tool_name in tools:
             tool_cfg = tool_configs[tool_name]
 
-            if should_skip_tool(tool_cfg, src["type"], dst["type"]):
+            if should_skip_tool(tool_cfg, src["type"], dst["type"], src_name, dst_name):
                 console.print(f"  [dim]{tool_name}: skipped[/dim]")
                 continue
 
@@ -830,7 +843,7 @@ def run_validation(
         for tool_name in tools:
             tool_cfg = tool_configs[tool_name]
 
-            if should_skip_tool(tool_cfg, src["type"], dst["type"]):
+            if should_skip_tool(tool_cfg, src["type"], dst["type"], src_name, dst_name):
                 console.print(f"  [{tool_name}] [dim]SKIP (tool skip rule)[/dim]")
                 skipped += 1
                 continue
