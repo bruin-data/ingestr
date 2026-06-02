@@ -148,7 +148,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "columns",
-				Usage:   "Override column types for schema evolution (format: 'col:type,col2:type2'). Types: bigint, int, smallint, float, double, decimal(p,s), string, text, boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
+				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:string:fname,email::eml'. Types: bigint, int, smallint, float, double, decimal(p,s), string, text, boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
 				Sources: cli.EnvVars("INGESTR_COLUMNS"),
 			},
 			&cli.StringSliceFlag{

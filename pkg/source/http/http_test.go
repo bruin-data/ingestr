@@ -69,6 +69,10 @@ func TestParseColumnNames(t *testing.T) {
 		{"fewer columns than data", "id:bigint,name:text", 3, []string{"id", "name", "unknown_col_2"}},
 		{"more columns than data", "id:bigint,name:text,value:double,extra:int", 3, []string{"id", "name", "value"}},
 		{"with spaces", " id : bigint , name : text ", 2, []string{"id", "name"}},
+		{"3-part picks source name", "first_name:string:fname,email::eml", 2, []string{"fname", "eml"}},
+		{"mixed 2 and 3 part", "id:bigint,first_name:string:fname", 2, []string{"id", "fname"}},
+		{"decimal type with rename", "amount:decimal(10,2):raw_amount,name:text", 2, []string{"raw_amount", "name"}},
+		{"decimal type without rename", "id:bigint,amount:decimal(10,2)", 2, []string{"id", "amount"}},
 	}
 
 	for _, tt := range tests {

@@ -166,14 +166,32 @@ func AppendMissingOverrideColumns(tableSchema *schema.TableSchema, columnsSpec, 
 
 	for _, name := range names {
 		ov := overrides[name]
-		if existing[normalize(ov.Name)] {
+		// If a rename was requested, the appended column should use the
+		// destination name.
+		finalName := ov.Name
+		if ov.RenameTo != "" {
+			finalName = ov.RenameTo
+		}
+		if existing[normalize(finalName)] {
 			continue
 		}
+
+		dataType := ov.DataType
+		precision := ov.Precision
+		scale := ov.Scale
+		// Rename-only overrides carry no type. Fall back to STRING
+		if dataType == schema.TypeUnknown {
+			dataType = schema.TypeString
+			precision = 0
+			scale = 0
+			fmt.Printf("Warning: column %q created as STRING placeholder (no type in --columns); pass --columns %s:<type>:%s for correct typing\n", finalName, finalName, ov.Name)
+		}
+
 		tableSchema.Columns = append(tableSchema.Columns, schema.Column{
-			Name:      ov.Name,
-			DataType:  ov.DataType,
-			Precision: ov.Precision,
-			Scale:     ov.Scale,
+			Name:      finalName,
+			DataType:  dataType,
+			Precision: precision,
+			Scale:     scale,
 			Nullable:  true,
 		})
 	}

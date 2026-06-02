@@ -1176,8 +1176,14 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 	}
 
 	applied := 0
+	renameMap := make(map[string]string)
 	for i, col := range sourceSchema.Columns {
-		if override, ok := overrides.GetForColumn(col.Name, p.config.SchemaNaming); ok {
+		override, ok := overrides.GetForColumn(col.Name, p.config.SchemaNaming)
+		if !ok {
+			continue
+		}
+
+		if override.DataType != schema.TypeUnknown {
 			newCol := override.ApplyToColumn(col)
 			if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale {
 				fmt.Printf("Column override: %q type changed from %v(p=%v,s=%v) to %v(p=%v,s=%v)\n",
@@ -1187,10 +1193,19 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 			config.Debug("[PIPELINE] Column override applied: %s -> %v", col.Name, override.DataType)
 			applied++
 		}
+
+		if override.RenameTo != "" && override.RenameTo != sourceSchema.Columns[i].Name {
+			renameMap[sourceSchema.Columns[i].Name] = override.RenameTo
+			fmt.Printf("Column rename: %q -> %q (from --columns)\n", sourceSchema.Columns[i].Name, override.RenameTo)
+		}
 	}
 
 	if applied > 0 {
 		config.Debug("[PIPELINE] Applied %d column type overrides", applied)
+	}
+
+	if len(renameMap) > 0 {
+		p.applyColumnMapping(sourceSchema, renameMap)
 	}
 
 	return nil
