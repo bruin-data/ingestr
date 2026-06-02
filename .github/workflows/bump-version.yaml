@@ -1,0 +1,22 @@
+name: Bump Version
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bump_version:
+    name: Bump Version
+    runs-on: depot-ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: '0'
+      - name: Bump version and push tag
+        id: bump_version
+        uses: anothrNick/github-tag-action@1.36.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          WITH_V: true
+          DEFAULT_BUMP: patch
+          PRERELEASE: true
+          RELEASE_BRANCHES: ${{ github.ref_name }}
