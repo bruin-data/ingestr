@@ -50,7 +50,6 @@ type accountFetchTask struct {
 type accountFetchResult struct {
 	accountID string
 	items     []map[string]interface{}
-	err       error
 }
 
 type accountItemFetcher func(ctx context.Context, accountID string, pageSize int) ([]map[string]interface{}, error)
@@ -352,12 +351,7 @@ func (s *LinkedInAdsSource) runParallelAccountFetch(
 
 				items, err := fetcher(workerCtx, task.accountID, pageSize)
 				if err != nil {
-					config.Debug("[LINKEDIN_ADS] Error fetching %s for account %s: %v", tableName, task.accountID, err)
-					select {
-					case resultChan <- accountFetchResult{accountID: task.accountID, err: err}:
-					case <-workerCtx.Done():
-						return
-					}
+					fmt.Printf("Warning: failed to fetch %s for account %s: %v\n", tableName, task.accountID, err)
 					continue
 				}
 
@@ -391,25 +385,15 @@ func (s *LinkedInAdsSource) runParallelAccountFetch(
 	}()
 
 	var allItems []map[string]interface{}
-	var firstErr error
 	for result := range resultChan {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
 		}
-		if result.err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("account %s: %w", result.accountID, result.err)
-			}
-			continue
-		}
 		allItems = append(allItems, result.items...)
 	}
 
-	if firstErr != nil {
-		return nil, fmt.Errorf("failed to fetch %s: %w", tableName, firstErr)
-	}
 	return allItems, nil
 }
 
