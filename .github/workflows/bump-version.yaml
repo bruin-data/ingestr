@@ -16,10 +16,10 @@ jobs:
         run: echo "branch_name=$(echo ${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}})" >> $GITHUB_OUTPUT
       - name: Bump version and push tag
         id: bump_version
-        uses: anothrNick/github-tag-action@ce4b5ffa38e072fa7a901e417253c438fcc2ccce # 1.36.0
+        uses: anothrNick/github-tag-action@4ed44965e0db8dab2b466a16da04aec3cc312fd8 # 1.75.0
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          WITH_V: true
+          TAG_PREFIX: v
           DEFAULT_BUMP: patch
           PRERELEASE: true
           RELEASE_BRANCHES: ${{ steps.extract_branch.outputs.branch_name }}
