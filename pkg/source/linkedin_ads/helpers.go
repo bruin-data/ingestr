@@ -195,7 +195,6 @@ const (
 )
 
 type customAnalyticsConfig struct {
-	tableName       string
 	dimensions      []string
 	metrics         []string
 	pivot           string
@@ -278,7 +277,6 @@ func parseCustomTableName(tableName string) (*customAnalyticsConfig, error) {
 	}
 
 	return &customAnalyticsConfig{
-		tableName:       "custom_reports",
 		dimensions:      dimensions,
 		metrics:         metrics,
 		pivot:           pivot,

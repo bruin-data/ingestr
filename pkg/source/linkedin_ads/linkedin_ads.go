@@ -924,7 +924,7 @@ func (s *LinkedInAdsSource) readCustomAnalytics(ctx context.Context, cfg *custom
 		dateHints = dailyDateColumns
 	}
 
-	return sendAsArrowRecord(allItems, dateHints, opts.ExcludeColumns, results, cfg.tableName)
+	return sendAsArrowRecord(allItems, dateHints, opts.ExcludeColumns, results, "custom_reports")
 }
 
 var _ source.Source = (*LinkedInAdsSource)(nil)
