@@ -16,6 +16,12 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/microsoft/go-mssqldb"
+	_ "github.com/microsoft/go-mssqldb/azuread"
+)
+
+const (
+	sqlServerDriverName = "sqlserver"
+	azureSQLDriverName  = "azuresql"
 )
 
 type MSSQLSource struct {
@@ -28,16 +34,16 @@ func NewMSSQLSource() *MSSQLSource {
 }
 
 func (s *MSSQLSource) Schemes() []string {
-	return []string{"mssql", "sqlserver", "mssql+pyodbc"}
+	return []string{"mssql", "sqlserver", "mssql+pyodbc", "azuresql", "azure-sql"}
 }
 
 func (s *MSSQLSource) Connect(ctx context.Context, uri string) error {
-	connStr, err := uriToConnString(uri)
+	connStr, driverName, err := uriToConnString(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse SQL Server URI: %w", err)
 	}
 
-	db, err := sql.Open("sqlserver", connStr)
+	db, err := sql.Open(driverName, connStr)
 	if err != nil {
 		return fmt.Errorf("failed to open SQL Server connection: %w", err)
 	}
@@ -57,19 +63,20 @@ func (s *MSSQLSource) Connect(ctx context.Context, uri string) error {
 	return nil
 }
 
-// uriToConnString converts a SQL Server URI to the connection string format
+// uriToConnString converts SQL Server and Azure SQL URIs to the connection
+// string format expected by go-mssqldb.
 // URI format: mssql://user:pass@host:port/database?param=value
 // Conn string format: sqlserver://user:pass@host:port?database=db&param=value
-func uriToConnString(uri string) (string, error) {
+func uriToConnString(uri string) (string, string, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	// Normalize scheme
 	scheme := strings.ToLower(u.Scheme)
-	if !strings.HasPrefix(scheme, "mssql") && scheme != "sqlserver" {
-		return "", fmt.Errorf("unsupported scheme: %s", scheme)
+	isAzureSQL := scheme == "azuresql" || scheme == "azure-sql"
+	if !strings.HasPrefix(scheme, "mssql") && scheme != "sqlserver" && !isAzureSQL {
+		return "", "", fmt.Errorf("unsupported scheme: %s", scheme)
 	}
 
 	host := u.Hostname()
@@ -85,14 +92,56 @@ func uriToConnString(uri string) (string, error) {
 	}
 
 	database := strings.TrimPrefix(u.Path, "/")
+	query := u.Query()
+	deleteQueryParamCI(query, "driver")
 
-	// Build sqlserver:// connection string
+	auth, hasAuthentication := normalizeQueryParamCI(query, "authentication")
+	if hasAuthentication {
+		deleteQueryParamCI(query, "authentication")
+		if _, hasFedAuth := normalizeQueryParamCI(query, "fedauth"); !hasFedAuth {
+			if fedAuth := fedAuthFromAuthentication(auth); fedAuth != "" {
+				query.Set("fedauth", fedAuth)
+			}
+		}
+	}
+
+	fedAuth, hasFedAuth := normalizeQueryParamCI(query, "fedauth")
+	tenantID, hasTenantID := normalizeQueryParamCI(query, "tenant_id")
+	if hasTenantID {
+		deleteQueryParamCI(query, "tenant_id")
+	}
+
+	if isAzureSQL {
+		if _, hasEncrypt := normalizeQueryParamCI(query, "encrypt"); !hasEncrypt {
+			query.Set("encrypt", "true")
+		}
+		if !hasFedAuth {
+			switch {
+			case tenantID != "" && user != "":
+				fedAuth = "ActiveDirectoryServicePrincipal"
+				query.Set("fedauth", fedAuth)
+			case user == "":
+				fedAuth = "ActiveDirectoryDefault"
+				query.Set("fedauth", fedAuth)
+			}
+		}
+	}
+
+	driverName := sqlServerDriverName
+	if isAzureSQL || hasFedAuth || hasAuthentication {
+		driverName = azureSQLDriverName
+	}
+
+	if tenantID != "" && user != "" && isServicePrincipalFedAuth(fedAuth) && !strings.Contains(user, "@") {
+		user = user + "@" + tenantID
+	}
+
 	connURL := &url.URL{
 		Scheme: "sqlserver",
 		Host:   fmt.Sprintf("%s:%s", host, port),
 	}
 
-	if user != "" {
+	if user != "" || password != "" {
 		if password != "" {
 			connURL.User = url.UserPassword(user, password)
 		} else {
@@ -100,14 +149,67 @@ func uriToConnString(uri string) (string, error) {
 		}
 	}
 
-	// Add query parameters
-	query := u.Query()
 	if database != "" {
 		query.Set("database", database)
 	}
 	connURL.RawQuery = query.Encode()
 
-	return connURL.String(), nil
+	return connURL.String(), driverName, nil
+}
+
+func normalizeQueryParamCI(query url.Values, canonical string) (string, bool) {
+	for key, values := range query {
+		if !strings.EqualFold(key, canonical) {
+			continue
+		}
+		value := ""
+		if len(values) > 0 {
+			value = values[0]
+		}
+		if key != canonical {
+			query.Del(key)
+			query.Set(canonical, value)
+		}
+		return value, true
+	}
+	return "", false
+}
+
+func deleteQueryParamCI(query url.Values, key string) {
+	for existing := range query {
+		if strings.EqualFold(existing, key) {
+			query.Del(existing)
+		}
+	}
+}
+
+func fedAuthFromAuthentication(authentication string) string {
+	normalized := strings.ToLower(strings.ReplaceAll(authentication, " ", ""))
+	switch normalized {
+	case "activedirectoryaccesstoken", "activedirectoryserviceprincipalaccesstoken":
+		return "ActiveDirectoryServicePrincipalAccessToken"
+	case "activedirectoryserviceprincipal", "activedirectoryapplication":
+		return "ActiveDirectoryServicePrincipal"
+	case "activedirectorydefault":
+		return "ActiveDirectoryDefault"
+	case "activedirectorymanagedidentity", "activedirectorymsi":
+		return "ActiveDirectoryManagedIdentity"
+	case "activedirectorypassword":
+		return "ActiveDirectoryPassword"
+	case "activedirectoryazcli":
+		return "ActiveDirectoryAzCli"
+	case "activedirectorydevicecode":
+		return "ActiveDirectoryDeviceCode"
+	case "activedirectoryinteractive":
+		return "ActiveDirectoryInteractive"
+	default:
+		return ""
+	}
+}
+
+func isServicePrincipalFedAuth(fedAuth string) bool {
+	return strings.EqualFold(fedAuth, "ActiveDirectoryServicePrincipal") ||
+		strings.EqualFold(fedAuth, "ActiveDirectoryApplication")
 }
 
 func (s *MSSQLSource) Close(ctx context.Context) error {

@@ -1,5 +1,7 @@
 package server
 
+import "net/url"
+
 type ConnectorField struct {
 	Name        string        `json:"name"`
 	Label       string        `json:"label"`
@@ -73,6 +75,30 @@ func GetConnectors() []ConnectorType {
 				{Name: "user", Label: "Username", Type: "string", Required: true, Placeholder: "sa"},
 				{Name: "password", Label: "Password", Type: "password", Required: false},
 				{Name: "database", Label: "Database", Type: "string", Required: true, Placeholder: "master"},
+			},
+		},
+		{
+			ID:            "azuresql",
+			Name:          "Azure SQL",
+			Schemes:       []string{"azuresql", "azure-sql"},
+			IsSource:      true,
+			IsDestination: false,
+			Fields: []ConnectorField{
+				{Name: "host", Label: "Server", Type: "string", Required: true, Placeholder: "myserver.database.windows.net"},
+				{Name: "port", Label: "Port", Type: "number", Required: false, Default: "1433", Placeholder: "1433"},
+				{Name: "user", Label: "Username / Client ID", Type: "string", Required: false},
+				{Name: "password", Label: "Password / Token", Type: "password", Required: false},
+				{Name: "database", Label: "Database", Type: "string", Required: true, Placeholder: "mydb"},
+				{Name: "fedauth", Label: "Authentication", Type: "select", Required: false, Options: []FieldOption{
+					{Value: "", Label: "SQL Authentication"},
+					{Value: "ActiveDirectoryDefault", Label: "Microsoft Entra Default"},
+					{Value: "ActiveDirectoryServicePrincipal", Label: "Service Principal"},
+					{Value: "ActiveDirectoryManagedIdentity", Label: "Managed Identity"},
+					{Value: "ActiveDirectoryServicePrincipalAccessToken", Label: "Access Token"},
+					{Value: "ActiveDirectoryAzCli", Label: "Azure CLI"},
+				}},
+				{Name: "tenant_id", Label: "Tenant ID", Type: "string", Required: false},
+				{Name: "encrypt", Label: "Encrypt", Type: "checkbox", Required: false, Default: "true"},
 			},
 		},
 		{
@@ -229,6 +255,8 @@ func BuildURI(connectorID string, fields map[string]string) string {
 		return buildStandardURI("mysql", fields, "3306")
 	case "mssql":
 		return buildStandardURI("mssql", fields, "1433")
+	case "azuresql":
+		return buildAzureSQLURI(fields)
 	case "mongodb":
 		scheme := "mongodb"
 		if fields["srv"] == "true" {
@@ -292,6 +320,45 @@ func BuildURI(connectorID string, fields map[string]string) string {
 	default:
 		return ""
 	}
+}
+
+func buildAzureSQLURI(fields map[string]string) string {
+	host := fields["host"]
+	port := fields["port"]
+	if port == "" {
+		port = "1433"
+	}
+
+	u := &url.URL{
+		Scheme: "azuresql",
+		Host:   host + ":" + port,
+	}
+	if fields["user"] != "" || fields["password"] != "" {
+		if fields["password"] != "" {
+			u.User = url.UserPassword(fields["user"], fields["password"])
+		} else {
+			u.User = url.User(fields["user"])
+		}
+	}
+	if fields["database"] != "" {
+		u.Path = "/" + fields["database"]
+	}
+
+	query := url.Values{}
+	if fields["fedauth"] != "" {
+		query.Set("fedauth", fields["fedauth"])
+	}
+	if fields["tenant_id"] != "" {
+		query.Set("tenant_id", fields["tenant_id"])
+	}
+	if fields["encrypt"] == "" {
+		query.Set("encrypt", "true")
+	} else {
+		query.Set("encrypt", fields["encrypt"])
+	}
+	u.RawQuery = query.Encode()
+
+	return u.String()
 }
 
 func buildStandardURI(scheme string, fields map[string]string, defaultPort string) string {
