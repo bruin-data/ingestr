@@ -491,11 +491,6 @@ func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts desti
 	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
 	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
 
-	quotedCols := make([]string, len(opts.Columns))
-	for i, col := range opts.Columns {
-		quotedCols[i] = quoteIdentifier(col)
-	}
-
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -516,19 +511,9 @@ func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts desti
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
-	colList := strings.Join(quotedCols, ", ")
-	// Dedupe staging by primary key so duplicate keys don't produce duplicate rows.
-	selectClause := fmt.Sprintf("SELECT %s FROM %s", colList, stagingFull)
-	if len(opts.PrimaryKeys) > 0 {
-		quotedPKs := make([]string, len(opts.PrimaryKeys))
-		for i, pk := range opts.PrimaryKeys {
-			quotedPKs[i] = quoteIdentifier(pk)
-		}
-		selectClause = fmt.Sprintf(
-			"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1",
-			colList, colList, strings.Join(quotedPKs, ", "), stagingFull,
-		)
-	}
+	colList := strings.Join(quoteColumns(opts.Columns), ", ")
+	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
+	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingFull, quoteIdentifier(opts.IncrementalKey))
 	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetFull, colList, selectClause)
 	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
 
@@ -849,6 +834,14 @@ func quoteIdentifier(name string) string {
 		return name
 	}
 	return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
+}
+
+func quoteColumns(cols []string) []string {
+	quoted := make([]string, len(cols))
+	for i, col := range cols {
+		quoted[i] = quoteIdentifier(col)
+	}
+	return quoted
 }
 
 func filterColumns(columns []string, exclude []string) []string {

@@ -481,15 +481,8 @@ func (d *SynapseDestination) DeleteInsertTable(ctx context.Context, opts destina
 	}
 
 	colList := strings.Join(quotedColumns, ", ")
-	stagingTable := quoteTable(opts.StagingTable)
-	// Dedupe staging by primary key so duplicate keys don't produce duplicate rows.
-	selectClause := fmt.Sprintf(`SELECT %s FROM %s`, colList, stagingTable)
-	if len(opts.PrimaryKeys) > 0 {
-		selectClause = fmt.Sprintf(
-			`SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1`,
-			colList, colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingTable,
-		)
-	}
+	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
+	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quoteTable(opts.StagingTable), quoteColumns([]string{opts.IncrementalKey})[0])
 	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) %s`, quoteTable(opts.TargetTable), colList, selectClause)
 	config.Debug("[Synapse DELETE+INSERT] Executing INSERT: %s", insertSQL)
 

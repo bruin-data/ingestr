@@ -583,13 +583,8 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 	}
 
 	colList := strings.Join(quotedColumns, ", ")
-	selectClause := fmt.Sprintf(`SELECT %s FROM %s`, colList, quotedStagingTable)
-	if len(opts.PrimaryKeys) > 0 {
-		// DISTINCT ON dedupes staging by PK so duplicate keys don't reach the
-		// target. No recency column exists here, so the winner per PK is arbitrary.
-		pkList := strings.Join(quoteColumns(opts.PrimaryKeys), ", ")
-		selectClause = fmt.Sprintf(`SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s`, pkList, colList, quotedStagingTable, pkList)
-	}
+	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
+	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quotedStagingTable, quoteColumns([]string{opts.IncrementalKey})[0])
 	insertSQL := fmt.Sprintf(
 		`INSERT INTO %s (%s) %s`,
 		quotedTargetTable,

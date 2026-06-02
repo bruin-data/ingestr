@@ -1211,7 +1211,7 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 		for i, pk := range opts.PrimaryKeys {
 			pkCols[i] = fmt.Sprintf("`%s`", pk)
 		}
-		selectClause += fmt.Sprintf(" QUALIFY ROW_NUMBER() OVER (PARTITION BY %s) = 1", strings.Join(pkCols, ", "))
+		selectClause += fmt.Sprintf(" QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `%s` DESC) = 1", strings.Join(pkCols, ", "), opts.IncrementalKey)
 	}
 
 	insertSQL := fmt.Sprintf(
