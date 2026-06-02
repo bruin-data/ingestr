@@ -106,7 +106,7 @@ custom:<dimensions>:<metrics>
   - Pivot dimensions (pick one):
     - Entity: `campaign`, `creative`, `account`
     - Placement & device: `impression_device`
-    - Demographic: `member_job_title`, `member_job_function`, `member_industry`, `member_company_size`, `member_company`, `member_country`, `member_region`
+    - Demographic: `member_job_title`, `member_job_function`, `member_seniority`, `member_industry`, `member_company_size`, `member_company`, `member_country`, `member_region`
   - Time dimensions:
     - `date`: group the data in your report by day
     - `month`: group the data in your report by month

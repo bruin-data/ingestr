@@ -331,6 +331,7 @@ var dimensionPivotMap = map[string]string{
 	"impression_device":   "IMPRESSION_DEVICE_TYPE",
 	"member_job_title":    "MEMBER_JOB_TITLE",
 	"member_job_function": "MEMBER_JOB_FUNCTION",
+	"member_seniority":    "MEMBER_SENIORITY",
 	"member_industry":     "MEMBER_INDUSTRY",
 	"member_company_size": "MEMBER_COMPANY_SIZE",
 	"member_company":      "MEMBER_COMPANY",
