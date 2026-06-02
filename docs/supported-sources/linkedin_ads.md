@@ -102,11 +102,14 @@ custom:<dimensions>:<metrics>
 ```
 
 **Parameters:**
-- `dimensions`(required): A comma-separated list of dimensions is required. It must include at least one entity dimension and one time-based dimension (`date` or `month`).
-  - Entity dimensions: `campaign`, `account`, `creative`
-  - Demographic dimensions: `member_job_title`, `member_seniority`, `member_industry`, `member_company_size`, `member_company`
-  - `date`: group the data in your report by day
-  - `month`: group the data in your report by month
+- `dimensions`(required): A comma-separated list of dimensions is required. It must include one pivot dimension and one time-based dimension (`date` or `month`).
+  - Pivot dimensions (pick one):
+    - Entity: `campaign`, `creative`, `account`
+    - Placement & device: `impression_device`
+    - Demographic: `member_job_title`, `member_job_function`, `member_seniority`, `member_industry`, `member_company_size`, `member_company`, `member_country`, `member_region`
+  - Time dimensions:
+    - `date`: group the data in your report by day
+    - `month`: group the data in your report by month
 - `metrics`(required): A comma-separated list of [metrics](https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/ads-reporting?view=li-lms-2024-11&tabs=http#metrics-available) to retrieve.
 
 > [!NOTE]
@@ -152,6 +155,25 @@ The applied parameters for the report are:
 - dimensions: `account`, `month`
 - metrics: `totalEngagements`, `impressions`
 
+### Common Ad Analytics Reports
+
+The following common analytics breakdowns are all available through the `custom:` table:
+
+| Report | `--source-table` |
+| ------ | ---------------- |
+| Ad Analytics by Campaign | `custom:campaign,date:<metrics>` |
+| Ad Analytics by Creative | `custom:creative,date:<metrics>` |
+| Ad Analytics by Impression Device | `custom:impression_device,date:<metrics>` |
+| Ad Analytics by Member Company Size | `custom:member_company_size,date:<metrics>` |
+| Ad Analytics by Member Country | `custom:member_country,date:<metrics>` |
+| Ad Analytics by Member Job Function | `custom:member_job_function,date:<metrics>` |
+| Ad Analytics by Member Job Title | `custom:member_job_title,date:<metrics>` |
+| Ad Analytics by Member Industry | `custom:member_industry,date:<metrics>` |
+| Ad Analytics by Member Region | `custom:member_region,date:<metrics>` |
+| Ad Analytics by Member Company | `custom:member_company,date:<metrics>` |
+
+Replace `<metrics>` with the LinkedIn metrics you want (e.g. `impressions,clicks,costInLocalCurrency`). Swap `date` for `month` to switch from daily to monthly granularity.
+
 ### Demographic Reports
 
 You can use demographic dimensions to audit targeting quality. For example, to retrieve impressions and clicks broken down by job title:
@@ -163,7 +185,7 @@ ingestr ingest \
     --dest-table 'dest.job_title_report'
 ```
 
-Available demographic dimensions: `member_job_title`, `member_seniority`, `member_industry`, `member_company_size`, `member_company`.
+Available demographic dimensions: `member_job_title`, `member_job_function`, `member_seniority`, `member_industry`, `member_company_size`, `member_company`, `member_country`, `member_region`.
 
 This command will retrieve data and save it to the destination table in the DuckDB database.
 

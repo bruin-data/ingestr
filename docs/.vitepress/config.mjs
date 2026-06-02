@@ -95,6 +95,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
             items: [
               { text: "AWS Athena", link: "/supported-sources/athena.md" },
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
+              { text: "Cassandra", link: "/supported-sources/cassandra.md" },
               { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
               { text: "Couchbase", link: "/supported-sources/couchbase.md" },
               { text: "CrateDB", link: "/supported-sources/cratedb.md" },
@@ -114,6 +115,10 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               {
                 text: "Microsoft Fabric",
                 link: "/supported-sources/fabric.md",
+              },
+              {
+                text: "Microsoft OneLake",
+                link: "/supported-sources/onelake.md",
               },
               {
                 text: "Microsoft SQL Server",

@@ -120,6 +120,10 @@ func (s *Hubspotsource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithTimeout(5*time.Minute),
 		httpclient.WithRateLimiterInstance(crmLimiter),
 		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
+		// HubSpot batch endpoints (associations, batch/read) are POST but
+		// semantically read-only; without this resty treats them as
+		// non-idempotent and skips retries on 429s.
+		httpclient.WithAllowNonIdempotentRetry(),
 		httpclient.WithRetryStrategy(hubspotRetryStrategy),
 		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
 		httpclient.WithDebug(config.DebugMode),
@@ -1439,10 +1443,11 @@ func (s *Hubspotsource) fetchAssociationsBatch(ctx context.Context, fromType str
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch associations %s->%s: %w", fromType, toType, err)
 		}
-		if resp.StatusCode() == 400 && len(inputs) > 1 {
+		if !resp.IsSuccess() && resp.StatusCode() != 404 && len(inputs) > 1 {
 			// HubSpot returns 400 for the whole batch if even one input id is
-			// invalid (deleted/archived). Split and recurse so the other ids
-			// in the chunk don't silently lose their associations.
+			// invalid (deleted/archived). Same thing can happen for 429/5xx that
+			// survived the HTTP client's retries. Split and recurse so the other
+			// ids in the chunk don't silently lose their associations.
 			mid := len(inputs) / 2
 			left, err := s.fetchAssociationsBatch(ctx, fromType, toType, objectIDs[i:i+mid])
 			if err != nil {
@@ -1460,12 +1465,9 @@ func (s *Hubspotsource) fetchAssociationsBatch(ctx context.Context, fromType str
 			}
 			continue
 		}
-		if resp.StatusCode() == 400 || resp.StatusCode() == 404 {
+		if !resp.IsSuccess() {
 			config.Debug("[HUBSPOT] association %s->%s skipped id=%v status=%d: %s", fromType, toType, objectIDs[i:end], resp.StatusCode(), resp.String())
 			continue
-		}
-		if !resp.IsSuccess() {
-			return nil, fmt.Errorf("hubspot API %s returned status %d: %s", endpoint, resp.StatusCode(), resp.String())
 		}
 
 		for _, item := range batchResp.Results {

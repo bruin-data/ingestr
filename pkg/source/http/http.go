@@ -293,12 +293,12 @@ func readCSV(_ context.Context, reader io.Reader, results chan<- source.RecordBa
 }
 
 func buildSchemaColumns(headers []string, overrides schemaevolution.ColumnOverrides, columnsStr string) []schema.Column {
-	pairs := strings.Split(columnsStr, ",")
+	pairs := schemaevolution.SplitColumnPairs(columnsStr)
 	orderedNames := make([]string, 0, len(pairs))
 	for _, pair := range pairs {
 		pair = strings.TrimSpace(pair)
-		if colonIdx := strings.Index(pair, ":"); colonIdx != -1 {
-			orderedNames = append(orderedNames, strings.TrimSpace(pair[:colonIdx]))
+		if name := overrideEntryReadName(pair); name != "" {
+			orderedNames = append(orderedNames, name)
 		}
 	}
 
@@ -309,16 +309,37 @@ func buildSchemaColumns(headers []string, overrides schemaevolution.ColumnOverri
 	}
 
 	for _, name := range names {
+		// Default to string so rename-only overrides (no type given) keep the
+		// string type; a real type override below will replace it.
 		col := schema.Column{Name: name, DataType: schema.TypeString, Nullable: true}
 		if override, ok := overrides.Get(name); ok {
-			col.DataType = override.DataType
-			col.Precision = override.Precision
-			col.Scale = override.Scale
+			if override.DataType != schema.TypeUnknown {
+				col.DataType = override.DataType
+				col.Precision = override.Precision
+				col.Scale = override.Scale
+			}
 		}
 		cols = append(cols, col)
 	}
 
 	return cols
+}
+
+// For headerless CSV, the column names in --columns may be in the form "col1:type:read_name" or "col1:type" or just "col1".
+// If "read_name" is provided, it is used for matching overrides to the actual column; otherwise the original column name is used.
+func overrideEntryReadName(pair string) string {
+	pair = strings.TrimSpace(pair)
+	if pair == "" {
+		return ""
+	}
+	if !strings.Contains(pair, ":") {
+		return pair
+	}
+	parts := strings.Split(pair, ":")
+	if len(parts) == 3 {
+		return strings.TrimSpace(parts[2])
+	}
+	return strings.TrimSpace(parts[0])
 }
 
 func readJSON(_ context.Context, data []byte, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
@@ -539,14 +560,14 @@ func excludeArrowColumns(rec arrow.RecordBatch, exclude map[string]struct{}) arr
 func parseColumnNames(columns string, numCols int) []string {
 	headers := make([]string, numCols)
 	if columns != "" {
-		parts := strings.Split(columns, ",")
+		parts := schemaevolution.SplitColumnPairs(columns)
 		for i := 0; i < numCols; i++ {
 			if i < len(parts) {
-				name := strings.TrimSpace(parts[i])
-				if colonIdx := strings.Index(name, ":"); colonIdx != -1 {
-					name = strings.TrimSpace(name[:colonIdx])
+				name := overrideEntryReadName(strings.TrimSpace(parts[i]))
+				if name == "" {
+					name = fmt.Sprintf("unknown_col_%d", i)
 				}
-				headers[i] = strings.TrimSpace(name)
+				headers[i] = name
 			} else {
 				headers[i] = fmt.Sprintf("unknown_col_%d", i)
 			}

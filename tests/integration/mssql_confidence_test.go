@@ -196,6 +196,65 @@ func TestMSSQLSource_TableToSQLite_CustomSchemaFiltersAndExcludeColumns(t *testi
 	assert.LessOrEqual(t, maxTS, "2024-01-01 00:40:00", "interval end filter should be applied")
 }
 
+func TestAzureSQLSourceScheme_SQLServerContainerToSQLite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	if mssqlDest.uri == "" {
+		t.Skip("MSSQL container not available")
+	}
+
+	ctx := context.Background()
+	db := openMSSQLTestDB(t, mssqlDest.uri)
+	t.Cleanup(func() { _ = db.Close() })
+
+	tableName := fmt.Sprintf("dbo.azuresql_source_%s", uniqueSuffix())
+	dropMSSQLTable(t, ctx, db, tableName)
+	t.Cleanup(func() { dropMSSQLTable(t, ctx, db, tableName) })
+
+	_, err := db.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE %s (
+		id INT PRIMARY KEY,
+		name NVARCHAR(100) NOT NULL
+	)`, quoteTableMSSQL(tableName)))
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(
+		ctx,
+		fmt.Sprintf("INSERT INTO %s (id, name) VALUES (@p1, @p2), (@p3, @p4)", quoteTableMSSQL(tableName)),
+		1, "alpha",
+		2, "bravo",
+	)
+	require.NoError(t, err)
+
+	tmpFile, err := os.CreateTemp("", "azuresql_source_*.db")
+	require.NoError(t, err)
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+	azureSourceURI := strings.Replace(mssqlDest.uri, "mssql://", "azuresql://", 1)
+	cfg := &config.IngestConfig{
+		SourceURI:           azureSourceURI,
+		SourceTable:         tableName,
+		DestURI:             fmt.Sprintf("sqlite:///%s", tmpFile.Name()),
+		DestTable:           "azuresql_rows",
+		IncrementalStrategy: config.StrategyReplace,
+	}
+	require.NoError(t, cfg.Validate())
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	destDB, err := sql.Open("sqlite3", tmpFile.Name())
+	require.NoError(t, err)
+	defer func() { _ = destDB.Close() }()
+
+	var count int
+	require.NoError(t, destDB.QueryRow("SELECT COUNT(*) FROM azuresql_rows").Scan(&count))
+	assert.Equal(t, 2, count)
+
+	var name string
+	require.NoError(t, destDB.QueryRow("SELECT name FROM azuresql_rows WHERE id = 2").Scan(&name))
+	assert.Equal(t, "bravo", name)
+}
+
 func TestMSSQLDestination_Replace_CustomSchemaSwapCleanup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

@@ -148,7 +148,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "columns",
-				Usage:   "Override column types for schema evolution (format: 'col:type,col2:type2'). Types: bigint, int, smallint, float, double, decimal(p,s), string, text, boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
+				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:string:fname,email::eml'. Types: bigint, int, smallint, float, double, decimal(p,s), string, text, boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
 				Sources: cli.EnvVars("INGESTR_COLUMNS"),
 			},
 			&cli.StringSliceFlag{
@@ -175,6 +175,11 @@ func IngestCommand() *cli.Command {
 				Name:    "debug",
 				Usage:   "Enable debug logging",
 				Sources: cli.EnvVars("DEBUG", "INGESTR_DEBUG"),
+			},
+			&cli.StringFlag{
+				Name:    "query-annotations",
+				Usage:   "JSON object of caller annotation keys (e.g. {\"pipeline\":\"p\",\"asset\":\"a\"}) merged into the '-- @bruin.config' comment on destination queries (QUERY_TAG on Snowflake) for cost attribution. ingestr always annotates with its own keys (type, ingestr_step); this flag adds the caller's keys on top.",
+				Sources: cli.EnvVars("INGESTR_QUERY_ANNOTATIONS"),
 			},
 		},
 		Action: runIngest,
@@ -214,6 +219,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.PipelinesDir = c.String("pipelines-dir")
 	cfg.StagingBucket = c.String("staging-bucket")
 	cfg.StagingDataset = c.String("staging-dataset")
+	cfg.QueryAnnotations = c.String("query-annotations")
 
 	if clusterBy := c.String("cluster-by"); clusterBy != "" {
 		// Split by comma to support multiple clustering columns

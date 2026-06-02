@@ -110,6 +110,15 @@ scenarios:
     destination: bigquery
 
   # Snowflake (requires BENCH_SNOWFLAKE_URI env var)
+  - source: local_postgres
+    destination: snowflake
+
+  - source: local_mysql
+    destination: snowflake
+
+  - source: local_mongodb
+    destination: snowflake
+
   - source: local_duckdb
     destination: snowflake
 

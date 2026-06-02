@@ -48,16 +48,17 @@ type maxcomputeEnv struct {
 }
 
 var (
-	pgSource       postgresEnv
-	pgDest         postgresEnv
-	chDest         clickhouseEnv
-	mysqlDest      mysqlEnv
-	mssqlDest      mssqlEnv
-	cratedbDest    cratedbEnv
-	maxcomputeDest maxcomputeEnv
-	minioShared    minioEnv
-	dynamoDBDest   dynamoDBEnv
-	rabbitmqShared rabbitmqEnv
+	pgSource        postgresEnv
+	pgDest          postgresEnv
+	chDest          clickhouseEnv
+	mysqlDest       mysqlEnv
+	mssqlDest       mssqlEnv
+	cratedbDest     cratedbEnv
+	maxcomputeDest  maxcomputeEnv
+	minioShared     minioEnv
+	dynamoDBDest    dynamoDBEnv
+	cassandraShared cassandraEnv
+	rabbitmqShared  rabbitmqEnv
 )
 
 func TestMain(m *testing.M) {
@@ -79,7 +80,7 @@ func TestMain(m *testing.M) {
 
 	var wg sync.WaitGroup
 
-	wg.Add(9)
+	wg.Add(10)
 	go func() {
 		defer wg.Done()
 		if c, uri, err := startPostgresContainerForMain(ctx, "shared-source"); err == nil {
@@ -134,6 +135,12 @@ func TestMain(m *testing.M) {
 			dynamoDBDest = dynamoDBEnv{container: c, uri: uri}
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		if c, uri, host, port, err := startCassandraContainerForMain(ctx); err == nil {
+			cassandraShared = cassandraEnv{container: c, uri: uri, host: host, port: port}
+		}
+	}()
 	wg.Wait()
 
 	// Start RabbitMQ container
@@ -148,6 +155,7 @@ func TestMain(m *testing.M) {
 		pgSource.container, pgDest.container, chDest.container,
 		mysqlDest.container, mssqlDest.container, cratedbDest.container,
 		maxcomputeDest.container, minioShared.container, dynamoDBDest.container,
+		cassandraShared.container,
 	}
 	var twg sync.WaitGroup
 	for _, c := range containers {
