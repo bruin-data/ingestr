@@ -144,7 +144,7 @@ func (s *LinkedInAdsSource) getTables() map[string]source.SourceTable {
 		return nil, fmt.Errorf("LinkedIn Ads source does not have a predefined schema; schema inference is required")
 	}
 
-	tables := map[string]source.SourceTable{
+	return map[string]source.SourceTable{
 		"ad_accounts": &source.DynamicSourceTable{
 			TableName:           "ad_accounts",
 			TablePrimaryKeys:    []string{"id"},
@@ -267,8 +267,6 @@ func (s *LinkedInAdsSource) getTables() map[string]source.SourceTable {
 			},
 		},
 	}
-
-	return tables
 }
 
 func normalizePageSize(pageSize int) int {
