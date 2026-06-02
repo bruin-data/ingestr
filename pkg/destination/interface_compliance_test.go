@@ -4,6 +4,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/athena"
 	"github.com/bruin-data/ingestr/pkg/destination/bigquery"
+	"github.com/bruin-data/ingestr/pkg/destination/cassandra"
 	"github.com/bruin-data/ingestr/pkg/destination/clickhouse"
 	"github.com/bruin-data/ingestr/pkg/destination/cratedb"
 	"github.com/bruin-data/ingestr/pkg/destination/databricks"
@@ -23,6 +24,7 @@ import (
 var (
 	_ destination.Destination = (*athena.AthenaDestination)(nil)
 	_ destination.Destination = (*bigquery.BigQueryDestination)(nil)
+	_ destination.Destination = (*cassandra.CassandraDestination)(nil)
 	_ destination.Destination = (*clickhouse.ClickHouseDestination)(nil)
 	_ destination.Destination = (*cratedb.CrateDBDestination)(nil)
 	_ destination.Destination = (*databricks.DatabricksDestination)(nil)

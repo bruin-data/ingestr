@@ -6,6 +6,7 @@ import (
 
 	// Import destination packages to register their dialects
 	_ "github.com/bruin-data/ingestr/pkg/destination/bigquery"
+	_ "github.com/bruin-data/ingestr/pkg/destination/cassandra"
 	_ "github.com/bruin-data/ingestr/pkg/destination/clickhouse"
 	_ "github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	_ "github.com/bruin-data/ingestr/pkg/destination/mssql"
@@ -35,6 +36,7 @@ func allDialects() []dialectConformanceTest {
 		"sqlite",
 		"snowflake",
 		"bigquery",
+		"cassandra",
 		"clickhouse",
 		"mysql",
 		"mssql",
@@ -310,8 +312,8 @@ func TestAllDialects_TypeName_Decimal(t *testing.T) {
 		t.Run(dt.Scheme, func(t *testing.T) {
 			typeName := dt.Dialect.TypeName(col)
 			assert.NotEmpty(t, typeName)
-			// SQLite uses REAL for decimals, so skip precision check for SQLite
-			if dt.Scheme != "sqlite" {
+			// SQLite uses REAL and Cassandra uses unparameterized decimal.
+			if dt.Scheme != "sqlite" && dt.Scheme != "cassandra" {
 				assert.Contains(t, typeName, "18")
 				assert.Contains(t, typeName, "4")
 			}
@@ -489,7 +491,7 @@ func TestAllDialects_AlterColumnTypeSQL(t *testing.T) {
 
 func TestDialect_SupportsAlterType(t *testing.T) {
 	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift"}
-	dialectsWithoutAlter := []string{"sqlite", "trino"}
+	dialectsWithoutAlter := []string{"sqlite", "trino", "cassandra"}
 
 	for _, scheme := range dialectsWithAlter {
 		t.Run(scheme+"_supports", func(t *testing.T) {

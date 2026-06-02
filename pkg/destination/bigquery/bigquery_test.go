@@ -3,6 +3,7 @@ package bigquery
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -104,6 +105,9 @@ func TestSchemes(t *testing.T) {
 }
 
 func TestParseBigQueryURI(t *testing.T) {
+	fakeServiceAccountJSON := `{"type":"service_account","project_id":"test"}`
+	fakeServiceAccountBase64 := base64.StdEncoding.EncodeToString([]byte(fakeServiceAccountJSON))
+
 	tests := []struct {
 		name           string
 		uri            string
@@ -159,9 +163,9 @@ func TestParseBigQueryURI(t *testing.T) {
 		},
 		{
 			name:           "with_base64_credentials",
-			uri:            "bigquery://test-project?credentials_base64=eyJ0eXBlIjoic2VydmljZV9hY2NvdW50IiwicHJvamVjdF9pZCI6InRlc3QifQ==",
+			uri:            "bigquery://test-project?credentials_base64=" + fakeServiceAccountBase64,
 			wantProjectID:  "test-project",
-			wantCredJSON:   `{"type":"service_account","project_id":"test"}`,
+			wantCredJSON:   fakeServiceAccountJSON,
 			wantLoadMethod: loadMethodLoadJob,
 			wantErr:        false,
 		},

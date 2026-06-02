@@ -91,6 +91,20 @@ func GetConnectors() []ConnectorType {
 			},
 		},
 		{
+			ID:            "cassandra",
+			Name:          "Cassandra",
+			Schemes:       []string{"cassandra"},
+			IsSource:      true,
+			IsDestination: true,
+			Fields: []ConnectorField{
+				{Name: "host", Label: "Host", Type: "string", Required: true, Placeholder: "localhost"},
+				{Name: "port", Label: "Port", Type: "number", Required: false, Default: "9042", Placeholder: "9042"},
+				{Name: "user", Label: "Username", Type: "string", Required: false},
+				{Name: "password", Label: "Password", Type: "password", Required: false},
+				{Name: "database", Label: "Keyspace", Type: "string", Required: true, Placeholder: "analytics"},
+			},
+		},
+		{
 			ID:            "duckdb",
 			Name:          "DuckDB",
 			Schemes:       []string{"duckdb"},
@@ -221,6 +235,8 @@ func BuildURI(connectorID string, fields map[string]string) string {
 			scheme = "mongodb+srv"
 		}
 		return buildStandardURI(scheme, fields, "27017")
+	case "cassandra":
+		return buildStandardURI("cassandra", fields, "9042")
 	case "duckdb":
 		return "duckdb:///" + fields["path"]
 	case "sqlite":
