@@ -11,6 +11,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/fabric"
 	"github.com/bruin-data/ingestr/pkg/destination/mssql"
 	"github.com/bruin-data/ingestr/pkg/destination/mysql"
+	"github.com/bruin-data/ingestr/pkg/destination/onelake"
 	"github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/destination/redshift"
 	"github.com/bruin-data/ingestr/pkg/destination/snowflake"
@@ -29,6 +30,7 @@ var (
 	_ destination.Destination = (*fabric.FabricDestination)(nil)
 	_ destination.Destination = (*mssql.MSSQLDestination)(nil)
 	_ destination.Destination = (*mysql.MySQLDestination)(nil)
+	_ destination.Destination = (*onelake.OneLakeDestination)(nil)
 	_ destination.Destination = (*postgres.PostgresDestination)(nil)
 	_ destination.Destination = (*redshift.RedshiftDestination)(nil)
 	_ destination.Destination = (*snowflake.SnowflakeDestination)(nil)
