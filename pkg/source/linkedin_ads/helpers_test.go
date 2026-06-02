@@ -200,6 +200,19 @@ func TestConstructAnalyticsURL(t *testing.T) {
 		expected := "/adAnalytics?q=analytics&timeGranularity=DAILY&dateRange=(start:(year:2024,month:6,day:15),end:(year:2024,month:12,day:15))&accounts=List(urn%3Ali%3AsponsoredAccount%3A999888)&pivot=ACCOUNT&fields=impressions,clicks"
 		assert.Equal(t, expected, url)
 	})
+
+	t.Run("daily granularity with impression device pivot", func(t *testing.T) {
+		start := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
+		end := time.Date(2024, 12, 15, 0, 0, 0, 0, time.UTC)
+		accountIDs := []string{"999888"}
+		metrics := []string{"impressions", "clicks"}
+		pivot := "impression_device"
+
+		url := constructAnalyticsURL(start, end, accountIDs, metrics, pivot, timeGranularityDaily)
+
+		expected := "/adAnalytics?q=analytics&timeGranularity=DAILY&dateRange=(start:(year:2024,month:6,day:15),end:(year:2024,month:12,day:15))&accounts=List(urn%3Ali%3AsponsoredAccount%3A999888)&pivot=IMPRESSION_DEVICE_TYPE&fields=impressions,clicks"
+		assert.Equal(t, expected, url)
+	})
 }
 
 func TestParseCustomTable(t *testing.T) {
@@ -238,6 +251,15 @@ func TestParseCustomTable(t *testing.T) {
 		assert.Equal(t, "account", cfg.pivot)
 	})
 
+	t.Run("valid custom table with member country", func(t *testing.T) {
+		cfg, err := parseCustomTableName("custom:member_country,date:impressions")
+
+		assert.NoError(t, err)
+		assert.NotNil(t, cfg)
+		assert.Equal(t, "member_country", cfg.pivot)
+		assert.Equal(t, []string{"member_country", "date"}, cfg.primaryKeys)
+	})
+
 	t.Run("invalid format - missing parts", func(t *testing.T) {
 		_, err := parseCustomTableName("custom:campaign")
 
@@ -249,7 +271,7 @@ func TestParseCustomTable(t *testing.T) {
 		_, err := parseCustomTableName("custom:date:impressions")
 
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "'campaign', 'creative' or 'account' is required")
+		assert.Contains(t, err.Error(), "dimensions must include one of")
 	})
 
 	t.Run("invalid format - missing time dimension", func(t *testing.T) {
@@ -264,6 +286,13 @@ func TestParseCustomTable(t *testing.T) {
 
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "at least one metric is required")
+	})
+
+	t.Run("invalid format - unsupported pivot", func(t *testing.T) {
+		_, err := parseCustomTableName("custom:objective_type,date:impressions")
+
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "dimensions must include one of")
 	})
 }
 
