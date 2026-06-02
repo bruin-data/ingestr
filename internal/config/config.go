@@ -73,6 +73,12 @@ type IngestConfig struct {
 
 	CDCResumeLSN  string // For CDC sources: resume from this LSN (auto-detected from destination)
 	CDCSlotSuffix string // For CDC sources: suffix appended to auto-generated slot names (derived from dest URI)
+
+	// QueryAnnotations is a JSON object of external annotation keys (e.g. asset,
+	// pipeline) supplied by the caller. When set, ingestr prepends a
+	// "-- @bruin.config: {...}" comment to destination queries (QUERY_TAG on
+	// Snowflake) for warehouse cost attribution. Empty disables annotations.
+	QueryAnnotations string
 }
 
 func DefaultConfig() *IngestConfig {

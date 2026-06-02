@@ -13,6 +13,7 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	gcsstorage "cloud.google.com/go/storage"
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -335,6 +336,7 @@ func jobRef(job *bigquery.Job) string {
 
 // PrepareTable creates or recreates a table with the given schema.
 func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	ctx = annotation.WithStep(ctx, annotation.StepDDL)
 	dataset, table, tableKey, err := d.resolveTable(opts.Table)
 	if err != nil {
 		return err
@@ -361,7 +363,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		go func() {
 			truncateSQL := fmt.Sprintf("TRUNCATE TABLE `%s`.`%s`.`%s`", d.projectID, dataset, table)
 			config.Debug("[DEST] Truncating table: %s", opts.Table)
-			query := d.client.Query(truncateSQL)
+			query := d.client.Query(annotation.Prepend(ctx, truncateSQL))
 			if d.location != "" {
 				query.Location = d.location
 			}
@@ -802,6 +804,7 @@ func (d *BigQueryDestination) queryTableRowCount(ctx context.Context, dataset, t
 
 // SwapTable swaps a staging table with the target table.
 func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	ctx = annotation.WithStep(ctx, annotation.StepSwap)
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
 	stagingDataset, stagingTableName, err := ParseTableName(stagingTable)
@@ -925,7 +928,7 @@ func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opL
 		lastErr error
 	)
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		query := d.client.Query(sql)
+		query := d.client.Query(annotation.Prepend(ctx, sql))
 		if d.location != "" {
 			query.Location = d.location
 		}
@@ -1053,7 +1056,7 @@ func (d *BigQueryDestination) execAlterColumnTypeWithRewrite(ctx context.Context
 	}
 
 	config.Debug("[DEST] Rewriting unsupported ALTER COLUMN TYPE with CREATE OR REPLACE TABLE for %s.%s", dataset, table)
-	query := d.client.Query(rewrittenSQL)
+	query := d.client.Query(annotation.Prepend(ctx, rewrittenSQL))
 	if d.location != "" {
 		query.Location = d.location
 	}
@@ -1132,6 +1135,7 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 // MergeTable performs an atomic merge operation using BigQuery's MERGE statement.
 // This merges data from stagingTable into targetTable based on primary keys.
 func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	ctx = annotation.WithStep(ctx, annotation.StepMerge)
 	if len(opts.PrimaryKeys) == 0 {
 		return errors.New("merge requires at least one primary key")
 	}
@@ -1170,6 +1174,7 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 
 // DeleteInsertTable performs a DELETE + INSERT operation for BigQuery.
 func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
+	ctx = annotation.WithStep(ctx, annotation.StepDeleteInsert)
 	stagingDataset, stagingTableName, err := ParseTableName(opts.StagingTable)
 	if err != nil {
 		return fmt.Errorf("invalid staging table name: %w", err)
@@ -1233,6 +1238,7 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
 func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
+	ctx = annotation.WithStep(ctx, annotation.StepSCD2)
 	startOp := time.Now()
 
 	stagingDataset, stagingTableName, err := ParseTableName(opts.StagingTable)
@@ -1592,6 +1598,7 @@ func (d *BigQueryDestination) DropTable(ctx context.Context, table string) error
 
 // TruncateTable empties a table while preserving its definition and dependents.
 func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) error {
+	ctx = annotation.WithStep(ctx, annotation.StepTruncate)
 	dataset, tableName, err := ParseTableName(table)
 	if err != nil {
 		return fmt.Errorf("invalid table name: %w", err)
@@ -1605,7 +1612,7 @@ func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) e
 	}
 
 	truncateSQL := fmt.Sprintf("TRUNCATE TABLE `%s`.`%s`.`%s`", d.projectID, dataset, tableName)
-	query := d.client.Query(truncateSQL)
+	query := d.client.Query(annotation.Prepend(ctx, truncateSQL))
 	if d.location != "" {
 		query.Location = d.location
 	}
