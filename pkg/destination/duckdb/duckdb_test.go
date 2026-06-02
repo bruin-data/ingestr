@@ -13,7 +13,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/bruin-data/ingestr/internal/duckdbtest"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -25,7 +24,6 @@ import (
 func connectTestDuckDB(t *testing.T, ctx context.Context) (*DuckDBDestination, string) {
 	t.Helper()
 
-	duckdbtest.LockADBC(t)
 	dest := NewDuckDBDestination()
 	path := filepath.Join(t.TempDir(), "test.duckdb")
 	err := dest.Connect(ctx, fmt.Sprintf("duckdb:///%s", path))
@@ -444,7 +442,6 @@ func TestConnect_InMemory(t *testing.T) {
 	ctx := context.Background()
 	dest := NewDuckDBDestination()
 
-	duckdbtest.LockADBC(t)
 	err := dest.Connect(ctx, "duckdb://:memory:")
 	require.NoError(t, err)
 
@@ -459,7 +456,6 @@ func TestConnect_FileDatabase(t *testing.T) {
 	tmpFile := fmt.Sprintf("/tmp/test_duckdb_%d.db", time.Now().UnixNano())
 	defer func() { _ = os.Remove(tmpFile) }()
 
-	duckdbtest.LockADBC(t)
 	err := dest.Connect(ctx, fmt.Sprintf("duckdb:///%s", tmpFile))
 	require.NoError(t, err)
 

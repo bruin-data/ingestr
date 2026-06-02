@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bruin-data/ingestr/internal/duckdbtest"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -38,7 +37,6 @@ func TestMMapSourceSingleFile(t *testing.T) {
 	schema, err := table.GetSchema(ctx)
 	require.NoError(t, err)
 
-	duckdbtest.LockADBC(t)
 	dest := duckdb.NewDuckDBDestination()
 	require.NoError(t, dest.Connect(ctx, fmt.Sprintf("duckdb:///%s", duckdbPath)))
 	t.Cleanup(func() { _ = dest.Close(ctx) })
@@ -107,7 +105,6 @@ func TestMMapSourceGlobPattern(t *testing.T) {
 	schema, err := table.GetSchema(ctx)
 	require.NoError(t, err)
 
-	duckdbtest.LockADBC(t)
 	dest := duckdb.NewDuckDBDestination()
 	require.NoError(t, dest.Connect(ctx, fmt.Sprintf("duckdb:///%s", duckdbPath)))
 	t.Cleanup(func() { _ = dest.Close(ctx) })
