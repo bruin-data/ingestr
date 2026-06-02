@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/duckdbtest"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
@@ -40,9 +41,6 @@ func TestAvroSource_RegistryLookup(t *testing.T) {
 }
 
 func TestAvroSource_ToDuckDBViaPipeline(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping DuckDB pipeline test in short mode")
-	}
 	t.Parallel()
 
 	ctx := context.Background()
@@ -61,6 +59,7 @@ func TestAvroSource_ToDuckDBViaPipeline(t *testing.T) {
 	cfg.Progress = ""
 	cfg.Yes = true
 
+	duckdbtest.LockADBC(t)
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
 	db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", duckdbPath))

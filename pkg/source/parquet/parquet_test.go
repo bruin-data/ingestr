@@ -14,6 +14,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	pqgo "github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/bruin-data/ingestr/internal/duckdbtest"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -291,9 +292,6 @@ func TestParquetSource_ConnectErrors(t *testing.T) {
 }
 
 func TestParquetSource_ToDuckDB(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping DuckDB destination test in short mode")
-	}
 	t.Parallel()
 
 	ctx := context.Background()
@@ -314,6 +312,7 @@ func TestParquetSource_ToDuckDB(t *testing.T) {
 	sch, err := tbl.GetSchema(ctx)
 	require.NoError(t, err)
 
+	duckdbtest.LockADBC(t)
 	dest := duckdb.NewDuckDBDestination()
 	require.NoError(t, dest.Connect(ctx, fmt.Sprintf("duckdb:///%s", duckdbPath)))
 	t.Cleanup(func() { _ = dest.Close(ctx) })

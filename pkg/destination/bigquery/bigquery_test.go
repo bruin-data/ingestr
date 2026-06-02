@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
+	"github.com/bruin-data/ingestr/internal/duckdbtest"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	duckdbdest "github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -26,6 +27,7 @@ func connectTestDuckDBDest(t *testing.T, ctx context.Context) (*duckdbdest.DuckD
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.duckdb")
 
+	duckdbtest.LockADBC(t)
 	dest := duckdbdest.NewDuckDBDestination()
 	if err := dest.Connect(ctx, fmt.Sprintf("duckdb:///%s", path)); err != nil {
 		t.Skipf("DuckDB unavailable: %v", err)
