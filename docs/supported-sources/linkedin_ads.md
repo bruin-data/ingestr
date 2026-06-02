@@ -102,7 +102,7 @@ custom:<dimensions>:<metrics>
 ```
 
 **Parameters:**
-- `dimensions`(required): A comma-separated list of dimensions is required. It must include at least one pivot dimension and one time-based dimension (`date` or `month`).
+- `dimensions`(required): A comma-separated list of dimensions is required. It must include one pivot dimension and one time-based dimension (`date` or `month`).
   - Pivot dimensions (pick one):
     - Entity: `campaign`, `creative`, `account`
     - Placement & device: `impression_device`
