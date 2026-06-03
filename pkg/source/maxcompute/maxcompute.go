@@ -524,17 +524,18 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 		}
 	}
 
-	if rowCount == 0 {
-		for _, b := range builders {
-			b.Release()
-		}
-		return nil, 0, nil
-	}
 	if err := rows.Err(); err != nil {
 		for _, b := range builders {
 			b.Release()
 		}
 		return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	if rowCount == 0 {
+		for _, b := range builders {
+			b.Release()
+		}
+		return nil, 0, nil
 	}
 
 	arrays := make([]arrow.Array, len(builders))
