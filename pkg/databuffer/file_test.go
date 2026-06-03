@@ -2,6 +2,7 @@ package databuffer
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -701,6 +702,55 @@ func TestCastRecordToSchema(t *testing.T) {
 		assert.Equal(t, "alice", nameCol.Value(0))
 		assert.Equal(t, 0, nameCol.NullN())
 	})
+}
+
+func TestCastRecordToSchema_UnknownToJSONEncodesScalarStrings(t *testing.T) {
+	mem := memory.DefaultAllocator
+
+	sourceSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "mixed_val", Type: schema.UnknownArrowType, Nullable: true},
+	}, nil)
+
+	builder := array.NewBuilder(mem, schema.UnknownArrowType).(*array.ExtensionBuilder)
+	storage := builder.StorageBuilder().(*array.StringBuilder)
+	storage.Append("1")
+	storage.Append(`{"kind":"document","row":2}`)
+	storage.Append(`"mixed_3"`)
+	storage.Append("plain-text")
+	storage.AppendNull()
+	unknownArr := builder.NewArray()
+	builder.Release()
+
+	record := array.NewRecordBatch(sourceSchema, []arrow.Array{unknownArr}, 5)
+	unknownArr.Release()
+	defer record.Release()
+
+	targetSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "mixed_val", Type: schema.JSONArrowType, Nullable: true},
+	}, nil)
+
+	casted, err := CastRecordToSchema(record, targetSchema, true)
+	require.NoError(t, err)
+	defer casted.Release()
+
+	jsonCol, ok := casted.Column(0).(array.ExtensionArray)
+	require.True(t, ok, "expected JSON extension array, got %T", casted.Column(0))
+
+	storageCol, ok := jsonCol.Storage().(*array.String)
+	require.True(t, ok, "expected JSON storage to be string, got %T", jsonCol.Storage())
+
+	want := []string{
+		`1`,
+		`{"kind":"document","row":2}`,
+		`"mixed_3"`,
+		`"plain-text"`,
+	}
+	for i, expected := range want {
+		got := storageCol.Value(i)
+		assert.True(t, json.Valid([]byte(got)), "row %d should be valid JSON: %q", i, got)
+		assert.Equal(t, expected, got)
+	}
+	assert.True(t, storageCol.IsNull(4))
 }
 
 // ============================================================================

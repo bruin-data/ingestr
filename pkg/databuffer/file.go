@@ -2,6 +2,7 @@ package databuffer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -340,6 +341,10 @@ func castUnknownArray(arr arrow.Array, target arrow.DataType) (arrow.Array, erro
 		return nil, fmt.Errorf("unknown type is not an extension array")
 	}
 
+	if isJSONType(target) {
+		return castUnknownArrayToJSON(ext, target)
+	}
+
 	builder := array.NewBuilder(memory.DefaultAllocator, target)
 	defer builder.Release()
 
@@ -364,6 +369,48 @@ func castUnknownArray(arr arrow.Array, target arrow.DataType) (arrow.Array, erro
 	}
 
 	return builder.NewArray(), nil
+}
+
+func castUnknownArrayToJSON(ext array.ExtensionArray, target arrow.DataType) (arrow.Array, error) {
+	extType, ok := target.(arrow.ExtensionType)
+	if !ok {
+		return nil, fmt.Errorf("target type is not an extension type")
+	}
+
+	builder := array.NewStringBuilder(memory.DefaultAllocator)
+	defer builder.Release()
+
+	storage := ext.Storage()
+	for i := 0; i < ext.Len(); i++ {
+		if ext.IsNull(i) {
+			builder.AppendNull()
+			continue
+		}
+
+		raw, ok := schemainfer.StringValueAt(storage, i)
+		if !ok {
+			builder.AppendNull()
+			continue
+		}
+
+		// Unknown storage is already JSON text; pass it through unless it came
+		// from a non-JSON fallback, in which case quote it as a JSON string.
+		if json.Valid([]byte(raw)) {
+			builder.Append(raw)
+			continue
+		}
+
+		jsonBytes, err := json.Marshal(raw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode unknown value as JSON: %w", err)
+		}
+		builder.Append(string(jsonBytes))
+	}
+
+	storageArr := builder.NewArray()
+	defer storageArr.Release()
+
+	return array.NewExtensionArrayWithStorage(extType, storageArr), nil
 }
 
 func castArrayToJSON(ctx context.Context, arr arrow.Array, target arrow.DataType) (arrow.Array, error) {
