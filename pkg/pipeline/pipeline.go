@@ -112,13 +112,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
-	// Check if source handles incrementality internally
-	if src.HandlesIncrementality() {
-		if p.config.IncrementalKey != "" {
-			fmt.Printf("Warning: source handles incrementality internally, ignoring --incremental-key=%s\n", p.config.IncrementalKey)
-		}
-	}
-
 	// Get the source table with user configuration
 	// Resolution of PKs, strategy, and incremental key happens inside GetTable
 	table, err := src.GetTable(ctx, source.TableRequest{
@@ -129,6 +122,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get table: %w", err)
+	}
+
+	// Sources that manage incrementality internally resolve their own key in
+	// GetTable. Only warn if the user's --incremental-key was actually dropped;
+	// a source that adopts it (resolved key matches) needs no warning.
+	if src.HandlesIncrementality() && p.config.IncrementalKey != "" && table.IncrementalKey() != p.config.IncrementalKey {
+		fmt.Printf("Warning: source handles incrementality internally, ignoring --incremental-key=%s\n", p.config.IncrementalKey)
 	}
 
 	if table.Name() == source.CustomQueryTableName {
