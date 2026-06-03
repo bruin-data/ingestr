@@ -133,7 +133,7 @@ var salesforceTableMeta = map[string]tableMeta{
 	"opportunity":              {"Opportunity", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 	"opportunity_line_item":    {"OpportunityLineItem", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 	"opportunity_contact_role": {"OpportunityContactRole", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"account":                  {"Account", config.StrategyMerge, []string{"Id"}, "LastModifiedDate"},
+	"account":                  {"Account", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 	"contact":                  {"Contact", config.StrategyReplace, []string{"Id"}, ""},
 	"lead":                     {"Lead", config.StrategyReplace, []string{"Id"}, ""},
 	"campaign":                 {"Campaign", config.StrategyReplace, []string{"Id"}, ""},
