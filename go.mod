@@ -16,6 +16,7 @@ require (
 	github.com/InfluxCommunity/influxdb3-go/v2 v2.13.0
 	github.com/SAP/go-hdb v1.16.2
 	github.com/alecthomas/chroma/v2 v2.23.1
+	github.com/aliyun/aliyun-odps-go-sdk v0.4.22
 	github.com/apache/arrow-adbc/go/adbc v1.9.0
 	github.com/apache/arrow-go/v18 v18.5.1
 	github.com/apache/cassandra-gocql-driver/v2 v2.1.1
@@ -113,6 +114,9 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/ProtonMail/gopenpgp/v3 v3.3.0 // indirect
+	github.com/alibabacloud-go/debug v1.0.1 // indirect
+	github.com/alibabacloud-go/tea v1.2.2 // indirect
+	github.com/aliyun/credentials-go v1.3.10 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/apache/arrow/go/v15 v15.0.2 // indirect
 	github.com/apache/thrift v0.22.0 // indirect

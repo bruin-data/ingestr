@@ -46,14 +46,23 @@ func Value(arr interface {
 		return v.ToTime()
 	case *array.Time64:
 		v := a.Value(idx)
-		micros := int64(v)
-		h := micros / 3600000000
-		micros %= 3600000000
-		m := micros / 60000000
-		micros %= 60000000
-		s := micros / 1000000
-		micros %= 1000000
-		return time.Date(0, 1, 1, int(h), int(m), int(s), int(micros)*1000, time.UTC)
+		timeType := a.DataType().(*arrow.Time64Type)
+		var duration time.Duration
+		switch timeType.Unit {
+		case arrow.Microsecond:
+			duration = time.Duration(v) * time.Microsecond
+		case arrow.Nanosecond:
+			duration = time.Duration(v) * time.Nanosecond
+		default:
+			return nil
+		}
+		h := duration / time.Hour
+		duration %= time.Hour
+		m := duration / time.Minute
+		duration %= time.Minute
+		s := duration / time.Second
+		duration %= time.Second
+		return time.Date(0, 1, 1, int(h), int(m), int(s), int(duration), time.UTC)
 	case *array.Timestamp:
 		v := a.Value(idx)
 		return v.ToTime(arrow.Microsecond)

@@ -41,6 +41,12 @@ type cratedbEnv struct {
 	uri       string
 }
 
+type maxcomputeEnv struct {
+	container testcontainers.Container
+	uri       string
+	dbPath    string
+}
+
 var (
 	pgSource        postgresEnv
 	pgDest          postgresEnv
@@ -48,6 +54,7 @@ var (
 	mysqlDest       mysqlEnv
 	mssqlDest       mssqlEnv
 	cratedbDest     cratedbEnv
+	maxcomputeDest  maxcomputeEnv
 	minioShared     minioEnv
 	dynamoDBDest    dynamoDBEnv
 	cassandraShared cassandraEnv
@@ -73,7 +80,7 @@ func TestMain(m *testing.M) {
 
 	var wg sync.WaitGroup
 
-	wg.Add(9)
+	wg.Add(10)
 	go func() {
 		defer wg.Done()
 		if c, uri, err := startPostgresContainerForMain(ctx, "shared-source"); err == nil {
@@ -112,6 +119,12 @@ func TestMain(m *testing.M) {
 	}()
 	go func() {
 		defer wg.Done()
+		if c, uri, dbPath, err := startMaxComputeContainerForMain(ctx, "shared-maxcompute"); err == nil {
+			maxcomputeDest = maxcomputeEnv{container: c, uri: uri, dbPath: dbPath}
+		}
+	}()
+	go func() {
+		defer wg.Done()
 		if c, endpoint, uri, err := startMinioContainerForMain(ctx); err == nil {
 			minioShared = minioEnv{container: c, endpoint: endpoint, uri: uri}
 		}
@@ -141,7 +154,8 @@ func TestMain(m *testing.M) {
 	containers := []testcontainers.Container{
 		pgSource.container, pgDest.container, chDest.container,
 		mysqlDest.container, mssqlDest.container, cratedbDest.container,
-		minioShared.container, dynamoDBDest.container, cassandraShared.container,
+		maxcomputeDest.container, minioShared.container, dynamoDBDest.container,
+		cassandraShared.container,
 	}
 	var twg sync.WaitGroup
 	for _, c := range containers {
@@ -156,6 +170,9 @@ func TestMain(m *testing.M) {
 	twg.Wait()
 	if rabbitmqShared.container != nil {
 		_ = rabbitmqShared.container.Terminate(ctx)
+	}
+	if maxcomputeDest.dbPath != "" {
+		_ = os.Remove(maxcomputeDest.dbPath)
 	}
 
 	os.Exit(code)

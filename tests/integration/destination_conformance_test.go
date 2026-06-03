@@ -241,6 +241,30 @@ func destinationCases() []destCase {
 			schemaEvolutionCapable: true,
 		},
 		{
+			name: "maxcompute",
+			setup: func(t *testing.T, ctx context.Context) (string, string, func()) {
+				if maxcomputeDest.uri == "" {
+					t.Skip("shared MaxCompute emulator container not available")
+				}
+
+				table := fmt.Sprintf("conformance_%s", uniqueSuffix())
+				cleanup := func() {
+					dest, err := uri.DefaultRegistry.GetDestination(maxcomputeDest.uri)
+					if err != nil {
+						return
+					}
+					if err := dest.Connect(ctx, maxcomputeDest.uri); err != nil {
+						return
+					}
+					_ = dest.DropTable(ctx, table)
+					_ = dest.Close(ctx)
+				}
+				return maxcomputeDest.uri, table, cleanup
+			},
+			validateNonSQL:       validateMaxComputeReplace,
+			validateAppendNonSQL: validateMaxComputeAppend,
+		},
+		{
 			name: "mssql",
 			setup: func(t *testing.T, ctx context.Context) (string, string, func()) {
 				if mssqlDest.uri == "" {
@@ -415,6 +439,44 @@ func validateAthenaAppend(t *testing.T, destURI, destTable string) {
 	ctx := context.Background()
 	rows := countRowsViaAthenaRead(t, ctx, destURI, destTable)
 	require.Equal(t, appendAfterRows, rows)
+}
+
+func validateMaxComputeReplace(t *testing.T, destURI, destTable string) {
+	ctx := context.Background()
+	rows := countRowsViaMaxComputeRead(t, ctx, destURI, destTable)
+	require.Equal(t, replaceFixtureRows, rows)
+}
+
+func validateMaxComputeAppend(t *testing.T, destURI, destTable string) {
+	ctx := context.Background()
+	rows := countRowsViaMaxComputeRead(t, ctx, destURI, destTable)
+	require.Equal(t, appendAfterRows, rows)
+}
+
+func countRowsViaMaxComputeRead(t *testing.T, ctx context.Context, maxComputeURI, maxComputeTable string) int {
+	tmpFile, err := os.CreateTemp("", "maxcompute_conformance_*.db")
+	require.NoError(t, err)
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+	cfg := &config.IngestConfig{
+		SourceURI:           maxComputeURI,
+		SourceTable:         maxComputeTable,
+		DestURI:             fmt.Sprintf("sqlite:///%s", tmpFile.Name()),
+		DestTable:           "out",
+		IncrementalStrategy: config.StrategyReplace,
+	}
+
+	p := pipeline.New(cfg)
+	require.NoError(t, p.Run(ctx))
+
+	db, err := sql.Open("sqlite3", tmpFile.Name())
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	var n int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM out").Scan(&n))
+	return n
 }
 
 func countRowsViaAthenaRead(t *testing.T, ctx context.Context, athenaURI, athenaTable string) int {
