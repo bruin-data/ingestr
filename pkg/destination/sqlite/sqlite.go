@@ -354,10 +354,28 @@ func (d *SQLiteDestination) SwapTable(ctx context.Context, opts destination.Swap
 			quotedCols[i] = destination.QuoteIdentifier(c.Name)
 		}
 		colList := strings.Join(quotedCols, ", ")
-		copySQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
-			destination.QuoteTableName(targetTable),
-			colList, colList,
-			destination.QuoteTableName(stagingTable))
+
+		// Deduplicate by primary key while copying so duplicate keys in staging
+		// collapse to one row per key in the target.
+		selectClause := fmt.Sprintf("SELECT %s FROM %s", colList, destination.QuoteTableName(stagingTable))
+		if len(opts.PrimaryKeys) > 0 {
+			quotedPKs := make([]string, len(opts.PrimaryKeys))
+			for i, pk := range opts.PrimaryKeys {
+				quotedPKs[i] = destination.QuoteIdentifier(pk)
+			}
+			// Keep the latest row per key by incremental key; fall back to an
+			// arbitrary winner when no incremental key is configured.
+			orderBy := "(SELECT NULL)"
+			if opts.IncrementalKey != "" {
+				orderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
+			}
+			selectClause = fmt.Sprintf(
+				"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1",
+				colList, colList, strings.Join(quotedPKs, ", "), orderBy, destination.QuoteTableName(stagingTable),
+			)
+		}
+		copySQL := fmt.Sprintf("INSERT INTO %s (%s) %s",
+			destination.QuoteTableName(targetTable), colList, selectClause)
 		if _, err := tx.ExecContext(ctx, copySQL); err != nil {
 			config.LogFailedQuery(copySQL, err)
 			_ = tx.Rollback()
@@ -667,6 +685,10 @@ func (d *SQLiteDestination) SupportsAppendStrategy() bool { return true }
 
 // SupportsMergeStrategy returns true as SQLite supports the merge strategy.
 func (d *SQLiteDestination) SupportsMergeStrategy() bool { return true }
+
+// DedupesOnReplace reports that SwapTable recreates the target by copying from
+// staging and deduplicates by primary key during that copy.
+func (d *SQLiteDestination) DedupesOnReplace() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as SQLite supports the delete+insert strategy.
 func (d *SQLiteDestination) SupportsDeleteInsertStrategy() bool { return true }

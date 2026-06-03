@@ -67,8 +67,11 @@ type destCase struct {
 	truncateInsertCapable  bool
 	scd2Capable            bool
 	schemaEvolutionCapable bool
-	validateNonSQL         func(t *testing.T, destURI, destTable string)
-	validateAppendNonSQL   func(t *testing.T, destURI, destTable string)
+	// replaceDedupCapable marks destinations whose replace swap recreates+copies
+	// and deduplicates by primary key (DuckDB, SQLite, BigQuery).
+	replaceDedupCapable  bool
+	validateNonSQL       func(t *testing.T, destURI, destTable string)
+	validateAppendNonSQL func(t *testing.T, destURI, destTable string)
 }
 
 func destinationCases() []destCase {
@@ -112,6 +115,7 @@ func destinationCases() []destCase {
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false, // SQLite doesn't support ALTER COLUMN TYPE
+			replaceDedupCapable:    true,
 		},
 		{
 			name: "duckdb",
@@ -127,6 +131,7 @@ func destinationCases() []destCase {
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
+			replaceDedupCapable:    true,
 		},
 		{
 			name: "csv",
@@ -190,6 +195,7 @@ func destinationCases() []destCase {
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
+			replaceDedupCapable:    true,
 		},
 		{
 			name: "clickhouse",
@@ -2432,6 +2438,63 @@ func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
 			require.NoError(t, pipeline.New(cfg).Run(ctx), "Second replace should succeed")
 			assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
 				"PRIMARY KEY on id should still be present after second replace (cross-schema swap)")
+		})
+	}
+}
+
+// TestDestinations_Replace_DedupesByPK verifies that, for destinations whose
+// replace swap recreates+copies (DuckDB, SQLite, BigQuery), a source containing
+// duplicate primary keys collapses to one row per key in the target, keeping the
+// latest row by incremental key. The fixture has 5 rows over 3 distinct ids
+// ({1,1,2,3,3}); incremental key = score, so the higher-score row wins.
+func TestDestinations_Replace_DedupesByPK(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceURI := jsonlURI(t, "testdata/conformance_replace_dedup.jsonl")
+
+	for _, tc := range destinationCases() {
+		tc := tc
+		if tc.sqlBackend == nil || !tc.replaceDedupCapable {
+			continue
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			destURI, destTable, cleanup := tc.setup(t, ctx)
+			defer cleanup()
+
+			cfg := &config.IngestConfig{
+				SourceURI:           sourceURI,
+				SourceTable:         "replace_dedup",
+				DestURI:             destURI,
+				DestTable:           destTable,
+				IncrementalStrategy: config.StrategyReplace,
+				IncrementalKey:      "score",
+				PrimaryKeys:         []string{"id"},
+			}
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+			db, err := tc.sqlBackend.openDB(destURI)
+			if err != nil {
+				t.Skipf("Could not open SQL backend for dedup validation: %v", err)
+				return
+			}
+			defer func() { _ = db.Close() }()
+
+			var count int
+			require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(destTable)).Scan(&count))
+			assert.Equal(t, 3, count, "duplicate primary keys should collapse to one row per key")
+
+			// Latest row per key wins (highest score).
+			var name1Raw []byte
+			require.NoError(t, db.QueryRow(tc.sqlBackend.nameByIDQuery(destTable, 1)).Scan(&name1Raw))
+			assert.Equal(t, "v1-latest", string(name1Raw), "id=1 should keep the latest row by incremental key")
+
+			var name3Raw []byte
+			require.NoError(t, db.QueryRow(tc.sqlBackend.nameByIDQuery(destTable, 3)).Scan(&name3Raw))
+			assert.Equal(t, "v3-latest", string(name3Raw), "id=3 should keep the latest row by incremental key")
 		})
 	}
 }
