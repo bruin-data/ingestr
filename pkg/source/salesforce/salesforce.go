@@ -184,7 +184,8 @@ func (s *salesforceSource) GetTable(ctx context.Context, req source.TableRequest
 		replicationKey = req.IncrementalKey
 		
 		// History tables are append only so merge strategy is not applicable
-		if strings.HasSuffix(tableName, "_history") {
+		// Exclude custom history tables to avoid conflicts with standard history tables
+		if strings.HasSuffix(tableName, "_history") && !strings.HasPrefix(tableName, "custom:") {
 			strategy = config.StrategyAppend
 		} else {
 			strategy = config.StrategyMerge
