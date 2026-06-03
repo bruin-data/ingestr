@@ -129,14 +129,22 @@ type tableMeta struct {
 
 var salesforceTableMeta = map[string]tableMeta{
 	"user":                     {"User", config.StrategyReplace, nil, ""},
+	"user_history":             {"UserHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
 	"user_role":                {"UserRole", config.StrategyReplace, nil, ""},
 	"opportunity":              {"Opportunity", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"opportunity_history":      {"OpportunityHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
 	"opportunity_line_item":    {"OpportunityLineItem", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 	"opportunity_contact_role": {"OpportunityContactRole", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 	"account":                  {"Account", config.StrategyMerge, []string{"Id"}, "LastModifiedDate"},
+	"account_history":          {"AccountHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
+	"case":                     {"Case", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"case_history":             {"CaseHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
 	"contact":                  {"Contact", config.StrategyReplace, []string{"Id"}, ""},
+	"contact_history":          {"ContactHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
 	"lead":                     {"Lead", config.StrategyReplace, []string{"Id"}, ""},
+	"lead_history":             {"LeadHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
 	"campaign":                 {"Campaign", config.StrategyReplace, []string{"Id"}, ""},
+	"campaign_history":         {"CampaignHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
 	"campaign_member":          {"CampaignMember", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 	"product":                  {"Product2", config.StrategyReplace, []string{"Id"}, ""},
 	"pricebook":                {"Pricebook2", config.StrategyReplace, []string{"Id"}, ""},
@@ -174,7 +182,14 @@ func (s *salesforceSource) GetTable(ctx context.Context, req source.TableRequest
 	// the object's datetime fields at read time.
 	if req.IncrementalKey != "" {
 		replicationKey = req.IncrementalKey
-		strategy = config.StrategyMerge
+		
+		// History tables are append only so merge strategy is not applicable
+		if strings.HasSuffix(tableName, "_history") {
+			strategy = config.StrategyAppend
+		} else {
+			strategy = config.StrategyMerge
+		}
+
 		// Merge requires primary keys. Every Salesforce object exposes an "Id"
 		// field, so fall back to it when neither the table metadata nor the
 		// caller supplied explicit PKs.
