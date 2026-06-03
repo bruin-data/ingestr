@@ -19,9 +19,30 @@ mongo_id_type() {
         2>/dev/null || echo ""
 }
 
+mongo_first_big_int() {
+    local collection="$1"
+    docker exec "$MONGO_SRC_CONTAINER" mongosh --quiet \
+        --eval "const doc = db.getSiblingDB('$MONGO_SRC_DB').getCollection('$collection').findOne({}, {big_int: 1}); doc ? doc.big_int.toString() : ''" \
+        2>/dev/null || echo ""
+}
+
+mongo_bson_marker() {
+    local collection="$1"
+    docker exec "$MONGO_SRC_CONTAINER" mongosh --quiet \
+        --eval "const doc = db.getSiblingDB('$MONGO_SRC_DB').getCollection('$collection').aggregate([{ \$limit: 1 }, { \$project: { _id_type: { \$type: '\$_id' }, date_val_type: { \$type: '\$date_val' }, json_val_type: { \$type: '\$json_val' }, array_val_type: { \$type: '\$array_val' }, binary_val_type: { \$type: '\$binary_val' }, decimal128_val_type: { \$type: '\$decimal128_val' }, timestamp_val_type: { \$type: '\$timestamp_val' }, regex_val_type: { \$type: '\$regex_val' }, mixed_val_type: { \$type: '\$mixed_val' } } }]).toArray()[0]; doc ? print([doc._id_type, doc.date_val_type, doc.json_val_type, doc.array_val_type, doc.binary_val_type, doc.decimal128_val_type, doc.timestamp_val_type, doc.regex_val_type, doc.mixed_val_type].join('|')) : print('')" \
+        2>/dev/null || echo ""
+}
+
+js_string() {
+    local value="${1//\\/\\\\}"
+    value="${value//\'/\\\'}"
+    printf "'%s'" "$value"
+}
+
 for rows in $SEED_SIZES; do
     suffix="$(bench_size_suffix "$rows")"
     table_name="bench_data_${suffix}"
+    bson_table_name="bench_data_bson_${suffix}"
 
     echo ""
     echo "====== $table_name ($rows rows) ======"
@@ -54,7 +75,15 @@ for rows in $SEED_SIZES; do
     mongo_needs_seed=false
     existing=$(mongo_count "$table_name")
     id_type=$(mongo_id_type "$table_name")
-    [[ "$existing" != "$rows" || "$id_type" != "string" ]] && mongo_needs_seed=true
+    first_big_int=$(mongo_first_big_int "$table_name")
+    expected_first_big_int=$((rows * 1000000))
+    [[ "$existing" != "$rows" || "$id_type" != "string" || "$first_big_int" != "$expected_first_big_int" ]] && mongo_needs_seed=true
+
+    mongo_bson_needs_seed=false
+    existing=$(mongo_count "$bson_table_name")
+    bson_marker=$(mongo_bson_marker "$bson_table_name")
+    expected_bson_marker="objectId|date|missing|array|binData|decimal|timestamp|regex|missing"
+    [[ "$existing" != "$rows" || "$bson_marker" != "$expected_bson_marker" ]] && mongo_bson_needs_seed=true
 
     # --- Postgres (via COPY from DuckDB CSV) ---
     if [[ "$pg_needs_seed" == "true" ]]; then
@@ -126,6 +155,7 @@ COPY (
         strftime(ts_tz_val, '%Y-%m-%d %H:%M:%S.%g') AS ts_tz_val,
         json_val, extra_text
     FROM ${table_name}
+    ORDER BY id DESC
 ) TO '${MONGO_JSON_PATH}' (FORMAT json, ARRAY false);
 "
         echo "  MongoDB: loading JSONL via mongoimport..."
@@ -133,6 +163,7 @@ COPY (
             --db "$MONGO_SRC_DB" \
             --collection "$table_name" \
             --drop \
+            --maintainInsertionOrder \
             --type json < "$MONGO_JSON_PATH" >/dev/null
         docker exec "$MONGO_SRC_CONTAINER" mongosh --quiet \
             --eval "db.getSiblingDB('$MONGO_SRC_DB').getCollection('$table_name').createIndex({id: 1})" >/dev/null
@@ -140,6 +171,21 @@ COPY (
         echo "  MongoDB: done ($(mongo_count "$table_name") rows)"
     else
         echo "  MongoDB: already seeded, skipping"
+    fi
+
+    # --- MongoDB BSON (native MongoDB types via mongosh) ---
+    if [[ "$mongo_bson_needs_seed" == "true" ]]; then
+        echo "  MongoDB BSON: seeding native BSON documents..."
+        {
+            printf "const seedDatabase = %s;\n" "$(js_string "$MONGO_SRC_DB")"
+            printf "const seedCollection = %s;\n" "$(js_string "$bson_table_name")"
+            printf "const seedRows = %d;\n" "$rows"
+            printf "const seedBatchSize = %d;\n" 10000
+            cat "$BENCH_DIR/scripts/seed_mongodb_bson.js"
+        } | docker exec -i "$MONGO_SRC_CONTAINER" mongosh --quiet --file /dev/stdin
+        echo "  MongoDB BSON: done ($(mongo_count "$bson_table_name") rows)"
+    else
+        echo "  MongoDB BSON: already seeded, skipping"
     fi
 done
 

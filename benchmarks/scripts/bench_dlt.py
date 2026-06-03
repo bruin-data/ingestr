@@ -1,17 +1,4 @@
-# /// script
-# requires-python = ">=3.9"
-# dependencies = [
-#     "dlt[postgres,duckdb,bigquery,snowflake]==1.27.0",
-#     "dlt-verified-sources @ git+https://github.com/dlt-hub/verified-sources.git@75b3ec17eab99d0079d9f61b7f47fc8b899a5738",
-#     "pymysql",
-#     "pymongo",
-#     "sqlalchemy>=1.4,<2",
-#     "duckdb-engine",
-#     "pyarrow",
-#     "numpy",
-# ]
-# ///
-"""Benchmark script for dlt-hub. Run via: uv run bench_dlt.py --source-uri ... --dest-uri ..."""
+"""Benchmark script for dlt-hub."""
 
 import argparse
 import json
@@ -23,8 +10,7 @@ os.environ.setdefault("RUNTIME__DLTHUB_TELEMETRY", "false")
 
 import dlt
 from dlt.sources.sql_database import sql_table
-from sources.mongodb import mongodb
-from sqlalchemy import Float
+from sources.mongodb import mongodb, mongodb_collection
 
 
 def normalize_source_uri(uri: str) -> str:
@@ -56,14 +42,31 @@ def parse_mongodb_table(table: str) -> tuple[str, str, dict | None]:
     return database, collection, filter_
 
 
-def mongodb_source(uri: str, table: str):
+def mongodb_source(uri: str, table: str, backend: str):
     database, collection, filter_ = parse_mongodb_table(table)
-    return mongodb(
+
+    if backend == "default":
+        return mongodb(
+            connection_url=uri,
+            database=database,
+            collection_names=[collection],
+            filter_=filter_ or {},
+        )
+
+    # The verified source exposes data_item_format only on the collection-level
+    # resource, so the pyarrow variant intentionally uses that lower-level API.
+    from dlt.extract.source import DltResource
+
+    mongodb_collection.__wrapped__.__annotations__["return"] = DltResource
+    source_kwargs = dict(
         connection_url=uri,
         database=database,
-        collection_names=[collection],
-        filter_=filter_ or {},
+        collection=collection,
+        data_item_format="arrow" if backend == "pyarrow" else "object",
     )
+    if filter_:
+        source_kwargs["filter_"] = filter_
+    return mongodb_collection(**source_kwargs)
 
 
 def main():
@@ -74,6 +77,12 @@ def main():
     parser.add_argument("--dest-uri")
     parser.add_argument("--dest-uri-env")
     parser.add_argument("--dest-table", required=True)
+    parser.add_argument(
+        "--backend",
+        choices=("default", "pyarrow"),
+        default=os.environ.get("BENCH_DLT_BACKEND", "default"),
+        help="dlt source backend mode: default uses dlt's out-of-box path; pyarrow opts into Arrow where supported",
+    )
     args = parser.parse_args()
 
     if args.source_uri_env:
@@ -98,20 +107,31 @@ def main():
     source_uri = normalize_source_uri(args.source_uri)
 
     if source_uri.startswith(("mongodb://", "mongodb+srv://")):
-        source = mongodb_source(source_uri, args.source_table)
+        source = mongodb_source(source_uri, args.source_table, args.backend)
     else:
-        def cast_doubles(table):
-            for col in table.columns:
-                if str(col.type) == "DOUBLE":
-                    col.type = Float()
+        if args.backend == "default":
+            source = sql_table(
+                credentials=source_uri,
+                table=src_table,
+                schema=src_schema,
+            )
+        else:
+            from sqlalchemy import Float
 
-        source = sql_table(
-            credentials=source_uri,
-            table=src_table,
-            schema=src_schema,
-            backend="pyarrow",
-            table_adapter_callback=cast_doubles,
-        )
+            def cast_doubles(table):
+                for col in table.columns:
+                    if str(col.type) == "DOUBLE":
+                        col.type = Float()
+
+            source_kwargs = dict(
+                credentials=source_uri,
+                table=src_table,
+                schema=src_schema,
+                table_adapter_callback=cast_doubles,
+            )
+            source_kwargs["backend"] = "pyarrow"
+
+            source = sql_table(**source_kwargs)
 
     # Build destination
     dest_uri = args.dest_uri
