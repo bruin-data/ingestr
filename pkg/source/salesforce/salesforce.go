@@ -204,7 +204,7 @@ func (s *salesforceSource) read(ctx context.Context, tableName, replicationKey s
 	go func() {
 		defer close(results)
 
-		sobject := tableName
+		var sobject string
 		if meta, ok := salesforceTableMeta[tableName]; ok {
 			sobject = meta.sobject
 		} else {
