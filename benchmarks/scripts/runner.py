@@ -241,20 +241,38 @@ def check_tool_available(name: str, tool_cfg: dict) -> bool:
     return True
 
 
+def scenario_rule_matches(rule: dict, src_type: str, dst_type: str, src_name: str, dst_name: str) -> bool:
+    checks = []
+    if "source_type" in rule:
+        checks.append(rule["source_type"] == src_type)
+    if "destination_type" in rule:
+        checks.append(rule["destination_type"] == dst_type)
+    if "source" in rule:
+        checks.append(rule["source"] == src_name)
+    if "destination" in rule:
+        checks.append(rule["destination"] == dst_name)
+    return bool(checks) and all(checks)
+
+
 def should_skip_tool(tool_cfg: dict, src_type: str, dst_type: str, src_name: str, dst_name: str) -> bool:
     for rule in tool_cfg.get("skip", []):
-        if "source_type" in rule and rule["source_type"] == src_type:
-            return True
-        if "destination_type" in rule and rule["destination_type"] == dst_type:
-            return True
-        source_matches = "source" in rule and rule["source"] == src_name
-        destination_matches = "destination" in rule and rule["destination"] == dst_name
-        if "source" in rule and "destination" in rule:
-            if source_matches and destination_matches:
-                return True
-        elif source_matches or destination_matches:
+        if scenario_rule_matches(rule, src_type, dst_type, src_name, dst_name):
             return True
     return False
+
+
+def resolve_tool_backend(
+    tool_cfg: dict,
+    src_type: str,
+    dst_type: str,
+    src_name: str,
+    dst_name: str,
+) -> str | None:
+    backend = tool_cfg.get("backend")
+    for rule in tool_cfg.get("backend_overrides", []):
+        if scenario_rule_matches(rule, src_type, dst_type, src_name, dst_name):
+            return rule.get("backend", backend)
+    return backend
 
 
 # ---------------------------------------------------------------------------
@@ -377,9 +395,11 @@ def build_tool_command(
         ]
         return "".join(parts)
 
-    if tool_name in ("dlt", "dlt_pyarrow"):
+    if tool_name == "dlt":
         script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_dlt.py")
-        backend = tool_cfg.get("backend")
+        backend = resolve_tool_backend(
+            tool_cfg, src_type, dst_type, src_cfg_name, dst_cfg_name,
+        )
         backend_arg = f" --backend {shlex.quote(backend)}" if backend else ""
         return (
             f"RUNTIME__DLTHUB_TELEMETRY=false {uv_python_command(script)}"

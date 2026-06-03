@@ -140,15 +140,11 @@ tools:
   dlt:
     script: scripts/bench_dlt.py
     requires: uv
-    backend: default
-
-  dlt_pyarrow:
-    script: scripts/bench_dlt.py
-    requires: uv
     backend: pyarrow
-    skip:
+    backend_overrides:
       - source: local_mongodb
-        destination: local_postgres
+        destination_type: postgres
+        backend: default
 
   airbyte:
     script: scripts/bench_airbyte.py
