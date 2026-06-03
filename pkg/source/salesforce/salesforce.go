@@ -175,6 +175,12 @@ func (s *salesforceSource) GetTable(ctx context.Context, req source.TableRequest
 	if req.IncrementalKey != "" {
 		replicationKey = req.IncrementalKey
 		strategy = config.StrategyMerge
+		// Merge requires primary keys. Every Salesforce object exposes an "Id"
+		// field, so fall back to it when neither the table metadata nor the
+		// caller supplied explicit PKs.
+		if len(pk) == 0 {
+			pk = []string{"Id"}
+		}
 	}
 
 	return &source.DynamicSourceTable{
