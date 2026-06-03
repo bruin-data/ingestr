@@ -105,10 +105,6 @@ uvx crash -c 'SELECT * FROM doc.sample'
 
 <img alt="CrateDB_img" src="../media/cratedb-destination.png" />
 
-> [!WARNING]
-> CrateDB supports the `replace` incremental materialization strategy, but
-> currently does not support the `delete+insert`, `merge`, or `scd2` strategies.
-
 ## Appendix
 
 To start a single-node instance of CrateDB for evaluation purposes,
