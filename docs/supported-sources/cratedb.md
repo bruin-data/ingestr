@@ -20,7 +20,7 @@ cratedb://<username>:<password>@<host>:<port>?sslmode=<sslmode>
 > [!INFO]
 > When connecting to CrateDB on localhost, use:
 > ```plaintext
-> cratedb://crate:@localhost:5432?sslmode=disable
+> cratedb://crate@localhost:5432?sslmode=disable
 > ```
 >
 > When connecting to [CrateDB Cloud], the URI looks like this:
@@ -43,7 +43,7 @@ to DuckDB, then display the content from DuckDB.
 
 ```shell
 ingestr ingest \
-    --source-uri 'cratedb://crate:@localhost:5432/?sslmode=disable' \
+    --source-uri 'cratedb://crate@localhost:5432/?sslmode=disable' \
     --source-table 'sys.summits' \
     --dest-uri 'duckdb:///cratedb.duckdb' \
     --dest-table 'dest.summits'
@@ -68,7 +68,7 @@ cratedb://<username>:<password>@<host>:<port>?sslmode=<sslmode>
 > [!INFO]
 > When connecting to CrateDB on localhost, use:
 > ```plaintext
-> cratedb://crate:@localhost:5432?sslmode=disable
+> cratedb://crate@localhost:5432?sslmode=disable
 > ```
 >
 > When connecting to [CrateDB Cloud], the URI looks like this:
@@ -96,7 +96,7 @@ wget -O input.csv https://github.com/bruin-data/ingestr/raw/refs/heads/main/inge
 ingestr ingest \
    --source-uri 'csv://input.csv' \
    --source-table 'sample' \
-   --dest-uri 'cratedb://crate:@localhost:5432/?sslmode=disable' \
+   --dest-uri 'cratedb://crate@localhost:5432/?sslmode=disable' \
    --dest-table 'doc.sample'
 ```
 ```shell
