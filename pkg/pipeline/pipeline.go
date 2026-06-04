@@ -1064,7 +1064,7 @@ func (p *Pipeline) resolveNamingConvention(ctx context.Context, sourceSchema *sc
 
 func (p *Pipeline) applyNamingConvention(sourceSchema *schema.TableSchema, namingConv naming.NamingConvention) error {
 	// If using direct naming (no transformation), skip setup
-	if namingConv.Name() == "direct" {
+	if namingConv.Name() == string(naming.Direct) {
 		config.Debug("[NAMING] Using direct naming (no column transformation)")
 		return nil
 	}
