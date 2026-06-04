@@ -334,6 +334,43 @@ func jobRef(job *bigquery.Job) string {
 	return job.ID()
 }
 
+// isDatePartitionColumn reports whether the named partition column is a DATE
+// column in the given internal schema. A DATE column must be referenced bare in
+// a PARTITION BY clause; TIMESTAMP/DATETIME columns must be wrapped in DATE().
+func isDatePartitionColumn(s *schema.TableSchema, column string) bool {
+	if s == nil || column == "" {
+		return false
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, column) {
+			return col.DataType == schema.TypeDate
+		}
+	}
+	return false
+}
+
+// partitionFieldIsDate is the equivalent of isDatePartitionColumn for a live
+// BigQuery schema, used where only table metadata (not the internal schema) is
+// available.
+func partitionFieldIsDate(s bigquery.Schema, column string) bool {
+	for _, field := range s {
+		if strings.EqualFold(field.Name, column) {
+			return field.Type == bigquery.DateFieldType
+		}
+	}
+	return false
+}
+
+// partitionByClause builds the PARTITION BY clause for a partition column.
+// BigQuery requires a DATE-valued expression: an already-DATE column is used
+// bare, while TIMESTAMP/DATETIME columns are wrapped in DATE().
+func partitionByClause(column string, isDateColumn bool) string {
+	if isDateColumn {
+		return fmt.Sprintf("PARTITION BY `%s`\n", column)
+	}
+	return fmt.Sprintf("PARTITION BY DATE(`%s`)\n", column)
+}
+
 // PrepareTable creates or recreates a table with the given schema.
 func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
 	ctx = annotation.WithStep(ctx, annotation.StepDDL)
@@ -850,7 +887,7 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE `%s`.`%s`.`%s`\n", d.projectID, targetDataset, targetTableName)
 
 		if d.partitionBy != "" {
-			sql += fmt.Sprintf("PARTITION BY DATE(`%s`)\n", d.partitionBy)
+			sql += partitionByClause(d.partitionBy, isDatePartitionColumn(opts.Schema, d.partitionBy))
 		}
 
 		if len(d.clusterBy) > 0 {
@@ -1111,7 +1148,7 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	var sqlBuilder strings.Builder
 	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE `%s`.`%s`.`%s`\n", d.projectID, dataset, table)
 	if meta.TimePartitioning != nil && meta.TimePartitioning.Field != "" {
-		fmt.Fprintf(&sqlBuilder, "PARTITION BY DATE(`%s`)\n", meta.TimePartitioning.Field)
+		sqlBuilder.WriteString(partitionByClause(meta.TimePartitioning.Field, partitionFieldIsDate(meta.Schema, meta.TimePartitioning.Field)))
 	}
 	if meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
 		clusterCols := make([]string, len(meta.Clustering.Fields))

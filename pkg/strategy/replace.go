@@ -141,6 +141,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 			TargetTable:    targetTable,
 			PrimaryKeys:    job.Config.PrimaryKeys,
 			IncrementalKey: job.Config.IncrementalKey,
+			Schema:         job.Schema,
 		}); err != nil {
 			if dropErr := job.Destination.DropTable(ctx, writeTable); dropErr != nil {
 				config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
@@ -269,6 +270,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 				StagingTable: stagingTable,
 				TargetTable:  destTable,
 				PrimaryKeys:  tableInfo.PrimaryKeys,
+				Schema:       tableInfo.Schema,
 			}); err != nil {
 				return fmt.Errorf("failed to swap table %s: %w", tableInfo.Name, err)
 			}
