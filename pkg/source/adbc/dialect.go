@@ -122,10 +122,3 @@ type URIAware interface {
 	// This is called after successful connection in ADBCSource.Connect().
 	SetURI(uri string)
 }
-
-// SessionQueryTagger is implemented by dialects that carry query attribution
-// via a session QUERY_TAG (Snowflake) instead of a leading comment. The
-// returned statement is run on a pinned connection before a custom query.
-type SessionQueryTagger interface {
-	SetSessionQueryTagSQL(tag string) string
-}

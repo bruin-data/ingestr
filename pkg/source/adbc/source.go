@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/annotation"
@@ -313,16 +314,15 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 		batchSize = 100000
 	}
 
-	// Annotate the extract: Snowflake carries it via a session QUERY_TAG (it
-	// strips leading comments); other engines keep a leading comment.
+	// Snowflake strips leading comments, so carry the tag via a session
+	// QUERY_TAG; other engines keep the comment.
 	annotated := annotation.WithStep(ctx, annotation.StepExtract)
 	var tagSQL string
-	if tagger, ok := s.dialect.(SessionQueryTagger); ok {
+	if s.dialect.Name() == "SNOWFLAKE" {
 		if tag, ok := annotation.QueryTag(annotated); ok {
-			tagSQL = tagger.SetSessionQueryTagSQL(tag)
+			tagSQL = "ALTER SESSION SET QUERY_TAG = '" + strings.ReplaceAll(tag, "'", "''") + "'"
 		}
-	}
-	if tagSQL == "" {
+	} else {
 		query = annotation.Prepend(annotated, query)
 	}
 
