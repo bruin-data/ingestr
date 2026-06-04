@@ -55,6 +55,7 @@ const (
 	defaultParallelism               = 5
 	defaultBlobstoreFilePathColumn   = "_ingestr_source_file_path"
 	defaultBlobstoreModifiedAtColumn = "_ingestr_source_file_modified_at"
+	defaultBlobstoreCreatedAtColumn  = "_ingestr_source_file_created_at"
 )
 
 type FileFormat string
@@ -85,13 +86,14 @@ type BlobstoreSource struct {
 }
 
 type blobstoreFile struct {
-	key          string
-	lastModified *time.Time
+	key        string
+	modifiedAt *time.Time
+	createdAt  *time.Time
 }
 
 type blobstoreFileMetadata struct {
 	incrementalKey string
-	lastModified   *time.Time
+	incrementalAt  *time.Time
 	filepathColumn string
 	filepath       string
 }
@@ -416,8 +418,8 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to list files: %w", err)}
 		} else if count == 0 {
-			if handlesBlobstoreModifiedIncrementality(s.provider) && usesBlobstoreModifiedIncrementality(opts) && hasModifiedInterval(opts) {
-				config.Debug("[BLOBSTORE-SRC] No files found matching pattern=%s/%s and modified interval", bucket, pattern)
+			if handlesBlobstoreTimestampIncrementality(s.provider) && usesBlobstoreTimestampIncrementality(opts) && hasBlobstoreTimestampInterval(opts) {
+				config.Debug("[BLOBSTORE-SRC] No files found matching pattern=%s/%s and source file timestamp interval", bucket, pattern)
 			} else {
 				results <- source.RecordBatchResult{Err: fmt.Errorf("no files found matching pattern: %s/%s", bucket, pattern)}
 			}
@@ -476,7 +478,7 @@ func (s *BlobstoreSource) processFile(ctx context.Context, bucket string, file b
 
 	var totalRows int64
 	var batchNum int
-	metadata := s.fileMetadata(opts, bucket, file.key, file.lastModified)
+	metadata := s.fileMetadata(opts, bucket, file.key, file.modifiedAt, file.createdAt)
 
 	switch format {
 	case FormatParquet:
@@ -521,9 +523,10 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 			}
 
 			updated := attrs.Updated
-			if matchesGlobPattern(attrs.Name, pattern) && objectMatchesIncrementalOptions(s.provider, &updated, opts) {
+			created := attrs.Created
+			if matchesGlobPattern(attrs.Name, pattern) && objectMatchesIncrementalOptions(s.provider, &updated, &created, opts) {
 				select {
-				case fileChan <- blobstoreFile{key: attrs.Name, lastModified: copyTimePtr(&updated)}:
+				case fileChan <- blobstoreFile{key: attrs.Name, modifiedAt: copyTimePtr(&updated), createdAt: copyTimePtr(&created)}:
 					count++
 				case <-ctx.Done():
 					return count, ctx.Err()
@@ -623,9 +626,9 @@ func (s *BlobstoreSource) listMatchingS3Objects(ctx context.Context, bucket, pat
 
 		for _, obj := range page.Contents {
 			key := aws.ToString(obj.Key)
-			if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(s.provider, obj.LastModified, opts) {
+			if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(s.provider, obj.LastModified, obj.LastModified, opts) {
 				select {
-				case fileChan <- blobstoreFile{key: key, lastModified: copyTimePtr(obj.LastModified)}:
+				case fileChan <- blobstoreFile{key: key, modifiedAt: copyTimePtr(obj.LastModified), createdAt: copyTimePtr(obj.LastModified)}:
 					count++
 				case <-ctx.Done():
 					return count, ctx.Err()
@@ -746,13 +749,13 @@ func (s *BlobstoreSource) streamS3InventoryQueryResults(ctx context.Context, exe
 				if key == "" {
 					continue
 				}
-				modified, err := parseAthenaInventoryTime(athenaRowValue(row, 1))
+				sourceTimestamp, err := parseAthenaInventoryTime(athenaRowValue(row, 1))
 				if err != nil {
-					return count, fmt.Errorf("failed to parse Athena inventory modified timestamp for key %q: %w", key, err)
+					return count, fmt.Errorf("failed to parse Athena inventory timestamp for key %q: %w", key, err)
 				}
-				if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(s.provider, modified, opts) {
+				if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(s.provider, sourceTimestamp, sourceTimestamp, opts) {
 					select {
-					case fileChan <- blobstoreFile{key: key, lastModified: modified}:
+					case fileChan <- blobstoreFile{key: key, modifiedAt: sourceTimestamp, createdAt: sourceTimestamp}:
 						count++
 					case <-ctx.Done():
 						return count, ctx.Err()
@@ -771,16 +774,18 @@ func (s *BlobstoreSource) streamS3InventoryQueryResults(ctx context.Context, exe
 	return count, nil
 }
 
-func (s *BlobstoreSource) fileMetadata(opts source.ReadOptions, bucket, key string, lastModified *time.Time) blobstoreFileMetadata {
-	if !handlesBlobstoreModifiedIncrementality(s.provider) || !usesBlobstoreModifiedIncrementality(opts) {
+func (s *BlobstoreSource) fileMetadata(opts source.ReadOptions, bucket, key string, modifiedAt, createdAt *time.Time) blobstoreFileMetadata {
+	if !handlesBlobstoreTimestampIncrementality(s.provider) || !usesBlobstoreTimestampIncrementality(opts) {
 		return blobstoreFileMetadata{}
 	}
 
 	metadata := blobstoreFileMetadata{}
-	if lastModified != nil && !lastModified.IsZero() && !isExcludedColumn(defaultBlobstoreModifiedAtColumn, opts.ExcludeColumns) {
-		t := lastModified.UTC()
-		metadata.incrementalKey = defaultBlobstoreModifiedAtColumn
-		metadata.lastModified = &t
+	incrementalKey := blobstoreTimestampIncrementalColumn(opts)
+	incrementalAt := blobstoreTimestampForColumn(incrementalKey, modifiedAt, createdAt)
+	if incrementalAt != nil && !incrementalAt.IsZero() && !isExcludedColumn(incrementalKey, opts.ExcludeColumns) {
+		t := incrementalAt.UTC()
+		metadata.incrementalKey = incrementalKey
+		metadata.incrementalAt = &t
 	}
 
 	if key != "" && !isExcludedColumn(defaultBlobstoreFilePathColumn, opts.ExcludeColumns) {
@@ -791,7 +796,7 @@ func (s *BlobstoreSource) fileMetadata(opts source.ReadOptions, bucket, key stri
 	return metadata
 }
 
-func handlesBlobstoreModifiedIncrementality(provider Provider) bool {
+func handlesBlobstoreTimestampIncrementality(provider Provider) bool {
 	return provider == ProviderS3 || provider == ProviderGCS
 }
 
@@ -799,35 +804,65 @@ func usesBlobstoreModifiedIncrementality(opts source.ReadOptions) bool {
 	return strings.EqualFold(opts.IncrementalKey, defaultBlobstoreModifiedAtColumn)
 }
 
-func hasModifiedInterval(opts source.ReadOptions) bool {
+func usesBlobstoreCreatedIncrementality(opts source.ReadOptions) bool {
+	return strings.EqualFold(opts.IncrementalKey, defaultBlobstoreCreatedAtColumn)
+}
+
+func usesBlobstoreTimestampIncrementality(opts source.ReadOptions) bool {
+	return blobstoreTimestampIncrementalColumn(opts) != ""
+}
+
+func blobstoreTimestampIncrementalColumn(opts source.ReadOptions) string {
+	if usesBlobstoreModifiedIncrementality(opts) {
+		return defaultBlobstoreModifiedAtColumn
+	}
+	if usesBlobstoreCreatedIncrementality(opts) {
+		return defaultBlobstoreCreatedAtColumn
+	}
+	return ""
+}
+
+func blobstoreTimestampForColumn(column string, modifiedAt, createdAt *time.Time) *time.Time {
+	switch {
+	case strings.EqualFold(column, defaultBlobstoreModifiedAtColumn):
+		return modifiedAt
+	case strings.EqualFold(column, defaultBlobstoreCreatedAtColumn):
+		return createdAt
+	default:
+		return nil
+	}
+}
+
+func hasBlobstoreTimestampInterval(opts source.ReadOptions) bool {
 	return opts.IntervalStart != nil || opts.IntervalEnd != nil
 }
 
-func objectMatchesIncrementalOptions(provider Provider, lastModified *time.Time, opts source.ReadOptions) bool {
-	if !handlesBlobstoreModifiedIncrementality(provider) || !usesBlobstoreModifiedIncrementality(opts) {
+func objectMatchesIncrementalOptions(provider Provider, modifiedAt, createdAt *time.Time, opts source.ReadOptions) bool {
+	if !handlesBlobstoreTimestampIncrementality(provider) || !usesBlobstoreTimestampIncrementality(opts) {
 		return true
 	}
-	return objectModifiedInInterval(lastModified, opts.IntervalStart, opts.IntervalEnd)
+	incrementalAt := blobstoreTimestampForColumn(blobstoreTimestampIncrementalColumn(opts), modifiedAt, createdAt)
+	return objectTimestampInInterval(incrementalAt, opts.IntervalStart, opts.IntervalEnd)
 }
 
-func objectModifiedInInterval(lastModified, intervalStart, intervalEnd *time.Time) bool {
+func objectTimestampInInterval(timestamp, intervalStart, intervalEnd *time.Time) bool {
 	if intervalStart == nil && intervalEnd == nil {
 		return true
 	}
-	if lastModified == nil || lastModified.IsZero() {
+	if timestamp == nil || timestamp.IsZero() {
 		return false
 	}
 
-	modified := lastModified.UTC()
+	ts := timestamp.UTC()
 	if intervalStart != nil {
 		start := intervalStart.UTC()
-		if modified.Before(start) {
+		if ts.Before(start) {
 			return false
 		}
 	}
 	if intervalEnd != nil {
 		end := intervalEnd.UTC()
-		if !modified.Before(end) {
+		if !ts.Before(end) {
 			return false
 		}
 	}
@@ -870,11 +905,11 @@ func buildS3InventoryQuery(parsed *parsedBlobstoreURI, bucket, prefix string, op
 	}
 
 	keyColumn := quoteAthenaIdent(parsed.athenaInventoryKeyColumn)
-	modifiedColumn := quoteAthenaIdent(parsed.athenaInventoryModifiedColumn)
+	timestampColumn := quoteAthenaIdent(parsed.athenaInventoryModifiedColumn)
 	query = fmt.Sprintf(
 		"SELECT %s, %s FROM %s",
 		keyColumn,
-		modifiedColumn,
+		timestampColumn,
 		quoteAthenaTableRef(database, table),
 	)
 
@@ -889,18 +924,18 @@ func buildS3InventoryQuery(parsed *parsedBlobstoreURI, bucket, prefix string, op
 			escapeAthenaString(prefix),
 		))
 	}
-	if usesBlobstoreModifiedIncrementality(opts) {
+	if usesBlobstoreTimestampIncrementality(opts) {
 		if opts.IntervalStart != nil {
 			conditions = append(conditions, fmt.Sprintf(
 				"%s >= timestamp '%s'",
-				modifiedColumn,
+				timestampColumn,
 				formatAthenaTimestamp(*opts.IntervalStart),
 			))
 		}
 		if opts.IntervalEnd != nil {
 			conditions = append(conditions, fmt.Sprintf(
 				"%s < timestamp '%s'",
-				modifiedColumn,
+				timestampColumn,
 				formatAthenaTimestamp(*opts.IntervalEnd),
 			))
 		}
@@ -1223,12 +1258,12 @@ func addBlobstoreMetadataColumns(record arrow.RecordBatch, metadata blobstoreFil
 		return record, false, nil
 	}
 
-	addLastModified := metadata.incrementalKey != "" && metadata.lastModified != nil
+	addIncrementalTimestamp := metadata.incrementalKey != "" && metadata.incrementalAt != nil
 	addFilepath := metadata.filepathColumn != "" && metadata.filepath != ""
-	if !addLastModified && !addFilepath {
+	if !addIncrementalTimestamp && !addFilepath {
 		return record, false, nil
 	}
-	if addLastModified && addFilepath && strings.EqualFold(metadata.incrementalKey, metadata.filepathColumn) {
+	if addIncrementalTimestamp && addFilepath && strings.EqualFold(metadata.incrementalKey, metadata.filepathColumn) {
 		return nil, false, fmt.Errorf("blobstore metadata columns conflict on %q; choose a different --incremental-key", metadata.incrementalKey)
 	}
 
@@ -1242,7 +1277,7 @@ func addBlobstoreMetadataColumns(record arrow.RecordBatch, metadata blobstoreFil
 	}
 
 	addedCols := 0
-	if addLastModified {
+	if addIncrementalTimestamp {
 		addedCols++
 	}
 	if addFilepath {
@@ -1258,7 +1293,7 @@ func addBlobstoreMetadataColumns(record arrow.RecordBatch, metadata blobstoreFil
 	}
 
 	nextCol := int(record.NumCols())
-	if addLastModified {
+	if addIncrementalTimestamp {
 		timestampType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
 		fields[nextCol] = arrow.Field{
 			Name:     metadata.incrementalKey,
@@ -1268,7 +1303,7 @@ func addBlobstoreMetadataColumns(record arrow.RecordBatch, metadata blobstoreFil
 
 		builder := array.NewTimestampBuilder(memory.DefaultAllocator, timestampType)
 		for i := int64(0); i < record.NumRows(); i++ {
-			builder.Append(arrow.Timestamp(metadata.lastModified.UTC().UnixMicro()))
+			builder.Append(arrow.Timestamp(metadata.incrementalAt.UTC().UnixMicro()))
 		}
 		columns[nextCol] = builder.NewArray()
 		builder.Release()

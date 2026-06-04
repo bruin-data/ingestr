@@ -607,9 +607,16 @@ func TestGetTableBlobstoreIncrementalKey(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, defaultBlobstoreModifiedAtColumn, table.IncrementalKey())
+
+	table, err = s.GetTable(context.Background(), source.TableRequest{
+		Name:           "bucket/test.csv",
+		IncrementalKey: defaultBlobstoreCreatedAtColumn,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, defaultBlobstoreCreatedAtColumn, table.IncrementalKey())
 }
 
-func TestObjectModifiedInInterval(t *testing.T) {
+func TestObjectTimestampInInterval(t *testing.T) {
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	mid := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
@@ -618,30 +625,35 @@ func TestObjectModifiedInInterval(t *testing.T) {
 	after := end.Add(time.Second)
 	zero := time.Time{}
 
-	assert.True(t, objectModifiedInInterval(&mid, nil, nil))
-	assert.True(t, objectModifiedInInterval(&start, &start, &end), "start bound is inclusive")
-	assert.True(t, objectModifiedInInterval(&justBeforeEnd, &start, &end), "values before end bound are included")
-	assert.False(t, objectModifiedInInterval(&end, &start, &end), "end bound is exclusive")
-	assert.False(t, objectModifiedInInterval(&before, &start, &end))
-	assert.False(t, objectModifiedInInterval(&after, &start, &end))
-	assert.False(t, objectModifiedInInterval(nil, &start, &end))
-	assert.False(t, objectModifiedInInterval(&zero, &start, &end))
+	assert.True(t, objectTimestampInInterval(&mid, nil, nil))
+	assert.True(t, objectTimestampInInterval(&start, &start, &end), "start bound is inclusive")
+	assert.True(t, objectTimestampInInterval(&justBeforeEnd, &start, &end), "values before end bound are included")
+	assert.False(t, objectTimestampInInterval(&end, &start, &end), "end bound is exclusive")
+	assert.False(t, objectTimestampInInterval(&before, &start, &end))
+	assert.False(t, objectTimestampInInterval(&after, &start, &end))
+	assert.False(t, objectTimestampInInterval(nil, &start, &end))
+	assert.False(t, objectTimestampInInterval(&zero, &start, &end))
 }
 
 func TestObjectMatchesIncrementalOptionsRequiresReservedKey(t *testing.T) {
 	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	before := start.Add(-time.Hour)
+	after := start.Add(time.Hour)
 
-	assert.True(t, objectMatchesIncrementalOptions(ProviderS3, &before, source.ReadOptions{IntervalStart: &start}))
-	assert.True(t, objectMatchesIncrementalOptions(ProviderS3, &before, source.ReadOptions{
+	assert.True(t, objectMatchesIncrementalOptions(ProviderS3, &before, &before, source.ReadOptions{IntervalStart: &start}))
+	assert.True(t, objectMatchesIncrementalOptions(ProviderS3, &before, &before, source.ReadOptions{
 		IncrementalKey: "updated_at",
 		IntervalStart:  &start,
 	}))
-	assert.False(t, objectMatchesIncrementalOptions(ProviderS3, &before, source.ReadOptions{
+	assert.False(t, objectMatchesIncrementalOptions(ProviderS3, &before, &after, source.ReadOptions{
 		IncrementalKey: defaultBlobstoreModifiedAtColumn,
 		IntervalStart:  &start,
 	}))
-	assert.True(t, objectMatchesIncrementalOptions(ProviderSFTP, &before, source.ReadOptions{
+	assert.True(t, objectMatchesIncrementalOptions(ProviderS3, &before, &after, source.ReadOptions{
+		IncrementalKey: defaultBlobstoreCreatedAtColumn,
+		IntervalStart:  &start,
+	}))
+	assert.True(t, objectMatchesIncrementalOptions(ProviderSFTP, &before, &before, source.ReadOptions{
 		IncrementalKey: defaultBlobstoreModifiedAtColumn,
 		IntervalStart:  &start,
 	}))
@@ -659,6 +671,15 @@ func TestBuildS3InventoryQuery(t *testing.T) {
 
 	query, database, err := buildS3InventoryQuery(parsed, "my-bucket", "logs/", source.ReadOptions{
 		IncrementalKey: defaultBlobstoreModifiedAtColumn,
+		IntervalStart:  &start,
+		IntervalEnd:    &end,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "inventory_db", database)
+	assert.Equal(t, `SELECT "key", "last_modified_date" FROM "inventory_db"."inventory_table" WHERE "bucket" = 'my-bucket' AND substr("key", 1, 5) = 'logs/' AND "last_modified_date" >= timestamp '2026-01-02 01:04:05' AND "last_modified_date" < timestamp '2026-01-03 04:05:06'`, query)
+
+	query, database, err = buildS3InventoryQuery(parsed, "my-bucket", "logs/", source.ReadOptions{
+		IncrementalKey: defaultBlobstoreCreatedAtColumn,
 		IntervalStart:  &start,
 		IntervalEnd:    &end,
 	})
@@ -756,61 +777,87 @@ func TestStreamS3InventoryQueryResultsFiltersRows(t *testing.T) {
 	require.Equal(t, 1, count)
 	file := <-files
 	assert.Equal(t, "logs/2026/keep.jsonl", file.key)
-	require.NotNil(t, file.lastModified)
-	assert.Equal(t, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), *file.lastModified)
+	require.NotNil(t, file.modifiedAt)
+	require.NotNil(t, file.createdAt)
+	assert.Equal(t, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), *file.modifiedAt)
+	assert.Equal(t, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), *file.createdAt)
 }
 
 func TestBlobstoreFileMetadata(t *testing.T) {
 	modified := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("UTC+2", 2*60*60))
+	created := time.Date(2026, 1, 1, 3, 4, 5, 0, time.FixedZone("UTC+2", 2*60*60))
 	s := NewBlobstoreSource()
 	s.provider = ProviderS3
 
-	metadata := s.fileMetadata(source.ReadOptions{}, "bucket", "data/file.csv", &modified)
+	metadata := s.fileMetadata(source.ReadOptions{}, "bucket", "data/file.csv", &modified, &created)
 	assert.Empty(t, metadata.incrementalKey)
-	assert.Nil(t, metadata.lastModified)
+	assert.Nil(t, metadata.incrementalAt)
 	assert.Empty(t, metadata.filepathColumn)
 	assert.Empty(t, metadata.filepath)
 
-	metadata = s.fileMetadata(source.ReadOptions{IncrementalKey: defaultBlobstoreModifiedAtColumn}, "bucket", "data/file.csv", &modified)
-	require.NotNil(t, metadata.lastModified)
+	metadata = s.fileMetadata(source.ReadOptions{IncrementalKey: defaultBlobstoreModifiedAtColumn}, "bucket", "data/file.csv", &modified, &created)
+	require.NotNil(t, metadata.incrementalAt)
 	assert.Equal(t, defaultBlobstoreModifiedAtColumn, metadata.incrementalKey)
-	assert.Equal(t, time.UTC, metadata.lastModified.Location())
+	assert.Equal(t, time.UTC, metadata.incrementalAt.Location())
+	assert.Equal(t, modified.UTC(), *metadata.incrementalAt)
+	assert.Equal(t, defaultBlobstoreFilePathColumn, metadata.filepathColumn)
+	assert.Equal(t, "s3://bucket/data/file.csv", metadata.filepath)
+
+	metadata = s.fileMetadata(source.ReadOptions{IncrementalKey: defaultBlobstoreCreatedAtColumn}, "bucket", "data/file.csv", &modified, &created)
+	require.NotNil(t, metadata.incrementalAt)
+	assert.Equal(t, defaultBlobstoreCreatedAtColumn, metadata.incrementalKey)
+	assert.Equal(t, created.UTC(), *metadata.incrementalAt)
 	assert.Equal(t, defaultBlobstoreFilePathColumn, metadata.filepathColumn)
 	assert.Equal(t, "s3://bucket/data/file.csv", metadata.filepath)
 
 	s.provider = ProviderGCS
-	metadata = s.fileMetadata(source.ReadOptions{IncrementalKey: defaultBlobstoreModifiedAtColumn}, "bucket", "data/file.csv", &modified)
-	require.NotNil(t, metadata.lastModified)
+	metadata = s.fileMetadata(source.ReadOptions{IncrementalKey: defaultBlobstoreModifiedAtColumn}, "bucket", "data/file.csv", &modified, &created)
+	require.NotNil(t, metadata.incrementalAt)
 	assert.Equal(t, defaultBlobstoreModifiedAtColumn, metadata.incrementalKey)
 	assert.Equal(t, defaultBlobstoreFilePathColumn, metadata.filepathColumn)
 	assert.Equal(t, "gs://bucket/data/file.csv", metadata.filepath)
 
+	metadata = s.fileMetadata(source.ReadOptions{IncrementalKey: defaultBlobstoreCreatedAtColumn}, "bucket", "data/file.csv", &modified, &created)
+	require.NotNil(t, metadata.incrementalAt)
+	assert.Equal(t, defaultBlobstoreCreatedAtColumn, metadata.incrementalKey)
+	assert.Equal(t, created.UTC(), *metadata.incrementalAt)
+	assert.Equal(t, defaultBlobstoreFilePathColumn, metadata.filepathColumn)
+	assert.Equal(t, "gs://bucket/data/file.csv", metadata.filepath)
+
 	s.provider = ProviderS3
-	metadata = s.fileMetadata(source.ReadOptions{IncrementalKey: "modified_at"}, "bucket", "data/file.csv", &modified)
+	metadata = s.fileMetadata(source.ReadOptions{IncrementalKey: "modified_at"}, "bucket", "data/file.csv", &modified, &created)
 	assert.Empty(t, metadata.incrementalKey)
-	assert.Nil(t, metadata.lastModified)
+	assert.Nil(t, metadata.incrementalAt)
 	assert.Empty(t, metadata.filepathColumn)
 	assert.Empty(t, metadata.filepath)
 
 	metadata = s.fileMetadata(source.ReadOptions{
 		IncrementalKey: defaultBlobstoreModifiedAtColumn,
 		ExcludeColumns: []string{"_INGESTR_SOURCE_FILE_MODIFIED_AT"},
-	}, "bucket", "data/file.csv", &modified)
+	}, "bucket", "data/file.csv", &modified, &created)
 	assert.Empty(t, metadata.incrementalKey)
-	assert.Nil(t, metadata.lastModified)
+	assert.Nil(t, metadata.incrementalAt)
+	assert.Equal(t, defaultBlobstoreFilePathColumn, metadata.filepathColumn)
+
+	metadata = s.fileMetadata(source.ReadOptions{
+		IncrementalKey: defaultBlobstoreCreatedAtColumn,
+		ExcludeColumns: []string{"_INGESTR_SOURCE_FILE_CREATED_AT"},
+	}, "bucket", "data/file.csv", &modified, &created)
+	assert.Empty(t, metadata.incrementalKey)
+	assert.Nil(t, metadata.incrementalAt)
 	assert.Equal(t, defaultBlobstoreFilePathColumn, metadata.filepathColumn)
 
 	metadata = s.fileMetadata(source.ReadOptions{
 		IncrementalKey: defaultBlobstoreModifiedAtColumn,
 		ExcludeColumns: []string{"_INGESTR_SOURCE_FILE_PATH"},
-	}, "bucket", "data/file.csv", &modified)
+	}, "bucket", "data/file.csv", &modified, &created)
 	assert.Empty(t, metadata.filepathColumn)
 	assert.Empty(t, metadata.filepath)
 
 	s.provider = ProviderSFTP
-	metadata = s.fileMetadata(source.ReadOptions{IncrementalKey: defaultBlobstoreModifiedAtColumn}, "", "data/file.csv", &modified)
+	metadata = s.fileMetadata(source.ReadOptions{IncrementalKey: defaultBlobstoreModifiedAtColumn}, "", "data/file.csv", &modified, &created)
 	assert.Empty(t, metadata.incrementalKey)
-	assert.Nil(t, metadata.lastModified)
+	assert.Nil(t, metadata.incrementalAt)
 	assert.Empty(t, metadata.filepathColumn)
 	assert.Empty(t, metadata.filepath)
 }
@@ -845,7 +892,7 @@ func TestAddBlobstoreMetadataColumns(t *testing.T) {
 	modified := time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)
 	output, added, err := addBlobstoreMetadataColumns(input, blobstoreFileMetadata{
 		incrementalKey: defaultBlobstoreModifiedAtColumn,
-		lastModified:   &modified,
+		incrementalAt:  &modified,
 		filepathColumn: defaultBlobstoreFilePathColumn,
 		filepath:       "s3://bucket/data/file.csv",
 	})
@@ -886,7 +933,7 @@ func TestAddBlobstoreMetadataColumnsRejectsExistingColumn(t *testing.T) {
 	modified := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	output, added, err := addBlobstoreMetadataColumns(input, blobstoreFileMetadata{
 		incrementalKey: defaultBlobstoreModifiedAtColumn,
-		lastModified:   &modified,
+		incrementalAt:  &modified,
 	})
 	require.Error(t, err)
 	assert.Nil(t, output)
@@ -911,7 +958,7 @@ func TestAddBlobstoreMetadataColumnsRejectsMetadataColumnConflict(t *testing.T) 
 	modified := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	output, added, err := addBlobstoreMetadataColumns(input, blobstoreFileMetadata{
 		incrementalKey: defaultBlobstoreFilePathColumn,
-		lastModified:   &modified,
+		incrementalAt:  &modified,
 		filepathColumn: defaultBlobstoreFilePathColumn,
 		filepath:       "s3://bucket/data/file.csv",
 	})

@@ -170,20 +170,21 @@ Supported format hints include:
 File type hinting works with `gzip` compressed files as well.
 :::
 
-### Incremental loading by source file modification date
+### Incremental loading by source file timestamps
 
-When GCS is used as a source, ingestr can use the GCS object `Updated` timestamp as the incremental key. This filters matching objects before they are downloaded, so only files modified inside the requested interval are read.
+When GCS is used as a source, ingestr can use the GCS object `Updated` or `Created` timestamp as the incremental key. This filters matching objects before they are downloaded, so only files inside the requested timestamp interval are read.
 
-This mode is opt-in for backward compatibility. Existing GCS ingestions without `--incremental-key _ingestr_source_file_modified_at` keep the previous schema and file-listing behavior.
+This mode is opt-in for backward compatibility. Existing GCS ingestions without `--incremental-key _ingestr_source_file_modified_at` or `--incremental-key _ingestr_source_file_created_at` keep the previous schema and file-listing behavior.
 
-When enabled, the source adds these metadata columns to every emitted row:
+When enabled, the source adds the selected timestamp column and the source file path to every emitted row:
 
 - `_ingestr_source_file_modified_at`: the GCS object `Updated` timestamp in UTC.
+- `_ingestr_source_file_created_at`: the GCS object `Created` timestamp in UTC.
 - `_ingestr_source_file_path`: the full `gs://bucket/key` path for the source object.
 
-Use `--incremental-key _ingestr_source_file_modified_at` to select this mode. Other `--incremental-key` values are treated as regular columns from the file data for destination write strategies. They do not enable GCS object modified-date filtering, add file metadata columns, or filter rows while reading the files.
+Use `--incremental-key _ingestr_source_file_modified_at` or `--incremental-key _ingestr_source_file_created_at` to select this mode. Other `--incremental-key` values are treated as regular columns from the file data for destination write strategies. They do not enable GCS object timestamp filtering, add file metadata columns, or filter rows while reading the files.
 
-Use `--interval-start` and optionally `--interval-end` to load only objects modified in that window:
+Use `--interval-start` and optionally `--interval-end` to load only objects whose selected timestamp is in that window:
 
 ```sh
 ingestr ingest \
@@ -196,9 +197,9 @@ ingestr ingest \
     --interval-start "2026-01-01T00:00:00Z"
 ```
 
-The interval bounds are compared to GCS object metadata, not row values inside the files. The interval is half-open: `--interval-start` is inclusive, and `--interval-end` is exclusive. If no interval is provided, ingestr reads all files matching the source-table pattern and still emits the metadata columns.
+The interval bounds are compared to the selected GCS object timestamp, not row values inside the files. The interval is half-open: `--interval-start` is inclusive, and `--interval-end` is exclusive. If no interval is provided, ingestr reads all files matching the source-table pattern and still emits the selected metadata columns.
 
-The `_ingestr_source_file_modified_at` and `_ingestr_source_file_path` column names must not already exist in the files. Use `--exclude-columns` only if you intentionally want to suppress one of these emitted metadata columns; excluding `_ingestr_source_file_modified_at` also means it will not be available to destination strategies as an incremental key.
+The `_ingestr_source_file_modified_at`, `_ingestr_source_file_created_at`, and `_ingestr_source_file_path` column names must not already exist in the files when they are emitted. Use `--exclude-columns` only if you intentionally want to suppress one of these emitted metadata columns; excluding the selected timestamp column also means it will not be available to destination strategies as an incremental key.
 
 ### CSV files without headers
 
