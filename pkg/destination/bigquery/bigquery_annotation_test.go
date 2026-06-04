@@ -22,7 +22,7 @@ func TestAnnotatedQueryComment(t *testing.T) {
 		ctx := annotation.WithStep(base, annotation.StepMerge)
 		got := annotation.Prepend(ctx, "MERGE INTO `p`.`raw`.`orders` ...")
 
-		wantComment := `-- @bruin.config: {"asset":"raw.orders","ingestr_step":"merge","pipeline":"shopify","type":"ingestr"}`
+		wantComment := `-- @bruin.config: {"asset":"raw.orders","ingestr_step":"merge","pipeline":"shopify","type":"ingestr_transform"}`
 		if !strings.HasPrefix(got, wantComment+"\n") {
 			t.Fatalf("missing/incorrect annotation comment\n got: %q\nwant prefix: %q", got, wantComment)
 		}
@@ -35,7 +35,7 @@ func TestAnnotatedQueryComment(t *testing.T) {
 		ctx := annotation.WithStep(base, annotation.StepDDL)
 		got := annotation.Prepend(ctx, "TRUNCATE TABLE `p`.`raw`.`orders`")
 
-		wantComment := `-- @bruin.config: {"asset":"raw.orders","ingestr_step":"ddl","pipeline":"shopify","type":"ingestr"}`
+		wantComment := `-- @bruin.config: {"asset":"raw.orders","ingestr_step":"ddl","pipeline":"shopify","type":"ingestr_load"}`
 		if !strings.HasPrefix(got, wantComment+"\n") {
 			t.Fatalf("missing/incorrect annotation comment\n got: %q\nwant prefix: %q", got, wantComment)
 		}
@@ -46,7 +46,7 @@ func TestAnnotatedQueryComment(t *testing.T) {
 		const sql = "MERGE INTO `p`.`raw`.`orders` ..."
 		got := annotation.Prepend(ctx, sql)
 
-		wantComment := `-- @bruin.config: {"ingestr_step":"merge","type":"ingestr"}`
+		wantComment := `-- @bruin.config: {"ingestr_step":"merge","type":"ingestr_transform"}`
 		if !strings.HasPrefix(got, wantComment+"\n") {
 			t.Fatalf("expected ingestr annotation without caller keys\n got: %q\nwant prefix: %q", got, wantComment)
 		}

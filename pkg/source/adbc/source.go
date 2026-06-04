@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -398,6 +399,11 @@ func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema
 		defer close(results)
 
 		query := BuildSelectQuery(table, columns, opts, s.dialect.QuoteIdentifier)
+		// Annotate the source read so a warehouse source (e.g. BigQuery) attributes
+		// the extract query's cost. Prepend keeps a leading comment (BigQuery,
+		// DuckDB); Snowflake strips it, so a Snowflake source would need a QUERY_TAG
+		// instead — not handled here.
+		query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
 		config.Debug("[%s] Executing query: %s", s.dialect.Name(), query)
 
 		startQuery := time.Now()

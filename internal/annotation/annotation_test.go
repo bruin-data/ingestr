@@ -56,7 +56,7 @@ func TestPrepend_emitsIngestrKeysWithoutPayload(t *testing.T) {
 	// A step alone, without a caller payload, carries type + ingestr_step.
 	ctx := WithStep(context.Background(), StepMerge)
 	got = Prepend(ctx, sql)
-	want = `-- @bruin.config: {"ingestr_step":"merge","type":"ingestr"}` + "\n" + sql
+	want = `-- @bruin.config: {"ingestr_step":"merge","type":"ingestr_transform"}` + "\n" + sql
 	if got != want {
 		t.Fatalf("expected ingestr_step annotation without payload\n got: %q\nwant: %q", got, want)
 	}
@@ -68,7 +68,7 @@ func TestPrepend_buildsComment(t *testing.T) {
 
 	got := Prepend(ctx, "MERGE INTO raw.orders ...")
 	// Keys are emitted in sorted order by encoding/json.
-	const wantComment = `-- @bruin.config: {"asset":"raw.orders","ingestr_step":"merge","pipeline":"shopify","type":"ingestr"}` + "\n"
+	const wantComment = `-- @bruin.config: {"asset":"raw.orders","ingestr_step":"merge","pipeline":"shopify","type":"ingestr_transform"}` + "\n"
 	want := wantComment + "MERGE INTO raw.orders ..."
 	if got != want {
 		t.Fatalf("comment mismatch\n got: %q\nwant: %q", got, want)
@@ -81,7 +81,7 @@ func TestPrepend_ingestrKeysWin(t *testing.T) {
 	ctx := WithStep(WithPayload(context.Background(), p), StepDDL)
 
 	got := Prepend(ctx, "X")
-	want := `-- @bruin.config: {"asset":"a","ingestr_step":"ddl","type":"ingestr"}` + "\n" + "X"
+	want := `-- @bruin.config: {"asset":"a","ingestr_step":"ddl","type":"ingestr_load"}` + "\n" + "X"
 	if got != want {
 		t.Fatalf("expected ingestr keys to win\n got: %q\nwant: %q", got, want)
 	}
@@ -98,6 +98,27 @@ func TestPrepend_noStepOmitsStepKey(t *testing.T) {
 	}
 }
 
+func TestTypeForStep(t *testing.T) {
+	cases := map[string]string{
+		StepExtract:      typeIngestrExtract,
+		StepLoad:         typeIngestrLoad,
+		StepDDL:          typeIngestrLoad,
+		StepSwap:         typeIngestrLoad,
+		StepCleanup:      typeIngestrLoad,
+		StepTruncate:     typeIngestrLoad,
+		StepMerge:        typeIngestrTransform,
+		StepDeleteInsert: typeIngestrTransform,
+		StepSCD2:         typeIngestrTransform,
+		"":               ingestrType, // no step → plain ingestr fallback
+		"unknown":        ingestrType,
+	}
+	for step, want := range cases {
+		if got := typeForStep(step); got != want {
+			t.Fatalf("typeForStep(%q) = %q, want %q", step, got, want)
+		}
+	}
+}
+
 func TestQueryTag(t *testing.T) {
 	t.Run("emits ingestr keys without payload", func(t *testing.T) {
 		ctx := WithStep(context.Background(), StepMerge)
@@ -105,7 +126,7 @@ func TestQueryTag(t *testing.T) {
 		if !ok {
 			t.Fatal("expected ok=true: ingestr always annotates")
 		}
-		want := `{"ingestr_step":"merge","type":"ingestr"}`
+		want := `{"ingestr_step":"merge","type":"ingestr_transform"}`
 		if tag != want {
 			t.Fatalf("tag mismatch\n got: %q\nwant: %q", tag, want)
 		}
@@ -119,7 +140,7 @@ func TestQueryTag(t *testing.T) {
 		if !ok {
 			t.Fatal("expected ok=true")
 		}
-		want := `{"asset":"raw.orders","ingestr_step":"merge","pipeline":"shopify","type":"ingestr"}`
+		want := `{"asset":"raw.orders","ingestr_step":"merge","pipeline":"shopify","type":"ingestr_transform"}`
 		if tag != want {
 			t.Fatalf("tag mismatch\n got: %q\nwant: %q", tag, want)
 		}
