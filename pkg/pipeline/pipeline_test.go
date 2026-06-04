@@ -361,6 +361,92 @@ func runLabel(i int) string {
 	return fmt.Sprintf("run%d", i)
 }
 
+func TestApplyExcludedColumnsNamingAware(t *testing.T) {
+	source := schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, IsPrimaryKey: true},
+			{Name: "FullName", DataType: schema.TypeString},
+			{Name: "SecretToken", DataType: schema.TypeString},
+		},
+		PrimaryKeys:    []string{"id"},
+		IncrementalKey: "FullName",
+	}
+
+	tests := []struct {
+		name         string
+		schemaNaming string
+		exclude      []string
+		wantColumns  []string
+		wantIncKey   string
+	}{
+		{
+			name:         "exclude by source name",
+			schemaNaming: "snake_case",
+			exclude:      []string{"SecretToken"},
+			wantColumns:  []string{"id", "FullName"},
+			wantIncKey:   "FullName",
+		},
+		{
+			name:         "exclude by destination snake_case name",
+			schemaNaming: "snake_case",
+			exclude:      []string{"secret_token"},
+			wantColumns:  []string{"id", "FullName"},
+			wantIncKey:   "FullName",
+		},
+		{
+			name:         "exclude incremental key by destination name",
+			schemaNaming: "snake_case",
+			exclude:      []string{"full_name"},
+			wantColumns:  []string{"id", "SecretToken"},
+			wantIncKey:   "",
+		},
+		{
+			name:         "direct naming does not match snake_case name",
+			schemaNaming: "direct",
+			exclude:      []string{"secret_token"},
+			wantColumns:  []string{"id", "FullName", "SecretToken"},
+			wantIncKey:   "FullName",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := source
+			src.Columns = make([]schema.Column, len(source.Columns))
+			copy(src.Columns, source.Columns)
+			src.PrimaryKeys = append([]string(nil), source.PrimaryKeys...)
+
+			p := &Pipeline{
+				config: &config.IngestConfig{
+					DestTable:         "users_out",
+					SchemaNaming:      tt.schemaNaming,
+					SQLExcludeColumns: tt.exclude,
+				},
+				dest: &mockDestination{},
+			}
+
+			namingConv, err := p.resolveNamingConvention(context.Background(), &src)
+			if err != nil {
+				t.Fatalf("resolveNamingConvention() error = %v", err)
+			}
+
+			got := p.applyExcludedColumnsToSchema(&src, namingConv)
+			gotColumns := got.ColumnNames()
+			if len(gotColumns) != len(tt.wantColumns) {
+				t.Fatalf("columns = %v, want %v", gotColumns, tt.wantColumns)
+			}
+			for i, want := range tt.wantColumns {
+				if gotColumns[i] != want {
+					t.Errorf("column[%d] = %q, want %q", i, gotColumns[i], want)
+				}
+			}
+			if got.IncrementalKey != tt.wantIncKey {
+				t.Errorf("incremental key = %q, want %q", got.IncrementalKey, tt.wantIncKey)
+			}
+		})
+	}
+}
+
 func TestNamingConsistency(t *testing.T) {
 	camelCaseSourceSchema := &schema.TableSchema{
 		Columns: []schema.Column{
