@@ -314,8 +314,10 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		}
 	}()
 
-	if stagingSchema == targetSchema {
-		// Same schema: cheap rename swap.
+	if stagingSchema == targetSchema && len(opts.PrimaryKeys) == 0 {
+		// Same schema and no dedup needed: cheap rename swap. When primary keys
+		// are set we fall through to the recreate+copy path below, which is the
+		// only place we can deduplicate (a rename can't) and re-apply the PK.
 		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("duckdb"))
 		oldTable := oldName
@@ -352,7 +354,12 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 			return fmt.Errorf("failed to drop target table: %w", err)
 		}
 
-		createSQL := buildCreateTableSQL(destination.QuoteTableName(targetTable), sch.Columns, sch.PrimaryKeys)
+		// Recreate the target with its primary key. 
+		pks := sch.PrimaryKeys
+		if len(opts.PrimaryKeys) > 0 {
+			pks = opts.PrimaryKeys
+		}
+		createSQL := buildCreateTableSQL(destination.QuoteTableName(targetTable), sch.Columns, pks)
 		if err := d.exec(ctx, createSQL); err != nil {
 			return fmt.Errorf("failed to recreate target table: %w", err)
 		}
@@ -362,10 +369,28 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 			quotedCols[i] = destination.QuoteIdentifier(c.Name)
 		}
 		colList := strings.Join(quotedCols, ", ")
-		copySQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
-			destination.QuoteTableName(targetTable),
-			colList, colList,
-			destination.QuoteTableName(stagingTable))
+
+		// Deduplicate by primary key while copying so duplicate keys in staging
+		// collapse to one row per key in the target.
+		selectClause := fmt.Sprintf("SELECT %s FROM %s", colList, destination.QuoteTableName(stagingTable))
+		if len(opts.PrimaryKeys) > 0 {
+			quotedPKs := make([]string, len(opts.PrimaryKeys))
+			for i, pk := range opts.PrimaryKeys {
+				quotedPKs[i] = destination.QuoteIdentifier(pk)
+			}
+			// Keep the latest row per key by incremental key; fall back to an
+			// arbitrary winner when no incremental key is configured.
+			orderBy := "(SELECT NULL)"
+			if opts.IncrementalKey != "" {
+				orderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
+			}
+			selectClause = fmt.Sprintf(
+				"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1",
+				colList, colList, strings.Join(quotedPKs, ", "), orderBy, destination.QuoteTableName(stagingTable),
+			)
+		}
+		copySQL := fmt.Sprintf("INSERT INTO %s (%s) %s",
+			destination.QuoteTableName(targetTable), colList, selectClause)
 		if err := d.exec(ctx, copySQL); err != nil {
 			return fmt.Errorf("failed to copy staging rows into target: %w", err)
 		}
@@ -685,6 +710,7 @@ func (d *DuckDBDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *DuckDBDestination) SupportsAppendStrategy() bool       { return true }
 func (d *DuckDBDestination) SupportsMergeStrategy() bool        { return true }
 func (d *DuckDBDestination) SupportsDeleteInsertStrategy() bool { return true }
+func (d *DuckDBDestination) DedupesOnReplace() bool             { return true }
 func (d *DuckDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *DuckDBDestination) SupportsAtomicSwap() bool           { return true }
 

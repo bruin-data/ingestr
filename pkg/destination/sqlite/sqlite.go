@@ -323,8 +323,10 @@ func (d *SQLiteDestination) SwapTable(ctx context.Context, opts destination.Swap
 		return fmt.Errorf("failed to drop target table: %w", err)
 	}
 
-	if stagingDB == targetDB {
-		// Same database — RENAME is supported.
+	if stagingDB == targetDB && len(opts.PrimaryKeys) == 0 {
+		// Same database and no dedup needed, cheap RENAME. When primary keys are
+		// set we fall through to the recreate+copy path below, the only place we
+		// can deduplicate (a rename can't) and re-apply the PK.
 		renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", destination.QuoteTableName(stagingTable), destination.QuoteIdentifier(extractTableName(targetTable)))
 		if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
@@ -342,7 +344,12 @@ func (d *SQLiteDestination) SwapTable(ctx context.Context, opts destination.Swap
 			return fmt.Errorf("cannot swap %s -> %s: no recorded schema for staging table", stagingTable, targetTable)
 		}
 
-		createSQL := buildCreateTableSQL(destination.QuoteTableName(targetTable), sch.Columns, sch.PrimaryKeys)
+		// Recreate the target with its primary key. 
+		pks := sch.PrimaryKeys
+		if len(opts.PrimaryKeys) > 0 {
+			pks = opts.PrimaryKeys
+		}
+		createSQL := buildCreateTableSQL(destination.QuoteTableName(targetTable), sch.Columns, pks)
 		if _, err := tx.ExecContext(ctx, createSQL); err != nil {
 			config.LogFailedQuery(createSQL, err)
 			_ = tx.Rollback()
@@ -354,10 +361,28 @@ func (d *SQLiteDestination) SwapTable(ctx context.Context, opts destination.Swap
 			quotedCols[i] = destination.QuoteIdentifier(c.Name)
 		}
 		colList := strings.Join(quotedCols, ", ")
-		copySQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
-			destination.QuoteTableName(targetTable),
-			colList, colList,
-			destination.QuoteTableName(stagingTable))
+
+		// Deduplicate by primary key while copying so duplicate keys in staging
+		// collapse to one row per key in the target.
+		selectClause := fmt.Sprintf("SELECT %s FROM %s", colList, destination.QuoteTableName(stagingTable))
+		if len(opts.PrimaryKeys) > 0 {
+			quotedPKs := make([]string, len(opts.PrimaryKeys))
+			for i, pk := range opts.PrimaryKeys {
+				quotedPKs[i] = destination.QuoteIdentifier(pk)
+			}
+			// Keep the latest row per key by incremental key; fall back to an
+			// arbitrary winner when no incremental key is configured.
+			orderBy := "(SELECT NULL)"
+			if opts.IncrementalKey != "" {
+				orderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
+			}
+			selectClause = fmt.Sprintf(
+				"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1",
+				colList, colList, strings.Join(quotedPKs, ", "), orderBy, destination.QuoteTableName(stagingTable),
+			)
+		}
+		copySQL := fmt.Sprintf("INSERT INTO %s (%s) %s",
+			destination.QuoteTableName(targetTable), colList, selectClause)
 		if _, err := tx.ExecContext(ctx, copySQL); err != nil {
 			config.LogFailedQuery(copySQL, err)
 			_ = tx.Rollback()
@@ -667,6 +692,10 @@ func (d *SQLiteDestination) SupportsAppendStrategy() bool { return true }
 
 // SupportsMergeStrategy returns true as SQLite supports the merge strategy.
 func (d *SQLiteDestination) SupportsMergeStrategy() bool { return true }
+
+// DedupesOnReplace reports that SwapTable recreates the target by copying from
+// staging and deduplicates by primary key during that copy.
+func (d *SQLiteDestination) DedupesOnReplace() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as SQLite supports the delete+insert strategy.
 func (d *SQLiteDestination) SupportsDeleteInsertStrategy() bool { return true }

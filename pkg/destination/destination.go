@@ -157,3 +157,10 @@ type ExactRowCountWaiter interface {
 type TruncateCapable interface {
 	TruncateTable(ctx context.Context, table string) error
 }
+
+// ReplaceDeduper is implemented by destinations whose SwapTable replaces the
+// target by recreating it and copying rows from staging (rather than an atomic
+// rename), so it can deduplicate by primary key.
+type ReplaceDeduper interface {
+	DedupesOnReplace() bool
+}

@@ -45,11 +45,22 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		config.Debug("[STRATEGY] Direct write to target (no staging): %s", writeTable)
 	}
 
+	// For destinations whose swap recreates+copies and deduplicates by PK, load
+	// staging WITHOUT a PK constraint so duplicate keys can land (the swap then
+	// collapses them). Rename-based destinations keep the PK on staging so the
+	// renamed target retains it. The keys are passed to SwapTable either way.
+	stagingPrimaryKeys := job.Config.PrimaryKeys
+	if useStaging && len(job.Config.PrimaryKeys) > 0 {
+		if d, ok := job.Destination.(destination.ReplaceDeduper); ok && d.DedupesOnReplace() {
+			stagingPrimaryKeys = nil
+		}
+	}
+
 	prepareOpts := destination.PrepareOptions{
 		Table:       writeTable,
 		Schema:      job.Schema,
 		DropFirst:   true,
-		PrimaryKeys: job.Config.PrimaryKeys,
+		PrimaryKeys: stagingPrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
 		ClusterBy:   job.Config.ClusterBy,
 	}
