@@ -342,7 +342,7 @@ func isDatePartitionColumn(s *schema.TableSchema, column string) bool {
 		return false
 	}
 	for _, col := range s.Columns {
-		if col.Name == column {
+		if strings.EqualFold(col.Name, column) {
 			return col.DataType == schema.TypeDate
 		}
 	}
@@ -354,7 +354,7 @@ func isDatePartitionColumn(s *schema.TableSchema, column string) bool {
 // available.
 func partitionFieldIsDate(s bigquery.Schema, column string) bool {
 	for _, field := range s {
-		if field.Name == column {
+		if strings.EqualFold(field.Name, column) {
 			return field.Type == bigquery.DateFieldType
 		}
 	}

@@ -870,6 +870,9 @@ func TestIsDatePartitionColumn(t *testing.T) {
 	if isDatePartitionColumn(s, "") {
 		t.Fatal("expected empty column to default to false")
 	}
+	if !isDatePartitionColumn(s, "Day") {
+		t.Fatal("expected case-insensitive match for BigQuery identifiers")
+	}
 }
 
 func TestPartitionFieldIsDate(t *testing.T) {
@@ -889,6 +892,9 @@ func TestPartitionFieldIsDate(t *testing.T) {
 	}
 	if partitionFieldIsDate(nil, "day") {
 		t.Fatal("expected nil schema to default to false")
+	}
+	if !partitionFieldIsDate(s, "Day") {
+		t.Fatal("expected case-insensitive match for BigQuery identifiers")
 	}
 }
 
