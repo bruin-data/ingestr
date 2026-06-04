@@ -54,6 +54,12 @@ func (d *Dialect) Name() string {
 	return "SNOWFLAKE"
 }
 
+// SetSessionQueryTagSQL carries the extract annotation via QUERY_TAG, since
+// Snowflake strips leading SQL comments.
+func (d *Dialect) SetSessionQueryTagSQL(tag string) string {
+	return "ALTER SESSION SET QUERY_TAG = '" + strings.ReplaceAll(tag, "'", "''") + "'"
+}
+
 func (d *Dialect) Schemes() []string {
 	return []string{"snowflake"}
 }

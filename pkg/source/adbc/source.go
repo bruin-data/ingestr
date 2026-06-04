@@ -313,14 +313,44 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 		batchSize = 100000
 	}
 
+	// Annotate the extract: Snowflake carries it via a session QUERY_TAG (it
+	// strips leading comments); other engines keep a leading comment.
+	annotated := annotation.WithStep(ctx, annotation.StepExtract)
+	var tagSQL string
+	if tagger, ok := s.dialect.(SessionQueryTagger); ok {
+		if tag, ok := annotation.QueryTag(annotated); ok {
+			tagSQL = tagger.SetSessionQueryTagSQL(tag)
+		}
+	}
+	if tagSQL == "" {
+		query = annotation.Prepend(annotated, query)
+	}
+
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
 		defer close(results)
 
-		query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
+		var runner interface {
+			QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+		} = s.db
+		if tagSQL != "" {
+			// Pin a connection so the tag and the query share one session.
+			conn, err := s.db.Conn(ctx)
+			if err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get connection: %w", err)}
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			if _, err := conn.ExecContext(ctx, tagSQL); err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to set query tag: %w", err)}
+				return
+			}
+			runner = conn
+		}
+
 		config.Debug("[%s] Executing custom query: %s", s.dialect.Name(), query)
-		rows, err := s.db.QueryContext(ctx, query)
+		rows, err := runner.QueryContext(ctx, query)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", err)}
 			return
