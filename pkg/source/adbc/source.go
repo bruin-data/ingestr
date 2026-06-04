@@ -318,7 +318,7 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 	// QUERY_TAG; other engines keep the comment.
 	annotated := annotation.WithStep(ctx, annotation.StepExtract)
 	var tagSQL string
-	if s.dialect.Name() == "SNOWFLAKE" {
+	if strings.EqualFold(s.dialect.Name(), "SNOWFLAKE") {
 		if tag, ok := annotation.QueryTag(annotated); ok {
 			tagSQL = "ALTER SESSION SET QUERY_TAG = '" + strings.ReplaceAll(tag, "'", "''") + "'"
 		}
