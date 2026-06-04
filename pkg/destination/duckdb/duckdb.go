@@ -354,7 +354,7 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 			return fmt.Errorf("failed to drop target table: %w", err)
 		}
 
-		// Recreate the target with its primary key. 
+		// Recreate the target with its primary key.
 		pks := sch.PrimaryKeys
 		if len(opts.PrimaryKeys) > 0 {
 			pks = opts.PrimaryKeys

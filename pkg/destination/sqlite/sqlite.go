@@ -344,7 +344,7 @@ func (d *SQLiteDestination) SwapTable(ctx context.Context, opts destination.Swap
 			return fmt.Errorf("cannot swap %s -> %s: no recorded schema for staging table", stagingTable, targetTable)
 		}
 
-		// Recreate the target with its primary key. 
+		// Recreate the target with its primary key.
 		pks := sch.PrimaryKeys
 		if len(opts.PrimaryKeys) > 0 {
 			pks = opts.PrimaryKeys
