@@ -11,7 +11,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-// Builds a TableSchema purely from --columns when a schema-less source produced no rows.
+// Builds a destination-facing TableSchema purely from --columns when a
+// schema-less source produced no rows.
 func TableSchemaFromColumnOverrides(columnsSpec, tableName, schemaNaming string) (*schema.TableSchema, error) {
 	if columnsSpec == "" {
 		return nil, nil
@@ -31,6 +32,60 @@ func TableSchemaFromColumnOverrides(columnsSpec, tableName, schemaNaming string)
 	if len(ts.Columns) == 0 {
 		return nil, nil
 	}
+	return ts, nil
+}
+
+// SourceTableSchemaFromColumnOverrides builds a source-facing TableSchema from
+// --columns. Rename overrides keep the source column name here; the pipeline
+// later applies the rename to the destination schema and record batches.
+func SourceTableSchemaFromColumnOverrides(columnsSpec, tableName string) (*schema.TableSchema, error) {
+	if columnsSpec == "" {
+		return nil, nil
+	}
+
+	schemaName := ""
+	tblName := tableName
+	if idx := strings.LastIndex(tableName, "."); idx > 0 {
+		schemaName = tableName[:idx]
+		tblName = tableName[idx+1:]
+	}
+
+	overrides, err := schemaevolution.ParseColumnOverrides(columnsSpec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse column overrides: %w", err)
+	}
+	if len(overrides) == 0 {
+		return nil, nil
+	}
+
+	names := make([]string, 0, len(overrides))
+	for name := range overrides {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	ts := &schema.TableSchema{Name: tblName, Schema: schemaName}
+	for _, name := range names {
+		ov := overrides[name]
+		dataType := ov.DataType
+		precision := ov.Precision
+		scale := ov.Scale
+		if dataType == schema.TypeUnknown {
+			dataType = schema.TypeString
+			precision = 0
+			scale = 0
+			fmt.Printf("Warning: column %q created as STRING placeholder (no type in --columns); pass --columns %s:<type> for correct typing\n", ov.Name, ov.Name)
+		}
+
+		ts.Columns = append(ts.Columns, schema.Column{
+			Name:      ov.Name,
+			DataType:  dataType,
+			Precision: precision,
+			Scale:     scale,
+			Nullable:  true,
+		})
+	}
+
 	return ts, nil
 }
 

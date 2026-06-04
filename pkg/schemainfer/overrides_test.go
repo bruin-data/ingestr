@@ -71,6 +71,38 @@ func TestTableSchemaFromColumnOverrides_InvalidType(t *testing.T) {
 	}
 }
 
+func TestSourceTableSchemaFromColumnOverrides_KeepsSourceNamesForRenames(t *testing.T) {
+	got, err := SourceTableSchemaFromColumnOverrides("id:string:_id,first_name:string:fname", "main.users")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected schema, got nil")
+	}
+	if got.Schema != "main" || got.Name != "users" {
+		t.Fatalf("schema/table = %q/%q, want main/users", got.Schema, got.Name)
+	}
+
+	names := got.ColumnNames()
+	want := []string{"_id", "fname"}
+	if len(names) != len(want) {
+		t.Fatalf("column names = %v, want %v", names, want)
+	}
+	for i, name := range names {
+		if name != want[i] {
+			t.Fatalf("column names = %v, want %v", names, want)
+		}
+	}
+
+	cols := indexColumns(got.Columns)
+	if cols["_id"].DataType != schema.TypeString {
+		t.Errorf("_id type = %v, want string", cols["_id"].DataType)
+	}
+	if cols["fname"].DataType != schema.TypeString {
+		t.Errorf("fname type = %v, want string", cols["fname"].DataType)
+	}
+}
+
 func TestAppendMissingOverrideColumns_NilSchemaIsNoop(t *testing.T) {
 	if err := AppendMissingOverrideColumns(nil, "id:bigint", "snake_case"); err != nil {
 		t.Fatalf("unexpected error: %v", err)

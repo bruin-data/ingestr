@@ -64,6 +64,7 @@ type IngestConfig struct {
 	SQLLimit          int
 	SQLExcludeColumns []string
 	Columns           string // Raw column overrides string (parsed by pipeline)
+	NoInference       bool   // Skip schema inference for unknown-schema sources and use Columns as the schema
 	Mask              []string
 
 	PipelinesDir   string
@@ -112,6 +113,9 @@ func (c *IngestConfig) Validate() error {
 			Field:   "interval-start",
 			Message: fmt.Sprintf("must be earlier than interval-end (got start=%s, end=%s)", c.IntervalStart.Format(time.RFC3339), c.IntervalEnd.Format(time.RFC3339)),
 		}
+	}
+	if c.NoInference && strings.TrimSpace(c.Columns) == "" {
+		return &ValidationError{Field: "columns", Message: "is required when no-inference is enabled"}
 	}
 	return nil
 }

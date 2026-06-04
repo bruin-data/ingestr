@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -1238,6 +1240,68 @@ func TestBuildBufferReaderTarget_KeepsAliasesForCanonicalDuplicate(t *testing.T)
 	got := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"_id", "userId", "user_id", "UserID"})
+}
+
+func TestBuildSourceSchemaCaster_ProjectsAndCastsToSourceSchema(t *testing.T) {
+	p := &Pipeline{}
+	sourceSchema := tschema(
+		"events",
+		tcol("id", schema.TypeInt64),
+		tcol("count", schema.TypeInt64),
+	)
+
+	caster := p.buildSourceSchemaCaster(sourceSchema)
+	if caster == nil {
+		t.Fatal("expected source schema caster")
+	}
+
+	mem := memory.NewGoAllocator()
+	idBuilder := array.NewInt64Builder(mem)
+	idBuilder.Append(7)
+	idArr := idBuilder.NewArray()
+	idBuilder.Release()
+	defer idArr.Release()
+
+	extraBuilder := array.NewStringBuilder(mem)
+	extraBuilder.Append("drop me")
+	extraArr := extraBuilder.NewArray()
+	extraBuilder.Release()
+	defer extraArr.Release()
+
+	countBuilder := array.NewStringBuilder(mem)
+	countBuilder.Append("42")
+	countArr := countBuilder.NewArray()
+	countBuilder.Release()
+	defer countArr.Release()
+
+	input := array.NewRecordBatch(
+		arrow.NewSchema([]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: "extra", Type: arrow.BinaryTypes.String, Nullable: true},
+			{Name: "count", Type: arrow.BinaryTypes.String, Nullable: true},
+		}, nil),
+		[]arrow.Array{idArr, extraArr, countArr},
+		1,
+	)
+	defer input.Release()
+
+	got, err := caster.Transform(input)
+	if err != nil {
+		t.Fatalf("Transform() error = %v", err)
+	}
+	defer got.Release()
+
+	assertColumns(t, "fields", arrowFieldNames(got.Schema()), []string{"id", "count"})
+	if got.Column(1).DataType().ID() != arrow.INT64 {
+		t.Fatalf("count type = %s, want int64", got.Column(1).DataType())
+	}
+	countCol, ok := got.Column(1).(*array.Int64)
+	if !ok {
+		t.Fatalf("count column type = %T, want *array.Int64", got.Column(1))
+	}
+	if got := countCol.Value(0); got != 42 {
+		t.Fatalf("count = %d, want 42", got)
+	}
 }
 
 func TestApplyColumnMapping_DedupesCanonicalColumns(t *testing.T) {

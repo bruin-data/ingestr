@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/arrowutil"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -602,6 +603,75 @@ func TestMongoBatchBuilder_AllNullColumnEmittedAsUnknown(t *testing.T) {
 		if !isUnknownType(field.Type) {
 			t.Fatalf("all-null column b: type = %s, want unknown", field.Type)
 		}
+	}
+}
+
+func TestMongoSchemaBatchBuilder_UsesProvidedSchema(t *testing.T) {
+	oid, _ := primitive.ObjectIDFromHex("507f1f77bcf86cd799439011")
+	created := primitive.NewDateTimeFromTime(time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC))
+
+	builder := newMongoSchemaBatchBuilder([]schema.Column{
+		{Name: "_id", DataType: schema.TypeString, Nullable: false},
+		{Name: "count", DataType: schema.TypeInt64, Nullable: true},
+		{Name: "created_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	}, nil)
+
+	if err := builder.AppendDocument(bson.M{
+		"_id":        oid,
+		"count":      "42",
+		"created_at": created,
+		"extra":      "ignored",
+	}); err != nil {
+		t.Fatalf("AppendDocument error = %v", err)
+	}
+
+	record, err := builder.NewRecordBatch()
+	if err != nil {
+		t.Fatalf("NewRecordBatch error = %v", err)
+	}
+	defer record.Release()
+
+	if got := record.NumCols(); got != 3 {
+		t.Fatalf("NumCols = %d, want 3", got)
+	}
+	wantNames := []string{"_id", "count", "created_at"}
+	for i, want := range wantNames {
+		if got := record.Schema().Field(i).Name; got != want {
+			t.Fatalf("field %d = %q, want %q", i, got, want)
+		}
+	}
+	if got := arrowutil.Value(record.Column(0), 0); got != oid.Hex() {
+		t.Fatalf("_id = %#v, want %q", got, oid.Hex())
+	}
+	if got := arrowutil.Value(record.Column(1), 0); got != int64(42) {
+		t.Fatalf("count = %#v, want %v", got, int64(42))
+	}
+	if got := record.Schema().Field(2).Type.String(); got != "timestamp[us, tz=UTC]" {
+		t.Fatalf("created_at type = %s, want timestamp[us, tz=UTC]", got)
+	}
+}
+
+func TestMongoSchemaBatchBuilder_ExcludesSchemaColumns(t *testing.T) {
+	builder := newMongoSchemaBatchBuilder([]schema.Column{
+		{Name: "keep", DataType: schema.TypeString},
+		{Name: "skip", DataType: schema.TypeString},
+	}, []string{"skip"})
+
+	if err := builder.AppendDocument(bson.M{"keep": "one", "skip": "two"}); err != nil {
+		t.Fatalf("AppendDocument error = %v", err)
+	}
+
+	record, err := builder.NewRecordBatch()
+	if err != nil {
+		t.Fatalf("NewRecordBatch error = %v", err)
+	}
+	defer record.Release()
+
+	if got := record.NumCols(); got != 1 {
+		t.Fatalf("NumCols = %d, want 1", got)
+	}
+	if got := record.Schema().Field(0).Name; got != "keep" {
+		t.Fatalf("field 0 = %q, want keep", got)
 	}
 }
 
