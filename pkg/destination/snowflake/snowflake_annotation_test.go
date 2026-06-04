@@ -21,7 +21,7 @@ func TestAnnotate(t *testing.T) {
 		if !ok {
 			t.Fatal("expected a query tag: ingestr always annotates")
 		}
-		want := `{"ingestr_step":"merge","type":"ingestr"}`
+		want := `{"ingestr_step":"merge","type":"ingestr_transform"}`
 		if tag != want {
 			t.Fatalf("query tag mismatch\n got: %s\nwant: %s", tag, want)
 		}
@@ -32,14 +32,14 @@ func TestAnnotate(t *testing.T) {
 		base := annotation.WithPayload(context.Background(), payload)
 
 		cases := map[string]string{
-			annotation.StepDDL:          `{"asset":"raw.orders","ingestr_step":"ddl","pipeline":"shopify","type":"ingestr"}`,
-			annotation.StepLoad:         `{"asset":"raw.orders","ingestr_step":"load","pipeline":"shopify","type":"ingestr"}`,
-			annotation.StepMerge:        `{"asset":"raw.orders","ingestr_step":"merge","pipeline":"shopify","type":"ingestr"}`,
-			annotation.StepDeleteInsert: `{"asset":"raw.orders","ingestr_step":"delete_insert","pipeline":"shopify","type":"ingestr"}`,
-			annotation.StepSCD2:         `{"asset":"raw.orders","ingestr_step":"scd2","pipeline":"shopify","type":"ingestr"}`,
-			annotation.StepSwap:         `{"asset":"raw.orders","ingestr_step":"swap","pipeline":"shopify","type":"ingestr"}`,
-			annotation.StepTruncate:     `{"asset":"raw.orders","ingestr_step":"truncate","pipeline":"shopify","type":"ingestr"}`,
-			annotation.StepCleanup:      `{"asset":"raw.orders","ingestr_step":"cleanup","pipeline":"shopify","type":"ingestr"}`,
+			annotation.StepDDL:          `{"asset":"raw.orders","ingestr_step":"ddl","pipeline":"shopify","type":"ingestr_load"}`,
+			annotation.StepLoad:         `{"asset":"raw.orders","ingestr_step":"load","pipeline":"shopify","type":"ingestr_load"}`,
+			annotation.StepMerge:        `{"asset":"raw.orders","ingestr_step":"merge","pipeline":"shopify","type":"ingestr_transform"}`,
+			annotation.StepDeleteInsert: `{"asset":"raw.orders","ingestr_step":"delete_insert","pipeline":"shopify","type":"ingestr_transform"}`,
+			annotation.StepSCD2:         `{"asset":"raw.orders","ingestr_step":"scd2","pipeline":"shopify","type":"ingestr_transform"}`,
+			annotation.StepSwap:         `{"asset":"raw.orders","ingestr_step":"swap","pipeline":"shopify","type":"ingestr_load"}`,
+			annotation.StepTruncate:     `{"asset":"raw.orders","ingestr_step":"truncate","pipeline":"shopify","type":"ingestr_load"}`,
+			annotation.StepCleanup:      `{"asset":"raw.orders","ingestr_step":"cleanup","pipeline":"shopify","type":"ingestr_load"}`,
 		}
 
 		for step, want := range cases {
