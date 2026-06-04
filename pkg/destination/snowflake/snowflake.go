@@ -397,13 +397,16 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 		pkMap[strings.ToLower(pk)] = true
 	}
 
-	cdcMerge := slices.Contains(opts.Columns, "_cdc_deleted")
+	cdcMerge := slices.Contains(opts.Columns, destination.CDCDeletedColumn)
+	unchangedRef := "source." + quoteIdentifier(destination.CDCUnchangedColsColumn)
 	var updateSets []string
 	for _, col := range opts.Columns {
 		if !pkMap[strings.ToLower(col)] {
 			q := quoteIdentifier(col)
-			if cdcMerge {
-				updateSets = append(updateSets, fmt.Sprintf("target.%s = COALESCE(source.%s, target.%s)", q, q, q))
+			if cdcMerge && !destination.IsCDCMetaColumn(col) {
+				updateSets = append(updateSets, cdcMergeAssign(
+					col, q, "target."+q, "source."+q, unchangedRef,
+				))
 			} else {
 				updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", q, q))
 			}
@@ -868,4 +871,11 @@ func formatSnowflakeValue(v interface{}) string {
 	default:
 		return fmt.Sprintf("'%v'", val)
 	}
+}
+
+func cdcMergeAssign(colName, colQuoted, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	return fmt.Sprintf(
+		"%s = IFF(ARRAY_CONTAINS(TO_VARIANT('%s'), TRY_PARSE_JSON(%s)), %s, %s)",
+		colQuoted, colName, unchangedColsExpr, targetExpr, sourceExpr,
+	)
 }

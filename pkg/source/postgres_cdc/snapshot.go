@@ -165,7 +165,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	config.Debug("[CDC] Reading snapshot data from %s", s.tableName)
 
 	// Build select query (excluding CDC columns as they don't exist in source)
-	sourceColumns := s.tableSchema.Columns[:len(s.tableSchema.Columns)-3] // Remove CDC columns
+	sourceColumns := s.tableSchema.Columns[:sourceColumnCount(s.tableSchema)]
 	colNames := make([]string, len(sourceColumns))
 	for i, col := range sourceColumns {
 		colNames[i] = fmt.Sprintf(`"%s"`, col.Name)
@@ -239,13 +239,10 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 			arrowconv.AppendValue(builders[i], convertValue(val, columns[i]))
 		}
 
-		// Append CDC columns
-		// _cdc_lsn
 		builders[len(columns)].(*array.StringBuilder).Append(lsn)
-		// _cdc_deleted (false for snapshot rows)
 		builders[len(columns)+1].(*array.BooleanBuilder).Append(false)
-		// _cdc_synced_at
 		builders[len(columns)+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
+		builders[len(columns)+3].(*array.StringBuilder).Append("[]")
 
 		rowCount++
 

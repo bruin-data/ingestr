@@ -2,6 +2,7 @@ package duckdb
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"net/url"
@@ -408,7 +409,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
-	cdcMerge := slices.Contains(opts.Columns, "_cdc_deleted")
+	cdcMerge := slices.Contains(opts.Columns, destination.CDCDeletedColumn)
 
 	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
@@ -966,15 +967,34 @@ func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 }
 
 func buildUpdateSet(columns []string, targetAlias, sourceAlias string, cdcMerge bool) string {
+	unchangedRef := fmt.Sprintf(`%s."%s"`, sourceAlias, destination.CDCUnchangedColsColumn)
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		if cdcMerge {
-			sets[i] = fmt.Sprintf(`"%s" = COALESCE(%s."%s", %s."%s")`, col, sourceAlias, col, targetAlias, col)
+		if cdcMerge && !destination.IsCDCMetaColumn(col) {
+			sets[i] = cdcMergeAssign(
+				col,
+				fmt.Sprintf(`%s."%s"`, targetAlias, col),
+				fmt.Sprintf(`%s."%s"`, sourceAlias, col),
+				unchangedRef,
+			)
 		} else {
 			sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
 		}
 	}
 	return strings.Join(sets, ", ")
+}
+
+func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	lit := cdcUnchangedColsJSONLiteral(col)
+	return fmt.Sprintf(
+		`"%s" = CASE WHEN %s::JSON @> '%s'::JSON THEN %s ELSE %s END`,
+		col, unchangedColsExpr, lit, targetExpr, sourceExpr,
+	)
+}
+
+func cdcUnchangedColsJSONLiteral(colName string) string {
+	b, _ := json.Marshal([]string{colName})
+	return string(b)
 }
 
 // buildChangeConditions builds change detection conditions using IS DISTINCT FROM.

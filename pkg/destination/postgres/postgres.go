@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -454,7 +455,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 
 	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := slices.Contains(columns, "_cdc_deleted")
+	hasCDCDeleted := slices.Contains(columns, destination.CDCDeletedColumn)
 
 	// Begin transaction for atomic merge
 	tx, err := d.pool.Begin(ctx)
@@ -918,11 +919,34 @@ func buildConflictUpdateSet(columns []string) string {
 }
 
 func buildCDCConflictUpdateSet(columns []string, quotedTable string) string {
+	unchangedRef := fmt.Sprintf(`EXCLUDED."%s"`, destination.CDCUnchangedColsColumn)
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf(`"%s" = COALESCE(EXCLUDED."%s", %s."%s")`, col, col, quotedTable, col)
+		if destination.IsCDCMetaColumn(col) {
+			sets[i] = fmt.Sprintf(`"%s" = EXCLUDED."%s"`, col, col)
+			continue
+		}
+		sets[i] = cdcMergeAssign(
+			col,
+			fmt.Sprintf(`%s."%s"`, quotedTable, col),
+			fmt.Sprintf(`EXCLUDED."%s"`, col),
+			unchangedRef,
+		)
 	}
 	return strings.Join(sets, ", ")
+}
+
+func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	lit := cdcUnchangedColsJSONLiteral(col)
+	return fmt.Sprintf(
+		`"%s" = CASE WHEN %s::jsonb @> '%s'::jsonb THEN %s ELSE %s END`,
+		col, unchangedColsExpr, lit, targetExpr, sourceExpr,
+	)
+}
+
+func cdcUnchangedColsJSONLiteral(colName string) string {
+	b, _ := json.Marshal([]string{colName})
+	return string(b)
 }
 
 // buildChangeConditions builds change detection conditions using IS DISTINCT FROM.

@@ -2,6 +2,7 @@ package redshift
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -174,13 +175,19 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		pkMap[strings.ToLower(pk)] = true
 	}
 
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+	hasCDCDeleted := slices.Contains(allColumns, destination.CDCDeletedColumn)
 
+	unchangedRef := fmt.Sprintf(`source."%s"`, destination.CDCUnchangedColsColumn)
 	var updateSets []string
 	for _, col := range allColumns {
 		if !pkMap[strings.ToLower(col)] {
-			if hasCDCDeleted {
-				updateSets = append(updateSets, fmt.Sprintf(`"%s" = COALESCE(source."%s", target."%s")`, col, col, col))
+			if hasCDCDeleted && !destination.IsCDCMetaColumn(col) {
+				updateSets = append(updateSets, cdcMergeAssign(
+					col,
+					fmt.Sprintf(`target."%s"`, col),
+					fmt.Sprintf(`source."%s"`, col),
+					unchangedRef,
+				))
 			} else {
 				updateSets = append(updateSets, fmt.Sprintf(`"%s" = source."%s"`, col, col))
 			}
@@ -240,4 +247,17 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 
 func (d *RedshiftDestination) SupportsCDCMerge() bool {
 	return true
+}
+
+func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	lit := cdcUnchangedColsJSONLiteral(col)
+	return fmt.Sprintf(
+		`"%s" = CASE WHEN POSITION('%s' IN COALESCE(%s, '[]')) > 0 THEN %s ELSE %s END`,
+		col, lit, unchangedColsExpr, targetExpr, sourceExpr,
+	)
+}
+
+func cdcUnchangedColsJSONLiteral(colName string) string {
+	b, _ := json.Marshal([]string{colName})
+	return string(b)
 }

@@ -57,7 +57,7 @@ func TestAddCDCColumns(t *testing.T) {
 	result := addCDCColumns(original)
 
 	// Should have 3 more columns
-	assert.Len(t, result.Columns, 5)
+	assert.Len(t, result.Columns, 6)
 
 	// Original columns intact
 	assert.Equal(t, "id", result.Columns[0].Name)
@@ -76,6 +76,10 @@ func TestAddCDCColumns(t *testing.T) {
 	assert.Equal(t, schema.TypeTimestampTZ, result.Columns[4].DataType)
 	assert.False(t, result.Columns[4].Nullable)
 
+	assert.Equal(t, CDCUnchangedColsColumn, result.Columns[5].Name)
+	assert.Equal(t, schema.TypeString, result.Columns[5].DataType)
+	assert.False(t, result.Columns[5].Nullable)
+
 	// Primary keys preserved
 	assert.Equal(t, original.PrimaryKeys, result.PrimaryKeys)
 
@@ -90,11 +94,12 @@ func TestBuildArrowSchema(t *testing.T) {
 		{Name: CDCLSNColumn, DataType: schema.TypeString, Nullable: false},
 		{Name: CDCDeletedColumn, DataType: schema.TypeBoolean, Nullable: false},
 		{Name: CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ, Nullable: false},
+		{Name: CDCUnchangedColsColumn, DataType: schema.TypeString, Nullable: false},
 	}
 
 	arrowSchema := buildArrowSchema(columns)
 
-	assert.Equal(t, 5, arrowSchema.NumFields())
+	assert.Equal(t, 6, arrowSchema.NumFields())
 
 	assert.Equal(t, "id", arrowSchema.Field(0).Name)
 	assert.False(t, arrowSchema.Field(0).Nullable)
@@ -105,4 +110,5 @@ func TestBuildArrowSchema(t *testing.T) {
 	assert.Equal(t, CDCLSNColumn, arrowSchema.Field(2).Name)
 	assert.Equal(t, CDCDeletedColumn, arrowSchema.Field(3).Name)
 	assert.Equal(t, CDCSyncedAtColumn, arrowSchema.Field(4).Name)
+	assert.Equal(t, CDCUnchangedColsColumn, arrowSchema.Field(5).Name)
 }

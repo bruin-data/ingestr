@@ -346,12 +346,12 @@ func TestBuildUpdateSet(t *testing.T) {
 			expected:    `"name" = s."name", "email" = s."email", "age" = s."age"`,
 		},
 		{
-			name:        "cdc_coalesce",
+			name:        "cdc_unchanged_cols",
 			columns:     []string{"config_data"},
 			targetAlias: "target",
 			sourceAlias: "source",
 			cdcMerge:    true,
-			expected:    `"config_data" = COALESCE(source."config_data", target."config_data")`,
+			expected:    `"config_data" = CASE WHEN source."_cdc_unchanged_cols"::JSON @> '["config_data"]'::JSON THEN target."config_data" ELSE source."config_data" END`,
 		},
 	}
 

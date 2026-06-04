@@ -1,5 +1,11 @@
 package postgres_cdc
 
+import (
+	"encoding/json"
+
+	"github.com/bruin-data/ingestr/pkg/schema"
+)
+
 type tupleUnchanged struct{}
 
 var tupleUnchangedMarker = tupleUnchanged{}
@@ -24,4 +30,31 @@ func resolveColumnValue(change Change, colIdx int) interface{} {
 		}
 	}
 	return nil
+}
+
+func columnIsUnchanged(change Change, colIdx int) bool {
+	if change.Operation != "UPDATE" {
+		return false
+	}
+	if colIdx >= len(change.Values) {
+		return false
+	}
+	return isTupleUnchanged(change.Values[colIdx])
+}
+
+func unchangedColumnsJSON(change Change, columns []schema.Column, nSourceCols int) string {
+	if change.Operation != "UPDATE" {
+		return "[]"
+	}
+	var names []string
+	for i := 0; i < nSourceCols && i < len(columns); i++ {
+		if columnIsUnchanged(change, i) {
+			names = append(names, columns[i].Name)
+		}
+	}
+	b, err := json.Marshal(names)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
 }

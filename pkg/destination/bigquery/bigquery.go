@@ -1478,14 +1478,17 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 		pkMap[strings.ToLower(pk)] = true
 	}
 
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+	hasCDCDeleted := slices.Contains(allColumns, destination.CDCDeletedColumn)
 
+	unchangedRef := fmt.Sprintf("s.`%s`", destination.CDCUnchangedColsColumn)
 	var updateSets []string
 	for _, col := range allColumns {
 		if !pkMap[strings.ToLower(col)] {
 			src := castSourceCol(col, castMap)
-			if hasCDCDeleted {
-				updateSets = append(updateSets, fmt.Sprintf("t.`%s` = COALESCE(%s, t.`%s`)", col, src, col))
+			if hasCDCDeleted && !destination.IsCDCMetaColumn(col) {
+				updateSets = append(updateSets, cdcMergeAssign(
+					col, fmt.Sprintf("t.`%s`", col), src, unchangedRef,
+				))
 			} else {
 				updateSets = append(updateSets, fmt.Sprintf("t.`%s` = %s", col, src))
 			}
@@ -1807,4 +1810,11 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	return fmt.Sprintf(
+		"t.`%s` = IF('%s' IN UNNEST(IFNULL(JSON_EXTRACT_STRING_ARRAY(%s), [])), %s, %s)",
+		col, col, unchangedColsExpr, targetExpr, sourceExpr,
+	)
 }

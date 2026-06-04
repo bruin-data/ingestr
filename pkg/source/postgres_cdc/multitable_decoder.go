@@ -402,7 +402,7 @@ func (d *MultiTableDecoder) parseTupleData(data []byte, rel *RelationInfo, table
 			data = data[length:]
 
 			// Convert text to appropriate type based on schema column
-			if int(i) < len(tableSchema.Columns)-3 { // Exclude CDC columns
+			if int(i) < sourceColumnCount(tableSchema) {
 				col := tableSchema.Columns[i]
 				values[i] = convertTextValue(textVal, col)
 			} else {
@@ -442,18 +442,17 @@ func (d *MultiTableDecoder) changesToBatch(changes []Change, tableSchema *schema
 	}
 
 	syncedAt := time.Now().UTC()
-	sourceColCount := len(tableSchema.Columns) - 3 // Exclude CDC columns
+	nSource := sourceColumnCount(tableSchema)
 
 	for _, change := range changes {
-		// Append source column values
-		for i := 0; i < sourceColCount; i++ {
-			arrowconv.AppendValue(builders[i], resolveColumnValue(change, i))
+		for colIdx := 0; colIdx < nSource; colIdx++ {
+			arrowconv.AppendValue(builders[colIdx], resolveColumnValue(change, colIdx))
 		}
 
-		// Append CDC columns
-		builders[sourceColCount].(*array.StringBuilder).Append(FormatLSN(change.LSN))
-		builders[sourceColCount+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
-		builders[sourceColCount+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
+		builders[nSource].(*array.StringBuilder).Append(FormatLSN(change.LSN))
+		builders[nSource+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
+		builders[nSource+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
+		builders[nSource+3].(*array.StringBuilder).Append(unchangedColumnsJSON(change, tableSchema.Columns, nSource))
 	}
 
 	arrays := make([]arrow.Array, len(builders))

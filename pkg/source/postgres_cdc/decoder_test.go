@@ -134,6 +134,7 @@ func TestDecoderHandleRelation(t *testing.T) {
 			{Name: CDCLSNColumn, DataType: schema.TypeString},
 			{Name: CDCDeletedColumn, DataType: schema.TypeBoolean},
 			{Name: CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+			{Name: CDCUnchangedColsColumn, DataType: schema.TypeString},
 		},
 	}
 
@@ -204,6 +205,7 @@ func TestDecoderBeginAndCommit(t *testing.T) {
 			{Name: CDCLSNColumn, DataType: schema.TypeString},
 			{Name: CDCDeletedColumn, DataType: schema.TypeBoolean},
 			{Name: CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+			{Name: CDCUnchangedColsColumn, DataType: schema.TypeString},
 		},
 	}
 
@@ -250,6 +252,21 @@ func TestResolveColumnValue(t *testing.T) {
 		}
 		assert.Nil(t, resolveColumnValue(change, 1))
 	})
+}
+
+func TestUnchangedColumnsJSON(t *testing.T) {
+	cols := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt32},
+		{Name: "config_data", DataType: schema.TypeString},
+		{Name: "status", DataType: schema.TypeString},
+	}
+	change := Change{
+		Operation: "UPDATE",
+		Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+		OldValues: []interface{}{int32(1), `{"big":true}`, "pending"},
+	}
+	assert.Equal(t, `["config_data"]`, unchangedColumnsJSON(change, cols, 3))
+	assert.Equal(t, "[]", unchangedColumnsJSON(Change{Operation: "INSERT", Values: []interface{}{int32(1)}}, cols, 3))
 }
 
 func TestNewDecoder(t *testing.T) {
