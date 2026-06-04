@@ -8,12 +8,40 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/athena"
+	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type fakeAthenaAPI struct {
+	results []*athena.GetQueryResultsOutput
+}
+
+func (f *fakeAthenaAPI) StartQueryExecution(context.Context, *athena.StartQueryExecutionInput, ...func(*athena.Options)) (*athena.StartQueryExecutionOutput, error) {
+	return &athena.StartQueryExecutionOutput{QueryExecutionId: aws.String("exec-1")}, nil
+}
+
+func (f *fakeAthenaAPI) GetQueryExecution(context.Context, *athena.GetQueryExecutionInput, ...func(*athena.Options)) (*athena.GetQueryExecutionOutput, error) {
+	return &athena.GetQueryExecutionOutput{
+		QueryExecution: &athenatypes.QueryExecution{
+			Status: &athenatypes.QueryExecutionStatus{State: athenatypes.QueryExecutionStateSucceeded},
+		},
+	}, nil
+}
+
+func (f *fakeAthenaAPI) GetQueryResults(context.Context, *athena.GetQueryResultsInput, ...func(*athena.Options)) (*athena.GetQueryResultsOutput, error) {
+	if len(f.results) == 0 {
+		return &athena.GetQueryResultsOutput{}, nil
+	}
+	out := f.results[0]
+	f.results = f.results[1:]
+	return out, nil
+}
 
 func TestParseBlobstoreURI_S3(t *testing.T) {
 	tests := []struct {
@@ -26,30 +54,93 @@ func TestParseBlobstoreURI_S3(t *testing.T) {
 			name: "basic S3 with credentials",
 			uri:  "s3://?access_key_id=AKIAIOSFODNN7EXAMPLE&secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 			want: &parsedBlobstoreURI{
-				provider:        ProviderS3,
-				accessKeyID:     "AKIAIOSFODNN7EXAMPLE",
-				secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+				provider:                      ProviderS3,
+				accessKeyID:                   "AKIAIOSFODNN7EXAMPLE",
+				secretAccessKey:               "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+				s3FileDiscovery:               s3FileDiscoveryList,
+				athenaInventoryBucketColumn:   "bucket",
+				athenaInventoryKeyColumn:      "key",
+				athenaInventoryModifiedColumn: "last_modified_date",
 			},
 		},
 		{
 			name: "S3 with region",
 			uri:  "s3://?access_key_id=ABC&secret_access_key=XYZ&region=eu-west-1",
 			want: &parsedBlobstoreURI{
-				provider:        ProviderS3,
-				accessKeyID:     "ABC",
-				secretAccessKey: "XYZ",
-				region:          "eu-west-1",
+				provider:                      ProviderS3,
+				accessKeyID:                   "ABC",
+				secretAccessKey:               "XYZ",
+				region:                        "eu-west-1",
+				s3FileDiscovery:               s3FileDiscoveryList,
+				athenaInventoryBucketColumn:   "bucket",
+				athenaInventoryKeyColumn:      "key",
+				athenaInventoryModifiedColumn: "last_modified_date",
 			},
 		},
 		{
 			name: "S3 with endpoint URL (Minio)",
 			uri:  "s3://?access_key_id=ABC&secret_access_key=XYZ&endpoint_url=http://localhost:9000",
 			want: &parsedBlobstoreURI{
-				provider:        ProviderS3,
-				accessKeyID:     "ABC",
-				secretAccessKey: "XYZ",
-				endpointURL:     "http://localhost:9000",
+				provider:                      ProviderS3,
+				accessKeyID:                   "ABC",
+				secretAccessKey:               "XYZ",
+				endpointURL:                   "http://localhost:9000",
+				s3FileDiscovery:               s3FileDiscoveryList,
+				athenaInventoryBucketColumn:   "bucket",
+				athenaInventoryKeyColumn:      "key",
+				athenaInventoryModifiedColumn: "last_modified_date",
 			},
+		},
+		{
+			name: "S3 with Athena inventory discovery",
+			uri:  "s3://?access_key_id=ABC&secret_access_key=XYZ&region=us-east-1&file_discovery=athena_inventory&athena_inventory_table=inventory_db.inventory_table&athena_results_location=s3://query-results/ingestr&athena_workgroup=primary",
+			want: &parsedBlobstoreURI{
+				provider:                      ProviderS3,
+				accessKeyID:                   "ABC",
+				secretAccessKey:               "XYZ",
+				region:                        "us-east-1",
+				s3FileDiscovery:               s3FileDiscoveryAthenaInventory,
+				athenaInventoryTable:          "inventory_db.inventory_table",
+				athenaInventoryBucketColumn:   "bucket",
+				athenaInventoryKeyColumn:      "key",
+				athenaInventoryModifiedColumn: "last_modified_date",
+				athenaResultsLocation:         "s3://query-results/ingestr/",
+				athenaWorkgroup:               "primary",
+			},
+		},
+		{
+			name: "S3 with Athena inventory custom columns",
+			uri:  "s3://?file_discovery=athena_inventory&athena_inventory_table=inventory_db.inventory_table&athena_results_location=query-results/ingestr&athena_inventory_bucket_column=b&athena_inventory_key_column=k&athena_inventory_modified_column=m&athena_region=eu-west-1",
+			want: &parsedBlobstoreURI{
+				provider:                      ProviderS3,
+				s3FileDiscovery:               s3FileDiscoveryAthenaInventory,
+				athenaInventoryTable:          "inventory_db.inventory_table",
+				athenaInventoryBucketColumn:   "b",
+				athenaInventoryKeyColumn:      "k",
+				athenaInventoryModifiedColumn: "m",
+				athenaResultsLocation:         "s3://query-results/ingestr/",
+				athenaRegion:                  "eu-west-1",
+			},
+		},
+		{
+			name:    "S3 with invalid file discovery",
+			uri:     "s3://?file_discovery=magic",
+			wantErr: true,
+		},
+		{
+			name:    "S3 Athena inventory requires table",
+			uri:     "s3://?file_discovery=athena_inventory&athena_results_location=s3://query-results/ingestr",
+			wantErr: true,
+		},
+		{
+			name:    "S3 Athena inventory requires results location",
+			uri:     "s3://?file_discovery=athena_inventory&athena_inventory_table=inventory_db.inventory_table",
+			wantErr: true,
+		},
+		{
+			name:    "S3 Athena inventory requires qualified table",
+			uri:     "s3://?file_discovery=athena_inventory&athena_inventory_table=inventory_table&athena_results_location=s3://query-results/ingestr",
+			wantErr: true,
 		},
 	}
 
@@ -66,6 +157,14 @@ func TestParseBlobstoreURI_S3(t *testing.T) {
 			assert.Equal(t, tt.want.secretAccessKey, got.secretAccessKey)
 			assert.Equal(t, tt.want.region, got.region)
 			assert.Equal(t, tt.want.endpointURL, got.endpointURL)
+			assert.Equal(t, tt.want.s3FileDiscovery, got.s3FileDiscovery)
+			assert.Equal(t, tt.want.athenaInventoryTable, got.athenaInventoryTable)
+			assert.Equal(t, tt.want.athenaInventoryBucketColumn, got.athenaInventoryBucketColumn)
+			assert.Equal(t, tt.want.athenaInventoryKeyColumn, got.athenaInventoryKeyColumn)
+			assert.Equal(t, tt.want.athenaInventoryModifiedColumn, got.athenaInventoryModifiedColumn)
+			assert.Equal(t, tt.want.athenaResultsLocation, got.athenaResultsLocation)
+			assert.Equal(t, tt.want.athenaWorkgroup, got.athenaWorkgroup)
+			assert.Equal(t, tt.want.athenaRegion, got.athenaRegion)
 		})
 	}
 }
@@ -540,6 +639,118 @@ func TestObjectMatchesIncrementalOptionsRequiresReservedKey(t *testing.T) {
 		IncrementalKey: defaultBlobstoreModifiedAtColumn,
 		IntervalStart:  &start,
 	}))
+}
+
+func TestBuildS3InventoryQuery(t *testing.T) {
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("UTC+2", 2*60*60))
+	end := time.Date(2026, 1, 3, 4, 5, 6, 0, time.UTC)
+	parsed := &parsedBlobstoreURI{
+		athenaInventoryTable:          "inventory_db.inventory_table",
+		athenaInventoryBucketColumn:   "bucket",
+		athenaInventoryKeyColumn:      "key",
+		athenaInventoryModifiedColumn: "last_modified_date",
+	}
+
+	query, database, err := buildS3InventoryQuery(parsed, "my-bucket", "logs/", source.ReadOptions{
+		IncrementalKey: defaultBlobstoreModifiedAtColumn,
+		IntervalStart:  &start,
+		IntervalEnd:    &end,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "inventory_db", database)
+	assert.Equal(t, `SELECT "key", "last_modified_date" FROM "inventory_db"."inventory_table" WHERE "bucket" = 'my-bucket' AND substr("key", 1, 5) = 'logs/' AND "last_modified_date" >= timestamp '2026-01-02 01:04:05' AND "last_modified_date" <= timestamp '2026-01-03 04:05:06'`, query)
+}
+
+func TestBuildS3InventoryQueryWithoutModifiedIncrementality(t *testing.T) {
+	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	parsed := &parsedBlobstoreURI{
+		athenaInventoryTable:          "inventory_db.inventory_table",
+		athenaInventoryBucketColumn:   "bucket",
+		athenaInventoryKeyColumn:      "key",
+		athenaInventoryModifiedColumn: "last_modified_date",
+	}
+
+	query, database, err := buildS3InventoryQuery(parsed, "my-bucket", "", source.ReadOptions{
+		IncrementalKey: "updated_at",
+		IntervalStart:  &start,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "inventory_db", database)
+	assert.Equal(t, `SELECT "key", "last_modified_date" FROM "inventory_db"."inventory_table" WHERE "bucket" = 'my-bucket'`, query)
+}
+
+func TestBuildS3InventoryQueryEscapesIdentifiersAndValues(t *testing.T) {
+	parsed := &parsedBlobstoreURI{
+		athenaInventoryTable:          `inventory_db.inventory"table`,
+		athenaInventoryBucketColumn:   `bucket"col`,
+		athenaInventoryKeyColumn:      `key"col`,
+		athenaInventoryModifiedColumn: "modified",
+	}
+
+	query, _, err := buildS3InventoryQuery(parsed, "bucket'1", "logs/o'hare/", source.ReadOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, `SELECT "key""col", "modified" FROM "inventory_db"."inventory""table" WHERE "bucket""col" = 'bucket''1' AND substr("key""col", 1, 12) = 'logs/o''hare/'`, query)
+}
+
+func TestParseAthenaInventoryTime(t *testing.T) {
+	tests := []struct {
+		value string
+		want  time.Time
+	}{
+		{"2026-01-02T03:04:05Z", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+		{"2026-01-02 03:04:05", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+		{"2026-01-02 03:04:05.123456", time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			got, err := parseAthenaInventoryTime(tt.value)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, tt.want, *got)
+		})
+	}
+
+	got, err := parseAthenaInventoryTime("")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	_, err = parseAthenaInventoryTime("not-a-time")
+	require.Error(t, err)
+}
+
+func TestStreamS3InventoryQueryResultsFiltersRows(t *testing.T) {
+	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	s := &BlobstoreSource{
+		athenaClient: &fakeAthenaAPI{
+			results: []*athena.GetQueryResultsOutput{
+				{
+					ResultSet: &athenatypes.ResultSet{
+						Rows: []athenatypes.Row{
+							{Data: []athenatypes.Datum{{VarCharValue: aws.String("key")}, {VarCharValue: aws.String("last_modified_date")}}},
+							{Data: []athenatypes.Datum{{VarCharValue: aws.String("logs/2026/keep.jsonl")}, {VarCharValue: aws.String("2026-01-02 03:04:05")}}},
+							{Data: []athenatypes.Datum{{VarCharValue: aws.String("logs/2026/skip.csv")}, {VarCharValue: aws.String("2026-01-02 03:04:05")}}},
+							{Data: []athenatypes.Datum{{VarCharValue: aws.String("logs/2026/old.jsonl")}, {VarCharValue: aws.String("2026-01-01 03:04:05")}}},
+						},
+					},
+				},
+			},
+		},
+	}
+	files := make(chan blobstoreFile, 3)
+
+	count, err := s.streamS3InventoryQueryResults(context.Background(), "exec-1", "logs/**/*.jsonl", source.ReadOptions{
+		IncrementalKey: defaultBlobstoreModifiedAtColumn,
+		IntervalStart:  &start,
+	}, files)
+	require.NoError(t, err)
+	close(files)
+
+	require.Equal(t, 1, count)
+	file := <-files
+	assert.Equal(t, "logs/2026/keep.jsonl", file.key)
+	require.NotNil(t, file.lastModified)
+	assert.Equal(t, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), *file.lastModified)
 }
 
 func TestBlobstoreFileMetadata(t *testing.T) {

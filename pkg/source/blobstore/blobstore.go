@@ -27,6 +27,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/athena"
+	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/bruin-data/ingestr/internal/adlsutil"
@@ -64,14 +66,22 @@ const (
 	FormatUnknown FileFormat = "unknown"
 )
 
+type s3FileDiscovery string
+
+const (
+	s3FileDiscoveryList            s3FileDiscovery = "list"
+	s3FileDiscoveryAthenaInventory s3FileDiscovery = "athena_inventory"
+)
+
 type BlobstoreSource struct {
-	provider   Provider
-	s3Client   *s3.Client
-	gcsClient  *storage.Client
-	adlsClient *azureDatalakeSourceClient
-	sftpClient *sftp.Client
-	sshClient  *ssh.Client
-	parsedURI  *parsedBlobstoreURI
+	provider     Provider
+	s3Client     *s3.Client
+	athenaClient athenaAPI
+	gcsClient    *storage.Client
+	adlsClient   *azureDatalakeSourceClient
+	sftpClient   *sftp.Client
+	sshClient    *ssh.Client
+	parsedURI    *parsedBlobstoreURI
 }
 
 type blobstoreFile struct {
@@ -84,6 +94,12 @@ type blobstoreFileMetadata struct {
 	lastModified   *time.Time
 	filepathColumn string
 	filepath       string
+}
+
+type athenaAPI interface {
+	StartQueryExecution(context.Context, *athena.StartQueryExecutionInput, ...func(*athena.Options)) (*athena.StartQueryExecutionOutput, error)
+	GetQueryExecution(context.Context, *athena.GetQueryExecutionInput, ...func(*athena.Options)) (*athena.GetQueryExecutionOutput, error)
+	GetQueryResults(context.Context, *athena.GetQueryResultsInput, ...func(*athena.Options)) (*athena.GetQueryResultsOutput, error)
 }
 
 func NewBlobstoreSource() *BlobstoreSource {
@@ -110,6 +126,13 @@ func (s *BlobstoreSource) Connect(ctx context.Context, uri string) error {
 			return fmt.Errorf("failed to create S3 client: %w", err)
 		}
 		s.s3Client = client
+		if parsed.s3FileDiscovery == s3FileDiscoveryAthenaInventory {
+			athenaClient, err := createS3DiscoveryAthenaClient(ctx, parsed)
+			if err != nil {
+				return fmt.Errorf("failed to create Athena client for S3 file discovery: %w", err)
+			}
+			s.athenaClient = athenaClient
+		}
 		config.Debug("[BLOBSTORE-SRC] Connected to S3")
 
 	case ProviderGCS:
@@ -145,21 +168,7 @@ func (s *BlobstoreSource) Connect(ctx context.Context, uri string) error {
 }
 
 func createS3Client(ctx context.Context, parsed *parsedBlobstoreURI) (*s3.Client, error) {
-	var opts []func(*awsconfig.LoadOptions) error
-
-	if parsed.accessKeyID != "" && parsed.secretAccessKey != "" {
-		opts = append(opts, awsconfig.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(parsed.accessKeyID, parsed.secretAccessKey, ""),
-		))
-	}
-
-	if parsed.region != "" {
-		opts = append(opts, awsconfig.WithRegion(parsed.region))
-	} else {
-		opts = append(opts, awsconfig.WithRegion("us-east-1"))
-	}
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+	cfg, err := loadAWSConfig(ctx, parsed, parsed.region)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +187,34 @@ func createS3Client(ctx context.Context, parsed *parsedBlobstoreURI) (*s3.Client
 	}
 
 	return s3.NewFromConfig(cfg, s3Opts...), nil
+}
+
+func createS3DiscoveryAthenaClient(ctx context.Context, parsed *parsedBlobstoreURI) (athenaAPI, error) {
+	cfg, err := loadAWSConfig(ctx, parsed, parsed.athenaRegion)
+	if err != nil {
+		return nil, err
+	}
+	return athena.NewFromConfig(cfg), nil
+}
+
+func loadAWSConfig(ctx context.Context, parsed *parsedBlobstoreURI, region string) (aws.Config, error) {
+	var opts []func(*awsconfig.LoadOptions) error
+
+	if parsed.accessKeyID != "" && parsed.secretAccessKey != "" {
+		opts = append(opts, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(parsed.accessKeyID, parsed.secretAccessKey, ""),
+		))
+	}
+
+	if region == "" {
+		region = parsed.region
+	}
+	if region == "" {
+		region = "us-east-1"
+	}
+	opts = append(opts, awsconfig.WithRegion(region))
+
+	return awsconfig.LoadDefaultConfig(ctx, opts...)
 }
 
 func createGCSClient(ctx context.Context, parsed *parsedBlobstoreURI) (*storage.Client, error) {
@@ -463,29 +500,14 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 
 	switch s.provider {
 	case ProviderS3:
-		paginator := s3.NewListObjectsV2Paginator(s.s3Client, &s3.ListObjectsV2Input{
-			Bucket: aws.String(bucket),
-			Prefix: aws.String(prefix),
-		})
-
-		for paginator.HasMorePages() {
-			page, err := paginator.NextPage(ctx)
-			if err != nil {
-				return count, fmt.Errorf("failed to list S3 objects: %w", err)
-			}
-
-			for _, obj := range page.Contents {
-				key := aws.ToString(obj.Key)
-				if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(obj.LastModified, opts) {
-					select {
-					case fileChan <- blobstoreFile{key: key, lastModified: copyTimePtr(obj.LastModified)}:
-						count++
-					case <-ctx.Done():
-						return count, ctx.Err()
-					}
-				}
-			}
+		if s.parsedURI != nil && s.parsedURI.s3FileDiscovery == s3FileDiscoveryAthenaInventory {
+			return s.listMatchingS3InventoryFiles(ctx, bucket, pattern, prefix, opts, fileChan)
 		}
+		s3Count, err := s.listMatchingS3Objects(ctx, bucket, pattern, prefix, opts, fileChan)
+		if err != nil {
+			return count, err
+		}
+		count += s3Count
 
 	case ProviderGCS:
 		it := s.gcsClient.Bucket(bucket).Objects(ctx, &storage.Query{Prefix: prefix})
@@ -586,6 +608,169 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 	return count, nil
 }
 
+func (s *BlobstoreSource) listMatchingS3Objects(ctx context.Context, bucket, pattern, prefix string, opts source.ReadOptions, fileChan chan<- blobstoreFile) (int, error) {
+	count := 0
+	paginator := s3.NewListObjectsV2Paginator(s.s3Client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(prefix),
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return count, fmt.Errorf("failed to list S3 objects: %w", err)
+		}
+
+		for _, obj := range page.Contents {
+			key := aws.ToString(obj.Key)
+			if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(obj.LastModified, opts) {
+				select {
+				case fileChan <- blobstoreFile{key: key, lastModified: copyTimePtr(obj.LastModified)}:
+					count++
+				case <-ctx.Done():
+					return count, ctx.Err()
+				}
+			}
+		}
+	}
+
+	return count, nil
+}
+
+func (s *BlobstoreSource) listMatchingS3InventoryFiles(ctx context.Context, bucket, pattern, prefix string, opts source.ReadOptions, fileChan chan<- blobstoreFile) (int, error) {
+	if s.athenaClient == nil {
+		return 0, fmt.Errorf("Athena client is not initialized for S3 file discovery")
+	}
+	if s.parsedURI == nil {
+		return 0, fmt.Errorf("S3 source URI is not initialized")
+	}
+
+	query, database, err := buildS3InventoryQuery(s.parsedURI, bucket, prefix, opts)
+	if err != nil {
+		return 0, err
+	}
+	config.Debug("[BLOBSTORE-SRC] Discovering S3 files with Athena inventory query: %s", query)
+
+	execID, err := s.startAthenaQuery(ctx, query, database)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.waitForAthenaQuery(ctx, execID); err != nil {
+		return 0, err
+	}
+
+	return s.streamS3InventoryQueryResults(ctx, execID, pattern, opts, fileChan)
+}
+
+func (s *BlobstoreSource) startAthenaQuery(ctx context.Context, query, database string) (string, error) {
+	input := &athena.StartQueryExecutionInput{
+		QueryString: aws.String(query),
+		ResultConfiguration: &athenatypes.ResultConfiguration{
+			OutputLocation: aws.String(s.parsedURI.athenaResultsLocation),
+		},
+	}
+	if database != "" {
+		input.QueryExecutionContext = &athenatypes.QueryExecutionContext{Database: aws.String(database)}
+	}
+	if s.parsedURI.athenaWorkgroup != "" {
+		input.WorkGroup = aws.String(s.parsedURI.athenaWorkgroup)
+	}
+
+	resp, err := s.athenaClient.StartQueryExecution(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("failed to start Athena inventory query: %w", err)
+	}
+	if resp.QueryExecutionId == nil || *resp.QueryExecutionId == "" {
+		return "", fmt.Errorf("failed to start Athena inventory query: empty execution id")
+	}
+	return *resp.QueryExecutionId, nil
+}
+
+func (s *BlobstoreSource) waitForAthenaQuery(ctx context.Context, executionID string) error {
+	delay := 400 * time.Millisecond
+	for {
+		resp, err := s.athenaClient.GetQueryExecution(ctx, &athena.GetQueryExecutionInput{QueryExecutionId: aws.String(executionID)})
+		if err != nil {
+			return fmt.Errorf("failed to get Athena inventory query status: %w", err)
+		}
+		if resp.QueryExecution == nil || resp.QueryExecution.Status == nil || resp.QueryExecution.Status.State == "" {
+			return fmt.Errorf("failed to get Athena inventory query status: missing state")
+		}
+
+		switch resp.QueryExecution.Status.State {
+		case athenatypes.QueryExecutionStateSucceeded:
+			return nil
+		case athenatypes.QueryExecutionStateFailed, athenatypes.QueryExecutionStateCancelled:
+			reason := "unknown reason"
+			if resp.QueryExecution.Status.StateChangeReason != nil && *resp.QueryExecution.Status.StateChangeReason != "" {
+				reason = *resp.QueryExecution.Status.StateChangeReason
+			}
+			return fmt.Errorf("Athena inventory query %s %s: %s", executionID, strings.ToLower(string(resp.QueryExecution.Status.State)), reason)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+			if delay < 5*time.Second {
+				delay *= 2
+				if delay > 5*time.Second {
+					delay = 5 * time.Second
+				}
+			}
+		}
+	}
+}
+
+func (s *BlobstoreSource) streamS3InventoryQueryResults(ctx context.Context, executionID, pattern string, opts source.ReadOptions, fileChan chan<- blobstoreFile) (int, error) {
+	count := 0
+	skipHeader := true
+	var nextToken *string
+
+	for {
+		out, err := s.athenaClient.GetQueryResults(ctx, &athena.GetQueryResultsInput{
+			QueryExecutionId: aws.String(executionID),
+			NextToken:        nextToken,
+			MaxResults:       aws.Int32(1000),
+		})
+		if err != nil {
+			return count, fmt.Errorf("failed to get Athena inventory query results: %w", err)
+		}
+
+		if out.ResultSet != nil {
+			for i, row := range out.ResultSet.Rows {
+				if skipHeader && i == 0 {
+					continue
+				}
+				key := athenaRowValue(row, 0)
+				if key == "" {
+					continue
+				}
+				modified, err := parseAthenaInventoryTime(athenaRowValue(row, 1))
+				if err != nil {
+					return count, fmt.Errorf("failed to parse Athena inventory modified timestamp for key %q: %w", key, err)
+				}
+				if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(modified, opts) {
+					select {
+					case fileChan <- blobstoreFile{key: key, lastModified: modified}:
+						count++
+					case <-ctx.Done():
+						return count, ctx.Err()
+					}
+				}
+			}
+		}
+
+		skipHeader = false
+		if out.NextToken == nil || *out.NextToken == "" {
+			break
+		}
+		nextToken = out.NextToken
+	}
+
+	return count, nil
+}
+
 func (s *BlobstoreSource) fileMetadata(opts source.ReadOptions, bucket, key string, lastModified *time.Time) blobstoreFileMetadata {
 	if !handlesBlobstoreModifiedIncrementality(s.provider) || !usesBlobstoreModifiedIncrementality(opts) {
 		return blobstoreFileMetadata{}
@@ -676,6 +861,112 @@ func isExcludedColumn(name string, excludeColumns []string) bool {
 		}
 	}
 	return false
+}
+
+func buildS3InventoryQuery(parsed *parsedBlobstoreURI, bucket, prefix string, opts source.ReadOptions) (query, database string, err error) {
+	database, table, err := parseAthenaTableRef(parsed.athenaInventoryTable)
+	if err != nil {
+		return "", "", err
+	}
+
+	keyColumn := quoteAthenaIdent(parsed.athenaInventoryKeyColumn)
+	modifiedColumn := quoteAthenaIdent(parsed.athenaInventoryModifiedColumn)
+	query = fmt.Sprintf(
+		"SELECT %s, %s FROM %s",
+		keyColumn,
+		modifiedColumn,
+		quoteAthenaTableRef(database, table),
+	)
+
+	conditions := []string{
+		fmt.Sprintf("%s = '%s'", quoteAthenaIdent(parsed.athenaInventoryBucketColumn), escapeAthenaString(bucket)),
+	}
+	if prefix != "" {
+		conditions = append(conditions, fmt.Sprintf(
+			"substr(%s, 1, %d) = '%s'",
+			keyColumn,
+			len([]rune(prefix)),
+			escapeAthenaString(prefix),
+		))
+	}
+	if usesBlobstoreModifiedIncrementality(opts) {
+		if opts.IntervalStart != nil {
+			conditions = append(conditions, fmt.Sprintf(
+				"%s >= timestamp '%s'",
+				modifiedColumn,
+				formatAthenaTimestamp(*opts.IntervalStart),
+			))
+		}
+		if opts.IntervalEnd != nil {
+			conditions = append(conditions, fmt.Sprintf(
+				"%s <= timestamp '%s'",
+				modifiedColumn,
+				formatAthenaTimestamp(*opts.IntervalEnd),
+			))
+		}
+	}
+
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	return query, database, nil
+}
+
+func athenaRowValue(row athenatypes.Row, index int) string {
+	if index < 0 || index >= len(row.Data) || row.Data[index].VarCharValue == nil {
+		return ""
+	}
+	return *row.Data[index].VarCharValue
+}
+
+func parseAthenaInventoryTime(value string) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+
+	formats := []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05.999",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	}
+	var lastErr error
+	for _, format := range formats {
+		t, err := time.ParseInLocation(format, value, time.UTC)
+		if err == nil {
+			utc := t.UTC()
+			return &utc, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+func parseAthenaTableRef(tableRef string) (database, table string, err error) {
+	parts := strings.Split(tableRef, ".")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", fmt.Errorf("athena_inventory_table must be qualified as <database>.<table>")
+	}
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), nil
+}
+
+func quoteAthenaTableRef(database, table string) string {
+	return quoteAthenaIdent(database) + "." + quoteAthenaIdent(table)
+}
+
+func quoteAthenaIdent(ident string) string {
+	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
+}
+
+func escapeAthenaString(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+func formatAthenaTimestamp(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05")
 }
 
 func (s *BlobstoreSource) downloadFile(ctx context.Context, bucket, key string) ([]byte, error) {
@@ -1045,22 +1336,30 @@ func parseCSVValue(s string) interface{} {
 }
 
 type parsedBlobstoreURI struct {
-	provider          Provider
-	accessKeyID       string
-	secretAccessKey   string
-	region            string
-	endpointURL       string
-	credentialsFile   string
-	accountName       string
-	accountKey        string
-	sasToken          string
-	clientCredentials adlsutil.ClientCredentials
-	sftpHost          string
-	sftpPort          string
-	sftpUsername      string
-	sftpPassword      string
-	sftpKeyFile       string
-	sftpKeyPassphrase string
+	provider                      Provider
+	accessKeyID                   string
+	secretAccessKey               string
+	region                        string
+	endpointURL                   string
+	s3FileDiscovery               s3FileDiscovery
+	athenaInventoryTable          string
+	athenaInventoryBucketColumn   string
+	athenaInventoryKeyColumn      string
+	athenaInventoryModifiedColumn string
+	athenaResultsLocation         string
+	athenaWorkgroup               string
+	athenaRegion                  string
+	credentialsFile               string
+	accountName                   string
+	accountKey                    string
+	sasToken                      string
+	clientCredentials             adlsutil.ClientCredentials
+	sftpHost                      string
+	sftpPort                      string
+	sftpUsername                  string
+	sftpPassword                  string
+	sftpKeyFile                   string
+	sftpKeyPassphrase             string
 }
 
 func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
@@ -1074,10 +1373,9 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 	switch u.Scheme {
 	case "s3":
 		parsed.provider = ProviderS3
-		parsed.accessKeyID = u.Query().Get("access_key_id")
-		parsed.secretAccessKey = u.Query().Get("secret_access_key")
-		parsed.region = u.Query().Get("region")
-		parsed.endpointURL = u.Query().Get("endpoint_url")
+		if err := parseS3BlobstoreURIOptions(u, parsed); err != nil {
+			return nil, err
+		}
 	case "gs", "gcs":
 		parsed.provider = ProviderGCS
 		parsed.credentialsFile = u.Query().Get("credentials_file")
@@ -1109,6 +1407,74 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 	}
 
 	return parsed, nil
+}
+
+func parseS3BlobstoreURIOptions(u *url.URL, parsed *parsedBlobstoreURI) error {
+	q := u.Query()
+	parsed.accessKeyID = q.Get("access_key_id")
+	parsed.secretAccessKey = q.Get("secret_access_key")
+	parsed.region = q.Get("region")
+	parsed.endpointURL = q.Get("endpoint_url")
+
+	discovery := strings.TrimSpace(q.Get("file_discovery"))
+	switch discovery {
+	case "", string(s3FileDiscoveryList), "s3_list", "list_objects":
+		parsed.s3FileDiscovery = s3FileDiscoveryList
+	case string(s3FileDiscoveryAthenaInventory):
+		parsed.s3FileDiscovery = s3FileDiscoveryAthenaInventory
+	default:
+		return fmt.Errorf("unsupported S3 file_discovery %q; supported values are %q and %q", discovery, s3FileDiscoveryList, s3FileDiscoveryAthenaInventory)
+	}
+
+	parsed.athenaInventoryTable = strings.TrimSpace(q.Get("athena_inventory_table"))
+	parsed.athenaInventoryBucketColumn = strings.TrimSpace(q.Get("athena_inventory_bucket_column"))
+	if parsed.athenaInventoryBucketColumn == "" {
+		parsed.athenaInventoryBucketColumn = "bucket"
+	}
+	parsed.athenaInventoryKeyColumn = strings.TrimSpace(q.Get("athena_inventory_key_column"))
+	if parsed.athenaInventoryKeyColumn == "" {
+		parsed.athenaInventoryKeyColumn = "key"
+	}
+	parsed.athenaInventoryModifiedColumn = strings.TrimSpace(q.Get("athena_inventory_modified_column"))
+	if parsed.athenaInventoryModifiedColumn == "" {
+		parsed.athenaInventoryModifiedColumn = "last_modified_date"
+	}
+	parsed.athenaWorkgroup = strings.TrimSpace(q.Get("athena_workgroup"))
+	parsed.athenaRegion = strings.TrimSpace(q.Get("athena_region"))
+	parsed.athenaResultsLocation = strings.TrimSpace(q.Get("athena_results_location"))
+
+	if parsed.s3FileDiscovery != s3FileDiscoveryAthenaInventory {
+		return nil
+	}
+	if parsed.athenaInventoryTable == "" {
+		return fmt.Errorf("athena_inventory_table is required when file_discovery=%s", s3FileDiscoveryAthenaInventory)
+	}
+	resultsLocation, err := normalizeS3Location(parsed.athenaResultsLocation, "athena_results_location")
+	if err != nil {
+		return err
+	}
+	parsed.athenaResultsLocation = resultsLocation
+	if _, _, err := parseAthenaTableRef(parsed.athenaInventoryTable); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizeS3Location(value, field string) (string, error) {
+	s := strings.TrimSpace(value)
+	if s == "" {
+		return "", fmt.Errorf("%s is required", field)
+	}
+	s = strings.TrimPrefix(s, "s3://")
+	s = strings.TrimLeft(s, "/")
+	if s == "" {
+		return "", fmt.Errorf("invalid %s %q", field, value)
+	}
+	out := "s3://" + s
+	if !strings.HasSuffix(out, "/") {
+		out += "/"
+	}
+	return out, nil
 }
 
 func buildAzureDatalakeFilesystemURL(accountName, fileSystem string) string {
