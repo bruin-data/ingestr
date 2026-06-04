@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -396,10 +397,16 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 		pkMap[strings.ToLower(pk)] = true
 	}
 
+	cdcMerge := slices.Contains(opts.Columns, "_cdc_deleted")
 	var updateSets []string
 	for _, col := range opts.Columns {
 		if !pkMap[strings.ToLower(col)] {
-			updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", quoteIdentifier(col), quoteIdentifier(col)))
+			q := quoteIdentifier(col)
+			if cdcMerge {
+				updateSets = append(updateSets, fmt.Sprintf("target.%s = COALESCE(source.%s, target.%s)", q, q, q))
+			} else {
+				updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", q, q))
+			}
 		}
 	}
 

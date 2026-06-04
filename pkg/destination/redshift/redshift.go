@@ -174,10 +174,16 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		pkMap[strings.ToLower(pk)] = true
 	}
 
+	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+
 	var updateSets []string
 	for _, col := range allColumns {
 		if !pkMap[strings.ToLower(col)] {
-			updateSets = append(updateSets, fmt.Sprintf(`"%s" = source."%s"`, col, col))
+			if hasCDCDeleted {
+				updateSets = append(updateSets, fmt.Sprintf(`"%s" = COALESCE(source."%s", target."%s")`, col, col, col))
+			} else {
+				updateSets = append(updateSets, fmt.Sprintf(`"%s" = source."%s"`, col, col))
+			}
 		}
 	}
 
@@ -187,8 +193,6 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		quotedCols[i] = fmt.Sprintf(`"%s"`, col)
 		sourceCols[i] = fmt.Sprintf(`source."%s"`, col)
 	}
-
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
 
 	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKsForPartition := make([]string, len(primaryKeys))

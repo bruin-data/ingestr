@@ -3,8 +3,10 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -417,6 +419,115 @@ func TestPostgresCDC_DuplicatePKWithinBatch(t *testing.T) {
 	assert.True(t, deleted, "Row should be marked deleted")
 	assert.Equal(t, "item1_updated", name, "Row should retain the latest values before delete")
 	assert.Equal(t, 999, value, "Row should retain the latest values before delete")
+}
+
+func TestPostgresCDC_MergePreservesUnchangedJSONB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+
+	sourcePool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+
+	testCases := make([]int, 200)
+	for i := range testCases {
+		testCases[i] = i
+	}
+	configPayload, err := json.Marshal(map[string]interface{}{
+		"testCases": testCases,
+		"padding":   strings.Repeat("x", 8*1024),
+	})
+	require.NoError(t, err)
+
+	_, err = sourcePool.Exec(ctx, `
+		CREATE TABLE public.test_toast_cdc (
+			id SERIAL PRIMARY KEY,
+			config_data JSONB NOT NULL,
+			result_data TEXT NOT NULL
+		)
+	`)
+	require.NoError(t, err)
+	_, err = sourcePool.Exec(ctx, `CREATE PUBLICATION test_toast_pub FOR TABLE public.test_toast_cdc`)
+	require.NoError(t, err)
+	_, err = sourcePool.Exec(ctx, `ALTER USER testuser REPLICATION`)
+	require.NoError(t, err)
+
+	_, err = sourcePool.Exec(ctx,
+		`INSERT INTO public.test_toast_cdc (config_data, result_data) VALUES ($1::jsonb, 'pending')`,
+		string(configPayload),
+	)
+	require.NoError(t, err)
+	sourcePool.Close()
+
+	destContainer, err := postgres.Run(
+		ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("destdb"),
+		postgres.WithUsername("destuser"),
+		postgres.WithPassword("destpass"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(30*time.Second),
+		),
+	)
+	require.NoError(t, err)
+	defer func() { _ = destContainer.Terminate(ctx) }()
+
+	destConnString, err := destContainer.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+
+	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_toast_pub&mode=batch"
+	cfg := &config.IngestConfig{
+		SourceURI:           cdcSourceURI,
+		DestURI:             destConnString,
+		SourceTable:         "public.test_toast_cdc",
+		DestTable:           "public.test_toast_cdc_dest",
+		PrimaryKeys:         []string{"id"},
+		IncrementalStrategy: "merge",
+	}
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	sourcePool, err = pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer sourcePool.Close()
+
+	_, err = sourcePool.Exec(ctx, `UPDATE public.test_toast_cdc SET result_data = 'completed' WHERE id = 1`)
+	require.NoError(t, err)
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	var sourceConfig, destConfig string
+	var sourceLen, destLen int
+	err = sourcePool.QueryRow(ctx, `
+		SELECT config_data::text, jsonb_array_length(config_data->'testCases')
+		FROM public.test_toast_cdc WHERE id = 1
+	`).Scan(&sourceConfig, &sourceLen)
+	require.NoError(t, err)
+
+	destPool, err := pgxpool.New(ctx, destConnString)
+	require.NoError(t, err)
+	defer destPool.Close()
+
+	err = destPool.QueryRow(ctx, `
+		SELECT config_data::text, jsonb_array_length(config_data->'testCases')
+		FROM public.test_toast_cdc_dest WHERE id = 1
+	`).Scan(&destConfig, &destLen)
+	require.NoError(t, err)
+
+	assert.Equal(t, sourceLen, destLen, "testCases array length should match")
+	assert.Equal(t, sourceConfig, destConfig, "unchanged JSONB payload should be preserved after partial update merge")
+
+	var resultData string
+	err = destPool.QueryRow(ctx, `SELECT result_data FROM public.test_toast_cdc_dest WHERE id = 1`).Scan(&resultData)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", resultData)
 }
 
 // TestPostgresCDC_BatchModeCompletesWithActiveWrites verifies that batch mode completes

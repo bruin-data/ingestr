@@ -496,7 +496,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedPKs, ", "),
-			buildConflictUpdateSet(nonPKColumns),
+			buildCDCConflictUpdateSet(nonPKColumns, quotedTargetTable),
 		)
 		config.Debug("[MERGE] Executing upsert for non-deleted rows: %s", upsertSQL)
 
@@ -913,6 +913,14 @@ func buildConflictUpdateSet(columns []string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
 		sets[i] = fmt.Sprintf(`"%s" = EXCLUDED."%s"`, col, col)
+	}
+	return strings.Join(sets, ", ")
+}
+
+func buildCDCConflictUpdateSet(columns []string, quotedTable string) string {
+	sets := make([]string, len(columns))
+	for i, col := range columns {
+		sets[i] = fmt.Sprintf(`"%s" = COALESCE(EXCLUDED."%s", %s."%s")`, col, col, quotedTable, col)
 	}
 	return strings.Join(sets, ", ")
 }

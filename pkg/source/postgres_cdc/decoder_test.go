@@ -222,6 +222,36 @@ func TestDecoderBeginAndCommit(t *testing.T) {
 	assert.Nil(t, batch)
 }
 
+func TestResolveColumnValue(t *testing.T) {
+	t.Run("unchanged uses old tuple on update", func(t *testing.T) {
+		change := Change{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+			OldValues: []interface{}{int32(1), `{"testCases":[1,2,3]}`, "pending"},
+		}
+		assert.Equal(t, `{"testCases":[1,2,3]}`, resolveColumnValue(change, 1))
+		assert.Equal(t, "done", resolveColumnValue(change, 2))
+	})
+
+	t.Run("unchanged without old tuple becomes nil", func(t *testing.T) {
+		change := Change{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), tupleUnchangedMarker},
+			OldValues: []interface{}{int32(1)},
+		}
+		assert.Nil(t, resolveColumnValue(change, 1))
+	})
+
+	t.Run("explicit null stays nil", func(t *testing.T) {
+		change := Change{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), nil},
+			OldValues: []interface{}{int32(1), `{"keep":true}`},
+		}
+		assert.Nil(t, resolveColumnValue(change, 1))
+	})
+}
+
 func TestNewDecoder(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Name:   "orders",

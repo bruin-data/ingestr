@@ -3,6 +3,7 @@ package duckdb
 import (
 	"context"
 	"fmt"
+	"slices"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -407,6 +408,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
+	cdcMerge := slices.Contains(opts.Columns, "_cdc_deleted")
 
 	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
@@ -422,7 +424,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
-			buildUpdateSet(nonPKColumns, "source"),
+			buildUpdateSet(nonPKColumns, "target", "source", cdcMerge),
 			dedupSource,
 			onCondition,
 		)
@@ -963,10 +965,14 @@ func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	return strings.Join(conditions, " AND ")
 }
 
-func buildUpdateSet(columns []string, sourceAlias string) string {
+func buildUpdateSet(columns []string, targetAlias, sourceAlias string, cdcMerge bool) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
+		if cdcMerge {
+			sets[i] = fmt.Sprintf(`"%s" = COALESCE(%s."%s", %s."%s")`, col, sourceAlias, col, targetAlias, col)
+		} else {
+			sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
+		}
 	}
 	return strings.Join(sets, ", ")
 }

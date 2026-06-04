@@ -387,7 +387,7 @@ func (d *MultiTableDecoder) parseTupleData(data []byte, rel *RelationInfo, table
 		case tupleDataNull:
 			values[i] = nil
 		case tupleDataUnchanged:
-			values[i] = nil
+			values[i] = tupleUnchangedMarker
 		case tupleDataText:
 			if len(data) < 4 {
 				return nil, fmt.Errorf("text length truncated")
@@ -447,11 +447,7 @@ func (d *MultiTableDecoder) changesToBatch(changes []Change, tableSchema *schema
 	for _, change := range changes {
 		// Append source column values
 		for i := 0; i < sourceColCount; i++ {
-			var val interface{}
-			if i < len(change.Values) {
-				val = change.Values[i]
-			}
-			arrowconv.AppendValue(builders[i], val)
+			arrowconv.AppendValue(builders[i], resolveColumnValue(change, i))
 		}
 
 		// Append CDC columns

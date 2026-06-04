@@ -1478,10 +1478,17 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 		pkMap[strings.ToLower(pk)] = true
 	}
 
+	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+
 	var updateSets []string
 	for _, col := range allColumns {
 		if !pkMap[strings.ToLower(col)] {
-			updateSets = append(updateSets, fmt.Sprintf("t.`%s` = %s", col, castSourceCol(col, castMap)))
+			src := castSourceCol(col, castMap)
+			if hasCDCDeleted {
+				updateSets = append(updateSets, fmt.Sprintf("t.`%s` = COALESCE(%s, t.`%s`)", col, src, col))
+			} else {
+				updateSets = append(updateSets, fmt.Sprintf("t.`%s` = %s", col, src))
+			}
 		}
 	}
 
@@ -1492,9 +1499,6 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 		quotedCols[i] = fmt.Sprintf("`%s`", col)
 		sourceCols[i] = castSourceCol(col, castMap)
 	}
-
-	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
 
 	var sql strings.Builder
 	fmt.Fprintf(&sql, "MERGE `%s`.`%s`.`%s` AS t\n", d.projectID, targetDataset, targetTable)

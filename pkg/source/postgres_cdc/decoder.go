@@ -432,7 +432,7 @@ func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{},
 		case tupleDataNull:
 			values[i] = nil
 		case tupleDataUnchanged:
-			values[i] = nil // Will use old value if needed
+			values[i] = tupleUnchangedMarker
 		case tupleDataText:
 			if len(data) < 4 {
 				return nil, fmt.Errorf("text length truncated")
@@ -492,11 +492,7 @@ func (d *Decoder) changesToBatch() (arrow.RecordBatch, error) {
 	for i, change := range d.pendingChanges {
 		// Append source column values
 		for colIdx := 0; colIdx < sourceColCount; colIdx++ {
-			var val interface{}
-			if colIdx < len(change.Values) {
-				val = change.Values[colIdx]
-			}
-			arrowconv.AppendValue(builders[colIdx], val)
+			arrowconv.AppendValue(builders[colIdx], resolveColumnValue(change, colIdx))
 		}
 
 		// Append CDC columns
