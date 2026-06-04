@@ -54,8 +54,9 @@ type BigQueryDestination struct {
 	loadMethod         bigQueryLoadMethod
 
 	// Table metadata for current operation
-	partitionBy string
-	clusterBy   []string
+	partitionBy       string
+	partitionByIsDate bool
+	clusterBy         []string
 
 	// Cache for dataset existence checks
 	knownDatasets map[string]bool
@@ -334,6 +335,28 @@ func jobRef(job *bigquery.Job) string {
 	return job.ID()
 }
 
+func isDatePartitionColumn(s *schema.TableSchema, column string) bool {
+	if s == nil || column == "" {
+		return false
+	}
+	for _, col := range s.Columns {
+		if col.Name == column {
+			return col.DataType == schema.TypeDate
+		}
+	}
+	return false
+}
+
+// partitionByClause builds the PARTITION BY clause for a partition column.
+// BigQuery requires a DATE-valued expression: an already-DATE column is used
+// bare, while TIMESTAMP/DATETIME columns are wrapped in DATE().
+func partitionByClause(column string, isDateColumn bool) string {
+	if isDateColumn {
+		return fmt.Sprintf("PARTITION BY `%s`\n", column)
+	}
+	return fmt.Sprintf("PARTITION BY DATE(`%s`)\n", column)
+}
+
 // PrepareTable creates or recreates a table with the given schema.
 func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
 	ctx = annotation.WithStep(ctx, annotation.StepDDL)
@@ -346,6 +369,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 
 	// Store partition and cluster information for use in SwapTable
 	d.partitionBy = opts.PartitionBy
+	d.partitionByIsDate = isDatePartitionColumn(opts.Schema, opts.PartitionBy)
 	d.clusterBy = opts.ClusterBy
 
 	if opts.DropFirst {
@@ -850,7 +874,7 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE `%s`.`%s`.`%s`\n", d.projectID, targetDataset, targetTableName)
 
 		if d.partitionBy != "" {
-			sql += fmt.Sprintf("PARTITION BY DATE(`%s`)\n", d.partitionBy)
+			sql += partitionByClause(d.partitionBy, d.partitionByIsDate)
 		}
 
 		if len(d.clusterBy) > 0 {
@@ -1111,7 +1135,14 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	var sqlBuilder strings.Builder
 	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE `%s`.`%s`.`%s`\n", d.projectID, dataset, table)
 	if meta.TimePartitioning != nil && meta.TimePartitioning.Field != "" {
-		fmt.Fprintf(&sqlBuilder, "PARTITION BY DATE(`%s`)\n", meta.TimePartitioning.Field)
+		isDate := false
+		for _, field := range meta.Schema {
+			if field.Name == meta.TimePartitioning.Field {
+				isDate = field.Type == bigquery.DateFieldType
+				break
+			}
+		}
+		sqlBuilder.WriteString(partitionByClause(meta.TimePartitioning.Field, isDate))
 	}
 	if meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
 		clusterCols := make([]string, len(meta.Clustering.Fields))

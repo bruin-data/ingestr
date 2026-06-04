@@ -821,6 +821,66 @@ func TestBuildAlterColumnTypeRewriteSQL(t *testing.T) {
 	}
 }
 
+func TestBuildAlterColumnTypeRewriteSQL_DatePartitionNotWrapped(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.projectID = "my-project"
+
+	meta := &bigquery.TableMetadata{
+		Schema: bigquery.Schema{
+			{Name: "day", Type: bigquery.DateFieldType},
+			{Name: "age", Type: bigquery.IntegerFieldType},
+		},
+		TimePartitioning: &bigquery.TimePartitioning{
+			Field: "day",
+		},
+	}
+
+	sql, err := dest.buildAlterColumnTypeRewriteSQL("my_dataset", "my_table", "age", "STRING", meta)
+	if err != nil {
+		t.Fatalf("buildAlterColumnTypeRewriteSQL returned error: %v", err)
+	}
+	if !contains(sql, "PARTITION BY `day`") {
+		t.Fatalf("DATE partition column should be referenced bare:\n%s", sql)
+	}
+	if contains(sql, "PARTITION BY DATE(`day`)") {
+		t.Fatalf("DATE partition column must not be wrapped in DATE():\n%s", sql)
+	}
+}
+
+func TestIsDatePartitionColumn(t *testing.T) {
+	s := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "day", DataType: schema.TypeDate},
+			{Name: "created_at", DataType: schema.TypeTimestamp},
+		},
+	}
+
+	if !isDatePartitionColumn(s, "day") {
+		t.Fatal("expected day to be detected as a DATE column")
+	}
+	if isDatePartitionColumn(s, "created_at") {
+		t.Fatal("expected created_at not to be detected as a DATE column")
+	}
+	if isDatePartitionColumn(s, "missing") {
+		t.Fatal("expected missing column to default to false")
+	}
+	if isDatePartitionColumn(nil, "day") {
+		t.Fatal("expected nil schema to default to false")
+	}
+	if isDatePartitionColumn(s, "") {
+		t.Fatal("expected empty column to default to false")
+	}
+}
+
+func TestPartitionByClause(t *testing.T) {
+	if got := partitionByClause("day", true); got != "PARTITION BY `day`\n" {
+		t.Fatalf("DATE column clause = %q", got)
+	}
+	if got := partitionByClause("created_at", false); got != "PARTITION BY DATE(`created_at`)\n" {
+		t.Fatalf("timestamp column clause = %q", got)
+	}
+}
+
 func TestBuildMergeSQL(t *testing.T) {
 	dest := NewBigQueryDestination()
 	dest.projectID = "my-project"
