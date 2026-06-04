@@ -497,11 +497,6 @@ func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts desti
 	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
 	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
 
-	quotedCols := make([]string, len(opts.Columns))
-	for i, col := range opts.Columns {
-		quotedCols[i] = quoteIdentifier(col)
-	}
-
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -522,13 +517,10 @@ func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts desti
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (%s) SELECT %s FROM %s",
-		targetFull,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
-		stagingFull,
-	)
+	colList := strings.Join(quoteColumns(opts.Columns), ", ")
+	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
+	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingFull, quoteIdentifier(opts.IncrementalKey))
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetFull, colList, selectClause)
 	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
 
 	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
@@ -870,6 +862,14 @@ func quoteIdentifier(name string) string {
 		return name
 	}
 	return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
+}
+
+func quoteColumns(cols []string) []string {
+	quoted := make([]string, len(cols))
+	for i, col := range cols {
+		quoted[i] = quoteIdentifier(col)
+	}
+	return quoted
 }
 
 func filterColumns(columns []string, exclude []string) []string {

@@ -454,13 +454,10 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
-	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s`,
-		quoteTable(opts.TargetTable),
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		quoteTable(opts.StagingTable),
-	)
+	colList := strings.Join(quotedColumns, ", ")
+	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
+	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quoteTable(opts.StagingTable), quoteColumns([]string{opts.IncrementalKey})[0])
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) %s`, quoteTable(opts.TargetTable), colList, selectClause)
 	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
 
 	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
