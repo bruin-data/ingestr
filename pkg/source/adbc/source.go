@@ -318,6 +318,11 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 	go func() {
 		defer close(results)
 
+		// A custom query (source_table: "query: ...") always runs as a real query
+		// — it can't use the Storage Read API — so annotate it for extract cost
+		// attribution. Prepend keeps a leading comment (BigQuery/DuckDB); Snowflake
+		// strips it, so a Snowflake source would need a QUERY_TAG instead.
+		query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
 		config.Debug("[%s] Executing custom query: %s", s.dialect.Name(), query)
 		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {

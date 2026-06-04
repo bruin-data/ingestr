@@ -14,6 +14,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
@@ -67,6 +68,12 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 	arrowCtx := sf.WithArrowBatches(ctx)
 	arrowCtx = sf.WithArrowBatchesTimestampOption(arrowCtx, sf.UseMicrosecondTimestamp)
 	// Note: WithHigherPrecision changes decimal handling - don't use it for simpler type mapping
+
+	// Attribute the extract read via Snowflake's QUERY_TAG (Snowflake strips
+	// leading comments, so the destination-style tag is used instead of Prepend).
+	if tag, ok := annotation.QueryTag(annotation.WithStep(ctx, annotation.StepExtract)); ok {
+		arrowCtx = sf.WithQueryTag(arrowCtx, tag)
+	}
 
 	// Get raw connection for Arrow batch access
 	conn, err := db.Conn(ctx)
