@@ -318,6 +318,7 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 	go func() {
 		defer close(results)
 
+		query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
 		config.Debug("[%s] Executing custom query: %s", s.dialect.Name(), query)
 		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {
