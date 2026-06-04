@@ -114,7 +114,7 @@ func TestTypeForStep(t *testing.T) {
 	}
 	for step, want := range cases {
 		if got := typeForStep(step); got != want {
-			t.Fatalf("typeForStep(%q) = %q, want %q", step, got, want)
+			t.Errorf("typeForStep(%q) = %q, want %q", step, got, want)
 		}
 	}
 }
