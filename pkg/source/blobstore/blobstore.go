@@ -19,6 +19,7 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
@@ -49,7 +50,9 @@ const (
 	ProviderAzureDatalake Provider = "adls"
 	ProviderSFTP          Provider = "sftp"
 
-	defaultParallelism = 5
+	defaultParallelism               = 5
+	defaultBlobstoreFilePathColumn   = "_ingestr_source_file_path"
+	defaultBlobstoreModifiedAtColumn = "_ingestr_source_file_modified_at"
 )
 
 type FileFormat string
@@ -69,6 +72,18 @@ type BlobstoreSource struct {
 	sftpClient *sftp.Client
 	sshClient  *ssh.Client
 	parsedURI  *parsedBlobstoreURI
+}
+
+type blobstoreFile struct {
+	key          string
+	lastModified *time.Time
+}
+
+type blobstoreFileMetadata struct {
+	incrementalKey string
+	lastModified   *time.Time
+	filepathColumn string
+	filepath       string
 }
 
 func NewBlobstoreSource() *BlobstoreSource {
@@ -281,6 +296,9 @@ func (s *BlobstoreSource) Close(ctx context.Context) error {
 }
 
 func (s *BlobstoreSource) HandlesIncrementality() bool {
+	// Blobstore still supports user-defined row-level incremental keys from file
+	// data. Object modified filtering is a reserved-key read mode, not a global
+	// source-managed incrementality contract.
 	return false
 }
 
@@ -334,7 +352,7 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 	config.Debug("[BLOBSTORE-SRC] Starting with parallelism %d", parallelism)
 
 	results := make(chan source.RecordBatchResult, parallelism*2)
-	fileChan := make(chan string, parallelism*2)
+	fileChan := make(chan blobstoreFile, parallelism*2)
 
 	var wg sync.WaitGroup
 	for i := 0; i < parallelism; i++ {
@@ -357,11 +375,15 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 	go func() {
 		defer wg.Done()
 		defer close(fileChan)
-		count, err := s.listMatchingFiles(ctx, bucket, pattern, fileChan)
+		count, err := s.listMatchingFiles(ctx, bucket, pattern, opts, fileChan)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to list files: %w", err)}
 		} else if count == 0 {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("no files found matching pattern: %s/%s", bucket, pattern)}
+			if handlesBlobstoreModifiedIncrementality(s.provider) && usesBlobstoreModifiedIncrementality(opts) && hasModifiedInterval(opts) {
+				config.Debug("[BLOBSTORE-SRC] No files found matching pattern=%s/%s and modified interval", bucket, pattern)
+			} else {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("no files found matching pattern: %s/%s", bucket, pattern)}
+			}
 		} else {
 			config.Debug("[BLOBSTORE-SRC] Found %d matching files", count)
 		}
@@ -377,8 +399,9 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 	return results, nil
 }
 
-func (s *BlobstoreSource) processFile(ctx context.Context, bucket, fileKey string, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) {
+func (s *BlobstoreSource) processFile(ctx context.Context, bucket string, file blobstoreFile, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) {
 	startFile := time.Now()
+	fileKey := file.key
 	format := detectFileFormat(fileKey, formatHint)
 	if format == FormatUnknown {
 		config.Debug("[BLOBSTORE-SRC] Skipping file with unknown format: %s", fileKey)
@@ -416,14 +439,15 @@ func (s *BlobstoreSource) processFile(ctx context.Context, bucket, fileKey strin
 
 	var totalRows int64
 	var batchNum int
+	metadata := s.fileMetadata(opts, bucket, file.key, file.lastModified)
 
 	switch format {
 	case FormatParquet:
-		err = s.readParquetFile(ctx, data, results, &totalRows, &batchNum, opts)
+		err = s.readParquetFile(ctx, data, results, &totalRows, &batchNum, opts, metadata)
 	case FormatJSONL:
-		err = s.readJSONLFile(ctx, dataReader, results, &totalRows, &batchNum, batchSize, opts)
+		err = s.readJSONLFile(ctx, dataReader, results, &totalRows, &batchNum, batchSize, opts, metadata)
 	case FormatCSV:
-		err = s.readCSVFile(ctx, dataReader, tableEncoding, results, &totalRows, &batchNum, batchSize, opts)
+		err = s.readCSVFile(ctx, dataReader, tableEncoding, results, &totalRows, &batchNum, batchSize, opts, metadata)
 	}
 
 	if err != nil {
@@ -433,7 +457,7 @@ func (s *BlobstoreSource) processFile(ctx context.Context, bucket, fileKey strin
 	config.Debug("[BLOBSTORE-SRC] File %s: %d rows in %d batches, read time: %v", fileKey, totalRows, batchNum, time.Since(startFile))
 }
 
-func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern string, fileChan chan<- string) (int, error) {
+func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern string, opts source.ReadOptions, fileChan chan<- blobstoreFile) (int, error) {
 	count := 0
 	prefix := extractPrefix(pattern)
 
@@ -452,9 +476,9 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 
 			for _, obj := range page.Contents {
 				key := aws.ToString(obj.Key)
-				if matchesGlobPattern(key, pattern) {
+				if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(obj.LastModified, opts) {
 					select {
-					case fileChan <- key:
+					case fileChan <- blobstoreFile{key: key, lastModified: copyTimePtr(obj.LastModified)}:
 						count++
 					case <-ctx.Done():
 						return count, ctx.Err()
@@ -474,9 +498,10 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 				return count, fmt.Errorf("failed to list GCS objects: %w", err)
 			}
 
-			if matchesGlobPattern(attrs.Name, pattern) {
+			updated := attrs.Updated
+			if matchesGlobPattern(attrs.Name, pattern) && objectMatchesIncrementalOptions(&updated, opts) {
 				select {
-				case fileChan <- attrs.Name:
+				case fileChan <- blobstoreFile{key: attrs.Name, lastModified: copyTimePtr(&updated)}:
 					count++
 				case <-ctx.Done():
 					return count, ctx.Err()
@@ -519,7 +544,7 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 				key := *item.Name
 				if matchesGlobPattern(key, pattern) {
 					select {
-					case fileChan <- key:
+					case fileChan <- blobstoreFile{key: key}:
 						count++
 					case <-ctx.Done():
 						return count, ctx.Err()
@@ -549,7 +574,7 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 			relPath := strings.TrimPrefix(walker.Path(), "/")
 			if matchesGlobPattern(relPath, pattern) {
 				select {
-				case fileChan <- walker.Path():
+				case fileChan <- blobstoreFile{key: walker.Path()}:
 					count++
 				case <-ctx.Done():
 					return count, ctx.Err()
@@ -559,6 +584,98 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 	}
 
 	return count, nil
+}
+
+func (s *BlobstoreSource) fileMetadata(opts source.ReadOptions, bucket, key string, lastModified *time.Time) blobstoreFileMetadata {
+	if !handlesBlobstoreModifiedIncrementality(s.provider) || !usesBlobstoreModifiedIncrementality(opts) {
+		return blobstoreFileMetadata{}
+	}
+
+	metadata := blobstoreFileMetadata{}
+	if lastModified != nil && !lastModified.IsZero() && !isExcludedColumn(defaultBlobstoreModifiedAtColumn, opts.ExcludeColumns) {
+		t := lastModified.UTC()
+		metadata.incrementalKey = defaultBlobstoreModifiedAtColumn
+		metadata.lastModified = &t
+	}
+
+	if key != "" && !isExcludedColumn(defaultBlobstoreFilePathColumn, opts.ExcludeColumns) {
+		metadata.filepathColumn = defaultBlobstoreFilePathColumn
+		metadata.filepath = s.filepath(bucket, key)
+	}
+
+	return metadata
+}
+
+func handlesBlobstoreModifiedIncrementality(provider Provider) bool {
+	return provider == ProviderS3 || provider == ProviderGCS
+}
+
+func usesBlobstoreModifiedIncrementality(opts source.ReadOptions) bool {
+	return strings.EqualFold(opts.IncrementalKey, defaultBlobstoreModifiedAtColumn)
+}
+
+func hasModifiedInterval(opts source.ReadOptions) bool {
+	return opts.IntervalStart != nil || opts.IntervalEnd != nil
+}
+
+func objectMatchesIncrementalOptions(lastModified *time.Time, opts source.ReadOptions) bool {
+	if !usesBlobstoreModifiedIncrementality(opts) {
+		return true
+	}
+	return objectModifiedInInterval(lastModified, opts.IntervalStart, opts.IntervalEnd)
+}
+
+func objectModifiedInInterval(lastModified, intervalStart, intervalEnd *time.Time) bool {
+	if intervalStart == nil && intervalEnd == nil {
+		return true
+	}
+	if lastModified == nil || lastModified.IsZero() {
+		return false
+	}
+
+	modified := lastModified.UTC()
+	if intervalStart != nil {
+		start := intervalStart.UTC()
+		if modified.Before(start) {
+			return false
+		}
+	}
+	if intervalEnd != nil {
+		end := intervalEnd.UTC()
+		if modified.After(end) {
+			return false
+		}
+	}
+	return true
+}
+
+func copyTimePtr(t *time.Time) *time.Time {
+	if t == nil || t.IsZero() {
+		return nil
+	}
+	copied := t.UTC()
+	return &copied
+}
+
+func (s *BlobstoreSource) filepath(bucket, key string) string {
+	if bucket == "" {
+		return key
+	}
+
+	scheme := string(s.provider)
+	if s.provider == ProviderGCS {
+		scheme = "gs"
+	}
+	return scheme + "://" + strings.TrimRight(bucket, "/") + "/" + strings.TrimLeft(key, "/")
+}
+
+func isExcludedColumn(name string, excludeColumns []string) bool {
+	for _, excluded := range excludeColumns {
+		if strings.EqualFold(name, excluded) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *BlobstoreSource) downloadFile(ctx context.Context, bucket, key string) ([]byte, error) {
@@ -612,7 +729,7 @@ func (s *BlobstoreSource) downloadFile(ctx context.Context, bucket, key string) 
 	return nil, fmt.Errorf("unsupported provider: %s", s.provider)
 }
 
-func (s *BlobstoreSource) readParquetFile(ctx context.Context, data []byte, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, opts source.ReadOptions) error {
+func (s *BlobstoreSource) readParquetFile(ctx context.Context, data []byte, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, opts source.ReadOptions, metadata blobstoreFileMetadata) error {
 	reader := bytes.NewReader(data)
 	pr, err := file.NewParquetReader(reader)
 	if err != nil {
@@ -647,7 +764,9 @@ func (s *BlobstoreSource) readParquetFile(ctx context.Context, data []byte, resu
 		*totalRows += rows
 		config.Debug("[BLOBSTORE-SRC] Parquet batch %d: %d rows (total: %d)", *batchNum, rows, *totalRows)
 
-		results <- source.RecordBatchResult{Batch: rec}
+		if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
+			return err
+		}
 
 		if opts.Limit > 0 && *totalRows >= int64(opts.Limit) {
 			break
@@ -657,7 +776,7 @@ func (s *BlobstoreSource) readParquetFile(ctx context.Context, data []byte, resu
 	return tr.Err()
 }
 
-func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
+func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions, metadata blobstoreFileMetadata) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 
@@ -689,7 +808,9 @@ func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, r
 			*totalRows += int64(len(items))
 			config.Debug("[BLOBSTORE-SRC] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
 
-			results <- source.RecordBatchResult{Batch: record}
+			if err := sendRecordBatchWithMetadata(results, record, metadata); err != nil {
+				return err
+			}
 			items = make([]map[string]interface{}, 0, batchSize)
 
 			if opts.Limit > 0 && *totalRows >= int64(opts.Limit) {
@@ -712,13 +833,15 @@ func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, r
 		*totalRows += int64(len(items))
 		config.Debug("[BLOBSTORE-SRC] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
 
-		results <- source.RecordBatchResult{Batch: record}
+		if err := sendRecordBatchWithMetadata(results, record, metadata); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tableEncoding string, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
+func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tableEncoding string, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions, metadata blobstoreFileMetadata) error {
 	decoded, err := csvsource.Decode(reader, tableEncoding)
 	if err != nil {
 		return fmt.Errorf("failed to set up CSV decoder: %w", err)
@@ -762,7 +885,9 @@ func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tab
 			*totalRows += int64(len(rows))
 			config.Debug("[BLOBSTORE-SRC] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
 
-			results <- source.RecordBatchResult{Batch: rec}
+			if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
+				return err
+			}
 			rows = make([]map[string]interface{}, 0, batchSize)
 
 			if opts.Limit > 0 && *totalRows >= int64(opts.Limit) {
@@ -781,10 +906,113 @@ func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tab
 		*totalRows += int64(len(rows))
 		config.Debug("[BLOBSTORE-SRC] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
 
-		results <- source.RecordBatchResult{Batch: rec}
+		if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+func sendRecordBatchWithMetadata(results chan<- source.RecordBatchResult, record arrow.RecordBatch, metadata blobstoreFileMetadata) error {
+	out, added, err := addBlobstoreMetadataColumns(record, metadata)
+	if err != nil {
+		record.Release()
+		return err
+	}
+	if added {
+		record.Release()
+	}
+	results <- source.RecordBatchResult{Batch: out}
+	return nil
+}
+
+func addBlobstoreMetadataColumns(record arrow.RecordBatch, metadata blobstoreFileMetadata) (arrow.RecordBatch, bool, error) {
+	if record == nil {
+		return record, false, nil
+	}
+
+	addLastModified := metadata.incrementalKey != "" && metadata.lastModified != nil
+	addFilepath := metadata.filepathColumn != "" && metadata.filepath != ""
+	if !addLastModified && !addFilepath {
+		return record, false, nil
+	}
+	if addLastModified && addFilepath && strings.EqualFold(metadata.incrementalKey, metadata.filepathColumn) {
+		return nil, false, fmt.Errorf("blobstore metadata columns conflict on %q; choose a different --incremental-key", metadata.incrementalKey)
+	}
+
+	for _, name := range []string{metadata.incrementalKey, metadata.filepathColumn} {
+		if name == "" {
+			continue
+		}
+		if recordHasColumn(record, name) {
+			return nil, false, fmt.Errorf("blobstore metadata column %q already exists in file data; choose a different --incremental-key or exclude the column", name)
+		}
+	}
+
+	addedCols := 0
+	if addLastModified {
+		addedCols++
+	}
+	if addFilepath {
+		addedCols++
+	}
+
+	fields := make([]arrow.Field, int(record.NumCols())+addedCols)
+	columns := make([]arrow.Array, int(record.NumCols())+addedCols)
+	for i := 0; i < int(record.NumCols()); i++ {
+		fields[i] = record.Schema().Field(i)
+		columns[i] = record.Column(i)
+		columns[i].Retain()
+	}
+
+	nextCol := int(record.NumCols())
+	if addLastModified {
+		timestampType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+		fields[nextCol] = arrow.Field{
+			Name:     metadata.incrementalKey,
+			Type:     timestampType,
+			Nullable: false,
+		}
+
+		builder := array.NewTimestampBuilder(memory.DefaultAllocator, timestampType)
+		for i := int64(0); i < record.NumRows(); i++ {
+			builder.Append(arrow.Timestamp(metadata.lastModified.UTC().UnixMicro()))
+		}
+		columns[nextCol] = builder.NewArray()
+		builder.Release()
+		nextCol++
+	}
+
+	if addFilepath {
+		fields[nextCol] = arrow.Field{
+			Name:     metadata.filepathColumn,
+			Type:     arrow.BinaryTypes.String,
+			Nullable: false,
+		}
+
+		builder := array.NewStringBuilder(memory.DefaultAllocator)
+		for i := int64(0); i < record.NumRows(); i++ {
+			builder.Append(metadata.filepath)
+		}
+		columns[nextCol] = builder.NewArray()
+		builder.Release()
+	}
+
+	newRecord := array.NewRecordBatch(arrow.NewSchema(fields, nil), columns, record.NumRows())
+	for _, col := range columns {
+		col.Release()
+	}
+	return newRecord, true, nil
+}
+
+func recordHasColumn(record arrow.RecordBatch, name string) bool {
+	for _, field := range record.Schema().Fields() {
+		if strings.EqualFold(field.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseCSVValue(s string) interface{} {
