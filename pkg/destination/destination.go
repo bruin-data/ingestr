@@ -63,6 +63,7 @@ type SwapOptions struct {
 	TargetTable    string
 	PrimaryKeys    []string
 	IncrementalKey string
+	Schema         *schema.TableSchema
 }
 
 // SCD2Options contains parameters for SCD2 (Slowly Changing Dimensions Type 2) operations.

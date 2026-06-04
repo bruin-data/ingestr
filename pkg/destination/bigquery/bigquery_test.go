@@ -872,6 +872,26 @@ func TestIsDatePartitionColumn(t *testing.T) {
 	}
 }
 
+func TestPartitionFieldIsDate(t *testing.T) {
+	s := bigquery.Schema{
+		{Name: "day", Type: bigquery.DateFieldType},
+		{Name: "created_at", Type: bigquery.TimestampFieldType},
+	}
+
+	if !partitionFieldIsDate(s, "day") {
+		t.Fatal("expected day to be detected as a DATE column")
+	}
+	if partitionFieldIsDate(s, "created_at") {
+		t.Fatal("expected created_at not to be detected as a DATE column")
+	}
+	if partitionFieldIsDate(s, "missing") {
+		t.Fatal("expected missing column to default to false")
+	}
+	if partitionFieldIsDate(nil, "day") {
+		t.Fatal("expected nil schema to default to false")
+	}
+}
+
 func TestPartitionByClause(t *testing.T) {
 	if got := partitionByClause("day", true); got != "PARTITION BY `day`\n" {
 		t.Fatalf("DATE column clause = %q", got)
