@@ -46,7 +46,7 @@ func unchangedColumnsJSON(change Change, columns []schema.Column, nSourceCols in
 	if change.Operation != "UPDATE" {
 		return "[]"
 	}
-	var names []string
+	names := make([]string, 0)
 	for i := 0; i < nSourceCols && i < len(columns); i++ {
 		if columnIsUnchanged(change, i) {
 			names = append(names, columns[i].Name)

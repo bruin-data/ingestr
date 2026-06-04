@@ -2,7 +2,6 @@ package redshift
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -250,14 +249,12 @@ func (d *RedshiftDestination) SupportsCDCMerge() bool {
 }
 
 func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
-	lit := cdcUnchangedColsJSONLiteral(col)
+	// Two-anchor check handles multi-element arrays: element is either first (after '[')
+	// or subsequent (after ','). Avoids full-literal ["col"] which fails for >1 elements.
 	return fmt.Sprintf(
-		`"%s" = CASE WHEN POSITION('%s' IN COALESCE(%s, '[]')) > 0 THEN %s ELSE %s END`,
-		col, lit, unchangedColsExpr, targetExpr, sourceExpr,
+		`"%s" = CASE WHEN CHARINDEX('["%s"', COALESCE(%s, '[]')) > 0 OR CHARINDEX(',"%s"', COALESCE(%s, '[]')) > 0 THEN %s ELSE %s END`,
+		col, col, unchangedColsExpr,
+		col, unchangedColsExpr,
+		targetExpr, sourceExpr,
 	)
-}
-
-func cdcUnchangedColsJSONLiteral(colName string) string {
-	b, _ := json.Marshal([]string{colName})
-	return string(b)
 }
