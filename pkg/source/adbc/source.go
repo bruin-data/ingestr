@@ -314,8 +314,9 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 		batchSize = 100000
 	}
 
-	// Snowflake strips leading comments, so carry the tag via a session
-	// QUERY_TAG; other engines keep the comment.
+	// Tag the extract query for cost attribution. Snowflake strips leading SQL
+	// comments, so it gets a session QUERY_TAG (applied below); every other
+	// engine keeps the "-- @bruin.config" comment.
 	annotated := annotation.WithStep(ctx, annotation.StepExtract)
 	var tagSQL string
 	if strings.EqualFold(s.dialect.Name(), "SNOWFLAKE") {
@@ -331,11 +332,13 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 	go func() {
 		defer close(results)
 
+		// Run on the pool by default. For Snowflake, pin one connection so the
+		// QUERY_TAG and the query share a session (both *sql.DB and *sql.Conn
+		// satisfy QueryContext).
 		var runner interface {
 			QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 		} = s.db
 		if tagSQL != "" {
-			// Pin a connection so the tag and the query share one session.
 			conn, err := s.db.Conn(ctx)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get connection: %w", err)}
