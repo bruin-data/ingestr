@@ -874,8 +874,9 @@ func formatSnowflakeValue(v interface{}) string {
 }
 
 func cdcMergeAssign(colName, colQuoted, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	colLit := strings.ReplaceAll(colName, "'", "''")
 	return fmt.Sprintf(
 		"%s = IFF(ARRAY_CONTAINS(TO_VARIANT('%s'), TRY_PARSE_JSON(%s)), %s, %s)",
-		colQuoted, colName, unchangedColsExpr, targetExpr, sourceExpr,
+		colQuoted, colLit, unchangedColsExpr, targetExpr, sourceExpr,
 	)
 }

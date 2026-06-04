@@ -984,17 +984,17 @@ func buildUpdateSet(columns []string, targetAlias, sourceAlias string, cdcMerge 
 	return strings.Join(sets, ", ")
 }
 
+func cdcUnchangedColsJSONLiteral(colName string) string {
+	b, _ := json.Marshal([]string{colName})
+	return strings.ReplaceAll(string(b), "'", "''")
+}
+
 func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
 	lit := cdcUnchangedColsJSONLiteral(col)
 	return fmt.Sprintf(
 		`"%s" = CASE WHEN %s::JSON @> '%s'::JSON THEN %s ELSE %s END`,
 		col, unchangedColsExpr, lit, targetExpr, sourceExpr,
 	)
-}
-
-func cdcUnchangedColsJSONLiteral(colName string) string {
-	b, _ := json.Marshal([]string{colName})
-	return string(b)
 }
 
 // buildChangeConditions builds change detection conditions using IS DISTINCT FROM.

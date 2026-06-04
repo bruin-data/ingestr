@@ -1813,8 +1813,9 @@ func containsHelper(s, substr string) bool {
 }
 
 func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	colLit := strings.ReplaceAll(col, "'", "''")
 	return fmt.Sprintf(
 		"t.`%s` = IF('%s' IN UNNEST(IFNULL(JSON_EXTRACT_STRING_ARRAY(%s), [])), %s, %s)",
-		col, col, unchangedColsExpr, targetExpr, sourceExpr,
+		col, colLit, unchangedColsExpr, targetExpr, sourceExpr,
 	)
 }
