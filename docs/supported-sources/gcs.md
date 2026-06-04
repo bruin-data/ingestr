@@ -196,7 +196,7 @@ ingestr ingest \
     --interval-start "2026-01-01T00:00:00Z"
 ```
 
-The interval bounds are compared to GCS object metadata, not row values inside the files. If no interval is provided, ingestr reads all files matching the source-table pattern and still emits the metadata columns.
+The interval bounds are compared to GCS object metadata, not row values inside the files. The interval is half-open: `--interval-start` is inclusive, and `--interval-end` is exclusive. If no interval is provided, ingestr reads all files matching the source-table pattern and still emits the metadata columns.
 
 The `_ingestr_source_file_modified_at` and `_ingestr_source_file_path` column names must not already exist in the files. Use `--exclude-columns` only if you intentionally want to suppress one of these emitted metadata columns; excluding `_ingestr_source_file_modified_at` also means it will not be available to destination strategies as an incremental key.
 

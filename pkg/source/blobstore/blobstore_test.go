@@ -614,12 +614,14 @@ func TestObjectModifiedInInterval(t *testing.T) {
 	mid := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
 	before := start.Add(-time.Second)
+	justBeforeEnd := end.Add(-time.Nanosecond)
 	after := end.Add(time.Second)
 	zero := time.Time{}
 
 	assert.True(t, objectModifiedInInterval(&mid, nil, nil))
 	assert.True(t, objectModifiedInInterval(&start, &start, &end), "start bound is inclusive")
-	assert.True(t, objectModifiedInInterval(&end, &start, &end), "end bound is inclusive")
+	assert.True(t, objectModifiedInInterval(&justBeforeEnd, &start, &end), "values before end bound are included")
+	assert.False(t, objectModifiedInInterval(&end, &start, &end), "end bound is exclusive")
 	assert.False(t, objectModifiedInInterval(&before, &start, &end))
 	assert.False(t, objectModifiedInInterval(&after, &start, &end))
 	assert.False(t, objectModifiedInInterval(nil, &start, &end))
@@ -630,12 +632,16 @@ func TestObjectMatchesIncrementalOptionsRequiresReservedKey(t *testing.T) {
 	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	before := start.Add(-time.Hour)
 
-	assert.True(t, objectMatchesIncrementalOptions(&before, source.ReadOptions{IntervalStart: &start}))
-	assert.True(t, objectMatchesIncrementalOptions(&before, source.ReadOptions{
+	assert.True(t, objectMatchesIncrementalOptions(ProviderS3, &before, source.ReadOptions{IntervalStart: &start}))
+	assert.True(t, objectMatchesIncrementalOptions(ProviderS3, &before, source.ReadOptions{
 		IncrementalKey: "updated_at",
 		IntervalStart:  &start,
 	}))
-	assert.False(t, objectMatchesIncrementalOptions(&before, source.ReadOptions{
+	assert.False(t, objectMatchesIncrementalOptions(ProviderS3, &before, source.ReadOptions{
+		IncrementalKey: defaultBlobstoreModifiedAtColumn,
+		IntervalStart:  &start,
+	}))
+	assert.True(t, objectMatchesIncrementalOptions(ProviderSFTP, &before, source.ReadOptions{
 		IncrementalKey: defaultBlobstoreModifiedAtColumn,
 		IntervalStart:  &start,
 	}))
@@ -658,7 +664,7 @@ func TestBuildS3InventoryQuery(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "inventory_db", database)
-	assert.Equal(t, `SELECT "key", "last_modified_date" FROM "inventory_db"."inventory_table" WHERE "bucket" = 'my-bucket' AND substr("key", 1, 5) = 'logs/' AND "last_modified_date" >= timestamp '2026-01-02 01:04:05' AND "last_modified_date" <= timestamp '2026-01-03 04:05:06'`, query)
+	assert.Equal(t, `SELECT "key", "last_modified_date" FROM "inventory_db"."inventory_table" WHERE "bucket" = 'my-bucket' AND substr("key", 1, 5) = 'logs/' AND "last_modified_date" >= timestamp '2026-01-02 01:04:05' AND "last_modified_date" < timestamp '2026-01-03 04:05:06'`, query)
 }
 
 func TestBuildS3InventoryQueryWithoutModifiedIncrementality(t *testing.T) {
@@ -722,6 +728,7 @@ func TestParseAthenaInventoryTime(t *testing.T) {
 func TestStreamS3InventoryQueryResultsFiltersRows(t *testing.T) {
 	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	s := &BlobstoreSource{
+		provider: ProviderS3,
 		athenaClient: &fakeAthenaAPI{
 			results: []*athena.GetQueryResultsOutput{
 				{

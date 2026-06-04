@@ -521,7 +521,7 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 			}
 
 			updated := attrs.Updated
-			if matchesGlobPattern(attrs.Name, pattern) && objectMatchesIncrementalOptions(&updated, opts) {
+			if matchesGlobPattern(attrs.Name, pattern) && objectMatchesIncrementalOptions(s.provider, &updated, opts) {
 				select {
 				case fileChan <- blobstoreFile{key: attrs.Name, lastModified: copyTimePtr(&updated)}:
 					count++
@@ -623,7 +623,7 @@ func (s *BlobstoreSource) listMatchingS3Objects(ctx context.Context, bucket, pat
 
 		for _, obj := range page.Contents {
 			key := aws.ToString(obj.Key)
-			if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(obj.LastModified, opts) {
+			if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(s.provider, obj.LastModified, opts) {
 				select {
 				case fileChan <- blobstoreFile{key: key, lastModified: copyTimePtr(obj.LastModified)}:
 					count++
@@ -750,7 +750,7 @@ func (s *BlobstoreSource) streamS3InventoryQueryResults(ctx context.Context, exe
 				if err != nil {
 					return count, fmt.Errorf("failed to parse Athena inventory modified timestamp for key %q: %w", key, err)
 				}
-				if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(modified, opts) {
+				if matchesGlobPattern(key, pattern) && objectMatchesIncrementalOptions(s.provider, modified, opts) {
 					select {
 					case fileChan <- blobstoreFile{key: key, lastModified: modified}:
 						count++
@@ -803,8 +803,8 @@ func hasModifiedInterval(opts source.ReadOptions) bool {
 	return opts.IntervalStart != nil || opts.IntervalEnd != nil
 }
 
-func objectMatchesIncrementalOptions(lastModified *time.Time, opts source.ReadOptions) bool {
-	if !usesBlobstoreModifiedIncrementality(opts) {
+func objectMatchesIncrementalOptions(provider Provider, lastModified *time.Time, opts source.ReadOptions) bool {
+	if !handlesBlobstoreModifiedIncrementality(provider) || !usesBlobstoreModifiedIncrementality(opts) {
 		return true
 	}
 	return objectModifiedInInterval(lastModified, opts.IntervalStart, opts.IntervalEnd)
@@ -827,7 +827,7 @@ func objectModifiedInInterval(lastModified, intervalStart, intervalEnd *time.Tim
 	}
 	if intervalEnd != nil {
 		end := intervalEnd.UTC()
-		if modified.After(end) {
+		if !modified.Before(end) {
 			return false
 		}
 	}
@@ -899,7 +899,7 @@ func buildS3InventoryQuery(parsed *parsedBlobstoreURI, bucket, prefix string, op
 		}
 		if opts.IntervalEnd != nil {
 			conditions = append(conditions, fmt.Sprintf(
-				"%s <= timestamp '%s'",
+				"%s < timestamp '%s'",
 				modifiedColumn,
 				formatAthenaTimestamp(*opts.IntervalEnd),
 			))
