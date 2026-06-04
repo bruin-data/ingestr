@@ -639,7 +639,7 @@ func (s *BlobstoreSource) listMatchingS3Objects(ctx context.Context, bucket, pat
 
 func (s *BlobstoreSource) listMatchingS3InventoryFiles(ctx context.Context, bucket, pattern, prefix string, opts source.ReadOptions, fileChan chan<- blobstoreFile) (int, error) {
 	if s.athenaClient == nil {
-		return 0, fmt.Errorf("Athena client is not initialized for S3 file discovery")
+		return 0, fmt.Errorf("athena client is not initialized for S3 file discovery")
 	}
 	if s.parsedURI == nil {
 		return 0, fmt.Errorf("S3 source URI is not initialized")
@@ -705,7 +705,7 @@ func (s *BlobstoreSource) waitForAthenaQuery(ctx context.Context, executionID st
 			if resp.QueryExecution.Status.StateChangeReason != nil && *resp.QueryExecution.Status.StateChangeReason != "" {
 				reason = *resp.QueryExecution.Status.StateChangeReason
 			}
-			return fmt.Errorf("Athena inventory query %s %s: %s", executionID, strings.ToLower(string(resp.QueryExecution.Status.State)), reason)
+			return fmt.Errorf("athena inventory query %s %s: %s", executionID, strings.ToLower(string(resp.QueryExecution.Status.State)), reason)
 		}
 
 		select {
