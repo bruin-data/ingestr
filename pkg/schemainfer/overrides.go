@@ -74,7 +74,11 @@ func SourceTableSchemaFromColumnOverrides(columnsSpec, tableName string) (*schem
 			dataType = schema.TypeString
 			precision = 0
 			scale = 0
-			fmt.Printf("Warning: column %q created as STRING placeholder (no type in --columns); pass --columns %s:<type> for correct typing\n", ov.Name, ov.Name)
+			if ov.RenameTo != "" {
+				fmt.Printf("Warning: column %q created as STRING placeholder (no type in --columns); pass --columns %s:<type>:%s for correct typing\n", ov.Name, ov.RenameTo, ov.Name)
+			} else {
+				fmt.Printf("Warning: column %q created as STRING placeholder (no type in --columns); pass --columns %s:<type> for correct typing\n", ov.Name, ov.Name)
+			}
 		}
 
 		ts.Columns = append(ts.Columns, schema.Column{

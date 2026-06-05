@@ -1,6 +1,9 @@
 package schemainfer
 
 import (
+	"bytes"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -101,6 +104,50 @@ func TestSourceTableSchemaFromColumnOverrides_KeepsSourceNamesForRenames(t *test
 	if cols["fname"].DataType != schema.TypeString {
 		t.Errorf("fname type = %v, want string", cols["fname"].DataType)
 	}
+}
+
+func TestSourceTableSchemaFromColumnOverrides_RenameOnlyWarningUsesRenameSyntax(t *testing.T) {
+	output := captureStdout(t, func() {
+		if _, err := SourceTableSchemaFromColumnOverrides("first_name::fname", "users"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, "pass --columns first_name:<type>:fname") {
+		t.Fatalf("warning = %q, want rename syntax advice", output)
+	}
+	if strings.Contains(output, "pass --columns fname:<type>") {
+		t.Fatalf("warning = %q, should not suggest a plain source-column override", output)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+	}()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stdout pipe: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close stdout reader: %v", err)
+	}
+	return buf.String()
 }
 
 func TestAppendMissingOverrideColumns_NilSchemaIsNoop(t *testing.T) {
