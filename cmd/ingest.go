@@ -151,6 +151,11 @@ func IngestCommand() *cli.Command {
 				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:string:fname,email::eml'. Types: bigint, int, smallint, float, double, decimal(p,s), string, text, boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
 				Sources: cli.EnvVars("INGESTR_COLUMNS"),
 			},
+			&cli.BoolFlag{
+				Name:    "no-inference",
+				Usage:   "Skip schema inference for schema-less sources and use --columns as the source schema",
+				Sources: cli.EnvVars("NO_INFERENCE", "INGESTR_NO_INFERENCE"),
+			},
 			&cli.StringSliceFlag{
 				Name:    "mask",
 				Usage:   "Column masking configuration in format 'column:algorithm[:param]'. Algorithms: hash, sha256, md5, hmac, email, phone, credit_card, ssn, redact, stars, fixed, random, partial, first_letter, uuid, sequential, round, range, noise, date_shift, year_only, month_year.",
@@ -215,6 +220,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.SQLLimit = int(c.Int("sql-limit"))
 	cfg.SQLExcludeColumns = c.StringSlice("sql-exclude-columns")
 	cfg.Columns = c.String("columns")
+	cfg.NoInference = c.Bool("no-inference")
 	cfg.Mask = c.StringSlice("mask")
 	cfg.PipelinesDir = c.String("pipelines-dir")
 	cfg.StagingBucket = c.String("staging-bucket")

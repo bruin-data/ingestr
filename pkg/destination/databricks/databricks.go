@@ -444,11 +444,6 @@ func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts dest
 	stagingFull := d.quoteFullTable(stagingSchema, stagingName)
 	targetFull := d.quoteFullTable(targetSchema, targetName)
 
-	quotedCols := make([]string, len(opts.Columns))
-	for i, col := range opts.Columns {
-		quotedCols[i] = fmt.Sprintf("`%s`", col)
-	}
-
 	startVal := d.formatValue(opts.IntervalStart)
 	endVal := d.formatValue(opts.IntervalEnd)
 
@@ -463,13 +458,10 @@ func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts dest
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (%s) SELECT %s FROM %s",
-		targetFull,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
-		stagingFull,
-	)
+	colList := strings.Join(quoteColumns(opts.Columns), ", ")
+	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
+	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingFull, fmt.Sprintf("`%s`", opts.IncrementalKey))
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetFull, colList, selectClause)
 	config.Debug("[DATABRICKS] Executing INSERT: %s", insertSQL)
 
 	if err := d.executeStatement(ctx, insertSQL); err != nil {
@@ -597,6 +589,14 @@ func (d *DatabricksDestination) parseTableName(table string) (schemaName, tableN
 
 func (d *DatabricksDestination) quoteFullTable(schemaName, tableName string) string {
 	return fmt.Sprintf("`%s`.`%s`.`%s`", d.catalog, schemaName, tableName)
+}
+
+func quoteColumns(cols []string) []string {
+	quoted := make([]string, len(cols))
+	for i, col := range cols {
+		quoted[i] = fmt.Sprintf("`%s`", col)
+	}
+	return quoted
 }
 
 func (d *DatabricksDestination) extractWarehouseID() string {

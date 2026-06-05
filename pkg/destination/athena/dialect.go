@@ -1,4 +1,4 @@
-package trino
+package athena
 
 import (
 	"fmt"
@@ -8,14 +8,15 @@ import (
 )
 
 func init() {
-	schemaevolution.RegisterDialect("trino", &Dialect{})
+	schemaevolution.RegisterDialect("athena", &Dialect{})
 }
 
-// Dialect implements the schemaevolution.Dialect interface for Trino.
+// Dialect implements schemaevolution.Dialect for Athena. Athena's SQL grammar
+// is Trino-compatible, so this mirrors the historical shared Trino dialect.
 type Dialect struct{}
 
 func (d *Dialect) Name() string {
-	return "Trino"
+	return "Athena"
 }
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {

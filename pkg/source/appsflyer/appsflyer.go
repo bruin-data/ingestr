@@ -363,12 +363,14 @@ func fixKey(key string) string {
 }
 
 func excludeMetricsForDateRange(metrics []string, toDate string) []string {
-	endDate, err := time.Parse("2006-01-02", toDate)
+	now := time.Now()
+	endDate, err := time.ParseInLocation("2006-01-02", toDate, now.Location())
 	if err != nil {
 		return nil
 	}
 
-	daysSinceEnd := int(time.Since(endDate).Hours() / 24)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	daysSinceEnd := int(today.Sub(endDate).Hours() / 24)
 
 	var excluded []string
 	for _, metric := range metrics {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -312,13 +314,46 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 		batchSize = 100000
 	}
 
+	// Tag the extract query for cost attribution. Snowflake strips leading SQL
+	// comments, so it gets a session QUERY_TAG (applied below); every other
+	// engine keeps the "-- @bruin.config" comment.
+	annotated := annotation.WithStep(ctx, annotation.StepExtract)
+	var tagSQL string
+	if strings.EqualFold(s.dialect.Name(), "SNOWFLAKE") {
+		if tag, ok := annotation.QueryTag(annotated); ok {
+			tagSQL = "ALTER SESSION SET QUERY_TAG = '" + strings.ReplaceAll(tag, "'", "''") + "'"
+		}
+	} else {
+		query = annotation.Prepend(annotated, query)
+	}
+
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
 		defer close(results)
 
+		// Run on the pool by default. For Snowflake, pin one connection so the
+		// QUERY_TAG and the query share a session (both *sql.DB and *sql.Conn
+		// satisfy QueryContext).
+		var runner interface {
+			QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+		} = s.db
+		if tagSQL != "" {
+			conn, err := s.db.Conn(ctx)
+			if err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get connection: %w", err)}
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			if _, err := conn.ExecContext(ctx, tagSQL); err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to set query tag: %w", err)}
+				return
+			}
+			runner = conn
+		}
+
 		config.Debug("[%s] Executing custom query: %s", s.dialect.Name(), query)
-		rows, err := s.db.QueryContext(ctx, query)
+		rows, err := runner.QueryContext(ctx, query)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", err)}
 			return
@@ -398,6 +433,11 @@ func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema
 		defer close(results)
 
 		query := BuildSelectQuery(table, columns, opts, s.dialect.QuoteIdentifier)
+		// Annotate the source read so a warehouse source (e.g. BigQuery) attributes
+		// the extract query's cost. Prepend keeps a leading comment (BigQuery,
+		// DuckDB); Snowflake strips it, so a Snowflake source would need a QUERY_TAG
+		// instead — not handled here.
+		query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
 		config.Debug("[%s] Executing query: %s", s.dialect.Name(), query)
 
 		startQuery := time.Now()

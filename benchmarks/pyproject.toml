@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.9.2,<3.13"
 dependencies = [
     "airbyte",
-    "dlt[postgres,duckdb,bigquery,snowflake]==1.27.0",
+    "dlt[postgres,duckdb,bigquery,snowflake,mssql]==1.27.0",
     "dlt-verified-sources @ git+https://github.com/dlt-hub/verified-sources.git@75b3ec17eab99d0079d9f61b7f47fc8b899a5738",
     "duckdb-engine",
     "numpy",
@@ -19,3 +19,4 @@ dependencies = [
 
 [tool.uv]
 package = false
+constraint-dependencies = ["nltk>=3.9.4"]

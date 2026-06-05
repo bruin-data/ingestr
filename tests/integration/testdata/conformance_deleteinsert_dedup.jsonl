@@ -1,0 +1,5 @@
+{"id":1,"name":"v1-1","active":true,"score":11.0}
+{"id":1,"name":"v1-1-dup","active":false,"score":12.0}
+{"id":2,"name":"v1-2","active":true,"score":21.0}
+{"id":3,"name":"v1-3","active":true,"score":31.0}
+{"id":3,"name":"v1-3-dup","active":false,"score":32.0}

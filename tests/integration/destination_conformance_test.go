@@ -655,6 +655,83 @@ func TestDestinations_DeleteInsert(t *testing.T) {
 	}
 }
 
+// TestDestinations_DeleteInsert_DedupesStagingByPK exercises delete+insert with
+// primary keys in two phases on the same target:
+//
+//  1. Dedup on load: a source with duplicate primary keys (5 rows across 3
+//     distinct ids {1,1,2,3,3}) must collapse to exactly 3 rows.
+//  2. Normal incremental delete+insert: a second source over the interval
+//     [3,4] must replace id=3 in place, insert net-new id=4, and leave id=1
+//     and id=2 (outside the interval) untouched — ending at 4 rows.
+func TestDestinations_DeleteInsert_DedupesStagingByPK(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	if _, err := strategy.Get(config.StrategyDeleteInsert); err != nil {
+		t.Skip("delete+insert strategy not implemented yet")
+	}
+
+	ctx := context.Background()
+	dupURI := jsonlURI(t, "testdata/conformance_deleteinsert_dedup.jsonl")
+	intervalURI := jsonlURI(t, "testdata/conformance_deleteinsert_dedup_interval.jsonl")
+
+	for _, tc := range destinationCases() {
+		tc := tc
+		if tc.sqlBackend == nil || !tc.deleteInsertCapable {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Skip("destination does not support delete+insert")
+			})
+			continue
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			destURI, destTable, cleanup := tc.setup(t, ctx)
+			defer cleanup()
+
+			countRows := func() int {
+				db, err := tc.sqlBackend.openDB(destURI)
+				require.NoError(t, err)
+				defer func() { _ = db.Close() }()
+				var n int
+				require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(destTable)).Scan(&n))
+				return n
+			}
+			nameByID := func(id int) string {
+				db, err := tc.sqlBackend.openDB(destURI)
+				require.NoError(t, err)
+				defer func() { _ = db.Close() }()
+				var raw []byte
+				require.NoError(t, db.QueryRow(tc.sqlBackend.nameByIDQuery(destTable, id)).Scan(&raw))
+				return string(raw)
+			}
+
+			cfg := &config.IngestConfig{
+				SourceURI:           dupURI,
+				SourceTable:         "deleteinsert_dedup",
+				DestURI:             destURI,
+				DestTable:           destTable,
+				IncrementalStrategy: config.StrategyDeleteInsert,
+				IncrementalKey:      "id",
+				PrimaryKeys:         []string{"id"},
+			}
+
+			// Phase 1: dedup on load — duplicate PKs collapse to one row each.
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			assert.Equal(t, 3, countRows(), "duplicate primary keys in staging should collapse to one row per key")
+
+			// Phase 2: normal incremental delete+insert over interval [3,4].
+			cfg.SourceURI = intervalURI
+			cfg.SourceTable = "deleteinsert_dedup_interval"
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+			assert.Equal(t, 4, countRows(), "interval delete+insert should replace id=3 and add net-new id=4")
+			assert.Equal(t, "v2-3", nameByID(3), "id=3 inside the interval should be replaced")
+			assert.Equal(t, "v2-4", nameByID(4), "net-new id=4 inside the interval should be inserted")
+		})
+	}
+}
+
 // TestDestinations_TruncateInsert validates truncate+insert semantics:
 //   - seed the destination with a small set of rows via replace
 //   - run truncate+insert with a larger source fixture
@@ -1996,6 +2073,7 @@ func TestChessSource_ToDestinations(t *testing.T) {
 				IncrementalStrategy: config.StrategyReplace,
 				IntervalStart:       &intervalStart,
 				IntervalEnd:         &intervalEnd,
+				Columns:             "end_time:timestamptz",
 			}
 
 			p := pipeline.New(cfg)

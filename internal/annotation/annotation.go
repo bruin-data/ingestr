@@ -5,12 +5,13 @@
 // The format matches bruin's own annotation comment so the same cost-tracking
 // tooling parses both:
 //
-//	-- @bruin.config: {"asset":"raw.orders","pipeline":"shopify","type":"ingestr","ingestr_step":"merge"}
+//	-- @bruin.config: {"asset":"raw.orders","pipeline":"shopify","type":"ingestr_transform","ingestr_step":"merge"}
 //	MERGE INTO raw.orders ...
 //
 // The caller (typically bruin) supplies the external keys (e.g. pipeline,
 // asset) via the --query-annotations flag. ingestr adds the keys only it knows
-// at runtime: type ("ingestr") and ingestr_step (which operation is running).
+// at runtime: type (the ETL phase — ingestr_load or ingestr_transform, or plain
+// ingestr when no step is set) and ingestr_step (which operation is running).
 // Snowflake strips leading comments, so for Snowflake the same JSON is applied
 // via the native QUERY_TAG instead (see QueryTag).
 package annotation
@@ -29,8 +30,9 @@ const commentPrefix = "-- @bruin.config: "
 // own slice in the cost report's Step Type breakdown.
 const ingestrType = "ingestr"
 
-// ingestr_step values, one per distinct destination operation.
+// ingestr_step values, one per distinct operation.
 const (
+	StepExtract      = "extract"       // source read (SELECT) — only meaningful for warehouse sources
 	StepDDL          = "ddl"           // PrepareTable: create target/staging tables
 	StepLoad         = "load"          // Write/WriteParallel: bulk-load rows
 	StepMerge        = "merge"         // MergeTable
@@ -40,6 +42,31 @@ const (
 	StepTruncate     = "truncate"      // TruncateTable: empty target in place
 	StepCleanup      = "cleanup"       // DropTable: drop staging tables
 )
+
+// ingestr classifies each query by ETL phase via the "type" value:
+//
+//	ingestr_extract   — read from the source: the SELECT a warehouse source runs
+//	ingestr_load      — move data in:   ddl, load, swap, truncate, cleanup
+//	ingestr_transform — apply strategy: merge, delete_insert, scd2
+const (
+	typeIngestrExtract   = "ingestr_extract"
+	typeIngestrLoad      = "ingestr_load"
+	typeIngestrTransform = "ingestr_transform"
+)
+
+// typeForStep classifies an ingestr_step into its ETL-phase type.
+func typeForStep(step string) string {
+	switch step {
+	case StepExtract:
+		return typeIngestrExtract
+	case StepMerge, StepDeleteInsert, StepSCD2:
+		return typeIngestrTransform
+	case StepDDL, StepLoad, StepSwap, StepCleanup, StepTruncate:
+		return typeIngestrLoad
+	default:
+		return ingestrType
+	}
+}
 
 // Payload holds the external annotation keys supplied by the caller. Values are
 // kept as interface{} (matching bruin) so callers may pass non-string values.
@@ -95,8 +122,9 @@ func stepFrom(ctx context.Context) string {
 }
 
 // build returns the merged annotation JSON for the current context. ingestr
-// always annotates its destination queries with its own keys (type, and
-// ingestr_step when a step is set), so build never returns "" in practice; the
+// always annotates its destination queries with its own keys (a phase-specific
+// type, and ingestr_step when a step is set), so build never returns "" in
+// practice; the
 // caller-supplied payload from --query-annotations is merged in on top. ingestr-
 // owned keys (type, ingestr_step) always win over caller-supplied keys of the
 // same name. encoding/json marshals map keys in sorted order, so the output is
@@ -110,6 +138,7 @@ func build(ctx context.Context) string {
 	}
 	merged["type"] = ingestrType
 	if step := stepFrom(ctx); step != "" {
+		merged["type"] = typeForStep(step)
 		merged["ingestr_step"] = step
 	}
 	b, err := json.Marshal(merged)

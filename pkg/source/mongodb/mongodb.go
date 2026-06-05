@@ -16,6 +16,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"go.mongodb.org/mongo-driver/bson"
@@ -537,7 +538,10 @@ func (s *MongoDBSource) consumeCursor(ctx context.Context, cursor *mongo.Cursor,
 		}
 
 		startBatch := time.Now()
-		builder := newMongoBatchBuilder(opts.ExcludeColumns)
+		var builder mongoRecordBatchBuilder = newMongoBatchBuilder(opts.ExcludeColumns)
+		if opts.Schema != nil {
+			builder = newMongoSchemaBatchBuilder(opts.Schema.Columns, opts.ExcludeColumns)
+		}
 		batchRows := 0
 
 		for batchRows < batchSize && cursor.Next(ctx) {
@@ -635,6 +639,12 @@ type mongoBatchBuilder struct {
 	rowCount   int
 }
 
+type mongoRecordBatchBuilder interface {
+	AppendDocument(doc bson.M) error
+	NewRecordBatch() (arrow.RecordBatch, error)
+	Release()
+}
+
 func newMongoBatchBuilder(excludeColumns []string) *mongoBatchBuilder {
 	excludeMap := make(map[string]bool, len(excludeColumns))
 	for _, col := range excludeColumns {
@@ -715,6 +725,89 @@ func (b *mongoBatchBuilder) Release() {
 func (b *mongoBatchBuilder) reset() {
 	b.fieldOrder = b.fieldOrder[:0]
 	b.cols = make(map[string]*typedColumnBuilder)
+	b.rowCount = 0
+}
+
+type mongoSchemaBatchBuilder struct {
+	columns  []schema.Column
+	builders []array.Builder
+	rowCount int
+}
+
+func newMongoSchemaBatchBuilder(columns []schema.Column, excludeColumns []string) *mongoSchemaBatchBuilder {
+	excludeMap := make(map[string]bool, len(excludeColumns))
+	for _, col := range excludeColumns {
+		excludeMap[strings.ToLower(col)] = true
+	}
+
+	filtered := make([]schema.Column, 0, len(columns))
+	for _, col := range columns {
+		if excludeMap[strings.ToLower(col.Name)] {
+			continue
+		}
+		filtered = append(filtered, col)
+	}
+
+	mem := memory.NewGoAllocator()
+	builders := make([]array.Builder, len(filtered))
+	for i, col := range filtered {
+		builders[i] = array.NewBuilder(mem, schema.DataTypeToArrowType(col))
+	}
+
+	return &mongoSchemaBatchBuilder{
+		columns:  filtered,
+		builders: builders,
+	}
+}
+
+func (b *mongoSchemaBatchBuilder) AppendDocument(doc bson.M) error {
+	for i, col := range b.columns {
+		val, ok := doc[col.Name]
+		if !ok || val == nil {
+			b.builders[i].AppendNull()
+			continue
+		}
+		arrowconv.AppendValue(b.builders[i], convertBSONValue(val))
+	}
+	b.rowCount++
+	return nil
+}
+
+func (b *mongoSchemaBatchBuilder) NewRecordBatch() (arrow.RecordBatch, error) {
+	if len(b.columns) == 0 {
+		emptySchema := arrow.NewSchema([]arrow.Field{}, nil)
+		return array.NewRecordBatch(emptySchema, []arrow.Array{}, int64(b.rowCount)), nil
+	}
+
+	fields := make([]arrow.Field, len(b.columns))
+	arrays := make([]arrow.Array, len(b.columns))
+	for i, col := range b.columns {
+		fields[i] = arrow.Field{
+			Name:     col.Name,
+			Type:     schema.DataTypeToArrowType(col),
+			Nullable: col.Nullable,
+		}
+		arrays[i] = b.builders[i].NewArray()
+	}
+
+	record := array.NewRecordBatch(arrow.NewSchema(fields, nil), arrays, int64(b.rowCount))
+
+	for _, arr := range arrays {
+		arr.Release()
+	}
+	b.Release()
+
+	return record, nil
+}
+
+func (b *mongoSchemaBatchBuilder) Release() {
+	for _, builder := range b.builders {
+		if builder != nil {
+			builder.Release()
+		}
+	}
+	b.builders = nil
+	b.columns = nil
 	b.rowCount = 0
 }
 
