@@ -109,16 +109,12 @@ The following placeholders can be used in the `layout` parameter:
 | `{table_name}` | Name of the table being written |
 | `{load_id}` | Unique identifier for the current load operation |
 | `{file_id}` | Unique identifier for each file within a load |
-| `{ext}` | File extension (e.g., `parquet`, `jsonl`) |
-| `{timestamp}` | Current timestamp |
-| `{load_package_timestamp}` | Timestamp of the load package |
-| `{curr_date}` | Current date in YYYY-MM-DD format |
-| `{schema_name}` | Name of the schema |
+| `{ext}` | File extension (`parquet`) |
 
 Example layouts:
-- `{table_name}/{load_id}.{file_id}.{ext}` - Default layout
+- `{load_id}.{file_id}.{ext}` - Default layout
+- `{table_name}/{load_id}.{file_id}.{ext}` - Organized by table name
 - `{table_name}.{ext}` - Single file per table
-- `{curr_date}/{table_name}.{ext}` - Organized by date
 
 ## Supported File Formats
 `gs` source only supports loading files in the following formats:

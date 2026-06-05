@@ -18,21 +18,49 @@ The URI is used to connect to the Shopify API for extracting data. More details 
 
 ## Setting up a Shopify Integration
 
-To use the Shopify API, you must create and install a custom app in your store. API credentials are generated as part of this process.
+To use the Shopify API, you need to create a custom app in the Shopify Partner Dashboard and install it in your store.
 
-Steps to get your API credentials:
-1) Open Shopify admin: `https://admin.shopify.com/store/your-store-name`
-2) **Settings** → **Apps and sales channels**
-3) **Develop apps** (top-right). If prompted, enable custom app development.
-4) If you see **Legacy custom apps**, open it; otherwise click **Create an app**.
-5) Name the app (e.g., "My Integration") and select yourself as the app developer.
-6) **Configuration** → **Admin API access scopes**: grant only the permissions you need (e.g., `read_products`, `read_orders`, `write_products`).
-7) **Install app** and confirm.
-8) Open **API credentials** and Find the **API key**
+### Step 1: Create or Select an App
 
-Important: The access token is displayed only once. Copy and store it securely.
+1. Go to the [Shopify Dev Dashboard](https://dev.shopify.com/dashboard)
+2. Select an existing app or create a new one
 
-Once you complete these steps, you will have the API key and your store name (e.g. `my-store.myshopify.com`) to connect. Example: if your API key is stored in `SHOPIFY_API_KEY` and your store is `my-store`, the command below will copy Shopify data into DuckDB:
+### Step 2: Get App Credentials
+
+1. In the app sidebar, open **Settings**
+2. In **Credentials**, copy the **Client ID**
+3. Reveal and copy the **Client secret**
+
+### Step 3: Configure API Scopes
+
+In the app configuration, make sure the app has read scopes for the data you want to ingest:
+- `read_products`
+- `read_customers`
+- `read_orders`
+- `read_inventory`
+- `read_locations`
+
+After changing scopes:
+1. Create a new app version
+2. Release the new app version
+
+### Step 4: Install the App in Your Store
+
+1. Open the Shopify store admin: `https://admin.shopify.com/store/your-store-name`
+2. Go to **Settings** → **Apps and sales channels**
+3. Find and open your app
+4. Install or reinstall the app so the new scopes become active
+
+### Step 5: Get the Admin API Access Token
+
+1. After installation, go back to **Apps and sales channels**
+2. Click on your app
+3. Click **API credentials**
+4. Copy the **Admin API access token**
+
+> **Important**: The access token is displayed only once. Copy and store it securely.
+
+Once you have the API key (access token) and your store name (e.g. `my-store.myshopify.com`), you can connect. Example: if your API key is stored in `SHOPIFY_API_KEY` and your store is `my-store`, the command below will copy Shopify data into DuckDB:
 
 ```sh
 SHOPIFY_API_KEY=your_api_key \

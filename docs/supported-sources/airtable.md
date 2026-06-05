@@ -25,10 +25,8 @@ To connect to Airtable, you need to create a Personal Access Token.
 ### Step 1: Create a Personal Access Token
 
 1. Log in to [Airtable](https://airtable.com/)
-2. Go to [Account Settings](https://airtable.com/account) → click your profile icon → **Account**
-3. Click on **Developer hub** in the left sidebar
-4. Click **Personal access tokens**
-5. Click **Create new token**
+2. Go to the [Personal Access Tokens page](https://airtable.com/create/tokens)
+3. Click **Create new token**
 
 ### Step 2: Configure the Token
 

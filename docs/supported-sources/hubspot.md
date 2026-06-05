@@ -20,20 +20,23 @@ The URI is used to connect to the HubSpot API for extracting data.
 
 ## Setting up a HubSpot Integration
 
-To connect to HubSpot, you need to create a Private App to obtain an access token.
+To connect to HubSpot, you need to create a Legacy Private App to obtain an access token.
 
-### Step 1: Create a Private App
+### Step 1: Create a Legacy App
 
 1. Log in to your [HubSpot account](https://app.hubspot.com/)
 2. Click the **Settings** icon (gear) in the top navigation
 3. In the left sidebar, navigate to **Integrations** → **Private Apps**
-4. Click **Create a private app**
+4. Click **Create Legacy App**
+5. Select **Private** as the app type
+6. If prompted to create a service key, select **I still want a legacy private app** and continue
 
 ### Step 2: Configure the App
 
 1. Enter a name for your app (e.g., "Data Integration")
-2. Optionally add a description and upload a logo
-3. Click the **Scopes** tab
+2. Optionally add a description
+3. Skip the webhook setup (not needed for data ingestion)
+4. Click the **Scopes** tab
 
 ### Step 3: Select Scopes
 

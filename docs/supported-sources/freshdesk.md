@@ -20,30 +20,31 @@ The URI is used to connect to the Freshdesk API for extracting data.
 
 ## Setting up a Freshdesk integration
 
-To connect to Freshdesk, you need to obtain your API key from your account settings.
+To connect to Freshdesk, you need to create an agent with API access and obtain the API key.
 
-### Step 1: Get Your API Key
+### Step 1: Create a New Agent
 
-1. Log in to your Freshdesk account
-2. Click your profile picture in the top right
-3. Select **Profile settings**
-4. On the right side, you'll see your **API Key**
-5. Copy the API key
+1. Log in to your Freshdesk admin account
+2. Go to **Admin** → **Team** → **Agents**
+3. Click **New Agent**
+4. Fill in the required details (name, email, etc.)
 
-### Step 2: Find Your Domain
+### Step 2: Enable API Key Access
+
+1. In the agent creation/edit form, go to **Security and permissions**
+2. Toggle on **API Key access**
+3. Save the agent configuration
+
+### Step 3: Get the API Key
+
+1. Go to **Profile settings** (click your profile picture in the top right)
+2. Click **View API Key** from the top right
+3. Copy the API key
+
+### Step 4: Find Your Domain
 
 Your domain is the subdomain in your Freshdesk URL. For example:
 - If your URL is `https://mycompany.freshdesk.com/`, your domain is `mycompany`
-
-### API Key Permissions
-
-The API key inherits the permissions of your user account. Make sure your account has access to:
-- **Tickets** - For ticket data
-- **Contacts** - For contact information
-- **Companies** - For company data
-- **Agents** - For agent information
-
-> **Tip**: For production use, consider creating a dedicated agent account with appropriate permissions for API access.
 
 Once you have your `api_key` and `domain`, for example, if your api_key is `test_key` and domain `my_company`, you can use the following command to copy data from Freshdesk into a DuckDB database:
 
