@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 
@@ -69,17 +70,34 @@ func buildAndRegisterCustomClient(q url.Values) (string, error) {
 		}
 	}
 
-	var tlsCfg *tls.Config
+	var (
+		tlsCfg    *tls.Config
+		certBytes []byte
+		keyBytes  []byte
+	)
 	if certPath != "" {
-		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		var err error
+		if certBytes, err = os.ReadFile(certPath); err != nil {
+			return "", fmt.Errorf("trino uri: failed to read client certificate: %w", err)
+		}
+		if keyBytes, err = os.ReadFile(keyPath); err != nil {
+			return "", fmt.Errorf("trino uri: failed to read client key: %w", err)
+		}
+		cert, err := tls.X509KeyPair(certBytes, keyBytes)
 		if err != nil {
-			return "", fmt.Errorf("trino uri: failed to load client certificate: %w", err)
+			return "", fmt.Errorf("trino uri: failed to parse client certificate: %w", err)
 		}
 		tlsCfg = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	}
 
-	sum := sha256.Sum256([]byte(certPath + "\x00" + keyPath + "\x00" + headersRaw))
-	name := "ingestr-trino-" + hex.EncodeToString(sum[:8])
+	// Cache key hashes contents (not paths) so rotated certs get a fresh client.
+	h := sha256.New()
+	h.Write(certBytes)
+	h.Write([]byte{0})
+	h.Write(keyBytes)
+	h.Write([]byte{0})
+	h.Write([]byte(headersRaw))
+	name := "ingestr-trino-" + hex.EncodeToString(h.Sum(nil)[:8])
 
 	clientRegistryMu.Lock()
 	defer clientRegistryMu.Unlock()
