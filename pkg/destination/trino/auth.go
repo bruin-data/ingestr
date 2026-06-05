@@ -17,41 +17,62 @@ import (
 
 // translateAliases rewrites v0 (Python/SQLAlchemy) parameter names to the
 // names trino-go-client understands. Existing canonical keys win on conflict.
+// The `verify` parameter is left in place when its value is a bool — that form
+// is consumed by buildAndRegisterCustomClient (false → InsecureSkipVerify).
 func translateAliases(q url.Values) {
 	aliases := map[string]string{
 		"access_token":     "accessToken",
 		"extra_credential": "extra_credentials",
 		"client_tags":      "clientTags",
-		"verify":           "SSLCertPath",
 	}
 	for old, canonical := range aliases {
 		vals := q[old]
 		if len(vals) == 0 {
 			continue
 		}
-		if old == "verify" {
-			v := strings.ToLower(strings.TrimSpace(vals[0]))
-			if v == "true" || v == "false" || v == "" {
-				q.Del(old)
-				continue
-			}
-		}
 		if _, exists := q[canonical]; !exists {
 			q[canonical] = vals
 		}
 		q.Del(old)
 	}
+
+	// verify=<path> → SSLCertPath. verify=true/false stays for later handling.
+	if vals := q["verify"]; len(vals) > 0 && !isVerifyBool(vals[0]) {
+		if _, exists := q["SSLCertPath"]; !exists {
+			q["SSLCertPath"] = vals
+		}
+		q.Del("verify")
+	}
 }
 
-// buildAndRegisterCustomClient builds an *http.Client from cert/key and
-// http_headers query parameters, registers it with trino-go-client, and
-// returns the registration key. Empty string means no custom client needed.
+// isVerifyBool reports whether v looks like a v0 boolean for the verify param.
+func isVerifyBool(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "false", "1", "0", "yes", "no", "":
+		return true
+	}
+	return false
+}
+
+// buildAndRegisterCustomClient builds an *http.Client from cert/key,
+// http_headers, and verify=false query parameters, registers it with
+// trino-go-client, and returns the registration key. Empty string means no
+// custom client is needed.
 func buildAndRegisterCustomClient(q url.Values) (string, error) {
 	certPath := q.Get("cert")
 	keyPath := q.Get("key")
 	headersRaw := q.Get("http_headers")
 
-	if certPath == "" && keyPath == "" && headersRaw == "" {
+	insecureSkipVerify := false
+	if vals := q["verify"]; len(vals) > 0 {
+		switch strings.ToLower(strings.TrimSpace(vals[0])) {
+		case "false", "0", "no":
+			insecureSkipVerify = true
+		}
+		q.Del("verify")
+	}
+
+	if certPath == "" && keyPath == "" && headersRaw == "" && !insecureSkipVerify {
 		return "", nil
 	}
 	if (certPath == "") != (keyPath == "") {
@@ -75,6 +96,9 @@ func buildAndRegisterCustomClient(q url.Values) (string, error) {
 		certBytes []byte
 		keyBytes  []byte
 	)
+	if certPath != "" || insecureSkipVerify {
+		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: insecureSkipVerify}
+	}
 	if certPath != "" {
 		var err error
 		if certBytes, err = os.ReadFile(certPath); err != nil {
@@ -87,7 +111,7 @@ func buildAndRegisterCustomClient(q url.Values) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("trino uri: failed to parse client certificate: %w", err)
 		}
-		tlsCfg = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
 
 	// Cache key hashes contents (not paths) so rotated certs get a fresh client.
@@ -97,6 +121,9 @@ func buildAndRegisterCustomClient(q url.Values) (string, error) {
 	h.Write(keyBytes)
 	h.Write([]byte{0})
 	h.Write([]byte(headersRaw))
+	if insecureSkipVerify {
+		h.Write([]byte("\x00insecure"))
+	}
 	name := "ingestr-trino-" + hex.EncodeToString(h.Sum(nil)[:8])
 
 	clientRegistryMu.Lock()

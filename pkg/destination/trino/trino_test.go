@@ -82,6 +82,14 @@ func TestParseTrinoURI(t *testing.T) {
 			wantInDSN:    []string{"custom_client=ingestr-trino-"},
 			wantNotInDSN: []string{"http_headers="},
 		},
+		{
+			// verify=false triggers custom client with InsecureSkipVerify
+			uri:          "trino://host:443/cat?http_scheme=https&verify=false",
+			wantCatalog:  "cat",
+			wantSchema:   "default",
+			wantInDSN:    []string{"custom_client=ingestr-trino-"},
+			wantNotInDSN: []string{"verify=", "SSLCertPath="},
+		},
 	}
 
 	for _, tt := range tests {

@@ -557,7 +557,7 @@ func isReservedURIKey(key string) bool {
 	switch key {
 	case "secure", "SSL", "http_scheme":
 		return true
-	case "cert", "key", "http_headers":
+	case "cert", "key", "http_headers", "verify":
 		return true
 	case "custom_client":
 		// We register our own client; never forward a user-supplied value
