@@ -168,6 +168,12 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to get schema: %w", err)
 		}
+	} else if p.config.NoInference {
+		tableSchema, err = p.schemaFromColumnOverrides(table)
+		if err != nil {
+			return err
+		}
+		config.Debug("[PIPELINE] Schema inference disabled; using %d columns from --columns", len(tableSchema.Columns))
 	} else {
 		// Schema inference path: read all data first. Buffer is opened later
 		config.Debug("[PIPELINE] Source has unknown schema, inferring from data...")
@@ -395,9 +401,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		EvolutionPlan:       evolutionPlan,
 	}
 
-	// For known-schema sources with column type overrides, add a type caster
-	// that converts Arrow batches from source types to the overridden types.
-	if p.config.Columns != "" && bufferedRecords == nil {
+	// For --no-inference, enforce the user-provided source schema even when
+	// a schema-less source does not apply ReadOptions.Schema itself.
+	if p.config.NoInference && bufferedRecords == nil {
+		job.TypeCaster = p.buildSourceSchemaCaster(originalSourceSchema)
+	} else if p.config.Columns != "" && bufferedRecords == nil {
+		// For known-schema sources with column type overrides, add a type caster
+		// that converts Arrow batches from source types to the overridden types.
 		job.TypeCaster = p.buildTypeCaster(tableSchema, destSchema)
 	}
 
@@ -406,6 +416,44 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (p *Pipeline) schemaFromColumnOverrides(table source.SourceTable) (*schema.TableSchema, error) {
+	tableSchema, err := schemainfer.SourceTableSchemaFromColumnOverrides(p.config.Columns, table.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to build schema from column overrides: %w", err)
+	}
+	if tableSchema == nil || len(tableSchema.Columns) == 0 {
+		return nil, fmt.Errorf("--no-inference requires at least one column in --columns")
+	}
+
+	pks := p.config.PrimaryKeys
+	if len(pks) == 0 {
+		pks = table.PrimaryKeys()
+	}
+	ik := p.config.IncrementalKey
+	if ik == "" {
+		ik = table.IncrementalKey()
+	}
+	partitionCol := resolvePartitionBy(p.config, table)
+	if err := schemainfer.AddKeyColumnsIfMissing(tableSchema, pks, ik, partitionCol, p.config.SchemaNaming); err != nil {
+		return nil, fmt.Errorf("failed to add key columns to --columns schema: %w", err)
+	}
+
+	return tableSchema, nil
+}
+
+func (p *Pipeline) buildSourceSchemaCaster(sourceSchema *schema.TableSchema) *transformer.TypeCaster {
+	if sourceSchema == nil {
+		return nil
+	}
+
+	fields := make([]arrow.Field, len(sourceSchema.Columns))
+	for i, col := range sourceSchema.Columns {
+		fields[i] = arrowField(col.Name, col, col.Nullable)
+	}
+
+	return transformer.NewTypeCaster(arrow.NewSchema(fields, nil))
 }
 
 // buildTypeCaster creates a TypeCaster when column type overrides differ from the source types.
