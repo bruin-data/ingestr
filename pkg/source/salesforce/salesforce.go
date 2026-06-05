@@ -19,19 +19,40 @@ import (
 )
 
 const (
-	defaultAPIVersion = "59.0"
+	defaultAPIVersion        = "59.0"
+	salesforceOAuthTokenPath = "/services/oauth2/token"
+)
+
+type salesforceAuthMethod string
+
+const (
+	salesforceAuthPassword          salesforceAuthMethod = "password"
+	salesforceAuthClientCredentials salesforceAuthMethod = "client_credentials"
 )
 
 type salesforceSource struct {
-	client      *simpleforce.Client
-	httpClient  *httpclient.Client
-	instanceURL string
-	sessionID   string
-	useBulkAPI  bool
-	sfUser      string
-	sfPassword  string
-	sfToken     string
-	sfUrl       string
+	client         *simpleforce.Client
+	httpClient     *httpclient.Client
+	instanceURL    string
+	sessionID      string
+	useBulkAPI     bool
+	sfUser         string
+	sfPassword     string
+	sfToken        string
+	sfClientID     string
+	sfClientSecret string
+	sfUrl          string
+	authMethod     salesforceAuthMethod
+}
+
+type salesforceConfig struct {
+	username     string
+	password     string
+	token        string
+	domain       string
+	clientID     string
+	clientSecret string
+	authMethod   salesforceAuthMethod
 }
 
 func NewSalesforceSource() *salesforceSource {
@@ -43,23 +64,35 @@ func (s *salesforceSource) Schemes() []string {
 }
 
 func (s *salesforceSource) Connect(ctx context.Context, uri string) error {
-	sfUser, sfPassword, sfToken, sfDomain, err := parseSalesforceURI(uri)
+	cfg, err := parseSalesforceURI(uri)
 	if err != nil {
 		return err
 	}
-	s.sfUser = sfUser
-	s.sfPassword = sfPassword
-	s.sfToken = sfToken
-	s.sfUrl = fmt.Sprintf("https://%s.salesforce.com/", sfDomain)
+	s.sfUser = cfg.username
+	s.sfPassword = cfg.password
+	s.sfToken = cfg.token
+	s.sfClientID = cfg.clientID
+	s.sfClientSecret = cfg.clientSecret
+	s.authMethod = cfg.authMethod
+	s.sfUrl = salesforceBaseURL(cfg.domain)
 
-	s.client = simpleforce.NewClient(s.sfUrl, simpleforce.DefaultClientID, defaultAPIVersion)
+	s.client = simpleforce.NewClient(s.sfUrl, s.simpleforceClientID(), defaultAPIVersion)
 
 	if s.client == nil {
 		return fmt.Errorf("failed to create Salesforce client")
 	}
-	err = s.client.LoginPassword(s.sfUser, s.sfPassword, s.sfToken)
-	if err != nil {
-		return fmt.Errorf("failed to login to Salesforce: %w", err)
+
+	switch s.authMethod {
+	case salesforceAuthPassword:
+		if err := s.client.LoginPassword(s.sfUser, s.sfPassword, s.sfToken); err != nil {
+			return fmt.Errorf("failed to login to Salesforce: %w", err)
+		}
+	case salesforceAuthClientCredentials:
+		if err := s.loginClientCredentials(ctx); err != nil {
+			return fmt.Errorf("failed to login to Salesforce with client credentials: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported Salesforce auth method: %s", s.authMethod)
 	}
 
 	s.sessionID = s.client.GetSid()
@@ -76,36 +109,130 @@ func (s *salesforceSource) Connect(ctx context.Context, uri string) error {
 	return nil
 }
 
-func parseSalesforceURI(uri string) (sfUser, sfPassword, sfToken, sfUrl string, err error) {
+func parseSalesforceURI(uri string) (salesforceConfig, error) {
 	if !strings.HasPrefix(uri, "salesforce://") {
-		return "", "", "", "", fmt.Errorf("invalid salesforce URI: must start with salesforce://")
+		return salesforceConfig{}, fmt.Errorf("invalid salesforce URI: must start with salesforce://")
 	}
 
 	parsed, err := url.Parse(uri)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to parse salesforce URI: %w", err)
+		return salesforceConfig{}, fmt.Errorf("failed to parse salesforce URI: %w", err)
 	}
 
 	params := parsed.Query()
-	sfUser = params.Get("username")
-	sfPassword = params.Get("password")
-	sfToken = params.Get("token")
-	sfDomain := params.Get("domain")
-
-	if sfUser == "" {
-		return "", "", "", "", fmt.Errorf("sfUser is required for Salesforce")
-	}
-	if sfPassword == "" {
-		return "", "", "", "", fmt.Errorf("sfPassword is required for Salesforce")
-	}
-	if sfToken == "" {
-		return "", "", "", "", fmt.Errorf("sfToken is required for Salesforce")
-	}
-	if sfDomain == "" {
-		return "", "", "", "", fmt.Errorf("sfUrl is required for Salesforce")
+	cfg := salesforceConfig{
+		username:     params.Get("username"),
+		password:     params.Get("password"),
+		token:        params.Get("token"),
+		domain:       params.Get("domain"),
+		clientID:     params.Get("client_id"),
+		clientSecret: params.Get("client_secret"),
 	}
 
-	return sfUser, sfPassword, sfToken, sfDomain, nil
+	authMethod := params.Get("auth_method")
+	if authMethod == "" {
+		authMethod = params.Get("grant_type")
+	}
+	switch authMethod {
+	case "":
+		if cfg.clientID != "" || cfg.clientSecret != "" {
+			cfg.authMethod = salesforceAuthClientCredentials
+		} else {
+			cfg.authMethod = salesforceAuthPassword
+		}
+	case string(salesforceAuthPassword), "username_password":
+		cfg.authMethod = salesforceAuthPassword
+	case string(salesforceAuthClientCredentials):
+		cfg.authMethod = salesforceAuthClientCredentials
+	default:
+		return salesforceConfig{}, fmt.Errorf("unsupported Salesforce auth_method: %s", authMethod)
+	}
+
+	if cfg.domain == "" {
+		return salesforceConfig{}, fmt.Errorf("domain is required for Salesforce")
+	}
+
+	switch cfg.authMethod {
+	case salesforceAuthPassword:
+		if cfg.username == "" {
+			return salesforceConfig{}, fmt.Errorf("username is required for Salesforce")
+		}
+		if cfg.password == "" {
+			return salesforceConfig{}, fmt.Errorf("password is required for Salesforce")
+		}
+		if cfg.token == "" {
+			return salesforceConfig{}, fmt.Errorf("token is required for Salesforce")
+		}
+	case salesforceAuthClientCredentials:
+		if cfg.clientID == "" {
+			return salesforceConfig{}, fmt.Errorf("client_id is required for Salesforce client credentials")
+		}
+		if cfg.clientSecret == "" {
+			return salesforceConfig{}, fmt.Errorf("client_secret is required for Salesforce client credentials")
+		}
+	}
+
+	return cfg, nil
+}
+
+func salesforceBaseURL(domain string) string {
+	domain = strings.TrimRight(strings.TrimSpace(domain), "/")
+	if strings.HasPrefix(domain, "http://") || strings.HasPrefix(domain, "https://") {
+		return domain
+	}
+	if strings.HasSuffix(domain, ".salesforce.com") {
+		return fmt.Sprintf("https://%s", domain)
+	}
+	return fmt.Sprintf("https://%s.salesforce.com", domain)
+}
+
+func (s *salesforceSource) simpleforceClientID() string {
+	if s.authMethod == salesforceAuthClientCredentials && s.sfClientID != "" {
+		return s.sfClientID
+	}
+	return simpleforce.DefaultClientID
+}
+
+func (s *salesforceSource) loginClientCredentials(ctx context.Context) error {
+	tokenClient := httpclient.New(
+		httpclient.WithTimeout(30*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+	)
+	defer func() { _ = tokenClient.Close() }()
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		InstanceURL string `json:"instance_url"`
+		TokenType   string `json:"token_type"`
+	}
+
+	resp, err := tokenClient.R(ctx).
+		SetHeader("Accept", "application/json").
+		SetFormData(map[string]string{
+			"grant_type":    string(salesforceAuthClientCredentials),
+			"client_id":     s.sfClientID,
+			"client_secret": s.sfClientSecret,
+		}).
+		SetResult(&tokenResp).
+		Post(fmt.Sprintf("%s%s", strings.TrimRight(s.sfUrl, "/"), salesforceOAuthTokenPath))
+	if err != nil {
+		return fmt.Errorf("token request failed: %w", err)
+	}
+	if !resp.IsSuccess() {
+		return fmt.Errorf("token request failed with status %d: %s", resp.StatusCode(), resp.String())
+	}
+	if tokenResp.AccessToken == "" {
+		return fmt.Errorf("empty access token in response")
+	}
+	if tokenResp.InstanceURL == "" {
+		return fmt.Errorf("empty instance_url in response")
+	}
+	if tokenResp.TokenType != "" && !strings.EqualFold(tokenResp.TokenType, "bearer") {
+		return fmt.Errorf("unsupported token type in response: %s", tokenResp.TokenType)
+	}
+
+	s.client.SetSidLoc(tokenResp.AccessToken, strings.TrimRight(tokenResp.InstanceURL, "/"))
+	return nil
 }
 
 func (s *salesforceSource) Close(ctx context.Context) error {

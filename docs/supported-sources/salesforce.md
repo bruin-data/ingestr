@@ -5,7 +5,7 @@ Ingestr supports Salesforce as a source.
 
 ## URI format
 
-The URI format for Salesforce is as follows:
+The URI format for Salesforce using username, password, and security token authentication is as follows:
 ```
 salesforce://?username=<username>&password=<password>&token=<token>&domain=<domain>
 ```
@@ -14,7 +14,18 @@ URI parameters:
 - `username` is your Salesforce account username.
 - `password` is your Salesforce account password.
 - `token` is your Salesforce security token.
-- `domain` is your Salesforce instance domain (for example, `login`, `test`, or `your-domain.my`). Do **not** include `.salesforce.com`.
+- `domain` is your Salesforce instance domain (for example, `login`, `test`, or `your-domain.my`). You can also pass the full Salesforce host or URL.
+
+To use the OAuth 2.0 client credentials flow, use the following URI:
+```
+salesforce://?grant_type=client_credentials&client_id=<client_id>&client_secret=<client_secret>&domain=<domain>
+```
+
+URI parameters:
+- `grant_type=client_credentials` selects the client credentials flow. This is optional when both `client_id` and `client_secret` are provided.
+- `client_id` is the consumer key for your Salesforce connected app.
+- `client_secret` is the consumer secret for your Salesforce connected app.
+- `domain` is your Salesforce My Domain or instance domain (for example, `your-domain.my`). You can also pass the full Salesforce host or URL.
 
 You can obtain your security token by logging into your Salesforce account and navigating to the user settings under "Reset My Security Token."
 
@@ -76,6 +87,15 @@ ingestr ingest \
   --dest-table "public.user_role"
 ```
 
+Copy account data using OAuth 2.0 client credentials:
+```sh
+ingestr ingest \
+  --source-uri "salesforce://?grant_type=client_credentials&client_id=<client_id>&client_secret=<client_secret>&domain=<domain>" \
+  --source-table "account" \
+  --dest-uri "duckdb:///sf.db" \
+  --dest-table "public.account"
+```
+
 Copy custom object data from Salesforce into a DuckDB database:
 ```sh
 ingestr ingest \
@@ -87,4 +107,3 @@ ingestr ingest \
 
 > [!WARNING]
 > Salesforce API limits may affect the frequency and volume of data ingestion. Incremental loading is supported for objects with the `SystemModstamp` field, but some objects may require full-refresh loads. This is indicated by `mode` in the tables above. Tables with mode `replace` don't support incremental loads, while the ones with `merge` do.
-
