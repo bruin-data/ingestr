@@ -117,7 +117,7 @@ func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	req = req.Clone(req.Context())
 	for k, vs := range h.headers {
 		for _, v := range vs {
-			req.Header.Add(k, v)
+			req.Header.Set(k, v)
 		}
 	}
 	return h.base.RoundTrip(req)
