@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -210,7 +211,7 @@ func (d *MSSQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 		batchNum++
 		startBatch := time.Now()
 
-		rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table)
+		rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table, opts.Schema)
 		if err != nil {
 			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
 		}
@@ -228,7 +229,7 @@ func (d *MSSQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 	return nil
 }
 
-func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string, tableSchema *schema.TableSchema) (int64, error) {
 	numRows := record.NumRows()
 	numCols := int(record.NumCols())
 
@@ -240,6 +241,7 @@ func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 	for i := 0; i < numCols; i++ {
 		colNames[i] = record.Schema().Field(i).Name
 	}
+	columnTypes := columnsForRecord(record, tableSchema)
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -264,7 +266,11 @@ func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 	values := make([]interface{}, numCols)
 	for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
 		for colIdx := 0; colIdx < numCols; colIdx++ {
-			values[colIdx] = extractValue(record.Column(colIdx), int(rowIdx))
+			value, err := extractValue(record.Column(colIdx), int(rowIdx), columnTypes[colIdx])
+			if err != nil {
+				return rowIdx, fmt.Errorf("failed to convert column %s row %d: %w", colNames[colIdx], rowIdx, err)
+			}
+			values[colIdx] = value
 		}
 
 		if _, err := stmt.ExecContext(ctx, values...); err != nil {
@@ -288,6 +294,25 @@ func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 	committed = true
 
 	return rowsAffected, nil
+}
+
+func columnsForRecord(record arrow.RecordBatch, tableSchema *schema.TableSchema) []*schema.Column {
+	columns := make([]*schema.Column, int(record.NumCols()))
+	if tableSchema == nil {
+		return columns
+	}
+
+	byName := make(map[string]int, len(tableSchema.Columns))
+	for i, col := range tableSchema.Columns {
+		byName[strings.ToLower(col.Name)] = i
+	}
+
+	for i, field := range record.Schema().Fields() {
+		if idx, ok := byName[strings.ToLower(field.Name)]; ok {
+			columns[i] = &tableSchema.Columns[idx]
+		}
+	}
+	return columns
 }
 
 func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
@@ -847,55 +872,100 @@ func mapColumnTypeForCreate(col schema.Column, isPrimaryKey bool) string {
 	}
 }
 
-func extractValue(arr arrow.Array, idx int) interface{} {
+func extractValue(arr arrow.Array, idx int, col *schema.Column) (interface{}, error) {
 	if arr.IsNull(idx) {
-		return nil
+		return nil, nil
 	}
 
 	switch a := arr.(type) {
 	case *array.Boolean:
-		return a.Value(idx)
+		return a.Value(idx), nil
+	case *array.Int8:
+		return int32(a.Value(idx)), nil
 	case *array.Int16:
-		return int32(a.Value(idx))
+		return int32(a.Value(idx)), nil
 	case *array.Int32:
-		return a.Value(idx)
+		return a.Value(idx), nil
 	case *array.Int64:
-		return a.Value(idx)
-	case *array.Float32:
-		return a.Value(idx)
-	case *array.Float64:
-		return a.Value(idx)
-	case *array.String:
-		return a.Value(idx)
-	case *array.LargeString:
-		return a.Value(idx)
-	case *array.Binary:
-		return a.Value(idx)
-	case *array.Date32:
-		return a.Value(idx).ToTime()
-	case *array.Date64:
-		return a.Value(idx).ToTime()
-	case *array.Time64:
-		value := int64(a.Value(idx))
-		unit := a.DataType().(*arrow.Time64Type).Unit
-		var nanos int64
-		switch unit {
-		case arrow.Nanosecond:
-			nanos = value
-		default:
-			nanos = value * int64(time.Microsecond)
+		return a.Value(idx), nil
+	case *array.Uint8:
+		return int32(a.Value(idx)), nil
+	case *array.Uint16:
+		return int32(a.Value(idx)), nil
+	case *array.Uint32:
+		return int64(a.Value(idx)), nil
+	case *array.Uint64:
+		value := a.Value(idx)
+		if value > math.MaxInt64 {
+			return nil, fmt.Errorf("uint64 value %d overflows SQL Server BIGINT", value)
 		}
-		t := time.Duration(nanos)
-		return time.Date(1, 1, 1, int(t.Hours()), int(t.Minutes())%60, int(t.Seconds())%60, int(nanos%int64(time.Second)), time.UTC)
+		return int64(value), nil
+	case *array.Float16:
+		return a.Value(idx).Float32(), nil
+	case *array.Float32:
+		return a.Value(idx), nil
+	case *array.Float64:
+		return a.Value(idx), nil
+	case *array.String:
+		return convertStringValue(a.Value(idx), col)
+	case *array.LargeString:
+		return convertStringValue(a.Value(idx), col)
+	case *array.Binary:
+		return a.Value(idx), nil
+	case *array.LargeBinary:
+		return a.Value(idx), nil
+	case *array.FixedSizeBinary:
+		return a.Value(idx), nil
+	case *array.Date32:
+		return a.Value(idx).ToTime(), nil
+	case *array.Date64:
+		return a.Value(idx).ToTime(), nil
+	case *array.Time32:
+		return timeFromArrowTime(int64(a.Value(idx)), a.DataType().(*arrow.Time32Type).Unit), nil
+	case *array.Time64:
+		return timeFromArrowTime(int64(a.Value(idx)), a.DataType().(*arrow.Time64Type).Unit), nil
 	case *array.Timestamp:
 		ts := a.Value(idx)
-		return ts.ToTime(a.DataType().(*arrow.TimestampType).Unit)
+		return ts.ToTime(a.DataType().(*arrow.TimestampType).Unit), nil
 	case *array.Decimal128:
-		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
+		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale)), nil
+	case *array.Decimal256:
+		return a.ValueStr(idx), nil
+	case array.ListLike:
+		return a.ValueStr(idx), nil
+	case *array.Struct:
+		return a.ValueStr(idx), nil
 	case array.ExtensionArray:
 		storage := a.Storage()
-		return extractValue(storage, idx)
+		return extractValue(storage, idx, col)
 	default:
-		return fmt.Sprintf("%v", arr)
+		return arr.ValueStr(idx), nil
 	}
+}
+
+func convertStringValue(value string, col *schema.Column) (interface{}, error) {
+	if col == nil || col.DataType != schema.TypeUUID {
+		return value, nil
+	}
+
+	var uuid mssqldb.UniqueIdentifier
+	if err := uuid.Scan(value); err != nil {
+		return nil, fmt.Errorf("invalid UUID %q: %w", value, err)
+	}
+	return uuid, nil
+}
+
+func timeFromArrowTime(value int64, unit arrow.TimeUnit) time.Time {
+	var duration time.Duration
+	switch unit {
+	case arrow.Second:
+		duration = time.Duration(value) * time.Second
+	case arrow.Millisecond:
+		duration = time.Duration(value) * time.Millisecond
+	case arrow.Nanosecond:
+		duration = time.Duration(value) * time.Nanosecond
+	default:
+		duration = time.Duration(value) * time.Microsecond
+	}
+	return time.Date(1, 1, 1, int(duration/time.Hour), int(duration/time.Minute)%60, int(duration/time.Second)%60, int(duration%time.Second), time.UTC)
 }

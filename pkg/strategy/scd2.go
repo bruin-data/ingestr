@@ -123,6 +123,7 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// Write to staging table using parallel writes
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            stagingTable,
+		Schema:           job.Schema,
 		Parallelism:      parallelism,
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
