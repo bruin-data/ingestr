@@ -44,7 +44,7 @@ require (
 	github.com/hamba/avro/v2 v2.31.0
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
 	github.com/jackc/pglogrepl v0.0.0-20251213150135-2e8d0df862c1
-	github.com/jackc/pgx/v5 v5.7.6
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/klauspost/compress v1.18.5
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/microsoft/go-mssqldb v1.9.4
