@@ -33,6 +33,8 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: bruin-data/ingestr
+  INGESTR_DISABLE_TELEMETRY: "true"
+  DISABLE_TELEMETRY: "true"
 
 jobs:
   test:
