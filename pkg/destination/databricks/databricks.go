@@ -371,6 +371,18 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 	stagingFull := d.quoteFullTable(stagingSchema, stagingName)
 	targetFull := d.quoteFullTable(targetSchema, targetName)
 
+	if destination.HasCDCDeletedColumn(opts.Columns) {
+		mergeSQL := buildDatabricksCDCMergeSQL(targetFull, stagingFull, opts.PrimaryKeys, opts.Columns)
+		config.Debug("[DATABRICKS] Executing CDC MERGE: %s", mergeSQL)
+		if err := d.executeStatement(ctx, mergeSQL); err != nil {
+			config.LogFailedQuery(mergeSQL, err)
+			return fmt.Errorf("failed to execute CDC merge: %w", err)
+		}
+
+		config.Debug("[DATABRICKS] CDC merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
 		onConditions[i] = fmt.Sprintf("target.`%s` = source.`%s`", pk, pk)
@@ -432,6 +444,188 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 
 	config.Debug("[DATABRICKS] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func databricksQuoteColumns(columns []string) []string {
+	quoted := make([]string, len(columns))
+	for i, col := range columns {
+		quoted[i] = fmt.Sprintf("`%s`", col)
+	}
+	return quoted
+}
+
+func databricksAliasJoin(primaryKeys []string, leftAlias, rightAlias string) string {
+	conditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		conditions[i] = fmt.Sprintf("%s.`%s` = %s.`%s`", leftAlias, pk, rightAlias, pk)
+	}
+	return strings.Join(conditions, " AND ")
+}
+
+func buildDatabricksLatestCDCSource(stagingFull string, primaryKeys, columns []string, filter, alias string) string {
+	quotedCols := databricksQuoteColumns(columns)
+	quotedPKs := databricksQuoteColumns(primaryKeys)
+	where := ""
+	if filter != "" {
+		where = " WHERE " + filter
+	}
+
+	return fmt.Sprintf(
+		"(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC, `_cdc_synced_at` DESC) AS __bruin_cdc_rn FROM %s%s) AS _numbered WHERE __bruin_cdc_rn = 1) AS %s",
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedPKs, ", "),
+		stagingFull,
+		where,
+		alias,
+	)
+}
+
+func databricksActiveAlias(index int) string {
+	return fmt.Sprintf("__bruin_active_%d", index)
+}
+
+func buildDatabricksCDCSource(stagingFull string, primaryKeys, allColumns, dataColumns []string) string {
+	activeColumns := append(append([]string{}, primaryKeys...), dataColumns...)
+	latestAll := buildDatabricksLatestCDCSource(stagingFull, primaryKeys, allColumns, "", "latest_all")
+	latestActive := buildDatabricksLatestCDCSource(stagingFull, primaryKeys, activeColumns, "`_cdc_deleted` = false", "latest_active")
+
+	selects := []string{
+		"latest_all.*",
+		fmt.Sprintf("latest_active.`%s` IS NOT NULL AS `__bruin_has_active`", primaryKeys[0]),
+	}
+	for i, col := range dataColumns {
+		selects = append(selects, fmt.Sprintf("latest_active.`%s` AS `%s`", col, databricksActiveAlias(i)))
+	}
+
+	return fmt.Sprintf(
+		`(SELECT %s FROM %s LEFT JOIN %s ON %s) AS source`,
+		strings.Join(selects, ", "),
+		latestAll,
+		latestActive,
+		databricksAliasJoin(primaryKeys, "latest_all", "latest_active"),
+	)
+}
+
+func buildDatabricksCDCMergeSQL(targetFull, stagingFull string, primaryKeys, allColumns []string) string {
+	dataColumns := destination.CDCDataColumns(allColumns, primaryKeys)
+	dataColumnIndex := make(map[string]int, len(dataColumns))
+	for i, col := range dataColumns {
+		dataColumnIndex[strings.ToLower(col)] = i
+	}
+
+	pkMap := make(map[string]bool)
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	var updateSets []string
+	for _, col := range allColumns {
+		if pkMap[strings.ToLower(col)] {
+			continue
+		}
+		if destination.IsCDCColumn(col) {
+			updateSets = append(updateSets, fmt.Sprintf("target.`%s` = source.`%s`", col, col))
+			continue
+		}
+
+		activeIndex := dataColumnIndex[strings.ToLower(col)]
+		updateSets = append(updateSets, fmt.Sprintf(
+			"target.`%s` = CASE WHEN source.`_cdc_deleted` = true THEN CASE WHEN source.`__bruin_has_active` THEN source.`%s` ELSE target.`%s` END ELSE source.`%s` END",
+			col,
+			databricksActiveAlias(activeIndex),
+			col,
+			col,
+		))
+	}
+
+	quotedCols := databricksQuoteColumns(allColumns)
+	sourceCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+			sourceCols[i] = fmt.Sprintf("source.`%s`", col)
+			continue
+		}
+
+		activeIndex := dataColumnIndex[strings.ToLower(col)]
+		sourceCols[i] = fmt.Sprintf(
+			"CASE WHEN source.`_cdc_deleted` = true AND source.`__bruin_has_active` THEN source.`%s` ELSE source.`%s` END",
+			databricksActiveAlias(activeIndex),
+			col,
+		)
+	}
+
+	var mergeSQL strings.Builder
+	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFull)
+	fmt.Fprintf(&mergeSQL, "USING %s\n", buildDatabricksCDCSource(stagingFull, primaryKeys, allColumns, dataColumns))
+	fmt.Fprintf(&mergeSQL, "ON %s\n", databricksAliasJoin(primaryKeys, "target", "source"))
+	if len(updateSets) > 0 {
+		mergeSQL.WriteString("WHEN MATCHED THEN\n")
+		fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+	}
+	mergeSQL.WriteString("WHEN NOT MATCHED AND (source.`_cdc_deleted` = false OR source.`__bruin_has_active`) THEN\n")
+	fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+	fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	return mergeSQL.String()
+}
+
+func buildDatabricksCDCActiveMergeSQL(targetFull, stagingFull string, primaryKeys, allColumns []string) string {
+	pkMap := make(map[string]bool)
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	var updateSets []string
+	for _, col := range allColumns {
+		if !pkMap[strings.ToLower(col)] {
+			updateSets = append(updateSets, fmt.Sprintf("target.`%s` = source.`%s`", col, col))
+		}
+	}
+
+	quotedCols := databricksQuoteColumns(allColumns)
+	sourceCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		sourceCols[i] = fmt.Sprintf("source.`%s`", col)
+	}
+
+	source := buildDatabricksLatestCDCSource(stagingFull, primaryKeys, allColumns, "`_cdc_deleted` = false", "source")
+
+	var mergeSQL strings.Builder
+	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFull)
+	fmt.Fprintf(&mergeSQL, "USING %s\n", source)
+	fmt.Fprintf(&mergeSQL, "ON %s\n", databricksAliasJoin(primaryKeys, "target", "source"))
+	if len(updateSets) > 0 {
+		mergeSQL.WriteString("WHEN MATCHED THEN\n")
+		fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+	}
+	mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
+	fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+	fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	return mergeSQL.String()
+}
+
+func buildDatabricksCDCDeletedMergeSQL(targetFull, stagingFull string, primaryKeys []string) string {
+	cdcColumns := append([]string{}, primaryKeys...)
+	cdcColumns = append(cdcColumns, "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at")
+	latestAll := buildDatabricksLatestCDCSource(stagingFull, primaryKeys, cdcColumns, "", "latest")
+	latestDeleted := buildDatabricksLatestCDCSource(stagingFull, primaryKeys, cdcColumns, "`_cdc_deleted` = true", "deleted")
+
+	source := fmt.Sprintf(
+		`(SELECT deleted.* FROM %s JOIN %s ON %s WHERE latest.`+"`_cdc_deleted`"+` = true) AS source`,
+		latestDeleted,
+		latestAll,
+		databricksAliasJoin(primaryKeys, "deleted", "latest"),
+	)
+
+	return fmt.Sprintf(
+		`MERGE INTO %s AS target
+USING %s
+ON %s
+WHEN MATCHED THEN UPDATE SET target.`+"`_cdc_deleted`"+` = true, target.`+"`_cdc_lsn`"+` = source.`+"`_cdc_lsn`"+`, target.`+"`_cdc_synced_at`"+` = source.`+"`_cdc_synced_at`",
+		targetFull,
+		source,
+		databricksAliasJoin(primaryKeys, "target", "source"),
+	)
 }
 
 func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
@@ -553,6 +747,7 @@ func (d *DatabricksDestination) SupportsMergeStrategy() bool        { return tru
 func (d *DatabricksDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DatabricksDestination) SupportsSCD2Strategy() bool         { return false }
 func (d *DatabricksDestination) SupportsAtomicSwap() bool           { return true }
+func (d *DatabricksDestination) SupportsCDCMerge() bool             { return true }
 
 func (d *DatabricksDestination) GetScheme() string { return "databricks" }
 

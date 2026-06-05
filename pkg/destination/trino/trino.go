@@ -243,6 +243,18 @@ func (d *TrinoDestination) MergeTable(ctx context.Context, opts destination.Merg
 	stagingFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", stagingCatalog, stagingSchema, stagingName)
 	targetFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", targetCatalog, targetSchema, targetName)
 
+	if destination.HasCDCDeletedColumn(opts.Columns) {
+		mergeSQL := buildTrinoCDCMergeSQL(targetFQN, stagingFQN, opts.PrimaryKeys, opts.Columns)
+		config.Debug("[TRINO MERGE] Executing CDC MERGE: %s", mergeSQL)
+		if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
+			config.LogFailedQuery(mergeSQL, err)
+			return fmt.Errorf("failed to execute CDC merge: %w", err)
+		}
+
+		config.Debug("[TRINO MERGE] CDC merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	var onConditions []string
 	for _, pk := range opts.PrimaryKeys {
 		onConditions = append(onConditions, fmt.Sprintf("t.\"%s\" = s.\"%s\"", pk, pk))
@@ -293,6 +305,180 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)`,
 
 	config.Debug("[TRINO MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func trinoAliasJoin(primaryKeys []string, leftAlias, rightAlias string) string {
+	conditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		conditions[i] = fmt.Sprintf("%s.\"%s\" = %s.\"%s\"", leftAlias, pk, rightAlias, pk)
+	}
+	return strings.Join(conditions, " AND ")
+}
+
+func buildTrinoLatestCDCSource(stagingFQN string, primaryKeys, columns []string, filter, alias string) string {
+	quotedCols := quoteColumns(columns)
+	quotedPKs := quoteColumns(primaryKeys)
+	where := ""
+	if filter != "" {
+		where = " WHERE " + filter
+	}
+
+	return fmt.Sprintf(
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY "_cdc_lsn" DESC, "_cdc_synced_at" DESC) AS __bruin_cdc_rn FROM %s%s) AS _numbered WHERE __bruin_cdc_rn = 1) AS %s`,
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedPKs, ", "),
+		stagingFQN,
+		where,
+		alias,
+	)
+}
+
+func trinoActiveAlias(index int) string {
+	return fmt.Sprintf("__bruin_active_%d", index)
+}
+
+func buildTrinoCDCSource(stagingFQN string, primaryKeys, allColumns, dataColumns []string) string {
+	activeColumns := append(append([]string{}, primaryKeys...), dataColumns...)
+	latestAll := buildTrinoLatestCDCSource(stagingFQN, primaryKeys, allColumns, "", "latest_all")
+	latestActive := buildTrinoLatestCDCSource(stagingFQN, primaryKeys, activeColumns, `"_cdc_deleted" = false`, "latest_active")
+
+	selects := []string{
+		"latest_all.*",
+		fmt.Sprintf(`latest_active."%s" IS NOT NULL AS "__bruin_has_active"`, primaryKeys[0]),
+	}
+	for i, col := range dataColumns {
+		selects = append(selects, fmt.Sprintf(`latest_active."%s" AS "%s"`, col, trinoActiveAlias(i)))
+	}
+
+	return fmt.Sprintf(
+		`(SELECT %s FROM %s LEFT JOIN %s ON %s)`,
+		strings.Join(selects, ", "),
+		latestAll,
+		latestActive,
+		trinoAliasJoin(primaryKeys, "latest_all", "latest_active"),
+	)
+}
+
+func buildTrinoCDCMergeSQL(targetFQN, stagingFQN string, primaryKeys, allColumns []string) string {
+	dataColumns := destination.CDCDataColumns(allColumns, primaryKeys)
+	dataColumnIndex := make(map[string]int, len(dataColumns))
+	for i, col := range dataColumns {
+		dataColumnIndex[strings.ToLower(col)] = i
+	}
+
+	pkMap := make(map[string]bool)
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	var updateSets []string
+	for _, col := range allColumns {
+		if pkMap[strings.ToLower(col)] {
+			continue
+		}
+		if destination.IsCDCColumn(col) {
+			updateSets = append(updateSets, fmt.Sprintf(`"%s" = source."%s"`, col, col))
+			continue
+		}
+
+		activeIndex := dataColumnIndex[strings.ToLower(col)]
+		updateSets = append(updateSets, fmt.Sprintf(
+			`"%s" = CASE WHEN source."_cdc_deleted" = true THEN CASE WHEN source."__bruin_has_active" THEN source."%s" ELSE target."%s" END ELSE source."%s" END`,
+			col,
+			trinoActiveAlias(activeIndex),
+			col,
+			col,
+		))
+	}
+
+	quotedCols := quoteColumns(allColumns)
+	sourceCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+			sourceCols[i] = fmt.Sprintf(`source."%s"`, col)
+			continue
+		}
+
+		activeIndex := dataColumnIndex[strings.ToLower(col)]
+		sourceCols[i] = fmt.Sprintf(
+			`CASE WHEN source."_cdc_deleted" = true AND source."__bruin_has_active" THEN source."%s" ELSE source."%s" END`,
+			trinoActiveAlias(activeIndex),
+			col,
+		)
+	}
+
+	var mergeSQL strings.Builder
+	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFQN)
+	fmt.Fprintf(&mergeSQL, "USING %s AS source\n", buildTrinoCDCSource(stagingFQN, primaryKeys, allColumns, dataColumns))
+	fmt.Fprintf(&mergeSQL, "ON %s\n", trinoAliasJoin(primaryKeys, "target", "source"))
+	if len(updateSets) > 0 {
+		mergeSQL.WriteString("WHEN MATCHED THEN\n")
+		fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+	}
+	mergeSQL.WriteString(`WHEN NOT MATCHED AND (source."_cdc_deleted" = false OR source."__bruin_has_active") THEN` + "\n")
+	fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+	fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	return mergeSQL.String()
+}
+
+func buildTrinoCDCActiveMergeSQL(targetFQN, stagingFQN string, primaryKeys, allColumns []string) string {
+	pkMap := make(map[string]bool)
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	var updateSets []string
+	for _, col := range allColumns {
+		if !pkMap[strings.ToLower(col)] {
+			updateSets = append(updateSets, fmt.Sprintf("\"%s\" = source.\"%s\"", col, col))
+		}
+	}
+
+	quotedCols := quoteColumns(allColumns)
+	sourceCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		sourceCols[i] = fmt.Sprintf("source.\"%s\"", col)
+	}
+
+	source := buildTrinoLatestCDCSource(stagingFQN, primaryKeys, allColumns, `"_cdc_deleted" = false`, "source")
+
+	var mergeSQL strings.Builder
+	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFQN)
+	fmt.Fprintf(&mergeSQL, "USING %s\n", source)
+	fmt.Fprintf(&mergeSQL, "ON %s\n", trinoAliasJoin(primaryKeys, "target", "source"))
+	if len(updateSets) > 0 {
+		mergeSQL.WriteString("WHEN MATCHED THEN\n")
+		fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+	}
+	mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
+	fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+	fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	return mergeSQL.String()
+}
+
+func buildTrinoCDCDeletedMergeSQL(targetFQN, stagingFQN string, primaryKeys []string) string {
+	cdcColumns := append([]string{}, primaryKeys...)
+	cdcColumns = append(cdcColumns, "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at")
+	latestAll := buildTrinoLatestCDCSource(stagingFQN, primaryKeys, cdcColumns, "", "latest")
+	latestDeleted := buildTrinoLatestCDCSource(stagingFQN, primaryKeys, cdcColumns, `"_cdc_deleted" = true`, "deleted")
+
+	source := fmt.Sprintf(
+		`(SELECT deleted.* FROM %s JOIN %s ON %s WHERE latest."_cdc_deleted" = true) AS source`,
+		latestDeleted,
+		latestAll,
+		trinoAliasJoin(primaryKeys, "deleted", "latest"),
+	)
+
+	return fmt.Sprintf(
+		`MERGE INTO %s AS target
+USING %s
+ON %s
+WHEN MATCHED THEN UPDATE SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at"`,
+		targetFQN,
+		source,
+		trinoAliasJoin(primaryKeys, "target", "source"),
+	)
 }
 
 func (d *TrinoDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
@@ -472,8 +658,28 @@ func (d *TrinoDestination) SupportsMergeStrategy() bool        { return true }
 func (d *TrinoDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *TrinoDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *TrinoDestination) SupportsAtomicSwap() bool           { return false }
+func (d *TrinoDestination) SupportsCDCMerge() bool             { return true }
 
 func (d *TrinoDestination) GetScheme() string { return "trino" }
+
+func (d *TrinoDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	catalog, schemaName, tableName := d.parseTableName(table)
+	tableFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", catalog, schemaName, tableName)
+	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, tableFQN)
+
+	var maxLSN sql.NullString
+	if err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return "", nil
+		}
+		config.LogFailedQuery(query, err)
+		return "", err
+	}
+	if !maxLSN.Valid {
+		return "", nil
+	}
+	return maxLSN.String, nil
+}
 
 func (d *TrinoDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	return nil, nil

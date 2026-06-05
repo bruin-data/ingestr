@@ -399,6 +399,18 @@ func (d *SynapseDestination) MergeTable(ctx context.Context, opts destination.Me
 	quotedColumns := quoteColumns(columns)
 	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
 
+	if destination.HasCDCDeletedColumn(columns) {
+		mergeSQL := buildCDCMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, columns, quotedColumns, nonPKColumns)
+		config.Debug("[Synapse MERGE] Executing CDC MERGE: %s", mergeSQL)
+		if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
+			config.LogFailedQuery(mergeSQL, err)
+			return fmt.Errorf("failed to execute CDC merge: %w", err)
+		}
+
+		config.Debug("[Synapse MERGE] CDC merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns)
 	config.Debug("[Synapse MERGE] Executing MERGE: %s", mergeSQL)
 
@@ -409,6 +421,178 @@ func (d *SynapseDestination) MergeTable(ctx context.Context, opts destination.Me
 
 	config.Debug("[Synapse MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func buildSynapseLatestCDCSource(stagingTable string, primaryKeys, quotedColumns []string, filter, alias string) string {
+	quotedPKs := quoteColumns(primaryKeys)
+	where := ""
+	if filter != "" {
+		where = " WHERE " + filter
+	}
+	return fmt.Sprintf(
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY [_cdc_lsn] DESC, [_cdc_synced_at] DESC) AS __bruin_cdc_rn FROM %s%s) AS _numbered WHERE __bruin_cdc_rn = 1) AS %s`,
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedPKs, ", "),
+		quoteTable(stagingTable),
+		where,
+		alias,
+	)
+}
+
+func synapseActiveAlias(index int) string {
+	return fmt.Sprintf("__bruin_active_%d", index)
+}
+
+func buildSynapseCDCSource(stagingTable string, primaryKeys, allColumns, dataColumns []string) string {
+	activeColumns := append(append([]string{}, primaryKeys...), dataColumns...)
+	latestAll := buildSynapseLatestCDCSource(stagingTable, primaryKeys, quoteColumns(allColumns), "", "latest_all")
+	latestActive := buildSynapseLatestCDCSource(stagingTable, primaryKeys, quoteColumns(activeColumns), "[_cdc_deleted] = 0", "latest_active")
+
+	selects := []string{
+		"latest_all.*",
+		fmt.Sprintf("CASE WHEN latest_active.[%s] IS NULL THEN 0 ELSE 1 END AS [__bruin_has_active]", primaryKeys[0]),
+	}
+	for i, col := range dataColumns {
+		selects = append(selects, fmt.Sprintf("latest_active.[%s] AS [%s]", col, synapseActiveAlias(i)))
+	}
+
+	return fmt.Sprintf(
+		`(SELECT %s FROM %s LEFT JOIN %s ON %s) AS source`,
+		strings.Join(selects, ", "),
+		latestAll,
+		latestActive,
+		buildJoinCondition(primaryKeys, "latest_all", "latest_active"),
+	)
+}
+
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, allColumns, quotedColumns, nonPKColumns []string) string {
+	dataColumns := destination.CDCDataColumns(allColumns, primaryKeys)
+	dataColumnIndex := make(map[string]int, len(dataColumns))
+	for i, col := range dataColumns {
+		dataColumnIndex[strings.ToLower(col)] = i
+	}
+	pkMap := make(map[string]bool, len(primaryKeys))
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	updates := make([]string, 0, len(nonPKColumns))
+	for _, col := range nonPKColumns {
+		if destination.IsCDCColumn(col) {
+			updates = append(updates, fmt.Sprintf("target.[%s] = source.[%s]", col, col))
+			continue
+		}
+
+		activeIndex := dataColumnIndex[strings.ToLower(col)]
+		updates = append(updates, fmt.Sprintf(
+			"target.[%s] = CASE WHEN source.[_cdc_deleted] = 1 THEN CASE WHEN source.[__bruin_has_active] = 1 THEN source.[%s] ELSE target.[%s] END ELSE source.[%s] END",
+			col,
+			synapseActiveAlias(activeIndex),
+			col,
+			col,
+		))
+	}
+
+	sourceCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		quotedCol := fmt.Sprintf("[%s]", col)
+		if destination.IsCDCColumn(col) {
+			sourceCols[i] = "source." + quotedCol
+			continue
+		}
+
+		if pkMap[strings.ToLower(col)] {
+			sourceCols[i] = "source." + quotedCol
+			continue
+		}
+
+		activeIndex := dataColumnIndex[strings.ToLower(col)]
+		sourceCols[i] = fmt.Sprintf(
+			"CASE WHEN source.[_cdc_deleted] = 1 AND source.[__bruin_has_active] = 1 THEN source.[%s] ELSE source.%s END",
+			synapseActiveAlias(activeIndex),
+			quotedCol,
+		)
+	}
+
+	var updateSet string
+	if len(updates) > 0 {
+		updateSet = fmt.Sprintf("WHEN MATCHED THEN UPDATE SET %s", strings.Join(updates, ", "))
+	}
+
+	return fmt.Sprintf(
+		`MERGE %s AS target
+USING %s
+ON %s
+%s
+WHEN NOT MATCHED AND (source.[_cdc_deleted] = 0 OR source.[__bruin_has_active] = 1) THEN INSERT (%s) VALUES (%s);`,
+		quoteTable(targetTable),
+		buildSynapseCDCSource(stagingTable, primaryKeys, allColumns, dataColumns),
+		buildJoinCondition(primaryKeys, "target", "source"),
+		updateSet,
+		strings.Join(quotedColumns, ", "),
+		strings.Join(sourceCols, ", "),
+	)
+}
+
+func buildCDCActiveMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string) string {
+	onConditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		onConditions[i] = fmt.Sprintf("target.[%s] = source.[%s]", pk, pk)
+	}
+
+	var updateSet string
+	if len(nonPKColumns) > 0 {
+		updates := make([]string, len(nonPKColumns))
+		for i, col := range nonPKColumns {
+			updates[i] = fmt.Sprintf("target.[%s] = source.[%s]", col, col)
+		}
+		updateSet = fmt.Sprintf("WHEN MATCHED THEN UPDATE SET %s", strings.Join(updates, ", "))
+	}
+
+	insertCols := strings.Join(quotedColumns, ", ")
+	sourceCols := make([]string, len(quotedColumns))
+	for i, col := range quotedColumns {
+		sourceCols[i] = "source." + col
+	}
+
+	dedupSource := buildSynapseLatestCDCSource(stagingTable, primaryKeys, quotedColumns, "[_cdc_deleted] = 0", "source")
+
+	return fmt.Sprintf(
+		`MERGE %s AS target
+USING %s
+ON %s
+%s
+WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
+		quoteTable(targetTable),
+		dedupSource,
+		strings.Join(onConditions, " AND "),
+		updateSet,
+		insertCols,
+		strings.Join(sourceCols, ", "),
+	)
+}
+
+func buildCDCDeletedUpdateSQL(targetTable, stagingTable string, primaryKeys []string) string {
+	cdcColumns := append([]string{}, primaryKeys...)
+	cdcColumns = append(cdcColumns, "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at")
+	quotedCDCColumns := quoteColumns(cdcColumns)
+	latestAll := buildSynapseLatestCDCSource(stagingTable, primaryKeys, quotedCDCColumns, "", "latest")
+	latestDeleted := buildSynapseLatestCDCSource(stagingTable, primaryKeys, quotedCDCColumns, "[_cdc_deleted] = 1", "deleted")
+
+	return fmt.Sprintf(
+		`UPDATE target
+SET target.[_cdc_deleted] = 1, target.[_cdc_lsn] = deleted.[_cdc_lsn], target.[_cdc_synced_at] = deleted.[_cdc_synced_at]
+FROM %s AS target
+INNER JOIN %s ON %s
+INNER JOIN %s ON %s
+WHERE latest.[_cdc_deleted] = 1;`,
+		quoteTable(targetTable),
+		latestDeleted,
+		buildJoinCondition(primaryKeys, "target", "deleted"),
+		latestAll,
+		buildJoinCondition(primaryKeys, "deleted", "latest"),
+	)
 }
 
 func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string) string {
@@ -633,8 +817,25 @@ func (d *SynapseDestination) SupportsMergeStrategy() bool        { return true }
 func (d *SynapseDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *SynapseDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *SynapseDestination) SupportsAtomicSwap() bool           { return true }
+func (d *SynapseDestination) SupportsCDCMerge() bool             { return true }
 
 func (d *SynapseDestination) GetScheme() string { return "synapse" }
+
+func (d *SynapseDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	var maxLSN sql.NullString
+	query := fmt.Sprintf("SELECT MAX([_cdc_lsn]) FROM %s", quoteTable(table))
+	if err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN); err != nil {
+		if strings.Contains(err.Error(), "Invalid object name") {
+			return "", nil
+		}
+		config.LogFailedQuery(query, err)
+		return "", err
+	}
+	if !maxLSN.Valid {
+		return "", nil
+	}
+	return maxLSN.String, nil
+}
 
 func (d *SynapseDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseTableName(table)
