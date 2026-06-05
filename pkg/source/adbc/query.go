@@ -51,7 +51,7 @@ func BuildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 		colNames[i] = quoteFunc(col.Name)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), table)
+	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteTableName(table, quoteFunc))
 
 	var conditions []string
 	config.Debug("[QUERY] Building query with IncrementalKey=%s, IntervalStart=%v, IntervalEnd=%v", opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd)
@@ -80,18 +80,26 @@ func BuildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 	return query
 }
 
+func quoteTableName(table string, quoteFunc func(string) string) string {
+	parts := strings.Split(table, ".")
+	for i, part := range parts {
+		parts[i] = quoteFunc(part)
+	}
+	return strings.Join(parts, ".")
+}
+
 // DefaultQuoteIdentifier provides the default quoting style (double quotes).
 // Used by PostgreSQL, DuckDB, Snowflake, BigQuery, SQL Server (ANSI mode).
 func DefaultQuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
 }
 
 // BacktickQuoteIdentifier uses backticks for quoting (MySQL style).
 func BacktickQuoteIdentifier(name string) string {
-	return fmt.Sprintf("`%s`", name)
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
 }
 
 // BracketQuoteIdentifier uses brackets for quoting (SQL Server style).
 func BracketQuoteIdentifier(name string) string {
-	return fmt.Sprintf("[%s]", name)
+	return fmt.Sprintf("[%s]", strings.ReplaceAll(name, "]", "]]"))
 }

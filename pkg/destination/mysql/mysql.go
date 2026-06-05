@@ -154,8 +154,7 @@ func (d *MySQLDestination) ensureDatabaseExists(ctx context.Context, database st
 	if exists {
 		return nil
 	}
-	escaped := strings.ReplaceAll(database, "`", "``")
-	createSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", escaped)
+	createSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", quoteIdentifier(database))
 	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create database %s: %w", database, err)
@@ -241,7 +240,7 @@ func (d *MySQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 	colNames := make([]string, numCols)
 	placeholders := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
-		colNames[i] = fmt.Sprintf("`%s`", record.Schema().Field(i).Name)
+		colNames[i] = quoteIdentifier(record.Schema().Field(i).Name)
 		placeholders[i] = "?"
 	}
 
@@ -432,8 +431,8 @@ func (d *MySQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	defer func() { _ = tx.Rollback() }()
 
 	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE `%s` >= ? AND `%s` <= ?",
-		quoteTable(opts.TargetTable), opts.IncrementalKey, opts.IncrementalKey,
+		"DELETE FROM %s WHERE %s >= ? AND %s <= ?",
+		quoteTable(opts.TargetTable), quoteIdentifier(opts.IncrementalKey), quoteIdentifier(opts.IncrementalKey),
 	)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -713,18 +712,22 @@ func mapMySQLTypeToSchema(dataType, columnType string) schema.DataType {
 	}
 }
 
+func quoteIdentifier(s string) string {
+	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+}
+
 func quoteTable(table string) string {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
-		return fmt.Sprintf("`%s`.`%s`", parts[0], parts[1])
+		return quoteIdentifier(parts[0]) + "." + quoteIdentifier(parts[1])
 	}
-	return fmt.Sprintf("`%s`", table)
+	return quoteIdentifier(table)
 }
 
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf("`%s`", col)
+		quoted[i] = quoteIdentifier(col)
 	}
 	return quoted
 }
@@ -747,7 +750,7 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf("%s.`%s` = %s.`%s`", targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf("%s.%s = %s.%s", targetAlias, quoteIdentifier(key), sourceAlias, quoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -755,13 +758,13 @@ func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 func buildUpdateSet(columns []string, targetAlias, sourceAlias string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf("%s.`%s` = %s.`%s`", targetAlias, col, sourceAlias, col)
+		sets[i] = fmt.Sprintf("%s.%s = %s.%s", targetAlias, quoteIdentifier(col), sourceAlias, quoteIdentifier(col))
 	}
 	return strings.Join(sets, ", ")
 }
 
 func quoteColumn(col string) string {
-	return fmt.Sprintf("`%s`", col)
+	return quoteIdentifier(col)
 }
 
 // buildChangeConditionsMySQL builds change detection conditions using COALESCE for NULL handling.
@@ -786,7 +789,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToMySQL(col)
-		colDefs = append(colDefs, fmt.Sprintf("`%s` %s", col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))
@@ -794,7 +797,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf("`%s`", k)
+			quotedKeys[i] = quoteIdentifier(k)
 		}
 		sql += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}

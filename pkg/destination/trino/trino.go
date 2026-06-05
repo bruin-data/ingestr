@@ -73,7 +73,7 @@ func (d *TrinoDestination) PrepareTable(ctx context.Context, opts destination.Pr
 
 	if opts.DropFirst {
 		startDrop := time.Now()
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS \"%s\".\"%s\".\"%s\"", catalog, schemaName, tableName)
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s.%s", quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(tableName))
 		if _, err := d.db.ExecContext(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
 			return fmt.Errorf("failed to drop table: %w", err)
@@ -98,11 +98,11 @@ func (d *TrinoDestination) ensureSchemaExists(ctx context.Context, catalog, sche
 		return nil
 	}
 
-	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS \"%s\".\"%s\"", catalog, schemaName)
+	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.%s", quoteIdentifier(catalog), quoteIdentifier(schemaName))
 	if _, err := d.db.ExecContext(ctx, createSchemaSQL); err != nil {
 		// Some catalogs (like memory) don't support CREATE SCHEMA, but have a default schema
 		// Check if the schema already exists by querying information_schema
-		checkSQL := fmt.Sprintf("SELECT 1 FROM \"%s\".information_schema.schemata WHERE schema_name = '%s'", catalog, schemaName)
+		checkSQL := fmt.Sprintf("SELECT 1 FROM %s.information_schema.schemata WHERE schema_name = '%s'", quoteIdentifier(catalog), strings.ReplaceAll(schemaName, "'", "''"))
 		rows, checkErr := d.db.QueryContext(ctx, checkSQL)
 		if checkErr != nil {
 			config.LogFailedQuery(createSchemaSQL, err)
@@ -200,11 +200,11 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
 	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
-	stagingFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", stagingCatalog, stagingSchema, stagingName)
-	targetFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", targetCatalog, targetSchema, targetName)
+	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingCatalog), quoteIdentifier(stagingSchema), quoteIdentifier(stagingName))
+	targetFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(targetName))
 	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 	oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("trino"))
-	oldFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", targetCatalog, targetSchema, oldName)
+	oldFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(oldName))
 
 	// Replace only PrepareTables the staging side, so the target schema may
 	// not exist yet on first run with the _bruin_staging design.
@@ -240,27 +240,27 @@ func (d *TrinoDestination) MergeTable(ctx context.Context, opts destination.Merg
 	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
 	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
-	stagingFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", stagingCatalog, stagingSchema, stagingName)
-	targetFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", targetCatalog, targetSchema, targetName)
+	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingCatalog), quoteIdentifier(stagingSchema), quoteIdentifier(stagingName))
+	targetFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(targetName))
 
 	var onConditions []string
 	for _, pk := range opts.PrimaryKeys {
-		onConditions = append(onConditions, fmt.Sprintf("t.\"%s\" = s.\"%s\"", pk, pk))
+		onConditions = append(onConditions, fmt.Sprintf("t.%s = s.%s", quoteIdentifier(pk), quoteIdentifier(pk)))
 	}
 
 	var updateSets []string
 	var insertCols []string
 	var insertVals []string
 	for _, col := range opts.Columns {
-		updateSets = append(updateSets, fmt.Sprintf("\"%s\" = s.\"%s\"", col, col))
-		insertCols = append(insertCols, fmt.Sprintf("\"%s\"", col))
-		insertVals = append(insertVals, fmt.Sprintf("s.\"%s\"", col))
+		updateSets = append(updateSets, fmt.Sprintf("%s = s.%s", quoteIdentifier(col), quoteIdentifier(col)))
+		insertCols = append(insertCols, quoteIdentifier(col))
+		insertVals = append(insertVals, fmt.Sprintf("s.%s", quoteIdentifier(col)))
 	}
 
 	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKsForPartition := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		quotedPKsForPartition[i] = fmt.Sprintf(`"%s"`, pk)
+		quotedPKsForPartition[i] = quoteIdentifier(pk)
 	}
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
@@ -301,12 +301,14 @@ func (d *TrinoDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
 	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
-	stagingFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", stagingCatalog, stagingSchema, stagingName)
-	targetFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", targetCatalog, targetSchema, targetName)
+	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingCatalog), quoteIdentifier(stagingSchema), quoteIdentifier(stagingName))
+	targetFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(targetName))
 
 	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE \"%s\" >= '%v' AND \"%s\" <= '%v'",
-		targetFQN, opts.IncrementalKey, opts.IntervalStart, opts.IncrementalKey, opts.IntervalEnd,
+		"DELETE FROM %s WHERE %s >= '%s' AND %s <= '%s'",
+		targetFQN,
+		quoteIdentifier(opts.IncrementalKey), escapeSQLValue(opts.IntervalStart),
+		quoteIdentifier(opts.IncrementalKey), escapeSQLValue(opts.IntervalEnd),
 	)
 	config.Debug("[TRINO DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -336,8 +338,8 @@ func (d *TrinoDestination) SCD2Table(ctx context.Context, opts destination.SCD2O
 	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
 	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
-	stagingFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", stagingCatalog, stagingSchema, stagingName)
-	targetFQN := fmt.Sprintf("\"%s\".\"%s\".\"%s\"", targetCatalog, targetSchema, targetName)
+	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingCatalog), quoteIdentifier(stagingSchema), quoteIdentifier(stagingName))
+	targetFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(targetName))
 
 	// Build column comparison for change detection (excluding SCD columns and PKs)
 	nonPKColumns := filterSCD2Columns(opts.Columns, opts.PrimaryKeys)
@@ -427,7 +429,7 @@ func (d *TrinoDestination) SCD2Table(ctx context.Context, opts destination.SCD2O
 
 func (d *TrinoDestination) DropTable(ctx context.Context, table string) error {
 	catalog, schemaName, tableName := d.parseTableName(table)
-	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS \"%s\".\"%s\".\"%s\"", catalog, schemaName, tableName)
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s.%s", quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(tableName))
 	if _, err := d.db.ExecContext(ctx, dropSQL); err != nil {
 		config.LogFailedQuery(dropSQL, err)
 		return fmt.Errorf("failed to drop table %s: %w", table, err)
@@ -556,12 +558,12 @@ func buildCreateTableSQL(catalog, schemaName, table string, columns []schema.Col
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToTrino(col)
-		colDefs = append(colDefs, fmt.Sprintf("\"%s\" %s", col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS \"%s\".\"%s\".\"%s\" (\n  %s\n)",
-		catalog, schemaName, table,
+		"CREATE TABLE IF NOT EXISTS %s.%s.%s (\n  %s\n)",
+		quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(table),
 		strings.Join(colDefs, ",\n  "),
 	)
 
@@ -571,7 +573,7 @@ func buildCreateTableSQL(catalog, schemaName, table string, columns []schema.Col
 func buildInsertSQLWithValues(catalog, schemaName, table string, columns []string, record arrow.RecordBatch, startRow, endRow int) string {
 	quotedCols := make([]string, len(columns))
 	for i, col := range columns {
-		quotedCols[i] = fmt.Sprintf("\"%s\"", col)
+		quotedCols[i] = quoteIdentifier(col)
 	}
 
 	var rows []string
@@ -583,8 +585,8 @@ func buildInsertSQLWithValues(catalog, schemaName, table string, columns []strin
 		rows = append(rows, "("+strings.Join(values, ", ")+")")
 	}
 
-	return fmt.Sprintf("INSERT INTO \"%s\".\"%s\".\"%s\" (%s) VALUES %s",
-		catalog, schemaName, table,
+	return fmt.Sprintf("INSERT INTO %s.%s.%s (%s) VALUES %s",
+		quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(table),
 		strings.Join(quotedCols, ", "),
 		strings.Join(rows, ", "))
 }
@@ -700,10 +702,18 @@ func escapeString(s string) string {
 	return "'" + escaped + "'"
 }
 
+func quoteIdentifier(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+func escapeSQLValue(v interface{}) string {
+	return strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''")
+}
+
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf("\"%s\"", col)
+		quoted[i] = quoteIdentifier(col)
 	}
 	return quoted
 }
@@ -728,7 +738,7 @@ func filterSCD2Columns(columns []string, exclude []string) []string {
 func buildSCD2PKMatchCondition(keys []string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf(`source."%s" = "%s"`, key, key)
+		conditions[i] = fmt.Sprintf(`source.%s = %s`, quoteIdentifier(key), quoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -737,7 +747,7 @@ func buildSCD2PKMatchCondition(keys []string) string {
 func buildSCD2ChangeDetectionSubquery(stagingFQN string, primaryKeys, nonPKColumns []string) string {
 	pkConditions := make([]string, len(primaryKeys))
 	for i, key := range primaryKeys {
-		pkConditions[i] = fmt.Sprintf(`source."%s" = "%s"`, key, key)
+		pkConditions[i] = fmt.Sprintf(`source.%s = %s`, quoteIdentifier(key), quoteIdentifier(key))
 	}
 
 	if len(nonPKColumns) == 0 {
@@ -746,7 +756,7 @@ func buildSCD2ChangeDetectionSubquery(stagingFQN string, primaryKeys, nonPKColum
 
 	changeConditions := make([]string, len(nonPKColumns))
 	for i, col := range nonPKColumns {
-		changeConditions[i] = fmt.Sprintf(`"%s" IS DISTINCT FROM source."%s"`, col, col)
+		changeConditions[i] = fmt.Sprintf(`%s IS DISTINCT FROM source.%s`, quoteIdentifier(col), quoteIdentifier(col))
 	}
 
 	return fmt.Sprintf(`EXISTS (
@@ -760,7 +770,7 @@ func buildSCD2ChangeDetectionSubquery(stagingFQN string, primaryKeys, nonPKColum
 func buildSCD2NotExistsCondition(stagingFQN string, primaryKeys []string) string {
 	pkConditions := make([]string, len(primaryKeys))
 	for i, key := range primaryKeys {
-		pkConditions[i] = fmt.Sprintf(`source."%s" = "%s"`, key, key)
+		pkConditions[i] = fmt.Sprintf(`source.%s = %s`, quoteIdentifier(key), quoteIdentifier(key))
 	}
 
 	return fmt.Sprintf(`NOT EXISTS (
@@ -773,7 +783,7 @@ func buildSCD2NotExistsCondition(stagingFQN string, primaryKeys []string) string
 func buildSCD2InsertNotExistsCondition(targetFQN string, primaryKeys []string) string {
 	pkConditions := make([]string, len(primaryKeys))
 	for i, key := range primaryKeys {
-		pkConditions[i] = fmt.Sprintf(`target."%s" = source."%s"`, key, key)
+		pkConditions[i] = fmt.Sprintf(`target.%s = source.%s`, quoteIdentifier(key), quoteIdentifier(key))
 	}
 
 	return fmt.Sprintf(`NOT EXISTS (

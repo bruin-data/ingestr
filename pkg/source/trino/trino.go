@@ -111,10 +111,10 @@ func (s *TrinoSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 			column_name,
 			data_type,
 			is_nullable
-		FROM "%s".information_schema.columns
+		FROM %s.information_schema.columns
 		WHERE table_schema = ? AND table_name = ?
 		ORDER BY ordinal_position
-	`, catalog)
+	`, quoteIdentifier(catalog))
 
 	rows, err := s.db.QueryContext(ctx, query, schemaName, tableName)
 	if err != nil {
@@ -284,11 +284,11 @@ func (s *TrinoSource) parseTableName(table string) (catalog, schemaName, tableNa
 func (s *TrinoSource) buildSelectQuery(table string, columns []schema.Column, opts source.ReadOptions) string {
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
-		colNames[i] = fmt.Sprintf(`"%s"`, col.Name)
+		colNames[i] = quoteIdentifier(col.Name)
 	}
 
 	catalog, schemaName, tableName := s.parseTableName(table)
-	fqn := fmt.Sprintf(`"%s"."%s"."%s"`, catalog, schemaName, tableName)
+	fqn := fmt.Sprintf("%s.%s.%s", quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(tableName))
 
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), fqn)
 
@@ -296,10 +296,10 @@ func (s *TrinoSource) buildSelectQuery(table string, columns []schema.Column, op
 	if opts.IncrementalKey != "" {
 		incrementalCol := findColumn(columns, opts.IncrementalKey)
 		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf(`"%s" >= %s`, opts.IncrementalKey, formatIncrementalLiteral(incrementalCol, *opts.IntervalStart)))
+			conditions = append(conditions, fmt.Sprintf(`%s >= %s`, quoteIdentifier(opts.IncrementalKey), formatIncrementalLiteral(incrementalCol, *opts.IntervalStart)))
 		}
 		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf(`"%s" <= %s`, opts.IncrementalKey, formatIncrementalLiteral(incrementalCol, *opts.IntervalEnd)))
+			conditions = append(conditions, fmt.Sprintf(`%s <= %s`, quoteIdentifier(opts.IncrementalKey), formatIncrementalLiteral(incrementalCol, *opts.IntervalEnd)))
 		}
 	}
 
@@ -339,6 +339,10 @@ func formatIncrementalLiteral(col *schema.Column, t time.Time) string {
 	default:
 		return fmt.Sprintf("TIMESTAMP '%s'", t.Format("2006-01-02 15:04:05.000000"))
 	}
+}
+
+func quoteIdentifier(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 func filterColumns(columns []schema.Column, exclude []string) []schema.Column {

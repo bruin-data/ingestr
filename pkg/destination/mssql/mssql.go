@@ -152,7 +152,7 @@ func (d *MSSQLDestination) ensureSchemaExists(ctx context.Context, schemaName st
 	createSchemaSQL := fmt.Sprintf(
 		"IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = '%s') EXEC('CREATE SCHEMA [%s]')",
 		strings.ReplaceAll(schemaName, "'", "''"),
-		strings.ReplaceAll(schemaName, "]", "]]"),
+		strings.ReplaceAll(strings.ReplaceAll(schemaName, "]", "]]"), "'", "''"),
 	)
 	if _, err := d.db.ExecContext(ctx, createSchemaSQL); err != nil {
 		config.LogFailedQuery(createSchemaSQL, err)
@@ -344,7 +344,7 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 			_ = tx.Rollback()
 			return fmt.Errorf("failed to ensure target schema exists: %w", err)
 		}
-		transferSQL := fmt.Sprintf("ALTER SCHEMA [%s] TRANSFER %s", targetSchema, quoteTable(stagingTable))
+		transferSQL := fmt.Sprintf("ALTER SCHEMA %s TRANSFER %s", quoteIdentifier(targetSchema), quoteTable(stagingTable))
 		if _, err := tx.ExecContext(ctx, transferSQL); err != nil {
 			config.LogFailedQuery(transferSQL, err)
 			_ = tx.Rollback()
@@ -365,7 +365,7 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 
 	if exists > 0 {
 		renameSQL := fmt.Sprintf("EXEC sp_rename '%s', '%s'",
-			escapeTableNameForRename(targetTable), extractTableName(oldTable))
+			escapeTableNameForRename(targetTable), escapeTableNameForRename(extractTableName(oldTable)))
 		if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
 			_ = tx.Rollback()
@@ -373,7 +373,7 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 		}
 
 		renameSQL = fmt.Sprintf("EXEC sp_rename '%s', '%s'",
-			escapeTableNameForRename(stagingTable), extractTableName(targetTable))
+			escapeTableNameForRename(stagingTable), escapeTableNameForRename(extractTableName(targetTable)))
 		if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
 			_ = tx.Rollback()
@@ -389,7 +389,7 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 		}
 	} else {
 		renameSQL := fmt.Sprintf("EXEC sp_rename '%s', '%s'",
-			escapeTableNameForRename(stagingTable), extractTableName(targetTable))
+			escapeTableNameForRename(stagingTable), escapeTableNameForRename(extractTableName(targetTable)))
 		if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
 			_ = tx.Rollback()
@@ -427,14 +427,16 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
-		onConditions[i] = fmt.Sprintf("target.[%s] = source.[%s]", pk, pk)
+		quotedPK := quoteIdentifier(pk)
+		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quotedPK, quotedPK)
 	}
 
 	var updateSet string
 	if len(nonPKColumns) > 0 {
 		updates := make([]string, len(nonPKColumns))
 		for i, col := range nonPKColumns {
-			updates[i] = fmt.Sprintf("target.[%s] = source.[%s]", col, col)
+			quotedCol := quoteIdentifier(col)
+			updates[i] = fmt.Sprintf("target.%s = source.%s", quotedCol, quotedCol)
 		}
 		updateSet = fmt.Sprintf("WHEN MATCHED THEN UPDATE SET %s", strings.Join(updates, ", "))
 	}
@@ -483,9 +485,10 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	quotedIncrementalKey := quoteIdentifier(opts.IncrementalKey)
 	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE [%s] >= @p1 AND [%s] <= @p2",
-		quoteTable(opts.TargetTable), opts.IncrementalKey, opts.IncrementalKey,
+		"DELETE FROM %s WHERE %s >= @p1 AND %s <= @p2",
+		quoteTable(opts.TargetTable), quotedIncrementalKey, quotedIncrementalKey,
 	)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -750,18 +753,22 @@ func mapMSSQLTypeToSchema(dataType string) schema.DataType {
 	}
 }
 
+func quoteIdentifier(s string) string {
+	return "[" + strings.ReplaceAll(s, "]", "]]") + "]"
+}
+
 func quoteTable(table string) string {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
-		return fmt.Sprintf("[%s].[%s]", parts[0], parts[1])
+		return fmt.Sprintf("%s.%s", quoteIdentifier(parts[0]), quoteIdentifier(parts[1]))
 	}
-	return fmt.Sprintf("[%s]", table)
+	return quoteIdentifier(table)
 }
 
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf("[%s]", col)
+		quoted[i] = quoteIdentifier(col)
 	}
 	return quoted
 }
@@ -789,7 +796,8 @@ func extractTableName(table string) string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf("%s.[%s] = %s.[%s]", targetAlias, key, sourceAlias, key)
+		quotedKey := quoteIdentifier(key)
+		conditions[i] = fmt.Sprintf("%s.%s = %s.%s", targetAlias, quotedKey, sourceAlias, quotedKey)
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -802,11 +810,12 @@ func buildChangeConditionsMSSQL(columns []string, targetAlias, sourceAlias strin
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
 		// MSSQL doesn't have IS DISTINCT FROM, use ISNULL or COALESCE comparison
+		quotedCol := quoteIdentifier(col)
 		conditions[i] = fmt.Sprintf(
-			`((%s.[%s] IS NULL AND %s.[%s] IS NOT NULL) OR (%s.[%s] IS NOT NULL AND %s.[%s] IS NULL) OR %s.[%s] <> %s.[%s])`,
-			targetAlias, col, sourceAlias, col,
-			targetAlias, col, sourceAlias, col,
-			targetAlias, col, sourceAlias, col,
+			`((%s.%s IS NULL AND %s.%s IS NOT NULL) OR (%s.%s IS NOT NULL AND %s.%s IS NULL) OR %s.%s <> %s.%s)`,
+			targetAlias, quotedCol, sourceAlias, quotedCol,
+			targetAlias, quotedCol, sourceAlias, quotedCol,
+			targetAlias, quotedCol, sourceAlias, quotedCol,
 		)
 	}
 	return strings.Join(conditions, " OR ")
@@ -829,7 +838,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := mapColumnTypeForCreate(col, primaryKeySet[strings.ToLower(col.Name)])
-		colDefs = append(colDefs, fmt.Sprintf("[%s] %s", col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
 	}
 
 	createPart := fmt.Sprintf("CREATE TABLE %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))
@@ -837,7 +846,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf("[%s]", k)
+			quotedKeys[i] = quoteIdentifier(k)
 		}
 		createPart += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}

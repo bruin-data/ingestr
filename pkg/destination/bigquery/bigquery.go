@@ -879,12 +879,12 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		return nil
 	}
 
-	stagingFQN := fmt.Sprintf("`%s`.`%s`.`%s`", d.projectID, stagingDataset, stagingTableName)
+	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName))
 	selectClause := buildBigQueryDedupSelect(stagingFQN, opts.PrimaryKeys, opts.IncrementalKey)
 
 	if d.partitionBy != "" || len(d.clusterBy) > 0 {
 		// For partitioned/clustered tables, must use SQL to apply partitioning
-		sql := fmt.Sprintf("CREATE OR REPLACE TABLE `%s`.`%s`.`%s`\n", d.projectID, targetDataset, targetTableName)
+		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName))
 
 		if d.partitionBy != "" {
 			sql += partitionByClause(d.partitionBy, isDatePartitionColumn(opts.Schema, d.partitionBy))
@@ -893,7 +893,7 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		if len(d.clusterBy) > 0 {
 			clusterCols := make([]string, len(d.clusterBy))
 			for i, col := range d.clusterBy {
-				clusterCols[i] = "`" + col + "`"
+				clusterCols[i] = quoteIdentifier(col)
 			}
 			sql += fmt.Sprintf("CLUSTER BY %s\n", strings.Join(clusterCols, ", "))
 		}
@@ -912,8 +912,8 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 	} else {
 		// Use SQL CREATE OR REPLACE TABLE AS SELECT * — Copy Jobs don't read
 		// from the streaming buffer, so they'd copy 0 rows after Storage Write API writes.
-		sql := fmt.Sprintf("CREATE OR REPLACE TABLE `%s`.`%s`.`%s` AS %s",
-			d.projectID, targetDataset, targetTableName, selectClause)
+		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s AS %s",
+			quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName), selectClause)
 
 		config.Debug("[DEST] Executing SQL swap: %s", sql)
 
@@ -1135,35 +1135,35 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	foundColumn := false
 	for _, field := range meta.Schema {
 		if field.Name == columnName {
-			selectExprs = append(selectExprs, fmt.Sprintf("CAST(`%s` AS %s) AS `%s`", field.Name, newType, field.Name))
+			selectExprs = append(selectExprs, fmt.Sprintf("CAST(%s AS %s) AS %s", quoteIdentifier(field.Name), newType, quoteIdentifier(field.Name)))
 			foundColumn = true
 			continue
 		}
-		selectExprs = append(selectExprs, fmt.Sprintf("`%s`", field.Name))
+		selectExprs = append(selectExprs, quoteIdentifier(field.Name))
 	}
 	if !foundColumn {
 		return "", fmt.Errorf("column %q not found in table metadata", columnName)
 	}
 
 	var sqlBuilder strings.Builder
-	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE `%s`.`%s`.`%s`\n", d.projectID, dataset, table)
+	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(table))
 	if meta.TimePartitioning != nil && meta.TimePartitioning.Field != "" {
 		sqlBuilder.WriteString(partitionByClause(meta.TimePartitioning.Field, partitionFieldIsDate(meta.Schema, meta.TimePartitioning.Field)))
 	}
 	if meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
 		clusterCols := make([]string, len(meta.Clustering.Fields))
 		for i, field := range meta.Clustering.Fields {
-			clusterCols[i] = fmt.Sprintf("`%s`", field)
+			clusterCols[i] = quoteIdentifier(field)
 		}
 		fmt.Fprintf(&sqlBuilder, "CLUSTER BY %s\n", strings.Join(clusterCols, ", "))
 	}
 	fmt.Fprintf(
 		&sqlBuilder,
-		"AS SELECT %s FROM `%s`.`%s`.`%s`",
+		"AS SELECT %s FROM %s.%s.%s",
 		strings.Join(selectExprs, ", "),
-		d.projectID,
-		dataset,
-		table,
+		quoteIdentifier(d.projectID),
+		quoteIdentifier(dataset),
+		quoteIdentifier(table),
 	)
 
 	return sqlBuilder.String(), nil
@@ -1381,7 +1381,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 }
 
 func quoteIdentifier(s string) string {
-	return fmt.Sprintf("`%s`", s)
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(s, "`", "``"))
 }
 
 func filterColumns(columns []string, exclude []string) []string {

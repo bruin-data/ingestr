@@ -243,7 +243,7 @@ func (d *SynapseDestination) writeRecordBatch(ctx context.Context, record arrow.
 
 	colNames := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
-		colNames[i] = fmt.Sprintf("[%s]", record.Schema().Field(i).Name)
+		colNames[i] = quoteIdentifier(record.Schema().Field(i).Name)
 	}
 	colList := strings.Join(colNames, ", ")
 
@@ -316,7 +316,7 @@ func (d *SynapseDestination) SwapTable(ctx context.Context, opts destination.Swa
 		if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
 			return fmt.Errorf("failed to ensure target schema exists: %w", err)
 		}
-		transferSQL := fmt.Sprintf("ALTER SCHEMA [%s] TRANSFER %s", schemaName, quoteTable(stagingTable))
+		transferSQL := fmt.Sprintf("ALTER SCHEMA %s TRANSFER %s", quoteIdentifier(schemaName), quoteTable(stagingTable))
 		if _, err := d.db.ExecContext(ctx, transferSQL); err != nil {
 			config.LogFailedQuery(transferSQL, err)
 			return fmt.Errorf("failed to transfer staging table to target schema: %w", err)
@@ -330,8 +330,8 @@ func (d *SynapseDestination) SwapTable(ctx context.Context, opts destination.Swa
 				return
 			}
 			currentLocation := schemaName + "." + stagingName
-			reverseSQL := fmt.Sprintf("ALTER SCHEMA [%s] TRANSFER %s",
-				stagingSchema, quoteTable(currentLocation))
+			reverseSQL := fmt.Sprintf("ALTER SCHEMA %s TRANSFER %s",
+				quoteIdentifier(stagingSchema), quoteTable(currentLocation))
 			if _, rbErr := d.db.ExecContext(ctx, reverseSQL); rbErr != nil {
 				config.Debug("[Synapse] Failed to reverse-transfer staging back to %s: %v", stagingSchema, rbErr)
 			}
@@ -349,20 +349,20 @@ func (d *SynapseDestination) SwapTable(ctx context.Context, opts destination.Swa
 	}
 
 	if exists > 0 {
-		renameSQL := fmt.Sprintf("RENAME OBJECT %s TO [%s]",
-			quoteTable(targetTable), oldTableName)
+		renameSQL := fmt.Sprintf("RENAME OBJECT %s TO %s",
+			quoteTable(targetTable), quoteIdentifier(oldTableName))
 		if _, err := d.db.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
 			return fmt.Errorf("failed to rename target table: %w", err)
 		}
 
-		renameSQL = fmt.Sprintf("RENAME OBJECT %s TO [%s]",
-			quoteTable(stagingTable), extractTableName(targetTable))
+		renameSQL = fmt.Sprintf("RENAME OBJECT %s TO %s",
+			quoteTable(stagingTable), quoteIdentifier(extractTableName(targetTable)))
 		if _, err := d.db.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
 			// Rollback: rename _old back to original target
-			rollbackSQL := fmt.Sprintf("RENAME OBJECT %s TO [%s]",
-				quoteTable(oldTable), extractTableName(targetTable))
+			rollbackSQL := fmt.Sprintf("RENAME OBJECT %s TO %s",
+				quoteTable(oldTable), quoteIdentifier(extractTableName(targetTable)))
 			if _, rbErr := d.db.ExecContext(ctx, rollbackSQL); rbErr != nil {
 				config.Debug("[Synapse] Rollback rename also failed: %v", rbErr)
 			}
@@ -378,8 +378,8 @@ func (d *SynapseDestination) SwapTable(ctx context.Context, opts destination.Swa
 			return fmt.Errorf("failed to drop old table: %w", err)
 		}
 	} else {
-		renameSQL := fmt.Sprintf("RENAME OBJECT %s TO [%s]",
-			quoteTable(stagingTable), extractTableName(targetTable))
+		renameSQL := fmt.Sprintf("RENAME OBJECT %s TO %s",
+			quoteTable(stagingTable), quoteIdentifier(extractTableName(targetTable)))
 		if _, err := d.db.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
 			return fmt.Errorf("failed to rename staging table: %w", err)
@@ -414,14 +414,14 @@ func (d *SynapseDestination) MergeTable(ctx context.Context, opts destination.Me
 func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
-		onConditions[i] = fmt.Sprintf("target.[%s] = source.[%s]", pk, pk)
+		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteIdentifier(pk), quoteIdentifier(pk))
 	}
 
 	var updateSet string
 	if len(nonPKColumns) > 0 {
 		updates := make([]string, len(nonPKColumns))
 		for i, col := range nonPKColumns {
-			updates[i] = fmt.Sprintf("target.[%s] = source.[%s]", col, col)
+			updates[i] = fmt.Sprintf("target.%s = source.%s", quoteIdentifier(col), quoteIdentifier(col))
 		}
 		updateSet = fmt.Sprintf("WHEN MATCHED THEN UPDATE SET %s", strings.Join(updates, ", "))
 	}
@@ -470,8 +470,8 @@ func (d *SynapseDestination) DeleteInsertTable(ctx context.Context, opts destina
 	defer func() { _ = tx.Rollback() }()
 
 	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE [%s] >= @p1 AND [%s] <= @p2",
-		quoteTable(opts.TargetTable), opts.IncrementalKey, opts.IncrementalKey,
+		"DELETE FROM %s WHERE %s >= @p1 AND %s <= @p2",
+		quoteTable(opts.TargetTable), quoteIdentifier(opts.IncrementalKey), quoteIdentifier(opts.IncrementalKey),
 	)
 	config.Debug("[Synapse DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -730,18 +730,22 @@ func mapSynapseTypeToSchema(dataType string) schema.DataType {
 	}
 }
 
+func quoteIdentifier(s string) string {
+	return "[" + strings.ReplaceAll(s, "]", "]]") + "]"
+}
+
 func quoteTable(table string) string {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
-		return fmt.Sprintf("[%s].[%s]", parts[0], parts[1])
+		return fmt.Sprintf("%s.%s", quoteIdentifier(parts[0]), quoteIdentifier(parts[1]))
 	}
-	return fmt.Sprintf("[%s]", table)
+	return quoteIdentifier(table)
 }
 
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf("[%s]", col)
+		quoted[i] = quoteIdentifier(col)
 	}
 	return quoted
 }
@@ -769,7 +773,7 @@ func extractTableName(table string) string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf("%s.[%s] = %s.[%s]", targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf("%s.%s = %s.%s", targetAlias, quoteIdentifier(key), sourceAlias, quoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -780,11 +784,12 @@ func buildChangeConditions(columns []string, targetAlias, sourceAlias string) st
 	}
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
+		qc := quoteIdentifier(col)
 		conditions[i] = fmt.Sprintf(
-			`((%s.[%s] IS NULL AND %s.[%s] IS NOT NULL) OR (%s.[%s] IS NOT NULL AND %s.[%s] IS NULL) OR %s.[%s] <> %s.[%s])`,
-			targetAlias, col, sourceAlias, col,
-			targetAlias, col, sourceAlias, col,
-			targetAlias, col, sourceAlias, col,
+			`((%s.%s IS NULL AND %s.%s IS NOT NULL) OR (%s.%s IS NOT NULL AND %s.%s IS NULL) OR %s.%s <> %s.%s)`,
+			targetAlias, qc, sourceAlias, qc,
+			targetAlias, qc, sourceAlias, qc,
+			targetAlias, qc, sourceAlias, qc,
 		)
 	}
 	return strings.Join(conditions, " OR ")
@@ -798,7 +803,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToSynapse(col)
-		colDefs = append(colDefs, fmt.Sprintf("[%s] %s", col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
 	}
 
 	createPart := fmt.Sprintf("CREATE TABLE %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))
@@ -806,7 +811,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf("[%s]", k)
+			quotedKeys[i] = quoteIdentifier(k)
 		}
 		createPart += fmt.Sprintf(",\n  PRIMARY KEY NONCLUSTERED (%s) NOT ENFORCED", strings.Join(quotedKeys, ", "))
 	}

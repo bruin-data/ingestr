@@ -147,7 +147,7 @@ func (d *Dialect) MapDataType(dbType string) (schema.DataType, int, int, schema.
 }
 
 func (d *Dialect) QuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
+	return `"` + strings.ReplaceAll(strings.ToUpper(name), `"`, `""`) + `"`
 }
 
 func (d *Dialect) ParsePrimaryKeyResult(rawValue interface{}) []string {
@@ -180,7 +180,7 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 	}
 
 	schemaName, tableName := d.ParseTableName(table)
-	fullTable := fmt.Sprintf("%s.%s", schemaName, tableName)
+	fullTable := fmt.Sprintf("%s.%s", d.QuoteIdentifier(schemaName), d.QuoteIdentifier(tableName))
 
 	config.Debug("[SNOWFLAKE] Using DESCRIBE TABLE for schema fetching: %s", fullTable)
 

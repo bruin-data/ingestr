@@ -60,7 +60,7 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 	// Build the query
 	columns := srcadbc.FilterColumns(opts.Schema.Columns, opts.ExcludeColumns)
 	schemaName, tableName := d.ParseTableName(table)
-	fullTable := fmt.Sprintf("%s.%s", schemaName, tableName)
+	fullTable := fmt.Sprintf("%s.%s", d.QuoteIdentifier(schemaName), d.QuoteIdentifier(tableName))
 	query := srcadbc.BuildSelectQuery(fullTable, columns, opts, d.QuoteIdentifier)
 	config.Debug("[SNOWFLAKE-NATIVE] Query: %s", query)
 
