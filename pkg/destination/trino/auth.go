@@ -87,7 +87,7 @@ func buildAndRegisterCustomClient(q url.Values) (string, error) {
 		return name, nil
 	}
 
-	transport := &http.Transport{}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if tlsCfg != nil {
 		transport.TLSClientConfig = tlsCfg
 	}
