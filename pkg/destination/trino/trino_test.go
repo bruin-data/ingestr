@@ -58,6 +58,38 @@ func TestParseTrinoURI(t *testing.T) {
 			wantInDSN:    []string{"https://", "user@host:443"},
 			wantNotInDSN: []string{"SSL=", "secure="},
 		},
+		{
+			// v0 aliases translate to driver names
+			uri:          "trino://host:443/cat?http_scheme=https&access_token=jwt&extra_credential=user%3Dalice&client_tags=etl",
+			wantCatalog:  "cat",
+			wantSchema:   "default",
+			wantInDSN:    []string{"accessToken=jwt", "extra_credentials=user%3Dalice", "clientTags=etl"},
+			wantNotInDSN: []string{"access_token", "extra_credential=user", "client_tags="},
+		},
+		{
+			// verify=<path> → SSLCertPath; verify=true silently dropped
+			uri:          "trino://host:443/cat?http_scheme=https&verify=%2Fetc%2Fssl%2Fca.pem",
+			wantCatalog:  "cat",
+			wantSchema:   "default",
+			wantInDSN:    []string{"SSLCertPath=%2Fetc%2Fssl%2Fca.pem"},
+			wantNotInDSN: []string{"verify="},
+		},
+		{
+			// http_headers triggers custom-client registration
+			uri:          `trino://host:443/cat?http_scheme=https&http_headers={"X-Tenant":"t1"}`,
+			wantCatalog:  "cat",
+			wantSchema:   "default",
+			wantInDSN:    []string{"custom_client=ingestr-trino-"},
+			wantNotInDSN: []string{"http_headers="},
+		},
+		{
+			// verify=false triggers custom client with InsecureSkipVerify
+			uri:          "trino://host:443/cat?http_scheme=https&verify=false",
+			wantCatalog:  "cat",
+			wantSchema:   "default",
+			wantInDSN:    []string{"custom_client=ingestr-trino-"},
+			wantNotInDSN: []string{"verify=", "SSLCertPath="},
+		},
 	}
 
 	for _, tt := range tests {
@@ -83,5 +115,19 @@ func TestParseTrinoURI(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParseTrinoURI_InvalidHTTPHeaders(t *testing.T) {
+	_, _, _, err := parseTrinoURI("trino://host:443/cat?http_headers=not-json")
+	if err == nil {
+		t.Fatal("expected error for invalid http_headers JSON, got nil")
+	}
+}
+
+func TestParseTrinoURI_CertWithoutKey(t *testing.T) {
+	_, _, _, err := parseTrinoURI("trino://host:443/cat?cert=/etc/ssl/client.pem")
+	if err == nil {
+		t.Fatal("expected error when cert is provided without key, got nil")
 	}
 }
