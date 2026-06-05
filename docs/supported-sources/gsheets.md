@@ -26,9 +26,44 @@ The URI is used to connect to the Google Sheets API for extracting data.
 
 ## Setting up a Google Sheets integration
 
-Google Sheets requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/google_sheets#setup-guide).
+To connect to Google Sheets, you need to create a Google Cloud service account and share your spreadsheet with it.
 
-Once you complete the guide, you should have a service account JSON file and the spreadsheet ID to connect to. Let's say:
+### Step 1: Create a Google Cloud Project
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project or select an existing one
+3. Note your project ID
+
+### Step 2: Enable the Google Sheets API
+
+1. In the Cloud Console, go to **APIs & Services** → **Library**
+2. Search for "Google Sheets API"
+3. Click on it and then click **Enable**
+
+### Step 3: Create a Service Account
+
+1. Go to **APIs & Services** → **Credentials**
+2. Click **Create Credentials** → **Service Account**
+3. Enter a name (e.g., "sheets-integration") and click **Create**
+4. Skip the optional steps and click **Done**
+
+### Step 4: Generate a JSON Key
+
+1. Click on the service account you just created
+2. Go to the **Keys** tab
+3. Click **Add Key** → **Create new key**
+4. Select **JSON** and click **Create**
+5. The JSON key file will be downloaded automatically - save it securely
+
+### Step 5: Share Your Spreadsheet
+
+1. Open the JSON key file and find the `client_email` field
+2. Open your Google Spreadsheet
+3. Click **Share** and add the service account email with **Viewer** access
+
+The JSON file path is your `credentials_path` for the ingestr URI.
+
+Once you have the service account JSON file and the spreadsheet ID, let's say:
 
 - you store your JSON file at the path `/path/to/file.json`.
 - the spreadsheet you'd like to connect to has the ID `fkdUQ2bjdNfUq2CA`. For example, if your spreadsheet URL is `https://docs.google.com/spreadsheets/d/fkdUQ2bjdNfUq2CA/edit?pli=1&gid=0#gid=0`, then the spreadsheet ID is `fkdUQ2bjdNfUq2CA`.

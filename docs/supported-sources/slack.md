@@ -20,9 +20,37 @@ The URI is used to connect to the Slack API for extracting data.
 
 ## Setting up a Slack integration
 
-Slack requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/Slack#setup-guide).
+To set up a Slack integration, you need to create a Slack App and obtain an API token with the necessary permissions.
 
-Once you complete the guide, you should have an API key with the necessary permissions as mentioned in the guide. Let's say your API key is axb-test-564. Here's a sample command that will copy the data from Slack into a DuckDB database:
+### Step 1: Create a Slack App
+
+1. Go to [Slack API Apps page](https://api.slack.com/apps)
+2. Click **Create New App**
+3. Choose **From scratch**
+4. Enter an App Name (e.g., "Data Integration") and select your workspace
+5. Click **Create App**
+
+### Step 2: Configure OAuth Scopes
+
+1. In the left sidebar, click **OAuth & Permissions**
+2. Scroll down to **Scopes** → **User Token Scopes** (or Bot Token Scopes)
+3. Add the following scopes based on the data you want to access:
+   - `channels:read` - View basic information about public channels
+   - `channels:history` - View messages in public channels
+   - `users:read` - View users in the workspace
+   - `team:read` - View team information
+   - For access logs, you need Enterprise Grid and `admin.teams:read` scope
+
+### Step 3: Install the App and Get Token
+
+1. Scroll to the top of **OAuth & Permissions** page
+2. Click **Install to Workspace**
+3. Review and allow the permissions
+4. Copy the **User OAuth Token** (starts with `xoxp-`) or **Bot User OAuth Token** (starts with `xoxb-`)
+
+This token is your `api_key` for the ingestr URI.
+
+Once you have the API key, let's say it is `axb-test-564`, here's a sample command that will copy the data from Slack into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'slack://?api_key=axb-test-564' --source-table 'channels' --dest-uri duckdb:///slack.duckdb --dest-table 'dest.channels'

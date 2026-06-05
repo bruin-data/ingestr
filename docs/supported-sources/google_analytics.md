@@ -20,7 +20,47 @@ URI parameters:
 - `property_id`: It is a unique number that identifies a particular property on Google Analytics. [Follow this guide](https://developers.google.com/analytics/devguides/reporting/data/v1/property-id#what_is_my_property_id) to know more about property ID.
 
 ## Setting up a Google Analytics Integration
-Google Analytics requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/google_analytics#grab-google-service-account-credentials). Once you complete the guide, you should have an `.json` file  and `project_id`. 
+
+To connect to Google Analytics, you need to create a Google Cloud service account and grant it access to your GA4 property.
+
+### Step 1: Create a Google Cloud Project
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project or select an existing one
+3. Note your project ID
+
+### Step 2: Enable the Google Analytics Data API
+
+1. In the Cloud Console, go to **APIs & Services** → **Library**
+2. Search for "Google Analytics Data API"
+3. Click on it and then click **Enable**
+
+### Step 3: Create a Service Account
+
+1. Go to **APIs & Services** → **Credentials**
+2. Click **Create Credentials** → **Service Account**
+3. Enter a name (e.g., "ga-integration") and click **Create**
+4. Skip the optional steps and click **Done**
+
+### Step 4: Generate a JSON Key
+
+1. Click on the service account you just created
+2. Go to the **Keys** tab
+3. Click **Add Key** → **Create new key**
+4. Select **JSON** and click **Create**
+5. The JSON key file will be downloaded automatically - save it securely
+
+### Step 5: Grant Access in Google Analytics
+
+1. Open [Google Analytics](https://analytics.google.com/)
+2. Go to **Admin** (gear icon)
+3. In the **Property** column, click **Property Access Management**
+4. Click the **+** button and select **Add users**
+5. Enter the service account email (found in your JSON file as `client_email`)
+6. Select **Viewer** role (minimum required)
+7. Click **Add**
+
+The JSON file path is your `credentials_path`, and your GA4 Property ID is the `property_id` for the ingestr URI. 
 
 ## Available Tables:
 

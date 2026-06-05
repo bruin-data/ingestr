@@ -100,7 +100,25 @@ my-org-bucket/
     └── users.parquet
 ```
 
-List of available Layout variables is available [here](https://dlthub.com/docs/dlt-ecosystem/destinations/filesystem#available-layout-placeholders)
+### Available Layout Placeholders
+
+The following placeholders can be used in the `layout` parameter:
+
+| Placeholder | Description |
+|-------------|-------------|
+| `{table_name}` | Name of the table being written |
+| `{load_id}` | Unique identifier for the current load operation |
+| `{file_id}` | Unique identifier for each file within a load |
+| `{ext}` | File extension (e.g., `parquet`, `jsonl`) |
+| `{timestamp}` | Current timestamp |
+| `{load_package_timestamp}` | Timestamp of the load package |
+| `{curr_date}` | Current date in YYYY-MM-DD format |
+| `{schema_name}` | Name of the schema |
+
+Example layouts:
+- `{table_name}/{load_id}.{file_id}.{ext}` - Default layout
+- `{table_name}.{ext}` - Single file per table
+- `{curr_date}/{table_name}.{ext}` - Organized by date
 
 ## Supported File Formats
 `gs` source only supports loading files in the following formats:

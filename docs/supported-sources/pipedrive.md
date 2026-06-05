@@ -16,9 +16,17 @@ URI parameters:
 
 ## Setting up a pipedrive Integration
 
-To grab pipedrive credentials, please follow the guide [here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/pipedrive#grab-api-token).
+To get your Pipedrive API token:
 
-Once you complete the guide, you should have a `api_token`. Let's say your `api_token` is token_123, here's a sample command that will copy the data from pipedriveinto a DuckDB database:
+1. Log in to your Pipedrive account
+2. Click on your profile picture in the top right corner
+3. Select **Personal preferences**
+4. Go to the **API** tab
+5. Copy your **Personal API token**
+
+Alternatively, you can create a new API token by clicking **Generate new token** if you want a dedicated token for this integration.
+
+Once you have the `api_token`, let's say your `api_token` is token_123, here's a sample command that will copy the data from Pipedrive into a DuckDB database:
 
 ```bash
 ingestr ingest \

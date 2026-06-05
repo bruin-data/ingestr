@@ -21,9 +21,42 @@ URI parameters:
 
 ## Setting up a GitHub Integration
 
-GitHub requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/github#setup-guide).
+To connect to GitHub, you need to create a Personal Access Token (PAT).
 
-Once you complete the guide, you should have an access token. Let's say your access token is `ghp_test_1234`, the owner is `max`, and the name of the repository is `test_example`. Here is a sample command that will copy the data from GitHub into a DuckDB database:
+### Step 1: Create a Personal Access Token
+
+1. Log in to [GitHub](https://github.com/)
+2. Click your profile picture → **Settings**
+3. Scroll down and click **Developer settings** in the left sidebar
+4. Click **Personal access tokens** → **Tokens (classic)** or **Fine-grained tokens**
+
+### Option A: Classic Token
+
+1. Click **Generate new token** → **Generate new token (classic)**
+2. Enter a note (e.g., "Data Integration")
+3. Select an expiration period
+4. Select scopes:
+   - `repo` - Full access to repositories (for private repos)
+   - `public_repo` - Access to public repositories only
+5. Click **Generate token**
+6. Copy the token immediately (starts with `ghp_`)
+
+### Option B: Fine-grained Token (Recommended)
+
+1. Click **Generate new token** → **Generate new token (fine-grained)**
+2. Enter a token name and expiration
+3. Under **Repository access**, select the repositories you need
+4. Under **Permissions**, set:
+   - **Issues**: Read-only (for issues table)
+   - **Pull requests**: Read-only (for pull_requests table)
+   - **Contents**: Read-only (for repo_events)
+   - **Metadata**: Read-only (required)
+5. Click **Generate token**
+6. Copy the token (starts with `github_pat_`)
+
+> **Note**: The access token is optional for public repositories, but recommended to avoid rate limits.
+
+Once you have your access token, let's say your access token is `ghp_test_1234`, the owner is `max`, and the name of the repository is `test_example`. Here is a sample command that will copy the data from GitHub into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=max&repo=test_example' --source-table 'issues' --dest-uri duckdb:///github.duckdb --dest-table 'dest.issues'

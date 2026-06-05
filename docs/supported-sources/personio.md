@@ -20,9 +20,34 @@ URI parameters:
 
 ## Setting up a Personio Integration
 
-To grab personio credentials, please follow the guide [here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/personio#grab-credentials).
+To connect to Personio, you need to create API credentials in your Personio account.
 
-Once you complete the guide, you should have a client ID and client secret. Let's say your `client_id` is id_123 and your `client_secret` is secret_123, here's a sample command that will copy the data from Personio into a DuckDB database:
+### Step 1: Access API Settings
+
+1. Log in to your Personio account
+2. Navigate to **Settings** → **Integrations** → **API credentials**
+
+### Step 2: Create API Credentials
+
+1. Click **Generate new credentials**
+2. Enter a description for the API credential (e.g., "Data Integration")
+3. Select the required permissions for the data you want to access:
+   - **Read employees** - For employee data
+   - **Read absences** - For absence data
+   - **Read attendances** - For attendance records
+   - **Read documents** - For document categories
+   - **Read custom reports** - For custom reports
+4. Click **Generate**
+
+### Step 3: Copy Credentials
+
+After generating, you will see:
+- **Client ID** - A unique identifier for your API credential
+- **Client Secret** - A secret key (shown only once, save it securely)
+
+These are your `client_id` and `client_secret` for the ingestr URI.
+
+Let's say your `client_id` is id_123 and your `client_secret` is secret_123, here's a sample command that will copy the data from Personio into a DuckDB database:
 
 ```bash
 ingestr ingest --source-uri 'personio://?client_id=id_123&client_secret=secret_123' \

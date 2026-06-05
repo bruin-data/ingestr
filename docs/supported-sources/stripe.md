@@ -20,9 +20,35 @@ The URI is used to connect to the Stripe API for extracting data. More details o
 
 ## Setting up a Stripe Integration
 
-Stripe requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/stripe#setup-guide).
+To connect to Stripe, you need to obtain an API key from your Stripe dashboard.
 
-Once you complete the guide, you should have an API key. Let's say your API key is `sk_test_12345`, here's a sample command that will copy the data from Stripe into a DuckDB database:
+### Step 1: Access Your API Keys
+
+1. Log in to your [Stripe Dashboard](https://dashboard.stripe.com/)
+2. Click on **Developers** in the left sidebar
+3. Select **API keys**
+
+### Step 2: Choose Your API Key
+
+Stripe provides two types of API keys:
+- **Test mode keys** (start with `sk_test_`) - Use for development and testing
+- **Live mode keys** (start with `sk_live_`) - Use for production data
+
+For data integration purposes, you should use the **Secret key** (not the Publishable key).
+
+### Step 3: Copy or Create a Restricted Key
+
+You can either:
+- **Use the standard secret key**: Copy the existing secret key directly
+- **Create a restricted key** (recommended for security):
+  1. Click **Create restricted key**
+  2. Name the key (e.g., "Data Integration")
+  3. Enable **Read** permissions for the resources you want to access (e.g., Charges, Customers, Subscriptions)
+  4. Click **Create key** and copy the key
+
+> **Note**: Secret keys should be kept confidential. Never expose them in client-side code or public repositories.
+
+Once you have your API key, let's say your API key is `sk_test_12345`, here's a sample command that will copy the data from Stripe into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'stripe://?api_key=sk_test_12345' --source-table 'charges' --dest-uri duckdb:///stripe.duckdb --dest-table 'dest.charges'

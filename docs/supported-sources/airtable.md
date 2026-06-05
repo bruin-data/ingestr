@@ -20,9 +20,33 @@ The URI is used to connect to the Airtable API for extracting data. More details
 
 ## Setting up a Airtable Integration
 
-Airtable requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/airtable#setup-guide).
+To connect to Airtable, you need to create a Personal Access Token.
 
-Once you complete the guide, you should have an Access Token. 
+### Step 1: Create a Personal Access Token
+
+1. Log in to [Airtable](https://airtable.com/)
+2. Go to [Account Settings](https://airtable.com/account) → click your profile icon → **Account**
+3. Click on **Developer hub** in the left sidebar
+4. Click **Personal access tokens**
+5. Click **Create new token**
+
+### Step 2: Configure the Token
+
+1. Enter a name for your token (e.g., "Data Integration")
+2. Under **Scopes**, select:
+   - `data.records:read` - Read records from bases
+   - `schema.bases:read` - Read base schemas
+3. Under **Access**, choose:
+   - **All current and future bases in all current and future workspaces** (for full access)
+   - Or select specific bases you want to access
+4. Click **Create token**
+
+### Step 3: Copy the Token
+
+1. Copy the token immediately (starts with `pat`)
+2. Store it securely - it won't be shown again
+
+Once you have the Access Token: 
 
 The source table you'll use for ingestr will be `<base_id>/<table_id>`.
 
