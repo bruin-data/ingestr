@@ -19,3 +19,4 @@ dependencies = [
 
 [tool.uv]
 package = false
+constraint-dependencies = ["nltk>=3.9.4"]
