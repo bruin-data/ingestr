@@ -1996,6 +1996,7 @@ func TestChessSource_ToDestinations(t *testing.T) {
 				IncrementalStrategy: config.StrategyReplace,
 				IntervalStart:       &intervalStart,
 				IntervalEnd:         &intervalEnd,
+				Columns:             "end_time:timestamptz",
 			}
 
 			p := pipeline.New(cfg)
