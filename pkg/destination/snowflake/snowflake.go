@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -385,6 +384,18 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 		return errors.New("merge requires at least one primary key")
 	}
 
+	if destination.HasCDCDeletedColumn(opts.Columns) {
+		mergeSQL := buildCDCMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns)
+		config.Debug("[MERGE] Executing CDC MERGE: %s", mergeSQL)
+		if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
+			config.LogFailedQuery(mergeSQL, err)
+			return fmt.Errorf("failed to execute CDC merge: %w", err)
+		}
+
+		config.Debug("[MERGE] CDC merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns)
 
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
@@ -396,6 +407,215 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 
 	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func buildCDCOrderBy() string {
+	return fmt.Sprintf("%s DESC, %s DESC", quoteIdentifier("_cdc_lsn"), quoteIdentifier("_cdc_synced_at"))
+}
+
+func buildSnowflakeLatestCDCSelect(table string, primaryKeys, columns []string, filter string) string {
+	quotedCols := make([]string, len(columns))
+	for i, col := range columns {
+		quotedCols[i] = quoteIdentifier(col)
+	}
+	quotedPKs := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		quotedPKs[i] = quoteIdentifier(pk)
+	}
+
+	where := ""
+	if filter != "" {
+		where = " WHERE " + filter
+	}
+
+	return fmt.Sprintf(
+		`SELECT %s FROM %s%s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) = 1`,
+		strings.Join(quotedCols, ", "),
+		table,
+		where,
+		strings.Join(quotedPKs, ", "),
+		buildCDCOrderBy(),
+	)
+}
+
+func buildSnowflakeLatestCDCCTE(name, table string, primaryKeys, columns []string, filter string) string {
+	return fmt.Sprintf("%s AS (%s)", name, buildSnowflakeLatestCDCSelect(table, primaryKeys, columns, filter))
+}
+
+func snowflakeAliasJoin(primaryKeys []string, leftAlias, rightAlias string) string {
+	conditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		conditions[i] = fmt.Sprintf("%s.%s = %s.%s", leftAlias, quoteIdentifier(pk), rightAlias, quoteIdentifier(pk))
+	}
+	return strings.Join(conditions, " AND ")
+}
+
+func snowflakeActiveAlias(index int) string {
+	return fmt.Sprintf("__bruin_active_%d", index)
+}
+
+func buildSnowflakeCDCSource(stagingFull string, primaryKeys, allColumns, dataColumns []string) string {
+	activeColumns := append(append([]string{}, primaryKeys...), dataColumns...)
+	latestAll := buildSnowflakeLatestCDCCTE("latest_all", stagingFull, primaryKeys, allColumns, "")
+	latestActive := buildSnowflakeLatestCDCCTE("latest_active", stagingFull, primaryKeys, activeColumns, fmt.Sprintf("%s = false", quoteIdentifier("_cdc_deleted")))
+
+	selects := []string{
+		"latest_all.*",
+		fmt.Sprintf("latest_active.%s IS NOT NULL AS %s", quoteIdentifier(primaryKeys[0]), quoteIdentifier("__bruin_has_active")),
+	}
+	for i, col := range dataColumns {
+		selects = append(selects, fmt.Sprintf("latest_active.%s AS %s", quoteIdentifier(col), quoteIdentifier(snowflakeActiveAlias(i))))
+	}
+
+	return fmt.Sprintf(
+		`(WITH %s, %s SELECT %s FROM latest_all LEFT JOIN latest_active ON %s) AS source`,
+		latestAll,
+		latestActive,
+		strings.Join(selects, ", "),
+		snowflakeAliasJoin(primaryKeys, "latest_all", "latest_active"),
+	)
+}
+
+func buildCDCMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
+	stagingSchema, stagingName := parseSchemaTable(stagingTable)
+	targetSchema, targetName := parseSchemaTable(targetTable)
+	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
+	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
+	dataColumns := destination.CDCDataColumns(allColumns, primaryKeys)
+	dataColumnIndex := make(map[string]int, len(dataColumns))
+	for i, col := range dataColumns {
+		dataColumnIndex[strings.ToLower(col)] = i
+	}
+
+	pkMap := make(map[string]bool)
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	var updateSets []string
+	for _, col := range allColumns {
+		if pkMap[strings.ToLower(col)] {
+			continue
+		}
+		if destination.IsCDCColumn(col) {
+			updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", quoteIdentifier(col), quoteIdentifier(col)))
+			continue
+		}
+
+		activeIndex := dataColumnIndex[strings.ToLower(col)]
+		updateSets = append(updateSets, fmt.Sprintf(
+			"target.%s = CASE WHEN source.%s = true THEN CASE WHEN source.%s THEN source.%s ELSE target.%s END ELSE source.%s END",
+			quoteIdentifier(col),
+			quoteIdentifier("_cdc_deleted"),
+			quoteIdentifier("__bruin_has_active"),
+			quoteIdentifier(snowflakeActiveAlias(activeIndex)),
+			quoteIdentifier(col),
+			quoteIdentifier(col),
+		))
+	}
+
+	quotedCols := make([]string, len(allColumns))
+	sourceCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		quotedCols[i] = quoteIdentifier(col)
+		if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+			sourceCols[i] = "source." + quoteIdentifier(col)
+			continue
+		}
+
+		activeIndex := dataColumnIndex[strings.ToLower(col)]
+		sourceCols[i] = fmt.Sprintf(
+			"CASE WHEN source.%s = true AND source.%s THEN source.%s ELSE source.%s END",
+			quoteIdentifier("_cdc_deleted"),
+			quoteIdentifier("__bruin_has_active"),
+			quoteIdentifier(snowflakeActiveAlias(activeIndex)),
+			quoteIdentifier(col),
+		)
+	}
+
+	var mergeSQL strings.Builder
+	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFull)
+	fmt.Fprintf(&mergeSQL, "USING %s\n", buildSnowflakeCDCSource(stagingFull, primaryKeys, allColumns, dataColumns))
+	fmt.Fprintf(&mergeSQL, "ON %s\n", snowflakeAliasJoin(primaryKeys, "target", "source"))
+	if len(updateSets) > 0 {
+		mergeSQL.WriteString("WHEN MATCHED THEN\n")
+		fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+	}
+	mergeSQL.WriteString("WHEN NOT MATCHED AND (source." + quoteIdentifier("_cdc_deleted") + " = false OR source." + quoteIdentifier("__bruin_has_active") + ") THEN\n")
+	fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+	fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	return mergeSQL.String()
+}
+
+func buildCDCActiveMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
+	stagingSchema, stagingName := parseSchemaTable(stagingTable)
+	targetSchema, targetName := parseSchemaTable(targetTable)
+	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
+	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
+	latestActive := buildSnowflakeLatestCDCCTE("latest_active", stagingFull, primaryKeys, allColumns, fmt.Sprintf("%s = false", quoteIdentifier("_cdc_deleted")))
+
+	onClause := buildJoinCondition(primaryKeys, "target", "source")
+
+	pkMap := make(map[string]bool)
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	var updateSets []string
+	for _, col := range allColumns {
+		if !pkMap[strings.ToLower(col)] {
+			updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", quoteIdentifier(col), quoteIdentifier(col)))
+		}
+	}
+
+	quotedCols := make([]string, len(allColumns))
+	sourceCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		quotedCols[i] = quoteIdentifier(col)
+		sourceCols[i] = "source." + quoteIdentifier(col)
+	}
+
+	var mergeSQL strings.Builder
+	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFull)
+	fmt.Fprintf(&mergeSQL, "USING (WITH %s SELECT * FROM latest_active) AS source\n", latestActive)
+	fmt.Fprintf(&mergeSQL, "ON %s\n", onClause)
+	if len(updateSets) > 0 {
+		mergeSQL.WriteString("WHEN MATCHED THEN\n")
+		fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+	}
+	mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
+	fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+	fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	return mergeSQL.String()
+}
+
+func buildCDCDeletedUpdateSQL(stagingTable, targetTable string, primaryKeys []string) string {
+	stagingSchema, stagingName := parseSchemaTable(stagingTable)
+	targetSchema, targetName := parseSchemaTable(targetTable)
+	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
+	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
+
+	cdcColumns := append([]string{}, primaryKeys...)
+	cdcColumns = append(cdcColumns, "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at")
+	latestAll := buildSnowflakeLatestCDCSelect(stagingFull, primaryKeys, cdcColumns, "")
+	latestDeleted := buildSnowflakeLatestCDCSelect(stagingFull, primaryKeys, cdcColumns, fmt.Sprintf("%s = true", quoteIdentifier("_cdc_deleted")))
+
+	return fmt.Sprintf(
+		`UPDATE %s AS target
+SET %s = true, %s = deleted.%s, %s = deleted.%s
+FROM (%s) AS deleted
+JOIN (%s) AS latest ON %s
+WHERE %s AND latest.%s = true`,
+		targetFull,
+		quoteIdentifier("_cdc_deleted"),
+		quoteIdentifier("_cdc_lsn"), quoteIdentifier("_cdc_lsn"),
+		quoteIdentifier("_cdc_synced_at"), quoteIdentifier("_cdc_synced_at"),
+		latestDeleted,
+		latestAll,
+		snowflakeAliasJoin(primaryKeys, "deleted", "latest"),
+		snowflakeAliasJoin(primaryKeys, "target", "deleted"),
+		quoteIdentifier("_cdc_deleted"),
+	)
 }
 
 func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
@@ -435,7 +655,7 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		quotedPKList[i] = quoteIdentifier(pk)
 	}
 
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 
 	dedupOrderBy := "(SELECT NULL)"
 	if hasCDCDeleted {

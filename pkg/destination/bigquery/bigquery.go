@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1153,6 +1152,10 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	// Fetch target and staging table schemas to detect type mismatches
 	castMap := d.buildCastMap(ctx, targetDataset, targetTableName, stagingDataset, stagingTableName)
 
+	if destination.HasCDCDeletedColumn(opts.Columns) {
+		return d.executeCDCMerge(ctx, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap)
+	}
+
 	// Build MERGE statement
 	mergeSQL := d.buildMergeSQL(targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap)
 
@@ -1169,6 +1172,23 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	}
 
 	config.Debug("[MERGE] Merge completed successfully (job %s)", jobRef(job))
+	return nil
+}
+
+func (d *BigQueryDestination) executeCDCMerge(ctx context.Context, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string) error {
+	mergeSQL := d.buildCDCMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap)
+	config.Debug("[MERGE] Executing CDC MERGE")
+	config.Debug("[MERGE] SQL: %s", mergeSQL)
+	job, err := d.runQueryJobWithRetry(ctx, mergeSQL, "CDC MERGE")
+	if err != nil {
+		config.LogFailedQuery(mergeSQL, err)
+		if job == nil {
+			return fmt.Errorf("failed to start CDC merge job: %w", err)
+		}
+		return fmt.Errorf("CDC merge job failed (job %s): %w", jobRef(job), err)
+	}
+
+	config.Debug("[MERGE] CDC merge completed successfully")
 	return nil
 }
 
@@ -1444,12 +1464,16 @@ func (d *BigQueryDestination) buildCastMap(ctx context.Context, targetDataset, t
 // castSourceCol returns the source column reference, adding a CAST if the column
 // has a type mismatch between staging and target tables.
 func castSourceCol(col string, castMap map[string]string) string {
+	return castBigQueryExpr(fmt.Sprintf("s.`%s`", col), col, castMap)
+}
+
+func castBigQueryExpr(expr, col string, castMap map[string]string) string {
 	if castMap != nil {
 		if targetType, ok := castMap[col]; ok {
-			return fmt.Sprintf("CAST(s.`%s` AS %s)", col, targetType)
+			return fmt.Sprintf("CAST(%s AS %s)", expr, targetType)
 		}
 	}
-	return fmt.Sprintf("s.`%s`", col)
+	return expr
 }
 
 func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, orderByCol string) string {
@@ -1467,6 +1491,213 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 	return fmt.Sprintf(
 		"SELECT * FROM %s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s%s) = 1",
 		qualifiedTable, strings.Join(pkCols, ", "), orderClause,
+	)
+}
+
+func quoteBigQueryColumns(columns []string) []string {
+	quoted := make([]string, len(columns))
+	for i, col := range columns {
+		quoted[i] = fmt.Sprintf("`%s`", col)
+	}
+	return quoted
+}
+
+func bigQueryPKPartition(primaryKeys []string) string {
+	quoted := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		quoted[i] = fmt.Sprintf("`%s`", pk)
+	}
+	return strings.Join(quoted, ", ")
+}
+
+func bigQueryAliasJoin(primaryKeys []string, leftAlias, rightAlias string) string {
+	conditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		conditions[i] = fmt.Sprintf("%s.`%s` = %s.`%s`", leftAlias, pk, rightAlias, pk)
+	}
+	return strings.Join(conditions, " AND ")
+}
+
+func bigQueryLatestCDCCTE(name, tableRef string, primaryKeys, allColumns []string, filter string) string {
+	return fmt.Sprintf("%s AS %s", name, bigQueryLatestCDCSelect(tableRef, primaryKeys, allColumns, filter))
+}
+
+func bigQueryLatestCDCSelect(tableRef string, primaryKeys, allColumns []string, filter string) string {
+	where := ""
+	if filter != "" {
+		where = " WHERE " + filter
+	}
+	quotedColumns := quoteBigQueryColumns(allColumns)
+	return fmt.Sprintf(
+		"(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC, `_cdc_synced_at` DESC) AS __bruin_cdc_rn FROM %s%s) WHERE __bruin_cdc_rn = 1)",
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedColumns, ", "),
+		bigQueryPKPartition(primaryKeys),
+		tableRef,
+		where,
+	)
+}
+
+func bigQueryActiveAlias(index int) string {
+	return fmt.Sprintf("__bruin_active_%d", index)
+}
+
+func bigQueryCDCSource(stagingRef string, primaryKeys, allColumns, dataColumns []string) string {
+	activeColumns := append(append([]string{}, primaryKeys...), dataColumns...)
+	latestAll := bigQueryLatestCDCCTE("latest_all", stagingRef, primaryKeys, allColumns, "")
+	latestActive := bigQueryLatestCDCCTE("latest_active", stagingRef, primaryKeys, activeColumns, "`_cdc_deleted` = false")
+
+	selects := []string{
+		"latest_all.*",
+		fmt.Sprintf("latest_active.`%s` IS NOT NULL AS `__bruin_has_active`", primaryKeys[0]),
+	}
+	for i, col := range dataColumns {
+		selects = append(selects, fmt.Sprintf("latest_active.`%s` AS `%s`", col, bigQueryActiveAlias(i)))
+	}
+
+	return fmt.Sprintf(
+		"(WITH %s, %s SELECT %s FROM latest_all LEFT JOIN latest_active ON %s)",
+		latestAll,
+		latestActive,
+		strings.Join(selects, ", "),
+		bigQueryAliasJoin(primaryKeys, "latest_all", "latest_active"),
+	)
+}
+
+func (d *BigQueryDestination) buildCDCMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string) string {
+	targetRef := fmt.Sprintf("`%s`.`%s`.`%s`", d.projectID, targetDataset, targetTable)
+	stagingRef := fmt.Sprintf("`%s`.`%s`.`%s`", d.projectID, stagingDataset, stagingTable)
+	dataColumns := destination.CDCDataColumns(allColumns, primaryKeys)
+	dataColumnIndex := make(map[string]int, len(dataColumns))
+	for i, col := range dataColumns {
+		dataColumnIndex[strings.ToLower(col)] = i
+	}
+
+	onConditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		sourceCol := castSourceCol(pk, castMap)
+		onConditions[i] = fmt.Sprintf("(t.`%s` = %s OR (t.`%s` IS NULL AND %s IS NULL))", pk, sourceCol, pk, sourceCol)
+	}
+
+	pkMap := make(map[string]bool)
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	var updateSets []string
+	for _, col := range allColumns {
+		if pkMap[strings.ToLower(col)] {
+			continue
+		}
+		if destination.IsCDCColumn(col) {
+			updateSets = append(updateSets, fmt.Sprintf("t.`%s` = %s", col, castSourceCol(col, castMap)))
+			continue
+		}
+
+		activeIndex := dataColumnIndex[strings.ToLower(col)]
+		activeExpr := castBigQueryExpr(fmt.Sprintf("s.`%s`", bigQueryActiveAlias(activeIndex)), col, castMap)
+		sourceExpr := castSourceCol(col, castMap)
+		updateSets = append(updateSets, fmt.Sprintf(
+			"t.`%s` = IF(s.`_cdc_deleted`, IF(s.`__bruin_has_active`, %s, t.`%s`), %s)",
+			col,
+			activeExpr,
+			col,
+			sourceExpr,
+		))
+	}
+
+	quotedCols := quoteBigQueryColumns(allColumns)
+	sourceCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+			sourceCols[i] = castSourceCol(col, castMap)
+			continue
+		}
+		activeIndex := dataColumnIndex[strings.ToLower(col)]
+		activeExpr := castBigQueryExpr(fmt.Sprintf("s.`%s`", bigQueryActiveAlias(activeIndex)), col, castMap)
+		sourceCols[i] = fmt.Sprintf(
+			"IF(s.`_cdc_deleted` AND s.`__bruin_has_active`, %s, %s)",
+			activeExpr,
+			castSourceCol(col, castMap),
+		)
+	}
+
+	var sql strings.Builder
+	fmt.Fprintf(&sql, "MERGE %s AS t\n", targetRef)
+	fmt.Fprintf(&sql, "USING %s AS s\n", bigQueryCDCSource(stagingRef, primaryKeys, allColumns, dataColumns))
+	fmt.Fprintf(&sql, "ON %s\n", strings.Join(onConditions, " AND "))
+	if len(updateSets) > 0 {
+		sql.WriteString("WHEN MATCHED THEN\n")
+		fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+	}
+	sql.WriteString("WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__bruin_has_active`) THEN\n")
+	fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+	fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	return sql.String()
+}
+
+func (d *BigQueryDestination) buildCDCActiveMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string) string {
+	targetRef := fmt.Sprintf("`%s`.`%s`.`%s`", d.projectID, targetDataset, targetTable)
+	stagingRef := fmt.Sprintf("`%s`.`%s`.`%s`", d.projectID, stagingDataset, stagingTable)
+	latestActive := bigQueryLatestCDCCTE("latest_active", stagingRef, primaryKeys, allColumns, "`_cdc_deleted` = false")
+
+	onConditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		sourceCol := castSourceCol(pk, castMap)
+		onConditions[i] = fmt.Sprintf("(t.`%s` = %s OR (t.`%s` IS NULL AND %s IS NULL))", pk, sourceCol, pk, sourceCol)
+	}
+
+	pkMap := make(map[string]bool)
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	var updateSets []string
+	for _, col := range allColumns {
+		if !pkMap[strings.ToLower(col)] {
+			updateSets = append(updateSets, fmt.Sprintf("t.`%s` = %s", col, castSourceCol(col, castMap)))
+		}
+	}
+
+	quotedCols := quoteBigQueryColumns(allColumns)
+	sourceCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		sourceCols[i] = castSourceCol(col, castMap)
+	}
+
+	var sql strings.Builder
+	fmt.Fprintf(&sql, "MERGE %s AS t\n", targetRef)
+	fmt.Fprintf(&sql, "USING (WITH %s SELECT * FROM latest_active) AS s\n", latestActive)
+	fmt.Fprintf(&sql, "ON %s\n", strings.Join(onConditions, " AND "))
+	if len(updateSets) > 0 {
+		sql.WriteString("WHEN MATCHED THEN\n")
+		fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+	}
+	sql.WriteString("WHEN NOT MATCHED THEN\n")
+	fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+	fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	return sql.String()
+}
+
+func (d *BigQueryDestination) buildCDCDeletedUpdateSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys []string) string {
+	targetRef := fmt.Sprintf("`%s`.`%s`.`%s`", d.projectID, targetDataset, targetTable)
+	stagingRef := fmt.Sprintf("`%s`.`%s`.`%s`", d.projectID, stagingDataset, stagingTable)
+	cdcColumns := append([]string{}, primaryKeys...)
+	cdcColumns = append(cdcColumns, "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at")
+	latestAll := bigQueryLatestCDCSelect(stagingRef, primaryKeys, cdcColumns, "")
+	latestDeleted := bigQueryLatestCDCSelect(stagingRef, primaryKeys, cdcColumns, "`_cdc_deleted` = true")
+
+	return fmt.Sprintf(
+		`UPDATE %s AS t
+SET t.`+"`_cdc_deleted`"+` = true, t.`+"`_cdc_lsn`"+` = d.`+"`_cdc_lsn`"+`, t.`+"`_cdc_synced_at`"+` = d.`+"`_cdc_synced_at`"+`
+FROM %s AS d
+JOIN %s AS latest ON %s
+WHERE %s AND latest.`+"`_cdc_deleted`"+` = true`,
+		targetRef,
+		latestDeleted,
+		latestAll,
+		bigQueryAliasJoin(primaryKeys, "d", "latest"),
+		bigQueryAliasJoin(primaryKeys, "t", "d"),
 	)
 }
 
@@ -1501,7 +1732,7 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 	}
 
 	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 
 	var sql strings.Builder
 	fmt.Fprintf(&sql, "MERGE `%s`.`%s`.`%s` AS t\n", d.projectID, targetDataset, targetTable)
