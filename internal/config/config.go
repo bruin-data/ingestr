@@ -118,7 +118,11 @@ func (c *IngestConfig) Validate() error {
 
 // IsCDCSource returns true if the source URI is a CDC source.
 func (c *IngestConfig) IsCDCSource() bool {
-	return strings.HasPrefix(c.SourceURI, "postgres+cdc://") || strings.HasPrefix(c.SourceURI, "postgresql+cdc://")
+	schemeEnd := strings.Index(c.SourceURI, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(c.SourceURI[:schemeEnd]), "+cdc")
 }
 
 type ValidationError struct {
