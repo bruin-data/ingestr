@@ -63,6 +63,7 @@ type destCase struct {
 	setup                  func(t *testing.T, ctx context.Context) (destURI string, destTable string, cleanup func())
 	sqlBackend             *sqlBackend
 	mergeCapable           bool
+	cdcMergeCapable        bool
 	deleteInsertCapable    bool
 	truncateInsertCapable  bool
 	scd2Capable            bool
@@ -92,6 +93,7 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             postgresBackend(),
 			mergeCapable:           true,
+			cdcMergeCapable:        true,
 			deleteInsertCapable:    true,
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
@@ -108,6 +110,7 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             sqliteBackend(),
 			mergeCapable:           true,
+			cdcMergeCapable:        true,
 			deleteInsertCapable:    true,
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
@@ -123,6 +126,7 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             duckdbBackend(),
 			mergeCapable:           true,
+			cdcMergeCapable:        true,
 			deleteInsertCapable:    true,
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
@@ -162,16 +166,13 @@ func destinationCases() []destCase {
 			name: "bigquery",
 			setup: func(t *testing.T, ctx context.Context) (string, string, func()) {
 				bqURI := os.Getenv("GONG_TEST_BIGQUERY_URI")
-				if bqURI == "" {
-					t.Skip("Set GONG_TEST_BIGQUERY_URI to run BigQuery standards")
+				project := bigQueryTestProject()
+				dataset := bigQueryTestDataset()
+				if bqURI == "" && project != "" && dataset != "" {
+					bqURI = fmt.Sprintf("bigquery://%s/%s", project, dataset)
 				}
-				project := os.Getenv("GONG_TEST_BIGQUERY_PROJECT")
-				if project == "" {
-					t.Skip("Set GONG_TEST_BIGQUERY_PROJECT to run BigQuery standards")
-				}
-				dataset := os.Getenv("GONG_TEST_BIGQUERY_DATASET")
-				if dataset == "" {
-					t.Skip("Set GONG_TEST_BIGQUERY_DATASET to run BigQuery standards")
+				if bqURI == "" || project == "" || dataset == "" {
+					t.Skip("Set GONG_TEST_BIGQUERY_URI/GONG_TEST_BIGQUERY_PROJECT/GONG_TEST_BIGQUERY_DATASET to run BigQuery standards")
 				}
 				table := fmt.Sprintf("conformance_%s", uniqueSuffix())
 				cleanup := func() {
@@ -186,6 +187,7 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             bigqueryBackend(),
 			mergeCapable:           true,
+			cdcMergeCapable:        true,
 			deleteInsertCapable:    true,
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
@@ -235,6 +237,7 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             mysqlBackend(),
 			mergeCapable:           true,
+			cdcMergeCapable:        true,
 			deleteInsertCapable:    true,
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
@@ -283,6 +286,7 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             mssqlBackend(),
 			mergeCapable:           true,
+			cdcMergeCapable:        true,
 			deleteInsertCapable:    true,
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
@@ -308,6 +312,7 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:            fabricBackend(),
 			mergeCapable:          true,
+			cdcMergeCapable:       true,
 			deleteInsertCapable:   true,
 			truncateInsertCapable: true,
 			scd2Capable:           true,
@@ -331,6 +336,7 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             cratedbBackend(),
 			mergeCapable:           true,
+			cdcMergeCapable:        true,
 			deleteInsertCapable:    true,
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
@@ -339,9 +345,9 @@ func destinationCases() []destCase {
 		{
 			name: "snowflake",
 			setup: func(t *testing.T, ctx context.Context) (string, string, func()) {
-				sfURI := os.Getenv("GONG_TEST_SNOWFLAKE_URI")
+				sfURI := snowflakeTestURI()
 				if sfURI == "" {
-					t.Skip("Set GONG_TEST_SNOWFLAKE_URI to run Snowflake tests")
+					t.Skip("Set GONG_TEST_SNOWFLAKE_URI or BENCH_SNOWFLAKE_URI to run Snowflake tests")
 				}
 				table := fmt.Sprintf("GONG.CONFORMANCE_%s", uniqueSuffix())
 				cleanup := func() {
@@ -355,6 +361,7 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             snowflakeBackend(),
 			mergeCapable:           true,
+			cdcMergeCapable:        true,
 			deleteInsertCapable:    true,
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
@@ -546,6 +553,52 @@ func TestDestinations_Merge(t *testing.T) {
 			p2 := pipeline.New(cfg)
 			require.NoError(t, p2.Run(ctx))
 			validateMergeSQL(t, tc.sqlBackend, destURI, destTable)
+		})
+	}
+}
+
+// TestDestinations_CDCMerge validates CDC-aware merge semantics:
+// - latest active events update/insert full row data
+// - a later delete marks a tombstone while preserving the latest active values
+// - a later active event after a delete keeps the row active
+// - delete events for absent rows do not create rows
+func TestDestinations_CDCMerge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	initialURI := jsonlURI(t, "testdata/conformance_cdc_initial.jsonl")
+	updateURI := jsonlURI(t, "testdata/conformance_cdc_update.jsonl")
+
+	for _, tc := range destinationCases() {
+		tc := tc
+		if tc.sqlBackend == nil || !tc.cdcMergeCapable {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Skip("destination does not support CDC-aware merge")
+			})
+			continue
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			destURI, destTable, cleanup := tc.setup(t, ctx)
+			defer cleanup()
+
+			cfg := &config.IngestConfig{
+				SourceURI:           initialURI,
+				SourceTable:         "cdc_initial",
+				DestURI:             destURI,
+				DestTable:           destTable,
+				IncrementalStrategy: config.StrategyMerge,
+				PrimaryKeys:         []string{"id"},
+			}
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+			cfg.SourceURI = updateURI
+			cfg.SourceTable = "cdc_update"
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+			validateCDCMergeSQL(t, tc.sqlBackend, destURI, destTable)
 		})
 	}
 }
@@ -965,6 +1018,9 @@ type sqlBackend struct {
 	countQuery        func(table string) string
 	nameByIDQuery     func(table string, id int) string
 	ageByIDQuery      func(table string, id int) string
+	cdcActiveCount    func(table string) string
+	cdcCountByID      func(table string, id int) string
+	cdcRowByID        func(table string, id int) string
 	scd2CountCurrent  func(table string) string
 	scd2CountByID     func(table string, id int) string
 	scd2HistNoValidTo func(table string) string
@@ -1011,6 +1067,15 @@ func postgresBackend() *sqlBackend {
 		ageByIDQuery: func(table string, id int) string {
 			return fmt.Sprintf("SELECT age FROM %s WHERE id=%d", table, id)
 		},
+		cdcActiveCount: func(table string) string {
+			return fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE "_cdc_deleted" = false`, table)
+		},
+		cdcCountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = %d", table, id)
+		},
+		cdcRowByID: func(table string, id int) string {
+			return fmt.Sprintf(`SELECT name, balance, "_cdc_deleted" FROM %s WHERE id = %d`, table, id)
+		},
 		scd2CountCurrent: func(table string) string {
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE _scd_is_current = true", table)
 		},
@@ -1034,6 +1099,27 @@ func splitSchemaTable(table string, defaultSchema string) (string, string) {
 func uniqueSuffix() string {
 	// short, safe suffix for table names
 	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+func bigQueryTestProject() string {
+	if project := os.Getenv("GONG_TEST_BIGQUERY_PROJECT"); project != "" {
+		return project
+	}
+	return "bruin-ingestr-playground"
+}
+
+func bigQueryTestDataset() string {
+	if dataset := os.Getenv("GONG_TEST_BIGQUERY_DATASET"); dataset != "" {
+		return dataset
+	}
+	return "ingestr_conformance"
+}
+
+func snowflakeTestURI() string {
+	if uri := os.Getenv("GONG_TEST_SNOWFLAKE_URI"); uri != "" {
+		return uri
+	}
+	return os.Getenv("BENCH_SNOWFLAKE_URI")
 }
 
 func sqliteBackend() *sqlBackend {
@@ -1076,6 +1162,15 @@ func sqliteBackend() *sqlBackend {
 		},
 		ageByIDQuery: func(table string, id int) string {
 			return fmt.Sprintf("SELECT age FROM %s WHERE id=%d", table, id)
+		},
+		cdcActiveCount: func(table string) string {
+			return fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE ("_cdc_deleted" = 0 OR lower(CAST("_cdc_deleted" AS TEXT)) = 'false')`, table)
+		},
+		cdcCountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = %d", table, id)
+		},
+		cdcRowByID: func(table string, id int) string {
+			return fmt.Sprintf(`SELECT name, balance, "_cdc_deleted" FROM %s WHERE id = %d`, table, id)
 		},
 		scd2CountCurrent: func(table string) string {
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE _scd_is_current = 1", table)
@@ -1130,6 +1225,15 @@ func duckdbBackend() *sqlBackend {
 		ageByIDQuery: func(table string, id int) string {
 			return fmt.Sprintf("SELECT age FROM %s WHERE id=%d", table, id)
 		},
+		cdcActiveCount: func(table string) string {
+			return fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE "_cdc_deleted" = false`, table)
+		},
+		cdcCountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = %d", table, id)
+		},
+		cdcRowByID: func(table string, id int) string {
+			return fmt.Sprintf(`SELECT name, balance, "_cdc_deleted" FROM %s WHERE id = %d`, table, id)
+		},
 		scd2CountCurrent: func(table string) string {
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE _scd_is_current = true", table)
 		},
@@ -1145,8 +1249,8 @@ func duckdbBackend() *sqlBackend {
 func bigqueryBackend() *sqlBackend {
 	return &sqlBackend{
 		openDB: func(_ string) (*sql.DB, error) {
-			project := os.Getenv("GONG_TEST_BIGQUERY_PROJECT")
-			dataset := os.Getenv("GONG_TEST_BIGQUERY_DATASET")
+			project := bigQueryTestProject()
+			dataset := bigQueryTestDataset()
 			if project == "" || dataset == "" {
 				return nil, fmt.Errorf("missing bigquery env")
 			}
@@ -1161,8 +1265,8 @@ func bigqueryBackend() *sqlBackend {
 		},
 		schemaTypes: func(db *sql.DB, table string) (map[string]string, error) {
 			_ = db
-			project := os.Getenv("GONG_TEST_BIGQUERY_PROJECT")
-			dataset := os.Getenv("GONG_TEST_BIGQUERY_DATASET")
+			project := bigQueryTestProject()
+			dataset := bigQueryTestDataset()
 			tableName := table
 			if idx := strings.LastIndex(table, "."); idx >= 0 {
 				tableName = table[idx+1:]
@@ -1191,7 +1295,7 @@ func bigqueryBackend() *sqlBackend {
 			"score":  "float64",
 		},
 		countQuery: func(table string) string {
-			dataset := os.Getenv("GONG_TEST_BIGQUERY_DATASET")
+			dataset := bigQueryTestDataset()
 			tableName := table
 			if idx := strings.LastIndex(table, "."); idx >= 0 {
 				tableName = table[idx+1:]
@@ -1199,7 +1303,7 @@ func bigqueryBackend() *sqlBackend {
 			return fmt.Sprintf("SELECT COUNT(*) FROM `%s.%s`", dataset, tableName)
 		},
 		nameByIDQuery: func(table string, id int) string {
-			dataset := os.Getenv("GONG_TEST_BIGQUERY_DATASET")
+			dataset := bigQueryTestDataset()
 			tableName := table
 			if idx := strings.LastIndex(table, "."); idx >= 0 {
 				tableName = table[idx+1:]
@@ -1207,15 +1311,39 @@ func bigqueryBackend() *sqlBackend {
 			return fmt.Sprintf("SELECT name FROM `%s.%s` WHERE id=%d", dataset, tableName, id)
 		},
 		ageByIDQuery: func(table string, id int) string {
-			dataset := os.Getenv("GONG_TEST_BIGQUERY_DATASET")
+			dataset := bigQueryTestDataset()
 			tableName := table
 			if idx := strings.LastIndex(table, "."); idx >= 0 {
 				tableName = table[idx+1:]
 			}
 			return fmt.Sprintf("SELECT age FROM `%s.%s` WHERE id=%d", dataset, tableName, id)
 		},
+		cdcActiveCount: func(table string) string {
+			dataset := bigQueryTestDataset()
+			tableName := table
+			if idx := strings.LastIndex(table, "."); idx >= 0 {
+				tableName = table[idx+1:]
+			}
+			return fmt.Sprintf("SELECT COUNT(*) FROM `%s.%s` WHERE `_cdc_deleted` = false", dataset, tableName)
+		},
+		cdcCountByID: func(table string, id int) string {
+			dataset := bigQueryTestDataset()
+			tableName := table
+			if idx := strings.LastIndex(table, "."); idx >= 0 {
+				tableName = table[idx+1:]
+			}
+			return fmt.Sprintf("SELECT COUNT(*) FROM `%s.%s` WHERE id = %d", dataset, tableName, id)
+		},
+		cdcRowByID: func(table string, id int) string {
+			dataset := bigQueryTestDataset()
+			tableName := table
+			if idx := strings.LastIndex(table, "."); idx >= 0 {
+				tableName = table[idx+1:]
+			}
+			return fmt.Sprintf("SELECT name, balance, `_cdc_deleted` FROM `%s.%s` WHERE id = %d", dataset, tableName, id)
+		},
 		scd2CountCurrent: func(table string) string {
-			dataset := os.Getenv("GONG_TEST_BIGQUERY_DATASET")
+			dataset := bigQueryTestDataset()
 			tableName := table
 			if idx := strings.LastIndex(table, "."); idx >= 0 {
 				tableName = table[idx+1:]
@@ -1223,7 +1351,7 @@ func bigqueryBackend() *sqlBackend {
 			return fmt.Sprintf("SELECT COUNT(*) FROM `%s.%s` WHERE _scd_is_current = true", dataset, tableName)
 		},
 		scd2CountByID: func(table string, id int) string {
-			dataset := os.Getenv("GONG_TEST_BIGQUERY_DATASET")
+			dataset := bigQueryTestDataset()
 			tableName := table
 			if idx := strings.LastIndex(table, "."); idx >= 0 {
 				tableName = table[idx+1:]
@@ -1231,7 +1359,7 @@ func bigqueryBackend() *sqlBackend {
 			return fmt.Sprintf("SELECT COUNT(*) FROM `%s.%s` WHERE id = %d", dataset, tableName, id)
 		},
 		scd2HistNoValidTo: func(table string) string {
-			dataset := os.Getenv("GONG_TEST_BIGQUERY_DATASET")
+			dataset := bigQueryTestDataset()
 			tableName := table
 			if idx := strings.LastIndex(table, "."); idx >= 0 {
 				tableName = table[idx+1:]
@@ -1315,6 +1443,109 @@ func validateMergeSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	var newNameRaw []byte
 	require.NoError(t, db.QueryRow(backend.nameByIDQuery(table, 6)).Scan(&newNameRaw))
 	assert.Equal(t, "foxtrot-new", string(newNameRaw))
+}
+
+func validateCDCMergeSQL(t *testing.T, backend *sqlBackend, uri, table string) {
+	t.Helper()
+	if backend.cdcActiveCount == nil || backend.cdcCountByID == nil || backend.cdcRowByID == nil {
+		t.Fatalf("CDC validation queries are not configured for this backend")
+	}
+
+	db, err := backend.openDB(uri)
+	if err != nil {
+		t.Skipf("Could not open SQL backend for CDC merge validation: %v", err)
+		return
+	}
+	defer func() { _ = db.Close() }()
+	if backend.refreshTable != nil {
+		backend.refreshTable(db, table)
+	}
+
+	var total int
+	require.NoError(t, db.QueryRow(backend.countQuery(table)).Scan(&total))
+	assert.Equal(t, 4, total, "CDC merge should keep rows 1-4 only")
+
+	var active int
+	require.NoError(t, db.QueryRow(backend.cdcActiveCount(table)).Scan(&active))
+	assert.Equal(t, 3, active, "CDC merge should leave exactly 3 active rows")
+
+	assertCDCRow(t, db, backend, table, 1, "alpha-updated", 150, true)
+	assertCDCRow(t, db, backend, table, 2, "bravo-new", 225, false)
+	assertCDCRow(t, db, backend, table, 3, "charlie-reborn", 330, false)
+	assertCDCRow(t, db, backend, table, 4, "delta-new", 400, false)
+
+	var absent int
+	require.NoError(t, db.QueryRow(backend.cdcCountByID(table, 5)).Scan(&absent))
+	assert.Equal(t, 0, absent, "delete-only row should not be inserted")
+}
+
+func assertCDCRow(t *testing.T, db *sql.DB, backend *sqlBackend, table string, id int, wantName string, wantBalance int64, wantDeleted bool) {
+	t.Helper()
+	var nameRaw, balanceRaw, deletedRaw interface{}
+	require.NoError(t, db.QueryRow(backend.cdcRowByID(table, id)).Scan(&nameRaw, &balanceRaw, &deletedRaw))
+	assert.Equal(t, wantName, sqlValueString(nameRaw))
+	assert.Equal(t, wantBalance, sqlValueInt64(t, balanceRaw))
+	assert.Equal(t, wantDeleted, sqlValueBool(t, deletedRaw))
+}
+
+func sqlValueString(v interface{}) string {
+	switch val := v.(type) {
+	case []byte:
+		return string(val)
+	case string:
+		return val
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
+func sqlValueInt64(t *testing.T, v interface{}) int64 {
+	t.Helper()
+	switch val := v.(type) {
+	case int:
+		return int64(val)
+	case int32:
+		return int64(val)
+	case int64:
+		return val
+	case float64:
+		return int64(val)
+	case []byte:
+		var n int64
+		require.NoError(t, scanIntString(string(val), &n))
+		return n
+	case string:
+		var n int64
+		require.NoError(t, scanIntString(val, &n))
+		return n
+	default:
+		t.Fatalf("unsupported integer value type %T (%v)", v, v)
+		return 0
+	}
+}
+
+func scanIntString(s string, dest *int64) error {
+	_, err := fmt.Sscanf(strings.TrimSpace(s), "%d", dest)
+	return err
+}
+
+func sqlValueBool(t *testing.T, v interface{}) bool {
+	t.Helper()
+	switch val := v.(type) {
+	case bool:
+		return val
+	case int:
+		return val != 0
+	case int64:
+		return val != 0
+	case []byte:
+		return strings.EqualFold(string(val), "true") || string(val) == "1"
+	case string:
+		return strings.EqualFold(val, "true") || val == "1"
+	default:
+		t.Fatalf("unsupported boolean value type %T (%v)", v, v)
+		return false
+	}
 }
 
 func validateAppendSQL(t *testing.T, backend *sqlBackend, uri, table string) {
@@ -1538,6 +1769,15 @@ func cratedbBackend() *sqlBackend {
 		ageByIDQuery: func(table string, id int) string {
 			return fmt.Sprintf("SELECT age FROM %s WHERE id=%d", table, id)
 		},
+		cdcActiveCount: func(table string) string {
+			return fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE "_cdc_deleted" = false`, table)
+		},
+		cdcCountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = %d", table, id)
+		},
+		cdcRowByID: func(table string, id int) string {
+			return fmt.Sprintf(`SELECT name, balance, "_cdc_deleted" FROM %s WHERE id = %d`, table, id)
+		},
 		scd2CountCurrent: func(table string) string {
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE _scd_is_current = true", table)
 		},
@@ -1551,9 +1791,9 @@ func cratedbBackend() *sqlBackend {
 }
 
 func snowflakeOpenDB() (*sql.DB, error) {
-	sfURI := os.Getenv("GONG_TEST_SNOWFLAKE_URI")
+	sfURI := snowflakeTestURI()
 	if sfURI == "" {
-		return nil, fmt.Errorf("GONG_TEST_SNOWFLAKE_URI not set")
+		return nil, fmt.Errorf("GONG_TEST_SNOWFLAKE_URI or BENCH_SNOWFLAKE_URI not set")
 	}
 
 	return snowflake.OpenDB(sfURI)
@@ -1600,6 +1840,15 @@ func snowflakeBackend() *sqlBackend {
 		},
 		ageByIDQuery: func(table string, id int) string {
 			return fmt.Sprintf("SELECT AGE FROM %s WHERE ID=%d", table, id)
+		},
+		cdcActiveCount: func(table string) string {
+			return fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE "_CDC_DELETED" = false`, table)
+		},
+		cdcCountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE ID = %d", table, id)
+		},
+		cdcRowByID: func(table string, id int) string {
+			return fmt.Sprintf(`SELECT NAME, BALANCE, "_CDC_DELETED" FROM %s WHERE ID = %d`, table, id)
 		},
 		scd2CountCurrent: func(table string) string {
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE _SCD_IS_CURRENT = true", table)
@@ -1695,6 +1944,15 @@ func mysqlBackend() *sqlBackend {
 		},
 		ageByIDQuery: func(table string, id int) string {
 			return fmt.Sprintf("SELECT age FROM `%s` WHERE id=%d", table, id)
+		},
+		cdcActiveCount: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE `_cdc_deleted` = false", table)
+		},
+		cdcCountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE id = %d", table, id)
+		},
+		cdcRowByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT name, balance, `_cdc_deleted` FROM `%s` WHERE id = %d", table, id)
 		},
 		scd2CountCurrent: func(table string) string {
 			return fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE _scd_is_current = 1", table)
@@ -1811,6 +2069,15 @@ func mssqlBackend() *sqlBackend {
 		},
 		ageByIDQuery: func(table string, id int) string {
 			return fmt.Sprintf("SELECT age FROM %s WHERE id=%d", quoteTableMSSQL(table), id)
+		},
+		cdcActiveCount: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE [_cdc_deleted] = 0", quoteTableMSSQL(table))
+		},
+		cdcCountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = %d", quoteTableMSSQL(table), id)
+		},
+		cdcRowByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT name, balance, [_cdc_deleted] FROM %s WHERE id = %d", quoteTableMSSQL(table), id)
 		},
 		scd2CountCurrent: func(table string) string {
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE _scd_is_current = 1", quoteTableMSSQL(table))
@@ -1937,6 +2204,15 @@ func fabricBackend() *sqlBackend {
 		},
 		ageByIDQuery: func(table string, id int) string {
 			return fmt.Sprintf("SELECT age FROM %s WHERE id=%d", quoteTableMSSQL(table), id)
+		},
+		cdcActiveCount: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE [_cdc_deleted] = 0", quoteTableMSSQL(table))
+		},
+		cdcCountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = %d", quoteTableMSSQL(table), id)
+		},
+		cdcRowByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT name, balance, [_cdc_deleted] FROM %s WHERE id = %d", quoteTableMSSQL(table), id)
 		},
 		scd2CountCurrent: func(table string) string {
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE _scd_is_current = 1", quoteTableMSSQL(table))

@@ -1,0 +1,8 @@
+{"id":1,"name":"alpha-updated","balance":150,"_cdc_lsn":"00000000000000000002","_cdc_deleted":false,"_cdc_synced_at":"2024-01-01T00:01:00Z"}
+{"id":1,"name":"alpha-updated","balance":150,"_cdc_lsn":"00000000000000000002","_cdc_deleted":true,"_cdc_synced_at":"2024-01-01T00:01:01Z"}
+{"id":2,"name":"bravo-old","balance":210,"_cdc_lsn":"00000000000000000002","_cdc_deleted":false,"_cdc_synced_at":"2024-01-01T00:01:00Z"}
+{"id":2,"name":"bravo-new","balance":225,"_cdc_lsn":"00000000000000000002","_cdc_deleted":false,"_cdc_synced_at":"2024-01-01T00:01:02Z"}
+{"id":3,"name":"charlie-deleted","balance":300,"_cdc_lsn":"00000000000000000002","_cdc_deleted":true,"_cdc_synced_at":"2024-01-01T00:01:00Z"}
+{"id":3,"name":"charlie-reborn","balance":330,"_cdc_lsn":"00000000000000000002","_cdc_deleted":false,"_cdc_synced_at":"2024-01-01T00:01:03Z"}
+{"id":4,"name":"delta-new","balance":400,"_cdc_lsn":"00000000000000000002","_cdc_deleted":false,"_cdc_synced_at":"2024-01-01T00:01:00Z"}
+{"id":5,"name":"echo-delete-only","balance":500,"_cdc_lsn":"00000000000000000002","_cdc_deleted":true,"_cdc_synced_at":"2024-01-01T00:01:00Z"}

@@ -1,0 +1,3 @@
+{"id":1,"name":"alpha","balance":100,"_cdc_lsn":"00000000000000000001","_cdc_deleted":false,"_cdc_synced_at":"2024-01-01T00:00:00Z"}
+{"id":2,"name":"bravo","balance":200,"_cdc_lsn":"00000000000000000001","_cdc_deleted":false,"_cdc_synced_at":"2024-01-01T00:00:00Z"}
+{"id":3,"name":"charlie","balance":300,"_cdc_lsn":"00000000000000000001","_cdc_deleted":false,"_cdc_synced_at":"2024-01-01T00:00:00Z"}
