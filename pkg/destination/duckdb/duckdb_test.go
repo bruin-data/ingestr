@@ -714,6 +714,137 @@ func TestMergeTable(t *testing.T) {
 	assert.Equal(t, 300, value)
 }
 
+func TestMergeTable_CDCUpdateDeleteSameBatch(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR,
+			value INTEGER,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMPTZ
+		)
+	`))
+	require.NoError(t, dest.Exec(ctx, `
+		INSERT INTO target_table VALUES
+			(1, 'Alice', 100, '00000000000000000001:00000000000000000000:00', false, TIMESTAMPTZ '2024-01-01 00:00:00+00'),
+			(2, 'Bob', 200, '00000000000000000001:00000000000000000000:00', false, TIMESTAMPTZ '2024-01-01 00:00:00+00')
+	`))
+
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR,
+			value INTEGER,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMPTZ
+		)
+	`))
+	require.NoError(t, dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(1, 'Alice Updated', 150, '00000000000000000002:00000000000000000001:04', false, TIMESTAMPTZ '2024-01-01 00:01:00+00'),
+			(1, 'Alice Updated', 150, '00000000000000000002:00000000000000000002:01', true, TIMESTAMPTZ '2024-01-01 00:02:00+00'),
+			(3, 'Charlie', 300, '00000000000000000003:00000000000000000001:02', false, TIMESTAMPTZ '2024-01-01 00:03:00+00'),
+			(3, 'Charlie', 300, '00000000000000000003:00000000000000000002:01', true, TIMESTAMPTZ '2024-01-01 00:04:00+00')
+	`))
+
+	err := dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		TargetTable:  "target_table",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id", "name", "value", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+	})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+	var total, active int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM target_table`).Scan(&total))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM target_table WHERE "_cdc_deleted" = false`).Scan(&active))
+	assert.Equal(t, 3, total)
+	assert.Equal(t, 1, active)
+
+	var nameRaw []byte
+	var value int
+	var deleted bool
+	var lsnRaw []byte
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT name, value, "_cdc_deleted", "_cdc_lsn" FROM target_table WHERE id = 1`).Scan(&nameRaw, &value, &deleted, &lsnRaw))
+	assert.Equal(t, "Alice Updated", string(append([]byte(nil), nameRaw...)))
+	assert.Equal(t, 150, value)
+	assert.True(t, deleted)
+	assert.Equal(t, "00000000000000000002:00000000000000000002:01", string(append([]byte(nil), lsnRaw...)))
+
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT name, value, "_cdc_deleted", "_cdc_lsn" FROM target_table WHERE id = 3`).Scan(&nameRaw, &value, &deleted, &lsnRaw))
+	assert.Equal(t, "Charlie", string(append([]byte(nil), nameRaw...)))
+	assert.Equal(t, 300, value)
+	assert.True(t, deleted)
+	assert.Equal(t, "00000000000000000003:00000000000000000002:01", string(append([]byte(nil), lsnRaw...)))
+}
+
+func TestMergeTable_CDCUsesStagingOrderForIdenticalLSNAndTimestamp(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR,
+			value INTEGER,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMPTZ
+		)
+	`))
+	require.NoError(t, dest.Exec(ctx, `
+		INSERT INTO target_table VALUES
+			(1, 'Alice', 100, '0/1', false, TIMESTAMPTZ '2024-01-01 00:00:00+00')
+	`))
+
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR,
+			value INTEGER,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMPTZ
+		)
+	`))
+	require.NoError(t, dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(1, 'Alice Updated', 150, '0/2', false, TIMESTAMPTZ '2024-01-01 00:01:00+00'),
+			(1, 'Alice Updated', 150, '0/2', true, TIMESTAMPTZ '2024-01-01 00:01:00+00'),
+			(3, 'Charlie Deleted', 250, '0/2', true, TIMESTAMPTZ '2024-01-01 00:01:00+00'),
+			(3, 'Charlie Inserted', 300, '0/2', false, TIMESTAMPTZ '2024-01-01 00:01:00+00')
+	`))
+
+	err := dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		TargetTable:  "target_table",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id", "name", "value", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+	})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+
+	var nameRaw []byte
+	var value int
+	var deleted bool
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT name, value, "_cdc_deleted" FROM target_table WHERE id = 1`).Scan(&nameRaw, &value, &deleted))
+	assert.Equal(t, "Alice Updated", string(append([]byte(nil), nameRaw...)))
+	assert.Equal(t, 150, value)
+	assert.True(t, deleted)
+
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT name, value, "_cdc_deleted" FROM target_table WHERE id = 3`).Scan(&nameRaw, &value, &deleted))
+	assert.Equal(t, "Charlie Inserted", string(append([]byte(nil), nameRaw...)))
+	assert.Equal(t, 300, value)
+	assert.False(t, deleted)
+}
+
 func TestSwapTable(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)

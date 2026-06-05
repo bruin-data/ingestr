@@ -434,6 +434,17 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 
+	if destination.HasCDCDeletedColumn(columns) {
+		if err := executeSQLiteCDCMerge(ctx, tx, opts, quotedTargetTable, quotedColumns, nonPKColumns); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		config.Debug("[MERGE] CDC merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 	dedupSource := fmt.Sprintf(
@@ -483,6 +494,109 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}
 
 	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+	return nil
+}
+
+func sqliteLatestCDCCTE(name string, stagingTable string, primaryKeys, columns []string, filter string) string {
+	quotedCols := quoteColumns(columns)
+	quotedPKs := quoteColumns(primaryKeys)
+	where := ""
+	if filter != "" {
+		where = " WHERE " + filter
+	}
+	return fmt.Sprintf(
+		`%s AS (SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY "_cdc_lsn" DESC, "_cdc_synced_at" DESC, rowid DESC) AS __bruin_cdc_rn FROM %s%s) AS _numbered WHERE __bruin_cdc_rn = 1)`,
+		name,
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedPKs, ", "),
+		destination.QuoteTableName(stagingTable),
+		where,
+	)
+}
+
+func sqliteCDCDeletedPredicate(value bool) string {
+	if value {
+		return `("_cdc_deleted" = true OR "_cdc_deleted" = 1 OR lower(CAST("_cdc_deleted" AS TEXT)) = 'true')`
+	}
+	return `("_cdc_deleted" = false OR "_cdc_deleted" = 0 OR lower(CAST("_cdc_deleted" AS TEXT)) = 'false')`
+}
+
+func buildSQLiteCDCMergeSQL(opts destination.MergeOptions, quotedTargetTable string, quotedColumns []string, nonPKColumns []string) string {
+	dataColumns := destination.CDCDataColumns(opts.Columns, opts.PrimaryKeys)
+	activeColumns := append(append([]string{}, opts.PrimaryKeys...), dataColumns...)
+	latestAll := sqliteLatestCDCCTE("latest_all", opts.StagingTable, opts.PrimaryKeys, opts.Columns, "")
+	latestActive := sqliteLatestCDCCTE("latest_active", opts.StagingTable, opts.PrimaryKeys, activeColumns, sqliteCDCDeletedPredicate(false))
+
+	selects := make([]string, len(opts.Columns))
+	for i, col := range opts.Columns {
+		switch {
+		case destination.IsCDCColumn(col):
+			selects[i] = fmt.Sprintf(`latest_all."%s" AS "%s"`, col, col)
+		case containsColumn(opts.PrimaryKeys, col):
+			selects[i] = fmt.Sprintf(`latest_all."%s" AS "%s"`, col, col)
+		default:
+			selects[i] = fmt.Sprintf(
+				`CASE WHEN %s THEN latest_all."%s" WHEN latest_active."%s" IS NOT NULL THEN latest_active."%s" ELSE existing."%s" END AS "%s"`,
+				strings.ReplaceAll(sqliteCDCDeletedPredicate(false), `"_cdc_deleted"`, `latest_all."_cdc_deleted"`),
+				col,
+				opts.PrimaryKeys[0],
+				col,
+				col,
+				col,
+			)
+		}
+	}
+
+	updates := make([]string, len(nonPKColumns))
+	for i, col := range nonPKColumns {
+		updates[i] = fmt.Sprintf(`"%s" = excluded."%s"`, col, col)
+	}
+
+	return fmt.Sprintf(
+		`WITH %s, %s, source AS (
+	SELECT %s
+	FROM latest_all
+	LEFT JOIN latest_active ON %s
+	LEFT JOIN %s AS existing ON %s
+	WHERE %s OR latest_active."%s" IS NOT NULL OR existing."%s" IS NOT NULL
+)
+INSERT INTO %s (%s)
+SELECT %s FROM source WHERE true
+ON CONFLICT (%s) DO UPDATE SET %s`,
+		latestAll,
+		latestActive,
+		strings.Join(selects, ", "),
+		buildJoinConditionSQLite(opts.PrimaryKeys, "latest_all", "latest_active"),
+		quotedTargetTable,
+		buildJoinConditionSQLite(opts.PrimaryKeys, "existing", "latest_all"),
+		strings.ReplaceAll(sqliteCDCDeletedPredicate(false), `"_cdc_deleted"`, `latest_all."_cdc_deleted"`),
+		opts.PrimaryKeys[0],
+		opts.PrimaryKeys[0],
+		quotedTargetTable,
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
+		strings.Join(updates, ", "),
+	)
+}
+
+func containsColumn(columns []string, column string) bool {
+	for _, col := range columns {
+		if strings.EqualFold(col, column) {
+			return true
+		}
+	}
+	return false
+}
+
+func executeSQLiteCDCMerge(ctx context.Context, tx *sql.Tx, opts destination.MergeOptions, quotedTargetTable string, quotedColumns []string, nonPKColumns []string) error {
+	mergeSQL := buildSQLiteCDCMergeSQL(opts, quotedTargetTable, quotedColumns, nonPKColumns)
+	config.Debug("[MERGE] Executing CDC merge: %s", mergeSQL)
+	if _, err := tx.ExecContext(ctx, mergeSQL); err != nil {
+		config.LogFailedQuery(mergeSQL, err)
+		return fmt.Errorf("failed to execute CDC merge: %w", err)
+	}
 	return nil
 }
 
@@ -677,8 +791,26 @@ func (d *SQLiteDestination) SupportsSCD2Strategy() bool { return true }
 // SupportsAtomicSwap returns true as SQLite supports atomic table renames.
 func (d *SQLiteDestination) SupportsAtomicSwap() bool { return true }
 
+func (d *SQLiteDestination) SupportsCDCMerge() bool { return true }
+
 // GetScheme returns the primary URI scheme for SQLite.
 func (d *SQLiteDestination) GetScheme() string { return "sqlite" }
+
+func (d *SQLiteDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	var maxLSN sql.NullString
+	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, destination.QuoteTableName(table))
+	if err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN); err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return "", nil
+		}
+		config.LogFailedQuery(query, err)
+		return "", err
+	}
+	if !maxLSN.Valid {
+		return "", nil
+	}
+	return maxLSN.String, nil
+}
 
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {

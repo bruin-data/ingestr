@@ -370,6 +370,17 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if destination.HasCDCDeletedColumn(columns) {
+		if err := executeMySQLCDCMerge(ctx, tx, opts, quotedColumns, nonPKColumns); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		config.Debug("[MERGE] CDC merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 	dedupSource := fmt.Sprintf(
@@ -417,6 +428,95 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	}
 
 	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+	return nil
+}
+
+func mysqlLatestCDCSource(stagingTable string, primaryKeys, columns []string, filter, alias string) string {
+	quotedCols := quoteColumns(columns)
+	quotedPKs := quoteColumns(primaryKeys)
+	where := ""
+	if filter != "" {
+		where = " WHERE " + filter
+	}
+	return fmt.Sprintf(
+		"(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC, `_cdc_synced_at` DESC) AS __bruin_cdc_rn FROM %s%s) AS _numbered WHERE __bruin_cdc_rn = 1) AS %s",
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedPKs, ", "),
+		quoteTable(stagingTable),
+		where,
+		alias,
+	)
+}
+
+func buildMySQLCDCMergeSQL(opts destination.MergeOptions, quotedColumns, nonPKColumns []string) string {
+	dataColumns := destination.CDCDataColumns(opts.Columns, opts.PrimaryKeys)
+	activeColumns := append(append([]string{}, opts.PrimaryKeys...), dataColumns...)
+	latestAll := mysqlLatestCDCSource(opts.StagingTable, opts.PrimaryKeys, opts.Columns, "", "latest_all")
+	latestActive := mysqlLatestCDCSource(opts.StagingTable, opts.PrimaryKeys, activeColumns, "`_cdc_deleted` = false", "latest_active")
+
+	selects := make([]string, len(opts.Columns))
+	for i, col := range opts.Columns {
+		switch {
+		case destination.IsCDCColumn(col):
+			selects[i] = fmt.Sprintf("latest_all.`%s` AS `%s`", col, col)
+		case containsColumn(opts.PrimaryKeys, col):
+			selects[i] = fmt.Sprintf("latest_all.`%s` AS `%s`", col, col)
+		default:
+			selects[i] = fmt.Sprintf(
+				"CASE WHEN latest_all.`_cdc_deleted` = false THEN latest_all.`%s` WHEN latest_active.`%s` IS NOT NULL THEN latest_active.`%s` ELSE existing.`%s` END AS `%s`",
+				col,
+				opts.PrimaryKeys[0],
+				col,
+				col,
+				col,
+			)
+		}
+	}
+
+	updates := make([]string, len(nonPKColumns))
+	for i, col := range nonPKColumns {
+		updates[i] = fmt.Sprintf("`%s` = VALUES(`%s`)", col, col)
+	}
+
+	return fmt.Sprintf(
+		`INSERT INTO %s (%s)
+SELECT %s
+FROM %s
+LEFT JOIN %s ON %s
+LEFT JOIN %s AS existing ON %s
+WHERE latest_all.`+"`_cdc_deleted`"+` = false OR latest_active.`+"`%s`"+` IS NOT NULL OR existing.`+"`%s`"+` IS NOT NULL
+ON DUPLICATE KEY UPDATE %s`,
+		quoteTable(opts.TargetTable),
+		strings.Join(quotedColumns, ", "),
+		strings.Join(selects, ", "),
+		latestAll,
+		latestActive,
+		buildJoinCondition(opts.PrimaryKeys, "latest_all", "latest_active"),
+		quoteTable(opts.TargetTable),
+		buildJoinCondition(opts.PrimaryKeys, "existing", "latest_all"),
+		opts.PrimaryKeys[0],
+		opts.PrimaryKeys[0],
+		strings.Join(updates, ", "),
+	)
+}
+
+func containsColumn(columns []string, column string) bool {
+	for _, col := range columns {
+		if strings.EqualFold(col, column) {
+			return true
+		}
+	}
+	return false
+}
+
+func executeMySQLCDCMerge(ctx context.Context, tx *sql.Tx, opts destination.MergeOptions, quotedColumns []string, nonPKColumns []string) error {
+	mergeSQL := buildMySQLCDCMergeSQL(opts, quotedColumns, nonPKColumns)
+	config.Debug("[MERGE] Executing CDC merge: %s", mergeSQL)
+	if _, err := tx.ExecContext(ctx, mergeSQL); err != nil {
+		config.LogFailedQuery(mergeSQL, err)
+		return fmt.Errorf("failed to execute CDC merge: %w", err)
+	}
 	return nil
 }
 
@@ -600,8 +700,25 @@ func (d *MySQLDestination) SupportsMergeStrategy() bool        { return true }
 func (d *MySQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MySQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MySQLDestination) SupportsAtomicSwap() bool           { return true }
+func (d *MySQLDestination) SupportsCDCMerge() bool             { return true }
 
 func (d *MySQLDestination) GetScheme() string { return "mysql" }
+
+func (d *MySQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	var maxLSN sql.NullString
+	query := fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s", quoteTable(table))
+	if err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN); err != nil {
+		if strings.Contains(err.Error(), "doesn't exist") || strings.Contains(err.Error(), "does not exist") {
+			return "", nil
+		}
+		config.LogFailedQuery(query, err)
+		return "", err
+	}
+	if !maxLSN.Valid {
+		return "", nil
+	}
+	return maxLSN.String, nil
+}
 
 func (d *MySQLDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	tableName := extractTableName(table)

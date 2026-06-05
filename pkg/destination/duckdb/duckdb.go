@@ -391,6 +391,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	columns := opts.Columns
 	quotedColumns := quoteColumns(columns)
 	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	hasCDCDeleted := destination.HasCDCDeletedColumn(columns)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -407,6 +408,22 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
+
+	if hasCDCDeleted {
+		if len(opts.PrimaryKeys) == 0 {
+			return fmt.Errorf("CDC merge requires at least one primary key")
+		}
+		if err := d.executeCDCMergeLocked(ctx, opts, quotedTargetTable, quotedColumns, nonPKColumns); err != nil {
+			return err
+		}
+		if err := d.exec(ctx, "COMMIT"); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		commit = true
+
+		config.Debug("[DUCKDB CDC MERGE] Merge completed in %v", time.Since(startMerge))
+		return nil
+	}
 
 	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
@@ -455,6 +472,101 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	config.Debug("[DUCKDB MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func (d *DuckDBDestination) executeCDCMergeLocked(ctx context.Context, opts destination.MergeOptions, quotedTargetTable string, quotedColumns []string, nonPKColumns []string) error {
+	mergeSQL := buildDuckDBCDCMergeSQL(opts, quotedTargetTable, quotedColumns, nonPKColumns)
+	config.Debug("[DUCKDB CDC MERGE] Executing CDC merge: %s", mergeSQL)
+	if err := d.exec(ctx, mergeSQL); err != nil {
+		return fmt.Errorf("failed to execute CDC merge: %w", err)
+	}
+	return nil
+}
+
+func duckDBLatestCDCCTE(name string, stagingTable string, primaryKeys, columns []string, filter string) string {
+	quotedCols := quoteColumns(columns)
+	quotedPKs := quoteColumns(primaryKeys)
+	where := ""
+	if filter != "" {
+		where = " WHERE " + filter
+	}
+	orderByParts := append(append([]string{}, quotedPKs...), `"_cdc_lsn" DESC`, `"_cdc_synced_at" DESC`, `rowid DESC`)
+	return fmt.Sprintf(
+		`%s AS (SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_cdc_rn FROM %s%s) AS _numbered WHERE __bruin_cdc_rn = 1)`,
+		name,
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedPKs, ", "),
+		strings.Join(orderByParts, ", "),
+		destination.QuoteTableName(stagingTable),
+		where,
+	)
+}
+
+func buildDuckDBCDCMergeSQL(opts destination.MergeOptions, quotedTargetTable string, quotedColumns []string, nonPKColumns []string) string {
+	dataColumns := destination.CDCDataColumns(opts.Columns, opts.PrimaryKeys)
+	activeColumns := append(append([]string{}, opts.PrimaryKeys...), dataColumns...)
+	latestAll := duckDBLatestCDCCTE("latest_all", opts.StagingTable, opts.PrimaryKeys, opts.Columns, "")
+	latestActive := duckDBLatestCDCCTE("latest_active", opts.StagingTable, opts.PrimaryKeys, activeColumns, `"_cdc_deleted" = false`)
+
+	selects := make([]string, len(opts.Columns))
+	for i, col := range opts.Columns {
+		switch {
+		case destination.IsCDCColumn(col):
+			selects[i] = fmt.Sprintf(`latest_all."%s" AS "%s"`, col, col)
+		case containsColumn(opts.PrimaryKeys, col):
+			selects[i] = fmt.Sprintf(`latest_all."%s" AS "%s"`, col, col)
+		default:
+			selects[i] = fmt.Sprintf(
+				`CASE WHEN latest_all."_cdc_deleted" = false THEN latest_all."%s" WHEN latest_active."%s" IS NOT NULL THEN latest_active."%s" ELSE existing."%s" END AS "%s"`,
+				col,
+				opts.PrimaryKeys[0],
+				col,
+				col,
+				col,
+			)
+		}
+	}
+
+	updates := make([]string, len(nonPKColumns))
+	for i, col := range nonPKColumns {
+		updates[i] = fmt.Sprintf(`"%s" = excluded."%s"`, col, col)
+	}
+
+	return fmt.Sprintf(
+		`WITH %s, %s, source AS (
+	SELECT %s
+	FROM latest_all
+	LEFT JOIN latest_active ON %s
+	LEFT JOIN %s AS existing ON %s
+	WHERE latest_all."_cdc_deleted" = false OR latest_active."%s" IS NOT NULL OR existing."%s" IS NOT NULL
+)
+INSERT INTO %s (%s)
+SELECT %s FROM source
+ON CONFLICT (%s) DO UPDATE SET %s`,
+		latestAll,
+		latestActive,
+		strings.Join(selects, ", "),
+		buildJoinCondition(opts.PrimaryKeys, "latest_all", "latest_active"),
+		quotedTargetTable,
+		buildJoinCondition(opts.PrimaryKeys, "existing", "latest_all"),
+		opts.PrimaryKeys[0],
+		opts.PrimaryKeys[0],
+		quotedTargetTable,
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
+		strings.Join(updates, ", "),
+	)
+}
+
+func containsColumn(columns []string, column string) bool {
+	for _, col := range columns {
+		if strings.EqualFold(col, column) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *DuckDBDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
@@ -687,6 +799,7 @@ func (d *DuckDBDestination) SupportsMergeStrategy() bool        { return true }
 func (d *DuckDBDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DuckDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *DuckDBDestination) SupportsAtomicSwap() bool           { return true }
+func (d *DuckDBDestination) SupportsCDCMerge() bool             { return true }
 
 // GetScheme returns the primary URI scheme for DuckDB.
 func (d *DuckDBDestination) GetScheme() string { return "duckdb" }

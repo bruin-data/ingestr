@@ -256,6 +256,15 @@ func (d *CrateDBDestination) MergeTable(ctx context.Context, opts destination.Me
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
+	if destination.HasCDCDeletedColumn(columns) {
+		if err := d.executeCDCMerge(ctx, opts, quotedTargetTable, quotedStagingTable, quotedColumns, nonPKColumns, quotedPKs); err != nil {
+			return err
+		}
+		d.refreshTable(ctx, opts.TargetTable)
+		config.Debug("[CRATEDB MERGE] CDC merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	var upsertSQL string
 	if len(nonPKColumns) == 0 {
 		upsertSQL = fmt.Sprintf(
@@ -287,6 +296,106 @@ func (d *CrateDBDestination) MergeTable(ctx context.Context, opts destination.Me
 	d.refreshTable(ctx, opts.TargetTable)
 
 	config.Debug("[CRATEDB MERGE] Merge completed in %v", time.Since(startMerge))
+	return nil
+}
+
+func cratedbLatestCDCSource(stagingTable string, primaryKeys, columns []string, filter, alias string) string {
+	quotedCols := quoteColumns(columns)
+	quotedPKs := quoteColumns(primaryKeys)
+	where := ""
+	if filter != "" {
+		where = " WHERE " + filter
+	}
+	return fmt.Sprintf(
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY "_cdc_lsn" DESC, "_cdc_synced_at" DESC) AS __bruin_cdc_rn FROM %s%s) AS _numbered WHERE __bruin_cdc_rn = 1) AS %s`,
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedCols, ", "),
+		strings.Join(quotedPKs, ", "),
+		destination.QuoteTableName(stagingTable),
+		where,
+		alias,
+	)
+}
+
+func cratedbAliasJoin(primaryKeys []string, leftAlias, rightAlias string) string {
+	conditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		conditions[i] = fmt.Sprintf(`%s."%s" = %s."%s"`, leftAlias, pk, rightAlias, pk)
+	}
+	return strings.Join(conditions, " AND ")
+}
+
+func buildCrateDBCDCMergeSQL(opts destination.MergeOptions, quotedTargetTable string, quotedColumns, nonPKColumns, quotedPKs []string) string {
+	dataColumns := destination.CDCDataColumns(opts.Columns, opts.PrimaryKeys)
+	activeColumns := append(append([]string{}, opts.PrimaryKeys...), dataColumns...)
+	latestAll := cratedbLatestCDCSource(opts.StagingTable, opts.PrimaryKeys, opts.Columns, "", "latest_all")
+	latestActive := cratedbLatestCDCSource(opts.StagingTable, opts.PrimaryKeys, activeColumns, `"_cdc_deleted" = false`, "latest_active")
+
+	selects := make([]string, len(opts.Columns))
+	for i, col := range opts.Columns {
+		switch {
+		case destination.IsCDCColumn(col):
+			selects[i] = fmt.Sprintf(`latest_all."%s" AS "%s"`, col, col)
+		case containsColumn(opts.PrimaryKeys, col):
+			selects[i] = fmt.Sprintf(`latest_all."%s" AS "%s"`, col, col)
+		default:
+			selects[i] = fmt.Sprintf(
+				`CASE WHEN latest_all."_cdc_deleted" = false THEN latest_all."%s" WHEN latest_active."%s" IS NOT NULL THEN latest_active."%s" ELSE existing."%s" END AS "%s"`,
+				col,
+				opts.PrimaryKeys[0],
+				col,
+				col,
+				col,
+			)
+		}
+	}
+
+	var conflictAction string
+	if len(nonPKColumns) == 0 {
+		conflictAction = "DO NOTHING"
+	} else {
+		conflictAction = "DO UPDATE SET " + buildConflictUpdateSet(nonPKColumns)
+	}
+
+	return fmt.Sprintf(
+		`INSERT INTO %s (%s)
+SELECT %s
+FROM %s
+LEFT JOIN %s ON %s
+LEFT JOIN %s AS existing ON %s
+WHERE latest_all."_cdc_deleted" = false OR latest_active."%s" IS NOT NULL OR existing."%s" IS NOT NULL
+ON CONFLICT (%s) %s`,
+		quotedTargetTable,
+		strings.Join(quotedColumns, ", "),
+		strings.Join(selects, ", "),
+		latestAll,
+		latestActive,
+		cratedbAliasJoin(opts.PrimaryKeys, "latest_all", "latest_active"),
+		quotedTargetTable,
+		cratedbAliasJoin(opts.PrimaryKeys, "existing", "latest_all"),
+		opts.PrimaryKeys[0],
+		opts.PrimaryKeys[0],
+		strings.Join(quotedPKs, ", "),
+		conflictAction,
+	)
+}
+
+func containsColumn(columns []string, column string) bool {
+	for _, col := range columns {
+		if strings.EqualFold(col, column) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *CrateDBDestination) executeCDCMerge(ctx context.Context, opts destination.MergeOptions, quotedTargetTable, _ string, quotedColumns, nonPKColumns, quotedPKs []string) error {
+	mergeSQL := buildCrateDBCDCMergeSQL(opts, quotedTargetTable, quotedColumns, nonPKColumns, quotedPKs)
+	config.Debug("[CRATEDB MERGE] Executing CDC merge: %s", mergeSQL)
+	if _, err := d.pool.Exec(ctx, mergeSQL); err != nil {
+		config.LogFailedQuery(mergeSQL, err)
+		return fmt.Errorf("failed to execute CDC merge: %w", err)
+	}
 	return nil
 }
 
@@ -557,7 +666,24 @@ func (d *CrateDBDestination) SupportsAppendStrategy() bool       { return true }
 func (d *CrateDBDestination) SupportsMergeStrategy() bool        { return true }
 func (d *CrateDBDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *CrateDBDestination) SupportsSCD2Strategy() bool         { return true }
+func (d *CrateDBDestination) SupportsCDCMerge() bool             { return true }
 func (d *CrateDBDestination) SupportsAtomicSwap() bool           { return false }
+
+func (d *CrateDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	var maxLSN *string
+	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, destination.QuoteTableName(table))
+	if err := d.pool.QueryRow(ctx, query).Scan(&maxLSN); err != nil {
+		if strings.Contains(err.Error(), "RelationUnknown") || strings.Contains(err.Error(), "does not exist") {
+			return "", nil
+		}
+		config.LogFailedQuery(query, err)
+		return "", err
+	}
+	if maxLSN == nil {
+		return "", nil
+	}
+	return *maxLSN, nil
+}
 
 func (d *CrateDBDestination) refreshTable(ctx context.Context, table string) {
 	sql := fmt.Sprintf("REFRESH TABLE %s", destination.QuoteTableName(table))

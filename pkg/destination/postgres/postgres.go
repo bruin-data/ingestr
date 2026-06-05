@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -454,7 +453,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 
 	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := slices.Contains(columns, "_cdc_deleted")
+	hasCDCDeleted := destination.HasCDCDeletedColumn(columns)
 
 	// Begin transaction for atomic merge
 	tx, err := d.pool.Begin(ctx)
@@ -467,60 +466,11 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
 	if hasCDCDeleted {
-		// CDC mode: dedupe within the staging table and apply changes deterministically.
-		// We upsert the latest non-deleted row per PK, then mark deletes only if the
-		// latest change for that PK is a delete (preserving row data).
-		pkList := strings.Join(quotedPKs, ", ")
-		selectCols := strings.Join(quotedColumns, ", ")
-		orderByParts := append(append([]string{}, quotedPKs...), `"_cdc_lsn"::pg_lsn DESC`, `"_cdc_synced_at" DESC`)
-		orderBy := strings.Join(orderByParts, ", ")
-
-		latestActive := fmt.Sprintf(
-			`latest_active AS (SELECT DISTINCT ON (%s) %s FROM %s WHERE "_cdc_deleted" = false ORDER BY %s)`,
-			pkList, selectCols, quotedStagingTable, orderBy,
-		)
-		latestAll := fmt.Sprintf(
-			`latest_all AS (SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s)`,
-			pkList, selectCols, quotedStagingTable, orderBy,
-		)
-		latestDeleted := fmt.Sprintf(
-			`latest_deleted AS (SELECT DISTINCT ON (%s) %s FROM %s WHERE "_cdc_deleted" = true ORDER BY %s)`,
-			pkList, selectCols, quotedStagingTable, orderBy,
-		)
-
-		// Step 1: Upsert latest non-deleted rows (data changes)
-		upsertSQL := fmt.Sprintf(
-			`WITH %s INSERT INTO %s (%s) SELECT %s FROM latest_active ON CONFLICT (%s) DO UPDATE SET %s`,
-			latestActive,
-			quotedTargetTable,
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedPKs, ", "),
-			buildConflictUpdateSet(nonPKColumns),
-		)
-		config.Debug("[MERGE] Executing upsert for non-deleted rows: %s", upsertSQL)
-
-		if _, err := tx.Exec(ctx, upsertSQL); err != nil {
-			config.LogFailedQuery(upsertSQL, err)
-			return fmt.Errorf("failed to upsert non-deleted records: %w", err)
-		}
-
-		// Step 2: Mark deletes only when the latest change is a delete
-		onLatestCondition := buildJoinCondition(opts.PrimaryKeys, "deleted", "latest")
-		onTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "deleted")
-		updateDeletedSQL := fmt.Sprintf(
-			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true`,
-			latestAll,
-			latestDeleted,
-			quotedTargetTable,
-			onLatestCondition,
-			onTargetCondition,
-		)
-		config.Debug("[MERGE] Executing UPDATE for deleted rows: %s", updateDeletedSQL)
-
-		if _, err := tx.Exec(ctx, updateDeletedSQL); err != nil {
-			config.LogFailedQuery(updateDeletedSQL, err)
-			return fmt.Errorf("failed to update deleted records: %w", err)
+		mergeSQL := buildPostgresCDCMergeSQL(quotedStagingTable, quotedTargetTable, opts.PrimaryKeys, columns, quotedColumns, nonPKColumns, quotedPKs)
+		config.Debug("[MERGE] Executing CDC merge: %s", mergeSQL)
+		if _, err := tx.Exec(ctx, mergeSQL); err != nil {
+			config.LogFailedQuery(mergeSQL, err)
+			return fmt.Errorf("failed to execute CDC merge: %w", err)
 		}
 	} else {
 		// Non-CDC mode: efficient upsert using INSERT ... ON CONFLICT.
@@ -554,6 +504,86 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func postgresLatestCDCCTE(name, quotedTable string, primaryKeys, columns []string, filter string) string {
+	quotedPKs := quoteColumns(primaryKeys)
+	quotedCols := quoteColumns(columns)
+	where := ""
+	if filter != "" {
+		where = " WHERE " + filter
+	}
+	orderByParts := append(append([]string{}, quotedPKs...), `"_cdc_lsn" DESC`, `"_cdc_synced_at" DESC`)
+	return fmt.Sprintf(
+		`%s AS (SELECT DISTINCT ON (%s) %s FROM %s%s ORDER BY %s)`,
+		name,
+		strings.Join(quotedPKs, ", "),
+		strings.Join(quotedCols, ", "),
+		quotedTable,
+		where,
+		strings.Join(orderByParts, ", "),
+	)
+}
+
+func buildPostgresCDCMergeSQL(quotedStagingTable, quotedTargetTable string, primaryKeys, allColumns, quotedColumns, nonPKColumns, quotedPKs []string) string {
+	dataColumns := destination.CDCDataColumns(allColumns, primaryKeys)
+	activeColumns := append(append([]string{}, primaryKeys...), dataColumns...)
+	latestAll := postgresLatestCDCCTE("latest_all", quotedStagingTable, primaryKeys, allColumns, "")
+	latestActive := postgresLatestCDCCTE("latest_active", quotedStagingTable, primaryKeys, activeColumns, `"_cdc_deleted" = false`)
+
+	selects := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		switch {
+		case destination.IsCDCColumn(col):
+			selects[i] = fmt.Sprintf(`latest_all."%s" AS "%s"`, col, col)
+		case containsColumn(primaryKeys, col):
+			selects[i] = fmt.Sprintf(`latest_all."%s" AS "%s"`, col, col)
+		default:
+			selects[i] = fmt.Sprintf(
+				`CASE WHEN latest_all."_cdc_deleted" = false THEN latest_all."%s" WHEN latest_active."%s" IS NOT NULL THEN latest_active."%s" ELSE existing."%s" END AS "%s"`,
+				col,
+				primaryKeys[0],
+				col,
+				col,
+				col,
+			)
+		}
+	}
+
+	return fmt.Sprintf(
+		`WITH %s, %s, source AS (
+	SELECT %s
+	FROM latest_all
+	LEFT JOIN latest_active ON %s
+	LEFT JOIN %s AS existing ON %s
+	WHERE latest_all."_cdc_deleted" = false OR latest_active."%s" IS NOT NULL OR existing."%s" IS NOT NULL
+)
+INSERT INTO %s (%s)
+SELECT %s FROM source
+ON CONFLICT (%s) DO UPDATE SET %s`,
+		latestAll,
+		latestActive,
+		strings.Join(selects, ", "),
+		buildJoinCondition(primaryKeys, "latest_all", "latest_active"),
+		quotedTargetTable,
+		buildJoinCondition(primaryKeys, "existing", "latest_all"),
+		primaryKeys[0],
+		primaryKeys[0],
+		quotedTargetTable,
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedPKs, ", "),
+		buildConflictUpdateSet(nonPKColumns),
+	)
+}
+
+func containsColumn(columns []string, column string) bool {
+	for _, col := range columns {
+		if strings.EqualFold(col, column) {
+			return true
+		}
+	}
+	return false
 }
 
 // DeleteInsertTable performs a DELETE + INSERT operation using a transaction.
