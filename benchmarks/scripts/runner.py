@@ -156,8 +156,37 @@ def snowflake_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def mssql_literal(value: str) -> str:
+    return "N'" + value.replace("'", "''") + "'"
+
+
 def snowflake_sql_command(uri: str, sql: str, mode: str = "exec") -> str:
     helper = "./benchmarks/scripts/snowflake_sql.go"
+    env_name = env_name_for_uri(uri)
+    if env_name:
+        return (
+            f"cd {shlex.quote(str(PROJECT_ROOT))} && "
+            f"go run {shlex.quote(helper)} -mode {shlex.quote(mode)} "
+            f"-uri-env {shlex.quote(env_name)} {shlex.quote(sql)}"
+        )
+    return (
+        f"cd {shlex.quote(str(PROJECT_ROOT))} && "
+        f"go run {shlex.quote(helper)} -mode {shlex.quote(mode)} "
+        f"{shlex.quote(uri)} {shlex.quote(sql)}"
+    )
+
+
+def quote_mssql_identifier(name: str) -> str:
+    return f"[{name.replace(']', ']]')}]"
+
+
+def mssql_full_table(schema: str, table: str) -> str:
+    schema = schema or "dbo"
+    return f"{quote_mssql_identifier(schema)}.{quote_mssql_identifier(table)}"
+
+
+def mssql_sql_command(uri: str, sql: str, mode: str = "exec") -> str:
+    helper = "./benchmarks/scripts/mssql_sql.go"
     env_name = env_name_for_uri(uri)
     if env_name:
         return (
@@ -177,6 +206,17 @@ def run_snowflake_sql(uri: str, sql: str, mode: str) -> subprocess.CompletedProc
     return subprocess.run(
         ["go", "run", "./benchmarks/scripts/snowflake_sql.go",
          "-mode", mode, "-uri-env", "_BENCH_SNOWFLAKE_SQL_URI", sql],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True, text=True, timeout=120,
+    )
+
+
+def run_mssql_sql(uri: str, sql: str, mode: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "_BENCH_MSSQL_SQL_URI": uri}
+    return subprocess.run(
+        ["go", "run", "./benchmarks/scripts/mssql_sql.go",
+         "-mode", mode, "-uri-env", "_BENCH_MSSQL_SQL_URI", sql],
         cwd=PROJECT_ROOT,
         env=env,
         capture_output=True, text=True, timeout=120,
@@ -334,6 +374,8 @@ def sling_connection_value(uri: str, db_type: str) -> str:
         return json.dumps(cfg)
     if db_type == "snowflake":
         return json.dumps(snowflake_connection_from_uri(uri))
+    if db_type in ("mssql", "sqlserver"):
+        return uri.replace("mssql://", "sqlserver://", 1)
     return uri
 
 
@@ -470,6 +512,19 @@ def build_prepare_command(
             for t in tables
         ]
         return snowflake_sql_command(dst_uri, "; ".join(drops), mode="exec")
+
+    if dst_type in ("mssql", "sqlserver"):
+        schema, table = parse_table_parts(dst_table)
+        schema = schema or "dbo"
+        tables = [table, "_dlt_loads", "_dlt_version", "_dlt_pipeline_state"]
+        drops = [
+            (
+                f"IF OBJECT_ID({mssql_literal(schema + '.' + t)}, N'U') IS NOT NULL "
+                f"DROP TABLE {mssql_full_table(schema, t)}"
+            )
+            for t in tables
+        ]
+        return mssql_sql_command(dst_uri, "; ".join(drops), mode="exec")
 
     raise ValueError(f"Unknown destination type: {dst_type}")
 
@@ -767,6 +822,56 @@ def query_destination(dst_type: str, dst_uri: str, table: str, schema: str, quer
             if query_type == "columns":
                 return lines
             return lines[-1] if lines else None
+
+        elif dst_type in ("mssql", "sqlserver"):
+            schema = schema or "dbo"
+            full_table = mssql_full_table(schema, table)
+            if query_type == "count":
+                sql = f"SELECT COUNT(*) FROM {full_table}"
+                result = run_mssql_sql(dst_uri, sql, "scalar")
+                if result.returncode != 0:
+                    return None
+                return result.stdout.strip()
+            elif query_type == "sum_id":
+                queries = [
+                    f"SELECT COALESCE(SUM(CAST([id] AS BIGINT)), 0) FROM {full_table}",
+                    (
+                        f"SELECT COALESCE(SUM(CAST(JSON_VALUE([data], '$.id') AS BIGINT)), 0) "
+                        f"FROM {full_table}"
+                    ),
+                ]
+                for sql in queries:
+                    result = run_mssql_sql(dst_uri, sql, "scalar")
+                    if result.returncode == 0:
+                        return result.stdout.strip()
+                return None
+            elif query_type == "columns":
+                sql = (
+                    "SELECT LOWER(COLUMN_NAME) FROM INFORMATION_SCHEMA.COLUMNS "
+                    f"WHERE TABLE_SCHEMA = {mssql_literal(schema)} "
+                    f"AND TABLE_NAME = {mssql_literal(table)} "
+                    "ORDER BY ORDINAL_POSITION"
+                )
+                result = run_mssql_sql(dst_uri, sql, "list")
+                if result.returncode != 0:
+                    return None
+                columns = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
+                if "data" in columns:
+                    json_sql = (
+                        f"SELECT DISTINCT LOWER([key]) FROM {full_table} "
+                        "CROSS APPLY OPENJSON([data]) ORDER BY 1"
+                    )
+                    json_result = run_mssql_sql(dst_uri, json_sql, "list")
+                    if json_result.returncode == 0:
+                        json_columns = [
+                            line.strip()
+                            for line in json_result.stdout.strip().split("\n")
+                            if line.strip()
+                        ]
+                        columns = list(dict.fromkeys(columns + json_columns))
+                return columns
+            else:
+                return None
 
     except Exception:
         return None

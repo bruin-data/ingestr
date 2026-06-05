@@ -45,6 +45,12 @@ destinations:
     uri: "duckdb:///{bench_dir}/duckdb_files/bench_dest.duckdb"
     table: "main.bench_data"
 
+  local_sqlserver:
+    type: mssql
+    uri: "mssql://sa:TestPassword123%21@localhost:1434/master?encrypt=disable"
+    table: "dbo.bench_data"
+    docker: bench-mssql-dest
+
   remote_postgres:
     type: postgres
     uri_from_env: BENCH_REMOTE_PG_URI
@@ -82,6 +88,18 @@ scenarios:
 
   - source: local_mongodb
     destination: local_duckdb
+
+  - source: local_postgres
+    destination: local_sqlserver
+
+  - source: local_mysql
+    destination: local_sqlserver
+
+  - source: local_mongodb
+    destination: local_sqlserver
+
+  - source: local_duckdb
+    destination: local_sqlserver
 
   # Remote Postgres (requires BENCH_REMOTE_PG_URI env var)
   - source: local_postgres
@@ -154,3 +172,4 @@ tools:
       - destination_type: duckdb
       - destination_type: bigquery
       - destination_type: snowflake
+      - destination_type: mssql

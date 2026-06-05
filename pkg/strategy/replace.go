@@ -95,6 +95,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 
 	writeOpts := destination.WriteOptions{
 		Table:            writeTable,
+		Schema:           job.Schema,
 		Parallelism:      parallelism,
 		StagingTable:     useStaging,
 		StagingBucket:    job.Config.StagingBucket,

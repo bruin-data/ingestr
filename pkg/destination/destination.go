@@ -23,6 +23,7 @@ type PrepareOptions struct {
 
 type WriteOptions struct {
 	Table            string
+	Schema           *schema.TableSchema
 	PrimaryKeys      []string
 	Parallelism      int
 	AtomicCommit     bool
