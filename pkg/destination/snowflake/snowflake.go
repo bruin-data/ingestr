@@ -416,7 +416,7 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		pkMap[strings.ToLower(pk)] = true
 	}
 
-	cdcMerge := slices.Contains(opts.Columns, destination.CDCDeletedColumn)
+	cdcMerge := slices.Contains(allColumns, destination.CDCDeletedColumn)
 	unchangedRef := "source." + quoteIdentifier(destination.CDCUnchangedColsColumn)
 	var updateSets []string
 	for _, col := range allColumns {

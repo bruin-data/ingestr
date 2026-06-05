@@ -459,7 +459,8 @@ func TestPostgresCDC_MergePreservesUnchangedJSONB(t *testing.T) {
 	_, err = sourcePool.Exec(ctx, `ALTER USER testuser REPLICATION`)
 	require.NoError(t, err)
 
-	_, err = sourcePool.Exec(ctx,
+	_, err = sourcePool.Exec(
+		ctx,
 		`INSERT INTO public.test_toast_cdc (config_data, result_data) VALUES ($1::jsonb, 'pending')`,
 		string(configPayload),
 	)
