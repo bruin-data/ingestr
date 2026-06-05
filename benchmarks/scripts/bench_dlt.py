@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import tempfile
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 os.environ.setdefault("RUNTIME__LOG_LEVEL", "ERROR")
 os.environ.setdefault("RUNTIME__DLTHUB_TELEMETRY", "false")
@@ -18,7 +19,33 @@ def normalize_source_uri(uri: str) -> str:
         return uri.replace("postgres://", "postgresql://", 1)
     if uri.startswith("mysql://"):
         return uri.replace("mysql://", "mysql+pymysql://", 1)
+    if uri.startswith(("mssql://", "sqlserver://")):
+        return normalize_mssql_uri(uri)
     return uri
+
+
+def normalize_mssql_uri(uri: str) -> str:
+    parsed = urlparse(uri)
+    scheme = "mssql+pyodbc" if parsed.scheme in ("mssql", "sqlserver") else parsed.scheme
+    params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+
+    encrypt = params.pop("encrypt", params.pop("Encrypt", None))
+    if encrypt is not None:
+        params["Encrypt"] = "no" if encrypt.lower() in ("disable", "false", "no", "0") else encrypt
+
+    params.setdefault("driver", "ODBC Driver 18 for SQL Server")
+    params.setdefault("TrustServerCertificate", "yes")
+
+    return urlunparse(parsed._replace(scheme=scheme, query=urlencode(params)))
+
+
+def patch_dlt_mssql_json_type():
+    from dlt.destinations.impl.mssql.factory import MsSqlTypeMapper
+
+    MsSqlTypeMapper.sct_to_unbound_dbt = {
+        **MsSqlTypeMapper.sct_to_unbound_dbt,
+        "json": "nvarchar(max)",
+    }
 
 
 def duckdb_path_from_uri(uri: str) -> str:
@@ -116,18 +143,20 @@ def main():
                 schema=src_schema,
             )
         else:
-            from sqlalchemy import Float
+            from sqlalchemy import Float, Text
 
-            def cast_doubles(table):
+            def adapt_column_types(table):
                 for col in table.columns:
                     if str(col.type) == "DOUBLE":
                         col.type = Float()
+                    elif str(col.type).upper() in ("JSON", "JSONB"):
+                        col.type = Text()
 
             source_kwargs = dict(
                 credentials=source_uri,
                 table=src_table,
                 schema=src_schema,
-                table_adapter_callback=cast_doubles,
+                table_adapter_callback=adapt_column_types,
             )
             source_kwargs["backend"] = "pyarrow"
 
@@ -151,6 +180,9 @@ def main():
         destination = dlt.destinations.bigquery(**bq_kwargs)
     elif dest_uri.startswith("snowflake://"):
         destination = dlt.destinations.snowflake(credentials=dest_uri)
+    elif dest_uri.startswith(("mssql://", "sqlserver://", "mssql+pyodbc://")):
+        patch_dlt_mssql_json_type()
+        destination = dlt.destinations.mssql(credentials=normalize_mssql_uri(dest_uri))
     else:
         raise ValueError(f"Unsupported destination: {dest_uri}")
 
