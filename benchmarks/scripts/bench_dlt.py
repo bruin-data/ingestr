@@ -1,25 +1,17 @@
-# /// script
-# requires-python = ">=3.9"
-# dependencies = [
-#     "dlt[postgres,duckdb,bigquery]==1.27.0",
-#     "pymysql",
-#     "sqlalchemy>=1.4,<2",
-#     "duckdb-engine",
-#     "pyarrow",
-#     "numpy",
-# ]
-# ///
-"""Benchmark script for dlt-hub. Run via: uv run bench_dlt.py --source-uri ... --dest-uri ..."""
+"""Benchmark script for dlt-hub."""
 
 import argparse
+import json
 import os
 import tempfile
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 os.environ.setdefault("RUNTIME__LOG_LEVEL", "ERROR")
+os.environ.setdefault("RUNTIME__DLTHUB_TELEMETRY", "false")
 
 import dlt
 from dlt.sources.sql_database import sql_table
-from sqlalchemy import Float
+from sources.mongodb import mongodb, mongodb_collection
 
 
 def normalize_source_uri(uri: str) -> str:
@@ -27,20 +19,107 @@ def normalize_source_uri(uri: str) -> str:
         return uri.replace("postgres://", "postgresql://", 1)
     if uri.startswith("mysql://"):
         return uri.replace("mysql://", "mysql+pymysql://", 1)
+    if uri.startswith(("mssql://", "sqlserver://")):
+        return normalize_mssql_uri(uri)
     return uri
+
+
+def normalize_mssql_uri(uri: str) -> str:
+    parsed = urlparse(uri)
+    scheme = "mssql+pyodbc" if parsed.scheme in ("mssql", "sqlserver") else parsed.scheme
+    params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+
+    encrypt = params.pop("encrypt", params.pop("Encrypt", None))
+    if encrypt is not None:
+        params["Encrypt"] = "no" if encrypt.lower() in ("disable", "false", "no", "0") else encrypt
+
+    params.setdefault("driver", "ODBC Driver 18 for SQL Server")
+    params.setdefault("TrustServerCertificate", "yes")
+
+    return urlunparse(parsed._replace(scheme=scheme, query=urlencode(params)))
+
+
+def patch_dlt_mssql_json_type():
+    from dlt.destinations.impl.mssql.factory import MsSqlTypeMapper
+
+    MsSqlTypeMapper.sct_to_unbound_dbt = {
+        **MsSqlTypeMapper.sct_to_unbound_dbt,
+        "json": "nvarchar(max)",
+    }
 
 
 def duckdb_path_from_uri(uri: str) -> str:
     return uri.split("duckdb:///", 1)[1]
 
 
+def parse_mongodb_table(table: str) -> tuple[str, str, dict | None]:
+    collection_part, _, filter_json = table.partition(":")
+    if "." not in collection_part:
+        raise ValueError(f"MongoDB source table must be database.collection, got: {table}")
+    database, collection = collection_part.split(".", 1)
+    if not filter_json:
+        return database, collection, None
+
+    filter_ = json.loads(filter_json)
+    if not isinstance(filter_, dict):
+        raise ValueError(
+            "The official dlt MongoDB source supports a JSON object filter after "
+            "the ':' suffix; aggregation pipelines are not supported."
+        )
+    return database, collection, filter_
+
+
+def mongodb_source(uri: str, table: str, backend: str):
+    database, collection, filter_ = parse_mongodb_table(table)
+
+    if backend == "default":
+        return mongodb(
+            connection_url=uri,
+            database=database,
+            collection_names=[collection],
+            filter_=filter_ or {},
+        )
+
+    # The verified source exposes data_item_format only on the collection-level
+    # resource, so the pyarrow variant intentionally uses that lower-level API.
+    from dlt.extract.source import DltResource
+
+    mongodb_collection.__wrapped__.__annotations__["return"] = DltResource
+    source_kwargs = dict(
+        connection_url=uri,
+        database=database,
+        collection=collection,
+        data_item_format="arrow" if backend == "pyarrow" else "object",
+    )
+    if filter_:
+        source_kwargs["filter_"] = filter_
+    return mongodb_collection(**source_kwargs)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source-uri", required=True)
+    parser.add_argument("--source-uri")
+    parser.add_argument("--source-uri-env")
     parser.add_argument("--source-table", required=True)
-    parser.add_argument("--dest-uri", required=True)
+    parser.add_argument("--dest-uri")
+    parser.add_argument("--dest-uri-env")
     parser.add_argument("--dest-table", required=True)
+    parser.add_argument(
+        "--backend",
+        choices=("default", "pyarrow"),
+        default=os.environ.get("BENCH_DLT_BACKEND", "default"),
+        help="dlt source backend mode: default uses dlt's out-of-box path; pyarrow opts into Arrow where supported",
+    )
     args = parser.parse_args()
+
+    if args.source_uri_env:
+        args.source_uri = os.environ.get(args.source_uri_env)
+    if args.dest_uri_env:
+        args.dest_uri = os.environ.get(args.dest_uri_env)
+    if not args.source_uri:
+        raise ValueError("--source-uri or --source-uri-env is required")
+    if not args.dest_uri:
+        raise ValueError("--dest-uri or --dest-uri-env is required")
 
     if "." in args.source_table:
         src_schema, src_table = args.source_table.split(".", 1)
@@ -54,18 +133,34 @@ def main():
 
     source_uri = normalize_source_uri(args.source_uri)
 
-    def cast_doubles(table):
-        for col in table.columns:
-            if str(col.type) == "DOUBLE":
-                col.type = Float()
+    if source_uri.startswith(("mongodb://", "mongodb+srv://")):
+        source = mongodb_source(source_uri, args.source_table, args.backend)
+    else:
+        if args.backend == "default":
+            source = sql_table(
+                credentials=source_uri,
+                table=src_table,
+                schema=src_schema,
+            )
+        else:
+            from sqlalchemy import Float, Text
 
-    source = sql_table(
-        credentials=source_uri,
-        table=src_table,
-        schema=src_schema,
-        backend="pyarrow",
-        table_adapter_callback=cast_doubles,
-    )
+            def adapt_column_types(table):
+                for col in table.columns:
+                    if str(col.type) == "DOUBLE":
+                        col.type = Float()
+                    elif str(col.type).upper() in ("JSON", "JSONB"):
+                        col.type = Text()
+
+            source_kwargs = dict(
+                credentials=source_uri,
+                table=src_table,
+                schema=src_schema,
+                table_adapter_callback=adapt_column_types,
+            )
+            source_kwargs["backend"] = "pyarrow"
+
+            source = sql_table(**source_kwargs)
 
     # Build destination
     dest_uri = args.dest_uri
@@ -83,6 +178,11 @@ def main():
         if creds:
             bq_kwargs["credentials"] = creds
         destination = dlt.destinations.bigquery(**bq_kwargs)
+    elif dest_uri.startswith("snowflake://"):
+        destination = dlt.destinations.snowflake(credentials=dest_uri)
+    elif dest_uri.startswith(("mssql://", "sqlserver://", "mssql+pyodbc://")):
+        patch_dlt_mssql_json_type()
+        destination = dlt.destinations.mssql(credentials=normalize_mssql_uri(dest_uri))
     else:
         raise ValueError(f"Unsupported destination: {dest_uri}")
 

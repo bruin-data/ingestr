@@ -33,10 +33,16 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: bruin-data/ingestr
+  INGESTR_DISABLE_TELEMETRY: "true"
+  DISABLE_TELEMETRY: "true"
 
 jobs:
   test:
     runs-on: depot-ubuntu-24.04-4
+    env:
+      # DuckDB's ADBC driver can crash when several package test binaries load it
+      # at the same time under race builds.
+      GOFLAGS: "-p=1"
     steps:
       - uses: actions/checkout@v4
 
@@ -121,4 +127,14 @@ jobs:
         run: make setup
       - name: Check the formatting and linting
         run: make lint-ci
-  
+
+  licenses:
+    runs-on: depot-ubuntu-24.04-4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: "go.sum"
+      - name: Check third-party license notices
+        run: make licenses-check

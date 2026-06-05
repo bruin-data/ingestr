@@ -83,11 +83,16 @@ func (r *Replicator) CurrentLSN() pglogrepl.LSN {
 	return r.clientXLogPos
 }
 
-func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, error) {
+// NextBatch returns the next decoded batch, if any. The hadActivity flag
+// distinguishes a genuine idle period (receive timeout / nil message) from
+// WAL activity that produced no batch yet (keepalives, buffered Begin/Insert/
+// Update/Delete messages awaiting a Commit). Callers use it to avoid flushing
+// the batch accumulator after every transaction.
+func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, bool, error) {
 	// Start replication if not yet started
 	if !r.started {
 		if err := r.Start(ctx); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
@@ -113,30 +118,30 @@ func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.Record
 	msg, err := r.source.replConn.ReceiveMessage(ctxWithTimeout)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, false, ctx.Err()
 		}
 		// Timeout is expected when no data is available
 		if ctxWithTimeout.Err() != nil {
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, fmt.Errorf("failed to receive message: %w", err)
+		return nil, false, fmt.Errorf("failed to receive message: %w", err)
 	}
 
 	if msg == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	switch msg := msg.(type) {
 	case *pgproto3.CopyData:
 		if len(msg.Data) == 0 {
-			return nil, nil
+			return nil, true, nil // Received a message, even if empty
 		}
 
 		switch msg.Data[0] {
 		case pglogrepl.PrimaryKeepaliveMessageByteID:
 			pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
 			if err != nil {
-				return nil, fmt.Errorf("failed to parse keepalive: %w", err)
+				return nil, true, fmt.Errorf("failed to parse keepalive: %w", err)
 			}
 
 			if pkm.ReplyRequested {
@@ -150,21 +155,21 @@ func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.Record
 		case pglogrepl.XLogDataByteID:
 			xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
 			if err != nil {
-				return nil, fmt.Errorf("failed to parse xlog data: %w", err)
+				return nil, true, fmt.Errorf("failed to parse xlog data: %w", err)
 			}
 
 			batch, err := r.decoder.Decode(xld.WALData, xld.WALStart)
 			if err != nil {
-				return nil, fmt.Errorf("failed to decode WAL data: %w", err)
+				return nil, true, fmt.Errorf("failed to decode WAL data: %w", err)
 			}
 
 			if xld.WALStart > r.clientXLogPos {
 				r.clientXLogPos = xld.WALStart
 			}
 
-			return batch, nil
+			return batch, true, nil
 		}
 	}
 
-	return nil, nil
+	return nil, true, nil // Received some message type we don't handle
 }

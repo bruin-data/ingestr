@@ -49,6 +49,26 @@ services:
       retries: 10
     shm_size: '1g'
 
+  bench-mssql-dest:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: bench-mssql-dest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "TestPassword123!"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1434:1433"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -C -Q \"SELECT 1\" >/dev/null || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -Q \"SELECT 1\" >/dev/null",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    shm_size: '1g'
+
   bench-mysql-source:
     image: mysql:8.0
     container_name: bench-mysql-source
@@ -70,3 +90,21 @@ services:
       interval: 3s
       timeout: 3s
       retries: 15
+
+  bench-mongo-source:
+    image: mongo:8.2.7
+    container_name: bench-mongo-source
+    ports:
+      - "27018:27017"
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--wiredTigerCacheSizeGB", "1"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({_id:\"rs0\",members:[{_id:0,host:\"host.docker.internal:27018\"}]}).ok }' | grep 1",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 30

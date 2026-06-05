@@ -236,13 +236,17 @@ func parseCustomTableName(tableName string) (*customAnalyticsConfig, error) {
 		return nil, fmt.Errorf("at least one metric is required")
 	}
 
-	// Validate dimensions - must have one of campaign, creative, or account
-	validDimensions := []string{"campaign", "creative", "account"}
 	dimensionIdx := slices.IndexFunc(dimensions, func(d string) bool {
-		return slices.Contains(validDimensions, d)
+		_, ok := dimensionPivotMap[d]
+		return ok
 	})
 	if dimensionIdx == -1 {
-		return nil, fmt.Errorf("'campaign', 'creative' or 'account' is required in dimensions")
+		validDimensions := make([]string, 0, len(dimensionPivotMap))
+		for k := range dimensionPivotMap {
+			validDimensions = append(validDimensions, k)
+		}
+		slices.Sort(validDimensions)
+		return nil, fmt.Errorf("dimensions must include one of: %s", strings.Join(validDimensions, ", "))
 	}
 	pivot := dimensions[dimensionIdx]
 
@@ -316,6 +320,25 @@ func findIntervals(startDate, endDate time.Time, granularity timeGranularity) ([
 	return intervals, nil
 }
 
+// dimensionPivotMap translates a user-supplied dimension name to the
+// LinkedIn Ad Analytics `pivot` API enum. Keep this as the single source of
+// truth — strings.ToUpper is unsafe because some enums have suffixes (e.g.
+// MEMBER_COUNTRY_V2, IMPRESSION_DEVICE_TYPE).
+var dimensionPivotMap = map[string]string{
+	"campaign":            "CAMPAIGN",
+	"creative":            "CREATIVE",
+	"account":             "ACCOUNT",
+	"impression_device":   "IMPRESSION_DEVICE_TYPE",
+	"member_job_title":    "MEMBER_JOB_TITLE",
+	"member_job_function": "MEMBER_JOB_FUNCTION",
+	"member_seniority":    "MEMBER_SENIORITY",
+	"member_industry":     "MEMBER_INDUSTRY",
+	"member_company_size": "MEMBER_COMPANY_SIZE",
+	"member_company":      "MEMBER_COMPANY",
+	"member_country":      "MEMBER_COUNTRY_V2",
+	"member_region":       "MEMBER_REGION_V2",
+}
+
 func constructAnalyticsURL(start, end time.Time, accountIDs []string, metrics []string, pivot string, granularity timeGranularity) string {
 	dateRange := fmt.Sprintf("(start:(year:%d,month:%d,day:%d),end:(year:%d,month:%d,day:%d))",
 		start.Year(), int(start.Month()), start.Day(),
@@ -327,7 +350,7 @@ func constructAnalyticsURL(start, end time.Time, accountIDs []string, metrics []
 	}
 	accounts := fmt.Sprintf("List(%s)", strings.Join(encodedAccounts, ","))
 
-	pivotStr := strings.ToUpper(pivot)
+	pivotStr := dimensionPivotMap[pivot]
 	metricsStr := strings.Join(metrics, ",")
 
 	return fmt.Sprintf("/adAnalytics?q=analytics&timeGranularity=%s&dateRange=%s&accounts=%s&pivot=%s&fields=%s",

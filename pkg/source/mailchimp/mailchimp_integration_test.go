@@ -1,3 +1,5 @@
+//go:build integration
+
 package mailchimp_test
 
 import (

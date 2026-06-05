@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -359,6 +361,121 @@ func assertColumns(t *testing.T, label string, got, want []string) {
 
 func runLabel(i int) string {
 	return fmt.Sprintf("run%d", i)
+}
+
+func TestApplyExcludedColumnsNamingAware(t *testing.T) {
+	source := schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "UserId", DataType: schema.TypeInt64, IsPrimaryKey: true},
+			{Name: "FullName", DataType: schema.TypeString},
+			{Name: "SecretToken", DataType: schema.TypeString},
+		},
+		PrimaryKeys:    []string{"UserId"},
+		IncrementalKey: "FullName",
+	}
+
+	tests := []struct {
+		name         string
+		schemaNaming string
+		exclude      []string
+		wantColumns  []string
+		wantPKs      []string
+		wantIncKey   string
+	}{
+		{
+			name:         "exclude by source name",
+			schemaNaming: "snake_case",
+			exclude:      []string{"SecretToken"},
+			wantColumns:  []string{"UserId", "FullName"},
+			wantPKs:      []string{"UserId"},
+			wantIncKey:   "FullName",
+		},
+		{
+			name:         "exclude by destination snake_case name",
+			schemaNaming: "snake_case",
+			exclude:      []string{"secret_token"},
+			wantColumns:  []string{"UserId", "FullName"},
+			wantPKs:      []string{"UserId"},
+			wantIncKey:   "FullName",
+		},
+		{
+			name:         "exclude incremental key by destination name",
+			schemaNaming: "snake_case",
+			exclude:      []string{"full_name"},
+			wantColumns:  []string{"UserId", "SecretToken"},
+			wantPKs:      []string{"UserId"},
+			wantIncKey:   "",
+		},
+		{
+			name:         "exclude primary key by destination name",
+			schemaNaming: "snake_case",
+			exclude:      []string{"user_id"},
+			wantColumns:  []string{"FullName", "SecretToken"},
+			wantPKs:      []string{},
+			wantIncKey:   "FullName",
+		},
+		{
+			name:         "exclude primary key by source name",
+			schemaNaming: "snake_case",
+			exclude:      []string{"UserId"},
+			wantColumns:  []string{"FullName", "SecretToken"},
+			wantPKs:      []string{},
+			wantIncKey:   "FullName",
+		},
+		{
+			name:         "direct naming does not match snake_case name",
+			schemaNaming: "direct",
+			exclude:      []string{"secret_token", "user_id"},
+			wantColumns:  []string{"UserId", "FullName", "SecretToken"},
+			wantPKs:      []string{"UserId"},
+			wantIncKey:   "FullName",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := source
+			src.Columns = make([]schema.Column, len(source.Columns))
+			copy(src.Columns, source.Columns)
+			src.PrimaryKeys = append([]string(nil), source.PrimaryKeys...)
+
+			p := &Pipeline{
+				config: &config.IngestConfig{
+					DestTable:         "users_out",
+					SchemaNaming:      tt.schemaNaming,
+					SQLExcludeColumns: tt.exclude,
+				},
+				dest: &mockDestination{},
+			}
+
+			namingConv, err := p.resolveNamingConvention(context.Background(), &src)
+			if err != nil {
+				t.Fatalf("resolveNamingConvention() error = %v", err)
+			}
+
+			got := p.applyExcludedColumnsToSchema(&src, namingConv)
+			gotColumns := got.ColumnNames()
+			if len(gotColumns) != len(tt.wantColumns) {
+				t.Fatalf("columns = %v, want %v", gotColumns, tt.wantColumns)
+			}
+			for i, want := range tt.wantColumns {
+				if gotColumns[i] != want {
+					t.Errorf("column[%d] = %q, want %q", i, gotColumns[i], want)
+				}
+			}
+			if len(got.PrimaryKeys) != len(tt.wantPKs) {
+				t.Fatalf("primary keys = %v, want %v", got.PrimaryKeys, tt.wantPKs)
+			}
+			for i, want := range tt.wantPKs {
+				if got.PrimaryKeys[i] != want {
+					t.Errorf("primary key[%d] = %q, want %q", i, got.PrimaryKeys[i], want)
+				}
+			}
+			if got.IncrementalKey != tt.wantIncKey {
+				t.Errorf("incremental key = %q, want %q", got.IncrementalKey, tt.wantIncKey)
+			}
+		})
+	}
 }
 
 func TestNamingConsistency(t *testing.T) {
@@ -1215,6 +1332,116 @@ func TestBuildBufferReaderTarget_HonorsRenamer(t *testing.T) {
 	}
 }
 
+func TestBuildBufferReaderTarget_KeepsAliasesForCanonicalDuplicate(t *testing.T) {
+	p := &Pipeline{
+		columnRenamer: transformer.NewColumnRenamer(map[string]string{
+			"userId": "user_id",
+			"UserID": "user_id",
+		}),
+	}
+	src := tschema(
+		"users",
+		tcol("_id", schema.TypeInt64),
+		tcol("userId", schema.TypeInt64),
+		tcol("user_id", schema.TypeInt64),
+		tcol("UserID", schema.TypeInt64),
+	)
+	dest := tschema(
+		"users",
+		tcol("_id", schema.TypeInt64),
+		tcol("user_id", schema.TypeInt64),
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"_id", "userId", "user_id", "UserID"})
+}
+
+func TestBuildSourceSchemaCaster_ProjectsAndCastsToSourceSchema(t *testing.T) {
+	p := &Pipeline{}
+	sourceSchema := tschema(
+		"events",
+		tcol("id", schema.TypeInt64),
+		tcol("count", schema.TypeInt64),
+	)
+
+	caster := p.buildSourceSchemaCaster(sourceSchema)
+	if caster == nil {
+		t.Fatal("expected source schema caster")
+	}
+
+	mem := memory.NewGoAllocator()
+	idBuilder := array.NewInt64Builder(mem)
+	idBuilder.Append(7)
+	idArr := idBuilder.NewArray()
+	idBuilder.Release()
+	defer idArr.Release()
+
+	extraBuilder := array.NewStringBuilder(mem)
+	extraBuilder.Append("drop me")
+	extraArr := extraBuilder.NewArray()
+	extraBuilder.Release()
+	defer extraArr.Release()
+
+	countBuilder := array.NewStringBuilder(mem)
+	countBuilder.Append("42")
+	countArr := countBuilder.NewArray()
+	countBuilder.Release()
+	defer countArr.Release()
+
+	input := array.NewRecordBatch(
+		arrow.NewSchema([]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: "extra", Type: arrow.BinaryTypes.String, Nullable: true},
+			{Name: "count", Type: arrow.BinaryTypes.String, Nullable: true},
+		}, nil),
+		[]arrow.Array{idArr, extraArr, countArr},
+		1,
+	)
+	defer input.Release()
+
+	got, err := caster.Transform(input)
+	if err != nil {
+		t.Fatalf("Transform() error = %v", err)
+	}
+	defer got.Release()
+
+	assertColumns(t, "fields", arrowFieldNames(got.Schema()), []string{"id", "count"})
+	if got.Column(1).DataType().ID() != arrow.INT64 {
+		t.Fatalf("count type = %s, want int64", got.Column(1).DataType())
+	}
+	countCol, ok := got.Column(1).(*array.Int64)
+	if !ok {
+		t.Fatalf("count column type = %T, want *array.Int64", got.Column(1))
+	}
+	if got := countCol.Value(0); got != 42 {
+		t.Fatalf("count = %d, want 42", got)
+	}
+}
+
+func TestApplyColumnMapping_DedupesCanonicalColumns(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"users",
+		tcol("_id", schema.TypeInt64),
+		tcol("userId", schema.TypeInt32),
+		tcol("user_id", schema.TypeInt64),
+		tcol("UserID", schema.TypeInt64),
+	)
+	src.PrimaryKeys = []string{"userId", "UserID"}
+
+	p.applyColumnMapping(src, map[string]string{
+		"userId": "user_id",
+		"UserID": "user_id",
+	})
+
+	assertColumns(t, "columns", src.ColumnNames(), []string{"_id", "user_id"})
+	assertColumns(t, "primary keys", src.PrimaryKeys, []string{"user_id"})
+	if got := src.Columns[1].DataType; got != schema.TypeInt64 {
+		t.Fatalf("user_id type = %v, want %v", got, schema.TypeInt64)
+	}
+}
+
 // Case 7: realistic evolve scenario.
 func TestBuildBufferReaderTarget_EvolveScenario(t *testing.T) {
 	p := &Pipeline{}
@@ -1240,4 +1467,22 @@ func TestBuildBufferReaderTarget_EvolveScenario(t *testing.T) {
 	got := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"age", "id", "name", "score", "email"})
+}
+
+func TestBuildBufferReaderTarget_CaseInsensitiveMatch(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"orders",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+	)
+	dest := tschema(
+		"orders",
+		tcol("ID", schema.TypeInt64),
+		tcol("NAME", schema.TypeString),
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }

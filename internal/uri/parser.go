@@ -98,6 +98,7 @@ func NormalizeScheme(scheme string) string {
 		"postgresql+asyncpg":  "postgres",
 		"pg":                  "postgres",
 		"redshift+psycopg2":   "redshift",
+		"azure-sql":           "azuresql",
 	}
 	if canonical, ok := aliases[scheme]; ok {
 		return canonical

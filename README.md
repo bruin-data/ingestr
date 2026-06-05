@@ -20,6 +20,8 @@ ingestr is a command-line app that allows you to ingest data from any source int
 
 ingestr takes away the complexity of managing any backend or writing any code for ingesting data, simply run the command and watch the data land on its destination.
 
+![MongoDB to Postgres benchmark](resources/mongodb-postgres-benchmark.png?raw=true)
+
 ## Installation
 
 You can install `ingestr` using the install script:
@@ -78,7 +80,17 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td colspan="3" style='text-align:center;'><strong>Databases</strong></td>
     </tr>
     <tr>
-        <td>BigQuery</td>
+        <td>AWS Athena</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
+        <td>AWS Redshift</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
+        <td>Cassandra</td>
         <td>✅</td>
         <td>✅</td>
     </tr>
@@ -86,6 +98,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>ClickHouse</td>
         <td>✅</td>
         <td>✅</td>
+    </tr>
+    <tr>
+        <td>Couchbase</td>
+        <td>✅</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>CrateDB</td>
@@ -98,11 +115,6 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
-        <td>IBM Db2</td>
-        <td>✅</td>
-        <td>-</td>
-    </tr>
-    <tr>
         <td>DuckDB</td>
         <td>✅</td>
         <td>✅</td>
@@ -110,15 +122,35 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     <tr>
         <td>DynamoDB</td>
         <td>✅</td>
-        <td>-</td>
+        <td>✅</td>
     </tr>
     <tr>
         <td>Elasticsearch</td>
         <td>✅</td>
         <td>✅</td>
     </tr>
-     <tr>
+    <tr>
+        <td>Google BigQuery</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
         <td>GCP Spanner</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>IBM Db2</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>InfluxDB</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Kafka</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -130,6 +162,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     <tr>
         <td>Microsoft Fabric</td>
         <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
+        <td>Microsoft OneLake</td>
+        <td>-</td>
         <td>✅</td>
     </tr>
     <tr>
@@ -150,27 +187,27 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     <tr>
         <td>MySQL</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>✅</td>
     </tr>
     <tr>
         <td>Oracle</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Postgres</td>
         <td>✅</td>
         <td>✅</td>
     </tr>
-     <tr>
-        <td>Redshift</td>
+    <tr>
+        <td>RabbitMQ</td>
         <td>✅</td>
-        <td>✅</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>SAP Hana</td>
         <td>✅</td>
-        <td>❌</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Snowflake</td>
@@ -178,8 +215,18 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
+        <td>Socrata</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>SQLite</td>
         <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
+        <td>Synapse</td>
+        <td>-</td>
         <td>✅</td>
     </tr>
     <tr>
@@ -190,11 +237,18 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     <tr>
         <td colspan="3" style='text-align:center;'><strong>Platforms</strong></td>
     </tr>
+    <tr>
         <td>Adjust</td>
         <td>✅</td>
         <td>-</td>
+    </tr>
     <tr>
         <td>Airtable</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Allium</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -204,7 +258,7 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
-        <td>Apache Kafka</td>
+        <td>Anthropic</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -214,7 +268,22 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
-        <td>App Store</td>
+        <td>Apple Ads</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Apple App Store</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Applovin</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Applovin Max</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -229,7 +298,37 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Azure Data Lake Storage Gen2</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
+        <td>Bruin</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Chess.com</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>ClickUp</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Cursor</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Docebo</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Dune</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -239,17 +338,37 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Fireflies</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Fluxx</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Frankfurter</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Freshdesk</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>FundraiseUp</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>G2</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>GitHub</td>
-        <td>✅</td>
-        <td>-</td>
-    </tr>
-    <tr>
-        <td>Gorgias</td>
-        <td>✅</td>
-        <td>-</td>
-    </tr>
-    <tr>
-        <td>Google Sheets</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -264,17 +383,87 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Google Cloud Storage (GCS)</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
+        <td>Google Sheets</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Gorgias</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Granola</td>
         <td>✅</td>
         <td>-</td>
     </tr>
-     <tr>
+    <tr>
+        <td>Hostaway</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>HubSpot</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Indeed</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Intercom</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Internet Society Pulse</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Jira</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>JobTread</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Klaviyo</td>
         <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
+        <td>Linear</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>LinkedIn Ads</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Mailchimp</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Mixpanel</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Monday</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -288,8 +477,13 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
         <td>-</td>
     </tr>
-     <tr>
-        <td>Phantombuster</td>
+    <tr>
+        <td>PhantomBuster</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Pinterest</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -298,13 +492,48 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
         <td>-</td>
     </tr>
-     <tr>
-        <td>S3</td>
+    <tr>
+        <td>Plus Vibe AI</td>
         <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
+        <td>PostHog</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Primer</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>QuickBooks</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Reddit Ads</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>RevenueCat</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>S3</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
         <td>Salesforce</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>SFTP</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -313,13 +542,18 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
         <td>-</td>
     </tr>
-     <tr>
+    <tr>
         <td>Slack</td>
         <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
-        <td>Smartsheets</td>
+        <td>Smartsheet</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Snapchat Ads</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -334,12 +568,32 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>SurveyMonkey</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>TikTok Ads</td>
         <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
+        <td>Trustpilot</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Wise</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Zendesk</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Zoom</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -349,7 +603,6 @@ Feel free to create an issue if you'd like to see support for another source or 
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+ingestr is source-available under the [Functional Source License 1.1](https://fsl.software/), with Apache 2.0 as the future license. You can use ingestr freely for internal production use, development, testing, education, research, and professional services. You cannot use ingestr to offer a competing commercial ingestion, ELT, connector, or managed data pipeline product/service.
 
-Some components are licensed under Apache 2.0 - see the NOTICE file for details.
-
+Each version becomes Apache 2.0 two years after release.

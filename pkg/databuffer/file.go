@@ -2,9 +2,11 @@ package databuffer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -194,13 +196,13 @@ func CastRecordToSchema(record arrow.RecordBatch, targetSchema *arrow.Schema, sa
 
 	existingCols := make(map[string]arrow.Array)
 	for i := 0; i < int(record.NumCols()); i++ {
-		existingCols[record.Schema().Field(i).Name] = record.Column(i)
+		existingCols[strings.ToLower(record.Schema().Field(i).Name)] = record.Column(i)
 	}
 
 	cols := make([]arrow.Array, targetSchema.NumFields())
 	for i := 0; i < targetSchema.NumFields(); i++ {
 		field := targetSchema.Field(i)
-		existingCol, ok := existingCols[field.Name]
+		existingCol, ok := existingCols[strings.ToLower(field.Name)]
 		if !ok {
 			nullArray, err := makeNullArray(mem, field.Type, int(numRows))
 			if err != nil {
@@ -339,6 +341,10 @@ func castUnknownArray(arr arrow.Array, target arrow.DataType) (arrow.Array, erro
 		return nil, fmt.Errorf("unknown type is not an extension array")
 	}
 
+	if isJSONType(target) {
+		return castUnknownArrayToJSON(ext, target)
+	}
+
 	builder := array.NewBuilder(memory.DefaultAllocator, target)
 	defer builder.Release()
 
@@ -363,6 +369,48 @@ func castUnknownArray(arr arrow.Array, target arrow.DataType) (arrow.Array, erro
 	}
 
 	return builder.NewArray(), nil
+}
+
+func castUnknownArrayToJSON(ext array.ExtensionArray, target arrow.DataType) (arrow.Array, error) {
+	extType, ok := target.(arrow.ExtensionType)
+	if !ok {
+		return nil, fmt.Errorf("target type is not an extension type")
+	}
+
+	builder := array.NewStringBuilder(memory.DefaultAllocator)
+	defer builder.Release()
+
+	storage := ext.Storage()
+	for i := 0; i < ext.Len(); i++ {
+		if ext.IsNull(i) {
+			builder.AppendNull()
+			continue
+		}
+
+		raw, ok := schemainfer.StringValueAt(storage, i)
+		if !ok {
+			builder.AppendNull()
+			continue
+		}
+
+		// Unknown storage is already JSON text; pass it through unless it came
+		// from a non-JSON fallback, in which case quote it as a JSON string.
+		if json.Valid([]byte(raw)) {
+			builder.Append(raw)
+			continue
+		}
+
+		jsonBytes, err := json.Marshal(raw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode unknown value as JSON: %w", err)
+		}
+		builder.Append(string(jsonBytes))
+	}
+
+	storageArr := builder.NewArray()
+	defer storageArr.Release()
+
+	return array.NewExtensionArrayWithStorage(extType, storageArr), nil
 }
 
 func castArrayToJSON(ctx context.Context, arr arrow.Array, target arrow.DataType) (arrow.Array, error) {

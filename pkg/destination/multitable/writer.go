@@ -62,6 +62,7 @@ func Write(
 
 			err := dest.WriteParallel(writeCtx, ch, destination.WriteOptions{
 				Table:            tableConfig.DestTable,
+				Schema:           tableConfig.Schema,
 				PrimaryKeys:      tableConfig.PrimaryKeys,
 				Parallelism:      parallelism,
 				StagingTable:     opts.StagingTable,

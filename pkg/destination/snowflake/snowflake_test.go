@@ -8,6 +8,54 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestBuildMergeSQL(t *testing.T) {
+	t.Run("non_cdc", func(t *testing.T) {
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "name", "updated_at"})
+
+		assert.Contains(t, sql, `MERGE INTO "TARGET_SCHEMA"."TARGET_TBL" AS target`)
+		assert.Contains(t, sql, `FROM "STAGING_SCHEMA"."STAGING_TBL"`)
+		assert.Contains(t, sql, "ORDER BY (SELECT NULL)")
+		assert.Contains(t, sql, `ON target."ID" = source."ID"`)
+		assert.Contains(t, sql, "WHEN MATCHED THEN")
+		assert.Contains(t, sql, `target."NAME" = source."NAME"`)
+		assert.NotContains(t, sql, `UPDATE SET target."ID" = source."ID"`)
+		assert.Contains(t, sql, "WHEN NOT MATCHED THEN")
+		assert.Contains(t, sql, `INSERT ("ID", "NAME", "UPDATED_AT")`)
+		assert.Contains(t, sql, `VALUES (source."ID", source."NAME", source."UPDATED_AT")`)
+		assert.NotContains(t, sql, "_CDC_DELETED")
+	})
+
+	t.Run("non_cdc_all_pk_columns", func(t *testing.T) {
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id"})
+		assert.NotContains(t, sql, "WHEN MATCHED THEN")
+		assert.Contains(t, sql, "WHEN NOT MATCHED THEN")
+	})
+
+	t.Run("cdc", func(t *testing.T) {
+		columns := []string{"id", "name", "value", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns)
+
+		assert.Contains(t, sql, `ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC`)
+		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = false THEN`)
+		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
+		assert.Contains(t, sql, `target."_CDC_DELETED" = true, target."_CDC_LSN" = source."_CDC_LSN", target."_CDC_SYNCED_AT" = source."_CDC_SYNCED_AT"`)
+		assert.Contains(t, sql, `WHEN NOT MATCHED AND source."_CDC_DELETED" = false THEN`)
+		assert.NotContains(t, sql, `WHEN NOT MATCHED AND source."_CDC_DELETED" = true`)
+		assert.NotContains(t, sql, "WHEN NOT MATCHED THEN\n")
+	})
+
+	t.Run("cdc_only_pk_and_metadata", func(t *testing.T) {
+		columns := []string{"id", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns)
+
+		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = false THEN`)
+		assert.Contains(t, sql, `target."_CDC_LSN" = source."_CDC_LSN"`)
+		assert.NotContains(t, sql, `target."NAME" = source."NAME"`)
+		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
+		assert.Contains(t, sql, `WHEN NOT MATCHED AND source."_CDC_DELETED" = false THEN`)
+	})
+}
+
 func TestParseSchemaTable(t *testing.T) {
 	tests := []struct {
 		name       string

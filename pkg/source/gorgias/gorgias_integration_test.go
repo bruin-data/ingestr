@@ -1,3 +1,5 @@
+//go:build integration
+
 package gorgias_test
 
 import (

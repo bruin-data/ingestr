@@ -242,6 +242,25 @@ func TestValue(t *testing.T) {
 		}
 	})
 
+	t.Run("time64 nanoseconds", func(t *testing.T) {
+		t.Parallel()
+
+		b := array.NewTime64Builder(mem, arrow.FixedWidthTypes.Time64ns.(*arrow.Time64Type))
+		defer b.Release()
+
+		// 01:02:03.000004 (nanosecond unit)
+		nanos := int64((1*3600+2*60+3)*1_000_000_000 + 4_000)
+		b.Append(arrow.Time64(nanos))
+		arr := b.NewArray()
+		defer arr.Release()
+
+		got, ok := Value(arr, 0).(time.Time)
+		want := time.Date(0, 1, 1, 1, 2, 3, 4*1000, time.UTC)
+		if !ok || !got.Equal(want) {
+			t.Fatalf("Value(time64 nanoseconds) = %#v, want %v", Value(arr, 0), want)
+		}
+	})
+
 	t.Run("timestamp", func(t *testing.T) {
 		t.Parallel()
 

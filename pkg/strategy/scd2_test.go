@@ -124,3 +124,26 @@ func TestSCD2Strategy_ExtendSchemaWithSCDColumns(t *testing.T) {
 		}
 	}
 }
+
+func TestSCD2Strategy_ExtendSchemaWithSCDColumns_CaseInsensitive(t *testing.T) {
+	original := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+			{Name: "_SCD_VALID_FROM", DataType: schema.TypeTimestampTZ, Nullable: false},
+			{Name: "_SCD_VALID_TO", DataType: schema.TypeTimestampTZ, Nullable: true},
+			{Name: "_SCD_IS_CURRENT", DataType: schema.TypeBoolean, Nullable: false},
+		},
+		PrimaryKeys: []string{"id"},
+	}
+
+	extended := extendSchemaWithSCDColumns(original)
+
+	assert.Equal(t, 5, len(extended.Columns))
+
+	colNames := make([]string, len(extended.Columns))
+	for i, col := range extended.Columns {
+		colNames[i] = col.Name
+	}
+	assert.Equal(t, []string{"id", "name", "_SCD_VALID_FROM", "_SCD_VALID_TO", "_SCD_IS_CURRENT"}, colNames)
+}

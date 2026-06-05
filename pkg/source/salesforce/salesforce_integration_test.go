@@ -1,8 +1,11 @@
+//go:build integration
+
 package salesforce_test
 
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,13 +23,28 @@ func TestSalesforcePipeline(t *testing.T) {
 	username := os.Getenv("SALESFORCE_USERNAME")
 	password := os.Getenv("SALESFORCE_PASSWORD")
 	token := os.Getenv("SALESFORCE_TOKEN")
+	clientID := os.Getenv("SALESFORCE_CLIENT_ID")
+	clientSecret := os.Getenv("SALESFORCE_CLIENT_SECRET")
 	domain := os.Getenv("SALESFORCE_DOMAIN")
-	if username == "" || password == "" || token == "" || domain == "" {
-		t.Skip("Set SALESFORCE_USERNAME, SALESFORCE_PASSWORD, SALESFORCE_TOKEN, and SALESFORCE_DOMAIN to run Salesforce integration tests")
+	if domain == "" {
+		t.Skip("Set SALESFORCE_DOMAIN to run Salesforce integration tests")
 	}
 
 	ctx := context.Background()
-	sourceURI := fmt.Sprintf("salesforce://localhost?username=%s&password=%s&token=%s&domain=%s", username, password, token, domain)
+	params := url.Values{"domain": []string{domain}}
+	if clientID != "" && clientSecret != "" {
+		params.Set("grant_type", "client_credentials")
+		params.Set("client_id", clientID)
+		params.Set("client_secret", clientSecret)
+	} else {
+		if username == "" || password == "" || token == "" {
+			t.Skip("Set SALESFORCE_CLIENT_ID and SALESFORCE_CLIENT_SECRET, or SALESFORCE_USERNAME, SALESFORCE_PASSWORD, and SALESFORCE_TOKEN to run Salesforce integration tests")
+		}
+		params.Set("username", username)
+		params.Set("password", password)
+		params.Set("token", token)
+	}
+	sourceURI := "salesforce://?" + params.Encode()
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, fmt.Sprintf("salesforce_%d.duckdb", time.Now().UnixNano()))

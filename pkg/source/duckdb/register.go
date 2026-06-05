@@ -10,4 +10,8 @@ func init() {
 		[]string{"duckdb", "motherduck", "md"},
 		func() interface{} { return adbc.NewADBCSource(NewDialect()) },
 	)
+	registry.RegisterSource(
+		[]string{"ducklake"},
+		func() interface{} { return adbc.NewADBCSource(NewDuckLakeDialect()) },
+	)
 }

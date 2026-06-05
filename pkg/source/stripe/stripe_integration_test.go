@@ -1,3 +1,5 @@
+//go:build integration
+
 package stripe_test
 
 import (

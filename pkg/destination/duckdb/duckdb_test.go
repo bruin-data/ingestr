@@ -726,6 +726,44 @@ func TestMergeTable(t *testing.T) {
 	assert.Equal(t, 300, value)
 }
 
+func TestDeleteInsertTable_DedupesStagingByPK(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `CREATE TABLE target_table (id BIGINT, name VARCHAR, ts BIGINT)`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `CREATE TABLE staging_table (id BIGINT, name VARCHAR, ts BIGINT)`)
+	require.NoError(t, err)
+
+	// Staging holds duplicate primary keys for id=1.
+	err = dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(1, 'Alice', 10),
+			(1, 'Alice Dup', 11),
+			(2, 'Bob', 20)
+	`)
+	require.NoError(t, err)
+
+	err = dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+		StagingTable:   "staging_table",
+		TargetTable:    "target_table",
+		IncrementalKey: "ts",
+		IntervalStart:  int64(0),
+		IntervalEnd:    int64(100),
+		Columns:        []string{"id", "name", "ts"},
+		PrimaryKeys:    []string{"id"},
+	})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+	var total, id1 int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM target_table").Scan(&total))
+	assert.Equal(t, 2, total, "duplicate PK in staging should collapse to one row")
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM target_table WHERE id = 1").Scan(&id1))
+	assert.Equal(t, 1, id1, "id=1 should appear exactly once")
+}
+
 func TestSwapTable(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)

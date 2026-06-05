@@ -1,3 +1,5 @@
+//go:build integration
+
 package integration
 
 import (
@@ -320,4 +322,150 @@ func TestBigQuery_DeleteInsertTable_DedupsDuplicateStagingPKs(t *testing.T) {
 	))
 	require.Len(t, rows, 1)
 	require.EqualValues(t, 3, rows[0][0], "expected 3 distinct ids inside the delete-insert window")
+}
+
+func TestBigQuery_MergeTable_NullSafeCompositePrimaryKey(t *testing.T) {
+	dest, client, project, dataset := bqDedupSetup(t)
+	ctx := context.Background()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stagingTbl := fmt.Sprintf("merge_null_pk_staging_%s", suffix)
+	targetTbl := fmt.Sprintf("merge_null_pk_target_%s", suffix)
+	defer bqDropTables(ctx, client, dataset, stagingTbl, targetTbl)
+	defer func() { _ = dest.Close(ctx) }()
+
+	for _, tbl := range []string{stagingTbl, targetTbl} {
+		require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+			"CREATE TABLE `%s.%s.%s` (tenant_id INT64, user_id INT64, value STRING)",
+			project, dataset, tbl,
+		)))
+	}
+
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO `+"`%s.%s.%s`"+` VALUES
+		(NULL, 100, 'target-null-tenant'),
+		(1,    NULL, 'target-null-user'),
+		(1,    100,  'target-both-set')`,
+		project, dataset, targetTbl,
+	)))
+
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO `+"`%s.%s.%s`"+` VALUES
+		(NULL, 100, 'staging-null-tenant-updated'),
+		(1,    NULL, 'staging-null-user-updated'),
+		(1,    100,  'staging-both-set-updated'),
+		(NULL, NULL, 'staging-both-null-new')`,
+		project, dataset, stagingTbl,
+	)))
+
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: dataset + "." + stagingTbl,
+		TargetTable:  dataset + "." + targetTbl,
+		PrimaryKeys:  []string{"tenant_id", "user_id"},
+		Columns:      []string{"tenant_id", "user_id", "value"},
+	}))
+
+	rows := bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT COUNT(*) FROM `%s.%s.%s`", project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1)
+	require.EqualValues(t, 4, rows[0][0],
+		"expected 3 updated rows + 1 inserted (NULL,NULL); NULL PKs must match, not duplicate")
+
+	rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT value FROM `%s.%s.%s` WHERE tenant_id IS NULL AND user_id = 100",
+		project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1, "row with NULL tenant_id must be updated, not duplicated")
+	require.Equal(t, "staging-null-tenant-updated", rows[0][0])
+
+	rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT value FROM `%s.%s.%s` WHERE tenant_id = 1 AND user_id IS NULL",
+		project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1, "row with NULL user_id must be updated, not duplicated")
+	require.Equal(t, "staging-null-user-updated", rows[0][0])
+
+	rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT value FROM `%s.%s.%s` WHERE tenant_id = 1 AND user_id = 100",
+		project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1)
+	require.Equal(t, "staging-both-set-updated", rows[0][0])
+
+	rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT value FROM `%s.%s.%s` WHERE tenant_id IS NULL AND user_id IS NULL",
+		project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1, "row with both PKs NULL must be inserted exactly once")
+	require.Equal(t, "staging-both-null-new", rows[0][0])
+}
+
+func TestBigQuery_SCD2Table_NullSafeCompositePrimaryKey(t *testing.T) {
+	dest, client, project, dataset := bqDedupSetup(t)
+	ctx := context.Background()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stagingTbl := fmt.Sprintf("scd2_null_pk_staging_%s", suffix)
+	targetTbl := fmt.Sprintf("scd2_null_pk_target_%s", suffix)
+	defer bqDropTables(ctx, client, dataset, stagingTbl, targetTbl)
+	defer func() { _ = dest.Close(ctx) }()
+
+	for _, tbl := range []string{stagingTbl, targetTbl} {
+		require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+			"CREATE TABLE `%s.%s.%s` (tenant_id INT64, user_id INT64, value STRING, _scd_valid_from TIMESTAMP, _scd_valid_to TIMESTAMP, _scd_is_current BOOL)",
+			project, dataset, tbl,
+		)))
+	}
+
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO `+"`%s.%s.%s`"+` VALUES
+		(NULL, 100, 'unchanged', TIMESTAMP '2024-01-01 00:00:00 UTC', NULL, true),
+		(1,    NULL, 'unchanged', TIMESTAMP '2024-01-01 00:00:00 UTC', NULL, true),
+		(1,    100,  'unchanged', TIMESTAMP '2024-01-01 00:00:00 UTC', NULL, true)`,
+		project, dataset, targetTbl,
+	)))
+
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO `+"`%s.%s.%s`"+` VALUES
+		(NULL, 100, 'unchanged', TIMESTAMP '2024-06-01 00:00:00 UTC', NULL, true),
+		(1,    NULL, 'unchanged', TIMESTAMP '2024-06-01 00:00:00 UTC', NULL, true),
+		(1,    100,  'unchanged', TIMESTAMP '2024-06-01 00:00:00 UTC', NULL, true)`,
+		project, dataset, stagingTbl,
+	)))
+
+	require.NoError(t, dest.SCD2Table(ctx, destination.SCD2Options{
+		StagingTable: dataset + "." + stagingTbl,
+		TargetTable:  dataset + "." + targetTbl,
+		PrimaryKeys:  []string{"tenant_id", "user_id"},
+		Columns:      []string{"tenant_id", "user_id", "value"},
+		Timestamp:    time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
+	}))
+
+	rows := bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT COUNT(*) FROM `%s.%s.%s`", project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1)
+	require.EqualValues(t, 3, rows[0][0],
+		"SCD2 over unchanged rows must be a no-op; NULL PKs must match and not get soft-deleted+re-inserted")
+
+	rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT COUNT(*) FROM `%s.%s.%s` WHERE _scd_is_current = true", project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1)
+	require.EqualValues(t, 3, rows[0][0], "all three original rows must remain current")
+
+	for _, where := range []string{
+		"tenant_id IS NULL AND user_id = 100",
+		"tenant_id = 1 AND user_id IS NULL",
+		"tenant_id = 1 AND user_id = 100",
+	} {
+		rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+			"SELECT COUNT(*) FROM `%s.%s.%s` WHERE %s AND _scd_is_current = true",
+			project, dataset, targetTbl, where,
+		))
+		require.Len(t, rows, 1)
+		require.EqualValues(t, 1, rows[0][0],
+			"exactly one current row for %s", where)
+	}
 }

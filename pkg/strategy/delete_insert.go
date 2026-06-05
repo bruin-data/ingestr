@@ -52,7 +52,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		Table:        stagingTable,
 		Schema:       job.Schema,
 		DropFirst:    true,
-		PrimaryKeys:  job.Config.PrimaryKeys,
+		PrimaryKeys:  nil,
 		PartitionBy:  job.Config.PartitionBy,
 		ClusterBy:    job.Config.ClusterBy,
 		ExpiresAfter: destination.ManagedStagingTTL,
@@ -96,6 +96,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            stagingTable,
+		Schema:           job.Schema,
 		Parallelism:      parallelism,
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,

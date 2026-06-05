@@ -13,6 +13,7 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	gcsstorage "cloud.google.com/go/storage"
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -333,8 +334,46 @@ func jobRef(job *bigquery.Job) string {
 	return job.ID()
 }
 
+// isDatePartitionColumn reports whether the named partition column is a DATE
+// column in the given internal schema. A DATE column must be referenced bare in
+// a PARTITION BY clause; TIMESTAMP/DATETIME columns must be wrapped in DATE().
+func isDatePartitionColumn(s *schema.TableSchema, column string) bool {
+	if s == nil || column == "" {
+		return false
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, column) {
+			return col.DataType == schema.TypeDate
+		}
+	}
+	return false
+}
+
+// partitionFieldIsDate is the equivalent of isDatePartitionColumn for a live
+// BigQuery schema, used where only table metadata (not the internal schema) is
+// available.
+func partitionFieldIsDate(s bigquery.Schema, column string) bool {
+	for _, field := range s {
+		if strings.EqualFold(field.Name, column) {
+			return field.Type == bigquery.DateFieldType
+		}
+	}
+	return false
+}
+
+// partitionByClause builds the PARTITION BY clause for a partition column.
+// BigQuery requires a DATE-valued expression: an already-DATE column is used
+// bare, while TIMESTAMP/DATETIME columns are wrapped in DATE().
+func partitionByClause(column string, isDateColumn bool) string {
+	if isDateColumn {
+		return fmt.Sprintf("PARTITION BY `%s`\n", column)
+	}
+	return fmt.Sprintf("PARTITION BY DATE(`%s`)\n", column)
+}
+
 // PrepareTable creates or recreates a table with the given schema.
 func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	ctx = annotation.WithStep(ctx, annotation.StepDDL)
 	dataset, table, tableKey, err := d.resolveTable(opts.Table)
 	if err != nil {
 		return err
@@ -361,7 +400,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		go func() {
 			truncateSQL := fmt.Sprintf("TRUNCATE TABLE `%s`.`%s`.`%s`", d.projectID, dataset, table)
 			config.Debug("[DEST] Truncating table: %s", opts.Table)
-			query := d.client.Query(truncateSQL)
+			query := d.client.Query(annotation.Prepend(ctx, truncateSQL))
 			if d.location != "" {
 				query.Location = d.location
 			}
@@ -802,6 +841,7 @@ func (d *BigQueryDestination) queryTableRowCount(ctx context.Context, dataset, t
 
 // SwapTable swaps a staging table with the target table.
 func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	ctx = annotation.WithStep(ctx, annotation.StepSwap)
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
 	stagingDataset, stagingTableName, err := ParseTableName(stagingTable)
@@ -847,7 +887,7 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE `%s`.`%s`.`%s`\n", d.projectID, targetDataset, targetTableName)
 
 		if d.partitionBy != "" {
-			sql += fmt.Sprintf("PARTITION BY DATE(`%s`)\n", d.partitionBy)
+			sql += partitionByClause(d.partitionBy, isDatePartitionColumn(opts.Schema, d.partitionBy))
 		}
 
 		if len(d.clusterBy) > 0 {
@@ -925,7 +965,7 @@ func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opL
 		lastErr error
 	)
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		query := d.client.Query(sql)
+		query := d.client.Query(annotation.Prepend(ctx, sql))
 		if d.location != "" {
 			query.Location = d.location
 		}
@@ -1053,7 +1093,7 @@ func (d *BigQueryDestination) execAlterColumnTypeWithRewrite(ctx context.Context
 	}
 
 	config.Debug("[DEST] Rewriting unsupported ALTER COLUMN TYPE with CREATE OR REPLACE TABLE for %s.%s", dataset, table)
-	query := d.client.Query(rewrittenSQL)
+	query := d.client.Query(annotation.Prepend(ctx, rewrittenSQL))
 	if d.location != "" {
 		query.Location = d.location
 	}
@@ -1108,7 +1148,7 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	var sqlBuilder strings.Builder
 	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE `%s`.`%s`.`%s`\n", d.projectID, dataset, table)
 	if meta.TimePartitioning != nil && meta.TimePartitioning.Field != "" {
-		fmt.Fprintf(&sqlBuilder, "PARTITION BY DATE(`%s`)\n", meta.TimePartitioning.Field)
+		sqlBuilder.WriteString(partitionByClause(meta.TimePartitioning.Field, partitionFieldIsDate(meta.Schema, meta.TimePartitioning.Field)))
 	}
 	if meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
 		clusterCols := make([]string, len(meta.Clustering.Fields))
@@ -1132,6 +1172,7 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 // MergeTable performs an atomic merge operation using BigQuery's MERGE statement.
 // This merges data from stagingTable into targetTable based on primary keys.
 func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	ctx = annotation.WithStep(ctx, annotation.StepMerge)
 	if len(opts.PrimaryKeys) == 0 {
 		return errors.New("merge requires at least one primary key")
 	}
@@ -1170,6 +1211,7 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 
 // DeleteInsertTable performs a DELETE + INSERT operation for BigQuery.
 func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
+	ctx = annotation.WithStep(ctx, annotation.StepDeleteInsert)
 	stagingDataset, stagingTableName, err := ParseTableName(opts.StagingTable)
 	if err != nil {
 		return fmt.Errorf("invalid staging table name: %w", err)
@@ -1211,7 +1253,7 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 		for i, pk := range opts.PrimaryKeys {
 			pkCols[i] = fmt.Sprintf("`%s`", pk)
 		}
-		selectClause += fmt.Sprintf(" QUALIFY ROW_NUMBER() OVER (PARTITION BY %s) = 1", strings.Join(pkCols, ", "))
+		selectClause += fmt.Sprintf(" QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `%s` DESC) = 1", strings.Join(pkCols, ", "), opts.IncrementalKey)
 	}
 
 	insertSQL := fmt.Sprintf(
@@ -1233,6 +1275,7 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
 func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
+	ctx = annotation.WithStep(ctx, annotation.StepSCD2)
 	startOp := time.Now()
 
 	stagingDataset, stagingTableName, err := ParseTableName(opts.StagingTable)
@@ -1250,7 +1293,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	changeConditions := buildChangeConditionsBigQuery(nonPKColumns, "t", "s")
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		onConditions[i] = fmt.Sprintf("t.`%s` = s.`%s`", pk, pk)
+		onConditions[i] = fmt.Sprintf("(t.`%s` = s.`%s` OR (t.`%s` IS NULL AND s.`%s` IS NULL))", pk, pk, pk, pk)
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -1468,7 +1511,8 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
-		onConditions[i] = fmt.Sprintf("t.`%s` = %s", pk, castSourceCol(pk, castMap))
+		sourceCol := castSourceCol(pk, castMap)
+		onConditions[i] = fmt.Sprintf("(t.`%s` = %s OR (t.`%s` IS NULL AND %s IS NULL))", pk, sourceCol, pk, sourceCol)
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -1598,6 +1642,7 @@ func (d *BigQueryDestination) DropTable(ctx context.Context, table string) error
 
 // TruncateTable empties a table while preserving its definition and dependents.
 func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) error {
+	ctx = annotation.WithStep(ctx, annotation.StepTruncate)
 	dataset, tableName, err := ParseTableName(table)
 	if err != nil {
 		return fmt.Errorf("invalid table name: %w", err)
@@ -1611,7 +1656,7 @@ func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) e
 	}
 
 	truncateSQL := fmt.Sprintf("TRUNCATE TABLE `%s`.`%s`.`%s`", d.projectID, dataset, tableName)
-	query := d.client.Query(truncateSQL)
+	query := d.client.Query(annotation.Prepend(ctx, truncateSQL))
 	if d.location != "" {
 		query.Location = d.location
 	}

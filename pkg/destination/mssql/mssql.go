@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -14,7 +15,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	_ "github.com/microsoft/go-mssqldb"
+	mssqldb "github.com/microsoft/go-mssqldb"
 )
 
 type MSSQLDestination struct {
@@ -210,7 +211,7 @@ func (d *MSSQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 		batchNum++
 		startBatch := time.Now()
 
-		rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table)
+		rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table, opts.Schema)
 		if err != nil {
 			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
 		}
@@ -228,51 +229,90 @@ func (d *MSSQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 	return nil
 }
 
-func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string, tableSchema *schema.TableSchema) (int64, error) {
 	numRows := record.NumRows()
 	numCols := int(record.NumCols())
 
-	if numRows == 0 {
+	if numRows == 0 || numCols == 0 {
 		return 0, nil
 	}
 
 	colNames := make([]string, numCols)
-	placeholders := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
-		colNames[i] = fmt.Sprintf("[%s]", record.Schema().Field(i).Name)
-		placeholders[i] = fmt.Sprintf("@p%d", i+1)
+		colNames[i] = record.Schema().Field(i).Name
 	}
-
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
-		quoteTable(table),
-		strings.Join(colNames, ", "),
-		strings.Join(placeholders, ", "),
-	)
+	columnTypes := columnsForRecord(record, tableSchema)
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-
-	for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
-		values := make([]interface{}, numCols)
-		for colIdx := 0; colIdx < numCols; colIdx++ {
-			values[colIdx] = extractValue(record.Column(colIdx), int(rowIdx))
-		}
-
-		if _, err := tx.ExecContext(ctx, insertSQL, values...); err != nil {
-			config.LogFailedQuery(insertSQL, err)
+	committed := false
+	defer func() {
+		if !committed {
 			_ = tx.Rollback()
-			return rowIdx, fmt.Errorf("failed to insert row %d: %w", rowIdx, err)
 		}
+	}()
+
+	stmt, err := tx.PrepareContext(ctx, mssqldb.CopyIn(quoteTable(table), mssqldb.BulkOptions{
+		RowsPerBatch: int(numRows),
+		Tablock:      true,
+	}, colNames...))
+	if err != nil {
+		return 0, fmt.Errorf("failed to prepare bulk copy: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	values := make([]interface{}, numCols)
+	for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
+		for colIdx := 0; colIdx < numCols; colIdx++ {
+			value, err := extractValue(record.Column(colIdx), int(rowIdx), columnTypes[colIdx])
+			if err != nil {
+				return rowIdx, fmt.Errorf("failed to convert column %s row %d: %w", colNames[colIdx], rowIdx, err)
+			}
+			values[colIdx] = value
+		}
+
+		if _, err := stmt.ExecContext(ctx, values...); err != nil {
+			return rowIdx, fmt.Errorf("failed to bulk copy row %d: %w", rowIdx, err)
+		}
+	}
+
+	result, err := stmt.ExecContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to flush bulk copy: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		rowsAffected = numRows
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
+	committed = true
 
-	return numRows, nil
+	return rowsAffected, nil
+}
+
+func columnsForRecord(record arrow.RecordBatch, tableSchema *schema.TableSchema) []*schema.Column {
+	columns := make([]*schema.Column, int(record.NumCols()))
+	if tableSchema == nil {
+		return columns
+	}
+
+	byName := make(map[string]int, len(tableSchema.Columns))
+	for i, col := range tableSchema.Columns {
+		byName[strings.ToLower(col.Name)] = i
+	}
+
+	for i, field := range record.Schema().Fields() {
+		if idx, ok := byName[strings.ToLower(field.Name)]; ok {
+			columns[i] = &tableSchema.Columns[idx]
+		}
+	}
+	return columns
 }
 
 func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
@@ -454,13 +494,10 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
-	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s`,
-		quoteTable(opts.TargetTable),
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		quoteTable(opts.StagingTable),
-	)
+	colList := strings.Join(quotedColumns, ", ")
+	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
+	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quoteTable(opts.StagingTable), quoteColumns([]string{opts.IncrementalKey})[0])
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) %s`, quoteTable(opts.TargetTable), colList, selectClause)
 	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
 
 	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
@@ -784,9 +821,14 @@ func escapeTableNameForRename(table string) string {
 }
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
+	primaryKeySet := make(map[string]bool, len(primaryKeys))
+	for _, key := range primaryKeys {
+		primaryKeySet[strings.ToLower(key)] = true
+	}
+
 	var colDefs []string
 	for _, col := range columns {
-		colType := MapDataTypeToMSSQL(col)
+		colType := mapColumnTypeForCreate(col, primaryKeySet[strings.ToLower(col.Name)])
 		colDefs = append(colDefs, fmt.Sprintf("[%s] %s", col.Name, colType))
 	}
 
@@ -807,54 +849,123 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	return sql
 }
 
-func extractValue(arr arrow.Array, idx int) interface{} {
+func mapColumnTypeForCreate(col schema.Column, isPrimaryKey bool) string {
+	if !isPrimaryKey {
+		return MapDataTypeToMSSQL(col)
+	}
+
+	switch col.DataType {
+	case schema.TypeString, schema.TypeJSON, schema.TypeArray:
+		// SQL Server cannot index NVARCHAR(MAX); clustered primary keys are
+		// limited to 900 bytes, which is 450 UTF-16 code units.
+		if col.MaxLength > 0 && col.MaxLength <= 450 {
+			return fmt.Sprintf("NVARCHAR(%d)", col.MaxLength)
+		}
+		return "NVARCHAR(450)"
+	case schema.TypeBinary:
+		if col.MaxLength > 0 && col.MaxLength <= 900 {
+			return fmt.Sprintf("VARBINARY(%d)", col.MaxLength)
+		}
+		return "VARBINARY(900)"
+	default:
+		return MapDataTypeToMSSQL(col)
+	}
+}
+
+func extractValue(arr arrow.Array, idx int, col *schema.Column) (interface{}, error) {
 	if arr.IsNull(idx) {
-		return nil
+		return nil, nil
 	}
 
 	switch a := arr.(type) {
 	case *array.Boolean:
-		if a.Value(idx) {
-			return 1
-		}
-		return 0
+		return a.Value(idx), nil
+	case *array.Int8:
+		return int32(a.Value(idx)), nil
 	case *array.Int16:
-		return a.Value(idx)
+		return int32(a.Value(idx)), nil
 	case *array.Int32:
-		return a.Value(idx)
+		return a.Value(idx), nil
 	case *array.Int64:
-		return a.Value(idx)
+		return a.Value(idx), nil
+	case *array.Uint8:
+		return int32(a.Value(idx)), nil
+	case *array.Uint16:
+		return int32(a.Value(idx)), nil
+	case *array.Uint32:
+		return int64(a.Value(idx)), nil
+	case *array.Uint64:
+		value := a.Value(idx)
+		if value > math.MaxInt64 {
+			return nil, fmt.Errorf("uint64 value %d overflows SQL Server BIGINT", value)
+		}
+		return int64(value), nil
+	case *array.Float16:
+		return a.Value(idx).Float32(), nil
 	case *array.Float32:
-		return a.Value(idx)
+		return a.Value(idx), nil
 	case *array.Float64:
-		return a.Value(idx)
+		return a.Value(idx), nil
 	case *array.String:
-		return a.Value(idx)
+		return convertStringValue(a.Value(idx), col)
 	case *array.LargeString:
-		return a.Value(idx)
+		return convertStringValue(a.Value(idx), col)
 	case *array.Binary:
-		return a.Value(idx)
+		return a.Value(idx), nil
+	case *array.LargeBinary:
+		return a.Value(idx), nil
+	case *array.FixedSizeBinary:
+		return a.Value(idx), nil
 	case *array.Date32:
-		return a.Value(idx).ToTime().Format("2006-01-02")
+		return a.Value(idx).ToTime(), nil
 	case *array.Date64:
-		return a.Value(idx).ToTime().Format("2006-01-02")
+		return a.Value(idx).ToTime(), nil
+	case *array.Time32:
+		return timeFromArrowTime(int64(a.Value(idx)), a.DataType().(*arrow.Time32Type).Unit), nil
 	case *array.Time64:
-		micros := int64(a.Value(idx))
-		t := time.Duration(micros) * time.Microsecond
-		hours := int(t.Hours())
-		mins := int(t.Minutes()) % 60
-		secs := int(t.Seconds()) % 60
-		micros = micros % 1000000
-		return fmt.Sprintf("%02d:%02d:%02d.%06d", hours, mins, secs, micros)
+		return timeFromArrowTime(int64(a.Value(idx)), a.DataType().(*arrow.Time64Type).Unit), nil
 	case *array.Timestamp:
 		ts := a.Value(idx)
-		return ts.ToTime(a.DataType().(*arrow.TimestampType).Unit).Format("2006-01-02 15:04:05.0000000")
+		return ts.ToTime(a.DataType().(*arrow.TimestampType).Unit), nil
 	case *array.Decimal128:
-		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
+		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale)), nil
+	case *array.Decimal256:
+		return a.ValueStr(idx), nil
+	case array.ListLike:
+		return a.ValueStr(idx), nil
+	case *array.Struct:
+		return a.ValueStr(idx), nil
 	case array.ExtensionArray:
 		storage := a.Storage()
-		return extractValue(storage, idx)
+		return extractValue(storage, idx, col)
 	default:
-		return fmt.Sprintf("%v", arr)
+		return arr.ValueStr(idx), nil
 	}
+}
+
+func convertStringValue(value string, col *schema.Column) (interface{}, error) {
+	if col == nil || col.DataType != schema.TypeUUID {
+		return value, nil
+	}
+
+	var uuid mssqldb.UniqueIdentifier
+	if err := uuid.Scan(value); err != nil {
+		return nil, fmt.Errorf("invalid UUID %q: %w", value, err)
+	}
+	return uuid, nil
+}
+
+func timeFromArrowTime(value int64, unit arrow.TimeUnit) time.Time {
+	var duration time.Duration
+	switch unit {
+	case arrow.Second:
+		duration = time.Duration(value) * time.Second
+	case arrow.Millisecond:
+		duration = time.Duration(value) * time.Millisecond
+	case arrow.Nanosecond:
+		duration = time.Duration(value) * time.Nanosecond
+	default:
+		duration = time.Duration(value) * time.Microsecond
+	}
+	return time.Date(1, 1, 1, int(duration/time.Hour), int(duration/time.Minute)%60, int(duration/time.Second)%60, int(duration%time.Second), time.UTC)
 }

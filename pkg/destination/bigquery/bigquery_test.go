@@ -3,6 +3,7 @@ package bigquery
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -104,6 +105,9 @@ func TestSchemes(t *testing.T) {
 }
 
 func TestParseBigQueryURI(t *testing.T) {
+	fakeServiceAccountJSON := `{"type":"service_account","project_id":"test"}`
+	fakeServiceAccountBase64 := base64.StdEncoding.EncodeToString([]byte(fakeServiceAccountJSON))
+
 	tests := []struct {
 		name           string
 		uri            string
@@ -159,9 +163,9 @@ func TestParseBigQueryURI(t *testing.T) {
 		},
 		{
 			name:           "with_base64_credentials",
-			uri:            "bigquery://test-project?credentials_base64=eyJ0eXBlIjoic2VydmljZV9hY2NvdW50IiwicHJvamVjdF9pZCI6InRlc3QifQ==",
+			uri:            "bigquery://test-project?credentials_base64=" + fakeServiceAccountBase64,
 			wantProjectID:  "test-project",
-			wantCredJSON:   `{"type":"service_account","project_id":"test"}`,
+			wantCredJSON:   fakeServiceAccountJSON,
 			wantLoadMethod: loadMethodLoadJob,
 			wantErr:        false,
 		},
@@ -817,6 +821,92 @@ func TestBuildAlterColumnTypeRewriteSQL(t *testing.T) {
 	}
 }
 
+func TestBuildAlterColumnTypeRewriteSQL_DatePartitionNotWrapped(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.projectID = "my-project"
+
+	meta := &bigquery.TableMetadata{
+		Schema: bigquery.Schema{
+			{Name: "day", Type: bigquery.DateFieldType},
+			{Name: "age", Type: bigquery.IntegerFieldType},
+		},
+		TimePartitioning: &bigquery.TimePartitioning{
+			Field: "day",
+		},
+	}
+
+	sql, err := dest.buildAlterColumnTypeRewriteSQL("my_dataset", "my_table", "age", "STRING", meta)
+	if err != nil {
+		t.Fatalf("buildAlterColumnTypeRewriteSQL returned error: %v", err)
+	}
+	if !contains(sql, "PARTITION BY `day`") {
+		t.Fatalf("DATE partition column should be referenced bare:\n%s", sql)
+	}
+	if contains(sql, "PARTITION BY DATE(`day`)") {
+		t.Fatalf("DATE partition column must not be wrapped in DATE():\n%s", sql)
+	}
+}
+
+func TestIsDatePartitionColumn(t *testing.T) {
+	s := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "day", DataType: schema.TypeDate},
+			{Name: "created_at", DataType: schema.TypeTimestamp},
+		},
+	}
+
+	if !isDatePartitionColumn(s, "day") {
+		t.Fatal("expected day to be detected as a DATE column")
+	}
+	if isDatePartitionColumn(s, "created_at") {
+		t.Fatal("expected created_at not to be detected as a DATE column")
+	}
+	if isDatePartitionColumn(s, "missing") {
+		t.Fatal("expected missing column to default to false")
+	}
+	if isDatePartitionColumn(nil, "day") {
+		t.Fatal("expected nil schema to default to false")
+	}
+	if isDatePartitionColumn(s, "") {
+		t.Fatal("expected empty column to default to false")
+	}
+	if !isDatePartitionColumn(s, "Day") {
+		t.Fatal("expected case-insensitive match for BigQuery identifiers")
+	}
+}
+
+func TestPartitionFieldIsDate(t *testing.T) {
+	s := bigquery.Schema{
+		{Name: "day", Type: bigquery.DateFieldType},
+		{Name: "created_at", Type: bigquery.TimestampFieldType},
+	}
+
+	if !partitionFieldIsDate(s, "day") {
+		t.Fatal("expected day to be detected as a DATE column")
+	}
+	if partitionFieldIsDate(s, "created_at") {
+		t.Fatal("expected created_at not to be detected as a DATE column")
+	}
+	if partitionFieldIsDate(s, "missing") {
+		t.Fatal("expected missing column to default to false")
+	}
+	if partitionFieldIsDate(nil, "day") {
+		t.Fatal("expected nil schema to default to false")
+	}
+	if !partitionFieldIsDate(s, "Day") {
+		t.Fatal("expected case-insensitive match for BigQuery identifiers")
+	}
+}
+
+func TestPartitionByClause(t *testing.T) {
+	if got := partitionByClause("day", true); got != "PARTITION BY `day`\n" {
+		t.Fatalf("DATE column clause = %q", got)
+	}
+	if got := partitionByClause("created_at", false); got != "PARTITION BY DATE(`created_at`)\n" {
+		t.Fatalf("timestamp column clause = %q", got)
+	}
+}
+
 func TestBuildMergeSQL(t *testing.T) {
 	dest := NewBigQueryDestination()
 	dest.projectID = "my-project"
@@ -830,7 +920,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		if !contains(sql, "USING (SELECT * FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `id`) = 1) AS s\n") {
 			t.Fatalf("sql missing using clause with dedup:\n%s", sql)
 		}
-		if !contains(sql, "ON t.`id` = s.`id`\n") {
+		if !contains(sql, "ON (t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))\n") {
 			t.Fatalf("sql missing on clause:\n%s", sql)
 		}
 		if !contains(sql, "WHEN MATCHED THEN\n") || !contains(sql, "UPDATE SET") {
@@ -860,11 +950,34 @@ func TestBuildMergeSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("on_clause_is_null_safe_single_pk", func(t *testing.T) {
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name"}, nil)
+
+		if !contains(sql, "ON (t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))\n") {
+			t.Fatalf("sql missing null-safe on clause:\n%s", sql)
+		}
+		if contains(sql, "ON t.`id` = s.`id`\n") {
+			t.Fatalf("sql should not use bare equality ON clause:\n%s", sql)
+		}
+	})
+
+	t.Run("on_clause_is_null_safe_composite_pk", func(t *testing.T) {
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"tenant_id", "user_id"}, []string{"tenant_id", "user_id", "value"}, nil)
+
+		expected := "ON (t.`tenant_id` = s.`tenant_id` OR (t.`tenant_id` IS NULL AND s.`tenant_id` IS NULL)) AND (t.`user_id` = s.`user_id` OR (t.`user_id` IS NULL AND s.`user_id` IS NULL))\n"
+		if !contains(sql, expected) {
+			t.Fatalf("sql missing null-safe composite on clause:\n%s", sql)
+		}
+		if contains(sql, "ON t.`tenant_id` = s.`tenant_id` AND t.`user_id` = s.`user_id`\n") {
+			t.Fatalf("sql should not use bare equality composite ON clause:\n%s", sql)
+		}
+	})
+
 	t.Run("with_cast_map", func(t *testing.T) {
 		castMap := map[string]string{"day": "STRING"}
 		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id", "day"}, []string{"id", "day", "amount"}, castMap)
 
-		if !contains(sql, "t.`day` = CAST(s.`day` AS STRING)") {
+		if !contains(sql, "(t.`day` = CAST(s.`day` AS STRING) OR (t.`day` IS NULL AND CAST(s.`day` AS STRING) IS NULL))") {
 			t.Fatalf("sql missing cast in ON clause:\n%s", sql)
 		}
 		if !contains(sql, "t.`amount` = s.`amount`") {
@@ -873,8 +986,8 @@ func TestBuildMergeSQL(t *testing.T) {
 		if !contains(sql, "CAST(s.`day` AS STRING)") {
 			t.Fatalf("sql missing cast in INSERT values:\n%s", sql)
 		}
-		if !contains(sql, "t.`id` = s.`id`") {
-			t.Fatalf("sql should not cast non-mismatched pk:\n%s", sql)
+		if !contains(sql, "(t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))") {
+			t.Fatalf("sql missing null-safe on clause for non-cast pk:\n%s", sql)
 		}
 	})
 }

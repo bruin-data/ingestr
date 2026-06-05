@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -122,6 +123,7 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// Write to staging table using parallel writes
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            stagingTable,
+		Schema:           job.Schema,
 		Parallelism:      parallelism,
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
@@ -165,14 +167,14 @@ func extendSchemaWithSCDColumns(original *schema.TableSchema) *schema.TableSchem
 		{Name: "_scd_is_current", DataType: schema.TypeBoolean, Nullable: false},
 	}
 
-	// Skip SCD columns that already exist.
+	// Skip SCD columns that already exist (case-insensitive).
 	existing := make(map[string]bool, len(original.Columns))
 	for _, c := range original.Columns {
-		existing[c.Name] = true
+		existing[strings.ToLower(c.Name)] = true
 	}
 	toAdd := make([]schema.Column, 0, len(scdColumns))
 	for _, c := range scdColumns {
-		if !existing[c.Name] {
+		if !existing[strings.ToLower(c.Name)] {
 			toAdd = append(toAdd, c)
 		}
 	}

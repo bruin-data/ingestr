@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/display"
 	"github.com/bruin-data/ingestr/internal/uri"
@@ -51,6 +52,16 @@ func (p *Pipeline) SetLogWriter(w io.Writer) {
 }
 
 func (p *Pipeline) Run(ctx context.Context) error {
+	// Parse query annotations once and carry the base payload on the context.
+	// Destinations read it (plus a per-operation step) to annotate queries for
+	// cost attribution. Absent caller annotations just means ingestr's own keys
+	// (type, ingestr_step) are emitted without any caller-supplied keys.
+	annotations, err := annotation.Parse(p.config.QueryAnnotations)
+	if err != nil {
+		return err
+	}
+	ctx = annotation.WithPayload(ctx, annotations)
+
 	src, err := uri.DefaultRegistry.GetSource(p.config.SourceURI)
 	if err != nil {
 		return fmt.Errorf("failed to get source: %w", err)
@@ -101,13 +112,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
-	// Check if source handles incrementality internally
-	if src.HandlesIncrementality() {
-		if p.config.IncrementalKey != "" {
-			fmt.Printf("Warning: source handles incrementality internally, ignoring --incremental-key=%s\n", p.config.IncrementalKey)
-		}
-	}
-
 	// Get the source table with user configuration
 	// Resolution of PKs, strategy, and incremental key happens inside GetTable
 	table, err := src.GetTable(ctx, source.TableRequest{
@@ -118,6 +122,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get table: %w", err)
+	}
+
+	// Sources that manage incrementality internally resolve their own key in
+	// GetTable. Only warn if the user's --incremental-key was actually dropped;
+	// a source that adopts it (resolved key matches) needs no warning.
+	if src.HandlesIncrementality() && p.config.IncrementalKey != "" && table.IncrementalKey() != p.config.IncrementalKey {
+		fmt.Printf("Warning: source handles incrementality internally, ignoring --incremental-key=%s\n", p.config.IncrementalKey)
 	}
 
 	if table.Name() == source.CustomQueryTableName {
@@ -157,6 +168,12 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to get schema: %w", err)
 		}
+	} else if p.config.NoInference {
+		tableSchema, err = p.schemaFromColumnOverrides(table)
+		if err != nil {
+			return err
+		}
+		config.Debug("[PIPELINE] Schema inference disabled; using %d columns from --columns", len(tableSchema.Columns))
 	} else {
 		// Schema inference path: read all data first. Buffer is opened later
 		config.Debug("[PIPELINE] Source has unknown schema, inferring from data...")
@@ -233,9 +250,16 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		tableSchema.PartitionBy = pt.PartitionBy()
 	}
 
+	// Resolve the naming convention up front so excluded columns can be matched
+	// against either the source name or the destination name they map to.
+	namingConv, err := p.resolveNamingConvention(ctx, tableSchema)
+	if err != nil {
+		return fmt.Errorf("failed to resolve naming convention: %w", err)
+	}
+
 	// Excluded columns should be removed from the effective schema before destination
 	// preparation, even for known-schema sources where read-time filtering alone is not enough.
-	tableSchema = p.applyExcludedColumnsToSchema(tableSchema)
+	tableSchema = p.applyExcludedColumnsToSchema(tableSchema, namingConv)
 
 	// Preserve the original source column names before naming convention renames them.
 	// The source needs original names for its SELECT queries; the ColumnRenamer
@@ -250,8 +274,8 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	copy(originalSourceSchema.Columns, tableSchema.Columns)
 	copy(originalSourceSchema.PrimaryKeys, tableSchema.PrimaryKeys)
 
-	// Setup naming convention and column renamer
-	if err := p.setupNamingConvention(ctx, tableSchema); err != nil {
+	// Setup naming convention and column renamer using the convention resolved above.
+	if err := p.applyNamingConvention(tableSchema, namingConv); err != nil {
 		return fmt.Errorf("failed to setup naming convention: %w", err)
 	}
 
@@ -377,9 +401,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		EvolutionPlan:       evolutionPlan,
 	}
 
-	// For known-schema sources with column type overrides, add a type caster
-	// that converts Arrow batches from source types to the overridden types.
-	if p.config.Columns != "" && bufferedRecords == nil {
+	// For --no-inference, enforce the user-provided source schema even when
+	// a schema-less source does not apply ReadOptions.Schema itself.
+	if p.config.NoInference && bufferedRecords == nil {
+		job.TypeCaster = p.buildSourceSchemaCaster(originalSourceSchema)
+	} else if p.config.Columns != "" && bufferedRecords == nil {
+		// For known-schema sources with column type overrides, add a type caster
+		// that converts Arrow batches from source types to the overridden types.
 		job.TypeCaster = p.buildTypeCaster(tableSchema, destSchema)
 	}
 
@@ -388,6 +416,44 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (p *Pipeline) schemaFromColumnOverrides(table source.SourceTable) (*schema.TableSchema, error) {
+	tableSchema, err := schemainfer.SourceTableSchemaFromColumnOverrides(p.config.Columns, table.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to build schema from column overrides: %w", err)
+	}
+	if tableSchema == nil || len(tableSchema.Columns) == 0 {
+		return nil, fmt.Errorf("--no-inference requires at least one column in --columns")
+	}
+
+	pks := p.config.PrimaryKeys
+	if len(pks) == 0 {
+		pks = table.PrimaryKeys()
+	}
+	ik := p.config.IncrementalKey
+	if ik == "" {
+		ik = table.IncrementalKey()
+	}
+	partitionCol := resolvePartitionBy(p.config, table)
+	if err := schemainfer.AddKeyColumnsIfMissing(tableSchema, pks, ik, partitionCol, p.config.SchemaNaming); err != nil {
+		return nil, fmt.Errorf("failed to add key columns to --columns schema: %w", err)
+	}
+
+	return tableSchema, nil
+}
+
+func (p *Pipeline) buildSourceSchemaCaster(sourceSchema *schema.TableSchema) *transformer.TypeCaster {
+	if sourceSchema == nil {
+		return nil
+	}
+
+	fields := make([]arrow.Field, len(sourceSchema.Columns))
+	for i, col := range sourceSchema.Columns {
+		fields[i] = arrowField(col.Name, col, col.Nullable)
+	}
+
+	return transformer.NewTypeCaster(arrow.NewSchema(fields, nil))
 }
 
 // buildTypeCaster creates a TypeCaster when column type overrides differ from the source types.
@@ -583,13 +649,14 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 		renameMap = p.columnRenamer.Mapping()
 	}
 
-	srcByDestName := make(map[string]schema.Column, len(sourceSchema.Columns))
+	srcByDestName := make(map[string][]schema.Column, len(sourceSchema.Columns))
 	for _, c := range sourceSchema.Columns {
 		key := c.Name
 		if r, ok := renameMap[key]; ok {
 			key = r
 		}
-		srcByDestName[key] = c
+		key = strings.ToLower(key)
+		srcByDestName[key] = append(srcByDestName[key], c)
 	}
 
 	fields := make([]arrow.Field, 0, len(destSchema.Columns))
@@ -597,10 +664,12 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 		if naming.IsIngestrColumn(dc.Name) || isSCD2MetadataColumn(dc.Name) {
 			continue
 		}
-		if sc, ok := srcByDestName[dc.Name]; ok {
-			m := sc
-			m.DataType, m.Precision, m.Scale, m.ArrayType = dc.DataType, dc.Precision, dc.Scale, dc.ArrayType
-			fields = append(fields, arrowField(sc.Name, m, m.Nullable || dc.Nullable)) // add columns using dest types but source names
+		if sourceCols, ok := srcByDestName[strings.ToLower(dc.Name)]; ok {
+			for _, sc := range sourceCols {
+				m := sc
+				m.DataType, m.Precision, m.Scale, m.ArrayType = dc.DataType, dc.Precision, dc.Scale, dc.ArrayType
+				fields = append(fields, arrowField(sc.Name, m, m.Nullable || dc.Nullable)) // add columns using dest types but source names
+			}
 			continue
 		}
 		fields = append(fields, arrowField(dc.Name, dc, true)) // add soft deleted columns using dest names
@@ -637,7 +706,7 @@ func (p *Pipeline) filterDroppedPKs(pks []string) []string {
 	return filtered
 }
 
-func (p *Pipeline) applyExcludedColumnsToSchema(tableSchema *schema.TableSchema) *schema.TableSchema {
+func (p *Pipeline) applyExcludedColumnsToSchema(tableSchema *schema.TableSchema, namingConv naming.NamingConvention) *schema.TableSchema {
 	if tableSchema == nil || len(p.config.SQLExcludeColumns) == 0 {
 		return tableSchema
 	}
@@ -647,9 +716,21 @@ func (p *Pipeline) applyExcludedColumnsToSchema(tableSchema *schema.TableSchema)
 		excluded[strings.ToLower(col)] = true
 	}
 
+	// A column matches if the user named it either by its source name or by the
+	// destination name it gets after the naming convention is applied
+	isExcluded := func(name string) bool {
+		if name == "" {
+			return false
+		}
+		if excluded[strings.ToLower(name)] {
+			return true
+		}
+		return namingConv != nil && excluded[strings.ToLower(namingConv.Normalize(name))]
+	}
+
 	filteredCols := make([]schema.Column, 0, len(tableSchema.Columns))
 	for _, col := range tableSchema.Columns {
-		if excluded[strings.ToLower(col.Name)] {
+		if isExcluded(col.Name) {
 			config.Debug("[PIPELINE] Excluding column from effective schema: %s", col.Name)
 			continue
 		}
@@ -658,7 +739,7 @@ func (p *Pipeline) applyExcludedColumnsToSchema(tableSchema *schema.TableSchema)
 
 	filteredPKs := make([]string, 0, len(tableSchema.PrimaryKeys))
 	for _, pk := range tableSchema.PrimaryKeys {
-		if excluded[strings.ToLower(pk)] {
+		if isExcluded(pk) {
 			config.Debug("[PIPELINE] Excluding primary key column from effective schema: %s", pk)
 			continue
 		}
@@ -666,7 +747,7 @@ func (p *Pipeline) applyExcludedColumnsToSchema(tableSchema *schema.TableSchema)
 	}
 
 	incrementalKey := tableSchema.IncrementalKey
-	if excluded[strings.ToLower(incrementalKey)] {
+	if isExcluded(incrementalKey) {
 		config.Debug("[PIPELINE] Excluding incremental key column from effective schema: %s", incrementalKey)
 		incrementalKey = ""
 	}
@@ -995,9 +1076,19 @@ func (p *Pipeline) setupIngestrColumns(ctx context.Context, sourceSchema *schema
 }
 
 func (p *Pipeline) setupNamingConvention(ctx context.Context, sourceSchema *schema.TableSchema) error {
-	convention, err := naming.ParseConvention(p.config.SchemaNaming)
+	namingConv, err := p.resolveNamingConvention(ctx, sourceSchema)
 	if err != nil {
 		return err
+	}
+	return p.applyNamingConvention(sourceSchema, namingConv)
+}
+
+// resolveNamingConvention determines which naming convention applies, resolving
+// the "auto" setting by inspecting the destination table. It never returns Auto.
+func (p *Pipeline) resolveNamingConvention(ctx context.Context, sourceSchema *schema.TableSchema) (naming.NamingConvention, error) {
+	convention, err := naming.ParseConvention(p.config.SchemaNaming)
+	if err != nil {
+		return nil, err
 	}
 
 	// For auto detection, check if destination exists and has snake_case naming
@@ -1016,14 +1107,16 @@ func (p *Pipeline) setupNamingConvention(ctx context.Context, sourceSchema *sche
 		}
 	}
 
+	return naming.Get(convention), nil
+}
+
+func (p *Pipeline) applyNamingConvention(sourceSchema *schema.TableSchema, namingConv naming.NamingConvention) error {
 	// If using direct naming (no transformation), skip setup
-	if convention == naming.Direct {
+	if namingConv.Name() == string(naming.Direct) {
 		config.Debug("[NAMING] Using direct naming (no column transformation)")
 		return nil
 	}
 
-	// Get the naming convention implementation
-	namingConv := naming.Get(convention)
 	config.Debug("[NAMING] Using %s naming convention", namingConv.Name())
 
 	// Build column mapping
@@ -1061,11 +1154,15 @@ func (p *Pipeline) applyColumnMapping(s *schema.TableSchema, mapping map[string]
 			s.Columns[i].Name = newName
 		}
 	}
+	s.Columns = dedupeMappedColumns(s.Columns)
+
 	for i, pk := range s.PrimaryKeys {
 		if newName, ok := mapping[pk]; ok {
 			s.PrimaryKeys[i] = newName
 		}
 	}
+	s.PrimaryKeys = dedupeStringsPreserveOrder(s.PrimaryKeys)
+
 	if newName, ok := mapping[s.IncrementalKey]; ok {
 		s.IncrementalKey = newName
 	}
@@ -1086,6 +1183,79 @@ func (p *Pipeline) applyColumnMapping(s *schema.TableSchema, mapping map[string]
 	p.columnRenamer = transformer.NewColumnRenamer(mapping)
 }
 
+func dedupeMappedColumns(columns []schema.Column) []schema.Column {
+	if len(columns) < 2 {
+		return columns
+	}
+
+	merged := make([]schema.Column, 0, len(columns))
+	indexByName := make(map[string]int, len(columns))
+	for _, col := range columns {
+		if idx, ok := indexByName[col.Name]; ok {
+			merged[idx] = mergeSchemaColumns(merged[idx], col)
+			continue
+		}
+		indexByName[col.Name] = len(merged)
+		merged = append(merged, col)
+	}
+
+	return merged
+}
+
+func mergeSchemaColumns(existing, next schema.Column) schema.Column {
+	merged := existing
+	merged.Nullable = existing.Nullable || next.Nullable
+	merged.IsPrimaryKey = existing.IsPrimaryKey || next.IsPrimaryKey
+	if next.MaxLength > merged.MaxLength {
+		merged.MaxLength = next.MaxLength
+	}
+
+	switch {
+	case existing.DataType == schema.TypeUnknown:
+		merged.DataType = next.DataType
+	case next.DataType == schema.TypeUnknown:
+		merged.DataType = existing.DataType
+	default:
+		merged.DataType, _ = schemaevolution.GetWidenedType(existing.DataType, next.DataType)
+	}
+
+	if merged.DataType == schema.TypeDecimal {
+		merged.Precision, merged.Scale = schemaevolution.MergeDecimalPrecision(existing, next)
+	} else {
+		merged.Precision = 0
+		merged.Scale = 0
+	}
+
+	if merged.DataType == schema.TypeArray {
+		if existing.ArrayType == next.ArrayType {
+			merged.ArrayType = existing.ArrayType
+		} else {
+			merged.ArrayType, _ = schemaevolution.GetWidenedType(existing.ArrayType, next.ArrayType)
+		}
+	} else {
+		merged.ArrayType = schema.TypeUnknown
+	}
+
+	return merged
+}
+
+func dedupeStringsPreserveOrder(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+
+	seen := make(map[string]bool, len(values))
+	deduped := values[:0]
+	for _, value := range values {
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		deduped = append(deduped, value)
+	}
+	return deduped
+}
+
 func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error {
 	overrides, err := schemaevolution.ParseColumnOverrides(p.config.Columns)
 	if err != nil {
@@ -1096,8 +1266,14 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 	}
 
 	applied := 0
+	renameMap := make(map[string]string)
 	for i, col := range sourceSchema.Columns {
-		if override, ok := overrides.GetForColumn(col.Name, p.config.SchemaNaming); ok {
+		override, ok := overrides.GetForColumn(col.Name, p.config.SchemaNaming)
+		if !ok {
+			continue
+		}
+
+		if override.DataType != schema.TypeUnknown {
 			newCol := override.ApplyToColumn(col)
 			if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale {
 				fmt.Printf("Column override: %q type changed from %v(p=%v,s=%v) to %v(p=%v,s=%v)\n",
@@ -1107,10 +1283,19 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 			config.Debug("[PIPELINE] Column override applied: %s -> %v", col.Name, override.DataType)
 			applied++
 		}
+
+		if override.RenameTo != "" && override.RenameTo != sourceSchema.Columns[i].Name {
+			renameMap[sourceSchema.Columns[i].Name] = override.RenameTo
+			fmt.Printf("Column rename: %q -> %q (from --columns)\n", sourceSchema.Columns[i].Name, override.RenameTo)
+		}
 	}
 
 	if applied > 0 {
 		config.Debug("[PIPELINE] Applied %d column type overrides", applied)
+	}
+
+	if len(renameMap) > 0 {
+		p.applyColumnMapping(sourceSchema, renameMap)
 	}
 
 	return nil

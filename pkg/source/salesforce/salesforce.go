@@ -19,19 +19,40 @@ import (
 )
 
 const (
-	defaultAPIVersion = "59.0"
+	defaultAPIVersion        = "59.0"
+	salesforceOAuthTokenPath = "/services/oauth2/token"
+)
+
+type salesforceAuthMethod string
+
+const (
+	salesforceAuthPassword          salesforceAuthMethod = "password"
+	salesforceAuthClientCredentials salesforceAuthMethod = "client_credentials"
 )
 
 type salesforceSource struct {
-	client      *simpleforce.Client
-	httpClient  *httpclient.Client
-	instanceURL string
-	sessionID   string
-	useBulkAPI  bool
-	sfUser      string
-	sfPassword  string
-	sfToken     string
-	sfUrl       string
+	client         *simpleforce.Client
+	httpClient     *httpclient.Client
+	instanceURL    string
+	sessionID      string
+	useBulkAPI     bool
+	sfUser         string
+	sfPassword     string
+	sfToken        string
+	sfClientID     string
+	sfClientSecret string
+	sfUrl          string
+	authMethod     salesforceAuthMethod
+}
+
+type salesforceConfig struct {
+	username     string
+	password     string
+	token        string
+	domain       string
+	clientID     string
+	clientSecret string
+	authMethod   salesforceAuthMethod
 }
 
 func NewSalesforceSource() *salesforceSource {
@@ -43,23 +64,35 @@ func (s *salesforceSource) Schemes() []string {
 }
 
 func (s *salesforceSource) Connect(ctx context.Context, uri string) error {
-	sfUser, sfPassword, sfToken, sfDomain, err := parseSalesforceURI(uri)
+	cfg, err := parseSalesforceURI(uri)
 	if err != nil {
 		return err
 	}
-	s.sfUser = sfUser
-	s.sfPassword = sfPassword
-	s.sfToken = sfToken
-	s.sfUrl = fmt.Sprintf("https://%s.salesforce.com/", sfDomain)
+	s.sfUser = cfg.username
+	s.sfPassword = cfg.password
+	s.sfToken = cfg.token
+	s.sfClientID = cfg.clientID
+	s.sfClientSecret = cfg.clientSecret
+	s.authMethod = cfg.authMethod
+	s.sfUrl = salesforceBaseURL(cfg.domain)
 
-	s.client = simpleforce.NewClient(s.sfUrl, simpleforce.DefaultClientID, defaultAPIVersion)
+	s.client = simpleforce.NewClient(s.sfUrl, s.simpleforceClientID(), defaultAPIVersion)
 
 	if s.client == nil {
 		return fmt.Errorf("failed to create Salesforce client")
 	}
-	err = s.client.LoginPassword(s.sfUser, s.sfPassword, s.sfToken)
-	if err != nil {
-		return fmt.Errorf("failed to login to Salesforce: %w", err)
+
+	switch s.authMethod {
+	case salesforceAuthPassword:
+		if err := s.client.LoginPassword(s.sfUser, s.sfPassword, s.sfToken); err != nil {
+			return fmt.Errorf("failed to login to Salesforce: %w", err)
+		}
+	case salesforceAuthClientCredentials:
+		if err := s.loginClientCredentials(ctx); err != nil {
+			return fmt.Errorf("failed to login to Salesforce with client credentials: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported Salesforce auth method: %s", s.authMethod)
 	}
 
 	s.sessionID = s.client.GetSid()
@@ -76,36 +109,130 @@ func (s *salesforceSource) Connect(ctx context.Context, uri string) error {
 	return nil
 }
 
-func parseSalesforceURI(uri string) (sfUser, sfPassword, sfToken, sfUrl string, err error) {
+func parseSalesforceURI(uri string) (salesforceConfig, error) {
 	if !strings.HasPrefix(uri, "salesforce://") {
-		return "", "", "", "", fmt.Errorf("invalid salesforce URI: must start with salesforce://")
+		return salesforceConfig{}, fmt.Errorf("invalid salesforce URI: must start with salesforce://")
 	}
 
 	parsed, err := url.Parse(uri)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to parse salesforce URI: %w", err)
+		return salesforceConfig{}, fmt.Errorf("failed to parse salesforce URI: %w", err)
 	}
 
 	params := parsed.Query()
-	sfUser = params.Get("username")
-	sfPassword = params.Get("password")
-	sfToken = params.Get("token")
-	sfDomain := params.Get("domain")
-
-	if sfUser == "" {
-		return "", "", "", "", fmt.Errorf("sfUser is required for Salesforce")
-	}
-	if sfPassword == "" {
-		return "", "", "", "", fmt.Errorf("sfPassword is required for Salesforce")
-	}
-	if sfToken == "" {
-		return "", "", "", "", fmt.Errorf("sfToken is required for Salesforce")
-	}
-	if sfDomain == "" {
-		return "", "", "", "", fmt.Errorf("sfUrl is required for Salesforce")
+	cfg := salesforceConfig{
+		username:     params.Get("username"),
+		password:     params.Get("password"),
+		token:        params.Get("token"),
+		domain:       params.Get("domain"),
+		clientID:     params.Get("client_id"),
+		clientSecret: params.Get("client_secret"),
 	}
 
-	return sfUser, sfPassword, sfToken, sfDomain, nil
+	authMethod := params.Get("auth_method")
+	if authMethod == "" {
+		authMethod = params.Get("grant_type")
+	}
+	switch authMethod {
+	case "":
+		if cfg.clientID != "" || cfg.clientSecret != "" {
+			cfg.authMethod = salesforceAuthClientCredentials
+		} else {
+			cfg.authMethod = salesforceAuthPassword
+		}
+	case string(salesforceAuthPassword), "username_password":
+		cfg.authMethod = salesforceAuthPassword
+	case string(salesforceAuthClientCredentials):
+		cfg.authMethod = salesforceAuthClientCredentials
+	default:
+		return salesforceConfig{}, fmt.Errorf("unsupported Salesforce auth_method: %s", authMethod)
+	}
+
+	if cfg.domain == "" {
+		return salesforceConfig{}, fmt.Errorf("domain is required for Salesforce")
+	}
+
+	switch cfg.authMethod {
+	case salesforceAuthPassword:
+		if cfg.username == "" {
+			return salesforceConfig{}, fmt.Errorf("username is required for Salesforce")
+		}
+		if cfg.password == "" {
+			return salesforceConfig{}, fmt.Errorf("password is required for Salesforce")
+		}
+		if cfg.token == "" {
+			return salesforceConfig{}, fmt.Errorf("token is required for Salesforce")
+		}
+	case salesforceAuthClientCredentials:
+		if cfg.clientID == "" {
+			return salesforceConfig{}, fmt.Errorf("client_id is required for Salesforce client credentials")
+		}
+		if cfg.clientSecret == "" {
+			return salesforceConfig{}, fmt.Errorf("client_secret is required for Salesforce client credentials")
+		}
+	}
+
+	return cfg, nil
+}
+
+func salesforceBaseURL(domain string) string {
+	domain = strings.TrimRight(strings.TrimSpace(domain), "/")
+	if strings.HasPrefix(domain, "http://") || strings.HasPrefix(domain, "https://") {
+		return domain
+	}
+	if strings.HasSuffix(domain, ".salesforce.com") {
+		return fmt.Sprintf("https://%s", domain)
+	}
+	return fmt.Sprintf("https://%s.salesforce.com", domain)
+}
+
+func (s *salesforceSource) simpleforceClientID() string {
+	if s.authMethod == salesforceAuthClientCredentials && s.sfClientID != "" {
+		return s.sfClientID
+	}
+	return simpleforce.DefaultClientID
+}
+
+func (s *salesforceSource) loginClientCredentials(ctx context.Context) error {
+	tokenClient := httpclient.New(
+		httpclient.WithTimeout(30*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+	)
+	defer func() { _ = tokenClient.Close() }()
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		InstanceURL string `json:"instance_url"`
+		TokenType   string `json:"token_type"`
+	}
+
+	resp, err := tokenClient.R(ctx).
+		SetHeader("Accept", "application/json").
+		SetFormData(map[string]string{
+			"grant_type":    string(salesforceAuthClientCredentials),
+			"client_id":     s.sfClientID,
+			"client_secret": s.sfClientSecret,
+		}).
+		SetResult(&tokenResp).
+		Post(fmt.Sprintf("%s%s", strings.TrimRight(s.sfUrl, "/"), salesforceOAuthTokenPath))
+	if err != nil {
+		return fmt.Errorf("token request failed: %w", err)
+	}
+	if !resp.IsSuccess() {
+		return fmt.Errorf("token request failed with status %d: %s", resp.StatusCode(), resp.String())
+	}
+	if tokenResp.AccessToken == "" {
+		return fmt.Errorf("empty access token in response")
+	}
+	if tokenResp.InstanceURL == "" {
+		return fmt.Errorf("empty instance_url in response")
+	}
+	if tokenResp.TokenType != "" && !strings.EqualFold(tokenResp.TokenType, "bearer") {
+		return fmt.Errorf("unsupported token type in response: %s", tokenResp.TokenType)
+	}
+
+	s.client.SetSidLoc(tokenResp.AccessToken, strings.TrimRight(tokenResp.InstanceURL, "/"))
+	return nil
 }
 
 func (s *salesforceSource) Close(ctx context.Context) error {
@@ -121,40 +248,38 @@ func (s *salesforceSource) HandlesIncrementality() bool {
 }
 
 type tableMeta struct {
+	sobject        string
 	strategy       config.IncrementalStrategy
 	pk             []string
 	replicationKey string
 }
 
 var salesforceTableMeta = map[string]tableMeta{
-	"user":                     {config.StrategyReplace, nil, ""},
-	"user_role":                {config.StrategyReplace, nil, ""},
-	"opportunity":              {config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"opportunity_line_item":    {config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"opportunity_contact_role": {config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"account":                  {config.StrategyMerge, []string{"Id"}, "LastModifiedDate"},
-	"contact":                  {config.StrategyReplace, []string{"Id"}, ""},
-	"lead":                     {config.StrategyReplace, []string{"Id"}, ""},
-	"campaign":                 {config.StrategyReplace, []string{"Id"}, ""},
-	"campaign_member":          {config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"product":                  {config.StrategyReplace, []string{"Id"}, ""},
-	"pricebook":                {config.StrategyReplace, []string{"Id"}, ""},
-	"pricebook_entry":          {config.StrategyReplace, []string{"Id"}, ""},
-	"task":                     {config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"event":                    {config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"user":                     {"User", config.StrategyReplace, nil, ""},
+	"user_role":                {"UserRole", config.StrategyReplace, nil, ""},
+	"opportunity":              {"Opportunity", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"opportunity_line_item":    {"OpportunityLineItem", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"opportunity_contact_role": {"OpportunityContactRole", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"account":                  {"Account", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"contact":                  {"Contact", config.StrategyReplace, []string{"Id"}, ""},
+	"lead":                     {"Lead", config.StrategyReplace, []string{"Id"}, ""},
+	"campaign":                 {"Campaign", config.StrategyReplace, []string{"Id"}, ""},
+	"campaign_member":          {"CampaignMember", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"product":                  {"Product2", config.StrategyReplace, []string{"Id"}, ""},
+	"pricebook":                {"Pricebook2", config.StrategyReplace, []string{"Id"}, ""},
+	"pricebook_entry":          {"PricebookEntry", config.StrategyReplace, []string{"Id"}, ""},
+	"task":                     {"Task", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"event":                    {"Event", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 }
 
 func (s *salesforceSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
-	if req.IncrementalKey != "" {
-		return nil, fmt.Errorf("salesforce takes care of incrementality on its own, you should not provide incremental_key")
-	}
-
 	tableName := req.Name
 	if tableName == "" {
 		return nil, fmt.Errorf("table name is required for salesforce source")
 	}
 
-	if _, ok := salesforceTableMeta[tableName]; !ok && !strings.HasPrefix(tableName, "custom:") {
+	meta, known := salesforceTableMeta[tableName]
+	if !known && !strings.HasPrefix(tableName, "custom:") {
 		supported := slices.Sorted(maps.Keys(salesforceTableMeta))
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s, or use 'custom:<object_name>' for custom objects)", req.Name, strings.Join(supported, ", "))
 	}
@@ -162,13 +287,26 @@ func (s *salesforceSource) GetTable(ctx context.Context, req source.TableRequest
 	strategy := config.StrategyReplace
 	replicationKey := ""
 	pk := req.PrimaryKeys
-	if meta, ok := salesforceTableMeta[tableName]; ok {
+	if known {
 		strategy = meta.strategy
 		if len(meta.pk) > 0 {
 			pk = meta.pk
 		}
-		if meta.replicationKey != "" {
-			replicationKey = meta.replicationKey
+		replicationKey = meta.replicationKey
+	}
+
+	// Allow callers to override the built-in incremental key (e.g. via
+	// --incremental-key). When provided, switch to an incremental merge keyed
+	// on that column instead of the default. The column is validated against
+	// the object's datetime fields at read time.
+	if req.IncrementalKey != "" {
+		replicationKey = req.IncrementalKey
+		strategy = config.StrategyMerge
+		// Merge requires primary keys. Every Salesforce object exposes an "Id"
+		// field, so fall back to it when neither the table metadata nor the
+		// caller supplied explicit PKs.
+		if len(pk) == 0 {
+			pk = []string{"Id"}
 		}
 	}
 
@@ -182,58 +320,32 @@ func (s *salesforceSource) GetTable(ctx context.Context, req source.TableRequest
 			return nil, fmt.Errorf("salesforce source does not have a predefined schema; schema inference is required")
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, tableName, opts)
+			return s.read(ctx, tableName, replicationKey, opts)
 		},
 	}, nil
 }
 
-func (s *salesforceSource) read(ctx context.Context, tableName string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *salesforceSource) read(ctx context.Context, tableName, replicationKey string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
 		defer close(results)
 
-		var err error
-		switch tableName {
-		case "user":
-			err = s.readUsers(ctx, opts, results)
-		case "user_role":
-			err = s.readUserRoles(ctx, opts, results)
-		case "opportunity":
-			err = s.readOpportunities(ctx, opts, results)
-		case "opportunity_line_item":
-			err = s.readOpportunityLineItems(ctx, opts, results)
-		case "opportunity_contact_role":
-			err = s.readOpportunityContactRoles(ctx, opts, results)
-		case "account":
-			err = s.readAccounts(ctx, opts, results)
-		case "contact":
-			err = s.readContacts(ctx, opts, results)
-		case "lead":
-			err = s.readLeads(ctx, opts, results)
-		case "campaign":
-			err = s.readCampaigns(ctx, opts, results)
-		case "campaign_member":
-			err = s.readCampaignMembers(ctx, opts, results)
-		case "product":
-			err = s.readProduct2(ctx, opts, results)
-		case "pricebook":
-			err = s.readPricebook2(ctx, opts, results)
-		case "pricebook_entry":
-			err = s.readPricebookEntries(ctx, opts, results)
-		case "task":
-			err = s.readTasks(ctx, opts, results)
-		case "event":
-			err = s.readEvents(ctx, opts, results)
-		default:
-			// Custom objects
-			customTable := tableName
-			if strings.HasPrefix(tableName, "custom:") {
-				customTable = strings.TrimPrefix(tableName, "custom:")
-			}
-			err = s.getRecords(ctx, customTable, nil, "", opts, results)
+		var sobject string
+		if meta, ok := salesforceTableMeta[tableName]; ok {
+			sobject = meta.sobject
+		} else {
+			sobject = strings.TrimPrefix(tableName, "custom:")
 		}
-		if err != nil {
+
+		// Filter incrementally only when a replication key is in play; otherwise
+		// fetch the full object.
+		var lastState interface{}
+		if replicationKey != "" {
+			lastState = opts.IntervalStart
+		}
+
+		if err := s.getRecords(ctx, sobject, lastState, replicationKey, opts, results); err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -286,6 +398,23 @@ func (s *salesforceSource) getRecords(ctx context.Context, sobject string, lastS
 		if fieldName != "" && !compoundFields[fieldName] {
 			fields = append(fields, fieldName)
 		}
+	}
+
+	// Incremental loading filters and orders by a datetime column, so the
+	// replication key must resolve to one of the object's datetime fields.
+	// Normalise to the field's canonical casing for the SOQL query.
+	if replicationKey != "" {
+		canonicalKey := ""
+		for name := range dateFields {
+			if strings.EqualFold(name, replicationKey) {
+				canonicalKey = name
+				break
+			}
+		}
+		if canonicalKey == "" {
+			return fmt.Errorf("incremental key %q is not a datetime field on %s; salesforce incremental loading requires a datetime column such as SystemModstamp or LastModifiedDate", replicationKey, sobject)
+		}
+		replicationKey = canonicalKey
 	}
 
 	predicate := ""
@@ -559,66 +688,6 @@ func (s *salesforceSource) bulkGetQueryResults(ctx context.Context, jobID, batch
 	}
 
 	return nil
-}
-
-func (s *salesforceSource) readUsers(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "User", nil, "", opts, results)
-}
-
-func (s *salesforceSource) readUserRoles(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "UserRole", nil, "", opts, results)
-}
-
-func (s *salesforceSource) readOpportunities(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "Opportunity", opts.IntervalStart, "SystemModstamp", opts, results)
-}
-
-func (s *salesforceSource) readOpportunityLineItems(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "OpportunityLineItem", opts.IntervalStart, "SystemModstamp", opts, results)
-}
-
-func (s *salesforceSource) readOpportunityContactRoles(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "OpportunityContactRole", opts.IntervalStart, "SystemModstamp", opts, results)
-}
-
-func (s *salesforceSource) readAccounts(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "Account", opts.IntervalStart, "LastModifiedDate", opts, results)
-}
-
-func (s *salesforceSource) readContacts(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "Contact", nil, "", opts, results)
-}
-
-func (s *salesforceSource) readLeads(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "Lead", nil, "", opts, results)
-}
-
-func (s *salesforceSource) readCampaigns(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "Campaign", nil, "", opts, results)
-}
-
-func (s *salesforceSource) readCampaignMembers(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "CampaignMember", opts.IntervalStart, "SystemModstamp", opts, results)
-}
-
-func (s *salesforceSource) readProduct2(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "Product2", nil, "SystemModstamp", opts, results)
-}
-
-func (s *salesforceSource) readPricebook2(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "Pricebook2", nil, "", opts, results)
-}
-
-func (s *salesforceSource) readPricebookEntries(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "PricebookEntry", nil, "", opts, results)
-}
-
-func (s *salesforceSource) readTasks(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "Task", opts.IntervalStart, "SystemModstamp", opts, results)
-}
-
-func (s *salesforceSource) readEvents(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	return s.getRecords(ctx, "Event", opts.IntervalStart, "SystemModstamp", opts, results)
 }
 
 func soqlTimestamp(v interface{}) string {

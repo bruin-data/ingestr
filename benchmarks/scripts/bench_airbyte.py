@@ -1,10 +1,4 @@
-# /// script
-# requires-python = ">=3.9"
-# dependencies = [
-#     "airbyte",
-# ]
-# ///
-"""Benchmark script for Airbyte (PyAirbyte). Run via: uv run bench_airbyte.py --source-uri ... --dest-uri ..."""
+"""Benchmark script for Airbyte (PyAirbyte)."""
 
 import argparse
 import os
@@ -171,6 +165,46 @@ def parse_mysql_uri(uri: str) -> dict:
     }
 
 
+def parse_mongodb_uri(uri: str, source_table: str) -> dict:
+    from urllib.parse import parse_qsl, urlencode, urlparse
+
+    collection_part, _, _ = source_table.partition(":")
+    if "." not in collection_part:
+        raise ValueError(f"MongoDB source table must be database.collection, got: {source_table}")
+    database, _ = collection_part.split(".", 1)
+
+    p = urlparse(uri)
+    if p.scheme == "mongodb+srv":
+        connection_string = uri
+    else:
+        auth = ""
+        if p.username:
+            auth = p.username
+            if p.password:
+                auth += f":{p.password}"
+            auth += "@"
+
+        query = dict(parse_qsl(p.query, keep_blank_values=True))
+        query.setdefault("directConnection", "true")
+        query.setdefault("replicaSet", "rs0")
+        connection_string = (
+            f"{p.scheme}://{auth}{docker_host(p.hostname)}:{p.port or 27017}/?"
+            f"{urlencode(query)}"
+        )
+
+    return {
+        "database_config": {
+            "cluster_type": "SELF_MANAGED_REPLICA_SET",
+            "connection_string": connection_string,
+            "databases": [database],
+            "schema_enforced": False,
+        },
+        "initial_waiting_seconds": 120,
+        "discover_sample_size": 1000,
+        "discover_timeout_seconds": 60,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-uri", required=True)
@@ -204,6 +238,8 @@ def main():
         source = ab.get_source("source-postgres", config=parse_postgres_uri(args.source_uri))
     elif args.source_uri.startswith("mysql://"):
         source = ab.get_source("source-mysql", config=parse_mysql_uri(args.source_uri))
+    elif args.source_uri.startswith(("mongodb://", "mongodb+srv://")):
+        source = ab.get_source("source-mongodb-v2", config=parse_mongodb_uri(args.source_uri, args.source_table))
     else:
         print(f"Unsupported source: {args.source_uri}", file=sys.stderr)
         sys.exit(1)

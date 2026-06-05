@@ -39,43 +39,37 @@ const (
 	retryMaxWait = 5 * time.Minute
 )
 
-// makeRetryStrategy returns a resty retry-delay function that honors the
-// standard Retry-After HTTP header or the `retry_after` field HubSpot/Cloudflare
-// returns in JSON error bodies, falling back to exponential backoff with
-// equal jitter. When a 429 is observed it signals the adaptive limiter to
-// shrink before the next attempt fires.
-func makeRetryStrategy(adaptive *adaptiveLimiter) func(*httpclient.Response, error) (time.Duration, error) {
-	return func(resp *httpclient.Response, _ error) (time.Duration, error) {
-		if resp != nil && resp.StatusCode() == http.StatusTooManyRequests && adaptive != nil {
-			adaptive.onThrottle()
-		}
-
-		if resp != nil {
-			if v := resp.Header().Get("Retry-After"); v != "" {
-				if secs, parseErr := strconv.Atoi(v); parseErr == nil && secs > 0 {
-					return jitter(time.Duration(secs) * time.Second), nil
-				}
-			}
-			var body struct {
-				RetryAfter int `json:"retry_after"`
-			}
-			if jsonErr := json.Unmarshal(resp.Body(), &body); jsonErr == nil && body.RetryAfter > 0 {
-				return jitter(time.Duration(body.RetryAfter) * time.Second), nil
+// hubspotRetryStrategy honors the standard Retry-After HTTP header or the
+// `retry_after` field HubSpot/Cloudflare returns in JSON error bodies, falling
+// back to exponential backoff with equal jitter. Limiter adjustment is handled
+// by the response middleware (see attachAdaptiveHooks), not here, so that 429s
+// are observed even when no retry is scheduled.
+func hubspotRetryStrategy(resp *httpclient.Response, _ error) (time.Duration, error) {
+	if resp != nil {
+		if v := resp.Header().Get("Retry-After"); v != "" {
+			if secs, parseErr := strconv.Atoi(v); parseErr == nil && secs > 0 {
+				return jitter(time.Duration(secs) * time.Second), nil
 			}
 		}
-
-		attempt := 1
-		if resp != nil {
-			if a := resp.Attempt(); a > 0 {
-				attempt = a
-			}
+		var body struct {
+			RetryAfter int `json:"retry_after"`
 		}
-		delay := time.Duration(math.Min(
-			float64(retryMaxWait),
-			float64(retryWait)*math.Exp2(float64(attempt)),
-		))
-		return jitter(delay), nil
+		if jsonErr := json.Unmarshal(resp.Body(), &body); jsonErr == nil && body.RetryAfter > 0 {
+			return jitter(time.Duration(body.RetryAfter) * time.Second), nil
+		}
 	}
+
+	attempt := 1
+	if resp != nil {
+		if a := resp.Attempt(); a > 0 {
+			attempt = a
+		}
+	}
+	delay := time.Duration(math.Min(
+		float64(retryMaxWait),
+		float64(retryWait)*math.Exp2(float64(attempt)),
+	))
+	return jitter(delay), nil
 }
 
 // jitter applies equal-jitter (delay/2 fixed + delay/2 random) to break
@@ -126,32 +120,45 @@ func (s *Hubspotsource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithTimeout(5*time.Minute),
 		httpclient.WithRateLimiterInstance(crmLimiter),
 		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
-		httpclient.WithRetryStrategy(makeRetryStrategy(s.crmAdaptive)),
+		// HubSpot batch endpoints (associations, batch/read) are POST but
+		// semantically read-only; without this resty treats them as
+		// non-idempotent and skips retries on 429s.
+		httpclient.WithAllowNonIdempotentRetry(),
+		httpclient.WithRetryStrategy(hubspotRetryStrategy),
 		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithHeader("Accept", "application/json"),
 	)
-	attachSuccessHook(s.client, s.crmAdaptive)
+	attachAdaptiveHooks(s.client, s.crmAdaptive)
 
 	s.searchClient = httpclient.New(
 		httpclient.WithBaseURL(baseURL),
 		httpclient.WithTimeout(5*time.Minute),
 		httpclient.WithRateLimiterInstance(searchLimiter),
 		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
-		httpclient.WithRetryStrategy(makeRetryStrategy(s.searchAdaptive)),
+		// HubSpot search endpoints are POST but semantically read-only; without
+		// this resty treats them as non-idempotent and skips retries entirely.
+		httpclient.WithAllowNonIdempotentRetry(),
+		httpclient.WithRetryStrategy(hubspotRetryStrategy),
 		httpclient.WithAuth(httpclient.NewBearerAuth(apiKey)),
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithHeader("Accept", "application/json"),
 	)
-	attachSuccessHook(s.searchClient, s.searchAdaptive)
+	attachAdaptiveHooks(s.searchClient, s.searchAdaptive)
 
 	config.Debug("[HUBSPOT] Connected successfully")
 	return nil
 }
 
-func attachSuccessHook(client *httpclient.Client, adaptive *adaptiveLimiter) {
+// attachAdaptiveHooks drives the adaptive limiter from every response, not just
+// retried ones: a 429 shrinks the rate (even on the final attempt or when no
+// retry is scheduled), and a 2xx counts toward growing it back.
+func attachAdaptiveHooks(client *httpclient.Client, adaptive *adaptiveLimiter) {
 	client.Resty().AddResponseMiddleware(func(_ *resty.Client, resp *resty.Response) error {
-		if resp.StatusCode() >= 200 && resp.StatusCode() < 300 {
+		switch {
+		case resp.StatusCode() == http.StatusTooManyRequests:
+			adaptive.onThrottle()
+		case resp.StatusCode() >= 200 && resp.StatusCode() < 300:
 			adaptive.onSuccess()
 		}
 		return nil
@@ -1003,7 +1010,7 @@ func (s *Hubspotsource) readCustomObject(ctx context.Context, table string, opts
 		startMs = fmt.Sprintf("%d", epochStart.UnixMilli())
 	}
 
-	return s.searchCRMObjects(ctx, objectName, cfg, properties, startMs, opts, results)
+	return s.searchCRMObjects(ctx, cfg, properties, startMs, opts, results)
 }
 
 func (s *Hubspotsource) readCustomObjectHistory(ctx context.Context, table string, historyProps []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -1069,7 +1076,7 @@ func (s *Hubspotsource) readCRMObjects(ctx context.Context, tableName string, hi
 		return s.searchCRMObjectsHistory(ctx, cfg, properties, startMs, opts, results)
 	}
 
-	if err := s.searchCRMObjects(ctx, tableName, cfg, properties, startMs, opts, results); err != nil {
+	if err := s.searchCRMObjects(ctx, cfg, properties, startMs, opts, results); err != nil {
 		return err
 	}
 
@@ -1083,7 +1090,7 @@ func timeToMs(val *time.Time) string {
 	return fmt.Sprintf("%d", val.UnixMilli())
 }
 
-func (s *Hubspotsource) searchCRMObjects(ctx context.Context, pluralType string, cfg tableConfig, properties []string, startDateMs string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *Hubspotsource) searchCRMObjects(ctx context.Context, cfg tableConfig, properties []string, startDateMs string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	endpoint := fmt.Sprintf("crm/v3/objects/%s/search", cfg.ObjectType)
 	totalProcessed := 0
 	endMs := timeToMs(opts.IntervalEnd)
@@ -1183,9 +1190,9 @@ func (s *Hubspotsource) searchCRMObjects(ctx context.Context, pluralType string,
 						wg.Add(1)
 						go func(at string) {
 							defer wg.Done()
-							am, err := s.fetchAssociationsBatch(ctx, pluralType, at, objIDs)
+							am, err := s.fetchAssociationsBatch(ctx, cfg.ObjectType, at, objIDs)
 							if err != nil {
-								config.Debug("[HUBSPOT] Failed to fetch associations %s->%s: %v", pluralType, at, err)
+								config.Debug("[HUBSPOT] Failed to fetch associations %s->%s: %v", cfg.ObjectType, at, err)
 								return
 							}
 							assocCh <- assocResult{assocType: at, assocMap: am}
@@ -1436,10 +1443,11 @@ func (s *Hubspotsource) fetchAssociationsBatch(ctx context.Context, fromType str
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch associations %s->%s: %w", fromType, toType, err)
 		}
-		if resp.StatusCode() == 400 && len(inputs) > 1 {
+		if !resp.IsSuccess() && resp.StatusCode() != 404 && len(inputs) > 1 {
 			// HubSpot returns 400 for the whole batch if even one input id is
-			// invalid (deleted/archived). Split and recurse so the other ids
-			// in the chunk don't silently lose their associations.
+			// invalid (deleted/archived). Same thing can happen for 429/5xx that
+			// survived the HTTP client's retries. Split and recurse so the other
+			// ids in the chunk don't silently lose their associations.
 			mid := len(inputs) / 2
 			left, err := s.fetchAssociationsBatch(ctx, fromType, toType, objectIDs[i:i+mid])
 			if err != nil {
@@ -1457,12 +1465,9 @@ func (s *Hubspotsource) fetchAssociationsBatch(ctx context.Context, fromType str
 			}
 			continue
 		}
-		if resp.StatusCode() == 400 || resp.StatusCode() == 404 {
+		if !resp.IsSuccess() {
 			config.Debug("[HUBSPOT] association %s->%s skipped id=%v status=%d: %s", fromType, toType, objectIDs[i:end], resp.StatusCode(), resp.String())
 			continue
-		}
-		if !resp.IsSuccess() {
-			return nil, fmt.Errorf("hubspot API %s returned status %d: %s", endpoint, resp.StatusCode(), resp.String())
 		}
 
 		for _, item := range batchResp.Results {

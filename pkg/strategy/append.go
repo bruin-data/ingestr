@@ -80,6 +80,7 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            job.Config.DestTable,
+		Schema:           job.Schema,
 		Parallelism:      parallelism,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,

@@ -1,3 +1,5 @@
+//go:build integration
+
 package clickup_test
 
 import (

@@ -3,6 +3,7 @@ package blobstore
 import (
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -152,6 +153,19 @@ func TestParseBlobstoreURI_Azure(t *testing.T) {
 				sasToken:    "sv=2020-08-04",
 			},
 		},
+		{
+			name: "Azure with service principal credentials",
+			uri:  "az://?account_name=myaccount&tenant_id=tenant&client_id=client&client_secret=secret",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzure,
+				accountName: "myaccount",
+				clientCredentials: adlsutil.ClientCredentials{
+					TenantID:     "tenant",
+					ClientID:     "client",
+					ClientSecret: "secret",
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -166,6 +180,82 @@ func TestParseBlobstoreURI_Azure(t *testing.T) {
 			assert.Equal(t, tt.want.accountName, got.accountName)
 			assert.Equal(t, tt.want.accountKey, got.accountKey)
 			assert.Equal(t, tt.want.sasToken, got.sasToken)
+			assert.Equal(t, tt.want.clientCredentials, got.clientCredentials)
+		})
+	}
+}
+
+func TestParseBlobstoreURI_AzureDatalake(t *testing.T) {
+	tests := []struct {
+		name    string
+		uri     string
+		want    *parsedBlobstoreURI
+		wantErr bool
+	}{
+		{
+			name: "ADLS Gen2 with account key",
+			uri:  "adls://?account_name=myaccount&account_key=mykey",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				accountKey:  "mykey",
+			},
+		},
+		{
+			name: "ADLS Gen2 alias",
+			uri:  "azdatalake://?account_name=myaccount&account_key=mykey",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				accountKey:  "mykey",
+			},
+		},
+		{
+			name: "ADLS Gen2 with SAS token",
+			uri:  "adlsgen2://?account_name=myaccount&sas_token=sv=2020-08-04",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				sasToken:    "sv=2020-08-04",
+			},
+		},
+		{
+			name: "ADLS Gen2 with service principal credentials",
+			uri:  "adls://?account_name=myaccount&tenant_id=tenant&client_id=client&client_secret=secret",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				clientCredentials: adlsutil.ClientCredentials{
+					TenantID:     "tenant",
+					ClientID:     "client",
+					ClientSecret: "secret",
+				},
+			},
+		},
+		{
+			name: "ABFSS with account in host",
+			uri:  "abfss://filesystem@myaccount.dfs.core.windows.net?account_key=mykey",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzureDatalake,
+				accountName: "myaccount",
+				accountKey:  "mykey",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseBlobstoreURI(tt.uri)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want.provider, got.provider)
+			assert.Equal(t, tt.want.accountName, got.accountName)
+			assert.Equal(t, tt.want.accountKey, got.accountKey)
+			assert.Equal(t, tt.want.sasToken, got.sasToken)
+			assert.Equal(t, tt.want.clientCredentials, got.clientCredentials)
 		})
 	}
 }
@@ -215,6 +305,18 @@ func TestRenderLayout(t *testing.T) {
 	assert.Equal(t, "users.parquet", result)
 }
 
+func TestBuildAzureDatalakePathURL(t *testing.T) {
+	got, err := buildAzureDatalakePathURL("myaccount", "filesystem", "records/users/file 1.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, "https://myaccount.dfs.core.windows.net/filesystem/records/users/file%201.parquet", got)
+}
+
+func TestParentDirectory(t *testing.T) {
+	assert.Equal(t, "records/users", parentDirectory("records/users/file.parquet"))
+	assert.Equal(t, "records", parentDirectory("/records/file.parquet"))
+	assert.Equal(t, "", parentDirectory("file.parquet"))
+}
+
 func TestSchemes(t *testing.T) {
 	d := NewBlobstoreDestination()
 	schemes := d.Schemes()
@@ -224,6 +326,11 @@ func TestSchemes(t *testing.T) {
 	assert.Contains(t, schemes, "gcs")
 	assert.Contains(t, schemes, "az")
 	assert.Contains(t, schemes, "azure")
+	assert.Contains(t, schemes, "adls")
+	assert.Contains(t, schemes, "adlsgen2")
+	assert.Contains(t, schemes, "azdatalake")
+	assert.Contains(t, schemes, "abfs")
+	assert.Contains(t, schemes, "abfss")
 }
 
 func TestStrategySupport(t *testing.T) {

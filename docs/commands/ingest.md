@@ -27,7 +27,8 @@ ingestr ingest \
 - `--interval-start`: Sets the start of the interval for the incremental key. Defaults to `None`.
 - `--interval-end`: Sets the end of the interval for the incremental key. Defaults to `None`.
 - `--primary-key TEXT`: Specifies the primary key for the merge operation. Defaults to `None`.
-- `--columns <column_name>:<column_type>`: Specifies the columns to be ingested. Defaults to `None`.
+- `--columns <name>:<type>:<source>`: Specifies the columns to be ingested. Use `name:type` to override a column's type, `name:type:source` to rename `source` to `name` with a type, or `name::source` to rename only. Multiple entries are comma-separated. Defaults to `None`.
+- `--no-inference`: Skips schema inference for schema-less sources and uses `--columns` as the source schema. Requires `--columns`.
 - `--mask <column_name>:<algorithm>[:param]`: Applies data masking to specified columns. Can be used multiple times for different columns. See the [Data Masking](../getting-started/data-masking.md) documentation for available algorithms and usage examples. Defaults to `None`.
 - `--schema-naming` Specifies what naming convention to use for table and column names on the destination. Can be `default` or `direct`.default is snake_case. `direct is case sensitive and doesn't contract underscores.
 
@@ -40,6 +41,7 @@ The `interval-start` and `interval-end` options support various datetime formats
 
 > [!INFO]
 > For the details around the incremental key and the various strategies, please refer to the [Incremental Loading](../getting-started/incremental-loading.md) section.
+
 
 ## General flags
 

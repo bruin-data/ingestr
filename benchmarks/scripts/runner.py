@@ -1,18 +1,14 @@
-# /// script
-# requires-python = ">=3.9"
-# dependencies = ["pyyaml", "rich"]
-# ///
 """Benchmark runner for gong vs other data ingestion tools.
 
 Reads scenario definitions from scenarios.yaml and orchestrates hyperfine benchmarks.
 
 Usage:
-    uv run benchmarks/scripts/runner.py                          # Run all scenarios
-    uv run benchmarks/scripts/runner.py --rows 1000 --runs 3     # Quick test
-    uv run benchmarks/scripts/runner.py --tools gong sling       # Specific tools
-    uv run benchmarks/scripts/runner.py --scenarios '*bigquery*'  # Filter scenarios
-    uv run benchmarks/scripts/runner.py --validate               # Validation mode
-    uv run benchmarks/scripts/runner.py --report                 # Report from latest results
+    uv run --project benchmarks python benchmarks/scripts/runner.py
+    uv run --project benchmarks python benchmarks/scripts/runner.py --rows 1000 --runs 3
+    uv run --project benchmarks python benchmarks/scripts/runner.py --tools gong sling
+    uv run --project benchmarks python benchmarks/scripts/runner.py --scenarios '*bigquery*'
+    uv run --project benchmarks python benchmarks/scripts/runner.py --validate
+    uv run --project benchmarks python benchmarks/scripts/runner.py --report
 """
 
 import argparse
@@ -20,9 +16,11 @@ import fnmatch
 import glob
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+from urllib.parse import parse_qs, unquote, urlparse
 from datetime import datetime
 from pathlib import Path
 
@@ -109,6 +107,122 @@ def bq_parts_from_uri(uri: str) -> tuple[str, str]:
     return project, dataset
 
 
+def snowflake_connection_from_uri(uri: str) -> dict:
+    parsed = urlparse(uri)
+    path_parts = [unquote(p) for p in parsed.path.strip("/").split("/") if p]
+    query = {k: v[-1] for k, v in parse_qs(parsed.query).items() if v}
+
+    cfg = {
+        "type": "snowflake",
+        "account": parsed.hostname or "",
+    }
+    if parsed.username:
+        cfg["user"] = unquote(parsed.username)
+    if parsed.password:
+        cfg["password"] = unquote(parsed.password)
+    if path_parts:
+        cfg["database"] = path_parts[0]
+    if len(path_parts) > 1:
+        cfg["schema"] = path_parts[1]
+
+    for key in (
+        "warehouse", "role", "authenticator", "token",
+        "private_key", "private_key_passphrase",
+    ):
+        if query.get(key):
+            cfg[key] = query[key]
+
+    return cfg
+
+
+def snowflake_name(name: str) -> str:
+    """Return Snowflake's stored identifier name for unquoted benchmark config."""
+    if name.startswith('"') and name.endswith('"'):
+        return name[1:-1].replace('""', '"')
+    return name.upper()
+
+
+def quote_snowflake_identifier(name: str) -> str:
+    stored = snowflake_name(name)
+    return f'"{stored.replace(chr(34), chr(34) + chr(34))}"'
+
+
+def snowflake_full_table(schema: str, table: str) -> str:
+    schema = schema or "PUBLIC"
+    return f"{quote_snowflake_identifier(schema)}.{quote_snowflake_identifier(table)}"
+
+
+def snowflake_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def mssql_literal(value: str) -> str:
+    return "N'" + value.replace("'", "''") + "'"
+
+
+def snowflake_sql_command(uri: str, sql: str, mode: str = "exec") -> str:
+    helper = "./benchmarks/scripts/snowflake_sql.go"
+    env_name = env_name_for_uri(uri)
+    if env_name:
+        return (
+            f"cd {shlex.quote(str(PROJECT_ROOT))} && "
+            f"go run {shlex.quote(helper)} -mode {shlex.quote(mode)} "
+            f"-uri-env {shlex.quote(env_name)} {shlex.quote(sql)}"
+        )
+    return (
+        f"cd {shlex.quote(str(PROJECT_ROOT))} && "
+        f"go run {shlex.quote(helper)} -mode {shlex.quote(mode)} "
+        f"{shlex.quote(uri)} {shlex.quote(sql)}"
+    )
+
+
+def quote_mssql_identifier(name: str) -> str:
+    return f"[{name.replace(']', ']]')}]"
+
+
+def mssql_full_table(schema: str, table: str) -> str:
+    schema = schema or "dbo"
+    return f"{quote_mssql_identifier(schema)}.{quote_mssql_identifier(table)}"
+
+
+def mssql_sql_command(uri: str, sql: str, mode: str = "exec") -> str:
+    helper = "./benchmarks/scripts/mssql_sql.go"
+    env_name = env_name_for_uri(uri)
+    if env_name:
+        return (
+            f"cd {shlex.quote(str(PROJECT_ROOT))} && "
+            f"go run {shlex.quote(helper)} -mode {shlex.quote(mode)} "
+            f"-uri-env {shlex.quote(env_name)} {shlex.quote(sql)}"
+        )
+    return (
+        f"cd {shlex.quote(str(PROJECT_ROOT))} && "
+        f"go run {shlex.quote(helper)} -mode {shlex.quote(mode)} "
+        f"{shlex.quote(uri)} {shlex.quote(sql)}"
+    )
+
+
+def run_snowflake_sql(uri: str, sql: str, mode: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "_BENCH_SNOWFLAKE_SQL_URI": uri}
+    return subprocess.run(
+        ["go", "run", "./benchmarks/scripts/snowflake_sql.go",
+         "-mode", mode, "-uri-env", "_BENCH_SNOWFLAKE_SQL_URI", sql],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True, text=True, timeout=120,
+    )
+
+
+def run_mssql_sql(uri: str, sql: str, mode: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "_BENCH_MSSQL_SQL_URI": uri}
+    return subprocess.run(
+        ["go", "run", "./benchmarks/scripts/mssql_sql.go",
+         "-mode", mode, "-uri-env", "_BENCH_MSSQL_SQL_URI", sql],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True, text=True, timeout=120,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
@@ -167,13 +281,38 @@ def check_tool_available(name: str, tool_cfg: dict) -> bool:
     return True
 
 
-def should_skip_tool(tool_cfg: dict, src_type: str, dst_type: str) -> bool:
+def scenario_rule_matches(rule: dict, src_type: str, dst_type: str, src_name: str, dst_name: str) -> bool:
+    checks = []
+    if "source_type" in rule:
+        checks.append(rule["source_type"] == src_type)
+    if "destination_type" in rule:
+        checks.append(rule["destination_type"] == dst_type)
+    if "source" in rule:
+        checks.append(rule["source"] == src_name)
+    if "destination" in rule:
+        checks.append(rule["destination"] == dst_name)
+    return bool(checks) and all(checks)
+
+
+def should_skip_tool(tool_cfg: dict, src_type: str, dst_type: str, src_name: str, dst_name: str) -> bool:
     for rule in tool_cfg.get("skip", []):
-        if "source_type" in rule and rule["source_type"] == src_type:
-            return True
-        if "destination_type" in rule and rule["destination_type"] == dst_type:
+        if scenario_rule_matches(rule, src_type, dst_type, src_name, dst_name):
             return True
     return False
+
+
+def resolve_tool_backend(
+    tool_cfg: dict,
+    src_type: str,
+    dst_type: str,
+    src_name: str,
+    dst_name: str,
+) -> str | None:
+    backend = tool_cfg.get("backend")
+    for rule in tool_cfg.get("backend_overrides", []):
+        if scenario_rule_matches(rule, src_type, dst_type, src_name, dst_name):
+            return rule.get("backend", backend)
+    return backend
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +324,40 @@ def translate_uri(uri: str, tool_cfg: dict) -> str:
         if uri.startswith(f"{original}://"):
             uri = uri.replace(f"{original}://", f"{replacement}://", 1)
     return uri
+
+
+def env_name_for_uri(uri: str) -> str | None:
+    for name, value in os.environ.items():
+        if value == uri and (
+            name.startswith("BENCH_")
+            or name.startswith("SNOWFLAKE_")
+            or name.endswith("_URI")
+        ):
+            return name
+    return None
+
+
+def shell_uri_arg(uri: str, tool_cfg: dict | None = None) -> str:
+    env_name = env_name_for_uri(uri)
+    if env_name and not (tool_cfg or {}).get("uri_scheme_overrides"):
+        return f'"${env_name}"'
+    if tool_cfg:
+        uri = translate_uri(uri, tool_cfg)
+    return shlex.quote(uri)
+
+
+def uri_option(flag: str, uri: str, tool_cfg: dict | None = None) -> str:
+    env_name = env_name_for_uri(uri)
+    if env_name and not (tool_cfg or {}).get("uri_scheme_overrides"):
+        return f"{flag}-env {shlex.quote(env_name)}"
+    return f"{flag} {shell_uri_arg(uri, tool_cfg)}"
+
+
+def uv_python_command(script: Path) -> str:
+    return (
+        f"uv run --project {shlex.quote(str(BENCH_DIR))} --locked "
+        f"python {shlex.quote(str(script))}"
+    )
 
 
 def sling_env_name(role: str, name: str) -> str:
@@ -199,6 +372,10 @@ def sling_connection_value(uri: str, db_type: str) -> str:
         if creds:
             cfg["gc_key_file"] = creds
         return json.dumps(cfg)
+    if db_type == "snowflake":
+        return json.dumps(snowflake_connection_from_uri(uri))
+    if db_type in ("mssql", "sqlserver"):
+        return uri.replace("mssql://", "sqlserver://", 1)
     return uri
 
 
@@ -212,10 +389,10 @@ def build_tool_command(
     if tool_name == "gong":
         binary = PROJECT_ROOT / tool_cfg.get("binary", "bin/gong")
         return (
-            f"'{binary}' ingest"
-            f" --source-uri '{src_uri}'"
+            f"INGESTR_DISABLE_TELEMETRY=1 DISABLE_TELEMETRY=1 '{binary}' ingest"
+            f" --source-uri {shell_uri_arg(src_uri)}"
             f" --source-table '{src_table}'"
-            f" --dest-uri '{dst_uri}'"
+            f" --dest-uri {shell_uri_arg(dst_uri)}"
             f" --dest-table '{dst_table}'"
             f" --incremental-strategy replace --progress log --yes"
         )
@@ -225,14 +402,13 @@ def build_tool_command(
             "command_prefix",
             "uv tool run --python 3.11 ingestr@0.14.141 ingest",
         )
-        tsrc = translate_uri(src_uri, tool_cfg)
-        tdst = translate_uri(dst_uri, tool_cfg)
+        prefix = f"INGESTR_DISABLE_TELEMETRY=1 DISABLE_TELEMETRY=1 {prefix}"
         extra = tool_cfg.get("extra_args_by_source", {}).get(src_type, "")
         parts = [
             prefix,
-            f"--source-uri '{tsrc}'",
+            f"--source-uri {shell_uri_arg(src_uri, tool_cfg)}",
             f"--source-table '{src_table}'",
-            f"--dest-uri '{tdst}'",
+            f"--dest-uri {shell_uri_arg(dst_uri, tool_cfg)}",
             f"--dest-table '{dst_table}'",
             "--yes --full-refresh",
         ]
@@ -243,32 +419,46 @@ def build_tool_command(
     if tool_name == "sling":
         src_env = sling_env_name("SRC", src_cfg_name)
         dst_env = sling_env_name("DST", dst_cfg_name)
-        return (
-            f"sling run"
-            f" --src-conn {src_env}"
-            f" --src-stream '{src_table}'"
-            f" --tgt-conn {dst_env}"
-            f" --tgt-object '{dst_table}'"
-            f" --mode full-refresh"
-        )
+        env = ["SLING_DISABLE_TELEMETRY=true"]
+        if src_type == "mongodb":
+            env.append("SLING_SAMPLE_SIZE=3000")
+        prefix = " ".join(env) + " "
+        parts = [
+            f"{prefix}sling run"
+            f" --src-conn {src_env}",
+            f" --src-stream '{src_table}'",
+        ]
+        if src_type == "mongodb":
+            parts.append(" --src-options '{flatten: true}'")
+        parts += [
+            f" --tgt-conn {dst_env}",
+            f" --tgt-object '{dst_table}'",
+            f" --mode full-refresh",
+        ]
+        return "".join(parts)
 
     if tool_name == "dlt":
         script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_dlt.py")
+        backend = resolve_tool_backend(
+            tool_cfg, src_type, dst_type, src_cfg_name, dst_cfg_name,
+        )
+        backend_arg = f" --backend {shlex.quote(backend)}" if backend else ""
         return (
-            f"uv run '{script}'"
-            f" --source-uri '{src_uri}'"
+            f"RUNTIME__DLTHUB_TELEMETRY=false {uv_python_command(script)}"
+            f" {uri_option('--source-uri', src_uri)}"
             f" --source-table '{src_table}'"
-            f" --dest-uri '{dst_uri}'"
+            f" {uri_option('--dest-uri', dst_uri)}"
             f" --dest-table '{dst_table}'"
+            f"{backend_arg}"
         )
 
     if tool_name == "airbyte":
         script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_airbyte.py")
         return (
-            f"uv run '{script}'"
-            f" --source-uri '{src_uri}'"
+            f"AIRBYTE_ANALYTICS_DISABLED=1 DO_NOT_TRACK=1 {uv_python_command(script)}"
+            f" --source-uri {shell_uri_arg(src_uri)}"
             f" --source-table '{src_table}'"
-            f" --dest-uri '{dst_uri}'"
+            f" --dest-uri {shell_uri_arg(dst_uri)}"
             f" --dest-table '{dst_table}'"
         )
 
@@ -313,6 +503,28 @@ def build_prepare_command(
             for t in tables
         ]
         return "; ".join(cmds) + "; true"
+
+    if dst_type == "snowflake":
+        schema, table = parse_table_parts(dst_table)
+        tables = [table, "_dlt_loads", "_dlt_version", "_dlt_pipeline_state"]
+        drops = [
+            f"DROP TABLE IF EXISTS {snowflake_full_table(schema, t)}"
+            for t in tables
+        ]
+        return snowflake_sql_command(dst_uri, "; ".join(drops), mode="exec")
+
+    if dst_type in ("mssql", "sqlserver"):
+        schema, table = parse_table_parts(dst_table)
+        schema = schema or "dbo"
+        tables = [table, "_dlt_loads", "_dlt_version", "_dlt_pipeline_state"]
+        drops = [
+            (
+                f"IF OBJECT_ID({mssql_literal(schema + '.' + t)}, N'U') IS NOT NULL "
+                f"DROP TABLE {mssql_full_table(schema, t)}"
+            )
+            for t in tables
+        ]
+        return mssql_sql_command(dst_uri, "; ".join(drops), mode="exec")
 
     raise ValueError(f"Unknown destination type: {dst_type}")
 
@@ -402,7 +614,7 @@ def run_benchmarks(
         for tool_name in tools:
             tool_cfg = tool_configs[tool_name]
 
-            if should_skip_tool(tool_cfg, src["type"], dst["type"]):
+            if should_skip_tool(tool_cfg, src["type"], dst["type"], src_name, dst_name):
                 console.print(f"  [dim]{tool_name}: skipped[/dim]")
                 continue
 
@@ -454,46 +666,109 @@ def query_destination(dst_type: str, dst_uri: str, table: str, schema: str, quer
             schema = schema or "public"
             if query_type == "count":
                 sql = f'SELECT count(*) FROM "{schema}".{table}'
+                result = subprocess.run(
+                    ["psql", dst_uri, "-t", "-A", "-c", sql],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    return None
+                return result.stdout.strip()
             elif query_type == "sum_id":
-                sql = f'SELECT COALESCE(SUM(id), 0) FROM "{schema}".{table}'
+                queries = [
+                    f'SELECT COALESCE(SUM(id), 0) FROM "{schema}".{table}',
+                    f"""SELECT COALESCE(SUM((data->>'id')::bigint), 0) FROM "{schema}".{table}""",
+                ]
+                for sql in queries:
+                    result = subprocess.run(
+                        ["psql", dst_uri, "-t", "-A", "-c", sql],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if result.returncode == 0:
+                        return result.stdout.strip()
+                return None
             elif query_type == "columns":
                 sql = (f"SELECT column_name FROM information_schema.columns "
                        f"WHERE table_schema='{schema}' AND table_name='{table}' "
                        f"ORDER BY ordinal_position")
+                result = subprocess.run(
+                    ["psql", dst_uri, "-t", "-A", "-c", sql],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    return None
+                columns = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
+                if "data" in columns:
+                    json_sql = (
+                        f"""SELECT DISTINCT key FROM "{schema}".{table}, """
+                        f"""LATERAL jsonb_object_keys(data) AS key ORDER BY key"""
+                    )
+                    json_result = subprocess.run(
+                        ["psql", dst_uri, "-t", "-A", "-c", json_sql],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if json_result.returncode == 0:
+                        json_columns = [
+                            line.strip()
+                            for line in json_result.stdout.strip().split("\n")
+                            if line.strip()
+                        ]
+                        columns = list(dict.fromkeys(columns + json_columns))
+                return columns
             else:
                 return None
-            result = subprocess.run(
-                ["psql", dst_uri, "-t", "-A", "-c", sql],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                return None
-            if query_type == "columns":
-                return [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
-            return result.stdout.strip()
 
         elif dst_type == "duckdb":
             path = duckdb_path_from_uri(dst_uri)
             schema = schema or "main"
             if query_type == "count":
                 sql = f'SELECT count(*) FROM "{schema}".{table}'
+                result = subprocess.run(
+                    ["duckdb", path, "-noheader", "-csv", "-c", sql],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    return None
+                return result.stdout.strip()
             elif query_type == "sum_id":
-                sql = f'SELECT COALESCE(SUM(id), 0) FROM "{schema}".{table}'
+                queries = [
+                    f'SELECT COALESCE(SUM(id), 0) FROM "{schema}".{table}',
+                    f"""SELECT COALESCE(SUM(CAST(json_extract_string(data, '$.id') AS BIGINT)), 0) FROM "{schema}".{table}""",
+                ]
+                for sql in queries:
+                    result = subprocess.run(
+                        ["duckdb", path, "-noheader", "-csv", "-c", sql],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if result.returncode == 0:
+                        return result.stdout.strip()
+                return None
             elif query_type == "columns":
                 sql = (f"SELECT column_name FROM information_schema.columns "
                        f"WHERE table_schema='{schema}' AND table_name='{table}' "
                        f"ORDER BY ordinal_position")
+                result = subprocess.run(
+                    ["duckdb", path, "-noheader", "-csv", "-c", sql],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    return None
+                columns = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
+                if "data" in columns:
+                    json_sql = f"""SELECT DISTINCT unnest(json_keys(data)) AS key FROM "{schema}".{table} ORDER BY key"""
+                    json_result = subprocess.run(
+                        ["duckdb", path, "-noheader", "-csv", "-c", json_sql],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if json_result.returncode == 0:
+                        json_columns = [
+                            line.strip()
+                            for line in json_result.stdout.strip().split("\n")
+                            if line.strip()
+                        ]
+                        columns = list(dict.fromkeys(columns + json_columns))
+                return columns
             else:
                 return None
-            result = subprocess.run(
-                ["duckdb", path, "-noheader", "-csv", "-c", sql],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                return None
-            if query_type == "columns":
-                return [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
-            return result.stdout.strip()
 
         elif dst_type == "bigquery":
             project, ds = bq_parts_from_uri(dst_uri)
@@ -519,6 +794,84 @@ def query_destination(dst_type: str, dst_uri: str, table: str, schema: str, quer
             if query_type == "columns":
                 return lines[1:] if len(lines) > 1 else []
             return lines[-1] if lines else None
+
+        elif dst_type == "snowflake":
+            schema = schema or "PUBLIC"
+            full_table = snowflake_full_table(schema, table)
+            if query_type == "count":
+                sql = f"SELECT COUNT(*) FROM {full_table}"
+            elif query_type == "sum_id":
+                sql = f"SELECT COALESCE(SUM(ID), 0) FROM {full_table}"
+            elif query_type == "columns":
+                schema_name = snowflake_name(schema)
+                table_name = snowflake_name(table)
+                sql = (
+                    "SELECT LOWER(COLUMN_NAME) FROM INFORMATION_SCHEMA.COLUMNS "
+                    f"WHERE TABLE_SCHEMA = {snowflake_literal(schema_name)} "
+                    f"AND TABLE_NAME = {snowflake_literal(table_name)} "
+                    "ORDER BY ORDINAL_POSITION"
+                )
+            else:
+                return None
+
+            mode = "list" if query_type == "columns" else "scalar"
+            result = run_snowflake_sql(dst_uri, sql, mode)
+            if result.returncode != 0:
+                return None
+            lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+            if query_type == "columns":
+                return lines
+            return lines[-1] if lines else None
+
+        elif dst_type in ("mssql", "sqlserver"):
+            schema = schema or "dbo"
+            full_table = mssql_full_table(schema, table)
+            if query_type == "count":
+                sql = f"SELECT COUNT(*) FROM {full_table}"
+                result = run_mssql_sql(dst_uri, sql, "scalar")
+                if result.returncode != 0:
+                    return None
+                return result.stdout.strip()
+            elif query_type == "sum_id":
+                queries = [
+                    f"SELECT COALESCE(SUM(CAST([id] AS BIGINT)), 0) FROM {full_table}",
+                    (
+                        f"SELECT COALESCE(SUM(CAST(JSON_VALUE([data], '$.id') AS BIGINT)), 0) "
+                        f"FROM {full_table}"
+                    ),
+                ]
+                for sql in queries:
+                    result = run_mssql_sql(dst_uri, sql, "scalar")
+                    if result.returncode == 0:
+                        return result.stdout.strip()
+                return None
+            elif query_type == "columns":
+                sql = (
+                    "SELECT LOWER(COLUMN_NAME) FROM INFORMATION_SCHEMA.COLUMNS "
+                    f"WHERE TABLE_SCHEMA = {mssql_literal(schema)} "
+                    f"AND TABLE_NAME = {mssql_literal(table)} "
+                    "ORDER BY ORDINAL_POSITION"
+                )
+                result = run_mssql_sql(dst_uri, sql, "list")
+                if result.returncode != 0:
+                    return None
+                columns = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
+                if "data" in columns:
+                    json_sql = (
+                        f"SELECT DISTINCT LOWER([key]) FROM {full_table} "
+                        "CROSS APPLY OPENJSON([data]) ORDER BY 1"
+                    )
+                    json_result = run_mssql_sql(dst_uri, json_sql, "list")
+                    if json_result.returncode == 0:
+                        json_columns = [
+                            line.strip()
+                            for line in json_result.stdout.strip().split("\n")
+                            if line.strip()
+                        ]
+                        columns = list(dict.fromkeys(columns + json_columns))
+                return columns
+            else:
+                return None
 
     except Exception:
         return None
@@ -615,7 +968,7 @@ def run_validation(
         for tool_name in tools:
             tool_cfg = tool_configs[tool_name]
 
-            if should_skip_tool(tool_cfg, src["type"], dst["type"]):
+            if should_skip_tool(tool_cfg, src["type"], dst["type"], src_name, dst_name):
                 console.print(f"  [{tool_name}] [dim]SKIP (tool skip rule)[/dim]")
                 skipped += 1
                 continue
@@ -650,7 +1003,7 @@ def run_validation(
 
             if tool_name == "airbyte":
                 check_table = src_table_bare
-                check_schema = src.get("database", "") if src["type"] == "mysql" else dst_schema
+                check_schema = src.get("database", "") if src["type"] in ("mysql", "mongodb") else dst_schema
             else:
                 check_table = dst_table_name
                 check_schema = dst_schema

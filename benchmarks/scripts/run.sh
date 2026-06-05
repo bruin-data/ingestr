@@ -9,4 +9,5 @@ set -euo pipefail
 #   BENCH_ROWS=1000 BENCH_RUNS=3 bash benchmarks/scripts/run.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec uv run "$SCRIPT_DIR/runner.py" "$@"
+BENCH_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+exec uv run --project "$BENCH_DIR" --locked python "$SCRIPT_DIR/runner.py" "$@"

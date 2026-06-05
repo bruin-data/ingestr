@@ -97,6 +97,18 @@ func extractValue(col arrow.Array, idx int) interface{} {
 		return arr.Value(idx)
 	case *array.Float32:
 		return float64(arr.Value(idx))
+	case *array.Decimal128:
+		dt, ok := arr.DataType().(*arrow.Decimal128Type)
+		if !ok {
+			return nil
+		}
+		return arr.Value(idx).ToFloat64(dt.Scale)
+	case *array.Decimal256:
+		dt, ok := arr.DataType().(*arrow.Decimal256Type)
+		if !ok {
+			return nil
+		}
+		return arr.Value(idx).ToFloat64(dt.Scale)
 	case *array.String:
 		return arr.Value(idx)
 	case *array.LargeString:

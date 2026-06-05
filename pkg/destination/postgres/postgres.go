@@ -583,12 +583,14 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
+	colList := strings.Join(quotedColumns, ", ")
+	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
+	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quotedStagingTable, quoteColumns([]string{opts.IncrementalKey})[0])
 	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s`,
+		`INSERT INTO %s (%s) %s`,
 		quotedTargetTable,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		quotedStagingTable,
+		colList,
+		selectClause,
 	)
 	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
 

@@ -74,6 +74,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
         text: "Commands",
         items: [
           { text: "ingest", link: "/commands/ingest.md" },
+          { text: "server", link: "/commands/server.md" },
           { text: "example-uris", link: "/commands/example-uris.md" },
         ],
       },
@@ -94,6 +95,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
             items: [
               { text: "AWS Athena", link: "/supported-sources/athena.md" },
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
+              { text: "Cassandra", link: "/supported-sources/cassandra.md" },
               { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
               { text: "Couchbase", link: "/supported-sources/couchbase.md" },
               { text: "CrateDB", link: "/supported-sources/cratedb.md" },
@@ -113,6 +115,10 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               {
                 text: "Microsoft Fabric",
                 link: "/supported-sources/fabric.md",
+              },
+              {
+                text: "Microsoft OneLake",
+                link: "/supported-sources/onelake.md",
               },
               {
                 text: "Microsoft SQL Server",
@@ -153,6 +159,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Applovin Max", link: "/supported-sources/applovin_max.md"},
               { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Attio", link: "/supported-sources/attio.md" },
+              { text: "Azure Data Lake Storage Gen2", link: "/supported-sources/adls.md" },
               { text: "Bruin", link: "/supported-sources/bruin.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               { text: "ClickUp", link: "/supported-sources/clickup.md" },

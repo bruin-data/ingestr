@@ -1,6 +1,9 @@
 package destination
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 // SCD2 metadata column names. Strategies and destinations must agree on these.
 const (
@@ -25,13 +28,15 @@ func SCD2NonDataColumns(primaryKeys []string) []string {
 }
 
 // AppendSCD2Columns appends the SCD2 metadata column names to cols, skipping
-// any that are already present.
+// any that are already present (case-insensitive).
 func AppendSCD2Columns(cols []string) []string {
 	scd := SCD2MetadataColumns()
 	out := make([]string, len(cols), len(cols)+len(scd))
 	copy(out, cols)
 	for _, c := range scd {
-		if !slices.Contains(cols, c) {
+		if !slices.ContainsFunc(cols, func(existing string) bool {
+			return strings.EqualFold(existing, c)
+		}) {
 			out = append(out, c)
 		}
 	}
