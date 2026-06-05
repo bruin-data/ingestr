@@ -79,7 +79,7 @@ func MapTrinoToDataType(trinoType string) (schema.DataType, int, int, schema.Dat
 	case "JSON":
 		return schema.TypeJSON, 0, 0, schema.TypeUnknown
 	case "UUID":
-		return schema.TypeString, 0, 0, schema.TypeUnknown
+		return schema.TypeUUID, 0, 0, schema.TypeUnknown
 	case "IPADDRESS":
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 	case "INTERVAL":

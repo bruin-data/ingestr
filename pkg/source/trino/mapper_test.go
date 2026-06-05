@@ -38,7 +38,7 @@ func TestMapTrinoToDataType(t *testing.T) {
 		{"timestamp with time zone", schema.TypeTimestampTZ, 0, 0, schema.TypeUnknown},
 		{"timestamp(6) with time zone", schema.TypeTimestampTZ, 0, 0, schema.TypeUnknown},
 		{"json", schema.TypeJSON, 0, 0, schema.TypeUnknown},
-		{"uuid", schema.TypeString, 0, 0, schema.TypeUnknown},
+		{"uuid", schema.TypeUUID, 0, 0, schema.TypeUnknown},
 		{"ipaddress", schema.TypeString, 0, 0, schema.TypeUnknown},
 		{"array(integer)", schema.TypeArray, 0, 0, schema.TypeInt64},
 		{"array(varchar)", schema.TypeArray, 0, 0, schema.TypeString},
