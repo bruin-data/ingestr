@@ -213,7 +213,7 @@ func checkResponse(endpoint string, resp *httpclient.Response) error {
 	}
 	switch resp.StatusCode() {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("balldontlie-fifa API authentication failed for %s (status %d)", endpoint, resp.StatusCode())
+		return fmt.Errorf("balldontlie-fifa API authentication or plan access failed for %s (status %d)", endpoint, resp.StatusCode())
 	case http.StatusTooManyRequests:
 		return fmt.Errorf("balldontlie-fifa API rate limit exceeded for %s (status 429)", endpoint)
 	default:

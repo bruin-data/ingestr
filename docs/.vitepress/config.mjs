@@ -174,6 +174,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               },
               { text: "Fireflies", link: "/supported-sources/fireflies.md" },
               { text: "Fluxx", link: "/supported-sources/fluxx.md" },
+              { text: "football-data.org", link: "/supported-sources/football-data-org.md" },
               { text: "Frankfurter", link: "/supported-sources/frankfurter.md" },
               { text: "Freshdesk", link: "/supported-sources/freshdesk.md" },
               { text: "FundraiseUp", link: "/supported-sources/fundraiseup.md" },

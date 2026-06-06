@@ -1,6 +1,6 @@
 # football-data.org Source Research
 
-Status: planned connector documentation only. No ingestr source has been implemented for football-data.org in this pass.
+Status: implemented in `pkg/source/football_data_org` with supported-source docs at `docs/supported-sources/football-data-org.md`.
 
 Primary docs:
 

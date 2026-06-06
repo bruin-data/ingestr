@@ -1,6 +1,6 @@
 # API-Football Source Research
 
-Status: planned connector documentation only. No ingestr source has been implemented for API-Football in this pass.
+Status: implemented in `pkg/source/api_football` with supported-source docs at `docs/supported-sources/api-football.md`.
 
 Primary docs:
 
