@@ -34,7 +34,7 @@ func TestAPIFootballReadTeamsUsesAuthLeagueAndSeason(t *testing.T) {
 		require.Equal(t, "test-key", r.Header.Get("x-apisports-key"))
 		require.Equal(t, "1", r.URL.Query().Get("league"))
 		require.Equal(t, "2026", r.URL.Query().Get("season"))
-		fmt.Fprint(w, `{"get":"teams","parameters":{"league":"1","season":"2026"},"errors":[],"results":1,"paging":{"current":1,"total":1},"response":[{"team":{"id":50,"name":"Brazil","code":"BRA","country":"Brazil","founded":1914,"national":true,"logo":"https://example.com/bra.png"},"venue":{"id":10,"name":"Maracana","address":"Rua","city":"Rio de Janeiro","capacity":78838,"surface":"grass","image":"https://example.com/venue.png"}}]}`)
+		_, _ = fmt.Fprint(w, `{"get":"teams","parameters":{"league":"1","season":"2026"},"errors":[],"results":1,"paging":{"current":1,"total":1},"response":[{"team":{"id":50,"name":"Brazil","code":"BRA","country":"Brazil","founded":1914,"national":true,"logo":"https://example.com/bra.png"},"venue":{"id":10,"name":"Maracana","address":"Rua","city":"Rio de Janeiro","capacity":78838,"surface":"grass","image":"https://example.com/venue.png"}}]}`)
 	}))
 	defer server.Close()
 
@@ -65,9 +65,9 @@ func TestAPIFootballPlayersPaginates(t *testing.T) {
 		pages = append(pages, r.URL.Query().Get("page"))
 		switch r.URL.Query().Get("page") {
 		case "1":
-			fmt.Fprint(w, `{"errors":[],"paging":{"current":1,"total":2},"response":[{"player":{"id":1,"name":"Player One","firstname":"Player","lastname":"One","age":29,"birth":{"date":"1997-01-01","place":"A","country":"B"},"nationality":"B","height":"180 cm","weight":"75 kg","injured":false,"photo":"p1"},"statistics":[{"team":{"id":50,"name":"Brazil","logo":"bra"},"games":{"position":"Attacker","number":10,"captain":true,"appearences":1,"lineups":1,"minutes":90,"rating":"7.2"},"goals":{"total":1,"assists":0,"saves":null},"cards":{"yellow":0,"yellowred":0,"red":0}}]}]}`)
+			_, _ = fmt.Fprint(w, `{"errors":[],"paging":{"current":1,"total":2},"response":[{"player":{"id":1,"name":"Player One","firstname":"Player","lastname":"One","age":29,"birth":{"date":"1997-01-01","place":"A","country":"B"},"nationality":"B","height":"180 cm","weight":"75 kg","injured":false,"photo":"p1"},"statistics":[{"team":{"id":50,"name":"Brazil","logo":"bra"},"games":{"position":"Attacker","number":10,"captain":true,"appearences":1,"lineups":1,"minutes":90,"rating":"7.2"},"goals":{"total":1,"assists":0,"saves":null},"cards":{"yellow":0,"yellowred":0,"red":0}}]}]}`)
 		case "2":
-			fmt.Fprint(w, `{"errors":[],"paging":{"current":2,"total":2},"response":[{"player":{"id":2,"name":"Player Two","firstname":"Player","lastname":"Two","age":24,"birth":{"date":"2002-02-02"},"nationality":"C","height":"175 cm","weight":"70 kg","injured":false,"photo":"p2"},"statistics":[]}]}`)
+			_, _ = fmt.Fprint(w, `{"errors":[],"paging":{"current":2,"total":2},"response":[{"player":{"id":2,"name":"Player Two","firstname":"Player","lastname":"Two","age":24,"birth":{"date":"2002-02-02"},"nationality":"C","height":"175 cm","weight":"70 kg","injured":false,"photo":"p2"},"statistics":[]}]}`)
 		default:
 			t.Fatalf("unexpected page %q", r.URL.Query().Get("page"))
 		}
@@ -95,7 +95,7 @@ func TestAPIFootballPlayersPaginates(t *testing.T) {
 func TestAPIFootballMatchesFlattenNestedObjects(t *testing.T) {
 	server := fixtureServer(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/fixtures", r.URL.Path)
-		fmt.Fprint(w, fixturesPayload())
+		_, _ = fmt.Fprint(w, fixturesPayload())
 	})
 	defer server.Close()
 
@@ -125,10 +125,10 @@ func TestAPIFootballStadiumsDeriveFromFixturesAndHydrateVenues(t *testing.T) {
 		requested = append(requested, r.URL.Path+"?"+r.URL.RawQuery)
 		switch r.URL.Path {
 		case "/fixtures":
-			fmt.Fprint(w, fixturesPayload())
+			_, _ = fmt.Fprint(w, fixturesPayload())
 		case "/venues":
 			require.Equal(t, "200", r.URL.Query().Get("id"))
-			fmt.Fprint(w, `{"errors":[],"paging":{"current":1,"total":1},"response":[{"id":200,"name":"MetLife Stadium","address":"1 MetLife Stadium Dr","city":"East Rutherford","country":"USA","capacity":82500,"surface":"grass","image":"stadium.png"}]}`)
+			_, _ = fmt.Fprint(w, `{"errors":[],"paging":{"current":1,"total":1},"response":[{"id":200,"name":"MetLife Stadium","address":"1 MetLife Stadium Dr","city":"East Rutherford","country":"USA","capacity":82500,"surface":"grass","image":"stadium.png"}]}`)
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -156,10 +156,10 @@ func TestAPIFootballMatchEventsFanOutFromFixtures(t *testing.T) {
 	server := fixtureServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/fixtures":
-			fmt.Fprint(w, fixturesPayload())
+			_, _ = fmt.Fprint(w, fixturesPayload())
 		case "/fixtures/events":
 			require.Equal(t, "1001", r.URL.Query().Get("fixture"))
-			fmt.Fprint(w, `{"errors":[],"paging":{"current":1,"total":1},"response":[{"time":{"elapsed":23,"extra":null},"team":{"id":50,"name":"Brazil","logo":"bra"},"player":{"id":9,"name":"Forward"},"assist":{"id":10,"name":"Creator"},"type":"Goal","detail":"Normal Goal","comments":null}]}`)
+			_, _ = fmt.Fprint(w, `{"errors":[],"paging":{"current":1,"total":1},"response":[{"time":{"elapsed":23,"extra":null},"team":{"id":50,"name":"Brazil","logo":"bra"},"player":{"id":9,"name":"Forward"},"assist":{"id":10,"name":"Creator"},"type":"Goal","detail":"Normal Goal","comments":null}]}`)
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}

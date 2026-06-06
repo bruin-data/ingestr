@@ -33,7 +33,7 @@ func TestFootballDataOrgReadTeamsUsesAuthCompetitionAndSeason(t *testing.T) {
 	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/competitions/WC/teams", r.URL.Path)
 		require.Equal(t, "2026", r.URL.Query().Get("season"))
-		fmt.Fprint(w, teamsPayload())
+		_, _ = fmt.Fprint(w, teamsPayload())
 	})
 	defer server.Close()
 
@@ -71,7 +71,7 @@ func TestFootballDataOrgMatchesUsesFiltersAndOptionalUnfoldHeaders(t *testing.T)
 		require.Equal(t, "GROUP_A", r.URL.Query().Get("group"))
 		require.Equal(t, "true", r.Header.Get("X-Unfold-Goals"))
 		require.Equal(t, "true", r.Header.Get("X-Unfold-Bookings"))
-		fmt.Fprint(w, matchesPayload())
+		_, _ = fmt.Fprint(w, matchesPayload())
 	})
 	defer server.Close()
 
@@ -97,7 +97,7 @@ func TestFootballDataOrgMatchesUsesFiltersAndOptionalUnfoldHeaders(t *testing.T)
 func TestFootballDataOrgStandingsFlattenTableRows(t *testing.T) {
 	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/competitions/WC/standings", r.URL.Path)
-		fmt.Fprint(w, standingsPayload())
+		_, _ = fmt.Fprint(w, standingsPayload())
 	})
 	defer server.Close()
 
@@ -123,9 +123,9 @@ func TestFootballDataOrgStadiumsDeriveAndDeduplicate(t *testing.T) {
 	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/competitions/WC/teams":
-			fmt.Fprint(w, teamsPayload())
+			_, _ = fmt.Fprint(w, teamsPayload())
 		case "/competitions/WC/matches":
-			fmt.Fprint(w, matchesPayload())
+			_, _ = fmt.Fprint(w, matchesPayload())
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -152,11 +152,11 @@ func TestFootballDataOrgPlayersHydrateTeamSquads(t *testing.T) {
 	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/competitions/WC/teams":
-			fmt.Fprint(w, teamsPayload())
+			_, _ = fmt.Fprint(w, teamsPayload())
 		case "/teams/764":
-			fmt.Fprint(w, teamDetailPayload(764, "Brazil", "BRA", 10, "Forward One"))
+			_, _ = fmt.Fprint(w, teamDetailPayload(764, "Brazil", "BRA", 10, "Forward One"))
 		case "/teams/773":
-			fmt.Fprint(w, teamDetailPayload(773, "France", "FRA", 11, "Forward Two"))
+			_, _ = fmt.Fprint(w, teamDetailPayload(773, "France", "FRA", 11, "Forward Two"))
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -188,7 +188,7 @@ func TestFootballDataOrgMatchEventsUseUnfoldHeadersAndFlatten(t *testing.T) {
 		require.Equal(t, "true", r.Header.Get("X-Unfold-Goals"))
 		require.Equal(t, "true", r.Header.Get("X-Unfold-Bookings"))
 		require.Equal(t, "true", r.Header.Get("X-Unfold-Subs"))
-		fmt.Fprint(w, matchesPayload())
+		_, _ = fmt.Fprint(w, matchesPayload())
 	})
 	defer server.Close()
 
@@ -214,7 +214,7 @@ func TestFootballDataOrgMatchEventsUseUnfoldHeadersAndFlatten(t *testing.T) {
 
 func TestFootballDataOrgReadRespectsExcludeColumns(t *testing.T) {
 	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, teamsPayload())
+		_, _ = fmt.Fprint(w, teamsPayload())
 	})
 	defer server.Close()
 

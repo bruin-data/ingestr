@@ -36,9 +36,9 @@ func TestBallDontLieFIFAReadTeamsUsesAuthSeasonAndPagination(t *testing.T) {
 
 		switch r.URL.Query().Get("cursor") {
 		case "":
-			fmt.Fprint(w, `{"data":[{"id":1,"name":"Argentina","abbreviation":"ARG","country_code":"ARG","confederation":"CONMEBOL"}],"meta":{"next_cursor":2,"per_page":1}}`)
+			_, _ = fmt.Fprint(w, `{"data":[{"id":1,"name":"Argentina","abbreviation":"ARG","country_code":"ARG","confederation":"CONMEBOL"}],"meta":{"next_cursor":2,"per_page":1}}`)
 		case "2":
-			fmt.Fprint(w, `{"data":[{"id":2,"name":"Brazil","abbreviation":"BRA","country_code":"BRA","confederation":"CONMEBOL"}],"meta":{"next_cursor":null,"per_page":1}}`)
+			_, _ = fmt.Fprint(w, `{"data":[{"id":2,"name":"Brazil","abbreviation":"BRA","country_code":"BRA","confederation":"CONMEBOL"}],"meta":{"next_cursor":null,"per_page":1}}`)
 		default:
 			t.Fatalf("unexpected cursor %q", r.URL.Query().Get("cursor"))
 		}
@@ -68,7 +68,7 @@ func TestBallDontLieFIFAReadTeamsUsesAuthSeasonAndPagination(t *testing.T) {
 func TestBallDontLieFIFAReadMatchesFlattensNestedObjects(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/fifa/worldcup/v1/matches", r.URL.Path)
-		fmt.Fprint(w, `{"data":[{"id":11,"match_number":11,"datetime":"2026-06-14T21:00:00Z","status":"scheduled","season":{"id":3,"year":2026},"stage":{"id":1,"name":"Group Stage","order":1},"group":{"id":6,"name":"F"},"stadium":{"id":4,"name":"AT&T Stadium","city":"Dallas","country":"USA"},"home_team":{"id":21,"name":"Netherlands","abbreviation":"NED"},"away_team":null,"away_team_source":{"placeholder":"Runner-up Group C"},"home_score":null,"away_score":null,"has_extra_time":false,"has_penalty_shootout":false}],"meta":{"next_cursor":null}}`)
+		_, _ = fmt.Fprint(w, `{"data":[{"id":11,"match_number":11,"datetime":"2026-06-14T21:00:00Z","status":"scheduled","season":{"id":3,"year":2026},"stage":{"id":1,"name":"Group Stage","order":1},"group":{"id":6,"name":"F"},"stadium":{"id":4,"name":"AT&T Stadium","city":"Dallas","country":"USA"},"home_team":{"id":21,"name":"Netherlands","abbreviation":"NED"},"away_team":null,"away_team_source":{"placeholder":"Runner-up Group C"},"home_score":null,"away_score":null,"has_extra_time":false,"has_penalty_shootout":false}],"meta":{"next_cursor":null}}`)
 	}))
 	defer server.Close()
 
@@ -96,7 +96,7 @@ func TestBallDontLieFIFAReadMatchesFlattensNestedObjects(t *testing.T) {
 func TestBallDontLieFIFAReadRostersFlattensNestedPlayerAndNormalizesStringNull(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/fifa/worldcup/v1/rosters", r.URL.Path)
-		fmt.Fprint(w, `{"data":[{"season":{"id":3,"year":2026},"team_id":21,"player":{"id":9,"name":"Forward Name","short_name":"Forward","position":"FW","date_of_birth":"1999-01-02","country_code":"NED","country_name":"Netherlands","height_cm":184,"jersey_number":"10"},"position":"attacker","appearances":1,"starts":1,"minutes_played":90,"goals":1,"assists":0,"yellow_cards":0,"red_cards":0,"avg_rating":"null"}],"meta":{"next_cursor":null}}`)
+		_, _ = fmt.Fprint(w, `{"data":[{"season":{"id":3,"year":2026},"team_id":21,"player":{"id":9,"name":"Forward Name","short_name":"Forward","position":"FW","date_of_birth":"1999-01-02","country_code":"NED","country_name":"Netherlands","height_cm":184,"jersey_number":"10"},"position":"attacker","appearances":1,"starts":1,"minutes_played":90,"goals":1,"assists":0,"yellow_cards":0,"red_cards":0,"avg_rating":"null"}],"meta":{"next_cursor":null}}`)
 	}))
 	defer server.Close()
 
@@ -125,7 +125,7 @@ func TestBallDontLieFIFAReadRostersFlattensNestedPlayerAndNormalizesStringNull(t
 func TestBallDontLieFIFAReadMatchEventsFlattensNestedPlayers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/fifa/worldcup/v1/match_events", r.URL.Path)
-		fmt.Fprint(w, `{"data":[{"id":700,"match_id":11,"incident_type":"goal","incident_class":"regular","time_minute":23,"added_time":null,"period":"first_half","is_home":true,"player":{"id":9,"name":"Scorer"},"assist_player":{"id":10,"name":"Creator"},"player_in":null,"player_out":null,"home_score":1,"away_score":0,"shootout_sequence":null,"shootout_description":null,"rescinded":false,"reason":null}],"meta":{"next_cursor":null}}`)
+		_, _ = fmt.Fprint(w, `{"data":[{"id":700,"match_id":11,"incident_type":"goal","incident_class":"regular","time_minute":23,"added_time":null,"period":"first_half","is_home":true,"player":{"id":9,"name":"Scorer"},"assist_player":{"id":10,"name":"Creator"},"player_in":null,"player_out":null,"home_score":1,"away_score":0,"shootout_sequence":null,"shootout_description":null,"rescinded":false,"reason":null}],"meta":{"next_cursor":null}}`)
 	}))
 	defer server.Close()
 
@@ -153,7 +153,7 @@ func TestBallDontLieFIFAReadMatchEventsFlattensNestedPlayers(t *testing.T) {
 func TestBallDontLieFIFAReadRespectsLimitAndExcludeColumns(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/fifa/worldcup/v1/teams", r.URL.Path)
-		fmt.Fprint(w, `{"data":[{"id":1,"name":"Argentina","abbreviation":"ARG","country_code":"ARG","confederation":"CONMEBOL"},{"id":2,"name":"Brazil","abbreviation":"BRA","country_code":"BRA","confederation":"CONMEBOL"}],"meta":{"next_cursor":null}}`)
+		_, _ = fmt.Fprint(w, `{"data":[{"id":1,"name":"Argentina","abbreviation":"ARG","country_code":"ARG","confederation":"CONMEBOL"},{"id":2,"name":"Brazil","abbreviation":"BRA","country_code":"BRA","confederation":"CONMEBOL"}],"meta":{"next_cursor":null}}`)
 	}))
 	defer server.Close()
 
