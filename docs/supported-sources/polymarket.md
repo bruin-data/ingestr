@@ -30,7 +30,11 @@ The connector maps each `--source-table` to one read-only endpoint. Rows include
 
 ## Interval behavior
 
-When the endpoint supports server-side time filtering, ingestr maps:
+Quick summary: intervals only narrow the API request for a few Polymarket tables. For `events` and `markets`, the interval means "events or markets scheduled in this date range", not "records updated in this date range". For `price_history`, the interval means "price points in this time range".
+
+Important: using an incremental strategy with intervals on `events` or `markets` can miss records that were created or scheduled outside the interval but updated inside it. Polymarket market responses include `updatedAt`, but the public list endpoint does not document `updatedAt` start/end filters. A reliable update-time sync would need to sort by `updatedAt`, page through results, and filter the returned rows client-side.
+
+When an endpoint supports time filtering, ingestr maps:
 
 - `--interval-start` to the provider's lower-bound time parameter.
 - `--interval-end` to the provider's upper-bound time parameter.
@@ -39,9 +43,9 @@ Polymarket interval mappings:
 
 | Table | API interval params |
 | --- | --- |
-| `events` | `start_date_min`, `end_date_max` as RFC3339 timestamps |
-| `markets` | `start_date_min`, `end_date_max` as RFC3339 timestamps |
-| `price_history` | `startTs`, `endTs` as Unix seconds |
+| `events` | `start_date_min`, `end_date_max` as RFC3339 timestamps. These filter event schedule dates, not `updatedAt`. |
+| `markets` | `start_date_min`, `end_date_max` as RFC3339 timestamps. These filter market schedule dates, not `updatedAt`. |
+| `price_history` | `startTs`, `endTs` as Unix seconds. These filter price-history point timestamps. |
 
 Tables not listed above do not have a documented API-side time filter, so intervals are not pushed down for those tables.
 

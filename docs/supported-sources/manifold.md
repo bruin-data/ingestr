@@ -31,14 +31,18 @@ Each `--source-table` maps to one public endpoint. Rows include selected stable 
 
 ## Interval behavior
 
+Quick summary: intervals are creation-time filters for the Manifold tables that support them. For `bets` and `transactions`, both start and end are sent to the API. For `search_markets` and `groups`, only `--interval-end` is sent, so the request asks for items created before that time.
+
+Important: using an incremental strategy with intervals for market discovery can miss markets that were created outside the interval but updated inside it. Manifold market responses include update timestamps, and the `markets` endpoint can sort by `updated-time`, but it does not provide updated-time start/end filters. A reliable update-time sync would need to request markets sorted by `updated-time`, page through results, and filter the returned rows client-side.
+
 When the endpoint supports server-side time filtering, ingestr pushes intervals into the API call:
 
 | Table | API interval params |
 | --- | --- |
-| `bets` | `afterTime`, `beforeTime` as Unix milliseconds |
-| `transactions` | `after`, `before` as Unix milliseconds |
-| `search_markets` | `beforeTime` from `--interval-end` as Unix milliseconds |
-| `groups` | `beforeTime` from `--interval-end` as Unix milliseconds |
+| `bets` | `afterTime`, `beforeTime` as Unix milliseconds. These filter bet creation time. |
+| `transactions` | `after`, `before` as Unix milliseconds. These filter transaction creation time. |
+| `search_markets` | `beforeTime` from `--interval-end` as Unix milliseconds. This is a market created-time pagination cursor for `sort=newest`; `--interval-start` is not pushed down. |
+| `groups` | `beforeTime` from `--interval-end` as Unix milliseconds. This filters group/topic creation time; `--interval-start` is not pushed down. |
 
 Tables not listed above do not have a documented API-side time filter, so intervals are not pushed down for those tables.
 

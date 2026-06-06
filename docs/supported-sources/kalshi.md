@@ -30,15 +30,19 @@ Each `--source-table` maps to one public endpoint. Rows include selected stable 
 
 ## Interval behavior
 
+Quick summary: intervals narrow the API request for market discovery, trades, and candlesticks. For `markets`, the interval means "markets created in this date range", not "markets updated in this date range". For trades, it means "trades in this time range". For candlesticks, it means "candlestick periods in this time range".
+
+Important: using an incremental strategy with intervals on `markets` can miss markets that were created outside the interval but updated inside it. Kalshi does expose `min_updated_ts`, so ingestr can ask for markets updated after a start time. However, Kalshi does not expose a matching `max_updated_ts`, ignores undocumented `max_updated_ts`, and rejects `min_updated_ts` when combined with most other filters such as `status=open`. A reliable "updated between start and end" sync would need `min_updated_ts` plus client-side filtering for the interval end.
+
 When an endpoint supports server-side time filtering, ingestr pushes intervals into the API call:
 
 | Table | API interval params |
 | --- | --- |
-| `markets` | `min_created_ts`, `max_created_ts` as Unix seconds |
-| `market_trades` | `min_ts`, `max_ts` as Unix seconds |
-| `historical_trades` | `min_ts`, `max_ts` as Unix seconds |
-| `market_candlesticks` | required `start_ts`, `end_ts` as Unix seconds |
-| `market_candlesticks_batch` | required `start_ts`, `end_ts` as Unix seconds |
+| `markets` | `min_created_ts`, `max_created_ts` as Unix seconds. These filter market creation time, not `updated_time`. |
+| `market_trades` | `min_ts`, `max_ts` as Unix seconds. These filter trade creation/execution time. |
+| `historical_trades` | `min_ts`, `max_ts` as Unix seconds. These filter trade creation/execution time. |
+| `market_candlesticks` | required `start_ts`, `end_ts` as Unix seconds. These filter candlestick periods. |
+| `market_candlesticks_batch` | required `start_ts`, `end_ts` as Unix seconds. These filter candlestick periods. |
 
 `market_candlesticks` and `market_candlesticks_batch` require both `--interval-start` and `--interval-end` because Kalshi requires those parameters.
 
