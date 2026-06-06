@@ -64,6 +64,16 @@ ingestr ingest \
   --dest-table manifold.bets
 ```
 
+Market probabilities for multiple markets use repeated `ids` URI parameters:
+
+```bash
+ingestr ingest \
+  --source-uri 'manifold://?ids=<market-id-1>&ids=<market-id-2>' \
+  --source-table market_probabilities \
+  --dest-uri 'duckdb:///manifold.duckdb' \
+  --dest-table manifold.market_probabilities
+```
+
 ## Tables
 
 | Table | Required URI params | Optional URI params | PK | Inc Key | Details |
@@ -92,6 +102,10 @@ ingestr ingest \
 
 ## Notes
 
+- A practical smoke-test flow is: ingest `markets`, use a returned `id` or `slug` for market detail/probability/bets/comments, ingest `users`, then use a returned `id` or `username` for user and portfolio tables.
+- `market_probabilities` expects repeated `ids` parameters for multiple markets. A single comma-separated `ids` value is sent as one string and is rejected by the Manifold API.
+- `boost_history` may return no rows for many markets. The Manifold API response is wrapped in a `boosts` array, so empty boost history should be expected for ordinary markets.
+- When loading into DuckDB, `--schema-naming direct` is currently the safest option for Manifold tables with camelCase columns such as `createdTime`, `userId`, and `contractId`.
 - `raw` is a JSON column containing the full API object.
 - Manifold's public API documents a rate limit of 500 requests per minute per IP.
 - Authenticated write endpoints for betting, market creation, comments, liquidity, bounty, selling, resolving, and moderation are not supported.

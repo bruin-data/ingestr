@@ -57,6 +57,26 @@ ingestr ingest \
   --interval-end '2030-01-01'
 ```
 
+For CLOB pricing/order book tables, first ingest `markets`, then use a CLOB token id from the market payload:
+
+```bash
+ingestr ingest \
+  --source-uri 'polymarket://?token_id=<clob-token-id>' \
+  --source-table orderbook \
+  --dest-uri 'duckdb:///polymarket.duckdb' \
+  --dest-table polymarket.orderbook
+```
+
+For comments, pass the parent entity explicitly:
+
+```bash
+ingestr ingest \
+  --source-uri 'polymarket://?parent_entity_id=<event-id>&parent_entity_type=Event' \
+  --source-table comments \
+  --dest-uri 'duckdb:///polymarket.duckdb' \
+  --dest-table polymarket.comments
+```
+
 ## Tables
 
 | Table | Required URI params | Optional URI params | PK | Inc Key | Details |
@@ -65,7 +85,7 @@ ingestr ingest \
 | `markets` | - | `order`, `ascending`, `slug`, `closed`, `active`, `archived`, `clob_token_ids`, `condition_ids`, `question_ids`, `tag_id`, `related_tags`, `include_tag`, `rfq_enabled` | `id` | `updatedAt` | Polymarket markets from Gamma keyset pagination. Returns market ids, question, condition id, outcomes, prices, CLOB token ids, volume/liquidity, dates, and `raw`. |
 | `tags` | - | `limit`, `offset`, `order`, `ascending`, `include_template` | `id` | `updatedAt` | Tags/categories. |
 | `series` | - | `limit`, `offset`, `order`, `ascending`, `closed`, `active`, `archived` | `id` | `updatedAt` | Event series metadata. |
-| `comments` | - | `market`, `user`, `parent_entity_id`, `parent_entity_type` | `id` | `createdAt` | Public comments. |
+| `comments` | `parent_entity_id`, `parent_entity_type` | `market`, `user` | `id` | `createdAt` | Public comments. Live API calls require a parent entity; event comments use `parent_entity_type=Event`. |
 | `search` | - | `q`, `events_status`, `markets_status` | - | - | Public search results. |
 | `orderbook` | `token_id` | - | `asset_id` | - | CLOB order book for one token. Returns bids, asks, tick size, last trade price, and `raw`. |
 | `price` | `token_id`, `side` | - | - | - | Best price for a token side (`BUY` or `SELL`). |
@@ -80,6 +100,8 @@ ingestr ingest \
 
 ## Notes
 
-- CLOB pricing tables use token ids from the `clobTokenIds` field in `markets`.
+- CLOB pricing tables use CLOB token ids, not Gamma market ids. Get token ids from `markets.raw.clobTokenIds`. Polymarket may return `clobTokenIds` as a JSON-encoded string, so the typed `clobTokenIds` column can be null even when the value is present in `raw`.
+- A practical smoke-test flow is: ingest `markets`, extract a CLOB token id from `raw`, ingest CLOB tables, ingest `trades`, then use a `proxyWallet` from `trades` for `positions`, `closed_positions`, and `activity`.
+- When loading into DuckDB, `--schema-naming direct` is currently the safest option for Polymarket tables with camelCase columns and primary keys such as `transactionHash`.
 - `raw` is a JSON column containing the full API object.
 - Trading, order placement, bridge, relayer, and wallet mutation endpoints are not supported.

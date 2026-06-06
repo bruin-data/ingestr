@@ -46,17 +46,27 @@ When an endpoint supports server-side time filtering, ingestr pushes intervals i
 
 ```bash
 ingestr ingest \
-  --source-uri 'kalshi://?series_ticker=KXHIGHNY&status=open' \
+  --source-uri 'kalshi://?status=open' \
   --source-table markets \
   --dest-uri 'duckdb:///kalshi.duckdb' \
   --dest-table kalshi.markets
+```
+
+Use a `ticker` and `event_ticker` returned by `markets` for single-market tables:
+
+```bash
+ingestr ingest \
+  --source-uri 'kalshi://?ticker=<market-ticker>' \
+  --source-table market_orderbook \
+  --dest-uri 'duckdb:///kalshi.duckdb' \
+  --dest-table kalshi.market_orderbook
 ```
 
 Candlestick example:
 
 ```bash
 ingestr ingest \
-  --source-uri 'kalshi://?series_ticker=KXHIGHNY&ticker=<market-ticker>&period_interval=60' \
+  --source-uri 'kalshi://?series_ticker=<series-ticker>&ticker=<market-ticker>&period_interval=60' \
   --source-table market_candlesticks \
   --interval-start '2026-01-01' \
   --interval-end '2026-01-02' \
@@ -87,6 +97,9 @@ ingestr ingest \
 
 ## Notes
 
-- Use `status=open` to limit live market discovery.
+- Use `status=open` to find currently populated live markets. Some series return zero events or markets, so a reliable smoke-test flow is: ingest `markets` with `status=open`, take a returned `ticker` and `event_ticker`, derive the series ticker from the event ticker prefix, then call `market_by_ticker`, `event_by_ticker`, order book, trade, and candlestick tables.
+- `market_candlesticks` and `market_candlesticks_batch` require both `--interval-start` and `--interval-end`. Use a short window around the selected market's active period to avoid empty results.
+- Batch order books use the `tickers` URI parameter, while batch candlesticks use `market_tickers`.
 - Kalshi order books return YES and NO bids; asks are implied by binary market mechanics.
+- When loading into DuckDB, `--schema-naming direct` is currently the safest option for these tables because many provider field names are mixed case or already provider-specific.
 - Authenticated trading, portfolio, order, account, and RFQ endpoints are not supported.
