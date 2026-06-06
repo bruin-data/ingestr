@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,6 @@ import (
 
 const (
 	defaultPageLimit = 100
-	defaultMaxPages  = 10
 )
 
 type PaginationKind string
@@ -185,10 +185,6 @@ func (s *JSONAPISource) FetchRows(ctx context.Context, spec TableSpec, opts sour
 	}
 
 	maxRows := opts.Limit
-	maxPages := spec.MaxPages
-	if maxPages <= 0 {
-		maxPages = defaultMaxPages
-	}
 
 	var rows []map[string]interface{}
 	var cursor string
@@ -197,7 +193,11 @@ func (s *JSONAPISource) FetchRows(ctx context.Context, spec TableSpec, opts sour
 	before := ""
 	timeCursor := ""
 
-	for pageNo := 0; pageNo < maxPages; pageNo++ {
+	for pageNo := 0; ; pageNo++ {
+		if spec.MaxPages > 0 && pageNo >= spec.MaxPages {
+			return nil, fmt.Errorf("table %s reached max page limit of %d before pagination completed", spec.Name, spec.MaxPages)
+		}
+
 		query := s.buildQuery(spec, opts)
 		switch spec.Pagination {
 		case PaginationCursor, PaginationKeyset:
@@ -318,7 +318,11 @@ func (s *JSONAPISource) validateRequired(spec TableSpec) error {
 
 func (s *JSONAPISource) buildQuery(spec TableSpec, opts source.ReadOptions) url.Values {
 	query := url.Values{}
+	pathParams := pathParamNames(spec)
 	for _, name := range spec.QueryParams {
+		if pathParams[name] {
+			continue
+		}
 		if values, ok := s.Params[name]; ok {
 			for _, value := range values {
 				if value != "" {
@@ -337,6 +341,16 @@ func (s *JSONAPISource) buildQuery(spec TableSpec, opts source.ReadOptions) url.
 		query.Set(spec.IntervalEndParam, formatInterval(*opts.IntervalEnd, spec.IntervalRFC3339, spec.IntervalUnixMillis))
 	}
 	return query
+}
+
+func pathParamNames(spec TableSpec) map[string]bool {
+	params := make(map[string]bool, len(spec.RequiredParams))
+	for _, name := range spec.RequiredParams {
+		if strings.Contains(spec.Path, "{"+name+"}") {
+			params[name] = true
+		}
+	}
+	return params
 }
 
 func formatInterval(t time.Time, rfc3339, millis bool) string {
@@ -473,9 +487,5 @@ func SortedTableNames(tables map[string]TableSpec) []string {
 }
 
 func sortStrings(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
+	sort.Strings(values)
 }

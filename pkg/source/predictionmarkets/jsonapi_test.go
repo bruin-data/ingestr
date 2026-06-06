@@ -2,8 +2,10 @@ package predictionmarkets
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +69,102 @@ func TestFetchRowsUsesIntervalParams(t *testing.T) {
 	}
 	if rawQuery != "afterTime=1700000000000&beforeTime=1700003600000&limit=1" {
 		t.Fatalf("query = %q", rawQuery)
+	}
+}
+
+func TestFetchRowsDoesNotApplyDefaultPageCap(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if requests <= 12 {
+			_, _ = fmt.Fprintf(w, `[{"id":"%d"}]`, requests)
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+
+	api := &JSONAPISource{
+		Scheme: "test",
+		Params: map[string][]string{},
+		Client: NewClient(server.URL, 0, 0),
+	}
+	defer func() { _ = api.Close(context.Background()) }()
+
+	rows, err := api.FetchRows(context.Background(), TableSpec{
+		Name:         "items",
+		Path:         "/items",
+		Columns:      []schema.Column{{Name: "id", DataType: schema.TypeString, Nullable: true}},
+		Pagination:   PaginationOffset,
+		LimitParam:   "limit",
+		LimitDefault: 1,
+		OffsetParam:  "offset",
+	}, source.ReadOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rows) != 12 {
+		t.Fatalf("got %d rows, want 12", len(rows))
+	}
+	if requests != 13 {
+		t.Fatalf("got %d requests, want 13", requests)
+	}
+}
+
+func TestFetchRowsErrorsWhenExplicitMaxPagesReached(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"1"}]`))
+	}))
+	defer server.Close()
+
+	api := &JSONAPISource{
+		Scheme: "test",
+		Params: map[string][]string{},
+		Client: NewClient(server.URL, 0, 0),
+	}
+	defer func() { _ = api.Close(context.Background()) }()
+
+	_, err := api.FetchRows(context.Background(), TableSpec{
+		Name:         "items",
+		Path:         "/items",
+		Columns:      []schema.Column{{Name: "id", DataType: schema.TypeString, Nullable: true}},
+		Pagination:   PaginationOffset,
+		LimitParam:   "limit",
+		LimitDefault: 1,
+		OffsetParam:  "offset",
+		MaxPages:     2,
+	}, source.ReadOptions{})
+	if err == nil {
+		t.Fatal("expected max page limit error")
+	}
+	if !strings.Contains(err.Error(), "reached max page limit of 2") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildQuerySkipsPathParams(t *testing.T) {
+	api := &JSONAPISource{
+		Scheme: "test",
+		Params: map[string][]string{
+			"ticker": {"ABC"},
+			"depth":  {"10"},
+		},
+	}
+
+	query := api.buildQuery(TableSpec{
+		Name:           "orderbook",
+		Path:           "/markets/{ticker}/orderbook",
+		QueryParams:    []string{"ticker", "depth"},
+		RequiredParams: []string{"ticker"},
+	}, source.ReadOptions{})
+
+	if got := query.Get("ticker"); got != "" {
+		t.Fatalf("ticker query param = %q, want empty", got)
+	}
+	if got := query.Get("depth"); got != "10" {
+		t.Fatalf("depth query param = %q, want 10", got)
 	}
 }
 
