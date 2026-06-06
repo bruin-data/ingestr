@@ -263,6 +263,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>API-Football</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>AppsFlyer</td>
         <td>✅</td>
         <td>-</td>
@@ -301,6 +306,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>Azure Data Lake Storage Gen2</td>
         <td>✅</td>
         <td>✅</td>
+    </tr>
+    <tr>
+        <td>BallDontLie FIFA</td>
+        <td>✅</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Bruin</td>
