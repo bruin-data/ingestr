@@ -187,3 +187,27 @@ func TestWistiaDateRange(t *testing.T) {
 	assert.Equal(t, "2026-01-02", start)
 	require.NotEmpty(t, end)
 }
+
+func TestResponseItems(t *testing.T) {
+	t.Run("rejects unexpected object for array response", func(t *testing.T) {
+		items, err := responseItems([]byte(`{"pagination":{"next":2}}`), true)
+		require.Error(t, err)
+		assert.Nil(t, items)
+		assert.Contains(t, err.Error(), "expected array response")
+	})
+
+	t.Run("keeps object for single item response", func(t *testing.T) {
+		items, err := responseItems([]byte(`{"id":"abc123","name":"A"}`), false)
+		require.NoError(t, err)
+		require.Len(t, items, 1)
+		assert.Equal(t, "abc123", items[0]["id"])
+	})
+
+	t.Run("unwraps recognized array envelope", func(t *testing.T) {
+		items, err := responseItems([]byte(`{"data":[{"id":"a"},{"id":"b"}]}`), true)
+		require.NoError(t, err)
+		require.Len(t, items, 2)
+		assert.Equal(t, "a", items[0]["id"])
+		assert.Equal(t, "b", items[1]["id"])
+	})
+}

@@ -532,9 +532,6 @@ func (s *WistiaSource) readPaginated(ctx context.Context, table string, cfg tabl
 
 		if opts.Limit > 0 {
 			remaining := opts.Limit - total
-			if remaining <= 0 {
-				break
-			}
 			if len(items) > remaining {
 				items = items[:remaining]
 			}
@@ -686,6 +683,7 @@ func responseItems(body []byte, expectArray bool) ([]map[string]interface{}, err
 			if data, ok := value["results"].([]interface{}); ok {
 				return interfaceSliceToItems(data), nil
 			}
+			return nil, fmt.Errorf("expected array response or object envelope with data, items, or results")
 		}
 		return []map[string]interface{}{value}, nil
 	case nil:
