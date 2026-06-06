@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -321,7 +322,7 @@ func parseWistiaURI(uri string) (*wistiaCredentials, error) {
 
 	rest := strings.TrimPrefix(uri, "wistia://")
 	if rest == "" || rest == "?" {
-		return nil, fmt.Errorf(authorizationError)
+		return nil, errors.New(authorizationError)
 	}
 
 	var values url.Values
@@ -344,7 +345,7 @@ func parseWistiaURI(uri string) (*wistiaCredentials, error) {
 	}
 
 	if accessToken == "" {
-		return nil, fmt.Errorf(authorizationError)
+		return nil, errors.New(authorizationError)
 	}
 
 	apiVersion := values.Get("api_version")

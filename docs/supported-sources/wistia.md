@@ -56,19 +56,19 @@ Available Data API tables:
 
 Available Stats API tables:
 
-| Table | Description |
-| --- | --- |
-| `stats_account` | Current account stats. |
-| `stats_account_by_date` | Account stats by date. |
-| `stats_events` | Event records. |
-| `stats_events:<media_id>` | Event records filtered by media. |
-| `stats_events_by_visitor:<visitor_key>` | Event records filtered by visitor. |
-| `stats_visitors` | Visitors. |
-| `stats_event:<event_key>` | A single event. |
-| `stats_visitor:<visitor_key>` | A single visitor. |
-| `stats_media:<media_id>` | Stats for a media. |
-| `stats_media_by_date:<media_id>` | Stats for a media by date. |
-| `stats_media_engagement:<media_id>` | Engagement stats for a media. |
-| `stats_project:<project_id>` | Stats for a project/folder. |
+| Table | Description | Incremental |
+| --- | --- | --- |
+| `stats_account` | Current account stats. | No |
+| `stats_account_by_date` | Account stats by date. | Yes, using `date` |
+| `stats_events` | Event records. | Yes, using `received_at` |
+| `stats_events:<media_id>` | Event records filtered by media. | Yes, using `received_at` |
+| `stats_events_by_visitor:<visitor_key>` | Event records filtered by visitor. | Yes, using `received_at` |
+| `stats_visitors` | Visitors. | No |
+| `stats_event:<event_key>` | A single event. | No |
+| `stats_visitor:<visitor_key>` | A single visitor. | No |
+| `stats_media:<media_id>` | Stats for a media. | No |
+| `stats_media_by_date:<media_id>` | Stats for a media by date. | Yes, using `date` |
+| `stats_media_engagement:<media_id>` | Engagement stats for a media. | No |
+| `stats_project:<project_id>` | Stats for a project/folder. | No |
 
 Date-filtered Stats API tables use `--interval-start` and `--interval-end` as Wistia `start_date` and `end_date` query parameters. For `stats_account_by_date`, ingestr sends yesterday/today when no interval is provided because the Wistia endpoint currently returns an internal server error without an explicit date range.
