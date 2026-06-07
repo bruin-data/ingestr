@@ -79,6 +79,54 @@ func TestParseKafkaURI(t *testing.T) {
 			},
 		},
 		{
+			name: "oauthbearer with default AWS credential chain",
+			uri:  "kafka://?bootstrap_servers=b-1.example.kafka.us-east-1.amazonaws.com:9098&group_id=g1&sasl_mechanisms=OAUTHBEARER&aws_region=us-east-1",
+			check: func(t *testing.T, cfg kafkaConfig) {
+				if cfg.SASLMechanism != "OAUTHBEARER" {
+					t.Errorf("SASLMechanism = %q, want %q", cfg.SASLMechanism, "OAUTHBEARER")
+				}
+				if cfg.AWS.Region != "us-east-1" {
+					t.Errorf("AWS.Region = %q, want %q", cfg.AWS.Region, "us-east-1")
+				}
+			},
+		},
+		{
+			name: "oauthbearer with assume role",
+			uri:  "kafka://?bootstrap_servers=localhost:9098&group_id=g1&sasl_mechanisms=OAUTHBEARER&aws_region=us-east-1&aws_role_arn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fmsk&aws_role_session_name=ingestr",
+			check: func(t *testing.T, cfg kafkaConfig) {
+				if cfg.AWS.RoleARN != "arn:aws:iam::123456789012:role/msk" {
+					t.Errorf("AWS.RoleARN = %q, want role ARN", cfg.AWS.RoleARN)
+				}
+				if cfg.AWS.RoleSessionName != "ingestr" {
+					t.Errorf("AWS.RoleSessionName = %q, want ingestr", cfg.AWS.RoleSessionName)
+				}
+			},
+		},
+		{
+			name: "oauthbearer with static session credentials",
+			uri:  "kafka://?bootstrap_servers=localhost:9098&group_id=g1&sasl_mechanisms=OAUTHBEARER&aws_region=us-east-1&aws_access_key_id=AKID&aws_secret_access_key=SECRET&aws_session_token=TOKEN",
+			check: func(t *testing.T, cfg kafkaConfig) {
+				if cfg.AWS.AccessKeyID != "AKID" {
+					t.Errorf("AWS.AccessKeyID = %q, want AKID", cfg.AWS.AccessKeyID)
+				}
+				if cfg.AWS.SecretAccessKey != "SECRET" {
+					t.Errorf("AWS.SecretAccessKey = %q, want SECRET", cfg.AWS.SecretAccessKey)
+				}
+				if cfg.AWS.SessionToken != "TOKEN" {
+					t.Errorf("AWS.SessionToken = %q, want TOKEN", cfg.AWS.SessionToken)
+				}
+			},
+		},
+		{
+			name: "non-oauth ignores incomplete AWS credentials",
+			uri:  "kafka://?bootstrap_servers=localhost:9092&group_id=g1&sasl_mechanisms=PLAIN&sasl_username=user&sasl_password=pass&aws_access_key_id=AKID",
+			check: func(t *testing.T, cfg kafkaConfig) {
+				if cfg.SASLMechanism != "PLAIN" {
+					t.Errorf("SASLMechanism = %q, want PLAIN", cfg.SASLMechanism)
+				}
+			},
+		},
+		{
 			name:    "wrong scheme",
 			uri:     "postgres://localhost:9092",
 			wantErr: true,
@@ -121,6 +169,21 @@ func TestParseKafkaURI(t *testing.T) {
 		{
 			name:    "zero batch_timeout",
 			uri:     "kafka://?bootstrap_servers=localhost:9092&group_id=g1&batch_timeout=0",
+			wantErr: true,
+		},
+		{
+			name:    "oauthbearer missing aws_region",
+			uri:     "kafka://?bootstrap_servers=localhost:9098&group_id=g1&sasl_mechanisms=OAUTHBEARER",
+			wantErr: true,
+		},
+		{
+			name:    "static credentials missing secret",
+			uri:     "kafka://?bootstrap_servers=localhost:9098&group_id=g1&sasl_mechanisms=OAUTHBEARER&aws_region=us-east-1&aws_access_key_id=AKID",
+			wantErr: true,
+		},
+		{
+			name:    "session token without static credentials",
+			uri:     "kafka://?bootstrap_servers=localhost:9098&group_id=g1&sasl_mechanisms=OAUTHBEARER&aws_region=us-east-1&aws_session_token=TOKEN",
 			wantErr: true,
 		},
 	}
@@ -343,22 +406,76 @@ func TestBuildDialer_SASL_SSL(t *testing.T) {
 	}
 }
 
+func TestBuildDialer_OAUTHBEARERAutoTLS(t *testing.T) {
+	s := &KafkaSource{
+		cfg: kafkaConfig{
+			BootstrapServers: "localhost:9098",
+			GroupID:          "test",
+			SASLMechanism:    "OAUTHBEARER",
+			AWS: kafkaAWSConfig{
+				Region: "us-east-1",
+			},
+		},
+	}
+
+	dialer, err := s.buildDialer()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dialer.TLS == nil {
+		t.Error("TLS should be auto-enabled for OAUTHBEARER")
+	}
+	if dialer.SASLMechanism == nil {
+		t.Fatal("SASL mechanism should be set")
+	}
+	if dialer.SASLMechanism.Name() != "OAUTHBEARER" {
+		t.Errorf("SASL mechanism = %q, want OAUTHBEARER", dialer.SASLMechanism.Name())
+	}
+}
+
+func TestBuildDialer_OAUTHBEARERSASLPlaintext(t *testing.T) {
+	s := &KafkaSource{
+		cfg: kafkaConfig{
+			BootstrapServers: "localhost:9092",
+			GroupID:          "test",
+			SecurityProtocol: "SASL_PLAINTEXT",
+			SASLMechanism:    "OAUTHBEARER",
+			AWS: kafkaAWSConfig{
+				Region: "us-east-1",
+			},
+		},
+	}
+
+	dialer, err := s.buildDialer()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dialer.TLS != nil {
+		t.Error("TLS should be nil when OAUTHBEARER explicitly uses SASL_PLAINTEXT")
+	}
+	if dialer.SASLMechanism == nil {
+		t.Fatal("SASL mechanism should be set")
+	}
+}
+
 func TestBuildSASLMechanism(t *testing.T) {
 	tests := []struct {
-		name      string
-		mechanism string
-		wantErr   bool
+		name    string
+		cfg     kafkaConfig
+		wantErr bool
 	}{
-		{name: "PLAIN", mechanism: "PLAIN"},
-		{name: "SCRAM-SHA-256", mechanism: "SCRAM-SHA-256"},
-		{name: "SCRAM-SHA-512", mechanism: "SCRAM-SHA-512"},
-		{name: "lowercase plain", mechanism: "plain"},
-		{name: "unsupported", mechanism: "OAUTHBEARER", wantErr: true},
+		{name: "PLAIN", cfg: kafkaConfig{SASLMechanism: "PLAIN", SASLUsername: "user", SASLPassword: "pass"}},
+		{name: "SCRAM-SHA-256", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-256", SASLUsername: "user", SASLPassword: "pass"}},
+		{name: "SCRAM-SHA-512", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-512", SASLUsername: "user", SASLPassword: "pass"}},
+		{name: "lowercase plain", cfg: kafkaConfig{SASLMechanism: "plain", SASLUsername: "user", SASLPassword: "pass"}},
+		{name: "OAUTHBEARER", cfg: kafkaConfig{SASLMechanism: "OAUTHBEARER", AWS: kafkaAWSConfig{Region: "us-east-1"}}},
+		{name: "oauthbearer missing region", cfg: kafkaConfig{SASLMechanism: "OAUTHBEARER"}, wantErr: true},
+		{name: "unsupported", cfg: kafkaConfig{SASLMechanism: "unsupported"}, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := buildSASLMechanism(tt.mechanism, "user", "pass")
+			m, err := buildSASLMechanism(tt.cfg)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -372,6 +489,59 @@ func TestBuildSASLMechanism(t *testing.T) {
 				t.Fatal("mechanism is nil")
 			}
 		})
+	}
+}
+
+func TestOAuthBearerMechanismStart(t *testing.T) {
+	calls := 0
+	m := oauthBearerMechanism{
+		generate: func(context.Context) (string, error) {
+			calls++
+			return "test-token", nil
+		},
+	}
+
+	state, ir, err := m.Start(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []byte("n,,\x01auth=Bearer test-token\x01\x01")
+	if string(ir) != string(want) {
+		t.Errorf("initial response = %q, want %q", string(ir), string(want))
+	}
+	done, response, err := state.Next(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected Next error: %v", err)
+	}
+	if !done {
+		t.Error("Next done = false, want true")
+	}
+	if response != nil {
+		t.Errorf("Next response = %v, want nil", response)
+	}
+
+	_, _, err = m.Start(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected second Start error: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("token generator calls = %d, want 2", calls)
+	}
+}
+
+func TestOAuthBearerMechanismStartError(t *testing.T) {
+	m := oauthBearerMechanism{
+		generate: func(context.Context) (string, error) {
+			return "", errors.New("no credentials")
+		},
+	}
+
+	_, _, err := m.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to generate MSK IAM auth token") {
+		t.Errorf("error = %v, want MSK IAM context", err)
 	}
 }
 

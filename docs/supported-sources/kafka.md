@@ -13,10 +13,17 @@ kafka://?bootstrap_servers=localhost:9092&group_id=test_group&security_protocol=
 URI parameters:
 - `bootstrap_servers`: Required, the Kafka server or servers to connect to, typically in the form of a host and port, e.g. `localhost:9092`
 - `group_id`: Required, the consumer group ID used for identifying the client when consuming messages.
-- `security_protocol`: The protocol used to communicate with brokers, e.g. `SASL_SSL` for secure communication.
-- `sasl_mechanisms`: The SASL mechanism to be used for authentication, e.g. `PLAIN`.
+- `security_protocol`: The protocol used to communicate with brokers, e.g. `SASL_SSL` for secure communication. `OAUTHBEARER` automatically enables TLS unless this is set to `SASL_PLAINTEXT`.
+- `sasl_mechanisms`: The SASL mechanism to be used for authentication. Supported values are `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, and `OAUTHBEARER`.
 - `sasl_username`: The username for SASL authentication.
 - `sasl_password`: The password for SASL authentication.
+- `aws_region`: Required for `OAUTHBEARER`; the AWS region used to sign Amazon MSK IAM tokens.
+- `aws_role_arn`: Optional for `OAUTHBEARER`; IAM role to assume before signing.
+- `aws_role_session_name`: Optional for `OAUTHBEARER`; STS session name when `aws_role_arn` is supplied.
+- `aws_profile`: Optional for `OAUTHBEARER`; AWS named profile used for signing.
+- `aws_access_key_id`: Optional for `OAUTHBEARER`; static AWS access key ID.
+- `aws_secret_access_key`: Optional for `OAUTHBEARER`; static AWS secret access key. Must be provided with `aws_access_key_id`.
+- `aws_session_token`: Optional for `OAUTHBEARER`; static AWS session token.
 - `batch_size`: The number of messages to fetch in a single batch, defaults to 3000.
 - `batch_timeout`: The maximum time to wait for messages, defaults to 3 seconds.
 
@@ -36,3 +43,16 @@ ingestr ingest \
 ```
 
 The result of this command will be a table in the `kafka.duckdb` database with JSON columns.
+
+### Amazon MSK IAM
+Amazon MSK clusters that use IAM access control require `OAUTHBEARER` and usually listen on port `9098`:
+
+```sh
+ingestr ingest \
+    --source-uri 'kafka://?bootstrap_servers=b-1.mycluster.kafka.us-east-1.amazonaws.com:9098&group_id=test_group&sasl_mechanisms=OAUTHBEARER&aws_region=us-east-1' \
+    --source-table 'my-topic' \
+    --dest-uri duckdb:///kafka.duckdb \
+    --dest-table 'dest.my_topic'
+```
+
+When no AWS credential parameters are supplied, ingestr uses the default AWS credential chain, including environment variables, shared config, EC2/ECS/EKS roles, IRSA, and EKS Pod Identity.

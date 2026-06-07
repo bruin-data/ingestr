@@ -40,8 +40,19 @@ type kafkaConfig struct {
 	SASLMechanism    string
 	SASLUsername     string
 	SASLPassword     string
+	AWS              kafkaAWSConfig
 	BatchSize        int
 	BatchTimeout     time.Duration
+}
+
+type kafkaAWSConfig struct {
+	Region          string
+	RoleARN         string
+	RoleSessionName string
+	Profile         string
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string
 }
 
 type KafkaSource struct {
@@ -355,14 +366,18 @@ func (s *KafkaSource) buildDialer() (*kafkago.Dialer, error) {
 		DualStack: true,
 	}
 
-	if s.cfg.SecurityProtocol == "SASL_SSL" || s.cfg.SecurityProtocol == "SSL" {
+	securityProtocol := strings.ToUpper(s.cfg.SecurityProtocol)
+	saslMechanism := strings.ToUpper(s.cfg.SASLMechanism)
+
+	if securityProtocol == "SASL_SSL" || securityProtocol == "SSL" ||
+		(saslMechanism == "OAUTHBEARER" && securityProtocol != "SASL_PLAINTEXT") {
 		dialer.TLS = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
 	}
 
-	if s.cfg.SASLMechanism != "" && s.cfg.SASLUsername != "" {
-		mechanism, err := buildSASLMechanism(s.cfg.SASLMechanism, s.cfg.SASLUsername, s.cfg.SASLPassword)
+	if s.cfg.SASLMechanism != "" && (s.cfg.SASLUsername != "" || saslMechanism == "OAUTHBEARER") {
+		mechanism, err := buildSASLMechanism(s.cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -372,27 +387,29 @@ func (s *KafkaSource) buildDialer() (*kafkago.Dialer, error) {
 	return dialer, nil
 }
 
-func buildSASLMechanism(mechanism, username, password string) (sasl.Mechanism, error) {
-	switch strings.ToUpper(mechanism) {
+func buildSASLMechanism(cfg kafkaConfig) (sasl.Mechanism, error) {
+	switch strings.ToUpper(cfg.SASLMechanism) {
 	case "PLAIN":
 		return &plain.Mechanism{
-			Username: username,
-			Password: password,
+			Username: cfg.SASLUsername,
+			Password: cfg.SASLPassword,
 		}, nil
 	case "SCRAM-SHA-256":
-		m, err := scram.Mechanism(scram.SHA256, username, password)
+		m, err := scram.Mechanism(scram.SHA256, cfg.SASLUsername, cfg.SASLPassword)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SCRAM-SHA-256 mechanism: %w", err)
 		}
 		return m, nil
 	case "SCRAM-SHA-512":
-		m, err := scram.Mechanism(scram.SHA512, username, password)
+		m, err := scram.Mechanism(scram.SHA512, cfg.SASLUsername, cfg.SASLPassword)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SCRAM-SHA-512 mechanism: %w", err)
 		}
 		return m, nil
+	case "OAUTHBEARER":
+		return newOAuthBearerMechanism(cfg.AWS)
 	default:
-		return nil, fmt.Errorf("unsupported SASL mechanism: %s (supported: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512)", mechanism)
+		return nil, fmt.Errorf("unsupported SASL mechanism: %s (supported: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512, OAUTHBEARER)", cfg.SASLMechanism)
 	}
 }
 
@@ -490,13 +507,36 @@ func parseKafkaURI(uri string) (kafkaConfig, error) {
 		batchTimeout = time.Duration(parsed) * time.Second
 	}
 
+	saslMechanism := values.Get("sasl_mechanisms")
+	awsCfg := kafkaAWSConfig{
+		Region:          values.Get("aws_region"),
+		RoleARN:         values.Get("aws_role_arn"),
+		RoleSessionName: values.Get("aws_role_session_name"),
+		Profile:         values.Get("aws_profile"),
+		AccessKeyID:     values.Get("aws_access_key_id"),
+		SecretAccessKey: values.Get("aws_secret_access_key"),
+		SessionToken:    values.Get("aws_session_token"),
+	}
+	if strings.EqualFold(saslMechanism, "OAUTHBEARER") {
+		if awsCfg.Region == "" {
+			return kafkaConfig{}, fmt.Errorf("aws_region is required for OAUTHBEARER")
+		}
+		if (awsCfg.AccessKeyID == "") != (awsCfg.SecretAccessKey == "") {
+			return kafkaConfig{}, fmt.Errorf("aws_access_key_id and aws_secret_access_key must be provided together")
+		}
+		if awsCfg.SessionToken != "" && (awsCfg.AccessKeyID == "" || awsCfg.SecretAccessKey == "") {
+			return kafkaConfig{}, fmt.Errorf("aws_session_token requires aws_access_key_id and aws_secret_access_key")
+		}
+	}
+
 	return kafkaConfig{
 		BootstrapServers: bootstrapServers,
 		GroupID:          groupID,
 		SecurityProtocol: values.Get("security_protocol"),
-		SASLMechanism:    values.Get("sasl_mechanisms"),
+		SASLMechanism:    saslMechanism,
 		SASLUsername:     values.Get("sasl_username"),
 		SASLPassword:     values.Get("sasl_password"),
+		AWS:              awsCfg,
 		BatchSize:        batchSize,
 		BatchTimeout:     batchTimeout,
 	}, nil
