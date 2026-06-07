@@ -1,14 +1,21 @@
+# /// script
+# requires-python = ">=3.13,<3.14"
+# dependencies = [
+#     "pyyaml>=6.0",
+#     "rich>=13.0",
+# ]
+# ///
 """Benchmark runner for gong vs other data ingestion tools.
 
 Reads scenario definitions from scenarios.yaml and orchestrates hyperfine benchmarks.
 
 Usage:
-    uv run --project benchmarks python benchmarks/scripts/runner.py
-    uv run --project benchmarks python benchmarks/scripts/runner.py --rows 1000 --runs 3
-    uv run --project benchmarks python benchmarks/scripts/runner.py --tools gong sling
-    uv run --project benchmarks python benchmarks/scripts/runner.py --scenarios '*bigquery*'
-    uv run --project benchmarks python benchmarks/scripts/runner.py --validate
-    uv run --project benchmarks python benchmarks/scripts/runner.py --report
+    uv run --no-project --script benchmarks/scripts/runner.py
+    uv run --no-project --script benchmarks/scripts/runner.py --rows 1000 --runs 3
+    uv run --no-project --script benchmarks/scripts/runner.py --tools gong sling
+    uv run --no-project --script benchmarks/scripts/runner.py --scenarios '*bigquery*'
+    uv run --no-project --script benchmarks/scripts/runner.py --validate
+    uv run --no-project --script benchmarks/scripts/runner.py --report
 """
 
 import argparse
@@ -20,7 +27,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
 from datetime import datetime
 from pathlib import Path
 
@@ -158,6 +165,20 @@ def snowflake_literal(value: str) -> str:
 
 def mssql_literal(value: str) -> str:
     return "N'" + value.replace("'", "''") + "'"
+
+
+def legacy_ingestr_mssql_uri(uri: str) -> str:
+    parsed = urlparse(uri)
+    if parsed.scheme not in ("mssql", "sqlserver"):
+        return uri
+
+    params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    encrypt = params.pop("encrypt", params.pop("Encrypt", None))
+    if encrypt is not None:
+        params["Encrypt"] = "no" if encrypt.lower() in ("disable", "false", "no", "0") else encrypt
+    params.setdefault("driver", "ODBC Driver 18 for SQL Server")
+    params.setdefault("TrustServerCertificate", "yes")
+    return urlunparse(parsed._replace(scheme="mssql", query=urlencode(params)))
 
 
 def snowflake_sql_command(uri: str, sql: str, mode: str = "exec") -> str:
@@ -353,10 +374,10 @@ def uri_option(flag: str, uri: str, tool_cfg: dict | None = None) -> str:
     return f"{flag} {shell_uri_arg(uri, tool_cfg)}"
 
 
-def uv_python_command(script: Path) -> str:
+def uv_python_command(script: Path, python: str = "3.13") -> str:
     return (
-        f"uv run --project {shlex.quote(str(BENCH_DIR))} --locked "
-        f"python {shlex.quote(str(script))}"
+        f"uv run --no-project --python {shlex.quote(python)} "
+        f"--script {shlex.quote(str(script))}"
     )
 
 
@@ -400,20 +421,24 @@ def build_tool_command(
     if tool_name == "ingestr":
         prefix = tool_cfg.get(
             "command_prefix",
-            "uv tool run --python 3.11 ingestr@0.14.141 ingest",
+            "uv tool run --python 3.13 ingestr@0.14.141 ingest",
         )
         prefix = f"INGESTR_DISABLE_TELEMETRY=1 DISABLE_TELEMETRY=1 {prefix}"
-        extra = tool_cfg.get("extra_args_by_source", {}).get(src_type, "")
+        src_arg_uri = src_uri
+        dst_arg_uri = legacy_ingestr_mssql_uri(dst_uri) if dst_type in ("mssql", "sqlserver") else dst_uri
+        extras = [
+            tool_cfg.get("extra_args_by_source", {}).get(src_type, ""),
+            tool_cfg.get("extra_args_by_destination", {}).get(dst_type, ""),
+        ]
         parts = [
             prefix,
-            f"--source-uri {shell_uri_arg(src_uri, tool_cfg)}",
+            f"--source-uri {shell_uri_arg(src_arg_uri, tool_cfg)}",
             f"--source-table '{src_table}'",
-            f"--dest-uri {shell_uri_arg(dst_uri, tool_cfg)}",
+            f"--dest-uri {shell_uri_arg(dst_arg_uri, tool_cfg)}",
             f"--dest-table '{dst_table}'",
             "--yes --full-refresh",
         ]
-        if extra:
-            parts.append(extra)
+        parts.extend(extra for extra in extras if extra)
         return " ".join(parts)
 
     if tool_name == "sling":
@@ -444,7 +469,7 @@ def build_tool_command(
         )
         backend_arg = f" --backend {shlex.quote(backend)}" if backend else ""
         return (
-            f"RUNTIME__DLTHUB_TELEMETRY=false {uv_python_command(script)}"
+            f"RUNTIME__DLTHUB_TELEMETRY=false {uv_python_command(script, '3.12')}"
             f" {uri_option('--source-uri', src_uri)}"
             f" --source-table '{src_table}'"
             f" {uri_option('--dest-uri', dst_uri)}"
@@ -455,7 +480,7 @@ def build_tool_command(
     if tool_name == "airbyte":
         script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_airbyte.py")
         return (
-            f"AIRBYTE_ANALYTICS_DISABLED=1 DO_NOT_TRACK=1 {uv_python_command(script)}"
+            f"AIRBYTE_ANALYTICS_DISABLED=1 DO_NOT_TRACK=1 {uv_python_command(script, '3.12')}"
             f" --source-uri {shell_uri_arg(src_uri)}"
             f" --source-table '{src_table}'"
             f" --dest-uri {shell_uri_arg(dst_uri)}"
@@ -1250,25 +1275,8 @@ def main():
     sources = resolve_sources(config, size)
     destinations = resolve_destinations(config)
 
-    # Determine available tools
     tool_configs = config.get("tools", {})
     tool_filter = args.tools or os.environ.get("BENCH_TOOLS", "").split() or None
-
-    available_tools = []
-    for tool_name, tool_cfg in tool_configs.items():
-        if tool_filter and tool_name not in tool_filter:
-            continue
-        if check_tool_available(tool_name, tool_cfg):
-            available_tools.append(tool_name)
-        else:
-            req = tool_cfg.get("requires", tool_cfg.get("binary", "?"))
-            console.print(f"  [dim]Tool '{tool_name}' skipped ({req} not found)[/dim]")
-
-    if not available_tools:
-        console.print("[red]No tools available![/red]")
-        sys.exit(1)
-
-    console.print(f"    Tools: {', '.join(available_tools)}")
 
     # Filter scenarios
     active_scenarios = []
@@ -1297,6 +1305,23 @@ def main():
     if not args.skip_setup:
         run_setup()
         run_seed(rows)
+
+    # Determine available tools after setup so a clean build can create bin/ingestr.
+    available_tools = []
+    for tool_name, tool_cfg in tool_configs.items():
+        if tool_filter and tool_name not in tool_filter:
+            continue
+        if check_tool_available(tool_name, tool_cfg):
+            available_tools.append(tool_name)
+        else:
+            req = tool_cfg.get("requires", tool_cfg.get("binary", "?"))
+            console.print(f"  [dim]Tool '{tool_name}' skipped ({req} not found)[/dim]")
+
+    if not available_tools:
+        console.print("[red]No tools available![/red]")
+        sys.exit(1)
+
+    console.print(f"    Tools: {', '.join(available_tools)}")
 
     # Run
     if args.validate:

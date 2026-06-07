@@ -1,3 +1,17 @@
+# /// script
+# requires-python = ">=3.12,<3.13"
+# dependencies = [
+#     "dlt[postgres,duckdb,bigquery,snowflake,mssql]==1.27.2",
+#     "dlt-verified-sources @ git+https://github.com/dlt-hub/verified-sources.git@75b3ec17eab99d0079d9f61b7f47fc8b899a5738",
+#     "duckdb-engine>=0.17.0",
+#     "pendulum>=3.0.0",
+#     "pyarrow>=17.0,<17.1",
+#     "pymongo>=4.4",
+#     "pymongoarrow==1.5.2",
+#     "pymysql",
+#     "sqlalchemy>=1.4,<3",
+# ]
+# ///
 """Benchmark script for dlt-hub."""
 
 import argparse
