@@ -76,20 +76,20 @@ func TestExcludeMetricsForDateRange(t *testing.T) {
 	}
 
 	t.Run("all excluded when end date is recent", func(t *testing.T) {
-		toDate := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+		toDate := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 		excluded := excludeMetricsForDateRange(metrics, toDate)
 		assert.Equal(t, metrics, excluded)
 	})
 
 	t.Run("none excluded when end date is old enough", func(t *testing.T) {
-		toDate := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+		toDate := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
 		excluded := excludeMetricsForDateRange(metrics, toDate)
 		assert.Empty(t, excluded)
 	})
 
 	t.Run("non-cohort metrics are never excluded", func(t *testing.T) {
 		nonCohort := []string{"clicks", "impressions", "cost"}
-		toDate := time.Now().Format("2006-01-02")
+		toDate := time.Now().UTC().Format("2006-01-02")
 		excluded := excludeMetricsForDateRange(nonCohort, toDate)
 		assert.Empty(t, excluded)
 	})

@@ -63,18 +63,11 @@ func (s *MSSQLSource) Connect(ctx context.Context, uri string) error {
 	return nil
 }
 
-// URIToConnString converts a SQL Server URI to the connection string format
-// expected by go-mssqldb. It is exported for SQL Server-derived sources such as
-// CDC that normalize their own schemes before connecting.
-func URIToConnString(uri string) (string, string, error) {
-	return uriToConnString(uri)
-}
-
-// uriToConnString converts SQL Server and Azure SQL URIs to the connection
+// URIToConnString converts SQL Server and Azure SQL URIs to the connection
 // string format expected by go-mssqldb.
 // URI format: mssql://user:pass@host:port/database?param=value
 // Conn string format: sqlserver://user:pass@host:port?database=db&param=value
-func uriToConnString(uri string) (string, string, error) {
+func URIToConnString(uri string) (string, string, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
 		return "", "", err
