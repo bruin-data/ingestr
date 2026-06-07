@@ -988,7 +988,8 @@ func buildChangesQuery(meta tableMetadata, columns []schema.Column) string {
 	for _, col := range columns {
 		selects = append(selects, quoteIdentifier(col.Name))
 	}
-	selects = append(selects,
+	selects = append(
+		selects,
 		`CONCAT(CONVERT(varchar(20), __$start_lsn, 2), ':', CONVERT(varchar(20), __$seqval, 2), ':', RIGHT('00' + CONVERT(varchar(2), __$operation), 2)) AS __ingestr_cdc_lsn`,
 		`__$operation AS __ingestr_cdc_operation`,
 	)

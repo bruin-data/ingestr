@@ -41,7 +41,8 @@ func TestStoredLSNHelpers(t *testing.T) {
 	assert.Equal(t, "0000002F0000010D0002", startLSNFromStored("0x0000002f0000010d0002"))
 	assert.Empty(t, startLSNFromStored("00000000/00000123"))
 
-	assert.Equal(t,
+	assert.Equal(
+		t,
 		"0000002F0000010D0002:0000002F0000010D0003:04",
 		formatStoredLSN("0000002f0000010d0002", "0000002f0000010d0003", 4),
 	)
