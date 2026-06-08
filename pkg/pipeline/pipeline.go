@@ -1276,7 +1276,7 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 		if override.DataType != schema.TypeUnknown {
 			newCol := override.ApplyToColumn(col)
 			if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale {
-				fmt.Printf("Column override: %q type changed from %v(p=%v,s=%v) to %v(p=%v,s=%v)\n",
+				fmt.Printf("Column override: %q type changed from %s(p=%v,s=%v) to %s(p=%v,s=%v)\n",
 					col.Name, col.DataType, col.Precision, col.Scale, newCol.DataType, newCol.Precision, newCol.Scale)
 			}
 			sourceSchema.Columns[i] = newCol

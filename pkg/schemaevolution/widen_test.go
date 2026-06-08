@@ -28,7 +28,7 @@ func TestCanWiden_SameType(t *testing.T) {
 	}
 
 	for _, dt := range types {
-		t.Run(dataTypeName(dt), func(t *testing.T) {
+		t.Run(dt.String(), func(t *testing.T) {
 			assert.True(t, CanWiden(dt, dt), "same type should always be widenable")
 		})
 	}
@@ -49,7 +49,7 @@ func TestCanWiden_IntegerHierarchy(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(dataTypeName(tt.from)+"_to_"+dataTypeName(tt.to), func(t *testing.T) {
+		t.Run(tt.from.String()+"_to_"+tt.to.String(), func(t *testing.T) {
 			assert.Equal(t, tt.expected, CanWiden(tt.from, tt.to))
 		})
 	}
@@ -68,7 +68,7 @@ func TestCanWiden_IntToFloat(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(dataTypeName(tt.from)+"_to_"+dataTypeName(tt.to), func(t *testing.T) {
+		t.Run(tt.from.String()+"_to_"+tt.to.String(), func(t *testing.T) {
 			assert.Equal(t, tt.expected, CanWiden(tt.from, tt.to))
 		})
 	}
@@ -85,7 +85,7 @@ func TestCanWiden_FloatHierarchy(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(dataTypeName(tt.from)+"_to_"+dataTypeName(tt.to), func(t *testing.T) {
+		t.Run(tt.from.String()+"_to_"+tt.to.String(), func(t *testing.T) {
 			assert.Equal(t, tt.expected, CanWiden(tt.from, tt.to))
 		})
 	}
@@ -100,7 +100,7 @@ func TestCanWiden_NumericToDecimal(t *testing.T) {
 	}
 
 	for _, from := range numericTypes {
-		t.Run(dataTypeName(from)+"_to_DECIMAL", func(t *testing.T) {
+		t.Run(from.String()+"_to_DECIMAL", func(t *testing.T) {
 			assert.True(t, CanWiden(from, schema.TypeDecimal))
 		})
 	}
@@ -125,7 +125,7 @@ func TestCanWiden_ToStringPath(t *testing.T) {
 	}
 
 	for _, from := range typesWithStringPath {
-		t.Run(dataTypeName(from)+"_to_STRING", func(t *testing.T) {
+		t.Run(from.String()+"_to_STRING", func(t *testing.T) {
 			assert.True(t, CanWiden(from, schema.TypeString))
 		})
 	}
@@ -152,7 +152,7 @@ func TestCanWiden_ToJSONPath(t *testing.T) {
 	}
 
 	for _, from := range allTypes {
-		t.Run(dataTypeName(from)+"_to_JSON", func(t *testing.T) {
+		t.Run(from.String()+"_to_JSON", func(t *testing.T) {
 			assert.True(t, CanWiden(from, schema.TypeJSON))
 		})
 	}
@@ -175,7 +175,7 @@ func TestCanWiden_TemporalTypes(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(dataTypeName(tt.from)+"_to_"+dataTypeName(tt.to), func(t *testing.T) {
+		t.Run(tt.from.String()+"_to_"+tt.to.String(), func(t *testing.T) {
 			assert.Equal(t, tt.expected, CanWiden(tt.from, tt.to))
 		})
 	}
@@ -193,7 +193,7 @@ func TestGetWidenedType_SameType(t *testing.T) {
 	}
 
 	for _, dt := range types {
-		t.Run(dataTypeName(dt), func(t *testing.T) {
+		t.Run(dt.String(), func(t *testing.T) {
 			result, warning := GetWidenedType(dt, dt)
 			assert.Equal(t, dt, result)
 			assert.Empty(t, warning)
@@ -357,33 +357,33 @@ func TestDataTypeName(t *testing.T) {
 		dt       schema.DataType
 		expected string
 	}{
-		{schema.TypeBoolean, "BOOLEAN"},
-		{schema.TypeInt16, "INT16"},
-		{schema.TypeInt32, "INT32"},
-		{schema.TypeInt64, "INT64"},
-		{schema.TypeFloat32, "FLOAT32"},
-		{schema.TypeFloat64, "FLOAT64"},
-		{schema.TypeDecimal, "DECIMAL"},
-		{schema.TypeString, "STRING"},
-		{schema.TypeBinary, "BINARY"},
-		{schema.TypeDate, "DATE"},
-		{schema.TypeTime, "TIME"},
-		{schema.TypeTimestamp, "TIMESTAMP"},
-		{schema.TypeTimestampTZ, "TIMESTAMPTZ"},
-		{schema.TypeInterval, "INTERVAL"},
-		{schema.TypeJSON, "JSON"},
-		{schema.TypeUUID, "UUID"},
-		{schema.TypeArray, "ARRAY"},
+		{schema.TypeBoolean, "boolean"},
+		{schema.TypeInt16, "int16"},
+		{schema.TypeInt32, "int32"},
+		{schema.TypeInt64, "int64"},
+		{schema.TypeFloat32, "float32"},
+		{schema.TypeFloat64, "float64"},
+		{schema.TypeDecimal, "decimal"},
+		{schema.TypeString, "string"},
+		{schema.TypeBinary, "binary"},
+		{schema.TypeDate, "date"},
+		{schema.TypeTime, "time"},
+		{schema.TypeTimestamp, "timestamp_ntz"},
+		{schema.TypeTimestampTZ, "timestamp"},
+		{schema.TypeInterval, "interval"},
+		{schema.TypeJSON, "json"},
+		{schema.TypeUUID, "uuid"},
+		{schema.TypeArray, "array"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
-			assert.Equal(t, tt.expected, dataTypeName(tt.dt))
+			assert.Equal(t, tt.expected, tt.dt.String())
 		})
 	}
 }
 
 func TestDataTypeName_Unknown(t *testing.T) {
 	unknown := schema.DataType(99)
-	assert.Equal(t, "UNKNOWN", dataTypeName(unknown))
+	assert.Equal(t, "unknown", unknown.String())
 }
