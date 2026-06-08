@@ -21,9 +21,20 @@ The URI is used to connect to the Intercom API for extracting data.
 
 ## Setting up an Intercom Integration
 
-Intercom requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/intercom).
+To obtain an Intercom access token, create a private app in your workspace:
 
-Once you complete the guide, you should have an access token. Let's say your access token is `dG9rOjE...` and your workspace is in the US region, here's a sample command that will copy the data from Intercom into a DuckDB database:
+1. Sign in to Intercom with the workspace you want to ingest data from, then open the [Intercom Developer Hub](https://developers.intercom.com/) — you can also reach it from within your workspace via **Settings → Integrations → Developer Hub**.
+2. Go to **Your apps** (or open [https://app.intercom.com/developers/_/apps](https://app.intercom.com/developers/_/apps) directly) and click **New app**. Give it a name, select the workspace you want to ingest from, and choose **Internal integration** as the app type.
+3. Open the new app and go to **Authentication** in the left sidebar.
+4. Under **Access token**, click **Generate token** (or copy the existing one). This token is the value you will pass as `access_token`.
+5. Go to **Authentication → Permissions** and enable read access for the resources you intend to ingest:
+   - **Read users and companies** — for `contacts` and `companies`.
+   - **Read conversations** — for `conversations`.
+   - **Read content data** — for `articles` and other help-center content.
+   - **Read and list admins** — for `admins` and `teams`.
+6. Note the region your workspace is hosted in (`us`, `eu`, or `au`). You can confirm it by checking the URL you sign in from: `app.intercom.com` for US, `app.eu.intercom.com` for EU, `app.au.intercom.com` for AU.
+
+Once you have an access token, let's say your access token is `dG9rOjE...` and your workspace is in the US region, here's a sample command that will copy the data from Intercom into a DuckDB database:
 
 ```sh
 ingestr ingest \

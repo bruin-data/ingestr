@@ -21,9 +21,55 @@ The URI is used to connect to Facebook Ads API for extracting data.
 
 ## Setting up a Facebook Ads Integration
 
-Facebook Ads requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/facebook_ads#setup-guide).
+To connect to Facebook Ads, you need to create a Facebook App and obtain an access token.
 
-Once you complete the guide, you should have an access token and an Account ID. Let's say your `access_token` is `abcdef` and `account_id` is `1234`, here's a sample command that will copy the data from Facebook Ads into a DuckDB database:
+### Step 1: Create a Facebook App
+
+1. Go to [Facebook Developers](https://developers.facebook.com/)
+2. Click **My Apps** → **Create App**
+3. Select **Business** as the app type
+4. Enter an app name and contact email
+5. Click **Create App**
+
+### Step 2: Add Marketing API
+
+1. In your app dashboard, click **Add Product**
+2. Find **Marketing API** and click **Set up**
+
+### Step 3: Get Access Token
+
+There are two ways to get an access token:
+
+#### Option A: Graph API Explorer (for testing)
+
+1. Go to [Graph API Explorer](https://developers.facebook.com/tools/explorer/)
+2. Select your app from the dropdown
+3. Set **User or Page** to **User Token**
+4. Add the required permissions:
+   - `ads_read` — required for `campaigns`, `ad_sets`, `ads`, `ad_creatives`, and `facebook_insights`.
+   - `leads_retrieval` — additionally required for the `leads` table.
+   - `business_management` — recommended if you use a System User or need to list all ad accounts in a business.
+5. Click **Generate Access Token** and copy it
+
+> **Note**: This token expires in about an hour. For production, use a System User token (Option B) and exchange it for a never-expiring token.
+
+#### Option B: System User Token (recommended for production)
+
+1. Go to [Business Settings](https://business.facebook.com/settings/)
+2. Navigate to **Users** → **System Users**
+3. Click **Add** to create a new system user
+4. Click **Add Assets** and grant the system user access to every Ad Account you want to ingest from — without this, the token will not be able to read data
+5. Click **Generate New Token**
+6. Select your app and the required permissions (`ads_read`, plus `leads_retrieval` if you ingest the `leads` table)
+7. Choose **Never** for expiration and copy the access token
+
+### Step 4: Get Your Account ID
+
+1. Go to [Facebook Ads Manager](https://www.facebook.com/adsmanager/)
+2. The account selector shows IDs in the form `act_1234567890`
+3. Pass only the numeric part (e.g. `1234567890`) as `account_id` — ingestr automatically prepends `act_` when calling the API
+
+Once you have your access token and Account ID, let's say your `access_token` is `abcdef` and `account_id` is `1234`, here's a sample command that will copy the data from Facebook Ads into a DuckDB database:
 
 ```sh
 ingestr ingest \

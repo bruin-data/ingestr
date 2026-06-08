@@ -20,10 +20,33 @@ The URI is used to connect to the Freshdesk API for extracting data.
 
 ## Setting up a Freshdesk integration
 
-Freshdesk requires a few steps to set up an integration, please follow dltHub [setup guide](https://dlthub.com/docs/dlt-ecosystem/verified-sources/freshdesk#setup-guide).
+To connect to Freshdesk, you need to create an agent with API access and obtain the API key.
 
-After completing the guide,, you will have your  `api_key` and `domain`. For example, if your api_key is
-`test_key` and domain `my_company`, you can use the following command to copy data from Freshdesk into a DuckDB database:
+### Step 1: Create a New Agent
+
+1. Log in to your Freshdesk admin account
+2. Go to **Admin** → **Team** → **Agents**
+3. Click **New Agent**
+4. Fill in the required details (name, email, etc.)
+
+### Step 2: Enable API Key Access
+
+1. In the agent creation/edit form, go to **Security and permissions**
+2. Toggle on **API Key access**
+3. Save the agent configuration
+
+### Step 3: Get the API Key
+
+1. Go to **Profile settings** (click your profile picture in the top right)
+2. Click **View API Key** from the top right
+3. Copy the API key
+
+### Step 4: Find Your Domain
+
+Your domain is the subdomain in your Freshdesk URL. For example:
+- If your URL is `https://mycompany.freshdesk.com/`, your domain is `mycompany`
+
+Once you have your `api_key` and `domain`, for example, if your api_key is `test_key` and domain `my_company`, you can use the following command to copy data from Freshdesk into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'freshdesk://$DOMAIN?api_key=$API_KEY' --source-table 'contacts' --dest-uri duckdb:///freshdesk.duckdb --dest-table 'dest.contacts'

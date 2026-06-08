@@ -25,7 +25,7 @@ The URI is composed of the following parts:
 ingestr can connect to any source or destination using this structure across all databases.
 
 > [!NOTE]
-> ingestr uses [dlt](https://github.com/dlt-hub/dlt) & [SQLAlchemy](https://www.sqlalchemy.org/) libraries internally, which means you can get connection URIs by following their documentation as well, they are supposed to work right away in ingestr.
+> ingestr uses standard database connection URI formats that are compatible with most database tools and libraries. For database-specific URI parameters, refer to each source/destination documentation page.
 
 ## Source & destination tables
 The source and destination tables are the tables from the source and destination databases, respectively. The source table is the table from where you want to ingest the data from, and the destination table is the table where you want to store the data.

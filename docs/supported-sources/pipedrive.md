@@ -14,11 +14,16 @@ pipedrive://?api_token=<api_token>
 URI parameters:
 - api_token: token used for authentication with the Pipedrive API
 
-## Setting up a pipedrive Integration
+## Setting up a Pipedrive Integration
 
-To grab pipedrive credentials, please follow the guide [here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/pipedrive#grab-api-token).
+Pipedrive uses a personal API token for authentication. Each user has their own token, and the token inherits that user's permissions:
 
-Once you complete the guide, you should have a `api_token`. Let's say your `api_token` is token_123, here's a sample command that will copy the data from pipedriveinto a DuckDB database:
+1. Sign in to your Pipedrive account with the user whose access you want ingestr to use. Make sure that user has visibility into the data you want to copy (deals, persons, organizations, etc.).
+2. Click your profile picture in the top-right corner and choose **Personal preferences**.
+3. Open the **API** tab. If you do not see this tab, ask an admin to enable API access for your user under **Settings → User management**.
+4. Copy the value shown under **Your personal API token**. This is your `api_token`. You can also click **Generate new token** if you want a dedicated token for this integration.
+
+Once you have the token, let's say your `api_token` is token_123, here's a sample command that will copy the data from Pipedrive into a DuckDB database:
 
 ```bash
 ingestr ingest \

@@ -20,9 +20,44 @@ The URI is used to connect to the HubSpot API for extracting data.
 
 ## Setting up a HubSpot Integration
 
-HubSpot requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/hubspot#setup-guide).
+To connect to HubSpot, you need to create a Legacy Private App to obtain an access token.
 
-Once you complete the guide, you should have an API key. Let's say your API key is `pat_test_12345`, here's a sample command that will copy the data from HubSpot into a DuckDB database:
+### Step 1: Create a Legacy App
+
+1. Log in to your [HubSpot account](https://app.hubspot.com/)
+2. Click the **Settings** icon (gear) in the top navigation
+3. In the left sidebar, navigate to **Integrations** → **Private Apps**
+4. Click **Create Legacy App**
+5. Select **Private** as the app type
+6. If prompted to create a service key, select **I still want a legacy private app** and continue
+
+### Step 2: Configure the App
+
+1. Enter a name for your app (e.g., "Data Integration")
+2. Optionally add a description
+3. Skip the webhook setup (not needed for data ingestion)
+4. Click the **Scopes** tab
+
+### Step 3: Select Scopes
+
+Add the scopes for the data you want to access. Common scopes include:
+- **CRM**: `crm.objects.contacts.read`, `crm.objects.companies.read`, `crm.objects.deals.read`
+- **Tickets**: `tickets`
+- **Sales**: `sales-email-read`
+- **Forms**: `forms`
+
+Select **Read** access for each object type you want to ingest.
+
+### Step 4: Create and Get the Token
+
+1. Click **Create app** in the top right
+2. Review the information and click **Continue creating**
+3. Copy the **Access token** that is displayed (starts with `pat-`)
+4. Store this token securely
+
+> **Note**: The token is only shown once. If you lose it, you'll need to rotate the token in the app settings.
+
+Once you have your access token, let's say your API key is `pat_test_12345`, here's a sample command that will copy the data from HubSpot into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'hubspot://?api_key=pat_test_12345' --source-table 'companies' --dest-uri duckdb:///hubspot.duckdb --dest-table 'companies.data'

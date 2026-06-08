@@ -8,7 +8,7 @@ The Zendesk supports two authentication methods when connecting through ingestr:
 - OAuth Token 
 - API Token
 
-For all resources except chat resources, you can use either the [API Token](https://dlthub.com/docs/dlt-ecosystem/verified-sources/zendesk#grab-zendesk-support-api-token) or the Zendesk Support [OAuth Token](https://dlthub.com/docs/dlt-ecosystem/verified-sources/zendesk#zendesk-support-oauth-token) to fetch data. However, for chat resources, you must use the [OAuth Token](https://dlthub.com/docs/dlt-ecosystem/verified-sources/zendesk#zendesk-chat) specific to Zendesk Chat.
+For all resources except chat resources, you can use either the API Token or the OAuth Token to fetch data. However, for chat resources, you must use the OAuth Token specific to Zendesk Chat.
 
 ## URI format
 
@@ -31,9 +31,43 @@ URI parameters:
 
 ## Setting up a Zendesk Integration
 
-Zendesk requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/zendesk#setup-guide).
+### Option 1: API Token Authentication
 
-Once you complete the guide, if you decide to use an OAuth token, you should have a subdomain and an OAuth token. Let’s say your subdomain is `mycompany` and your OAuth token is `qVsbdiasVt`.
+1. Log in to your Zendesk Admin Center
+2. Go to **Apps and integrations** → **APIs** → **Zendesk API**
+3. Click the **Settings** tab and make sure **Token Access** is enabled
+4. Click **Add API token**
+5. Enter a description (e.g., "Data Integration")
+6. Click **Copy** to save the token (it won't be shown again)
+7. Click **Save**
+
+You'll need your email address and the API token for authentication.
+
+### Option 2: OAuth Token Authentication
+
+1. Log in to your Zendesk Admin Center
+2. Go to **Apps and integrations** → **APIs** → **Zendesk API**
+3. Click **OAuth Clients** tab
+4. Click **Add OAuth client**
+5. Fill in the client name and description
+6. Set the redirect URL (can be `http://localhost` for testing)
+7. Click **Save** and note the **Client ID** and **Client Secret**
+8. Use the OAuth flow to obtain an access token
+
+### For Zendesk Chat Resources
+
+Chat resources require a separate Zendesk Chat OAuth token:
+
+1. Go to [Zendesk Chat Admin](https://www.zopim.com/admin)
+2. Navigate to **Settings** → **Account** → **API & SDKs**
+3. Create a new API client and complete the OAuth flow
+4. Use the resulting access token for chat-related tables
+
+### Finding Your Subdomain
+
+Your subdomain is part of your Zendesk URL. For example, if your Zendesk URL is `https://mycompany.zendesk.com/`, then `mycompany` is your subdomain.
+
+Once you have your credentials, if you decide to use an OAuth token, you should have a subdomain and an OAuth token. Let's say your subdomain is `mycompany` and your OAuth token is `qVsbdiasVt`.
 
 ```sh
 ingestr ingest --source-uri "zendesk://:qVsbdiasVt@mycompany" \
@@ -43,7 +77,7 @@ ingestr ingest --source-uri "zendesk://:qVsbdiasVt@mycompany" \
 --interval-start '2024-01-01'
 ```
 
-If you decide to use an API Token, you should have a subdomain, email, and API token. Let’s say your subdomain is `mycompany`, your email is `john@get.com`, and your API token is `nbs123`.
+If you decide to use an API Token, you should have a subdomain, email, and API token. Let's say your subdomain is `mycompany`, your email is `john@get.com`, and your API token is `nbs123`.
 
 ```sh
 ingestr ingest --source-uri "zendesk://john@get.com:nbs123@mycompany" \

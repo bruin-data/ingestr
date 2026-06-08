@@ -20,9 +20,38 @@ URI parameters:
 
 
 ## Setting up a Kinesis Integration
-To get Kinesis credentials, please refer to the guide [here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/amazon_kinesis#grab-credentials)
 
-Once you complete the guide, you should have a aws_access_key_id, aws_secret_access_key and region_name. Let's say your `aws_access_key_id` is id_123, your `aws_secret_access_key` is secret_123 and your `region_name` is eu-central-1, here's a sample command that will copy the data from Kinesis into a DuckDB database:
+To access Amazon Kinesis, you need AWS credentials with appropriate permissions.
+
+### Step 1: Create an IAM User (if needed)
+
+1. Go to the [AWS IAM Console](https://console.aws.amazon.com/iam/)
+2. Click **Users** → **Create user**
+3. Enter a username (e.g., "kinesis-integration") and continue without granting console access
+4. Click **Next**
+
+### Step 2: Assign Permissions
+
+Attach a policy that grants Kinesis read access. You can use the managed policy `AmazonKinesisReadOnlyAccess` or create a custom policy with:
+- `kinesis:DescribeStream`
+- `kinesis:DescribeStreamSummary`
+- `kinesis:GetShardIterator`
+- `kinesis:GetRecords`
+- `kinesis:ListShards`
+- `kinesis:ListStreams`
+
+### Step 3: Get Access Keys
+
+1. Open the new user and go to the **Security credentials** tab
+2. Under **Access keys**, click **Create access key**
+3. Select **Application running outside AWS** and create the key
+4. Copy the **Access key ID** and **Secret access key** (the secret key is shown only once)
+
+### Finding Your Region
+
+Your region is the AWS region where your Kinesis stream is located (e.g., `us-east-1`, `eu-central-1`, `ap-southeast-1`).
+
+Once you have your `aws_access_key_id`, `aws_secret_access_key`, and `region_name`, let's say your `aws_access_key_id` is id_123, your `aws_secret_access_key` is secret_123 and your `region_name` is eu-central-1, here's a sample command that will copy the data from Kinesis into a DuckDB database:
 
 ```bash
 ingestr ingest --source-uri 'kinesis://?aws_access_key_id=id_123&aws_secret_access_key=secret_123&region_name=eu-central-1' \
