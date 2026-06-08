@@ -25,6 +25,8 @@ URI parameters:
 
 Provide exactly one of `api_key` or `service_key`. Both are sent to HubSpot as an HTTP Bearer token, so they are interchangeable as the credential.
 
+> **Note:** HubSpot service keys are currently in **public beta**. The feature may change before general availability, so keep that in mind before relying on it for production workloads.
+
 The URI is used to connect to the HubSpot API for extracting data.
 
 ## Setting up a HubSpot Integration
