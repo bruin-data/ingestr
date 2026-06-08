@@ -981,16 +981,16 @@ func buildUpdateSet(columns []string, targetAlias, sourceAlias string, cdcMerge 
 	return strings.Join(sets, ", ")
 }
 
-func cdcUnchangedColsJSONLiteral(colName string) string {
-	b, _ := json.Marshal([]string{colName})
+func cdcUnchangedColJSONNeedle(colName string) string {
+	b, _ := json.Marshal(colName)
 	return strings.ReplaceAll(string(b), "'", "''")
 }
 
 func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
-	lit := cdcUnchangedColsJSONLiteral(col)
+	needle := cdcUnchangedColJSONNeedle(col)
 	return fmt.Sprintf(
-		`"%s" = CASE WHEN %s::JSON @> '%s'::JSON THEN %s ELSE %s END`,
-		col, unchangedColsExpr, lit, targetExpr, sourceExpr,
+		`"%s" = CASE WHEN json_contains(%s, '%s') THEN %s ELSE %s END`,
+		col, unchangedColsExpr, needle, targetExpr, sourceExpr,
 	)
 }
 
