@@ -1,11 +1,13 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -407,8 +409,19 @@ func TestBuildDialer_OAuthBearer_MissingRegion(t *testing.T) {
 		},
 	}
 
-	if _, err := s.buildDialer(); err == nil {
-		t.Fatal("expected error for OAUTHBEARER without aws_region")
+	oldDebugMode := config.DebugMode
+	config.DebugMode = true
+	t.Cleanup(func() {
+		config.DebugMode = oldDebugMode
+	})
+
+	output := captureStdout(t, func() {
+		if _, err := s.buildDialer(); err == nil {
+			t.Fatal("expected error for OAUTHBEARER without aws_region")
+		}
+	})
+	if strings.Contains(output, "TLS auto-enabled") {
+		t.Fatalf("debug output = %q, should not log TLS auto-enable for invalid OAUTHBEARER config", output)
 	}
 }
 
@@ -445,6 +458,12 @@ func TestBuildSASLMechanism(t *testing.T) {
 		{name: "SCRAM-SHA-256", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-256", SASLUsername: "user", SASLPassword: "pass"}},
 		{name: "SCRAM-SHA-512", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-512", SASLUsername: "user", SASLPassword: "pass"}},
 		{name: "lowercase plain", cfg: kafkaConfig{SASLMechanism: "plain", SASLUsername: "user", SASLPassword: "pass"}},
+		{name: "PLAIN missing username", cfg: kafkaConfig{SASLMechanism: "PLAIN", SASLPassword: "pass"}, wantErr: true},
+		{name: "PLAIN missing password", cfg: kafkaConfig{SASLMechanism: "PLAIN", SASLUsername: "user"}, wantErr: true},
+		{name: "SCRAM-SHA-256 missing username", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-256", SASLPassword: "pass"}, wantErr: true},
+		{name: "SCRAM-SHA-256 missing password", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-256", SASLUsername: "user"}, wantErr: true},
+		{name: "SCRAM-SHA-512 missing username", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-512", SASLPassword: "pass"}, wantErr: true},
+		{name: "SCRAM-SHA-512 missing password", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-512", SASLUsername: "user"}, wantErr: true},
 		{name: "OAUTHBEARER", cfg: kafkaConfig{SASLMechanism: "OAUTHBEARER", AWSRegion: "us-east-1"}},
 		{name: "OAUTHBEARER missing region", cfg: kafkaConfig{SASLMechanism: "OAUTHBEARER"}, wantErr: true},
 		{name: "unsupported", cfg: kafkaConfig{SASLMechanism: "GSSAPI"}, wantErr: true},
@@ -467,6 +486,35 @@ func TestBuildSASLMechanism(t *testing.T) {
 			}
 		})
 	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+	}()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stdout pipe: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close stdout reader: %v", err)
+	}
+	return buf.String()
 }
 
 func TestGetTable(t *testing.T) {

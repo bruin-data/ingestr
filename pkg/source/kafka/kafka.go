@@ -370,39 +370,49 @@ func (s *KafkaSource) buildDialer() (*kafkago.Dialer, error) {
 		}
 	}
 
-	// MSK IAM serves OAUTHBEARER only over TLS and the token is a sensitive
-	// presigned URL, so enable TLS unless the user explicitly opted out.
-	if strings.EqualFold(s.cfg.SASLMechanism, "OAUTHBEARER") &&
-		dialer.TLS == nil && !strings.EqualFold(s.cfg.SecurityProtocol, "SASL_PLAINTEXT") {
-		dialer.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
-		config.Debug("[KAFKA] OAUTHBEARER: TLS auto-enabled (MSK IAM requires TLS)")
-	}
-
 	if s.cfg.SASLMechanism != "" {
 		mechanism, err := buildSASLMechanism(s.cfg)
 		if err != nil {
 			return nil, err
 		}
 		dialer.SASLMechanism = mechanism
+
+		// MSK IAM serves OAUTHBEARER only over TLS and the token is a sensitive
+		// presigned URL, so enable TLS unless the user explicitly opted out.
+		if strings.EqualFold(s.cfg.SASLMechanism, "OAUTHBEARER") &&
+			dialer.TLS == nil && !strings.EqualFold(s.cfg.SecurityProtocol, "SASL_PLAINTEXT") {
+			dialer.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
+			config.Debug("[KAFKA] OAUTHBEARER: TLS auto-enabled (MSK IAM requires TLS)")
+		}
 	}
 
 	return dialer, nil
 }
 
 func buildSASLMechanism(cfg kafkaConfig) (sasl.Mechanism, error) {
-	switch strings.ToUpper(cfg.SASLMechanism) {
+	mechanism := strings.ToUpper(cfg.SASLMechanism)
+	switch mechanism {
 	case "PLAIN":
+		if err := validateSASLCredentials(mechanism, cfg); err != nil {
+			return nil, err
+		}
 		return &plain.Mechanism{
 			Username: cfg.SASLUsername,
 			Password: cfg.SASLPassword,
 		}, nil
 	case "SCRAM-SHA-256":
+		if err := validateSASLCredentials(mechanism, cfg); err != nil {
+			return nil, err
+		}
 		m, err := scram.Mechanism(scram.SHA256, cfg.SASLUsername, cfg.SASLPassword)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SCRAM-SHA-256 mechanism: %w", err)
 		}
 		return m, nil
 	case "SCRAM-SHA-512":
+		if err := validateSASLCredentials(mechanism, cfg); err != nil {
+			return nil, err
+		}
 		m, err := scram.Mechanism(scram.SHA512, cfg.SASLUsername, cfg.SASLPassword)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SCRAM-SHA-512 mechanism: %w", err)
@@ -417,6 +427,13 @@ func buildSASLMechanism(cfg kafkaConfig) (sasl.Mechanism, error) {
 	default:
 		return nil, fmt.Errorf("unsupported SASL mechanism: %s (supported: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512, OAUTHBEARER)", cfg.SASLMechanism)
 	}
+}
+
+func validateSASLCredentials(mechanism string, cfg kafkaConfig) error {
+	if cfg.SASLUsername == "" || cfg.SASLPassword == "" {
+		return fmt.Errorf("kafka SASL %s requires sasl_username and sasl_password", mechanism)
+	}
+	return nil
 }
 
 func (s *KafkaSource) getPartitions(ctx context.Context, dialer *kafkago.Dialer, brokers []string, topic string) ([]int, error) {

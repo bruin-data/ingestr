@@ -62,6 +62,19 @@ func TestOAuthBearerSession_Next(t *testing.T) {
 	}
 }
 
+func TestOAuthBearerSession_NextNonEmptyChallenge(t *testing.T) {
+	done, resp, err := oauthBearerSession{}.Next(context.Background(), []byte(`{"status":"invalid_token"}`))
+	if err == nil {
+		t.Fatal("expected error for non-empty broker challenge")
+	}
+	if done {
+		t.Error("Next should not report done on broker challenge")
+	}
+	if resp != nil {
+		t.Errorf("response = %q, want nil", string(resp))
+	}
+}
+
 func TestNewOAuthBearerTokenProvider_RequiresRegion(t *testing.T) {
 	if _, err := newOAuthBearerTokenProvider(kafkaConfig{}); err == nil {
 		t.Fatal("expected error when aws_region is empty")
@@ -110,6 +123,7 @@ func TestNewOAuthBearerTokenProvider_PartialStaticCredentials(t *testing.T) {
 	cases := []kafkaConfig{
 		{AWSRegion: "us-east-1", AWSAccessKeyID: "AKID"},
 		{AWSRegion: "us-east-1", AWSSecretAccessKey: "SECRET"},
+		{AWSRegion: "us-east-1", AWSSessionToken: "TOKEN"},
 	}
 	for _, cfg := range cases {
 		if _, err := newOAuthBearerTokenProvider(cfg); err == nil {

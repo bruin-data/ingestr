@@ -36,7 +36,11 @@ func (m oauthBearerMechanism) Start(ctx context.Context) (sasl.StateMachine, []b
 
 type oauthBearerSession struct{}
 
-func (oauthBearerSession) Next(_ context.Context, _ []byte) (bool, []byte, error) {
+func (oauthBearerSession) Next(_ context.Context, challenge []byte) (bool, []byte, error) {
+	if len(challenge) > 0 {
+		return false, nil, fmt.Errorf("unexpected OAUTHBEARER broker challenge: %s", string(challenge))
+	}
+
 	// The broker rejects an invalid token by failing the SASL exchange before
 	// Next is reached, so arriving here means authentication succeeded. This
 	// mirrors kafka-go's built-in plain.Mechanism.
@@ -66,7 +70,7 @@ func newOAuthBearerTokenProvider(cfg kafkaConfig) (tokenProvider, error) {
 			return token, err
 		}, nil
 
-	case cfg.AWSAccessKeyID != "" || cfg.AWSSecretAccessKey != "":
+	case cfg.AWSAccessKeyID != "" || cfg.AWSSecretAccessKey != "" || cfg.AWSSessionToken != "":
 		if cfg.AWSAccessKeyID == "" || cfg.AWSSecretAccessKey == "" {
 			return nil, fmt.Errorf("kafka OAUTHBEARER: both aws_access_key_id and aws_secret_access_key are required for static credentials")
 		}
