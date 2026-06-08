@@ -180,6 +180,9 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 	unchangedRef := fmt.Sprintf(`source."%s"`, destination.CDCUnchangedColsColumn)
 	var updateSets []string
 	for _, col := range allColumns {
+		if destination.IsCDCStagingOnlyColumn(col) {
+			continue
+		}
 		if !pkMap[strings.ToLower(col)] {
 			if hasCDCDeleted && !destination.IsCDCMetaColumn(col) {
 				updateSets = append(updateSets, cdcMergeAssign(
@@ -194,11 +197,21 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		}
 	}
 
-	quotedCols := make([]string, len(allColumns))
-	sourceCols := make([]string, len(allColumns))
-	for i, col := range allColumns {
+	// Target columns exclude staging-only CDC columns (e.g. _cdc_unchanged_cols),
+	// which are read from the source but never written to the destination.
+	targetColumns := destination.FilterCDCStagingOnlyColumns(allColumns)
+	quotedCols := make([]string, len(targetColumns))
+	sourceCols := make([]string, len(targetColumns))
+	for i, col := range targetColumns {
 		quotedCols[i] = fmt.Sprintf(`"%s"`, col)
 		sourceCols[i] = fmt.Sprintf(`source."%s"`, col)
+	}
+
+	// The dedup subquery selects every column so the merge condition can still
+	// reference staging-only CDC columns from the source side.
+	quotedAllCols := make([]string, len(allColumns))
+	for i, col := range allColumns {
+		quotedAllCols[i] = fmt.Sprintf(`"%s"`, col)
 	}
 
 	// Build dedup subquery to handle duplicate PKs in staging
@@ -208,8 +221,8 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 	}
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
+		strings.Join(quotedAllCols, ", "),
+		strings.Join(quotedAllCols, ", "),
 		strings.Join(quotedPKsForPartition, ", "),
 		destination.QuoteTableName(stagingTable),
 	)

@@ -1527,6 +1527,9 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 	unchangedRef := fmt.Sprintf("s.`%s`", destination.CDCUnchangedColsColumn)
 	var updateSets []string
 	for _, col := range allColumns {
+		if destination.IsCDCStagingOnlyColumn(col) {
+			continue
+		}
 		if !pkMap[strings.ToLower(col)] {
 			src := castSourceCol(col, castMap)
 			if hasCDCDeleted && !destination.IsCDCMetaColumn(col) {
@@ -1539,10 +1542,13 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 		}
 	}
 
-	// Build INSERT columns and values
-	quotedCols := make([]string, len(allColumns))
-	sourceCols := make([]string, len(allColumns))
-	for i, col := range allColumns {
+	// Build INSERT columns and values. Staging-only CDC columns (e.g.
+	// _cdc_unchanged_cols) are readable via the source alias `s` (SELECT *) but
+	// excluded here so they are never written to the destination table.
+	targetColumns := destination.FilterCDCStagingOnlyColumns(allColumns)
+	quotedCols := make([]string, len(targetColumns))
+	sourceCols := make([]string, len(targetColumns))
+	for i, col := range targetColumns {
 		quotedCols[i] = fmt.Sprintf("`%s`", col)
 		sourceCols[i] = castSourceCol(col, castMap)
 	}

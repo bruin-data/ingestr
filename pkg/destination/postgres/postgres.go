@@ -454,6 +454,12 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 
+	// Target columns exclude staging-only CDC columns (e.g. _cdc_unchanged_cols),
+	// which are read from staging during the merge but never persisted.
+	targetColumns := destination.FilterCDCStagingOnlyColumns(columns)
+	quotedTargetColumns := quoteColumns(targetColumns)
+	nonPKTargetColumns := filterColumns(targetColumns, opts.PrimaryKeys)
+
 	// Check if this is CDC mode (has _cdc_deleted column)
 	hasCDCDeleted := slices.Contains(columns, destination.CDCDeletedColumn)
 
@@ -489,21 +495,43 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			pkList, selectCols, quotedStagingTable, orderBy,
 		)
 
-		// Step 1: Upsert latest non-deleted rows (data changes)
-		upsertSQL := fmt.Sprintf(
-			`WITH %s INSERT INTO %s (%s) SELECT %s FROM latest_active ON CONFLICT (%s) DO UPDATE SET %s`,
+		// Step 1: Upsert latest non-deleted rows (data changes).
+		// We use UPDATE ... FROM + INSERT ... WHERE NOT EXISTS rather than
+		// INSERT ... ON CONFLICT because the _cdc_unchanged_cols marker must be
+		// read from the source row, and ON CONFLICT can only reference it via
+		// EXCLUDED — which would force the column to be persisted in the target.
+		onActiveCondition := buildJoinCondition(opts.PrimaryKeys, "target", "latest_active")
+
+		if len(nonPKTargetColumns) > 0 {
+			updateActiveSQL := fmt.Sprintf(
+				`WITH %s UPDATE %s AS target SET %s FROM latest_active WHERE %s`,
+				latestActive,
+				quotedTargetTable,
+				buildCDCUpdateSet(nonPKTargetColumns, "target", "latest_active"),
+				onActiveCondition,
+			)
+			config.Debug("[MERGE] Executing update for non-deleted rows: %s", updateActiveSQL)
+
+			if _, err := tx.Exec(ctx, updateActiveSQL); err != nil {
+				config.LogFailedQuery(updateActiveSQL, err)
+				return fmt.Errorf("failed to update non-deleted records: %w", err)
+			}
+		}
+
+		insertActiveSQL := fmt.Sprintf(
+			`WITH %s INSERT INTO %s (%s) SELECT %s FROM latest_active WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 			latestActive,
 			quotedTargetTable,
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedPKs, ", "),
-			buildCDCConflictUpdateSet(nonPKColumns, quotedTargetTable),
+			strings.Join(quotedTargetColumns, ", "),
+			strings.Join(quotedTargetColumns, ", "),
+			quotedTargetTable,
+			onActiveCondition,
 		)
-		config.Debug("[MERGE] Executing upsert for non-deleted rows: %s", upsertSQL)
+		config.Debug("[MERGE] Executing insert for new rows: %s", insertActiveSQL)
 
-		if _, err := tx.Exec(ctx, upsertSQL); err != nil {
-			config.LogFailedQuery(upsertSQL, err)
-			return fmt.Errorf("failed to upsert non-deleted records: %w", err)
+		if _, err := tx.Exec(ctx, insertActiveSQL); err != nil {
+			config.LogFailedQuery(insertActiveSQL, err)
+			return fmt.Errorf("failed to insert non-deleted records: %w", err)
 		}
 
 		// Step 2: Mark deletes only when the latest change is a delete
@@ -920,20 +948,27 @@ func buildConflictUpdateSet(columns []string) string {
 	return strings.Join(sets, ", ")
 }
 
-func buildCDCConflictUpdateSet(columns []string, quotedTable string) string {
-	unchangedRef := fmt.Sprintf(`EXCLUDED."%s"`, destination.CDCUnchangedColsColumn)
-	sets := make([]string, len(columns))
-	for i, col := range columns {
-		if destination.IsCDCMetaColumn(col) {
-			sets[i] = fmt.Sprintf(`"%s" = EXCLUDED."%s"`, col, col)
+// buildCDCUpdateSet builds the SET clause for an UPDATE ... FROM <source> merge.
+// Values are read from sourceAlias; staging-only CDC columns (_cdc_unchanged_cols)
+// are skipped so they are never written to the target. For data columns, the
+// _cdc_unchanged_cols marker decides whether to preserve the target value.
+func buildCDCUpdateSet(columns []string, targetAlias, sourceAlias string) string {
+	unchangedRef := fmt.Sprintf(`%s."%s"`, sourceAlias, destination.CDCUnchangedColsColumn)
+	sets := make([]string, 0, len(columns))
+	for _, col := range columns {
+		if destination.IsCDCStagingOnlyColumn(col) {
 			continue
 		}
-		sets[i] = cdcMergeAssign(
+		if destination.IsCDCMetaColumn(col) {
+			sets = append(sets, fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col))
+			continue
+		}
+		sets = append(sets, cdcMergeAssign(
 			col,
-			fmt.Sprintf(`%s."%s"`, quotedTable, col),
-			fmt.Sprintf(`EXCLUDED."%s"`, col),
+			fmt.Sprintf(`%s."%s"`, targetAlias, col),
+			fmt.Sprintf(`%s."%s"`, sourceAlias, col),
 			unchangedRef,
-		)
+		))
 	}
 	return strings.Join(sets, ", ")
 }

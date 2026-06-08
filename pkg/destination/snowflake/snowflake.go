@@ -420,6 +420,9 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	unchangedRef := "source." + quoteIdentifier(destination.CDCUnchangedColsColumn)
 	var updateSets []string
 	for _, col := range allColumns {
+		if destination.IsCDCStagingOnlyColumn(col) {
+			continue
+		}
 		if !pkMap[strings.ToLower(col)] {
 			q := quoteIdentifier(col)
 			if cdcMerge && !destination.IsCDCMetaColumn(col) {
@@ -432,9 +435,18 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		}
 	}
 
-	quotedCols := make([]string, len(allColumns))
-	sourceCols := make([]string, len(allColumns))
+	// quotedAllCols feeds the staging-derived source so staging-only CDC columns
+	// (e.g. _cdc_unchanged_cols) remain readable in the merge condition. The INSERT
+	// target list excludes them so they are never persisted.
+	quotedAllCols := make([]string, len(allColumns))
 	for i, col := range allColumns {
+		quotedAllCols[i] = quoteIdentifier(col)
+	}
+
+	targetColumns := destination.FilterCDCStagingOnlyColumns(allColumns)
+	quotedCols := make([]string, len(targetColumns))
+	sourceCols := make([]string, len(targetColumns))
+	for i, col := range targetColumns {
 		quotedCols[i] = quoteIdentifier(col)
 		sourceCols[i] = "source." + quoteIdentifier(col)
 	}
@@ -455,8 +467,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
+		strings.Join(quotedAllCols, ", "),
+		strings.Join(quotedAllCols, ", "),
 		strings.Join(quotedPKList, ", "),
 		dedupOrderBy,
 		stagingFull,

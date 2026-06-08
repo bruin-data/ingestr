@@ -45,10 +45,12 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		}
 	}
 
-	// Ensure destination table exists (don't drop it)
+	// Ensure destination table exists (don't drop it). Staging-only CDC columns
+	// (e.g. _cdc_unchanged_cols) are excluded from the target — they live only in
+	// the staging table during the merge.
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       job.Config.DestTable,
-		Schema:      job.Schema,
+		Schema:      targetMergeSchema(job.Schema),
 		DropFirst:   false,
 		PrimaryKeys: job.Config.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
@@ -185,7 +187,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 
 			if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 				Table:       destTable,
-				Schema:      ti.Schema,
+				Schema:      targetMergeSchema(ti.Schema),
 				DropFirst:   false,
 				PrimaryKeys: ti.PrimaryKeys,
 			}); err != nil {
@@ -311,6 +313,28 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	}
 
 	return nil
+}
+
+// targetMergeSchema returns a copy of s with staging-only CDC columns removed.
+// These columns (e.g. _cdc_unchanged_cols) are needed in the staging table during
+// the merge but are never persisted in the destination table.
+func targetMergeSchema(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+	cols := make([]schema.Column, 0, len(s.Columns))
+	for _, col := range s.Columns {
+		if destination.IsCDCStagingOnlyColumn(col.Name) {
+			continue
+		}
+		cols = append(cols, col)
+	}
+	if len(cols) == len(s.Columns) {
+		return s
+	}
+	copied := *s
+	copied.Columns = cols
+	return &copied
 }
 
 // hasCDCColumns checks if a schema has CDC columns (specifically _cdc_deleted).

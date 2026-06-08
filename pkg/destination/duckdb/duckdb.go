@@ -392,7 +392,11 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	columns := opts.Columns
 	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	// Staging-only CDC columns are read from the staging table during the merge
+	// but never written to the target.
+	targetColumns := destination.FilterCDCStagingOnlyColumns(columns)
+	quotedTargetColumns := quoteColumns(targetColumns)
+	nonPKColumns := filterColumns(targetColumns, opts.PrimaryKeys)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -439,8 +443,8 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	insertSQL := fmt.Sprintf(
 		`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 		quotedTargetTable,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedTargetColumns, ", "),
+		strings.Join(quotedTargetColumns, ", "),
 		dedupSource,
 		quotedTargetTable,
 		onCondition,

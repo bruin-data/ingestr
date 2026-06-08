@@ -726,6 +726,103 @@ func TestMergeTable(t *testing.T) {
 	assert.Equal(t, 300, value)
 }
 
+func TestMergeTable_CDCDoesNotPersistUnchangedColsAndPreservesTOAST(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	// Target is created WITHOUT _cdc_unchanged_cols, mirroring what the merge
+	// strategy does: it is a staging-only column.
+	err := dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR,
+			value INTEGER,
+			_cdc_lsn VARCHAR,
+			_cdc_deleted BOOLEAN,
+			_cdc_synced_at TIMESTAMP
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		INSERT INTO target_table VALUES
+			(1, 'Alice', 100, '0/100', false, TIMESTAMP '2024-01-01 00:00:00')
+	`)
+	require.NoError(t, err)
+
+	// Staging carries the staging-only _cdc_unchanged_cols column. For id=1,
+	// "value" is reported unchanged (a TOAST column that wasn't re-sent), so the
+	// existing target value must be preserved while "name" is updated.
+	err = dest.Exec(ctx, `
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR,
+			value INTEGER,
+			_cdc_lsn VARCHAR,
+			_cdc_deleted BOOLEAN,
+			_cdc_synced_at TIMESTAMP,
+			_cdc_unchanged_cols VARCHAR
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(1, 'Alice Updated', 999, '0/200', false, TIMESTAMP '2024-01-02 00:00:00', '["value"]'),
+			(3, 'Charlie', 300, '0/300', false, TIMESTAMP '2024-01-02 00:00:00', '[]')
+	`)
+	require.NoError(t, err)
+
+	err = dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		TargetTable:  "target_table",
+		PrimaryKeys:  []string{"id"},
+		Columns: []string{
+			"id", "name", "value",
+			"_cdc_lsn", "_cdc_deleted", "_cdc_synced_at", "_cdc_unchanged_cols",
+		},
+	})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+
+	// The staging-only column must not be persisted in the destination table.
+	var unchangedColCount int
+	err = db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'target_table' AND column_name = '_cdc_unchanged_cols'`,
+	).Scan(&unchangedColCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, unchangedColCount, "_cdc_unchanged_cols must not be added to the destination table")
+
+	// The other CDC metadata columns must still be persisted.
+	var metaCount int
+	err = db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'target_table' AND column_name IN ('_cdc_lsn', '_cdc_deleted', '_cdc_synced_at')`,
+	).Scan(&metaCount)
+	require.NoError(t, err)
+	assert.Equal(t, 3, metaCount, "regular CDC metadata columns must still be persisted")
+
+	var count int
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM target_table").Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+
+	// id=1: name updated, value preserved (listed as unchanged), lsn advanced.
+	var nameRaw, lsnRaw []byte
+	var value int
+	err = db.QueryRowContext(ctx, `SELECT name, value, _cdc_lsn FROM target_table WHERE id = 1`).Scan(&nameRaw, &value, &lsnRaw)
+	require.NoError(t, err)
+	assert.Equal(t, "Alice Updated", string(append([]byte(nil), nameRaw...)))
+	assert.Equal(t, 100, value, "TOAST-unchanged column value must be preserved")
+	assert.Equal(t, "0/200", string(append([]byte(nil), lsnRaw...)))
+
+	// id=3: newly inserted with source values.
+	err = db.QueryRowContext(ctx, `SELECT name, value FROM target_table WHERE id = 3`).Scan(&nameRaw, &value)
+	require.NoError(t, err)
+	assert.Equal(t, "Charlie", string(append([]byte(nil), nameRaw...)))
+	assert.Equal(t, 300, value)
+}
+
 func TestDeleteInsertTable_DedupesStagingByPK(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)
