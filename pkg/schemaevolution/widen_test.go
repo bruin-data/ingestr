@@ -100,7 +100,7 @@ func TestCanWiden_NumericToDecimal(t *testing.T) {
 	}
 
 	for _, from := range numericTypes {
-		t.Run(from.String()+"_to_DECIMAL", func(t *testing.T) {
+		t.Run(from.String()+"_to_"+schema.TypeDecimal.String(), func(t *testing.T) {
 			assert.True(t, CanWiden(from, schema.TypeDecimal))
 		})
 	}
@@ -125,7 +125,7 @@ func TestCanWiden_ToStringPath(t *testing.T) {
 	}
 
 	for _, from := range typesWithStringPath {
-		t.Run(from.String()+"_to_STRING", func(t *testing.T) {
+		t.Run(from.String()+"_to_"+schema.TypeString.String(), func(t *testing.T) {
 			assert.True(t, CanWiden(from, schema.TypeString))
 		})
 	}
@@ -152,7 +152,7 @@ func TestCanWiden_ToJSONPath(t *testing.T) {
 	}
 
 	for _, from := range allTypes {
-		t.Run(from.String()+"_to_JSON", func(t *testing.T) {
+		t.Run(from.String()+"_to_"+schema.TypeJSON.String(), func(t *testing.T) {
 			assert.True(t, CanWiden(from, schema.TypeJSON))
 		})
 	}
