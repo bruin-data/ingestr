@@ -10,7 +10,7 @@ var DebugMode bool
 
 func Debug(format string, args ...interface{}) {
 	if DebugMode {
-		fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, args...))
+		fmt.Printf("%s\tDEBUG\t%s\n", time.Now().Format("2006-01-02T15:04:05.000Z0700"), fmt.Sprintf(format, args...))
 	}
 }
 
