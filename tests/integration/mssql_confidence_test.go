@@ -74,7 +74,7 @@ func TestMSSQLSource_TableToSQLite_MergeUsesAutoDetectedPrimaryKey(t *testing.T)
 	}
 	require.NoError(t, cfg.Validate())
 
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	_, err = db.ExecContext(
 		ctx,
@@ -93,7 +93,7 @@ func TestMSSQLSource_TableToSQLite_MergeUsesAutoDetectedPrimaryKey(t *testing.T)
 	)
 	require.NoError(t, err)
 
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	destDB, err := sql.Open("sqlite3", tmpFile.Name())
 	require.NoError(t, err)
@@ -177,7 +177,7 @@ func TestMSSQLSource_TableToSQLite_CustomSchemaFiltersAndExcludeColumns(t *testi
 		SQLLimit:            2,
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	destDB, err := sql.Open("sqlite3", tmpFile.Name())
 	require.NoError(t, err)
@@ -240,7 +240,7 @@ func TestAzureSQLSourceScheme_SQLServerContainerToSQLite(t *testing.T) {
 		IncrementalStrategy: config.StrategyReplace,
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	destDB, err := sql.Open("sqlite3", tmpFile.Name())
 	require.NoError(t, err)
@@ -285,8 +285,8 @@ func TestMSSQLDestination_Replace_CustomSchemaSwapCleanup(t *testing.T) {
 		IncrementalStrategy: config.StrategyReplace,
 	}
 
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	var schemaCount int
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sys.schemas WHERE name = @p1", schemaName).Scan(&schemaCount))

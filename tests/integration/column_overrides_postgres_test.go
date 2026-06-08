@@ -52,7 +52,7 @@ func TestColumnOverrides_CSVToPostgres_EmptySourceWithOverrides(t *testing.T) {
 		Columns:             "id:bigint,name:string,email:string,age:smallint",
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	types := readPostgresColumnTypes(t, pgDest.uri, schemaName, "empty")
 	assert.Equal(t, "bigint", types["id"])
@@ -90,7 +90,7 @@ func TestColumnOverrides_CSVToPostgres_AppliesTypes(t *testing.T) {
 		Columns:             "id:bigint,age:smallint",
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	types := readPostgresColumnTypes(t, pgDest.uri, schemaName, "users")
 	assert.Equal(t, "bigint", types["id"], "id retyped to bigint")

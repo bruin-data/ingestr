@@ -57,7 +57,7 @@ func TestDestinations_SchemaContract_Freeze(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 			// Validate initial load
 			validateContractInitialSQL(t, tc.sqlBackend, destURI, destTable)
@@ -68,7 +68,7 @@ func TestDestinations_SchemaContract_Freeze(t *testing.T) {
 			cfg.SchemaContract = "freeze"
 
 			p2 := pipeline.New(cfg)
-			err := p2.Run(ctx)
+			err := runPipeline(t, ctx, p2)
 			require.Error(t, err, "Freeze mode should reject new column")
 			assert.Contains(t, err.Error(), "schema contract violation", "Error should mention contract violation")
 
@@ -114,7 +114,7 @@ func TestDestinations_SchemaContract_Freeze_TypeChange(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 			// Second load: with freeze mode, type change (age int->string) should fail
 			cfg.SourceURI = typeChangeURI
@@ -122,7 +122,7 @@ func TestDestinations_SchemaContract_Freeze_TypeChange(t *testing.T) {
 			cfg.SchemaContract = "freeze"
 
 			p2 := pipeline.New(cfg)
-			err := p2.Run(ctx)
+			err := runPipeline(t, ctx, p2)
 			require.Error(t, err, "Freeze mode should reject type change")
 			assert.Contains(t, err.Error(), "schema contract violation", "Error should mention contract violation")
 		})
@@ -165,14 +165,14 @@ func TestDestinations_SchemaContract_Evolve(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 			// Second load: with evolve mode, new column should succeed
 			cfg.SourceURI = newColumnURI
 			cfg.SourceTable = "contract_new_column"
 
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "Evolve mode should allow new column")
+			require.NoError(t, runPipeline(t, ctx, p2), "Evolve mode should allow new column")
 
 			// Verify all rows are present
 			validateContractRowCountSQL(t, tc.sqlBackend, destURI, destTable, schemaContractInitialRows+schemaContractNewColumnRows)
@@ -221,7 +221,7 @@ func TestDestinations_SchemaContract_DiscardValue(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 			// Second load: discard_value mode should allow new columns
 			cfg.SourceURI = newColumnURI
@@ -229,7 +229,7 @@ func TestDestinations_SchemaContract_DiscardValue(t *testing.T) {
 			cfg.SchemaContract = "discard_value"
 
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "Discard value mode should succeed with new column")
+			require.NoError(t, runPipeline(t, ctx, p2), "Discard value mode should succeed with new column")
 
 			// Verify new column was added (discard_value allows ChangeAddColumn)
 			validateContractEmailColumnExists(t, tc.sqlBackend, destURI, destTable)
@@ -275,7 +275,7 @@ func TestDestinations_SchemaContract_DiscardValue_TypeChange(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 			// Get initial age column type
 			initialTypes := getColumnTypes(t, tc.sqlBackend, destURI, destTable)
@@ -288,7 +288,7 @@ func TestDestinations_SchemaContract_DiscardValue_TypeChange(t *testing.T) {
 			cfg.SchemaContract = "discard_value"
 
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "Discard value mode should succeed and ingest with NULLs")
+			require.NoError(t, runPipeline(t, ctx, p2), "Discard value mode should succeed and ingest with NULLs")
 
 			// Verify age column type was NOT widened (schema evolution skips type changes)
 			finalTypes := getColumnTypes(t, tc.sqlBackend, destURI, destTable)
@@ -339,7 +339,7 @@ func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 			// Get initial column count
 			initialTypes := getColumnTypes(t, tc.sqlBackend, destURI, destTable)
@@ -352,7 +352,7 @@ func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
 			cfg.SchemaContract = "discard_row"
 
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "Discard row mode should succeed and filter incompatible rows")
+			require.NoError(t, runPipeline(t, ctx, p2), "Discard row mode should succeed and filter incompatible rows")
 
 			// Verify new columns WERE added (schema evolution applies allowed changes)
 			finalTypes := getColumnTypes(t, tc.sqlBackend, destURI, destTable)
@@ -403,14 +403,14 @@ func TestDestinations_SchemaContract_DefaultIsEvolve(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 			// Second load with empty contract - should allow new column
 			cfg.SourceURI = newColumnURI
 			cfg.SourceTable = "contract_new_column"
 
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "Default (evolve) mode should allow new column")
+			require.NoError(t, runPipeline(t, ctx, p2), "Default (evolve) mode should allow new column")
 
 			// Verify new column was added
 			validateContractEmailColumnExists(t, tc.sqlBackend, destURI, destTable)
@@ -510,7 +510,7 @@ func TestDestinations_SchemaContract_ColumnRemoval_Evolve(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 			// Verify email column exists after first load
 			types := getColumnTypes(t, tc.sqlBackend, destURI, destTable)
@@ -523,7 +523,7 @@ func TestDestinations_SchemaContract_ColumnRemoval_Evolve(t *testing.T) {
 			cfg.SourceTable = "contract_initial"
 
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "Evolve mode should allow column removal (soft delete)")
+			require.NoError(t, runPipeline(t, ctx, p2), "Evolve mode should allow column removal (soft delete)")
 
 			// Verify email column still exists
 			typesAfter := getColumnTypes(t, tc.sqlBackend, destURI, destTable)
@@ -571,7 +571,7 @@ func TestDestinations_SchemaContract_ColumnRemoval_Freeze(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 			// Second load: source no longer has email column
 			// Freeze mode should reject this as a schema change
@@ -580,7 +580,7 @@ func TestDestinations_SchemaContract_ColumnRemoval_Freeze(t *testing.T) {
 			cfg.SchemaContract = "freeze"
 
 			p2 := pipeline.New(cfg)
-			err := p2.Run(ctx)
+			err := runPipeline(t, ctx, p2)
 			require.Error(t, err, "Freeze mode should reject column removal")
 			assert.Contains(t, err.Error(), "schema contract violation", "Error should mention contract violation")
 		})
@@ -628,7 +628,7 @@ func TestDestinations_SchemaContract_InvalidMode(t *testing.T) {
 		}
 
 		p1 := pipeline.New(cfg)
-		require.NoError(t, p1.Run(ctx), "First load should succeed")
+		require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 		// Second load with invalid mode
 		cfg.SourceURI = newColumnURI
@@ -636,7 +636,7 @@ func TestDestinations_SchemaContract_InvalidMode(t *testing.T) {
 		cfg.SchemaContract = "invalid_mode"
 
 		p2 := pipeline.New(cfg)
-		err := p2.Run(ctx)
+		err := runPipeline(t, ctx, p2)
 		require.Error(t, err, "Invalid mode should be rejected")
 		assert.Contains(t, err.Error(), "unknown schema contract mode", "Error should mention unknown mode")
 	})

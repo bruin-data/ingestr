@@ -525,7 +525,7 @@ func TestDestinations_MultiTable_Replace(t *testing.T) {
 			}
 
 			p := pipeline.New(cfg)
-			require.NoError(t, p.Run(ctx), "Multi-table replace should succeed")
+			require.NoError(t, runPipeline(t, ctx, p), "Multi-table replace should succeed")
 
 			// Verify each table has correct row counts
 			db, err := tc.sqlBackend.openDB(destURI)
@@ -607,14 +607,14 @@ func TestDestinations_MultiTable_Append(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "Initial load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "Initial load should succeed")
 
 			// Second run: append more data
 			cfg.SourceURI = sourceURI2
 			cfg.IncrementalStrategy = config.StrategyAppend
 
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "Append should succeed")
+			require.NoError(t, runPipeline(t, ctx, p2), "Append should succeed")
 
 			// Verify row counts after append
 			db, err := tc.sqlBackend.openDB(destURI)
@@ -692,14 +692,14 @@ func TestDestinations_MultiTable_Merge(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "Initial load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "Initial load should succeed")
 
 			// Second run: merge updates
 			cfg.SourceURI = sourceURI2
 			cfg.IncrementalStrategy = config.StrategyMerge
 
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "Merge should succeed")
+			require.NoError(t, runPipeline(t, ctx, p2), "Merge should succeed")
 
 			// Verify row counts after merge
 			db, err := tc.sqlBackend.openDB(destURI)

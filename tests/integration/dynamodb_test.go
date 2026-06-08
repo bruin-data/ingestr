@@ -119,7 +119,7 @@ func TestDynamoDB_Replace(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	require.NoError(t, p.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p))
 
 	count := scanCount(t, ctx, client, table)
 	assert.Equal(t, replaceFixtureRows, count, "replace should write all rows")
@@ -153,14 +153,14 @@ func TestDynamoDB_Append(t *testing.T) {
 	}
 
 	p1 := pipeline.New(cfg)
-	require.NoError(t, p1.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p1))
 
 	count1 := scanCount(t, ctx, client, table)
 	assert.Equal(t, appendInitialRows, count1, "initial append should have 5 rows")
 
 	cfg.SourceURI = moreURI
 	p2 := pipeline.New(cfg)
-	require.NoError(t, p2.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p2))
 
 	// append_more has IDs 6-11, initial has IDs 1-5. No overlap, so 11 total.
 	count2 := scanCount(t, ctx, client, table)
@@ -191,14 +191,14 @@ func TestDynamoDB_Merge(t *testing.T) {
 	}
 
 	p1 := pipeline.New(cfg)
-	require.NoError(t, p1.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p1))
 
 	count1 := scanCount(t, ctx, client, table)
 	assert.Equal(t, 5, count1, "initial merge should insert 5 rows")
 
 	cfg.SourceURI = updateURI
 	p2 := pipeline.New(cfg)
-	require.NoError(t, p2.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p2))
 
 	count2 := scanCount(t, ctx, client, table)
 	assert.Equal(t, mergeAfterRows, count2, "after merge update, should have 6 rows")
@@ -246,13 +246,13 @@ func TestDynamoDB_ReplaceOverwrites(t *testing.T) {
 	}
 
 	// First run
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 	count1 := scanCount(t, ctx, client, table)
 	assert.Equal(t, replaceFixtureRows, count1)
 
 	// Second run with smaller dataset - replace should drop and recreate
 	cfg.SourceURI = jsonlURI(t, "testdata/conformance_merge_initial.jsonl")
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	count2 := scanCount(t, ctx, client, table)
 	assert.Equal(t, 5, count2, "replace should overwrite with new data only")

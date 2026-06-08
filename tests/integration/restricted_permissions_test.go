@@ -76,7 +76,7 @@ func TestPostgresDestination_RestrictedPermissions(t *testing.T) {
 			PrimaryKeys:         []string{"id"},
 			IncrementalStrategy: config.StrategyMerge, // exercises staging-schema creation
 		}
-		err := pipeline.New(cfg).Run(ctx)
+		err := runPipeline(t, ctx, pipeline.New(cfg))
 		require.Error(t, err, "ingest should fail when restricted user can't create _bruin_staging")
 		errMsg := strings.ToLower(err.Error())
 		assert.True(t,
@@ -104,7 +104,7 @@ func TestPostgresDestination_RestrictedPermissions(t *testing.T) {
 			PrimaryKeys:         []string{"id"},
 			IncrementalStrategy: config.StrategyMerge,
 		}
-		require.NoError(t, pipeline.New(cfg).Run(ctx),
+		require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)),
 			"ingest should succeed once _bruin_staging is pre-created and granted")
 
 		var count int
@@ -165,7 +165,7 @@ func TestMySQLDestination_RestrictedPermissions(t *testing.T) {
 			PrimaryKeys:         []string{"id"},
 			IncrementalStrategy: config.StrategyMerge,
 		}
-		err := pipeline.New(cfg).Run(ctx)
+		err := runPipeline(t, ctx, pipeline.New(cfg))
 		require.Error(t, err, "ingest should fail when restricted user can't create _bruin_staging")
 		errMsg := strings.ToLower(err.Error())
 		assert.True(t,
@@ -190,7 +190,7 @@ func TestMySQLDestination_RestrictedPermissions(t *testing.T) {
 			PrimaryKeys:         []string{"id"},
 			IncrementalStrategy: config.StrategyMerge,
 		}
-		require.NoError(t, pipeline.New(cfg).Run(ctx),
+		require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)),
 			"ingest should succeed once _bruin_staging is pre-created and granted")
 
 		var count int
@@ -259,7 +259,7 @@ func TestMSSQLDestination_RestrictedPermissions(t *testing.T) {
 			PrimaryKeys:         []string{"id"},
 			IncrementalStrategy: config.StrategyMerge,
 		}
-		err := pipeline.New(cfg).Run(ctx)
+		err := runPipeline(t, ctx, pipeline.New(cfg))
 		require.Error(t, err, "ingest should fail when restricted user can't create _bruin_staging")
 		errMsg := strings.ToLower(err.Error())
 		assert.True(t,
@@ -283,7 +283,7 @@ func TestMSSQLDestination_RestrictedPermissions(t *testing.T) {
 			PrimaryKeys:         []string{"id"},
 			IncrementalStrategy: config.StrategyMerge,
 		}
-		require.NoError(t, pipeline.New(cfg).Run(ctx),
+		require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)),
 			"ingest should succeed once _bruin_staging is pre-created and granted")
 
 		var count int

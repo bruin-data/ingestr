@@ -57,7 +57,7 @@ func TestParquetSeedToPostgres(t *testing.T) {
 		IncrementalStrategy: "replace",
 	}
 
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	db, err := sql.Open("pgx", destURI)
 	require.NoError(t, err)
@@ -105,7 +105,7 @@ func TestAvroSeedToPostgres(t *testing.T) {
 		IncrementalStrategy: "replace",
 	}
 
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	db, err := sql.Open("pgx", destURI)
 	require.NoError(t, err)
@@ -145,27 +145,27 @@ func TestParquetSeedToPostgres_Merge(t *testing.T) {
 	initial := filepath.Join(dir, "initial.parquet")
 	writeSeedParquet(t, initial, 10)
 
-	require.NoError(t, pipeline.New(&config.IngestConfig{
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(&config.IngestConfig{
 		SourceURI:           "parquet://" + initial,
 		SourceTable:         "users",
 		DestURI:             destURI,
 		DestTable:           destSchema + ".users",
 		IncrementalStrategy: "merge",
 		PrimaryKeys:         []string{"id"},
-	}).Run(ctx))
+	})))
 
 	// second load: ids 1..15 (overlapping + new)
 	update := filepath.Join(dir, "update.parquet")
 	writeSeedParquet(t, update, 15)
 
-	require.NoError(t, pipeline.New(&config.IngestConfig{
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(&config.IngestConfig{
 		SourceURI:           "parquet://" + update,
 		SourceTable:         "users",
 		DestURI:             destURI,
 		DestTable:           destSchema + ".users",
 		IncrementalStrategy: "merge",
 		PrimaryKeys:         []string{"id"},
-	}).Run(ctx))
+	})))
 
 	db, err := sql.Open("pgx", destURI)
 	require.NoError(t, err)

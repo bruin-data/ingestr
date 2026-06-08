@@ -45,7 +45,7 @@ func runCSVtoDuckDB(t *testing.T, csvBody string, mutate func(*config.IngestConf
 		mutate(cfg)
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 	return duckDBPath
 }
 
@@ -156,6 +156,6 @@ func TestInvalidSchemaNaming_FailsFast(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		return
 	}
-	err := pipeline.New(cfg).Run(ctx)
+	err := runPipeline(t, ctx, pipeline.New(cfg))
 	require.Error(t, err)
 }

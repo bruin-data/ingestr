@@ -157,7 +157,7 @@ func TestStaging_BasicMergeMirrorsDest(t *testing.T) {
 		KeepStaging:         true,
 	}
 
-	require.NoError(t, pipeline.New(cfg).Run(ctx), "pipeline should succeed")
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "pipeline should succeed")
 
 	db := openDuckDB(t, destPath)
 	staging := findStagingTable(t, db)
@@ -207,7 +207,7 @@ func TestStaging_SoftRemovedColumnNullFilled(t *testing.T) {
 		PrimaryKeys:         []string{"id"},
 		KeepStaging:         true,
 	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx), "pipeline should succeed")
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "pipeline should succeed")
 
 	db := openDuckDB(t, destPath)
 	staging := findStagingTable(t, db)
@@ -257,7 +257,7 @@ func TestStaging_WidenedDestTypeUsedInStaging(t *testing.T) {
 		PrimaryKeys:         []string{"id"},
 		KeepStaging:         true,
 	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx), "pipeline should succeed")
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "pipeline should succeed")
 
 	db := openDuckDB(t, destPath)
 	staging := findStagingTable(t, db)
@@ -299,7 +299,7 @@ func TestStaging_SCD2HasMetadataColumns(t *testing.T) {
 		PrimaryKeys:         []string{"id"},
 		KeepStaging:         true,
 	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx), "SCD2 pipeline should succeed")
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "SCD2 pipeline should succeed")
 
 	db := openDuckDB(t, destPath)
 	staging := findStagingTable(t, db)
@@ -361,7 +361,7 @@ func TestStaging_SourceNarrower_BooleanVsVarchar(t *testing.T) {
 		PrimaryKeys:         []string{"id"},
 		KeepStaging:         true,
 	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx), "pipeline should succeed")
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "pipeline should succeed")
 
 	db := openDuckDB(t, destPath)
 	staging := findStagingTable(t, db)
@@ -410,7 +410,7 @@ func TestStaging_MixedDrift_AddWidenSoftRemove(t *testing.T) {
 		PrimaryKeys:         []string{"id"},
 		KeepStaging:         true,
 	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx), "pipeline should succeed")
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "pipeline should succeed")
 
 	db := openDuckDB(t, destPath)
 	staging := findStagingTable(t, db)
@@ -472,12 +472,12 @@ func TestStaging_SecondRun_StillMirrorsDest(t *testing.T) {
 		PrimaryKeys:         []string{"id"},
 		KeepStaging:         false, // first run cleans up so the second is unambiguous
 	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx), "first run")
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "first run")
 
 	cfg.SourceURI = jsonlURI(t, "testdata/conformance_merge_update.jsonl")
 	cfg.SourceTable = "users"
 	cfg.KeepStaging = true
-	require.NoError(t, pipeline.New(cfg).Run(ctx), "second run")
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "second run")
 
 	db := openDuckDB(t, destPath)
 	staging := findStagingTable(t, db)

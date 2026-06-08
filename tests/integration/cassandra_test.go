@@ -66,7 +66,7 @@ func TestCassandraSourceToDuckDB(t *testing.T) {
 		PageSize:            1,
 		Yes:                 true,
 	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", duckDBPath))
 	require.NoError(t, err)
@@ -117,7 +117,7 @@ func TestCassandraDestinationReplaceAndMerge(t *testing.T) {
 		PageSize:            1,
 		Yes:                 true,
 	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	updatePath := writeJSONL(t, "updates.jsonl", []string{
 		`{"id":"u1","name":"Alice Updated","score":30,"active":true}`,
@@ -125,7 +125,7 @@ func TestCassandraDestinationReplaceAndMerge(t *testing.T) {
 	})
 	cfg.SourceURI = "jsonl://" + updatePath
 	cfg.IncrementalStrategy = config.StrategyMerge
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	got := readCassandraUsers(t, session, table)
 	require.Equal(t, map[string]string{

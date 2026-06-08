@@ -178,7 +178,7 @@ func TestMongoDB_SchemaEvolution_EndToEnd(t *testing.T) {
 				PageSize:            tc.pageSize,
 				Yes:                 true,
 			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx), "pipeline.Run")
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "pipeline.Run")
 
 			conn, err := sql.Open("sqlite3", sqlitePath)
 			require.NoError(t, err)

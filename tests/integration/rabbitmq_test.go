@@ -56,7 +56,7 @@ func TestRabbitMQToSQLite(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -97,7 +97,7 @@ func TestRabbitMQToPostgres(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err := p.Run(ctx)
+	err := runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	validatePostgresResults(t, ctx, destURI, destSchema, "messages", messageCount)
@@ -138,7 +138,7 @@ func TestRabbitMQEmptyQueue(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	t.Log("Empty queue ingestion completed without error")

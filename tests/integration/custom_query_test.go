@@ -127,7 +127,7 @@ func TestCustomQuery_PostgresToSQLite(t *testing.T) {
 			require.NoError(t, cfg.Validate())
 
 			p := pipeline.New(cfg)
-			err := p.Run(ctx)
+			err := runPipeline(t, ctx, p)
 			require.NoError(t, err)
 
 			db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -176,7 +176,7 @@ func TestCustomQuery_PostgresToPostgres(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	p := pipeline.New(cfg)
-	err := p.Run(ctx)
+	err := runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("pgx", destURI)
@@ -244,7 +244,7 @@ func TestCustomQuery_WithIntervalParams(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -342,7 +342,7 @@ func TestCustomQuery_DuckDBToSQLite(t *testing.T) {
 			require.NoError(t, cfg.Validate())
 
 			p := pipeline.New(cfg)
-			err := p.Run(ctx)
+			err := runPipeline(t, ctx, p)
 			require.NoError(t, err)
 
 			db, err := sql.Open("sqlite3", sqlitePath)
@@ -388,7 +388,7 @@ func TestCustomQuery_MySQLToSQLite(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -443,7 +443,7 @@ func TestCustomQuery_MSSQLToSQLite(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -500,7 +500,7 @@ func TestCustomQuery_ClickHouseToSQLite(t *testing.T) {
 		require.NoError(t, cfg.Validate())
 
 		p := pipeline.New(cfg)
-		err := p.Run(ctx)
+		err := runPipeline(t, ctx, p)
 		require.NoError(t, err)
 
 		db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -541,7 +541,7 @@ func TestCustomQuery_ClickHouseToSQLite(t *testing.T) {
 		require.NoError(t, cfg.Validate())
 
 		p := pipeline.New(cfg)
-		err := p.Run(ctx)
+		err := runPipeline(t, ctx, p)
 		require.NoError(t, err)
 
 		db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -597,7 +597,7 @@ func TestCustomQuery_DatabricksToSQLite(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -642,7 +642,7 @@ func TestCustomQuery_AthenaToSQLite(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -704,7 +704,7 @@ func TestCustomQuery_MergeStrategy_Postgres(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	p := pipeline.New(cfg)
-	require.NoError(t, p.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p))
 
 	destDB, err := sql.Open("pgx", destURI)
 	require.NoError(t, err)
@@ -733,7 +733,7 @@ func TestCustomQuery_MergeStrategy_Postgres(t *testing.T) {
 	require.NoError(t, cfg2.Validate())
 
 	p2 := pipeline.New(cfg2)
-	require.NoError(t, p2.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p2))
 
 	err = destDB.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", pqTable(destSchema, "players"))).Scan(&count)
 	require.NoError(t, err)
@@ -793,7 +793,7 @@ func TestCustomQuery_MergeStrategy_DuckDB(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	p := pipeline.New(cfg)
-	require.NoError(t, p.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p))
 
 	destDB, err := sql.Open("sqlite3", sqlitePath)
 	require.NoError(t, err)
@@ -827,7 +827,7 @@ func TestCustomQuery_MergeStrategy_DuckDB(t *testing.T) {
 	require.NoError(t, cfg2.Validate())
 
 	p2 := pipeline.New(cfg2)
-	require.NoError(t, p2.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p2))
 
 	destDB, err = sql.Open("sqlite3", sqlitePath)
 	require.NoError(t, err)

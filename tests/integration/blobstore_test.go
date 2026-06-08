@@ -125,7 +125,7 @@ func TestPostgresToS3_BasicWrite(t *testing.T) {
 
 	t.Logf("Running pipeline with source=%s dest=%s destTable=%s", cfg.SourceURI, cfg.DestURI, cfg.DestTable)
 	p := pipeline.New(cfg)
-	err := p.Run(ctx)
+	err := runPipeline(t, ctx, p)
 	if err != nil {
 		t.Logf("Pipeline error: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestPostgresToS3_CustomLayout(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err := p.Run(ctx)
+	err := runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	keys := listObjects(t, ctx, client, bucket, "data/")
@@ -231,7 +231,7 @@ func TestS3ToSQLite_CSVSource(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should run without errors")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -276,7 +276,7 @@ func TestS3ToSQLite_CSVGlobPattern(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should run without errors")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -322,7 +322,7 @@ func TestS3ToSQLite_RecursiveGlobPattern(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should run without errors")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -370,7 +370,7 @@ func TestS3ToSQLite_JSONLSource(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should run without errors")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -415,7 +415,7 @@ func TestS3ToSQLite_JSONLGlobPattern(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -463,7 +463,7 @@ func TestS3ToSQLite_ParquetSource(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should run without errors")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -512,7 +512,7 @@ func TestS3ToSQLite_GzipCSV(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should handle gzipped CSV")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -557,7 +557,7 @@ func TestS3ToSQLite_GzipJSONL(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should handle gzipped JSONL")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -602,7 +602,7 @@ func TestS3ToSQLite_GzipGlobPattern(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -650,7 +650,7 @@ func TestS3ToSQLite_FileTypeHint_JSONL(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should use JSONL format hint")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -694,7 +694,7 @@ func TestS3ToSQLite_FileTypeHint_CSV(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should use CSV format hint")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -739,7 +739,7 @@ func TestRoundTrip_PostgresS3SQLite(t *testing.T) {
 	}
 
 	p1 := pipeline.New(cfg1)
-	err := p1.Run(ctx)
+	err := runPipeline(t, ctx, p1)
 	require.NoError(t, err, "Stage 1: PostgreSQL -> S3 should succeed")
 
 	keys := listObjects(t, ctx, client, bucket, "patients/")
@@ -761,7 +761,7 @@ func TestRoundTrip_PostgresS3SQLite(t *testing.T) {
 	}
 
 	p2 := pipeline.New(cfg2)
-	err = p2.Run(ctx)
+	err = runPipeline(t, ctx, p2)
 	require.NoError(t, err, "Stage 2: S3 -> SQLite should succeed")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -815,7 +815,7 @@ func TestS3_DataIntegrity_NumericValues(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -887,7 +887,7 @@ func TestS3_DataIntegrity_SpecialCharacters(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
@@ -933,7 +933,7 @@ func TestS3_Error_NonExistentBucket(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	assert.Error(t, err, "Should fail for non-existent bucket")
 }
 
@@ -967,7 +967,7 @@ func TestS3_Error_NoMatchingFiles(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	assert.Error(t, err, "Should fail when no files match pattern")
 }
 
@@ -1006,7 +1006,7 @@ func TestS3_LargeFile_CSV(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Should handle large CSV file")
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())

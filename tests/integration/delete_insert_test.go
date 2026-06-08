@@ -52,7 +52,7 @@ func TestDeleteInsertStrategy_JSONLToDuckDB(t *testing.T) {
 	}
 
 	p1 := pipeline.New(cfg1)
-	err = p1.Run(ctx)
+	err = runPipeline(t, ctx, p1)
 	require.NoError(t, err, "First pipeline run should succeed")
 
 	validateDuckDBDeleteInsertResults(t, duckDBPath, "After initial load", 10, map[int64]string{
@@ -79,7 +79,7 @@ func TestDeleteInsertStrategy_JSONLToDuckDB(t *testing.T) {
 	}
 
 	p2 := pipeline.New(cfg2)
-	err = p2.Run(ctx)
+	err = runPipeline(t, ctx, p2)
 	require.NoError(t, err, "Second pipeline run should succeed")
 
 	validateDuckDBDeleteInsertResults(t, duckDBPath, "After interval update", 11, map[int64]string{
@@ -146,7 +146,7 @@ func TestDeleteInsertStrategy_DeletesRecordsNotInNewData(t *testing.T) {
 		IncrementalKey:      "batch_id",
 	}
 
-	err = pipeline.New(cfg1).Run(ctx)
+	err = runPipeline(t, ctx, pipeline.New(cfg1))
 	require.NoError(t, err)
 
 	// Open fresh connection after first pipeline
@@ -172,7 +172,7 @@ func TestDeleteInsertStrategy_DeletesRecordsNotInNewData(t *testing.T) {
 		IncrementalKey:      "batch_id",
 	}
 
-	err = pipeline.New(cfg2).Run(ctx)
+	err = runPipeline(t, ctx, pipeline.New(cfg2))
 	require.NoError(t, err)
 
 	// Open fresh connection after second pipeline to see latest changes

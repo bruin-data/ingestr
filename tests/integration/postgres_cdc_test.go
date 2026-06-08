@@ -141,7 +141,7 @@ func TestPostgresCDC_Snapshot(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	// Verify data in destination
@@ -263,7 +263,7 @@ func TestPostgresCDC_IncrementalResume(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	// Verify initial data
@@ -306,7 +306,7 @@ func TestPostgresCDC_IncrementalResume(t *testing.T) {
 	}
 
 	p2 := pipeline.New(cfg2)
-	err = p2.Run(ctx)
+	err = runPipeline(t, ctx, p2)
 	require.NoError(t, err)
 
 	// Verify incremental changes were captured
@@ -377,7 +377,7 @@ func TestPostgresCDC_DuplicatePKWithinBatch(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	sourcePool, err := pgxpool.New(ctx, sourceConnString)
@@ -396,7 +396,7 @@ func TestPostgresCDC_DuplicatePKWithinBatch(t *testing.T) {
 
 	// Run incremental CDC pipeline (should not fail)
 	p2 := pipeline.New(cfg)
-	err = p2.Run(ctx)
+	err = runPipeline(t, ctx, p2)
 	require.NoError(t, err)
 
 	destPool, err := pgxpool.New(ctx, destConnString)
@@ -470,7 +470,7 @@ func TestPostgresCDC_BatchModeCompletesWithActiveWrites(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	// Verify initial data
@@ -535,7 +535,7 @@ func TestPostgresCDC_BatchModeCompletesWithActiveWrites(t *testing.T) {
 	startTime := time.Now()
 
 	p2 := pipeline.New(cfg)
-	err = p2.Run(pipelineCtx)
+	err = runPipeline(t, pipelineCtx, p2)
 
 	elapsed := time.Since(startTime)
 
@@ -596,7 +596,7 @@ func TestPostgresCDC_IncrementalResume_DuckDB(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err)
 
 	// Query DuckDB to verify initial data
@@ -645,7 +645,7 @@ func TestPostgresCDC_IncrementalResume_DuckDB(t *testing.T) {
 	}
 
 	p2 := pipeline.New(cfg2)
-	err = p2.Run(ctx)
+	err = runPipeline(t, ctx, p2)
 	require.NoError(t, err)
 
 	// Verify incremental changes were captured

@@ -58,7 +58,7 @@ func TestPostgresToPostgres(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err := p.Run(ctx)
+	err := runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should run without errors")
 
 	// Validate results
@@ -98,7 +98,7 @@ func TestPostgresToPostgresWithMerge(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err := p.Run(ctx)
+	err := runPipeline(t, ctx, p)
 	require.NoError(t, err, "First pipeline run should succeed")
 
 	// Validate initial data
@@ -109,7 +109,7 @@ func TestPostgresToPostgresWithMerge(t *testing.T) {
 
 	// Second run - merge updated data
 	p2 := pipeline.New(cfg)
-	err = p2.Run(ctx)
+	err = runPipeline(t, ctx, p2)
 	require.NoError(t, err, "Second pipeline run should succeed")
 
 	// Validate merged data (same count, but updated values)
@@ -150,7 +150,7 @@ func TestPostgresToSQLite(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should run without errors")
 
 	// Validate SQLite results
@@ -186,7 +186,7 @@ func TestDuckDBToSQLite(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err := p.Run(ctx)
+	err := runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should run without errors")
 
 	// Validate SQLite results
@@ -225,7 +225,7 @@ func TestDuckDBToPostgres(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err := p.Run(ctx)
+	err := runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should run without errors")
 
 	// Validate PostgreSQL results
@@ -262,7 +262,7 @@ func TestDuckDBWithPrimaryKeyAutoDetection(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err := p.Run(ctx)
+	err := runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline should auto-detect PKs and run merge")
 
 	// Validate results
@@ -320,7 +320,7 @@ func TestPostgresToPostgresCamelCaseColumns(t *testing.T) {
 	}
 
 	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = runPipeline(t, ctx, p)
 	require.NoError(t, err, "Pipeline with camelCase source columns should succeed")
 
 	// Validate destination has data with snake_case column names

@@ -432,7 +432,7 @@ func TestDestinations_Replace(t *testing.T) {
 			}
 
 			p := pipeline.New(cfg)
-			require.NoError(t, p.Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, p))
 			if tc.sqlBackend != nil {
 				validateReplaceSQL(t, tc.sqlBackend, destURI, destTable)
 				return
@@ -481,7 +481,7 @@ func countRowsViaMaxComputeRead(t *testing.T, ctx context.Context, maxComputeURI
 	}
 
 	p := pipeline.New(cfg)
-	require.NoError(t, p.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p))
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
 	require.NoError(t, err)
@@ -507,7 +507,7 @@ func countRowsViaAthenaRead(t *testing.T, ctx context.Context, athenaURI, athena
 	}
 
 	p := pipeline.New(cfg)
-	require.NoError(t, p.Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, p))
 
 	db, err := sql.Open("sqlite3", tmpFile.Name())
 	require.NoError(t, err)
@@ -553,11 +553,11 @@ func TestDestinations_Merge(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, p1))
 
 			cfg.SourceURI = updateURI
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, p2))
 			validateMergeSQL(t, tc.sqlBackend, destURI, destTable)
 		})
 	}
@@ -595,11 +595,11 @@ func TestDestinations_Append(t *testing.T) {
 				IncrementalStrategy: config.StrategyAppend,
 			}
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, p1))
 
 			cfg.SourceURI = moreURI
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, p2))
 
 			if tc.sqlBackend != nil {
 				validateAppendSQL(t, tc.sqlBackend, destURI, destTable)
@@ -654,14 +654,14 @@ func TestDestinations_DeleteInsert(t *testing.T) {
 				DestTable:           destTable,
 				IncrementalStrategy: config.StrategyReplace,
 			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 			// Apply delete+insert over the interval inferred from the source data.
 			cfg.SourceURI = intervalURI
 			cfg.SourceTable = "deleteinsert_interval"
 			cfg.IncrementalStrategy = config.StrategyDeleteInsert
 			cfg.IncrementalKey = "id"
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 			validateDeleteInsertSQL(t, tc.sqlBackend, destURI, destTable)
 		})
@@ -730,13 +730,13 @@ func TestDestinations_DeleteInsert_DedupesStagingByPK(t *testing.T) {
 			}
 
 			// Phase 1: dedup on load — duplicate PKs collapse to one row each.
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 			assert.Equal(t, 3, countRows(), "duplicate primary keys in staging should collapse to one row per key")
 
 			// Phase 2: normal incremental delete+insert over interval [3,4].
 			cfg.SourceURI = intervalURI
 			cfg.SourceTable = "deleteinsert_dedup_interval"
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 			assert.Equal(t, 4, countRows(), "interval delete+insert should replace id=3 and add net-new id=4")
 			assert.Equal(t, "v2-3", nameByID(3), "id=3 inside the interval should be replaced")
@@ -784,7 +784,7 @@ func TestDestinations_TruncateInsert(t *testing.T) {
 				DestTable:           destTable,
 				IncrementalStrategy: config.StrategyReplace,
 			}
-			require.NoError(t, pipeline.New(seedCfg).Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(seedCfg)))
 
 			// Truncate+insert with 10 rows. Final count should be 10 (not 15).
 			cfg := &config.IngestConfig{
@@ -794,7 +794,7 @@ func TestDestinations_TruncateInsert(t *testing.T) {
 				DestTable:           destTable,
 				IncrementalStrategy: config.StrategyTruncateInsert,
 			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 			validateTruncateInsertSQL(t, tc.sqlBackend, destURI, destTable)
 		})
@@ -838,7 +838,7 @@ func TestDestinations_TruncateInsert_Dedup(t *testing.T) {
 				IncrementalStrategy: config.StrategyTruncateInsert,
 				PrimaryKeys:         []string{"id"},
 			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 			db, err := tc.sqlBackend.openDB(destURI)
 			if err != nil {
@@ -900,13 +900,13 @@ func TestDestinations_SCD2(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "Initial SCD2 load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "Initial SCD2 load should succeed")
 
 			// Update load: apply changes
 			cfg.SourceURI = updateURI
 			cfg.SourceTable = "scd2_update"
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "SCD2 update load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p2), "SCD2 update load should succeed")
 
 			validateSCD2SQL(t, tc.sqlBackend, destURI, destTable)
 		})
@@ -2090,7 +2090,7 @@ func TestChessSource_ToDestinations(t *testing.T) {
 			}
 
 			p := pipeline.New(cfg)
-			err := p.Run(ctx)
+			err := runPipeline(t, ctx, p)
 			require.NoError(t, err, "Pipeline should run without errors")
 
 			// Validate that data was ingested
@@ -2161,7 +2161,7 @@ func TestDestinations_SchemaEvolution(t *testing.T) {
 			}
 
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First load should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First load should succeed")
 
 			// Validate initial schema
 			validateSchemaEvolutionInitialSQL(t, tc.sqlBackend, destURI, destTable)
@@ -2171,7 +2171,7 @@ func TestDestinations_SchemaEvolution(t *testing.T) {
 			cfg.SourceTable = "schema_evolution_evolved"
 
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "Second load with evolved schema should succeed")
+			require.NoError(t, runPipeline(t, ctx, p2), "Second load with evolved schema should succeed")
 
 			// Validate final state: row count and evolved types
 			validateSchemaEvolutionFinalSQL(t, tc.sqlBackend, destURI, destTable)
@@ -2370,7 +2370,7 @@ func TestDestinations_SwapTableCleansUpOldTables(t *testing.T) {
 
 			// First run: creates the initial table
 			p1 := pipeline.New(cfg)
-			require.NoError(t, p1.Run(ctx), "First replace should succeed")
+			require.NoError(t, runPipeline(t, ctx, p1), "First replace should succeed")
 
 			// Check no _old_ tables after first run
 			oldTables := countOldTables(t, tc.sqlBackend, destURI, destTable)
@@ -2378,7 +2378,7 @@ func TestDestinations_SwapTableCleansUpOldTables(t *testing.T) {
 
 			// Second run: triggers swap (rename existing -> _old_, rename staging -> target, drop _old_)
 			p2 := pipeline.New(cfg)
-			require.NoError(t, p2.Run(ctx), "Second replace should succeed")
+			require.NoError(t, runPipeline(t, ctx, p2), "Second replace should succeed")
 
 			// Check no _old_ tables after second run - this is where the bug manifested
 			oldTables = countOldTables(t, tc.sqlBackend, destURI, destTable)
@@ -2575,14 +2575,14 @@ func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
 				IncrementalStrategy: config.StrategyReplace,
 			}
 
-			require.NoError(t, pipeline.New(cfg).Run(ctx), "First replace should succeed")
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "First replace should succeed")
 			assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
 				"PRIMARY KEY on id should be present after first replace")
 
 			// Second run exercises the cross-schema swap path again — the staging table is
 			// in _bruin_staging while the existing target is in the target schema. This is
 			// where the CTAS regression manifested.
-			require.NoError(t, pipeline.New(cfg).Run(ctx), "Second replace should succeed")
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "Second replace should succeed")
 			assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
 				"PRIMARY KEY on id should still be present after second replace (cross-schema swap)")
 		})
@@ -2622,7 +2622,7 @@ func TestDestinations_Replace_DedupesByPK(t *testing.T) {
 				IncrementalKey:      "score",
 				PrimaryKeys:         []string{"id"},
 			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 			if tc.name == "duckdb" || tc.name == "sqlite" || tc.name == "postgres" || tc.name == "mssql" {
 				assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
@@ -2692,7 +2692,7 @@ func TestDestinations_Replace_DedupesByPK_NoIncrementalKey(t *testing.T) {
 				PrimaryKeys:         []string{"id"},
 				// No IncrementalKey: dedup keeps one arbitrary row per key.
 			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 			if tc.name == "duckdb" || tc.name == "sqlite" || tc.name == "postgres" || tc.name == "mssql" {
 				assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
@@ -2752,7 +2752,7 @@ func TestDestinations_LongColumnNames(t *testing.T) {
 			}
 
 			p := pipeline.New(cfg)
-			err := p.Run(ctx)
+			err := runPipeline(t, ctx, p)
 			require.NoError(t, err, "Pipeline should handle long column names without duplicate errors")
 
 			// Validate row count
@@ -2793,10 +2793,10 @@ func TestDestinations_LongColumnNames(t *testing.T) {
 					SchemaNaming:        "snake_case",
 				}
 
-				require.NoError(t, pipeline.New(cfg).Run(ctx), "Initial load should succeed")
+				require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "Initial load should succeed")
 
 				cfg.SourceURI = updateURI
-				require.NoError(t, pipeline.New(cfg).Run(ctx), "Merge update should succeed")
+				require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "Merge update should succeed")
 
 				db, err := tc.sqlBackend.openDB(destURI)
 				require.NoError(t, err)

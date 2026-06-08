@@ -62,7 +62,7 @@ func TestColumnOverrides_CSVToDuckDB(t *testing.T) {
 		IncrementalStrategy: config.StrategyReplace,
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	types := readDuckDBColumnTypes(t, duckDBPath, "main.users")
 	assert.Equal(t, "VARCHAR", types["id"])
@@ -93,7 +93,7 @@ func TestColumnOverrides_CSVToDuckDB_AppliesTypes(t *testing.T) {
 		Columns:             "id:bigint,age:smallint",
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	types := readDuckDBColumnTypes(t, duckDBPath, "main.users")
 	assert.Equal(t, "BIGINT", types["id"], "id should be overridden to BIGINT")
@@ -128,7 +128,7 @@ func TestColumnMasking_CSVToDuckDB(t *testing.T) {
 		},
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	assert.Equal(t, 2, readDuckDBRowCount(t, duckDBPath, "main.users"))
 
@@ -199,7 +199,7 @@ func TestColumnOverrides_EmptyCSV_NoOverrides_TableNotCreated(t *testing.T) {
 		IncrementalStrategy: config.StrategyReplace,
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx), "pipeline should succeed (skip) even with no rows")
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)), "pipeline should succeed (skip) even with no rows")
 
 	assert.False(t, duckDBTableExists(t, duckDBPath, "main", "empty"),
 		"destination table should NOT be created when source has no rows and no overrides")
@@ -225,7 +225,7 @@ func TestColumnOverrides_EmptyCSV_WithOverrides_TableCreatedFromOverrides(t *tes
 		Columns:             "id:bigint,name:string,email:string,age:smallint",
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	require.True(t, duckDBTableExists(t, duckDBPath, "main", "empty"),
 		"destination table should be created from --columns when source has no rows")
@@ -262,7 +262,7 @@ func TestColumnOverrides_InvalidType_ReturnsError(t *testing.T) {
 	}
 	require.NoError(t, cfg.Validate())
 
-	err := pipeline.New(cfg).Run(ctx)
+	err := runPipeline(t, ctx, pipeline.New(cfg))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown type 'bogustype'")
 
@@ -290,7 +290,7 @@ func TestColumnOverrides_ExtraColumn_AddedWithNulls(t *testing.T) {
 		Columns:             "id:bigint,does_not_exist:string",
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	types := readDuckDBColumnTypes(t, duckDBPath, "main.users")
 	assert.Equal(t, "BIGINT", types["id"], "id override should apply")
@@ -328,7 +328,7 @@ func TestColumnOverrides_DroppedColumn_ReappearsViaOverride(t *testing.T) {
 			IncrementalStrategy: config.StrategyReplace,
 		}
 		require.NoError(t, cfg.Validate())
-		require.NoError(t, pipeline.New(cfg).Run(ctx))
+		require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 		types := readDuckDBColumnTypes(t, duckDBPath, "main.sparse")
 		_, hasEmail := types["email"]
@@ -346,7 +346,7 @@ func TestColumnOverrides_DroppedColumn_ReappearsViaOverride(t *testing.T) {
 			Columns:             "email:string,age:int",
 		}
 		require.NoError(t, cfg.Validate())
-		require.NoError(t, pipeline.New(cfg).Run(ctx))
+		require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 		types := readDuckDBColumnTypes(t, duckDBPath, "main.sparse")
 		assert.Equal(t, "VARCHAR", types["email"], "email override should re-add the column")
@@ -383,7 +383,7 @@ func TestColumnOverrides_EmptyCSV_AutoAddsPKColumn(t *testing.T) {
 		Columns:             "id:bigint,name:string",
 	}
 	require.NoError(t, cfg.Validate())
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, runPipeline(t, ctx, pipeline.New(cfg)))
 
 	require.True(t, duckDBTableExists(t, duckDBPath, "main", "empty"))
 
