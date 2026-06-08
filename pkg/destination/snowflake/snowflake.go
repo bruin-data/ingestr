@@ -399,6 +399,7 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 }
 
 func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
+	destColumns := destination.DestinationColumns(allColumns)
 	stagingSchema, stagingName := parseSchemaTable(stagingTable)
 	targetSchema, targetName := parseSchemaTable(targetTable)
 
@@ -419,7 +420,7 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	cdcMerge := slices.Contains(allColumns, destination.CDCDeletedColumn)
 	unchangedRef := "source." + quoteIdentifier(destination.CDCUnchangedColsColumn)
 	var updateSets []string
-	for _, col := range allColumns {
+	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
 			q := quoteIdentifier(col)
 			if cdcMerge && !destination.IsCDCMetaColumn(col) {
@@ -432,11 +433,15 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		}
 	}
 
-	quotedCols := make([]string, len(allColumns))
-	sourceCols := make([]string, len(allColumns))
+	stagingQuoted := make([]string, len(allColumns))
 	for i, col := range allColumns {
-		quotedCols[i] = quoteIdentifier(col)
-		sourceCols[i] = "source." + quoteIdentifier(col)
+		stagingQuoted[i] = quoteIdentifier(col)
+	}
+	destQuoted := make([]string, len(destColumns))
+	destSourceCols := make([]string, len(destColumns))
+	for i, col := range destColumns {
+		destQuoted[i] = quoteIdentifier(col)
+		destSourceCols[i] = "source." + quoteIdentifier(col)
 	}
 
 	quotedPKList := make([]string, len(primaryKeys))
@@ -455,8 +460,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
+		strings.Join(stagingQuoted, ", "),
+		strings.Join(stagingQuoted, ", "),
 		strings.Join(quotedPKList, ", "),
 		dedupOrderBy,
 		stagingFull,
@@ -480,8 +485,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 			quoteIdentifier("_cdc_synced_at"), quoteIdentifier("_cdc_synced_at"))
 
 		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND source.%s = false THEN\n", quoteIdentifier("_cdc_deleted"))
-		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 	} else {
 		if len(updateSets) > 0 {
 			mergeSQL.WriteString("WHEN MATCHED THEN\n")
@@ -489,8 +494,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		}
 
 		mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
-		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 	}
 
 	return mergeSQL.String()

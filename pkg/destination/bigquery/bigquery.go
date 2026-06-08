@@ -1509,6 +1509,8 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 
 // buildMergeSQL constructs a BigQuery MERGE statement
 func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string) string {
+	destColumns := destination.DestinationColumns(allColumns)
+
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		sourceCol := castSourceCol(pk, castMap)
@@ -1526,7 +1528,7 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 
 	unchangedRef := fmt.Sprintf("s.`%s`", destination.CDCUnchangedColsColumn)
 	var updateSets []string
-	for _, col := range allColumns {
+	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
 			src := castSourceCol(col, castMap)
 			if hasCDCDeleted && !destination.IsCDCMetaColumn(col) {
@@ -1540,9 +1542,9 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 	}
 
 	// Build INSERT columns and values
-	quotedCols := make([]string, len(allColumns))
-	sourceCols := make([]string, len(allColumns))
-	for i, col := range allColumns {
+	quotedCols := make([]string, len(destColumns))
+	sourceCols := make([]string, len(destColumns))
+	for i, col := range destColumns {
 		quotedCols[i] = fmt.Sprintf("`%s`", col)
 		sourceCols[i] = castSourceCol(col, castMap)
 	}

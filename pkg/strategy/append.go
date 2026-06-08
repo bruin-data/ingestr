@@ -34,7 +34,7 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       job.Config.DestTable,
-		Schema:      job.Schema,
+		Schema:      destination.DestinationTableSchema(job.Schema),
 		DropFirst:   false,
 		PrimaryKeys: job.Schema.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
@@ -115,7 +115,7 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 
 			if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 				Table:       destTable,
-				Schema:      ti.Schema,
+				Schema:      destination.DestinationTableSchema(ti.Schema),
 				DropFirst:   false,
 				PrimaryKeys: ti.PrimaryKeys,
 			}); err != nil {

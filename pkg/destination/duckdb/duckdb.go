@@ -390,9 +390,11 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
 
-	columns := opts.Columns
-	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	stagingColumns := opts.Columns
+	destColumns := destination.DestinationColumns(stagingColumns)
+	stagingQuoted := quoteColumns(stagingColumns)
+	destQuoted := quoteColumns(destColumns)
+	nonPKColumns := filterColumns(destColumns, opts.PrimaryKeys)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -415,8 +417,8 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
+		strings.Join(stagingQuoted, ", "),
+		strings.Join(stagingQuoted, ", "),
 		strings.Join(quotedPKs, ", "),
 		destination.QuoteTableName(opts.StagingTable),
 	)
@@ -439,8 +441,8 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	insertSQL := fmt.Sprintf(
 		`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 		quotedTargetTable,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
+		strings.Join(destQuoted, ", "),
+		strings.Join(destQuoted, ", "),
 		dedupSource,
 		quotedTargetTable,
 		onCondition,

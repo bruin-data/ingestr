@@ -902,9 +902,9 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 		config.Debug("[SCHEMA EVOLUTION] Applying %d column type overrides", len(overrides))
 	}
 
-	// Compare schemas with overrides
+	// Compare schemas with overrides. Staging-only CDC columns are not persisted on the destination.
 	opts := &schemaevolution.CompareOptions{Overrides: overrides}
-	comparison, err := schemaevolution.Compare(sourceSchema, destSchema, opts)
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
 	}

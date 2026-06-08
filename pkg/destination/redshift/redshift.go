@@ -164,6 +164,8 @@ func (d *RedshiftDestination) MergeTable(ctx context.Context, opts destination.M
 }
 
 func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
+	destColumns := destination.DestinationColumns(allColumns)
+
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf(`target."%s" = source."%s"`, pk, pk)
@@ -179,7 +181,7 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 
 	unchangedRef := fmt.Sprintf(`source."%s"`, destination.CDCUnchangedColsColumn)
 	var updateSets []string
-	for _, col := range allColumns {
+	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
 			if hasCDCDeleted && !destination.IsCDCMetaColumn(col) {
 				updateSets = append(updateSets, cdcMergeAssign(
@@ -194,11 +196,15 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		}
 	}
 
-	quotedCols := make([]string, len(allColumns))
-	sourceCols := make([]string, len(allColumns))
+	stagingQuoted := make([]string, len(allColumns))
 	for i, col := range allColumns {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, col)
-		sourceCols[i] = fmt.Sprintf(`source."%s"`, col)
+		stagingQuoted[i] = fmt.Sprintf(`"%s"`, col)
+	}
+	destQuoted := make([]string, len(destColumns))
+	destSourceCols := make([]string, len(destColumns))
+	for i, col := range destColumns {
+		destQuoted[i] = fmt.Sprintf(`"%s"`, col)
+		destSourceCols[i] = fmt.Sprintf(`source."%s"`, col)
 	}
 
 	// Build dedup subquery to handle duplicate PKs in staging
@@ -208,8 +214,8 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 	}
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
+		strings.Join(stagingQuoted, ", "),
+		strings.Join(stagingQuoted, ", "),
 		strings.Join(quotedPKsForPartition, ", "),
 		destination.QuoteTableName(stagingTable),
 	)
@@ -229,8 +235,8 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		sql.WriteString(`  UPDATE SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at"` + "\n")
 
 		sql.WriteString(`WHEN NOT MATCHED AND source."_cdc_deleted" = false THEN` + "\n")
-		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 	} else {
 		if len(updateSets) > 0 {
 			sql.WriteString("WHEN MATCHED THEN\n")
@@ -238,8 +244,8 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		}
 
 		sql.WriteString("WHEN NOT MATCHED THEN\n")
-		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 	}
 
 	return sql.String()

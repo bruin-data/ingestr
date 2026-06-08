@@ -449,13 +449,15 @@ func (t *pgTransaction) Rollback(ctx context.Context) error {
 func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
 
-	columns := opts.Columns
-	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	stagingColumns := opts.Columns
+	destColumns := destination.DestinationColumns(stagingColumns)
+	stagingQuoted := quoteColumns(stagingColumns)
+	destQuoted := quoteColumns(destColumns)
+	nonPKColumns := filterColumns(destColumns, opts.PrimaryKeys)
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 
 	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := slices.Contains(columns, destination.CDCDeletedColumn)
+	hasCDCDeleted := slices.Contains(stagingColumns, destination.CDCDeletedColumn)
 
 	// Begin transaction for atomic merge
 	tx, err := d.pool.Begin(ctx)
@@ -472,7 +474,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// We upsert the latest non-deleted row per PK, then mark deletes only if the
 		// latest change for that PK is a delete (preserving row data).
 		pkList := strings.Join(quotedPKs, ", ")
-		selectCols := strings.Join(quotedColumns, ", ")
+		selectCols := strings.Join(stagingQuoted, ", ")
 		orderByParts := append(append([]string{}, quotedPKs...), `"_cdc_lsn"::pg_lsn DESC`, `"_cdc_synced_at" DESC`)
 		orderBy := strings.Join(orderByParts, ", ")
 
@@ -494,10 +496,10 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			`WITH %s INSERT INTO %s (%s) SELECT %s FROM latest_active ON CONFLICT (%s) DO UPDATE SET %s`,
 			latestActive,
 			quotedTargetTable,
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedColumns, ", "),
+			strings.Join(destQuoted, ", "),
+			strings.Join(destQuoted, ", "),
 			strings.Join(quotedPKs, ", "),
-			buildCDCConflictUpdateSet(nonPKColumns, quotedTargetTable),
+			buildCDCConflictUpdateSet(nonPKColumns, quotedTargetTable, buildCDCUnchangedColsRef(opts.PrimaryKeys)),
 		)
 		config.Debug("[MERGE] Executing upsert for non-deleted rows: %s", upsertSQL)
 
@@ -533,9 +535,9 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		upsertSQL := fmt.Sprintf(
 			`INSERT INTO %s (%s) SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s ON CONFLICT (%s) DO UPDATE SET %s`,
 			quotedTargetTable,
-			strings.Join(quotedColumns, ", "),
+			strings.Join(destQuoted, ", "),
 			pkList,
-			strings.Join(quotedColumns, ", "),
+			strings.Join(destQuoted, ", "),
 			quotedStagingTable,
 			pkList,
 			pkList,
@@ -920,8 +922,19 @@ func buildConflictUpdateSet(columns []string) string {
 	return strings.Join(sets, ", ")
 }
 
-func buildCDCConflictUpdateSet(columns []string, quotedTable string) string {
-	unchangedRef := fmt.Sprintf(`EXCLUDED."%s"`, destination.CDCUnchangedColsColumn)
+func buildCDCUnchangedColsRef(primaryKeys []string) string {
+	conditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		conditions[i] = fmt.Sprintf(`la."%s" = EXCLUDED."%s"`, pk, pk)
+	}
+	return fmt.Sprintf(
+		`(SELECT la."%s" FROM latest_active la WHERE %s)`,
+		destination.CDCUnchangedColsColumn,
+		strings.Join(conditions, " AND "),
+	)
+}
+
+func buildCDCConflictUpdateSet(columns []string, quotedTable string, unchangedRef string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
 		if destination.IsCDCMetaColumn(col) {
