@@ -19,14 +19,19 @@ import (
 var stdoutCaptureMu sync.Mutex
 
 // runPipeline runs p while capturing everything it (and the packages it calls)
-// prints to stdout. The captured output is attached to the test log, which
-// `go test` only surfaces when the test fails or when run with -v — keeping
-// passing-test logs free of pipeline progress noise.
+// prints to stdout. The captured output is replayed only if the test fails,
+// keeping passing-test logs free of pipeline progress noise. We gate on
+// t.Failed() in a cleanup rather than using t.Logf directly because t.Logf
+// always prints under `go test -v`, which defeats the purpose.
 func runPipeline(t *testing.T, ctx context.Context, p *pipeline.Pipeline) error {
 	t.Helper()
 	out, err := captureStdout(func() error { return p.Run(ctx) })
 	if s := strings.TrimSpace(out); s != "" {
-		t.Logf("pipeline output:\n%s", s)
+		t.Cleanup(func() {
+			if t.Failed() {
+				t.Logf("pipeline output:\n%s", s)
+			}
+		})
 	}
 	return err
 }
