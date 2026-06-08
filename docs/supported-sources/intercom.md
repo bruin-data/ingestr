@@ -23,8 +23,8 @@ The URI is used to connect to the Intercom API for extracting data.
 
 To obtain an Intercom access token, create a private app in your workspace:
 
-1. Sign in to the [Intercom Developer Hub](https://app.intercom.com/a/developer-signup) with the workspace you want to ingest data from.
-2. Click **New app**, give it a name, select your workspace, and create it.
+1. Sign in to Intercom with the workspace you want to ingest data from, then open the [Intercom Developer Hub](https://developers.intercom.com/) — you can also reach it from within your workspace via **Settings → Integrations → Developer Hub**.
+2. Go to **Your apps** (or open [https://app.intercom.com/developers/_/apps](https://app.intercom.com/developers/_/apps) directly) and click **New app**. Give it a name, select the workspace you want to ingest from, and create it.
 3. Open the new app and go to **Authentication** in the left sidebar.
 4. Under **Access token**, click **Generate token** (or copy the existing one). This token is the value you will pass as `access_token`.
 5. Go to **Authentication → Permissions** and enable read access for the resources you intend to ingest (e.g. contacts, companies, conversations, articles, tags, segments, admins, teams, data attributes).
