@@ -41,10 +41,11 @@ type Transaction interface {
 
 // MergeOptions contains parameters for merge operations.
 type MergeOptions struct {
-	StagingTable string
-	TargetTable  string
-	PrimaryKeys  []string
-	Columns      []string
+	StagingTable   string
+	TargetTable    string
+	PrimaryKeys    []string
+	Columns        []string
+	IncrementalKey string
 }
 
 // DeleteInsertOptions contains parameters for delete+insert operations.

@@ -55,3 +55,17 @@ func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string
 
 	return fmt.Sprintf("%s.%s%s", stagingSchema, embeddedName, tail)
 }
+
+// GenerateNormalisedStagingTableName returns a transient table name in the
+// TARGET table's own schema (not the staging schema).
+func GenerateNormalisedStagingTableName(targetTable, stagingDataset string) string {
+	staged := GenerateStagingTableName(targetTable, "staging_normalised", stagingDataset)
+	name := staged
+	if i := strings.Index(staged, "."); i >= 0 {
+		name = staged[i+1:]
+	}
+	if parts := strings.SplitN(targetTable, ".", 2); len(parts) == 2 {
+		return parts[0] + "." + name
+	}
+	return name
+}

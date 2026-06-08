@@ -396,16 +396,22 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 		sourceCols[i] = fmt.Sprintf("source.`%s`", col)
 	}
 
-	// Build dedup subquery to handle duplicate PKs in staging
+	// Build dedup subquery to handle duplicate PKs in staging. When an
+	// incremental key is set the latest row per PK wins; otherwise arbitrary.
 	quotedPKsForPartition := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
 		quotedPKsForPartition[i] = fmt.Sprintf("`%s`", pk)
 	}
+	dedupOrderBy := ""
+	if opts.IncrementalKey != "" {
+		dedupOrderBy = fmt.Sprintf(" ORDER BY `%s` DESC", opts.IncrementalKey)
+	}
 	dedupSource := fmt.Sprintf(
-		"(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)",
+		"(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s%s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)",
 		strings.Join(quotedCols, ", "),
 		strings.Join(quotedCols, ", "),
 		strings.Join(quotedPKsForPartition, ", "),
+		dedupOrderBy,
 		stagingFull,
 	)
 

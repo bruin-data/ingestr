@@ -385,7 +385,7 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 		return errors.New("merge requires at least one primary key")
 	}
 
-	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns)
+	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
 
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
@@ -398,7 +398,7 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 	return nil
 }
 
-func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
+func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string) string {
 	stagingSchema, stagingName := parseSchemaTable(stagingTable)
 	targetSchema, targetName := parseSchemaTable(targetTable)
 
@@ -442,6 +442,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		dedupOrderBy = fmt.Sprintf("%s DESC, %s DESC",
 			quoteIdentifier("_cdc_lsn"),
 			quoteIdentifier("_cdc_deleted"))
+	} else if incrementalKey != "" {
+		dedupOrderBy = quoteIdentifier(incrementalKey) + " DESC"
 	}
 
 	dedupSource := fmt.Sprintf(
