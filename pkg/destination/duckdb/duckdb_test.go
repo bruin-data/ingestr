@@ -351,7 +351,7 @@ func TestBuildUpdateSet(t *testing.T) {
 			targetAlias: "target",
 			sourceAlias: "source",
 			cdcMerge:    true,
-			expected:    `"config_data" = CASE WHEN source."_cdc_unchanged_cols"::JSON @> '["config_data"]'::JSON THEN target."config_data" ELSE source."config_data" END`,
+			expected:    `"config_data" = CASE WHEN json_contains(source."_cdc_unchanged_cols"::JSON, '"config_data"') THEN target."config_data" ELSE source."config_data" END`,
 		},
 	}
 
