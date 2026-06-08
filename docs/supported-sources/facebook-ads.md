@@ -45,7 +45,7 @@ There are two ways to get an access token:
 1. Go to [Graph API Explorer](https://developers.facebook.com/tools/explorer/)
 2. Select your app from the dropdown
 3. Click **Generate Access Token**
-4. Select the permissions: `ads_read`, `ads_management`, `business_management`
+4. Select the permissions: `ads_read`, `ads_management`, `business_management`, and `leads_retrieval` (the last one is required for the `leads` table)
 5. Click **Generate Access Token** and copy it
 
 > **Note**: This token expires quickly. For production, use a System User token.
@@ -56,17 +56,18 @@ There are two ways to get an access token:
 2. Navigate to **Users** → **System Users**
 3. Click **Add** to create a new system user
 4. Select **Admin** role
-5. Click **Generate New Token**
-6. Select your app and the required permissions: `ads_read`, `ads_management`
-7. Copy the access token
+5. Click **Add Assets** and grant the system user access to every Ad Account you want to ingest from — without this, the token cannot read data
+6. Click **Generate New Token**
+7. Select your app and the required permissions: `ads_read`, `ads_management` (plus `leads_retrieval` for the `leads` table)
+8. Copy the access token
 
 ### Step 4: Get Your Account ID
 
 1. Go to [Facebook Ads Manager](https://www.facebook.com/adsmanager/)
-2. Look at the URL - the account ID is the number after `act=`
+2. Look at the URL - the account ID is the numeric part of `act_<id>` (e.g. for `act_1234567890`, the ID is `1234567890`)
 3. Or go to **Settings** in Ads Manager to see your Account ID
 
-The Account ID is typically a number like `1234567890`.
+The Account ID is typically a number like `1234567890`. Pass only the numeric part as `account_id` — ingestr automatically prepends `act_` when calling the API.
 
 Once you have your access token and Account ID, let's say your `access_token` is `abcdef` and `account_id` is `1234`, here's a sample command that will copy the data from Facebook Ads into a DuckDB database:
 

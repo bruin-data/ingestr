@@ -37,6 +37,7 @@ Attach a policy that grants Kinesis read access. You can use the managed policy 
 - `kinesis:DescribeStream`
 - `kinesis:GetShardIterator`
 - `kinesis:GetRecords`
+- `kinesis:ListShards`
 - `kinesis:ListStreams`
 
 ### Step 3: Get Access Keys
