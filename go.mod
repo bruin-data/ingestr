@@ -27,7 +27,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.37
 	github.com/aws/aws-sdk-go-v2/service/athena v1.56.4
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.1
-	github.com/aws/aws-sdk-go-v2/service/kinesis v1.43.4
+	github.com/aws/aws-sdk-go-v2/service/kinesis v1.43.5
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.3
 	github.com/bmatcuk/doublestar/v4 v4.9.2
 	github.com/columnar-tech/dbc v0.3.0
