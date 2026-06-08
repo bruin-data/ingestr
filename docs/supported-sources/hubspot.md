@@ -12,17 +12,28 @@ The URI format for HubSpot is as follows:
 hubspot://?api_key=<api-key-here>
 ```
 
+or, using a service key:
+
+```plaintext
+hubspot://?service_key=<service-key-here>
+```
+
 URI parameters:
 
-- `api_key`: The API key is used for authentication with the HubSpot API.
+- `api_key`: A private app access token used for authentication with the HubSpot API.
+- `service_key`: A HubSpot [service key](https://developers.hubspot.com/blog/hubspot-service-keys-the-right-api-credential-for-data-integrations) used for authentication with the HubSpot API.
+
+Provide exactly one of `api_key` or `service_key`. Both are sent to HubSpot as an HTTP Bearer token, so they are interchangeable as the credential.
 
 The URI is used to connect to the HubSpot API for extracting data.
 
 ## Setting up a HubSpot Integration
 
-HubSpot requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/hubspot#setup-guide).
+To authenticate with a **service key**, go to Settings → Integrations → Service Keys in your HubSpot account, create a key, grant it the required scopes, and copy the generated key.
 
-Once you complete the guide, you should have an API key. Let's say your API key is `pat_test_12345`, here's a sample command that will copy the data from HubSpot into a DuckDB database:
+To authenticate with a **private app access token**, go to Settings → Integrations → Private Apps in your HubSpot account, create a private app, grant it the required scopes, and copy the generated access token.
+
+Once you have a key (for example `pat_test_12345`), here's a sample command that will copy the data from HubSpot into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'hubspot://?api_key=pat_test_12345' --source-table 'companies' --dest-uri duckdb:///hubspot.duckdb --dest-table 'companies.data'
