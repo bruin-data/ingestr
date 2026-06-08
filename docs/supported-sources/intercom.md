@@ -21,42 +21,20 @@ The URI is used to connect to the Intercom API for extracting data.
 
 ## Setting up an Intercom Integration
 
-To connect to Intercom, you need to create an app and obtain an access token.
+To obtain an Intercom access token, create a private app in your workspace:
 
-### Option 1: Create a Private App (Recommended)
+1. Sign in to Intercom with the workspace you want to ingest data from, then open the [Intercom Developer Hub](https://developers.intercom.com/) — you can also reach it from within your workspace via **Settings → Integrations → Developer Hub**.
+2. Go to **Your apps** (or open [https://app.intercom.com/developers/_/apps](https://app.intercom.com/developers/_/apps) directly) and click **New app**. Give it a name, select the workspace you want to ingest from, and choose **Internal integration** as the app type.
+3. Open the new app and go to **Authentication** in the left sidebar.
+4. Under **Access token**, click **Generate token** (or copy the existing one). This token is the value you will pass as `access_token`.
+5. Go to **Authentication → Permissions** and enable read access for the resources you intend to ingest:
+   - **Read users and companies** — for `contacts` and `companies`.
+   - **Read conversations** — for `conversations`.
+   - **Read content data** — for `articles` and other help-center content.
+   - **Read and list admins** — for `admins` and `teams`.
+6. Note the region your workspace is hosted in (`us`, `eu`, or `au`). You can confirm it by checking the URL you sign in from: `app.intercom.com` for US, `app.eu.intercom.com` for EU, `app.au.intercom.com` for AU.
 
-1. Log in to your [Intercom Developer Hub](https://developers.intercom.com/)
-2. Click **Your apps** in the top right
-3. Click **New app**
-4. Enter an app name and select your workspace
-5. Choose **Internal integration** as the app type
-6. Click **Create app**
-
-### Step 2: Configure Permissions
-
-1. In your app settings, go to **Authentication**
-2. Under **Access Token**, click **Edit** next to the workspace
-3. Enable the permissions you need:
-   - **Read users and companies** - For contacts and companies
-   - **Read conversations** - For conversations
-   - **Read content data** - For articles and help center content
-   - **Read and list admins** - For admin users
-4. Click **Save**
-
-### Step 3: Get the Access Token
-
-1. In **Authentication**, find the **Access Token** section
-2. Copy the access token (it starts with `dG9r` when base64 encoded)
-3. Store this token securely
-
-### Determine Your Region
-
-Intercom has different data regions. Check your Intercom URL:
-- `app.intercom.com` → `us` region
-- `app.eu.intercom.com` → `eu` region  
-- `app.au.intercom.com` → `au` region
-
-Once you have your access token, let's say your access token is `dG9rOjE...` and your workspace is in the US region, here's a sample command that will copy the data from Intercom into a DuckDB database:
+Once you have an access token, let's say your access token is `dG9rOjE...` and your workspace is in the US region, here's a sample command that will copy the data from Intercom into a DuckDB database:
 
 ```sh
 ingestr ingest \

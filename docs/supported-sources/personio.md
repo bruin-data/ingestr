@@ -20,34 +20,22 @@ URI parameters:
 
 ## Setting up a Personio Integration
 
-To connect to Personio, you need to create API credentials in your Personio account.
+Personio uses an API client (a `client_id` / `client_secret` pair) for authentication. You need an administrator account to create one:
 
-### Step 1: Access API Settings
+1. Sign in to your Personio workspace as an administrator.
+2. Open **Settings** (the gear icon) and go to **Integrations → API credentials**.
+3. Click **Generate new credentials** and give the credential a descriptive name (e.g. `ingestr`).
+4. Under **Scopes / Readable attributes**, enable read access for every endpoint and attribute you plan to ingest:
+   - **Read employees** — for the `employees` table.
+   - **Read absences** — for `absence_types`, `absences`, and `employees_absences_balance`.
+   - **Read attendances** — for `attendances` and `projects`.
+   - **Read documents** — for `document_categories`.
+   - **Read custom reports** — for `custom_reports_list`.
 
-1. Log in to your Personio account
-2. Navigate to **Settings** → **Integrations** → **API credentials**
+   Without these scopes, the corresponding tables will return empty or error.
+5. Save the credential. Personio will show the **Client ID** and **Client Secret** once — copy them immediately, as the secret cannot be retrieved later.
 
-### Step 2: Create API Credentials
-
-1. Click **Generate new credentials**
-2. Enter a description for the API credential (e.g., "Data Integration")
-3. Select the required permissions for the data you want to access:
-   - **Read employees** - For employee data
-   - **Read absences** - For absence data
-   - **Read attendances** - For attendance records
-   - **Read documents** - For document categories
-   - **Read custom reports** - For custom reports
-4. Click **Generate**
-
-### Step 3: Copy Credentials
-
-After generating, you will see:
-- **Client ID** - A unique identifier for your API credential
-- **Client Secret** - A secret key (shown only once, save it securely)
-
-These are your `client_id` and `client_secret` for the ingestr URI.
-
-Let's say your `client_id` is id_123 and your `client_secret` is secret_123, here's a sample command that will copy the data from Personio into a DuckDB database:
+Once you complete these steps, you should have a client ID and client secret. Let's say your `client_id` is id_123 and your `client_secret` is secret_123, here's a sample command that will copy the data from Personio into a DuckDB database:
 
 ```bash
 ingestr ingest --source-uri 'personio://?client_id=id_123&client_secret=secret_123' \
