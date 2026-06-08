@@ -161,6 +161,11 @@ func IngestCommand() *cli.Command {
 				Usage:   "Column masking configuration in format 'column:algorithm[:param]'. Algorithms: hash, sha256, md5, hmac, email, phone, credit_card, ssn, redact, stars, fixed, random, partial, first_letter, uuid, sequential, round, range, noise, date_shift, year_only, month_year.",
 				Sources: cli.EnvVars("MASK", "INGESTR_MASK"),
 			},
+			&cli.StringSliceFlag{
+				Name:    "debug-mask",
+				Usage:   "Exact strings to redact in debug output. Repeatable. Use to mask credentials in cloud runs without sanitizing every call site.",
+				Sources: cli.EnvVars("DEBUG_MASK", "INGESTR_DEBUG_MASK"),
+			},
 			&cli.StringFlag{
 				Name:    "pipelines-dir",
 				Usage:   "The path to store pipeline metadata",
@@ -222,6 +227,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.Columns = c.String("columns")
 	cfg.NoInference = c.Bool("no-inference")
 	cfg.Mask = c.StringSlice("mask")
+	config.SetDebugMaskValues(c.StringSlice("debug-mask"))
 	cfg.PipelinesDir = c.String("pipelines-dir")
 	cfg.StagingBucket = c.String("staging-bucket")
 	cfg.StagingDataset = c.String("staging-dataset")

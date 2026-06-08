@@ -2,15 +2,47 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
 
-var DebugMode bool
+// minMaskLength drops too-short masks to avoid catastrophic collisions
+// (e.g. an unfortunate password of "test" masking the literal word everywhere).
+const minMaskLength = 8
+
+var (
+	DebugMode       bool
+	debugMaskValues []string
+)
+
+// SetDebugMaskValues installs the set of strings to redact inside Debug
+// output. Values under minMaskLength characters are dropped. Sorted
+// longest-first so substring overlaps mask the longer match first.
+// Should be called once during startup before any goroutines call Debug.
+func SetDebugMaskValues(values []string) {
+	filtered := make([]string, 0, len(values))
+	for _, v := range values {
+		if len(v) >= minMaskLength {
+			filtered = append(filtered, v)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return len(filtered[i]) > len(filtered[j])
+	})
+	debugMaskValues = filtered
+}
+
+func maskDebugMessage(msg string) string {
+	for _, secret := range debugMaskValues {
+		msg = strings.ReplaceAll(msg, secret, "***")
+	}
+	return msg
+}
 
 func Debug(format string, args ...interface{}) {
 	if DebugMode {
-		fmt.Printf("%s\tDEBUG\t%s\n", time.Now().Format("2006-01-02T15:04:05.000Z0700"), fmt.Sprintf(format, args...))
+		fmt.Printf("%s\tDEBUG\t%s\n", time.Now().Format("2006-01-02T15:04:05.000Z0700"), maskDebugMessage(fmt.Sprintf(format, args...)))
 	}
 }
 
