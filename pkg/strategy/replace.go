@@ -343,7 +343,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			swapPrimaryKeys := tableInfo.PrimaryKeys
 			if replaceShouldDedup(job.Destination, tableInfo.PrimaryKeys) {
 				normalised, err := deduplicateStaging(ctx, job.Destination, stagingTable, destTable,
-					job.Config.StagingDataset, "", tableInfo.Schema, tableInfo.PrimaryKeys, "", nil)
+					job.Config.StagingDataset, tableInfo.Schema.IncrementalKey, tableInfo.Schema, tableInfo.PrimaryKeys, "", nil)
 				if err != nil {
 					return fmt.Errorf("failed to deduplicate table %s: %w", tableInfo.Name, err)
 				}
