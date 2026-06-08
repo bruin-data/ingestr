@@ -21,9 +21,38 @@ The URI is used to connect to Facebook Ads API for extracting data.
 
 ## Setting up a Facebook Ads Integration
 
-Facebook Ads requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/facebook_ads#setup-guide).
+Facebook Ads is accessed through the [Marketing API](https://developers.facebook.com/docs/marketing-api/) and requires a long-lived access token with `ads_read` permission. ingestr currently calls Graph API `v21.0`.
 
-Once you complete the guide, you should have an access token and an Account ID. Let's say your `access_token` is `abcdef` and `account_id` is `1234`, here's a sample command that will copy the data from Facebook Ads into a DuckDB database:
+1. **Grant yourself access to the Ad Account.** In [Business Manager](https://business.facebook.com/) under **Business settings → Accounts → Ad accounts**, confirm that the user (or System User — see step 6) you plan to authenticate as has at least **View performance** access to every Ad Account you want to ingest from.
+
+2. **Create a Meta app.** Open [Meta for Developers → My Apps](https://developers.facebook.com/apps/) and click **Create app**. When asked what your app does, pick the option that lets you manage business assets and the Marketing API (currently labelled "Other" → "Business" in most regions). Give the app a name and finish creating it.
+
+3. **Add the Marketing API product.** In the new app's dashboard, find **Add a product** (or **Add products to your app**) and click **Set up** on the **Marketing API** card. This unlocks the `ads_read`, `ads_management`, and `leads_retrieval` permissions for your app.
+
+4. **Generate a short-lived access token.** Open the [Graph API Explorer](https://developers.facebook.com/tools/explorer/), select your app in the **Meta App** dropdown, set **User or Page** to **User Token**, click **Add a Permission**, and add at least:
+   - `ads_read` — required for `campaigns`, `ad_sets`, `ads`, `ad_creatives`, and `facebook_insights`.
+   - `leads_retrieval` — additionally required for the `leads` table.
+   - `business_management` — recommended if you use a System User or need to list all ad accounts in a business.
+
+   Click **Generate Access Token** and copy the token that appears. This short-lived token expires in about an hour.
+
+5. **Exchange it for a long-lived token.** Long-lived user tokens last about 60 days. To exchange, call:
+
+   ```text
+   https://graph.facebook.com/v21.0/oauth/access_token
+       ?grant_type=fb_exchange_token
+       &client_id=<APP_ID>
+       &client_secret=<APP_SECRET>
+       &fb_exchange_token=<SHORT_LIVED_TOKEN>
+   ```
+
+   Find `<APP_ID>` and `<APP_SECRET>` in your app's **Settings → Basic** page. The `access_token` field in the JSON response is what you pass to ingestr.
+
+6. **(Recommended for production)** Use a **System User token** instead. User tokens still expire after 60 days, which will break scheduled pipelines. In **Business Manager → Business settings → Users → System users**, create a new system user, click **Add assets** to grant it access to the relevant Ad Accounts, then click **Generate new token**, pick your app, select the same permissions as step 4, and choose **Never** for expiration. Use that token as `access_token`.
+
+7. **Find your Ad Account ID.** In [Ads Manager](https://www.facebook.com/adsmanager/) the account selector shows IDs in the form `act_1234567890`. Pass only the numeric part (`1234567890`) as `account_id` — ingestr automatically prepends `act_` when calling the API.
+
+Once you complete these steps, you should have an access token and an Account ID. Let's say your `access_token` is `abcdef` and `account_id` is `1234`, here's a sample command that will copy the data from Facebook Ads into a DuckDB database:
 
 ```sh
 ingestr ingest \

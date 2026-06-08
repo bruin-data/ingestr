@@ -20,9 +20,23 @@ URI parameters:
 
 
 ## Setting up a Kinesis Integration
-To get Kinesis credentials, please refer to the guide [here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/amazon_kinesis#grab-credentials)
 
-Once you complete the guide, you should have a aws_access_key_id, aws_secret_access_key and region_name. Let's say your `aws_access_key_id` is id_123, your `aws_secret_access_key` is secret_123 and your `region_name` is eu-central-1, here's a sample command that will copy the data from Kinesis into a DuckDB database:
+To read from Kinesis, you need an AWS access key pair with permission to describe the stream and read its records. The recommended approach is to create a dedicated IAM user:
+
+1. Sign in to the [AWS IAM console](https://console.aws.amazon.com/iam/).
+2. Go to **Users → Create user**, give the user a name (e.g. `ingestr-kinesis`), and continue without granting console access.
+3. On the **Set permissions** step, choose **Attach policies directly** and attach a policy that allows reading the streams you want to ingest. The AWS-managed policy `AmazonKinesisReadOnlyAccess` is sufficient for most cases, or you can create a custom policy granting at minimum:
+   - `kinesis:DescribeStream`
+   - `kinesis:DescribeStreamSummary`
+   - `kinesis:GetShardIterator`
+   - `kinesis:GetRecords`
+   - `kinesis:ListShards`
+   - `kinesis:ListStreams`
+4. Finish creating the user, then open the user and go to the **Security credentials** tab → **Access keys** → **Create access key**.
+5. Select **Application running outside AWS**, create the key, and copy the **Access key ID** (your `aws_access_key_id`) and **Secret access key** (your `aws_secret_access_key`).
+6. Note the AWS region where your stream lives (e.g. `eu-central-1`); that is your `region_name`. You can find it in the [Kinesis console](https://console.aws.amazon.com/kinesis/).
+
+Once you have these credentials, let's say your `aws_access_key_id` is id_123, your `aws_secret_access_key` is secret_123 and your `region_name` is eu-central-1, here's a sample command that will copy the data from Kinesis into a DuckDB database:
 
 ```bash
 ingestr ingest --source-uri 'kinesis://?aws_access_key_id=id_123&aws_secret_access_key=secret_123&region_name=eu-central-1' \
