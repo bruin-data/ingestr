@@ -40,7 +40,16 @@ Athena requires a `bucket`, `access_key_id`, `secret_access_key` and `region_nam
 4. Select the same region where you'll use Athena
 5. Click **Create bucket**
 
-### Step 2: Create an IAM User with Permissions
+### Step 2: Configure an Athena Workgroup
+
+Athena needs a **Query result location** configured on the workgroup it runs through. ingestr uses the account's `primary` workgroup by default.
+
+1. Go to the [Athena Console](https://console.aws.amazon.com/athena/) → **Workgroups**
+2. Edit the existing `primary` workgroup (or create a new one)
+3. Set **Query result location** to a prefix in the bucket from Step 1 (e.g. `s3://my-athena-results/query-results/`) and save
+4. If you created a new workgroup, pass its name via the `workgroup` URI parameter
+
+### Step 3: Create an IAM User with Permissions
 
 1. Go to the [AWS IAM Console](https://console.aws.amazon.com/iam/)
 2. Click **Users** → **Add users**
@@ -51,12 +60,12 @@ Athena requires a `bucket`, `access_key_id`, `secret_access_key` and `region_nam
    - `AmazonS3FullAccess` - For S3 bucket access (or create a more restrictive policy)
    - `AWSGlueConsoleFullAccess` - For Glue Catalog access
 
-### Step 3: Get Access Keys
+### Step 4: Get Access Keys
 
 1. After creating the user, copy the **Access key ID** and **Secret access key**
 2. Store these credentials securely (the secret key is shown only once)
 
-### Step 4: Note Your Region
+### Step 5: Note Your Region
 
 Ensure you know the AWS region where your Athena is configured (e.g., `us-east-1`, `eu-central-1`).
 
