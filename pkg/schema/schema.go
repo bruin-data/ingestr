@@ -27,6 +27,47 @@ const (
 	TypeArray
 )
 
+func (d DataType) String() string {
+	switch d {
+	case TypeBoolean:
+		return "boolean"
+	case TypeInt16:
+		return "int16"
+	case TypeInt32:
+		return "int32"
+	case TypeInt64:
+		return "int64"
+	case TypeFloat32:
+		return "float32"
+	case TypeFloat64:
+		return "float64"
+	case TypeDecimal:
+		return "decimal"
+	case TypeString:
+		return "string"
+	case TypeBinary:
+		return "binary"
+	case TypeDate:
+		return "date"
+	case TypeTime:
+		return "time"
+	case TypeTimestamp:
+		return "timestamp_ntz"
+	case TypeTimestampTZ:
+		return "timestamp"
+	case TypeInterval:
+		return "interval"
+	case TypeJSON:
+		return "json"
+	case TypeUUID:
+		return "uuid"
+	case TypeArray:
+		return "array"
+	default:
+		return "unknown"
+	}
+}
+
 type Column struct {
 	Name         string
 	DataType     DataType

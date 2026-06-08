@@ -87,14 +87,14 @@ func GetWidenedType(src, dest schema.DataType) (schema.DataType, string) {
 	if srcOrder > destOrder {
 		if CanWiden(dest, src) {
 			if src == schema.TypeString || src == schema.TypeJSON {
-				return src, "type widened to " + dataTypeName(src)
+				return src, "type widened to " + src.String()
 			}
 			return src, ""
 		}
 	} else {
 		if CanWiden(src, dest) {
 			if dest == schema.TypeString || dest == schema.TypeJSON {
-				return dest, "type widened to " + dataTypeName(dest)
+				return dest, "type widened to " + dest.String()
 			}
 			return dest, ""
 		}
@@ -140,45 +140,4 @@ func MergeDecimalPrecision(src, dest schema.Column) (precision, scale int) {
 	}
 
 	return precision, scale
-}
-
-func dataTypeName(dt schema.DataType) string {
-	switch dt {
-	case schema.TypeBoolean:
-		return "BOOLEAN"
-	case schema.TypeInt16:
-		return "INT16"
-	case schema.TypeInt32:
-		return "INT32"
-	case schema.TypeInt64:
-		return "INT64"
-	case schema.TypeFloat32:
-		return "FLOAT32"
-	case schema.TypeFloat64:
-		return "FLOAT64"
-	case schema.TypeDecimal:
-		return "DECIMAL"
-	case schema.TypeString:
-		return "STRING"
-	case schema.TypeBinary:
-		return "BINARY"
-	case schema.TypeDate:
-		return "DATE"
-	case schema.TypeTime:
-		return "TIME"
-	case schema.TypeTimestamp:
-		return "TIMESTAMP"
-	case schema.TypeTimestampTZ:
-		return "TIMESTAMPTZ"
-	case schema.TypeInterval:
-		return "INTERVAL"
-	case schema.TypeJSON:
-		return "JSON"
-	case schema.TypeUUID:
-		return "UUID"
-	case schema.TypeArray:
-		return "ARRAY"
-	default:
-		return "UNKNOWN"
-	}
 }
