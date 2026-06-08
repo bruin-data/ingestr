@@ -412,7 +412,7 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	quotedColumns := quoteColumns(columns)
 	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
 
-	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns)
+	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns, opts.IncrementalKey)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
@@ -424,7 +424,7 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	return nil
 }
 
-func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string) string {
+func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string, incrementalKey string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.[%s] = source.[%s]", pk, pk)
@@ -445,13 +445,19 @@ func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns,
 		sourceCols[i] = "source." + col
 	}
 
-	// Build dedup subquery to handle duplicate PKs in staging
+	// Build dedup subquery to handle duplicate PKs in staging. When an
+	// incremental key is set the latest row per PK wins; otherwise arbitrary.
 	quotedPKs := quoteColumns(primaryKeys)
+	dedupOrderBy := "(SELECT NULL)"
+	if incrementalKey != "" {
+		dedupOrderBy = quoteColumns([]string{incrementalKey})[0] + " DESC"
+	}
 	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
 		insertCols,
 		insertCols,
 		strings.Join(quotedPKs, ", "),
+		dedupOrderBy,
 		quoteTable(stagingTable),
 	)
 

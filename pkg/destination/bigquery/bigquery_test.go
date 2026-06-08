@@ -912,7 +912,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	dest.projectID = "my-project"
 
 	t.Run("single_pk", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, nil)
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, nil, "")
 
 		if !contains(sql, "MERGE `my-project`.`target_ds`.`target_tbl` AS t\n") {
 			t.Fatalf("sql missing merge header:\n%s", sql)
@@ -941,7 +941,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("all_columns_are_pk_no_update", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id"}, nil)
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id"}, nil, "")
 		if contains(sql, "WHEN MATCHED THEN") {
 			t.Fatalf("sql should not include matched update when there are no non-PK columns:\n%s", sql)
 		}
@@ -951,7 +951,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("on_clause_is_null_safe_single_pk", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name"}, nil)
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name"}, nil, "")
 
 		if !contains(sql, "ON (t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))\n") {
 			t.Fatalf("sql missing null-safe on clause:\n%s", sql)
@@ -962,7 +962,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("on_clause_is_null_safe_composite_pk", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"tenant_id", "user_id"}, []string{"tenant_id", "user_id", "value"}, nil)
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"tenant_id", "user_id"}, []string{"tenant_id", "user_id", "value"}, nil, "")
 
 		expected := "ON (t.`tenant_id` = s.`tenant_id` OR (t.`tenant_id` IS NULL AND s.`tenant_id` IS NULL)) AND (t.`user_id` = s.`user_id` OR (t.`user_id` IS NULL AND s.`user_id` IS NULL))\n"
 		if !contains(sql, expected) {
@@ -975,7 +975,7 @@ func TestBuildMergeSQL(t *testing.T) {
 
 	t.Run("with_cast_map", func(t *testing.T) {
 		castMap := map[string]string{"day": "STRING"}
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id", "day"}, []string{"id", "day", "amount"}, castMap)
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id", "day"}, []string{"id", "day", "amount"}, castMap, "")
 
 		if !contains(sql, "(t.`day` = CAST(s.`day` AS STRING) OR (t.`day` IS NULL AND CAST(s.`day` AS STRING) IS NULL))") {
 			t.Fatalf("sql missing cast in ON clause:\n%s", sql)

@@ -408,13 +408,19 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 
-	// Build dedup subquery to handle duplicate PKs in staging
+	// Build dedup subquery to handle duplicate PKs in staging. When an
+	// incremental key is set the latest row per PK wins; otherwise arbitrary.
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
+	dedupOrderBy := "(SELECT NULL)"
+	if opts.IncrementalKey != "" {
+		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
+	}
 	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedPKs, ", "),
+		dedupOrderBy,
 		destination.QuoteTableName(opts.StagingTable),
 	)
 

@@ -1,0 +1,5 @@
+{"id":1,"name":"v1-old","active":true,"score":10.0}
+{"id":1,"name":"v1-latest","active":false,"score":11.0}
+{"id":2,"name":"v2","active":true,"score":20.0}
+{"id":3,"name":"v3-old","active":true,"score":30.0}
+{"id":3,"name":"v3-latest","active":false,"score":31.0}
