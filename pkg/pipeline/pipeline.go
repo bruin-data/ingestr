@@ -308,6 +308,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
+	// Full ingest schema includes staging-only CDC columns needed for staging writes.
+	ingestSchema := destSchema
+
 	// Schema contract handling: evolve destination schema if needed (skip for replace strategy)
 	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
 	var evolutionPlan *schemaevolution.EvolutionPlan
@@ -346,13 +349,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	// Primary key columns must be NOT NULL
-	pkSet := make(map[string]bool, len(destSchema.PrimaryKeys))
-	for _, pk := range destSchema.PrimaryKeys {
+	pkSet := make(map[string]bool, len(ingestSchema.PrimaryKeys))
+	for _, pk := range ingestSchema.PrimaryKeys {
 		pkSet[pk] = true
 	}
-	for i := range destSchema.Columns {
-		if pkSet[destSchema.Columns[i].Name] {
-			destSchema.Columns[i].Nullable = false
+	for i := range ingestSchema.Columns {
+		if pkSet[ingestSchema.Columns[i].Name] {
+			ingestSchema.Columns[i].Nullable = false
 		}
 	}
 
@@ -377,10 +380,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			return fmt.Errorf("invalid mask configuration: %w", err)
 		}
 		if m.HasMasks() {
-			if err := m.ValidateColumns(destSchema); err != nil {
+			if err := m.ValidateColumns(ingestSchema); err != nil {
 				return fmt.Errorf("invalid mask configuration: %w", err)
 			}
-			m.ApplyToSchema(destSchema)
+			m.ApplyToSchema(ingestSchema)
 			columnMasker = m
 		}
 	}
@@ -389,7 +392,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		Config:              &resolvedConfig,
 		Table:               table,
 		Destination:         dest,
-		Schema:              destSchema,
+		Schema:              ingestSchema,
 		SourceSchema:        originalSourceSchema,
 		Tracker:             jobTracker,
 		BufferedRecords:     bufferedRecords,
@@ -1276,7 +1279,7 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 		if override.DataType != schema.TypeUnknown {
 			newCol := override.ApplyToColumn(col)
 			if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale {
-				fmt.Printf("Column override: %q type changed from %v(p=%v,s=%v) to %v(p=%v,s=%v)\n",
+				fmt.Printf("Column override: %q type changed from %s(p=%v,s=%v) to %s(p=%v,s=%v)\n",
 					col.Name, col.DataType, col.Precision, col.Scale, newCol.DataType, newCol.Precision, newCol.Scale)
 			}
 			sourceSchema.Columns[i] = newCol

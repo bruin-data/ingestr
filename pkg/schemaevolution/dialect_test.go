@@ -54,47 +54,6 @@ func allDialects() []dialectConformanceTest {
 	return dialects
 }
 
-func dataTypeName(dt schema.DataType) string {
-	switch dt {
-	case schema.TypeBoolean:
-		return "BOOLEAN"
-	case schema.TypeInt16:
-		return "INT16"
-	case schema.TypeInt32:
-		return "INT32"
-	case schema.TypeInt64:
-		return "INT64"
-	case schema.TypeFloat32:
-		return "FLOAT32"
-	case schema.TypeFloat64:
-		return "FLOAT64"
-	case schema.TypeDecimal:
-		return "DECIMAL"
-	case schema.TypeString:
-		return "STRING"
-	case schema.TypeBinary:
-		return "BINARY"
-	case schema.TypeDate:
-		return "DATE"
-	case schema.TypeTime:
-		return "TIME"
-	case schema.TypeTimestamp:
-		return "TIMESTAMP"
-	case schema.TypeTimestampTZ:
-		return "TIMESTAMPTZ"
-	case schema.TypeInterval:
-		return "INTERVAL"
-	case schema.TypeJSON:
-		return "JSON"
-	case schema.TypeUUID:
-		return "UUID"
-	case schema.TypeArray:
-		return "ARRAY"
-	default:
-		return "UNKNOWN"
-	}
-}
-
 func TestDialectRegistry(t *testing.T) {
 	schemes := []string{
 		"postgres",
@@ -241,7 +200,7 @@ func TestAllDialects_TypeName_Integers(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(dataTypeName(tt.dataType), func(t *testing.T) {
+		t.Run(tt.dataType.String(), func(t *testing.T) {
 			col := schema.Column{Name: "val", DataType: tt.dataType}
 			for scheme, exp := range tt.expected {
 				t.Run(scheme, func(t *testing.T) {
@@ -292,7 +251,7 @@ func TestAllDialects_TypeName_Floats(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(dataTypeName(tt.dataType), func(t *testing.T) {
+		t.Run(tt.dataType.String(), func(t *testing.T) {
 			col := schema.Column{Name: "val", DataType: tt.dataType}
 			for scheme, exp := range tt.expected {
 				t.Run(scheme, func(t *testing.T) {
@@ -424,7 +383,7 @@ func TestAllDialects_TypeName_AllTypes(t *testing.T) {
 			for _, dataType := range types {
 				col := schema.Column{Name: "test", DataType: dataType, Precision: 10, Scale: 2}
 				typeName := dt.Dialect.TypeName(col)
-				assert.NotEmpty(t, typeName, "type %s should produce non-empty type name", dataTypeName(dataType))
+				assert.NotEmpty(t, typeName, "type %s should produce non-empty type name", dataType.String())
 			}
 		})
 	}

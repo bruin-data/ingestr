@@ -294,11 +294,12 @@ func (s *TrinoSource) buildSelectQuery(table string, columns []schema.Column, op
 
 	var conditions []string
 	if opts.IncrementalKey != "" {
+		incrementalCol := findColumn(columns, opts.IncrementalKey)
 		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf(`"%s" >= TIMESTAMP '%s'`, opts.IncrementalKey, opts.IntervalStart.Format("2006-01-02 15:04:05.000000")))
+			conditions = append(conditions, fmt.Sprintf(`"%s" >= %s`, opts.IncrementalKey, formatIncrementalLiteral(incrementalCol, *opts.IntervalStart)))
 		}
 		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf(`"%s" <= TIMESTAMP '%s'`, opts.IncrementalKey, opts.IntervalEnd.Format("2006-01-02 15:04:05.000000")))
+			conditions = append(conditions, fmt.Sprintf(`"%s" <= %s`, opts.IncrementalKey, formatIncrementalLiteral(incrementalCol, *opts.IntervalEnd)))
 		}
 	}
 
@@ -311,6 +312,33 @@ func (s *TrinoSource) buildSelectQuery(table string, columns []schema.Column, op
 	}
 
 	return query
+}
+
+func findColumn(columns []schema.Column, name string) *schema.Column {
+	for i := range columns {
+		if strings.EqualFold(columns[i].Name, name) {
+			return &columns[i]
+		}
+	}
+	return nil
+}
+
+// formatIncrementalLiteral emits a typed Trino literal — Trino rejects
+// comparisons between mismatched literal/column types (e.g. TIMESTAMP vs DATE).
+func formatIncrementalLiteral(col *schema.Column, t time.Time) string {
+	if col == nil {
+		return fmt.Sprintf("TIMESTAMP '%s'", t.Format("2006-01-02 15:04:05.000000"))
+	}
+	switch col.DataType {
+	case schema.TypeDate:
+		return fmt.Sprintf("DATE '%s'", t.Format("2006-01-02"))
+	case schema.TypeTime:
+		return fmt.Sprintf("TIME '%s'", t.Format("15:04:05.000000"))
+	case schema.TypeTimestampTZ:
+		return fmt.Sprintf("TIMESTAMP '%s UTC'", t.UTC().Format("2006-01-02 15:04:05.000000"))
+	default:
+		return fmt.Sprintf("TIMESTAMP '%s'", t.Format("2006-01-02 15:04:05.000000"))
+	}
 }
 
 func filterColumns(columns []schema.Column, exclude []string) []schema.Column {

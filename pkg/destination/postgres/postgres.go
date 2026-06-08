@@ -529,9 +529,13 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// Non-CDC mode: efficient upsert using INSERT ... ON CONFLICT.
 		// DISTINCT ON dedupes staging by PK so the same target row isn't
 		// affected twice in one statement, which Postgres rejects with
-		// SQLSTATE 21000. No deterministic recency column exists outside
-		// CDC mode, so the winner per PK is arbitrary.
+		// SQLSTATE 21000. When an incremental key is set the latest row per PK
+		// wins; otherwise the winner is arbitrary.
 		pkList := strings.Join(quotedPKs, ", ")
+		orderBy := pkList
+		if opts.IncrementalKey != "" {
+			orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
+		}
 		upsertSQL := fmt.Sprintf(
 			`INSERT INTO %s (%s) SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s ON CONFLICT (%s) DO UPDATE SET %s`,
 			quotedTargetTable,
@@ -539,7 +543,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			pkList,
 			strings.Join(destQuoted, ", "),
 			quotedStagingTable,
-			pkList,
+			orderBy,
 			pkList,
 			buildConflictUpdateSet(nonPKColumns),
 		)

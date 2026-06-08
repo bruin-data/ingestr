@@ -212,10 +212,11 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 
 	config.Debug("[TRUNCATE+INSERT] Executing deduplicated insert via merge from staging")
 	if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
-		StagingTable: stagingTable,
-		TargetTable:  targetTable,
-		PrimaryKeys:  job.Config.PrimaryKeys,
-		Columns:      job.Schema.ColumnNames(),
+		StagingTable:   stagingTable,
+		TargetTable:    targetTable,
+		PrimaryKeys:    job.Config.PrimaryKeys,
+		Columns:        job.Schema.ColumnNames(),
+		IncrementalKey: job.Config.IncrementalKey,
 	}); err != nil {
 		return fmt.Errorf("failed to insert from staging: %w", err)
 	}

@@ -1187,11 +1187,22 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 		return fmt.Errorf("invalid target table name: %w", err)
 	}
 
+	// The merge target may have just been created asynchronously by PrepareTable
+	// (e.g. the deduplicated replace table). Wait for that creation to finish so
+	// the MERGE doesn't 404 on a not-yet-visible table.
+	if _, _, tableKey, resolveErr := d.resolveTable(opts.TargetTable); resolveErr == nil {
+		if pendingErr := d.takePendingTableErr(tableKey); pendingErr != nil {
+			if err := <-pendingErr; err != nil {
+				return fmt.Errorf("failed to prepare merge target table: %w", err)
+			}
+		}
+	}
+
 	// Fetch target and staging table schemas to detect type mismatches
 	castMap := d.buildCastMap(ctx, targetDataset, targetTableName, stagingDataset, stagingTableName)
 
 	// Build MERGE statement
-	mergeSQL := d.buildMergeSQL(targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap)
+	mergeSQL := d.buildMergeSQL(targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey)
 
 	config.Debug("[MERGE] Executing MERGE statement")
 	config.Debug("[MERGE] SQL: %s", mergeSQL)
@@ -1508,9 +1519,8 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 }
 
 // buildMergeSQL constructs a BigQuery MERGE statement
-func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string) string {
+func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string) string {
 	destColumns := destination.DestinationColumns(allColumns)
-
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		sourceCol := castSourceCol(pk, castMap)
@@ -1570,10 +1580,16 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 			pkPartition[i] = fmt.Sprintf("`%s`", pk)
 		}
 
+		// When an incremental key is set the latest row per PK wins; otherwise
+		// the winner is arbitrary.
+		dedupOrderBy := ""
+		if incrementalKey != "" {
+			dedupOrderBy = fmt.Sprintf(" ORDER BY `%s` DESC", incrementalKey)
+		}
 		fmt.Fprintf(
 			&sql,
-			"USING (SELECT * FROM `%s`.`%s`.`%s` QUALIFY ROW_NUMBER() OVER (PARTITION BY %s) = 1) AS s\n",
-			d.projectID, stagingDataset, stagingTable, strings.Join(pkPartition, ", "),
+			"USING (SELECT * FROM `%s`.`%s`.`%s` QUALIFY ROW_NUMBER() OVER (PARTITION BY %s%s) = 1) AS s\n",
+			d.projectID, stagingDataset, stagingTable, strings.Join(pkPartition, ", "), dedupOrderBy,
 		)
 	}
 

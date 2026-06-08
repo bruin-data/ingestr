@@ -182,22 +182,22 @@ func TestDescribeChange(t *testing.T) {
 		{
 			"add column",
 			SchemaChange{Type: ChangeAddColumn, ColumnName: "new_col", NewColumn: schema.Column{DataType: schema.TypeString}},
-			[]string{"new column", "STRING"},
+			[]string{"new column", "string"},
 		},
 		{
 			"widen type with old",
 			SchemaChange{Type: ChangeWidenType, ColumnName: "val", OldColumn: &schema.Column{DataType: schema.TypeInt32}, NewColumn: schema.Column{DataType: schema.TypeInt64}},
-			[]string{"type change", "INT32", "INT64"},
+			[]string{"type change", "int32", "int64"},
 		},
 		{
 			"widen type without old",
 			SchemaChange{Type: ChangeWidenType, ColumnName: "val", NewColumn: schema.Column{DataType: schema.TypeString}},
-			[]string{"widened", "STRING"},
+			[]string{"widened", "string"},
 		},
 		{
 			"override type",
 			SchemaChange{Type: ChangeOverrideType, ColumnName: "val", OldColumn: &schema.Column{DataType: schema.TypeString}, NewColumn: schema.Column{DataType: schema.TypeInt64}},
-			[]string{"override", "STRING", "INT64"},
+			[]string{"override", "string", "int64"},
 		},
 	}
 
@@ -216,7 +216,7 @@ func TestViolationError(t *testing.T) {
 		Mode: ContractFreeze,
 		Violations: []ContractViolation{
 			{ColumnName: "col1", Description: "new column detected"},
-			{ColumnName: "col2", Description: "type change from INT32 to INT64"},
+			{ColumnName: "col2", Description: "type change from int32 to int64"},
 		},
 	}
 

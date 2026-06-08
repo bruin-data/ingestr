@@ -145,12 +145,17 @@ tools:
     binary: bin/ingestr
 
   ingestr:
-    command_prefix: "uv tool run --python 3.11 ingestr@0.14.155 ingest"
+    command_prefix: "uv tool run --python 3.13 --with pyodbc ingestr@0.14.155 ingest"
     requires: uv
     uri_scheme_overrides:
       postgres: postgresql
     extra_args_by_source:
       mysql: "--columns float_val:double"
+    extra_args_by_destination:
+      mssql: "--columns json_val:text"
+    skip:
+      - source_type: mongodb
+        destination_type: mssql
 
   sling:
     requires: sling
@@ -162,6 +167,9 @@ tools:
     backend_overrides:
       - source: local_mongodb
         destination_type: postgres
+        backend: default
+      - source: local_mongodb
+        destination_type: mssql
         backend: default
 
   airbyte:
