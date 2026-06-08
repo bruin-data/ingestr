@@ -30,9 +30,9 @@ If there's no access key and secret key provided, ingestr will try to find the c
 
 ## Setting up an Athena Integration
 
-Athena requires a `bucket`, `access_key_id`, `secret_access_key` and `region_name` to access the S3 bucket and run queries.
+Athena requires an S3 bucket, an AWS region, a workgroup with a configured query result location, and credentials.
 
-### Step 1: Create an S3 Bucket for Results
+### Step 1: Create an S3 Bucket
 
 1. Go to the [Amazon S3 Console](https://s3.console.aws.amazon.com/)
 2. Click **Create bucket**
@@ -40,25 +40,51 @@ Athena requires a `bucket`, `access_key_id`, `secret_access_key` and `region_nam
 4. Select the same region where you'll use Athena
 5. Click **Create bucket**
 
-### Step 2: Create an IAM User with Permissions
+This is your `bucket` URI parameter. The region you picked is your `region_name`.
 
-1. Go to the [AWS IAM Console](https://console.aws.amazon.com/iam/)
-2. Click **Users** → **Add users**
-3. Enter a username (e.g., "athena-integration")
-4. Select **Access key - Programmatic access**
-5. Attach the following managed policies:
-   - `AmazonAthenaFullAccess` - For Athena query access
-   - `AmazonS3FullAccess` - For S3 bucket access (or create a more restrictive policy)
-   - `AWSGlueConsoleFullAccess` - For Glue Catalog access
+### Step 2: Configure an Athena Workgroup
 
-### Step 3: Get Access Keys
+Athena needs a **Query result location** configured on the workgroup it runs queries through. ingestr uses the account's `primary` workgroup by default.
 
-1. After creating the user, copy the **Access key ID** and **Secret access key**
-2. Store these credentials securely (the secret key is shown only once)
+1. Go to the [Athena Console](https://console.aws.amazon.com/athena/) → **Workgroups**
+2. Either edit the existing `primary` workgroup or create a new one
+3. Set **Query result location** to a prefix inside the bucket from Step 1 (e.g. `s3://my-athena-results/query-results/`) and save
+4. If you created a new workgroup instead of using `primary`, pass its name via the `workgroup` URI parameter
 
-### Step 4: Note Your Region
+### Step 3: Permissions
 
-Ensure you know the AWS region where your Athena is configured (e.g., `us-east-1`, `eu-central-1`).
+The identity ingestr uses must have:
+- **S3** on the bucket: `GetObject`, `PutObject`, `DeleteObject`, `ListBucket`. The managed `AmazonS3FullAccess` policy works for testing; a bucket-scoped policy is safer for production.
+- **Athena**: `StartQueryExecution`, `GetQueryExecution`, `GetQueryResults`, `StopQueryExecution` (or the managed `AmazonAthenaFullAccess` policy).
+- **Glue**: `GetDatabase`, `CreateDatabase`, `GetTable`, `CreateTable`, `UpdateTable`, `DeleteTable`, `GetPartitions`, `BatchCreatePartition` — required so ingestr can register external tables in the AWS Glue Data Catalog that Athena reads from.
+
+### Step 4: Credentials
+
+Pick one of the following based on how you sign in to AWS:
+
+**A. IAM user with long-lived keys** — for accounts not managed by AWS Identity Center, or when you want a dedicated service identity for ingestr.
+
+1. In the [IAM Console](https://console.aws.amazon.com/iam/), go to **Users → Create user**, give it a name (e.g. "athena-integration"), and continue without granting console access
+2. On the **Set permissions** step, attach a policy granting the S3, Athena, and Glue permissions from Step 3
+3. Open the new user, go to the **Security credentials** tab → **Access keys** → **Create access key**, choose **Application running outside AWS**, and copy the **Access key ID** and **Secret access key** (the secret key is shown only once)
+
+Pass these as `access_key_id` and `secret_access_key` in the URI.
+
+**B. AWS Identity Center (SSO) via a local profile** — for developer machines that already use `aws configure sso` / `aws sso login`. ingestr reads the credentials (including the rotating session token) from your local AWS credentials file, so you never paste secrets into the URI.
+
+1. If you have not yet, run `aws configure sso` and attach your Identity Center login to a named profile (e.g. `ingestr`)
+2. Run `aws sso login --profile ingestr` whenever the session expires
+3. Make sure the Identity Center permission set you assume includes the S3, Athena, and Glue permissions from Step 3
+4. Pass `profile=ingestr` in the URI instead of access key parameters
+
+**C. Short-lived keys from the SSO access portal** — for a one-off run from a machine that does not have the AWS CLI configured.
+
+1. Open your AWS access portal (`https://<your-sso-portal>.awsapps.com/start`)
+2. Pick the target account, then click **Access keys** next to the permission set you want to use
+3. Copy the **Access key ID**, **Secret access key**, and **Session token**, and pass all three (`access_key_id`, `secret_access_key`, `session_token`) in the URI
+
+> [!WARNING]
+> Option C credentials expire after a few hours — do not use them for scheduled pipelines. Use Option A or B instead.
 
 Once you have all the credentials:
 ```

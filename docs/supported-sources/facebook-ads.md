@@ -44,29 +44,30 @@ There are two ways to get an access token:
 
 1. Go to [Graph API Explorer](https://developers.facebook.com/tools/explorer/)
 2. Select your app from the dropdown
-3. Click **Generate Access Token**
-4. Select the permissions: `ads_read`, `ads_management`, `business_management`
+3. Set **User or Page** to **User Token**
+4. Add the required permissions:
+   - `ads_read` — required for `campaigns`, `ad_sets`, `ads`, `ad_creatives`, and `facebook_insights`.
+   - `leads_retrieval` — additionally required for the `leads` table.
+   - `business_management` — recommended if you use a System User or need to list all ad accounts in a business.
 5. Click **Generate Access Token** and copy it
 
-> **Note**: This token expires quickly. For production, use a System User token.
+> **Note**: This token expires in about an hour. For production, use a System User token (Option B) and exchange it for a never-expiring token.
 
 #### Option B: System User Token (recommended for production)
 
 1. Go to [Business Settings](https://business.facebook.com/settings/)
 2. Navigate to **Users** → **System Users**
 3. Click **Add** to create a new system user
-4. Select **Admin** role
+4. Click **Add Assets** and grant the system user access to every Ad Account you want to ingest from — without this, the token will not be able to read data
 5. Click **Generate New Token**
-6. Select your app and the required permissions: `ads_read`, `ads_management`
-7. Copy the access token
+6. Select your app and the required permissions (`ads_read`, plus `leads_retrieval` if you ingest the `leads` table)
+7. Choose **Never** for expiration and copy the access token
 
 ### Step 4: Get Your Account ID
 
 1. Go to [Facebook Ads Manager](https://www.facebook.com/adsmanager/)
-2. Look at the URL - the account ID is the number after `act=`
-3. Or go to **Settings** in Ads Manager to see your Account ID
-
-The Account ID is typically a number like `1234567890`.
+2. The account selector shows IDs in the form `act_1234567890`
+3. Pass only the numeric part (e.g. `1234567890`) as `account_id` — ingestr automatically prepends `act_` when calling the API
 
 Once you have your access token and Account ID, let's say your `access_token` is `abcdef` and `account_id` is `1234`, here's a sample command that will copy the data from Facebook Ads into a DuckDB database:
 

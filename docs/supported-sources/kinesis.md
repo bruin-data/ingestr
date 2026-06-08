@@ -26,28 +26,26 @@ To access Amazon Kinesis, you need AWS credentials with appropriate permissions.
 ### Step 1: Create an IAM User (if needed)
 
 1. Go to the [AWS IAM Console](https://console.aws.amazon.com/iam/)
-2. Click **Users** → **Add users**
-3. Enter a username (e.g., "kinesis-integration")
-4. Select **Access key - Programmatic access**
-5. Click **Next: Permissions**
+2. Click **Users** → **Create user**
+3. Enter a username (e.g., "kinesis-integration") and continue without granting console access
+4. Click **Next**
 
 ### Step 2: Assign Permissions
 
 Attach a policy that grants Kinesis read access. You can use the managed policy `AmazonKinesisReadOnlyAccess` or create a custom policy with:
 - `kinesis:DescribeStream`
+- `kinesis:DescribeStreamSummary`
 - `kinesis:GetShardIterator`
 - `kinesis:GetRecords`
+- `kinesis:ListShards`
 - `kinesis:ListStreams`
 
 ### Step 3: Get Access Keys
 
-1. After creating the user, you'll see the **Access key ID** and **Secret access key**
-2. Download or copy these credentials securely (the secret key is shown only once)
-
-If you already have an IAM user, you can generate new access keys:
-1. Go to **IAM** → **Users** → select your user
-2. Click the **Security credentials** tab
-3. Click **Create access key**
+1. Open the new user and go to the **Security credentials** tab
+2. Under **Access keys**, click **Create access key**
+3. Select **Application running outside AWS** and create the key
+4. Copy the **Access key ID** and **Secret access key** (the secret key is shown only once)
 
 ### Finding Your Region
 
