@@ -1,11 +1,20 @@
 package snowflake
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	pqgo "github.com/apache/arrow-go/v18/parquet"
+	pqfile "github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	pqschema "github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildMergeSQL(t *testing.T) {
@@ -171,6 +180,54 @@ func TestImplicitTableStageName(t *testing.T) {
 			assert.Equal(t, tt.wantStage, stageName)
 		})
 	}
+}
+
+func TestBuildCopyIntoSQLUsesParquetLogicalTypes(t *testing.T) {
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789")
+	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789 FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
+	assert.Equal(t, want, got)
+}
+
+func TestSnowflakeParquetWriterTimestampLogicalTypes(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "created_at", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "synced_at", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, Nullable: true},
+	}, nil)
+
+	builder := array.NewRecordBuilder(mem, arrowSchema)
+	builder.Field(0).(*array.TimestampBuilder).Append(arrow.Timestamp(1717245296789123))
+	builder.Field(1).(*array.TimestampBuilder).Append(arrow.Timestamp(1717245296789123))
+	record := builder.NewRecord()
+	builder.Release()
+	defer record.Release()
+
+	var buf bytes.Buffer
+	writerProps, arrowProps := snowflakeParquetWriterProperties()
+	writer, err := pqarrow.NewFileWriter(record.Schema(), &buf, writerProps, arrowProps)
+	require.NoError(t, err)
+	require.NoError(t, writer.Write(record))
+	require.NoError(t, writer.Close())
+
+	reader, err := pqfile.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer func() { _ = reader.Close() }()
+
+	createdAt := reader.MetaData().Schema.Column(0)
+	assert.Equal(t, pqgo.Types.Int64, createdAt.PhysicalType())
+	createdAtLogical, ok := createdAt.LogicalType().(pqschema.TimestampLogicalType)
+	require.True(t, ok, "created_at logical type = %T", createdAt.LogicalType())
+	assert.Equal(t, pqschema.TimeUnitMicros, createdAtLogical.TimeUnit())
+	assert.False(t, createdAtLogical.IsAdjustedToUTC())
+
+	syncedAt := reader.MetaData().Schema.Column(1)
+	assert.Equal(t, pqgo.Types.Int64, syncedAt.PhysicalType())
+	syncedAtLogical, ok := syncedAt.LogicalType().(pqschema.TimestampLogicalType)
+	require.True(t, ok, "synced_at logical type = %T", syncedAt.LogicalType())
+	assert.Equal(t, pqschema.TimeUnitMicros, syncedAtLogical.TimeUnit())
+	assert.True(t, syncedAtLogical.IsAdjustedToUTC())
 }
 
 func TestMapDataTypeToSnowflake(t *testing.T) {
