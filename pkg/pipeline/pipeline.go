@@ -308,8 +308,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
-	// Full ingest schema includes staging-only CDC columns needed for staging writes.
-	ingestSchema := destSchema
+	fullSchema := destSchema
 
 	// Schema contract handling: evolve destination schema if needed (skip for replace strategy)
 	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
@@ -323,6 +322,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			destSchema = evolutionPlan.FinalSchema
 		}
 	}
+
+	// Staging mirrors the destination schema, with staging-only CDC columns retained.
+	ingestSchema := destination.StagingIngestSchema(fullSchema, destSchema)
 
 	if inferBuffer != nil {
 		bufferTarget := p.buildBufferReaderTarget(originalSourceSchema, destSchema)

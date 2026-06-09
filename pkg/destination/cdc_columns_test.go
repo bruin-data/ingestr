@@ -19,6 +19,34 @@ func TestDestinationColumns(t *testing.T) {
 	}
 }
 
+func TestStagingIngestSchema(t *testing.T) {
+	dest := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt32},
+			{Name: "name", DataType: schema.TypeString},
+		},
+	}
+	full := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt32},
+			{Name: "name", DataType: schema.TypeString},
+			{Name: CDCUnchangedColsColumn, DataType: schema.TypeString},
+		},
+	}
+	got := StagingIngestSchema(full, dest)
+	if len(got.Columns) != 3 {
+		t.Fatalf("len(columns) = %d, want 3", len(got.Columns))
+	}
+	if got.Columns[2].Name != CDCUnchangedColsColumn {
+		t.Fatalf("columns = %#v", got.Columns)
+	}
+
+	unchanged := StagingIngestSchema(full, full)
+	if unchanged != full {
+		t.Fatalf("expected same pointer when dest already has staging cols")
+	}
+}
+
 func TestDestinationTableSchema(t *testing.T) {
 	input := &schema.TableSchema{
 		Columns: []schema.Column{

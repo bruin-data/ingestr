@@ -41,6 +41,38 @@ func DestinationColumns(columns []string) []string {
 	return out
 }
 
+// StagingIngestSchema returns the schema used for staging writes. It mirrors the
+// destination-aligned schema while retaining staging-only CDC columns from the
+// full source schema.
+func StagingIngestSchema(fullSchema, destSchema *schema.TableSchema) *schema.TableSchema {
+	if destSchema == nil {
+		return fullSchema
+	}
+	if fullSchema == nil {
+		return destSchema
+	}
+	destNames := make(map[string]struct{}, len(destSchema.Columns))
+	for _, col := range destSchema.Columns {
+		destNames[col.Name] = struct{}{}
+	}
+	extra := make([]schema.Column, 0)
+	for _, col := range fullSchema.Columns {
+		if !IsCDCStagingOnlyColumn(col.Name) {
+			continue
+		}
+		if _, ok := destNames[col.Name]; ok {
+			continue
+		}
+		extra = append(extra, col)
+	}
+	if len(extra) == 0 {
+		return destSchema
+	}
+	result := *destSchema
+	result.Columns = append(append([]schema.Column{}, destSchema.Columns...), extra...)
+	return &result
+}
+
 // DestinationTableSchema returns a copy of the schema without staging-only CDC columns.
 func DestinationTableSchema(s *schema.TableSchema) *schema.TableSchema {
 	if s == nil {
