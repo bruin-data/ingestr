@@ -61,7 +61,12 @@ jobs:
           tags()   { gh api "repos/$1/tags" --paginate --jq '.[].name' | sort; }
           runs()   { gh run list --repo "$1" --workflow "$2" --limit 50 --json databaseId -q '.[].databaseId' | sort; }
           have()   { grep -qF "$2" "$1" || fail "$3"; }
-          clone()  { git clone -q --depth 1 "https://x-access-token:${RELEASE_TOKEN}@github.com/$1.git" "$2"; }
+          # clone <slug> <dir> <sparse-path...> — shallow + partial + sparse (checkout only needed dirs)
+          clone() {
+            local slug="$1" dir="$2"; shift 2
+            git clone -q --depth 1 --filter=blob:none --sparse "https://x-access-token:${RELEASE_TOKEN}@github.com/$slug.git" "$dir"
+            git -C "$dir" sparse-checkout set "$@"
+          }
 
           # Wait for a NEW run of <workflow> (id not in <before-ids>) to succeed.
           wait_run() {
@@ -143,7 +148,7 @@ jobs:
           # Phase 2 — bump ingestr in bruin
           slack "2️⃣ bumping ingestr → $ITAG in bruin"
           if ! dry; then
-            clone bruin-data/bruin bruin
+            clone bruin-data/bruin bruin pkg/python
             sed -i "s|IngestrVersionV1 = \"[^\"]*\"|IngestrVersionV1 = \"$IVER\"|" bruin/pkg/python/uv.go
             have bruin/pkg/python/uv.go "IngestrVersionV1 = \"$IVER\"" "bruin: uv.go not updated"
             open_pr bruin-data/bruin bruin "bump-ingestr-$ITAG" "Bump ingestr to $ITAG" "Updates IngestrVersionV1 to $IVER."
@@ -159,13 +164,13 @@ jobs:
           # Phase 4 — bump bruin in orchestrator + airflow
           slack "4️⃣ bumping bruin → $BTAG in orchestrator + airflow"
           if ! dry; then
-            clone bruin-data/orchestrator orchestrator
+            clone bruin-data/orchestrator orchestrator deployment
             sed -i "s|bruinImageTag: .*|bruinImageTag: $BTAG|" orchestrator/deployment/values.yaml
             have orchestrator/deployment/values.yaml "bruinImageTag: $BTAG" "orchestrator: values.yaml not updated"
             open_pr bruin-data/orchestrator orchestrator "bump-bruin-$BTAG" "Bump bruin to $BTAG" "Updates bruinImageTag to $BTAG."
             ORCH_PR=$PR_NUM
 
-            clone bruin-data/airflow airflow
+            clone bruin-data/airflow airflow src/core src/ingestr src/python
             echo "$BTAG" > airflow/src/core/BRUIN_VERSION.txt
             sed -i "s|ghcr.io/bruin-data/bruin:v[0-9][0-9.]*|ghcr.io/bruin-data/bruin:$BTAG|g" airflow/src/ingestr/expected_seed_spec.yml
             sed -i "s|registry.digitalocean.com/bruin/python:v[0-9][0-9.]*|registry.digitalocean.com/bruin/python:$BTAG|g" \
