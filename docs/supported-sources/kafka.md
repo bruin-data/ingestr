@@ -28,7 +28,7 @@ For [Amazon MSK](https://aws.amazon.com/msk/) clusters that use IAM access contr
 Additional URI parameters for MSK IAM:
 - `aws_region`: Required, the AWS region of the MSK cluster, e.g. `us-east-1`.
 - `aws_role_arn`: Optional, an IAM role ARN to assume for generating the token.
-- `aws_role_session_name`: Optional, the STS session name used when assuming `aws_role_arn`.
+- `aws_role_session_name`: Optional, the STS session name used when assuming `aws_role_arn`. Defaults to `ingestr-msk-iam` when omitted. When provided, it must be 2-64 characters and contain only letters, numbers, and `_+=,.@-`.
 - `aws_profile`: Optional, an AWS named profile to load credentials from.
 - `aws_access_key_id` / `aws_secret_access_key`: Optional static credentials. Both are required together.
 - `aws_session_token`: Optional session token to use with static credentials.

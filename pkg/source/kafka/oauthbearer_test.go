@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -87,8 +88,12 @@ func TestNewOAuthBearerTokenProvider_Selection(t *testing.T) {
 		cfg  kafkaConfig
 	}{
 		{
-			name: "role arn",
+			name: "role arn uses default session name",
 			cfg:  kafkaConfig{AWSRegion: "us-east-1", AWSRoleArn: "arn:aws:iam::123:role/msk"},
+		},
+		{
+			name: "role arn with explicit session name",
+			cfg:  kafkaConfig{AWSRegion: "us-east-1", AWSRoleArn: "arn:aws:iam::123:role/msk", AWSRoleSessionName: "ingestr"},
 		},
 		{
 			name: "profile",
@@ -116,6 +121,19 @@ func TestNewOAuthBearerTokenProvider_Selection(t *testing.T) {
 				t.Fatal("provider should not be nil")
 			}
 		})
+	}
+}
+
+func TestNewOAuthBearerTokenProvider_InvalidRoleSessionName(t *testing.T) {
+	cases := []kafkaConfig{
+		{AWSRegion: "us-east-1", AWSRoleArn: "arn:aws:iam::123:role/msk", AWSRoleSessionName: "a"},
+		{AWSRegion: "us-east-1", AWSRoleArn: "arn:aws:iam::123:role/msk", AWSRoleSessionName: strings.Repeat("a", 65)},
+		{AWSRegion: "us-east-1", AWSRoleArn: "arn:aws:iam::123:role/msk", AWSRoleSessionName: "bad session"},
+	}
+	for _, cfg := range cases {
+		if _, err := newOAuthBearerTokenProvider(cfg); err == nil || !strings.Contains(err.Error(), "aws_role_session_name") {
+			t.Errorf("expected aws_role_session_name error for config %+v, got %v", cfg, err)
+		}
 	}
 }
 

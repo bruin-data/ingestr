@@ -3,11 +3,16 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	"github.com/aws/aws-msk-iam-sasl-signer-go/signer"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/segmentio/kafka-go/sasl"
 )
+
+const defaultOAuthBearerRoleSessionName = "ingestr-msk-iam"
+
+var validOAuthBearerRoleSessionName = regexp.MustCompile(`^[A-Za-z0-9_+=,.@-]{2,64}$`)
 
 // tokenProvider returns a fresh OAUTHBEARER token. It is invoked on every SASL
 // handshake, allowing short-lived tokens (e.g. AWS MSK IAM presigned URLs) to be
@@ -59,8 +64,12 @@ func newOAuthBearerTokenProvider(cfg kafkaConfig) (tokenProvider, error) {
 
 	switch {
 	case cfg.AWSRoleArn != "":
+		sessionName, err := resolveOAuthBearerRoleSessionName(cfg.AWSRoleSessionName)
+		if err != nil {
+			return nil, err
+		}
 		return func(ctx context.Context) (string, error) {
-			token, _, err := signer.GenerateAuthTokenFromRole(ctx, region, cfg.AWSRoleArn, cfg.AWSRoleSessionName)
+			token, _, err := signer.GenerateAuthTokenFromRole(ctx, region, cfg.AWSRoleArn, sessionName)
 			return token, err
 		}, nil
 
@@ -86,4 +95,14 @@ func newOAuthBearerTokenProvider(cfg kafkaConfig) (tokenProvider, error) {
 			return token, err
 		}, nil
 	}
+}
+
+func resolveOAuthBearerRoleSessionName(sessionName string) (string, error) {
+	if sessionName == "" {
+		return defaultOAuthBearerRoleSessionName, nil
+	}
+	if !validOAuthBearerRoleSessionName.MatchString(sessionName) {
+		return "", fmt.Errorf("kafka OAUTHBEARER: aws_role_session_name must be 2-64 characters and contain only letters, numbers, and _+=,.@-")
+	}
+	return sessionName, nil
 }
