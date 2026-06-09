@@ -205,7 +205,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 				b.AppendNull()
 			}
 		case json.Number:
-			if i, err := v.Int64(); err == nil {
+			if i, err := v.Int64(); err == nil && i >= -128 && i <= 127 {
 				b.Append(int8(i))
 			} else {
 				b.AppendNull()
