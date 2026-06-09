@@ -273,6 +273,11 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			destTable := job.GetDestTableName(ti.Name)
 			stagingTable := stagingTables[ti.Name]
 
+			if err := job.ApplyEvolution(ctx, ti.Name); err != nil {
+				mergeErrChan <- fmt.Errorf("failed to apply schema evolution for %s: %w", ti.Name, err)
+				return
+			}
+
 			if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
 				StagingTable: stagingTable,
 				TargetTable:  destTable,

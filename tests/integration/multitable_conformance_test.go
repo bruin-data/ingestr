@@ -727,6 +727,86 @@ func TestDestinations_MultiTable_Merge(t *testing.T) {
 	}
 }
 
+// TestDestinations_MultiTable_SchemaEvolution validates that multi-table merge
+// applies schema evolution when source tables gain new columns.
+func TestDestinations_MultiTable_SchemaEvolution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	usersFile1 := createMultiTableTestFile(t, "users_evolve_initial", []map[string]interface{}{
+		{"id": 1, "name": "alice", "active": true},
+		{"id": 2, "name": "bob", "active": false},
+	})
+	defer func() { _ = os.Remove(usersFile1) }()
+
+	ordersFile1 := createMultiTableTestFile(t, "orders_evolve_initial", []map[string]interface{}{
+		{"id": 1, "user_id": 1, "amount": 100.50},
+	})
+	defer func() { _ = os.Remove(ordersFile1) }()
+
+	usersFile2 := createMultiTableTestFile(t, "users_evolve_updated", []map[string]interface{}{
+		{"id": 1, "name": "alice", "active": true, "email": "alice@example.com"},
+		{"id": 3, "name": "charlie", "active": true, "email": "charlie@example.com"},
+	})
+	defer func() { _ = os.Remove(usersFile2) }()
+
+	ordersFile2 := createMultiTableTestFile(t, "orders_evolve_updated", []map[string]interface{}{
+		{"id": 2, "user_id": 3, "amount": 50.00},
+	})
+	defer func() { _ = os.Remove(ordersFile2) }()
+
+	sourceURI1 := fmt.Sprintf("multitable-test://users=%s,orders=%s", usersFile1, ordersFile1)
+	sourceURI2 := fmt.Sprintf("multitable-test://users=%s,orders=%s", usersFile2, ordersFile2)
+
+	for _, tc := range multiTableDestinationCases() {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			destURI, destPrefix, cleanup := tc.setup(t, ctx)
+			defer cleanup()
+
+			cfg := &config.IngestConfig{
+				SourceURI:           sourceURI1,
+				SourceTable:         "",
+				DestURI:             destURI,
+				DestTable:           destPrefix,
+				IncrementalStrategy: config.StrategyMerge,
+				PrimaryKeys:         []string{"id"},
+				SchemaContract:      "evolve",
+			}
+
+			p1 := pipeline.New(cfg)
+			require.NoError(t, p1.Run(ctx), "Initial multi-table merge should succeed")
+
+			cfg.SourceURI = sourceURI2
+			p2 := pipeline.New(cfg)
+			require.NoError(t, p2.Run(ctx), "Multi-table merge with new column should succeed")
+
+			db, err := tc.sqlBackend.openDB(destURI)
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+
+			usersTable := fmt.Sprintf("%s.users", destPrefix)
+			ordersTable := fmt.Sprintf("%s.orders", destPrefix)
+
+			types, err := tc.sqlBackend.schemaTypes(db, usersTable)
+			require.NoError(t, err)
+			_, hasEmail := types["email"]
+			assert.True(t, hasEmail, "users table should have email column after schema evolution")
+
+			var usersCount int
+			require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(usersTable)).Scan(&usersCount))
+			assert.Equal(t, 3, usersCount, "users table should have 3 rows after merge")
+
+			var ordersCount int
+			require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(ordersTable)).Scan(&ordersCount))
+			assert.Equal(t, 2, ordersCount, "orders table should have 2 rows after merge")
+		})
+	}
+}
+
 func createMultiTableTestFile(t *testing.T, name string, items []map[string]interface{}) string {
 	t.Helper()
 

@@ -312,7 +312,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
 	var evolutionPlan *schemaevolution.EvolutionPlan
 	if resolvedStrategy != config.StrategyReplace {
-		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, destSchema)
+		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, destSchema, p.config.DestTable)
 		if err != nil {
 			return fmt.Errorf("schema evolution failed: %w", err)
 		}
@@ -852,14 +852,30 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		}
 	}
 
+	var evolutionPlans map[string]*schemaevolution.EvolutionPlan
+	if resolvedStrategy != config.StrategyReplace {
+		evolutionPlans = make(map[string]*schemaevolution.EvolutionPlan, len(tables))
+		for _, table := range tables {
+			destTable := tableDestNames[table.Name]
+			plan, err := p.buildEvolutionPlan(ctx, table.Schema, destTable)
+			if err != nil {
+				return fmt.Errorf("schema evolution failed for table %s: %w", table.Name, err)
+			}
+			if plan != nil {
+				evolutionPlans[table.Name] = plan.plan
+			}
+		}
+	}
+
 	job := &strategy.MultiTableIngestionJob{
-		Config:         &resolvedConfig,
-		Source:         src,
-		Destination:    p.dest,
-		Tables:         tables,
-		TableDestNames: tableDestNames,
-		Tracker:        tracker,
-		CDCResumeLSNs:  cdcResumeLSNs,
+		Config:          &resolvedConfig,
+		Source:          src,
+		Destination:     p.dest,
+		Tables:          tables,
+		TableDestNames:  tableDestNames,
+		Tracker:         tracker,
+		CDCResumeLSNs:   cdcResumeLSNs,
+		EvolutionPlans:  evolutionPlans,
 	}
 
 	if err := mtStrat.ExecuteMultiTable(ctx, job); err != nil {
@@ -871,29 +887,46 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 // evolveSchemaIfNeeded inspects the destination's current schema and builds an
 // EvolutionPlan describing how it should change to accommodate sourceSchema.
-func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
-	// Get destination table schema (nil if table doesn't exist)
-	destSchema, err := p.dest.GetTableSchema(ctx, p.config.DestTable)
+// It also stores comparison state on the pipeline for single-table batch transformation.
+func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schema.TableSchema, destTable string) (*schemaevolution.EvolutionPlan, error) {
+	result, err := p.buildEvolutionPlan(ctx, sourceSchema, destTable)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, nil
+	}
+
+	p.destinationSchema = result.destSchema
+	p.schemaComparison = result.comparison
+	p.filteredSchemaComparison = result.filteredComparison
+	return result.plan, nil
+}
+
+type evolutionPlanResult struct {
+	plan               *schemaevolution.EvolutionPlan
+	destSchema         *schema.TableSchema
+	comparison         *schemaevolution.SchemaComparison
+	filteredComparison *schemaevolution.SchemaComparison
+}
+
+func (p *Pipeline) buildEvolutionPlan(ctx context.Context, sourceSchema *schema.TableSchema, destTable string) (*evolutionPlanResult, error) {
+	destSchema, err := p.dest.GetTableSchema(ctx, destTable)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get destination schema: %w", err)
 	}
 	if destSchema == nil {
-		config.Debug("[SCHEMA EVOLUTION] Destination table doesn't exist yet, skipping evolution")
+		config.Debug("[SCHEMA EVOLUTION] Destination table %s doesn't exist yet, skipping evolution", destTable)
 		return nil, nil
 	}
 
-	// Store destination schema for use by strategies
-	p.destinationSchema = destSchema
-
-	// Parse schema contract mode
 	contractMode, err := schemaevolution.ParseContractMode(p.config.SchemaContract)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse schema contract: %w", err)
 	}
 	contract := schemaevolution.SchemaContract{Mode: contractMode}
-	config.Debug("[SCHEMA EVOLUTION] Using schema contract mode: %s", contractMode)
+	config.Debug("[SCHEMA EVOLUTION] Using schema contract mode: %s for %s", contractMode, destTable)
 
-	// Parse column overrides from config
 	overrides, err := schemaevolution.ParseColumnOverrides(p.config.Columns)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse column overrides: %w", err)
@@ -902,46 +935,50 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 		config.Debug("[SCHEMA EVOLUTION] Applying %d column type overrides", len(overrides))
 	}
 
-	// Compare schemas with overrides
 	opts := &schemaevolution.CompareOptions{Overrides: overrides}
 	comparison, err := schemaevolution.Compare(sourceSchema, destSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
 	}
 	if !comparison.HasChanges {
-		config.Debug("[SCHEMA EVOLUTION] No schema changes detected")
-		return &schemaevolution.EvolutionPlan{
-			FinalSchema: schemaevolution.BuildFinalSchema(destSchema, nil),
-			Migration:   nil,
+		config.Debug("[SCHEMA EVOLUTION] No schema changes detected for %s", destTable)
+		return &evolutionPlanResult{
+			plan: &schemaevolution.EvolutionPlan{
+				FinalSchema: schemaevolution.BuildFinalSchema(destSchema, nil),
+				Migration:   nil,
+			},
+			destSchema:         destSchema,
+			comparison:         comparison,
+			filteredComparison: nil,
 		}, nil
 	}
 
-	config.Debug("[SCHEMA EVOLUTION] Detected %d schema changes", len(comparison.Changes))
+	config.Debug("[SCHEMA EVOLUTION] Detected %d schema changes for %s", len(comparison.Changes), destTable)
 
-	// Log warnings for removed columns (Fivetran-style soft removal)
 	for _, change := range comparison.Changes {
 		if change.Type == schemaevolution.ChangeRemoveColumn {
 			fmt.Printf("Warning: Column %q no longer exists in source, future values will be NULL\n", change.ColumnName)
 		}
 	}
 
-	// Apply schema contract to determine which changes are allowed
 	contractResult := schemaevolution.ApplyContract(contract, comparison)
 
-	// Store ORIGINAL schema comparison for use by strategies (for runtime batch transformation)
-	// This includes all violations, even those that will be handled by the contract
-	p.schemaComparison = comparison
+	var filteredComparison *schemaevolution.SchemaComparison
 
-	// Handle contract violations based on mode
 	switch contract.Mode {
 	case schemaevolution.ContractFreeze:
 		if contractResult.HasViolations() {
 			return nil, contractResult.ViolationError()
 		}
-		p.filteredSchemaComparison = comparison
-		return &schemaevolution.EvolutionPlan{
-			FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
-			Migration:   nil,
+		filteredComparison = comparison
+		return &evolutionPlanResult{
+			plan: &schemaevolution.EvolutionPlan{
+				FinalSchema: schemaevolution.BuildFinalSchema(destSchema, filteredComparison),
+				Migration:   nil,
+			},
+			destSchema:         destSchema,
+			comparison:         comparison,
+			filteredComparison: filteredComparison,
 		}, nil
 
 	case schemaevolution.ContractDiscardRow:
@@ -951,8 +988,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 			}
 			config.Debug("[SCHEMA EVOLUTION] Discard row mode will filter out incompatible rows during ingestion")
 		}
-		// For discard_row, apply all schema changes but filter rows at write time
-		p.filteredSchemaComparison = comparison
+		filteredComparison = comparison
 
 	case schemaevolution.ContractDiscardValue:
 		if contractResult.HasViolations() {
@@ -961,16 +997,11 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 			}
 			config.Debug("[SCHEMA EVOLUTION] Discard value mode will NULL out incompatible values during ingestion")
 
-			// Patch source schema to match destination types for violations
-			// This ensures Staging table is created with Destination types (e.g. INT) instead of Source types (e.g. STRING)
-			// enabling correct INSERT INTO ... SELECT behavior on strict DBs like Postgres
 			for _, change := range comparison.Changes {
 				if change.Type == schemaevolution.ChangeWidenType && change.OldColumn != nil {
-					// Find column in sourceSchema and revert it to OldColumn (Dest Type)
 					for i, col := range sourceSchema.Columns {
 						if col.Name == change.ColumnName {
 							sourceSchema.Columns[i] = *change.OldColumn
-							// Ensure nullable is true as we might be setting NULLs
 							sourceSchema.Columns[i].Nullable = true
 							break
 						}
@@ -979,61 +1010,67 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 			}
 		}
 		if len(contractResult.Allowed) == 0 {
-			// No new columns to migrate, but violations still need to be NULLed during ingestion
-			p.filteredSchemaComparison = &schemaevolution.SchemaComparison{
+			filteredComparison = &schemaevolution.SchemaComparison{
 				Changes:    []schemaevolution.SchemaChange{},
 				HasChanges: false,
 			}
-			return &schemaevolution.EvolutionPlan{
-				FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
-				Migration:   nil,
+			return &evolutionPlanResult{
+				plan: &schemaevolution.EvolutionPlan{
+					FinalSchema: schemaevolution.BuildFinalSchema(destSchema, filteredComparison),
+					Migration:   nil,
+				},
+				destSchema:         destSchema,
+				comparison:         comparison,
+				filteredComparison: filteredComparison,
 			}, nil
 		}
-		// For migration, only apply allowed changes (new columns) for discard_value mode
-		// Type changes are NOT applied, but they ARE captured for runtime transformation
-		p.filteredSchemaComparison = &schemaevolution.SchemaComparison{
+		filteredComparison = &schemaevolution.SchemaComparison{
 			Changes:    contractResult.Allowed,
 			HasChanges: len(contractResult.Allowed) > 0,
 		}
 
 	case schemaevolution.ContractEvolve:
-		p.filteredSchemaComparison = comparison
+		filteredComparison = comparison
 	}
 
-	// Get dialect for the destination
 	dialect := schemaevolution.GetDialect(p.dest.GetScheme())
 	if dialect == nil {
 		config.Debug("[SCHEMA EVOLUTION] No dialect registered for scheme %s, skipping", p.dest.GetScheme())
-		return &schemaevolution.EvolutionPlan{
-			FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
-			Migration:   nil,
+		return &evolutionPlanResult{
+			plan: &schemaevolution.EvolutionPlan{
+				FinalSchema: schemaevolution.BuildFinalSchema(destSchema, filteredComparison),
+				Migration:   nil,
+			},
+			destSchema:         destSchema,
+			comparison:         comparison,
+			filteredComparison: filteredComparison,
 		}, nil
 	}
 
-	// Generate migration using the FILTERED schema comparison (after contract filtering)
-	// This ensures we only apply allowed changes (e.g., new columns in discard_value mode)
-	migration, err := schemaevolution.GenerateMigration(p.filteredSchemaComparison, dialect, p.config.DestTable)
+	migration, err := schemaevolution.GenerateMigration(filteredComparison, dialect, destTable)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate migration: %w", err)
 	}
 
-	// Log warnings
 	for _, w := range migration.Warnings {
 		fmt.Printf("Warning: %s\n", w)
 	}
 
-	// Log SQL statements in debug mode
 	for _, sql := range migration.Statements {
 		config.Debug("[SCHEMA EVOLUTION] %s", sql)
 	}
 
-	// Build the plan; migration is NOT applied here.
 	plan := &schemaevolution.EvolutionPlan{
-		FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
+		FinalSchema: schemaevolution.BuildFinalSchema(destSchema, filteredComparison),
 		Migration:   migration,
 	}
-	config.Debug("[SCHEMA EVOLUTION] Built plan with %d statements (deferred apply)", len(migration.Statements))
-	return plan, nil
+	config.Debug("[SCHEMA EVOLUTION] Built plan with %d statements for %s (deferred apply)", len(migration.Statements), destTable)
+	return &evolutionPlanResult{
+		plan:               plan,
+		destSchema:         destSchema,
+		comparison:         comparison,
+		filteredComparison: filteredComparison,
+	}, nil
 }
 
 func (p *Pipeline) setupIngestrColumns(ctx context.Context, sourceSchema *schema.TableSchema) (*schema.TableSchema, error) {

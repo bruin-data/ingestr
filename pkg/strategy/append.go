@@ -123,6 +123,11 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 				return
 			}
 
+			if err := job.ApplyEvolution(ctx, ti.Name); err != nil {
+				errChan <- fmt.Errorf("failed to apply schema evolution for %s: %w", ti.Name, err)
+				return
+			}
+
 			mu.Lock()
 			tableConfigs[ti.Name] = destination.TableWriteConfig{
 				DestTable:   destTable,

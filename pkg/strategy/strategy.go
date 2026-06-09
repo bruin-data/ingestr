@@ -86,6 +86,7 @@ type MultiTableIngestionJob struct {
 	TableDestNames map[string]string // source table → dest table mapping
 	Tracker        progress.Tracker
 	CDCResumeLSNs  map[string]string // Per-table CDC resume LSNs: source table → max LSN already processed
+	EvolutionPlans map[string]*schemaevolution.EvolutionPlan
 }
 
 // GetDestTableName returns the destination table name for a source table.
@@ -94,6 +95,18 @@ func (j *MultiTableIngestionJob) GetDestTableName(sourceTable string) string {
 		return mapping
 	}
 	return sourceTable
+}
+
+// ApplyEvolution applies the pending schema evolution plan for a source table.
+func (j *MultiTableIngestionJob) ApplyEvolution(ctx context.Context, sourceTable string) error {
+	if j.EvolutionPlans == nil {
+		return nil
+	}
+	plan := j.EvolutionPlans[sourceTable]
+	if plan == nil || !plan.HasMigration() {
+		return nil
+	}
+	return plan.Apply(ctx, j.Destination)
 }
 
 // MultiTableStrategy extends WriteStrategy for multi-table sources.
