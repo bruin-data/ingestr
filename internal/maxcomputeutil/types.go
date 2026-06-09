@@ -74,6 +74,8 @@ func MapDataTypeToMaxCompute(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		return "BOOLEAN"
+	case schema.TypeInt8:
+		return "TINYINT"
 	case schema.TypeInt16:
 		return "SMALLINT"
 	case schema.TypeInt32:

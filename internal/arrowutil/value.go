@@ -20,6 +20,8 @@ func Value(arr interface {
 	switch a := arr.(type) {
 	case interface{ Value(int) bool }:
 		return a.Value(idx)
+	case interface{ Value(int) int8 }:
+		return a.Value(idx)
 	case interface{ Value(int) int16 }:
 		return a.Value(idx)
 	case interface{ Value(int) int32 }:

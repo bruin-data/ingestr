@@ -85,6 +85,8 @@ func athenaCastTypeForColumn(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		return "boolean"
+	case schema.TypeInt8:
+		return "tinyint"
 	case schema.TypeInt16:
 		return "smallint"
 	case schema.TypeInt32:

@@ -241,6 +241,7 @@ func duckdbSchemaTypes(db *sql.DB, table string) (map[string]string, error) {
 var schemaTypeToDuckDBMap = map[schema.DataType]string{
 	schema.TypeString:      "varchar",
 	schema.TypeBoolean:     "boolean",
+	schema.TypeInt8:        "tinyint",
 	schema.TypeInt16:       "smallint",
 	schema.TypeInt32:       "integer",
 	schema.TypeInt64:       "bigint",

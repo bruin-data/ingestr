@@ -83,6 +83,8 @@ func TestParseColumnOverrides_AllTypes(t *testing.T) {
 	}{
 		{"col:boolean", schema.TypeBoolean},
 		{"col:bool", schema.TypeBoolean},
+		{"col:int8", schema.TypeInt8},
+		{"col:tinyint", schema.TypeInt8},
 		{"col:int16", schema.TypeInt16},
 		{"col:smallint", schema.TypeInt16},
 		{"col:int32", schema.TypeInt32},
