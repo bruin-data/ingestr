@@ -600,7 +600,7 @@ func (d *DatabricksDestination) quoteFullTable(schemaName, tableName string) str
 func quoteColumns(cols []string) []string {
 	quoted := make([]string, len(cols))
 	for i, col := range cols {
-		quoted[i] = fmt.Sprintf("`%s`", col)
+		quoted[i] = fmt.Sprintf("`%s`", strings.ReplaceAll(col, "`", "``"))
 	}
 	return quoted
 }

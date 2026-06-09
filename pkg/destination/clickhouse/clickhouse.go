@@ -815,23 +815,19 @@ func mapDataTypeForColumn(col schema.Column, isPrimaryKey bool) string {
 }
 
 func buildInsertSQL(database, table string, columns []string) string {
-	quotedCols := make([]string, len(columns))
-	for i, col := range columns {
-		quotedCols[i] = fmt.Sprintf("`%s`", col)
-	}
-	return fmt.Sprintf("INSERT INTO `%s`.`%s` (%s)", database, table, strings.Join(quotedCols, ", "))
+	return fmt.Sprintf("INSERT INTO %s.%s (%s)", quoteIdentifier(database), quoteIdentifier(table), strings.Join(quoteColumns(columns), ", "))
 }
 
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf("`%s`", col)
+		quoted[i] = quoteIdentifier(col)
 	}
 	return quoted
 }
 
 func quoteIdentifier(s string) string {
-	return fmt.Sprintf("`%s`", s)
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(s, "`", "``"))
 }
 
 func filterColumns(columns []string, exclude []string) []string {

@@ -753,7 +753,7 @@ func mapSQLiteTypeToSchema(colType string) schema.DataType {
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf(`"%s"`, col)
+		quoted[i] = fmt.Sprintf(`"%s"`, strings.ReplaceAll(col, `"`, `""`))
 	}
 	return quoted
 }

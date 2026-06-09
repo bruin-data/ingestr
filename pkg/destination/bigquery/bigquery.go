@@ -1392,7 +1392,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 }
 
 func quoteIdentifier(s string) string {
-	return fmt.Sprintf("`%s`", s)
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(s, "`", "``"))
 }
 
 func filterColumns(columns []string, exclude []string) []string {

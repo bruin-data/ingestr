@@ -375,22 +375,26 @@ func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 	return arrow.NewSchema(fields, nil)
 }
 
+func quoteIdentifier(name string) string {
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
+}
+
 func buildSelectQuery(database, table string, columns []schema.Column, opts source.ReadOptions) string {
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
-		colNames[i] = fmt.Sprintf("`%s`", col.Name)
+		colNames[i] = quoteIdentifier(col.Name)
 	}
 
-	fullTable := fmt.Sprintf("`%s`.`%s`", database, table)
+	fullTable := fmt.Sprintf("%s.%s", quoteIdentifier(database), quoteIdentifier(table))
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), fullTable)
 
 	var conditions []string
 	if opts.IncrementalKey != "" {
 		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf("`%s` >= '%s'", opts.IncrementalKey, formatIntervalValue(opts.IntervalStart)))
+			conditions = append(conditions, fmt.Sprintf("%s >= '%s'", quoteIdentifier(opts.IncrementalKey), formatIntervalValue(opts.IntervalStart)))
 		}
 		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf("`%s` <= '%s'", opts.IncrementalKey, formatIntervalValue(opts.IntervalEnd)))
+			conditions = append(conditions, fmt.Sprintf("%s <= '%s'", quoteIdentifier(opts.IncrementalKey), formatIntervalValue(opts.IntervalEnd)))
 		}
 	}
 

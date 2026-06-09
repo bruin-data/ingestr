@@ -83,15 +83,15 @@ func BuildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 // DefaultQuoteIdentifier provides the default quoting style (double quotes).
 // Used by PostgreSQL, DuckDB, Snowflake, BigQuery, SQL Server (ANSI mode).
 func DefaultQuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
 }
 
 // BacktickQuoteIdentifier uses backticks for quoting (MySQL style).
 func BacktickQuoteIdentifier(name string) string {
-	return fmt.Sprintf("`%s`", name)
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
 }
 
 // BracketQuoteIdentifier uses brackets for quoting (SQL Server style).
 func BracketQuoteIdentifier(name string) string {
-	return fmt.Sprintf("[%s]", name)
+	return fmt.Sprintf("[%s]", strings.ReplaceAll(name, "]", "]]"))
 }
