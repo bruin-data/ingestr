@@ -2,7 +2,12 @@ package mssql
 
 import (
 	"net/url"
+	"strings"
 	"testing"
+
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
+	mssqldb "github.com/microsoft/go-mssqldb"
 )
 
 func TestURIToConnString(t *testing.T) {
@@ -89,7 +94,7 @@ func TestURIToConnString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			connStr, driverName, err := uriToConnString(tt.uri)
+			connStr, driverName, err := URIToConnString(tt.uri)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (connStr=%q)", connStr)
@@ -139,5 +144,132 @@ func TestURIToConnString(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildSelectQueryPreservesColumnCasing(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "RowPointer"},
+		{Name: "NoteExistsFlag"},
+		{Name: "CreatedBy"},
+	}
+
+	query := buildSelectQuery("dbo.notes", columns, source.ReadOptions{})
+
+	for _, name := range []string{"[RowPointer]", "[NoteExistsFlag]", "[CreatedBy]"} {
+		if !strings.Contains(query, name) {
+			t.Errorf("query %q missing original column %q", query, name)
+		}
+	}
+	for _, name := range []string{"row_pointer", "note_exists_flag", "created_by"} {
+		if strings.Contains(query, name) {
+			t.Errorf("query %q must not contain renamed column %q", query, name)
+		}
+	}
+}
+
+func TestGuidConversionEnabled(t *testing.T) {
+	connStr, _, err := uriToConnString("mssql://sa:pass@localhost/db?guid+conversion=true")
+	if err != nil {
+		t.Fatalf("uriToConnString error: %v", err)
+	}
+	if !guidConversionEnabled(connStr) {
+		t.Fatal("expected guid conversion to be enabled")
+	}
+
+	connStr, _, err = uriToConnString("mssql://sa:pass@localhost/db?guid+conversion=false")
+	if err != nil {
+		t.Fatalf("uriToConnString error: %v", err)
+	}
+	if guidConversionEnabled(connStr) {
+		t.Fatal("expected guid conversion to be disabled")
+	}
+
+	connStr, _, err = uriToConnString("mssql://sa:pass@localhost/db?GUID+CONVERSION=1")
+	if err != nil {
+		t.Fatalf("uriToConnString error: %v", err)
+	}
+	if !guidConversionEnabled(connStr) {
+		t.Fatal("expected case-insensitive guid conversion to be enabled")
+	}
+}
+
+func TestNormalizeUUIDValueFormatsRawSQLServerBytes(t *testing.T) {
+	raw := []byte{
+		0x6F, 0x96, 0x19, 0xFF,
+		0x8B, 0x86,
+		0xD0, 0x11,
+		0xB4, 0x2D,
+		0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF,
+	}
+
+	got, err := normalizeUUIDValue(raw, false)
+	if err != nil {
+		t.Fatalf("normalizeUUIDValue error: %v", err)
+	}
+	if got != "FF19966F-868B-11D0-B42D-00C04FC964FF" {
+		t.Fatalf("got %q, want canonical UUID", got)
+	}
+}
+
+func TestNormalizeUUIDValueFormatsGuidConvertedBytes(t *testing.T) {
+	raw := []byte{
+		0xFF, 0x19, 0x96, 0x6F,
+		0x86, 0x8B,
+		0x11, 0xD0,
+		0xB4, 0x2D,
+		0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF,
+	}
+
+	got, err := normalizeUUIDValue(raw, true)
+	if err != nil {
+		t.Fatalf("normalizeUUIDValue error: %v", err)
+	}
+	if got != "FF19966F-868B-11D0-B42D-00C04FC964FF" {
+		t.Fatalf("got %q, want canonical UUID", got)
+	}
+}
+
+func TestNormalizeUUIDValueHandlesDriverUUIDTypes(t *testing.T) {
+	uuid := mssqldb.UniqueIdentifier{
+		0xFF, 0x19, 0x96, 0x6F,
+		0x86, 0x8B,
+		0x11, 0xD0,
+		0xB4, 0x2D,
+		0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF,
+	}
+
+	got, err := normalizeUUIDValue(mssqldb.NullUniqueIdentifier{UUID: uuid, Valid: true}, false)
+	if err != nil {
+		t.Fatalf("normalizeUUIDValue error: %v", err)
+	}
+	if got != "FF19966F-868B-11D0-B42D-00C04FC964FF" {
+		t.Fatalf("got %q, want canonical UUID", got)
+	}
+
+	got, err = normalizeUUIDValue(mssqldb.NullUniqueIdentifier{}, false)
+	if err != nil {
+		t.Fatalf("normalizeUUIDValue error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("got %v, want nil", got)
+	}
+}
+
+func TestNormalizeUUIDValuePassesStringsThrough(t *testing.T) {
+	const want = "ff19966f-868b-11d0-b42d-00c04fc964ff"
+
+	got, err := normalizeUUIDValue(want, false)
+	if err != nil {
+		t.Fatalf("normalizeUUIDValue error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeUUIDValueRejectsInvalidByteLength(t *testing.T) {
+	if _, err := normalizeUUIDValue([]byte{0x01, 0x02}, false); err == nil {
+		t.Fatal("expected invalid uniqueidentifier length error")
 	}
 }

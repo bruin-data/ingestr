@@ -779,6 +779,9 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	config.Debug("[PIPELINE] Multi-table mode: %d tables", len(tables))
 
 	resolvedStrategy := p.config.IncrementalStrategy
+	if isCDCSource(p.config.SourceURI) && !p.config.FullRefresh && (resolvedStrategy == "" || resolvedStrategy == config.StrategyReplace) {
+		resolvedStrategy = config.StrategyMerge
+	}
 	if p.config.FullRefresh {
 		resolvedStrategy = config.StrategyReplace
 	}
@@ -1319,6 +1322,9 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 	} else {
 		s = cfg.IncrementalStrategy
 	}
+	if isCDCSource(cfg.SourceURI) && !cfg.FullRefresh && (s == "" || s == config.StrategyReplace) {
+		s = config.StrategyMerge
+	}
 	if cfg.FullRefresh {
 		s = config.StrategyReplace
 	}
@@ -1372,7 +1378,11 @@ func rewriteReplaceForPostgres(strat config.IncrementalStrategy, destURI string)
 
 // isCDCSource returns true if the source URI indicates a CDC source
 func isCDCSource(uri string) bool {
-	return strings.HasPrefix(uri, "postgres+cdc://") || strings.HasPrefix(uri, "postgresql+cdc://")
+	schemeEnd := strings.Index(uri, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(uri[:schemeEnd]), "+cdc")
 }
 
 // cdcSlotSuffix returns a 6-hex-char hash of the destination URI for use as a

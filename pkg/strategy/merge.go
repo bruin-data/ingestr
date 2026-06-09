@@ -323,10 +323,5 @@ func hasCDCColumns(s *schema.TableSchema) bool {
 	if s == nil {
 		return false
 	}
-	for _, col := range s.Columns {
-		if col.Name == destination.CDCDeletedColumn {
-			return true
-		}
-	}
-	return false
+	return destination.HasCDCDeletedColumn(s.ColumnNames())
 }
