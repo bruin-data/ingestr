@@ -366,9 +366,9 @@ func partitionFieldIsDate(s bigquery.Schema, column string) bool {
 // bare, while TIMESTAMP/DATETIME columns are wrapped in DATE().
 func partitionByClause(column string, isDateColumn bool) string {
 	if isDateColumn {
-		return fmt.Sprintf("PARTITION BY `%s`\n", column)
+		return fmt.Sprintf("PARTITION BY %s\n", quoteIdentifier(column))
 	}
-	return fmt.Sprintf("PARTITION BY DATE(`%s`)\n", column)
+	return fmt.Sprintf("PARTITION BY DATE(%s)\n", quoteIdentifier(column))
 }
 
 // PrepareTable creates or recreates a table with the given schema.
@@ -398,7 +398,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		errCh := make(chan error, 1)
 		d.setPendingTableErr(tableKey, errCh)
 		go func() {
-			truncateSQL := fmt.Sprintf("TRUNCATE TABLE `%s`.`%s`.`%s`", d.projectID, dataset, table)
+			truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(table))
 			config.Debug("[DEST] Truncating table: %s", opts.Table)
 			query := d.client.Query(annotation.Prepend(ctx, truncateSQL))
 			if d.location != "" {
@@ -814,7 +814,7 @@ func (d *BigQueryDestination) WaitForExactRowCount(ctx context.Context, table st
 }
 
 func (d *BigQueryDestination) queryTableRowCount(ctx context.Context, dataset, table string) (int64, error) {
-	sql := fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s`.`%s`", d.projectID, dataset, table)
+	sql := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(table))
 	q := d.client.Query(sql)
 	it, err := q.Read(ctx)
 	if err != nil {
@@ -879,12 +879,12 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		return nil
 	}
 
-	stagingFQN := fmt.Sprintf("`%s`.`%s`.`%s`", d.projectID, stagingDataset, stagingTableName)
+	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName))
 	selectClause := buildBigQueryDedupSelect(stagingFQN, opts.PrimaryKeys, opts.IncrementalKey)
 
 	if d.partitionBy != "" || len(d.clusterBy) > 0 {
 		// For partitioned/clustered tables, must use SQL to apply partitioning
-		sql := fmt.Sprintf("CREATE OR REPLACE TABLE `%s`.`%s`.`%s`\n", d.projectID, targetDataset, targetTableName)
+		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName))
 
 		if d.partitionBy != "" {
 			sql += partitionByClause(d.partitionBy, isDatePartitionColumn(opts.Schema, d.partitionBy))
@@ -893,7 +893,7 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		if len(d.clusterBy) > 0 {
 			clusterCols := make([]string, len(d.clusterBy))
 			for i, col := range d.clusterBy {
-				clusterCols[i] = "`" + col + "`"
+				clusterCols[i] = quoteIdentifier(col)
 			}
 			sql += fmt.Sprintf("CLUSTER BY %s\n", strings.Join(clusterCols, ", "))
 		}
@@ -912,8 +912,8 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 	} else {
 		// Use SQL CREATE OR REPLACE TABLE AS SELECT * — Copy Jobs don't read
 		// from the streaming buffer, so they'd copy 0 rows after Storage Write API writes.
-		sql := fmt.Sprintf("CREATE OR REPLACE TABLE `%s`.`%s`.`%s` AS %s",
-			d.projectID, targetDataset, targetTableName, selectClause)
+		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s AS %s",
+			quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName), selectClause)
 
 		config.Debug("[DEST] Executing SQL swap: %s", sql)
 
@@ -1135,35 +1135,35 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	foundColumn := false
 	for _, field := range meta.Schema {
 		if field.Name == columnName {
-			selectExprs = append(selectExprs, fmt.Sprintf("CAST(`%s` AS %s) AS `%s`", field.Name, newType, field.Name))
+			selectExprs = append(selectExprs, fmt.Sprintf("CAST(%s AS %s) AS %s", quoteIdentifier(field.Name), newType, quoteIdentifier(field.Name)))
 			foundColumn = true
 			continue
 		}
-		selectExprs = append(selectExprs, fmt.Sprintf("`%s`", field.Name))
+		selectExprs = append(selectExprs, quoteIdentifier(field.Name))
 	}
 	if !foundColumn {
 		return "", fmt.Errorf("column %q not found in table metadata", columnName)
 	}
 
 	var sqlBuilder strings.Builder
-	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE `%s`.`%s`.`%s`\n", d.projectID, dataset, table)
+	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(table))
 	if meta.TimePartitioning != nil && meta.TimePartitioning.Field != "" {
 		sqlBuilder.WriteString(partitionByClause(meta.TimePartitioning.Field, partitionFieldIsDate(meta.Schema, meta.TimePartitioning.Field)))
 	}
 	if meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
 		clusterCols := make([]string, len(meta.Clustering.Fields))
 		for i, field := range meta.Clustering.Fields {
-			clusterCols[i] = fmt.Sprintf("`%s`", field)
+			clusterCols[i] = quoteIdentifier(field)
 		}
 		fmt.Fprintf(&sqlBuilder, "CLUSTER BY %s\n", strings.Join(clusterCols, ", "))
 	}
 	fmt.Fprintf(
 		&sqlBuilder,
-		"AS SELECT %s FROM `%s`.`%s`.`%s`",
+		"AS SELECT %s FROM %s.%s.%s",
 		strings.Join(selectExprs, ", "),
-		d.projectID,
-		dataset,
-		table,
+		quoteIdentifier(d.projectID),
+		quoteIdentifier(dataset),
+		quoteIdentifier(table),
 	)
 
 	return sqlBuilder.String(), nil
@@ -1237,10 +1237,10 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 	endVal := formatBigQueryValue(opts.IntervalEnd, opts.IncrementalKeyType)
 
 	deleteSQL := fmt.Sprintf(
-		"DELETE FROM `%s`.`%s`.`%s` WHERE `%s` >= %s AND `%s` <= %s",
-		d.projectID, targetDataset, targetTableName,
-		opts.IncrementalKey, startVal,
-		opts.IncrementalKey, endVal,
+		"DELETE FROM %s.%s.%s WHERE %s >= %s AND %s <= %s",
+		quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
+		quoteIdentifier(opts.IncrementalKey), startVal,
+		quoteIdentifier(opts.IncrementalKey), endVal,
 	)
 
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
@@ -1251,25 +1251,25 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 
 	quotedCols := make([]string, len(opts.Columns))
 	for i, col := range opts.Columns {
-		quotedCols[i] = fmt.Sprintf("`%s`", col)
+		quotedCols[i] = quoteIdentifier(col)
 	}
 
 	selectClause := fmt.Sprintf(
-		"SELECT %s FROM `%s`.`%s`.`%s`",
+		"SELECT %s FROM %s.%s.%s",
 		strings.Join(quotedCols, ", "),
-		d.projectID, stagingDataset, stagingTableName,
+		quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
 	)
 	if len(opts.PrimaryKeys) > 0 {
 		pkCols := make([]string, len(opts.PrimaryKeys))
 		for i, pk := range opts.PrimaryKeys {
-			pkCols[i] = fmt.Sprintf("`%s`", pk)
+			pkCols[i] = quoteIdentifier(pk)
 		}
-		selectClause += fmt.Sprintf(" QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `%s` DESC) = 1", strings.Join(pkCols, ", "), opts.IncrementalKey)
+		selectClause += fmt.Sprintf(" QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s DESC) = 1", strings.Join(pkCols, ", "), quoteIdentifier(opts.IncrementalKey))
 	}
 
 	insertSQL := fmt.Sprintf(
-		"INSERT INTO `%s`.`%s`.`%s` (%s) %s",
-		d.projectID, targetDataset, targetTableName,
+		"INSERT INTO %s.%s.%s (%s) %s",
+		quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
 		strings.Join(quotedCols, ", "),
 		selectClause,
 	)
@@ -1304,7 +1304,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	changeConditions := buildChangeConditionsBigQuery(nonPKColumns, "t", "s")
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		onConditions[i] = fmt.Sprintf("(t.`%s` = s.`%s` OR (t.`%s` IS NULL AND s.`%s` IS NULL))", pk, pk, pk, pk)
+		onConditions[i] = fmt.Sprintf("(t.%s = s.%s OR (t.%s IS NULL AND s.%s IS NULL))", quoteIdentifier(pk), quoteIdentifier(pk), quoteIdentifier(pk), quoteIdentifier(pk))
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -1332,7 +1332,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	if opts.IncrementalKey == "" {
 		pkColumnsQuoted := make([]string, len(opts.PrimaryKeys))
 		for i, pk := range opts.PrimaryKeys {
-			pkColumnsQuoted[i] = fmt.Sprintf("`%s`", pk)
+			pkColumnsQuoted[i] = quoteIdentifier(pk)
 		}
 		// Format timestamp as BigQuery TIMESTAMP literal
 		tsLiteral := fmt.Sprintf("TIMESTAMP '%s'", opts.Timestamp.Format("2006-01-02 15:04:05.999999"))
@@ -1362,7 +1362,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	allColumns := destination.AppendSCD2Columns(opts.Columns)
 	quotedColumns := make([]string, len(allColumns))
 	for i, col := range allColumns {
-		quotedColumns[i] = fmt.Sprintf("`%s`", col)
+		quotedColumns[i] = quoteIdentifier(col)
 	}
 
 	insertSQL := fmt.Sprintf(
@@ -1392,7 +1392,7 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 }
 
 func quoteIdentifier(s string) string {
-	return fmt.Sprintf("`%s`", s)
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(s, "`", "``"))
 }
 
 func filterColumns(columns []string, exclude []string) []string {
@@ -1494,10 +1494,10 @@ func (d *BigQueryDestination) buildCastMap(ctx context.Context, targetDataset, t
 func castSourceCol(col string, castMap map[string]string) string {
 	if castMap != nil {
 		if targetType, ok := castMap[col]; ok {
-			return fmt.Sprintf("CAST(s.`%s` AS %s)", col, targetType)
+			return fmt.Sprintf("CAST(s.%s AS %s)", quoteIdentifier(col), targetType)
 		}
 	}
-	return fmt.Sprintf("s.`%s`", col)
+	return fmt.Sprintf("s.%s", quoteIdentifier(col))
 }
 
 func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, orderByCol string) string {
@@ -1506,11 +1506,11 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 	}
 	pkCols := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
-		pkCols[i] = fmt.Sprintf("`%s`", pk)
+		pkCols[i] = quoteIdentifier(pk)
 	}
 	orderClause := ""
 	if orderByCol != "" {
-		orderClause = fmt.Sprintf(" ORDER BY `%s` DESC", orderByCol)
+		orderClause = fmt.Sprintf(" ORDER BY %s DESC", quoteIdentifier(orderByCol))
 	}
 	return fmt.Sprintf(
 		"SELECT * FROM %s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s%s) = 1",
@@ -1524,7 +1524,7 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		sourceCol := castSourceCol(pk, castMap)
-		onConditions[i] = fmt.Sprintf("(t.`%s` = %s OR (t.`%s` IS NULL AND %s IS NULL))", pk, sourceCol, pk, sourceCol)
+		onConditions[i] = fmt.Sprintf("(t.%s = %s OR (t.%s IS NULL AND %s IS NULL))", quoteIdentifier(pk), sourceCol, quoteIdentifier(pk), sourceCol)
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -1536,17 +1536,17 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 
 	hasCDCDeleted := slices.Contains(allColumns, destination.CDCDeletedColumn)
 
-	unchangedRef := fmt.Sprintf("s.`%s`", destination.CDCUnchangedColsColumn)
+	unchangedRef := fmt.Sprintf("s.%s", quoteIdentifier(destination.CDCUnchangedColsColumn))
 	var updateSets []string
 	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
 			src := castSourceCol(col, castMap)
 			if hasCDCDeleted && !destination.IsCDCMetaColumn(col) {
 				updateSets = append(updateSets, cdcMergeAssign(
-					col, fmt.Sprintf("t.`%s`", col), src, unchangedRef,
+					col, fmt.Sprintf("t.%s", quoteIdentifier(col)), src, unchangedRef,
 				))
 			} else {
-				updateSets = append(updateSets, fmt.Sprintf("t.`%s` = %s", col, src))
+				updateSets = append(updateSets, fmt.Sprintf("t.%s = %s", quoteIdentifier(col), src))
 			}
 		}
 	}
@@ -1555,41 +1555,41 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 	quotedCols := make([]string, len(destColumns))
 	sourceCols := make([]string, len(destColumns))
 	for i, col := range destColumns {
-		quotedCols[i] = fmt.Sprintf("`%s`", col)
+		quotedCols[i] = quoteIdentifier(col)
 		sourceCols[i] = castSourceCol(col, castMap)
 	}
 
 	var sql strings.Builder
-	fmt.Fprintf(&sql, "MERGE `%s`.`%s`.`%s` AS t\n", d.projectID, targetDataset, targetTable)
+	fmt.Fprintf(&sql, "MERGE %s.%s.%s AS t\n", quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTable))
 
 	if hasCDCDeleted && len(primaryKeys) > 0 {
 		// CDC mode: deduplicate staging table by PKs, keeping the latest change per row.
 		// This handles cases where the same row appears in both the snapshot and WAL stream.
 		pkPartition := make([]string, len(primaryKeys))
 		for i, pk := range primaryKeys {
-			pkPartition[i] = fmt.Sprintf("`%s`", pk)
+			pkPartition[i] = quoteIdentifier(pk)
 		}
 		fmt.Fprintf(
 			&sql,
-			"USING (SELECT * FROM `%s`.`%s`.`%s` QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC, `_cdc_deleted` DESC) = 1) AS s\n",
-			d.projectID, stagingDataset, stagingTable, strings.Join(pkPartition, ", "),
+			"USING (SELECT * FROM %s.%s.%s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC, `_cdc_deleted` DESC) = 1) AS s\n",
+			quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable), strings.Join(pkPartition, ", "),
 		)
 	} else {
 		pkPartition := make([]string, len(primaryKeys))
 		for i, pk := range primaryKeys {
-			pkPartition[i] = fmt.Sprintf("`%s`", pk)
+			pkPartition[i] = quoteIdentifier(pk)
 		}
 
 		// When an incremental key is set the latest row per PK wins; otherwise
 		// the winner is arbitrary.
 		dedupOrderBy := ""
 		if incrementalKey != "" {
-			dedupOrderBy = fmt.Sprintf(" ORDER BY `%s` DESC", incrementalKey)
+			dedupOrderBy = fmt.Sprintf(" ORDER BY %s DESC", quoteIdentifier(incrementalKey))
 		}
 		fmt.Fprintf(
 			&sql,
-			"USING (SELECT * FROM `%s`.`%s`.`%s` QUALIFY ROW_NUMBER() OVER (PARTITION BY %s%s) = 1) AS s\n",
-			d.projectID, stagingDataset, stagingTable, strings.Join(pkPartition, ", "), dedupOrderBy,
+			"USING (SELECT * FROM %s.%s.%s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s%s) = 1) AS s\n",
+			quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable), strings.Join(pkPartition, ", "), dedupOrderBy,
 		)
 	}
 
@@ -1673,7 +1673,7 @@ func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) e
 		return errors.New("dataset must be specified in table name (dataset.table) or URI path")
 	}
 
-	truncateSQL := fmt.Sprintf("TRUNCATE TABLE `%s`.`%s`.`%s`", d.projectID, dataset, tableName)
+	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(tableName))
 	query := d.client.Query(annotation.Prepend(ctx, truncateSQL))
 	if d.location != "" {
 		query.Location = d.location
@@ -1833,7 +1833,7 @@ func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 		return "", errors.New("dataset must be specified in table name (dataset.table) or URI path")
 	}
 
-	query := d.client.Query(fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM `%s`.`%s`.`%s`", d.projectID, dataset, tableName))
+	query := d.client.Query(fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(tableName)))
 	if d.location != "" {
 		query.Location = d.location
 	}

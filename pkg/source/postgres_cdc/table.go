@@ -279,6 +279,15 @@ func parseTableName(table string) (string, string) {
 	return "public", table
 }
 
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+func quoteTableName(table string) string {
+	schemaName, tableName := parseTableName(table)
+	return quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName)
+}
+
 func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 	fields := make([]arrow.Field, len(columns))
 	for i, col := range columns {

@@ -365,7 +365,7 @@ func (d *AthenaDestination) SwapTable(ctx context.Context, opts destination.Swap
 		if err := validateIdent(c.Name); err != nil {
 			return fmt.Errorf("invalid column name %q: %w", c.Name, err)
 		}
-		quotedCols[i] = fmt.Sprintf(`"%s"`, c.Name)
+		quotedCols[i] = fmt.Sprintf(`"%s"`, strings.ReplaceAll(c.Name, `"`, `""`))
 	}
 	colList := strings.Join(quotedCols, ", ")
 	copySQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
@@ -450,7 +450,7 @@ func (d *AthenaDestination) ensureDatabaseExists(ctx context.Context, database s
 	if err := validateIdent(database); err != nil {
 		return fmt.Errorf("invalid database name: %w", err)
 	}
-	createSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", database)
+	createSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", strings.ReplaceAll(database, "`", "``"))
 	start := time.Now()
 	if err := d.Exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("failed to create database %s: %w", database, err)

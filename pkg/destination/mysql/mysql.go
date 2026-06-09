@@ -241,7 +241,7 @@ func (d *MySQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 	colNames := make([]string, numCols)
 	placeholders := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
-		colNames[i] = fmt.Sprintf("`%s`", record.Schema().Field(i).Name)
+		colNames[i] = quoteColumn(record.Schema().Field(i).Name)
 		placeholders[i] = "?"
 	}
 
@@ -438,8 +438,8 @@ func (d *MySQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	defer func() { _ = tx.Rollback() }()
 
 	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE `%s` >= ? AND `%s` <= ?",
-		quoteTable(opts.TargetTable), opts.IncrementalKey, opts.IncrementalKey,
+		"DELETE FROM %s WHERE %s >= ? AND %s <= ?",
+		quoteTable(opts.TargetTable), quoteColumn(opts.IncrementalKey), quoteColumn(opts.IncrementalKey),
 	)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -722,15 +722,15 @@ func mapMySQLTypeToSchema(dataType, columnType string) schema.DataType {
 func quoteTable(table string) string {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
-		return fmt.Sprintf("`%s`.`%s`", parts[0], parts[1])
+		return fmt.Sprintf("`%s`.`%s`", strings.ReplaceAll(parts[0], "`", "``"), strings.ReplaceAll(parts[1], "`", "``"))
 	}
-	return fmt.Sprintf("`%s`", table)
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(table, "`", "``"))
 }
 
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf("`%s`", col)
+		quoted[i] = fmt.Sprintf("`%s`", strings.ReplaceAll(col, "`", "``"))
 	}
 	return quoted
 }
@@ -753,7 +753,7 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf("%s.`%s` = %s.`%s`", targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf("%s.%s = %s.%s", targetAlias, quoteColumn(key), sourceAlias, quoteColumn(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -761,13 +761,13 @@ func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 func buildUpdateSet(columns []string, targetAlias, sourceAlias string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf("%s.`%s` = %s.`%s`", targetAlias, col, sourceAlias, col)
+		sets[i] = fmt.Sprintf("%s.%s = %s.%s", targetAlias, quoteColumn(col), sourceAlias, quoteColumn(col))
 	}
 	return strings.Join(sets, ", ")
 }
 
 func quoteColumn(col string) string {
-	return fmt.Sprintf("`%s`", col)
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(col, "`", "``"))
 }
 
 // buildChangeConditionsMySQL builds change detection conditions using COALESCE for NULL handling.
@@ -792,7 +792,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToMySQL(col)
-		colDefs = append(colDefs, fmt.Sprintf("`%s` %s", col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))
@@ -800,7 +800,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf("`%s`", k)
+			quotedKeys[i] = quoteColumn(k)
 		}
 		sql += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}

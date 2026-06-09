@@ -490,8 +490,8 @@ func (d *DuckDBDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
 	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE "%s" >= ? AND "%s" <= ?`,
-		quotedTargetTable, opts.IncrementalKey, opts.IncrementalKey,
+		`DELETE FROM %s WHERE %s >= ? AND %s <= ?`,
+		quotedTargetTable, quoteIdentifier(opts.IncrementalKey), quoteIdentifier(opts.IncrementalKey),
 	)
 	config.Debug("[DUCKDB DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -923,7 +923,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToDuckDB(col)
-		colDefs = append(colDefs, fmt.Sprintf(`"%s" %s`, col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf(`%s %s`, quoteIdentifier(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", table, strings.Join(colDefs, ",\n  "))
@@ -931,7 +931,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf(`"%s"`, k)
+			quotedKeys[i] = quoteIdentifier(k)
 		}
 		sql += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}
@@ -940,10 +940,14 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	return sql
 }
 
+func quoteIdentifier(name string) string {
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
+}
+
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf(`"%s"`, col)
+		quoted[i] = quoteIdentifier(col)
 	}
 	return quoted
 }
@@ -966,24 +970,24 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf(`%s."%s" = %s."%s"`, targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf(`%s.%s = %s.%s`, targetAlias, quoteIdentifier(key), sourceAlias, quoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
 
 func buildUpdateSet(columns []string, targetAlias, sourceAlias string, cdcMerge bool) string {
-	unchangedRef := fmt.Sprintf(`%s."%s"`, sourceAlias, destination.CDCUnchangedColsColumn)
+	unchangedRef := fmt.Sprintf(`%s.%s`, sourceAlias, quoteIdentifier(destination.CDCUnchangedColsColumn))
 	sets := make([]string, len(columns))
 	for i, col := range columns {
 		if cdcMerge && !destination.IsCDCMetaColumn(col) {
 			sets[i] = cdcMergeAssign(
 				col,
-				fmt.Sprintf(`%s."%s"`, targetAlias, col),
-				fmt.Sprintf(`%s."%s"`, sourceAlias, col),
+				fmt.Sprintf(`%s.%s`, targetAlias, quoteIdentifier(col)),
+				fmt.Sprintf(`%s.%s`, sourceAlias, quoteIdentifier(col)),
 				unchangedRef,
 			)
 		} else {
-			sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
+			sets[i] = fmt.Sprintf(`%s = %s.%s`, quoteIdentifier(col), sourceAlias, quoteIdentifier(col))
 		}
 	}
 	return strings.Join(sets, ", ")
@@ -1009,7 +1013,7 @@ func buildChangeConditions(columns []string, targetAlias, sourceAlias string) st
 	}
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
-		conditions[i] = fmt.Sprintf(`%s."%s" IS DISTINCT FROM %s."%s"`, targetAlias, col, sourceAlias, col)
+		conditions[i] = fmt.Sprintf(`%s.%s IS DISTINCT FROM %s.%s`, targetAlias, quoteIdentifier(col), sourceAlias, quoteIdentifier(col))
 	}
 	return strings.Join(conditions, " OR ")
 }

@@ -168,7 +168,7 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
-		onConditions[i] = fmt.Sprintf(`target."%s" = source."%s"`, pk, pk)
+		onConditions[i] = fmt.Sprintf(`target.%s = source.%s`, destination.QuoteIdentifier(pk), destination.QuoteIdentifier(pk))
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -179,38 +179,38 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 
 	hasCDCDeleted := slices.Contains(allColumns, destination.CDCDeletedColumn)
 
-	unchangedRef := fmt.Sprintf(`source."%s"`, destination.CDCUnchangedColsColumn)
+	unchangedRef := fmt.Sprintf("source.%s", destination.QuoteIdentifier(destination.CDCUnchangedColsColumn))
 	var updateSets []string
 	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
 			if hasCDCDeleted && !destination.IsCDCMetaColumn(col) {
 				updateSets = append(updateSets, cdcMergeAssign(
 					col,
-					fmt.Sprintf(`target."%s"`, col),
-					fmt.Sprintf(`source."%s"`, col),
+					fmt.Sprintf("target.%s", destination.QuoteIdentifier(col)),
+					fmt.Sprintf("source.%s", destination.QuoteIdentifier(col)),
 					unchangedRef,
 				))
 			} else {
-				updateSets = append(updateSets, fmt.Sprintf(`"%s" = source."%s"`, col, col))
+				updateSets = append(updateSets, fmt.Sprintf(`%s = source.%s`, destination.QuoteIdentifier(col), destination.QuoteIdentifier(col)))
 			}
 		}
 	}
 
 	stagingQuoted := make([]string, len(allColumns))
 	for i, col := range allColumns {
-		stagingQuoted[i] = fmt.Sprintf(`"%s"`, col)
+		stagingQuoted[i] = destination.QuoteIdentifier(col)
 	}
 	destQuoted := make([]string, len(destColumns))
 	destSourceCols := make([]string, len(destColumns))
 	for i, col := range destColumns {
-		destQuoted[i] = fmt.Sprintf(`"%s"`, col)
-		destSourceCols[i] = fmt.Sprintf(`source."%s"`, col)
+		destQuoted[i] = destination.QuoteIdentifier(col)
+		destSourceCols[i] = fmt.Sprintf("source.%s", destination.QuoteIdentifier(col))
 	}
 
 	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKsForPartition := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
-		quotedPKsForPartition[i] = fmt.Sprintf(`"%s"`, pk)
+		quotedPKsForPartition[i] = destination.QuoteIdentifier(pk)
 	}
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,

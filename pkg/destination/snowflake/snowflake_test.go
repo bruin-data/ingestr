@@ -167,7 +167,7 @@ func TestImplicitTableStageName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			schemaName, tableName := parseSchemaTable(tt.table)
-			stageName := fmt.Sprintf(`%s.%%"%s"`, quoteIdentifier(schemaName), tableName)
+			stageName := fmt.Sprintf(`%s.%%%s`, quoteIdentifier(schemaName), quoteIdentifier(tableName))
 			assert.Equal(t, tt.wantStage, stageName)
 		})
 	}

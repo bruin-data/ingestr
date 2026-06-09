@@ -37,7 +37,7 @@ func formatQualifiedTable(database, table string) (string, error) {
 	if err := validateIdent(table); err != nil {
 		return "", fmt.Errorf("invalid table name: %w", err)
 	}
-	return fmt.Sprintf(`"%s"."%s"`, database, table), nil
+	return fmt.Sprintf(`"%s"."%s"`, strings.ReplaceAll(database, `"`, `""`), strings.ReplaceAll(table, `"`, `""`)), nil
 }
 
 // formatQualifiedTableHive returns a Hive-style backtick identifier (used for SHOW
@@ -50,7 +50,7 @@ func formatQualifiedTableHive(database, table string) (string, error) {
 	if err := validateIdent(table); err != nil {
 		return "", fmt.Errorf("invalid table name: %w", err)
 	}
-	return fmt.Sprintf("`%s`.`%s`", database, table), nil
+	return fmt.Sprintf("`%s`.`%s`", strings.ReplaceAll(database, "`", "``"), strings.ReplaceAll(table, "`", "``")), nil
 }
 
 func escapeSQLString(s string) string {

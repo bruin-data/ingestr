@@ -169,7 +169,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 	// Use the implicit table stage (@%table_name) which exists automatically
 	// for every table and doesn't require CREATE STAGE privilege
-	stageName := fmt.Sprintf(`%s.%%"%s"`, quoteIdentifier(schemaName), tableName)
+	stageName := fmt.Sprintf(`%s.%%%s`, quoteIdentifier(schemaName), quoteIdentifier(tableName))
 	loadID := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	type uploadResult struct {
@@ -877,7 +877,7 @@ func quoteIdentifier(name string) string {
 	if strings.HasPrefix(name, `"`) && strings.HasSuffix(name, `"`) {
 		return name
 	}
-	return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(strings.ToUpper(name), `"`, `""`))
 }
 
 func quoteColumns(cols []string) []string {
@@ -906,7 +906,7 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf(`%s."%s" = %s."%s"`, targetAlias, strings.ToUpper(key), sourceAlias, strings.ToUpper(key))
+		conditions[i] = fmt.Sprintf(`%s.%s = %s.%s`, targetAlias, quoteIdentifier(key), sourceAlias, quoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -918,7 +918,7 @@ func buildChangeConditionsSnowflake(columns []string, targetAlias, sourceAlias s
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
 		// Snowflake supports IS DISTINCT FROM
-		conditions[i] = fmt.Sprintf(`%s."%s" IS DISTINCT FROM %s."%s"`, targetAlias, strings.ToUpper(col), sourceAlias, strings.ToUpper(col))
+		conditions[i] = fmt.Sprintf(`%s.%s IS DISTINCT FROM %s.%s`, targetAlias, quoteIdentifier(col), sourceAlias, quoteIdentifier(col))
 	}
 	return strings.Join(conditions, " OR ")
 }

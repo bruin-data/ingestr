@@ -189,7 +189,7 @@ func (d *Dialect) MapDataType(dbType string) (schema.DataType, int, int, schema.
 }
 
 func (d *Dialect) QuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
 }
 
 func (d *Dialect) ParsePrimaryKeyResult(rawValue interface{}) []string {
