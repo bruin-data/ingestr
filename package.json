@@ -5,7 +5,7 @@
     "docs:preview": "vitepress preview docs"
   },
   "devDependencies": {
-    "rollup": "^4.27.3",
+    "rollup": "^4.59.0",
     "vitepress": "^1.6.3"
   }
 }
