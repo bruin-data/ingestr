@@ -28,7 +28,6 @@ jobs:
     timeout-minutes: 360
     env:
       GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
       SLACK_CHANNEL: ${{ inputs.slack_channel }}
       THREAD_TS: ${{ inputs.slack_thread_ts }}
@@ -41,6 +40,7 @@ jobs:
           set -Eeuo pipefail
           git config --global user.name  release-bot
           git config --global user.email release-bot@users.noreply.github.com
+          gh auth setup-git    # git uses GH_TOKEN via gh's credential helper — no token written to disk
           JOB_DEADLINE=$(( $(date +%s) + 350*60 ))
 
           # Post to the run's Slack thread (first call opens it).
@@ -61,10 +61,11 @@ jobs:
           tags()   { gh api "repos/$1/tags" --paginate --jq '.[].name' | sort; }
           runs()   { gh run list --repo "$1" --workflow "$2" --limit 50 --json databaseId -q '.[].databaseId' | sort; }
           have()   { grep -qF "$2" "$1" || fail "$3"; }
-          # clone <slug> <dir> <sparse-path...> — shallow + partial + sparse (checkout only needed dirs)
+          # clone <slug> <dir> <sparse-path...> — shallow + partial + sparse (checkout only needed dirs).
+          # Plain URL (no token in the URL/.git/config); auth comes from gh's credential helper.
           clone() {
             local slug="$1" dir="$2"; shift 2
-            git clone -q --depth 1 --filter=blob:none --sparse "https://x-access-token:${RELEASE_TOKEN}@github.com/$slug.git" "$dir"
+            git clone -q --depth 1 --filter=blob:none --sparse "https://github.com/$slug.git" "$dir"
             git -C "$dir" sparse-checkout set "$@"
           }
 
