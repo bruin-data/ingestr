@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/progress"
@@ -65,6 +66,7 @@ func (j *IngestionJob) ApplyEvolution(ctx context.Context) error {
 	if j.EvolutionPlan == nil || !j.EvolutionPlan.HasMigration() {
 		return nil
 	}
+	ctx = annotation.WithStep(ctx, annotation.StepEvolve)
 	return j.EvolutionPlan.Apply(ctx, j.Destination)
 }
 

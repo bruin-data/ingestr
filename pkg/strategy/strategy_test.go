@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,9 +11,11 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -67,6 +70,11 @@ func (t *fakeSourceTable) Read(ctx context.Context, opts source.ReadOptions) (<-
 	return t.readCh, t.readErr
 }
 
+type execCall struct {
+	ctx context.Context
+	sql string
+}
+
 type fakeDestination struct {
 	mu sync.Mutex
 
@@ -78,6 +86,7 @@ type fakeDestination struct {
 	mergeCalls   []destination.MergeOptions
 	diCalls      []destination.DeleteInsertOptions
 	dropCalls    []string
+	execCalls    []execCall
 	waitCalls    []struct {
 		Table        string
 		ExpectedRows int64
@@ -96,6 +105,9 @@ func (d *fakeDestination) Schemes() []string                             { retur
 func (d *fakeDestination) Connect(ctx context.Context, uri string) error { return nil }
 func (d *fakeDestination) Close(ctx context.Context) error               { return nil }
 func (d *fakeDestination) Exec(ctx context.Context, sql string, args ...interface{}) error {
+	d.mu.Lock()
+	d.execCalls = append(d.execCalls, execCall{ctx: ctx, sql: sql})
+	d.mu.Unlock()
 	return nil
 }
 
@@ -353,6 +365,35 @@ func minimalJob() (*IngestionJob, *fakeSourceTable, *fakeDestination) {
 		SourceSchema: tableSchema,
 	}
 	return job, src, dest
+}
+
+func TestApplyEvolution_AnnotatesWithEvolveStep(t *testing.T) {
+	job, _, dest := minimalJob()
+	job.EvolutionPlan = &schemaevolution.EvolutionPlan{
+		Migration: &schemaevolution.Migration{
+			Statements: []string{"ALTER TABLE ds.tbl ADD COLUMN new_col INT"},
+		},
+	}
+
+	err := job.ApplyEvolution(context.Background())
+	require.NoError(t, err)
+	require.Len(t, dest.execCalls, 1)
+
+	got := annotation.Prepend(dest.execCalls[0].ctx, "X")
+	assert.True(t, strings.Contains(got, `"ingestr_step":"evolve"`), "missing ingestr_step=evolve: %s", got)
+	assert.True(t, strings.Contains(got, `"type":"ingestr_load"`), "missing type=ingestr_load: %s", got)
+}
+
+func TestApplyEvolution_NoMigrationDoesNothing(t *testing.T) {
+	job, _, dest := minimalJob()
+	// Nil plan
+	require.NoError(t, job.ApplyEvolution(context.Background()))
+	assert.Empty(t, dest.execCalls)
+
+	// Empty plan
+	job.EvolutionPlan = &schemaevolution.EvolutionPlan{Migration: &schemaevolution.Migration{}}
+	require.NoError(t, job.ApplyEvolution(context.Background()))
+	assert.Empty(t, dest.execCalls)
 }
 
 func TestDeleteInsertStrategy_UsesIncrementalKeyFromLaterBatch(t *testing.T) {
