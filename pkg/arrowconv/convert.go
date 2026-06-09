@@ -184,21 +184,32 @@ func AppendValue(builder array.Builder, val interface{}) {
 		}
 
 	case *array.Int8Builder:
+		appendInt8 := func(i int64) {
+			if i >= math.MinInt8 && i <= math.MaxInt8 {
+				b.Append(int8(i))
+			} else {
+				b.AppendNull()
+			}
+		}
 		switch v := val.(type) {
 		case int8:
 			b.Append(v)
 		case int16:
-			b.Append(int8(v))
+			appendInt8(int64(v))
 		case int32:
-			b.Append(int8(v))
+			appendInt8(int64(v))
 		case int64:
-			b.Append(int8(v))
+			appendInt8(v)
 		case int:
-			b.Append(int8(v))
+			appendInt8(int64(v))
 		case float64:
-			b.Append(int8(v))
+			if v >= math.MinInt8 && v <= math.MaxInt8 {
+				b.Append(int8(v))
+			} else {
+				b.AppendNull()
+			}
 		case uint8:
-			b.Append(int8(v))
+			appendInt8(int64(v))
 		case string:
 			if i, err := strconv.ParseInt(v, 10, 8); err == nil {
 				b.Append(int8(i))
@@ -206,8 +217,8 @@ func AppendValue(builder array.Builder, val interface{}) {
 				b.AppendNull()
 			}
 		case json.Number:
-			if i, err := v.Int64(); err == nil && i >= math.MinInt8 && i <= math.MaxInt8 {
-				b.Append(int8(i))
+			if i, err := v.Int64(); err == nil {
+				appendInt8(i)
 			} else {
 				b.AppendNull()
 			}
