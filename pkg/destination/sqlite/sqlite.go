@@ -244,7 +244,7 @@ func (d *SQLiteDestination) writeRecordBatch(ctx context.Context, record arrow.R
 	colNames := make([]string, numCols)
 	placeholders := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
-		colNames[i] = fmt.Sprintf(`"%s"`, record.Schema().Field(i).Name)
+		colNames[i] = destination.QuoteIdentifier(record.Schema().Field(i).Name)
 		placeholders[i] = "?"
 	}
 
@@ -508,8 +508,8 @@ func (d *SQLiteDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
 	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE "%s" >= ? AND "%s" <= ?`,
-		quotedTargetTable, opts.IncrementalKey, opts.IncrementalKey,
+		`DELETE FROM %s WHERE %s >= ? AND %s <= ?`,
+		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
 	)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -778,7 +778,7 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinConditionSQLite(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf(`%s."%s" = %s."%s"`, targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf(`%s.%s = %s.%s`, targetAlias, destination.QuoteIdentifier(key), sourceAlias, destination.QuoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -787,7 +787,7 @@ func buildJoinConditionSQLite(keys []string, targetAlias, sourceAlias string) st
 func buildUpdateSetSQLite(columns []string, sourceAlias string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
+		sets[i] = fmt.Sprintf(`%s = %s.%s`, destination.QuoteIdentifier(col), sourceAlias, destination.QuoteIdentifier(col))
 	}
 	return strings.Join(sets, ", ")
 }
@@ -799,7 +799,7 @@ func buildChangeConditionsSQLite(columns []string, targetAlias, sourceAlias stri
 	}
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
-		conditions[i] = fmt.Sprintf(`%s."%s" IS NOT %s."%s"`, targetAlias, col, sourceAlias, col)
+		conditions[i] = fmt.Sprintf(`%s.%s IS NOT %s.%s`, targetAlias, destination.QuoteIdentifier(col), sourceAlias, destination.QuoteIdentifier(col))
 	}
 	return strings.Join(conditions, " OR ")
 }
@@ -837,7 +837,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToSQLite(col)
-		colDefs = append(colDefs, fmt.Sprintf(`"%s" %s`, col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf(`%s %s`, destination.QuoteIdentifier(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", table, strings.Join(colDefs, ",\n  "))
@@ -845,7 +845,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf(`"%s"`, k)
+			quotedKeys[i] = destination.QuoteIdentifier(k)
 		}
 		sql += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}

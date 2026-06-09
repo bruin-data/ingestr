@@ -168,10 +168,10 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	sourceColumns := s.tableSchema.Columns[:len(s.tableSchema.Columns)-3] // Remove CDC columns
 	colNames := make([]string, len(sourceColumns))
 	for i, col := range sourceColumns {
-		colNames[i] = fmt.Sprintf(`"%s"`, col.Name)
+		colNames[i] = quoteIdentifier(col.Name)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), s.tableName)
+	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteTableName(s.tableName))
 	config.Debug("[CDC] Snapshot query: %s", query)
 
 	rows, err := tx.Query(ctx, query)

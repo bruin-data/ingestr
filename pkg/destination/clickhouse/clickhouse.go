@@ -83,7 +83,7 @@ func (d *ClickHouseDestination) PrepareTable(ctx context.Context, opts destinati
 
 	if opts.DropFirst {
 		startDrop := time.Now()
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS `%s`.`%s`", database, tableName)
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", quoteIdentifier(database), quoteIdentifier(tableName))
 		if err := d.conn.Exec(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
 			return fmt.Errorf("failed to drop table: %w", err)
@@ -108,7 +108,7 @@ func (d *ClickHouseDestination) ensureDatabaseExists(ctx context.Context, databa
 		return nil
 	}
 
-	createDBSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", database)
+	createDBSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", quoteIdentifier(database))
 	if err := d.conn.Exec(ctx, createDBSQL); err != nil {
 		config.LogFailedQuery(createDBSQL, err)
 		return fmt.Errorf("failed to create database %s: %w", database, err)
@@ -212,25 +212,25 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 		return fmt.Errorf("failed to ensure target database exists: %w", err)
 	}
 
-	exchangeSQL := fmt.Sprintf("EXCHANGE TABLES `%s`.`%s` AND `%s`.`%s`", stagingDB, stagingName, targetDB, targetName)
+	exchangeSQL := fmt.Sprintf("EXCHANGE TABLES %s.%s AND %s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName))
 	if err := d.conn.Exec(ctx, exchangeSQL); err != nil {
 		config.Debug("[CLICKHOUSE] EXCHANGE TABLES failed, falling back to RENAME: %v", err)
 
 		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("clickhouse"))
 
-		renameOldSQL := fmt.Sprintf("RENAME TABLE `%s`.`%s` TO `%s`.`%s`", targetDB, targetName, targetDB, oldName)
+		renameOldSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s", quoteIdentifier(targetDB), quoteIdentifier(targetName), quoteIdentifier(targetDB), quoteIdentifier(oldName))
 		if err := d.conn.Exec(ctx, renameOldSQL); err != nil {
 			config.Debug("[CLICKHOUSE] No existing table to rename (this is OK for first run)")
 		}
 
-		renameNewSQL := fmt.Sprintf("RENAME TABLE `%s`.`%s` TO `%s`.`%s`", stagingDB, stagingName, targetDB, targetName)
+		renameNewSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName))
 		if err := d.conn.Exec(ctx, renameNewSQL); err != nil {
 			config.LogFailedQuery(renameNewSQL, err)
 			return fmt.Errorf("failed to rename staging to target: %w", err)
 		}
 
-		dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS `%s`.`%s`", targetDB, oldName)
+		dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", quoteIdentifier(targetDB), quoteIdentifier(oldName))
 		_ = d.conn.Exec(ctx, dropOldSQL)
 	}
 
@@ -247,11 +247,11 @@ func (d *ClickHouseDestination) MergeTable(ctx context.Context, opts destination
 	quotedColumns := quoteColumns(opts.Columns)
 
 	insertSQL := fmt.Sprintf(
-		"INSERT INTO `%s`.`%s` (%s) SELECT %s FROM `%s`.`%s`",
-		targetDB, targetName,
+		"INSERT INTO %s.%s (%s) SELECT %s FROM %s.%s",
+		quoteIdentifier(targetDB), quoteIdentifier(targetName),
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedColumns, ", "),
-		stagingDB, stagingName,
+		quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
 	)
 	config.Debug("[CLICKHOUSE MERGE] Executing INSERT: %s", insertSQL)
 
@@ -260,7 +260,7 @@ func (d *ClickHouseDestination) MergeTable(ctx context.Context, opts destination
 		return fmt.Errorf("failed to insert records: %w", err)
 	}
 
-	optimizeSQL := fmt.Sprintf("OPTIMIZE TABLE `%s`.`%s` FINAL", targetDB, targetName)
+	optimizeSQL := fmt.Sprintf("OPTIMIZE TABLE %s.%s FINAL", quoteIdentifier(targetDB), quoteIdentifier(targetName))
 	if err := d.conn.Exec(ctx, optimizeSQL); err != nil {
 		config.LogFailedQuery(optimizeSQL, err)
 		config.Debug("[CLICKHOUSE MERGE] OPTIMIZE FINAL completed with note: %v", err)
@@ -279,8 +279,8 @@ func (d *ClickHouseDestination) DeleteInsertTable(ctx context.Context, opts dest
 	quotedColumns := quoteColumns(opts.Columns)
 
 	deleteSQL := fmt.Sprintf(
-		"ALTER TABLE `%s`.`%s` DELETE WHERE `%s` >= '%v' AND `%s` <= '%v'",
-		targetDB, targetName, opts.IncrementalKey, opts.IntervalStart, opts.IncrementalKey, opts.IntervalEnd,
+		"ALTER TABLE %s.%s DELETE WHERE %s >= '%v' AND %s <= '%v'",
+		quoteIdentifier(targetDB), quoteIdentifier(targetName), quoteIdentifier(opts.IncrementalKey), opts.IntervalStart, quoteIdentifier(opts.IncrementalKey), opts.IntervalEnd,
 	)
 	config.Debug("[CLICKHOUSE DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -315,11 +315,11 @@ func (d *ClickHouseDestination) DeleteInsertTable(ctx context.Context, opts dest
 	}
 
 	insertSQL := fmt.Sprintf(
-		"INSERT INTO `%s`.`%s` (%s) SELECT %s FROM `%s`.`%s`",
-		targetDB, targetName,
+		"INSERT INTO %s.%s (%s) SELECT %s FROM %s.%s",
+		quoteIdentifier(targetDB), quoteIdentifier(targetName),
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedColumns, ", "),
-		stagingDB, stagingName,
+		quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
 	)
 	config.Debug("[CLICKHOUSE DELETE+INSERT] Executing INSERT: %s", insertSQL)
 
@@ -351,7 +351,7 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	// that finds PKs of records that exist in staging AND have changed
 	pkSelectTarget := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		pkSelectTarget[i] = fmt.Sprintf("target.`%s`", pk)
+		pkSelectTarget[i] = fmt.Sprintf("target.%s", quoteIdentifier(pk))
 	}
 	updateSQL := fmt.Sprintf(
 		`
@@ -423,7 +423,7 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 		strings.Join(quotedColumns, ", "), quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
 		quoteIdentifier(targetDB), quoteIdentifier(targetName),
 		onCondition,
-		fmt.Sprintf("`%s`", opts.PrimaryKeys[0]),
+		quoteIdentifier(opts.PrimaryKeys[0]),
 	)
 	config.Debug("[CLICKHOUSE SCD2] Step 3 - Insert new versions: %s", insertSQL)
 
@@ -465,7 +465,7 @@ func (d *ClickHouseDestination) waitForMutations(ctx context.Context, database, 
 
 func (d *ClickHouseDestination) DropTable(ctx context.Context, table string) error {
 	database, tableName := d.parseTableName(table)
-	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS `%s`.`%s`", database, tableName)
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", quoteIdentifier(database), quoteIdentifier(tableName))
 	if err := d.conn.Exec(ctx, dropSQL); err != nil {
 		config.LogFailedQuery(dropSQL, err)
 		return fmt.Errorf("failed to drop table %s: %w", table, err)
@@ -476,7 +476,7 @@ func (d *ClickHouseDestination) DropTable(ctx context.Context, table string) err
 
 func (d *ClickHouseDestination) TruncateTable(ctx context.Context, table string) error {
 	database, tableName := d.parseTableName(table)
-	truncateSQL := fmt.Sprintf("TRUNCATE TABLE `%s`.`%s`", database, tableName)
+	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s", quoteIdentifier(database), quoteIdentifier(tableName))
 	if err := d.conn.Exec(ctx, truncateSQL); err != nil {
 		config.LogFailedQuery(truncateSQL, err)
 		return fmt.Errorf("failed to truncate table %s: %w", table, err)
@@ -529,7 +529,7 @@ func (d *ClickHouseDestination) GetScheme() string { return "clickhouse" }
 func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	database, tableName := d.parseTableName(table)
 
-	query := fmt.Sprintf("DESCRIBE TABLE `%s`.`%s`", database, tableName)
+	query := fmt.Sprintf("DESCRIBE TABLE %s.%s", quoteIdentifier(database), quoteIdentifier(tableName))
 
 	rows, err := d.conn.Query(ctx, query)
 	if err != nil {
@@ -706,14 +706,14 @@ func buildCreateTableSQL(database, table string, columns []schema.Column, primar
 	for _, col := range columns {
 		isPK := pkSet[strings.ToLower(col.Name)]
 		colType := mapDataTypeForColumn(col, isPK)
-		colDefs = append(colDefs, fmt.Sprintf("`%s` %s", col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
 	}
 
 	engine, isMergeTree := validateEngineType(engineType, len(primaryKeys) > 0)
 
 	parts := []string{
-		fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s`.`%s` (\n  %s\n) ENGINE = %s",
-			database, table, strings.Join(colDefs, ",\n  "), engine),
+		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s.%s (\n  %s\n) ENGINE = %s",
+			quoteIdentifier(database), quoteIdentifier(table), strings.Join(colDefs, ",\n  "), engine),
 	}
 
 	if isMergeTree {
@@ -721,7 +721,7 @@ func buildCreateTableSQL(database, table string, columns []schema.Column, primar
 		if len(primaryKeys) > 0 {
 			quotedKeys := make([]string, len(primaryKeys))
 			for i, k := range primaryKeys {
-				quotedKeys[i] = fmt.Sprintf("`%s`", k)
+				quotedKeys[i] = quoteIdentifier(k)
 			}
 			orderBy = strings.Join(quotedKeys, ", ")
 		} else {
@@ -848,7 +848,7 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf("%s.`%s` = %s.`%s`", targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf("%s.%s = %s.%s", targetAlias, quoteIdentifier(key), sourceAlias, quoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -860,9 +860,10 @@ func buildChangeConditionsClickHouse(columns []string, targetAlias, sourceAlias 
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
 		// ClickHouse supports DISTINCT FROM
-		conditions[i] = fmt.Sprintf("NOT (%s.`%s` = %s.`%s` OR (%s.`%s` IS NULL AND %s.`%s` IS NULL))",
-			targetAlias, col, sourceAlias, col,
-			targetAlias, col, sourceAlias, col)
+		qc := quoteIdentifier(col)
+		conditions[i] = fmt.Sprintf("NOT (%s.%s = %s.%s OR (%s.%s IS NULL AND %s.%s IS NULL))",
+			targetAlias, qc, sourceAlias, qc,
+			targetAlias, qc, sourceAlias, qc)
 	}
 	return strings.Join(conditions, " OR ")
 }

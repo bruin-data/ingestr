@@ -165,7 +165,7 @@ func (d *RedshiftDestination) MergeTable(ctx context.Context, opts destination.M
 func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
-		onConditions[i] = fmt.Sprintf(`target."%s" = source."%s"`, pk, pk)
+		onConditions[i] = fmt.Sprintf(`target.%s = source.%s`, destination.QuoteIdentifier(pk), destination.QuoteIdentifier(pk))
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -177,15 +177,15 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 	var updateSets []string
 	for _, col := range allColumns {
 		if !pkMap[strings.ToLower(col)] {
-			updateSets = append(updateSets, fmt.Sprintf(`"%s" = source."%s"`, col, col))
+			updateSets = append(updateSets, fmt.Sprintf(`%s = source.%s`, destination.QuoteIdentifier(col), destination.QuoteIdentifier(col)))
 		}
 	}
 
 	quotedCols := make([]string, len(allColumns))
 	sourceCols := make([]string, len(allColumns))
 	for i, col := range allColumns {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, col)
-		sourceCols[i] = fmt.Sprintf(`source."%s"`, col)
+		quotedCols[i] = destination.QuoteIdentifier(col)
+		sourceCols[i] = fmt.Sprintf(`source.%s`, destination.QuoteIdentifier(col))
 	}
 
 	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
@@ -193,7 +193,7 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKsForPartition := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
-		quotedPKsForPartition[i] = fmt.Sprintf(`"%s"`, pk)
+		quotedPKsForPartition[i] = destination.QuoteIdentifier(pk)
 	}
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,

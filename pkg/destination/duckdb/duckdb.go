@@ -485,8 +485,8 @@ func (d *DuckDBDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
 	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE "%s" >= ? AND "%s" <= ?`,
-		quotedTargetTable, opts.IncrementalKey, opts.IncrementalKey,
+		`DELETE FROM %s WHERE %s >= ? AND %s <= ?`,
+		quotedTargetTable, quoteIdentifier(opts.IncrementalKey), quoteIdentifier(opts.IncrementalKey),
 	)
 	config.Debug("[DUCKDB DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -965,7 +965,7 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf(`%s."%s" = %s."%s"`, targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf(`%s.%s = %s.%s`, targetAlias, quoteIdentifier(key), sourceAlias, quoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -973,7 +973,7 @@ func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 func buildUpdateSet(columns []string, sourceAlias string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
+		sets[i] = fmt.Sprintf(`%s = %s.%s`, quoteIdentifier(col), sourceAlias, quoteIdentifier(col))
 	}
 	return strings.Join(sets, ", ")
 }
@@ -985,7 +985,7 @@ func buildChangeConditions(columns []string, targetAlias, sourceAlias string) st
 	}
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
-		conditions[i] = fmt.Sprintf(`%s."%s" IS DISTINCT FROM %s."%s"`, targetAlias, col, sourceAlias, col)
+		conditions[i] = fmt.Sprintf(`%s.%s IS DISTINCT FROM %s.%s`, targetAlias, quoteIdentifier(col), sourceAlias, quoteIdentifier(col))
 	}
 	return strings.Join(conditions, " OR ")
 }

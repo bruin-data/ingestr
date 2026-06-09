@@ -551,7 +551,7 @@ func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOptions) string {
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
-		colNames[i] = fmt.Sprintf("[%s]", col.Name)
+		colNames[i] = quoteColumn(col.Name)
 	}
 
 	// Handle TOP for limit (SQL Server uses TOP instead of LIMIT)
@@ -565,10 +565,10 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 	var conditions []string
 	if opts.IncrementalKey != "" {
 		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf("[%s] >= '%s'", opts.IncrementalKey, opts.IntervalStart.Format("2006-01-02 15:04:05")))
+			conditions = append(conditions, fmt.Sprintf("%s >= '%s'", quoteColumn(opts.IncrementalKey), opts.IntervalStart.Format("2006-01-02 15:04:05")))
 		}
 		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf("[%s] <= '%s'", opts.IncrementalKey, opts.IntervalEnd.Format("2006-01-02 15:04:05")))
+			conditions = append(conditions, fmt.Sprintf("%s <= '%s'", quoteColumn(opts.IncrementalKey), opts.IntervalEnd.Format("2006-01-02 15:04:05")))
 		}
 	}
 
@@ -582,9 +582,13 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 func quoteTable(table string) string {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
-		return fmt.Sprintf("[%s].[%s]", parts[0], parts[1])
+		return fmt.Sprintf("[%s].[%s]", strings.ReplaceAll(parts[0], "]", "]]"), strings.ReplaceAll(parts[1], "]", "]]"))
 	}
-	return fmt.Sprintf("[%s]", table)
+	return fmt.Sprintf("[%s]", strings.ReplaceAll(table, "]", "]]"))
+}
+
+func quoteColumn(name string) string {
+	return fmt.Sprintf("[%s]", strings.ReplaceAll(name, "]", "]]"))
 }
 
 func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, guidConversion bool) (arrow.RecordBatch, int64, error) {

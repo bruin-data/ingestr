@@ -131,7 +131,7 @@ func (s *SpannerSource) getSchema(ctx context.Context, table string) (*schema.Ta
 }
 
 func (s *SpannerSource) getSchemaFromQuery(ctx context.Context, table string) ([]schema.Column, error) {
-	query := fmt.Sprintf("SELECT * FROM `%s` LIMIT 1", table)
+	query := fmt.Sprintf("SELECT * FROM %s LIMIT 1", quoteIdentifier(table))
 	iter := s.client.Single().Query(ctx, spanner.NewStatement(query))
 	defer iter.Stop()
 
@@ -755,21 +755,25 @@ func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 	return arrow.NewSchema(fields, nil)
 }
 
+func quoteIdentifier(name string) string {
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
+}
+
 func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOptions) string {
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
-		colNames[i] = fmt.Sprintf("`%s`", col.Name)
+		colNames[i] = quoteIdentifier(col.Name)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM `%s`", strings.Join(colNames, ", "), table)
+	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteIdentifier(table))
 
 	var conditions []string
 	if opts.IncrementalKey != "" {
 		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf("`%s` >= TIMESTAMP('%s')", opts.IncrementalKey, opts.IntervalStart.Format("2006-01-02T15:04:05Z")))
+			conditions = append(conditions, fmt.Sprintf("%s >= TIMESTAMP('%s')", quoteIdentifier(opts.IncrementalKey), opts.IntervalStart.Format("2006-01-02T15:04:05Z")))
 		}
 		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf("`%s` <= TIMESTAMP('%s')", opts.IncrementalKey, opts.IntervalEnd.Format("2006-01-02T15:04:05Z")))
+			conditions = append(conditions, fmt.Sprintf("%s <= TIMESTAMP('%s')", quoteIdentifier(opts.IncrementalKey), opts.IntervalEnd.Format("2006-01-02T15:04:05Z")))
 		}
 	}
 

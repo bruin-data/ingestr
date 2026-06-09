@@ -200,7 +200,7 @@ func (d *CrateDBDestination) writeRecordBatch(ctx context.Context, record arrow.
 	colNames := make([]string, numCols)
 	unnestParams := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
-		colNames[i] = fmt.Sprintf(`"%s"`, record.Schema().Field(i).Name)
+		colNames[i] = destination.QuoteIdentifier(record.Schema().Field(i).Name)
 		unnestParams[i] = fmt.Sprintf("$%d::%s", i+1, arrowFieldToCrateDBArrayCast(record.Schema().Field(i)))
 	}
 
@@ -300,8 +300,8 @@ func (d *CrateDBDestination) DeleteInsertTable(ctx context.Context, opts destina
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
 	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE "%s" >= $1 AND "%s" <= $2`,
-		quotedTargetTable, opts.IncrementalKey, opts.IncrementalKey,
+		`DELETE FROM %s WHERE %s >= $1 AND %s <= $2`,
+		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
 	)
 	config.Debug("[CRATEDB DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -351,13 +351,13 @@ func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD
 	// We identify PKs where at least one non-PK column differs
 	pkJoin := make([]string, len(opts.PrimaryKeys))
 	for i, key := range opts.PrimaryKeys {
-		pkJoin[i] = fmt.Sprintf(`s."%s" = t."%s"`, key, key)
+		pkJoin[i] = fmt.Sprintf(`s.%s = t.%s`, destination.QuoteIdentifier(key), destination.QuoteIdentifier(key))
 	}
 	changeDetect := make([]string, len(nonPKColumns))
 	for i, col := range nonPKColumns {
 		changeDetect[i] = fmt.Sprintf(
-			`(s."%s" <> t."%s" OR (s."%s" IS NULL AND t."%s" IS NOT NULL) OR (s."%s" IS NOT NULL AND t."%s" IS NULL))`,
-			col, col, col, col, col, col,
+			`(s.%[1]s <> t.%[1]s OR (s.%[1]s IS NULL AND t.%[1]s IS NOT NULL) OR (s.%[1]s IS NOT NULL AND t.%[1]s IS NULL))`,
+			destination.QuoteIdentifier(col),
 		)
 	}
 
@@ -423,7 +423,7 @@ func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD
 	// Only insert where no current row exists (changed rows were closed in step 1, new rows never existed)
 	existsJoin := make([]string, len(opts.PrimaryKeys))
 	for i, key := range opts.PrimaryKeys {
-		existsJoin[i] = fmt.Sprintf(`existing."%s" = source."%s"`, key, key)
+		existsJoin[i] = fmt.Sprintf(`existing.%s = source.%s`, destination.QuoteIdentifier(key), destination.QuoteIdentifier(key))
 	}
 
 	insertSQL := fmt.Sprintf(
@@ -580,7 +580,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := mapDataTypeToCrateDB(col)
-		colDefs = append(colDefs, fmt.Sprintf(`"%s" %s`, col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf(`%s %s`, destination.QuoteIdentifier(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", table, strings.Join(colDefs, ",\n  "))
@@ -588,7 +588,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf(`"%s"`, k)
+			quotedKeys[i] = destination.QuoteIdentifier(k)
 		}
 		sql += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}
@@ -626,16 +626,16 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildConcatExpr(keys []string, prefix string) string {
 	if len(keys) == 1 {
 		if prefix != "" {
-			return fmt.Sprintf(`%s."%s"`, prefix, keys[0])
+			return fmt.Sprintf(`%s.%s`, prefix, destination.QuoteIdentifier(keys[0]))
 		}
-		return fmt.Sprintf(`"%s"`, keys[0])
+		return destination.QuoteIdentifier(keys[0])
 	}
 	parts := make([]string, len(keys))
 	for i, key := range keys {
 		if prefix != "" {
-			parts[i] = fmt.Sprintf(`CAST(%s."%s" AS TEXT)`, prefix, key)
+			parts[i] = fmt.Sprintf(`CAST(%s.%s AS TEXT)`, prefix, destination.QuoteIdentifier(key))
 		} else {
-			parts[i] = fmt.Sprintf(`CAST("%s" AS TEXT)`, key)
+			parts[i] = fmt.Sprintf(`CAST(%s AS TEXT)`, destination.QuoteIdentifier(key))
 		}
 	}
 	return strings.Join(parts, " || '~' || ")
@@ -667,7 +667,7 @@ func arrowFieldToCrateDBArrayCast(field arrow.Field) string {
 func buildConflictUpdateSet(columns []string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf(`"%s" = EXCLUDED."%s"`, col, col)
+		sets[i] = fmt.Sprintf(`%s = EXCLUDED.%s`, destination.QuoteIdentifier(col), destination.QuoteIdentifier(col))
 	}
 	return strings.Join(sets, ", ")
 }

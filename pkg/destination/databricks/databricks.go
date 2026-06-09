@@ -373,7 +373,7 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		onConditions[i] = fmt.Sprintf("target.`%s` = source.`%s`", pk, pk)
+		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteIdentifier(pk), quoteIdentifier(pk))
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -385,26 +385,26 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 	var updateSets []string
 	for _, col := range opts.Columns {
 		if !pkMap[strings.ToLower(col)] {
-			updateSets = append(updateSets, fmt.Sprintf("target.`%s` = source.`%s`", col, col))
+			updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", quoteIdentifier(col), quoteIdentifier(col)))
 		}
 	}
 
 	quotedCols := make([]string, len(opts.Columns))
 	sourceCols := make([]string, len(opts.Columns))
 	for i, col := range opts.Columns {
-		quotedCols[i] = fmt.Sprintf("`%s`", col)
-		sourceCols[i] = fmt.Sprintf("source.`%s`", col)
+		quotedCols[i] = quoteIdentifier(col)
+		sourceCols[i] = fmt.Sprintf("source.%s", quoteIdentifier(col))
 	}
 
 	// Build dedup subquery to handle duplicate PKs in staging. When an
 	// incremental key is set the latest row per PK wins; otherwise arbitrary.
 	quotedPKsForPartition := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		quotedPKsForPartition[i] = fmt.Sprintf("`%s`", pk)
+		quotedPKsForPartition[i] = quoteIdentifier(pk)
 	}
 	dedupOrderBy := ""
 	if opts.IncrementalKey != "" {
-		dedupOrderBy = fmt.Sprintf(" ORDER BY `%s` DESC", opts.IncrementalKey)
+		dedupOrderBy = fmt.Sprintf(" ORDER BY %s DESC", quoteIdentifier(opts.IncrementalKey))
 	}
 	dedupSource := fmt.Sprintf(
 		"(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s%s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)",
@@ -454,8 +454,8 @@ func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts dest
 	endVal := d.formatValue(opts.IntervalEnd)
 
 	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE `%s` >= %s AND `%s` <= %s",
-		targetFull, opts.IncrementalKey, startVal, opts.IncrementalKey, endVal,
+		"DELETE FROM %s WHERE %s >= %s AND %s <= %s",
+		targetFull, quoteIdentifier(opts.IncrementalKey), startVal, quoteIdentifier(opts.IncrementalKey), endVal,
 	)
 	config.Debug("[DATABRICKS] Executing DELETE: %s", deleteSQL)
 
@@ -466,7 +466,7 @@ func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts dest
 
 	colList := strings.Join(quoteColumns(opts.Columns), ", ")
 	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
-	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingFull, fmt.Sprintf("`%s`", opts.IncrementalKey))
+	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingFull, quoteIdentifier(opts.IncrementalKey))
 	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetFull, colList, selectClause)
 	config.Debug("[DATABRICKS] Executing INSERT: %s", insertSQL)
 
@@ -594,13 +594,17 @@ func (d *DatabricksDestination) parseTableName(table string) (schemaName, tableN
 }
 
 func (d *DatabricksDestination) quoteFullTable(schemaName, tableName string) string {
-	return fmt.Sprintf("`%s`.`%s`.`%s`", d.catalog, schemaName, tableName)
+	return fmt.Sprintf("`%s`.`%s`.`%s`", strings.ReplaceAll(d.catalog, "`", "``"), strings.ReplaceAll(schemaName, "`", "``"), strings.ReplaceAll(tableName, "`", "``"))
+}
+
+func quoteIdentifier(name string) string {
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
 }
 
 func quoteColumns(cols []string) []string {
 	quoted := make([]string, len(cols))
 	for i, col := range cols {
-		quoted[i] = fmt.Sprintf("`%s`", strings.ReplaceAll(col, "`", "``"))
+		quoted[i] = quoteIdentifier(col)
 	}
 	return quoted
 }
@@ -619,7 +623,7 @@ func (d *DatabricksDestination) buildCreateTableSQL(fullTable string, columns []
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToDatabricks(col)
-		colDefs = append(colDefs, fmt.Sprintf("`%s` %s", col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", fullTable, strings.Join(colDefs, ",\n  "))
