@@ -219,14 +219,8 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 				startBatch := time.Now()
 
-				// Write to parquet in memory
 				buf := new(bytes.Buffer)
-				writerProps := parquet.NewWriterProperties(
-					parquet.WithCompression(compress.Codecs.Snappy),
-					parquet.WithBatchSize(64*1024),
-				)
-				arrowProps := pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(memory.DefaultAllocator))
-
+				writerProps, arrowProps := snowflakeParquetWriterProperties()
 				writer, err := pqarrow.NewFileWriter(record.Schema(), buf, writerProps, arrowProps)
 				if err != nil {
 					record.Release()
@@ -308,8 +302,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 	config.Debug("[DEST] Loading %d files with single COPY INTO...", len(uploadedFiles))
 	startCopy := time.Now()
 
-	copySQL := fmt.Sprintf("COPY INTO %s FROM @%s/%s FILE_FORMAT = (TYPE = PARQUET) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE",
-		fullTable, stageName, loadID)
+	copySQL := buildCopyIntoSQL(fullTable, stageName, loadID)
 
 	if _, err := d.db.ExecContext(ctx, copySQL); err != nil {
 		config.LogFailedQuery(copySQL, err)
@@ -319,6 +312,23 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 	config.Debug("[DEST] COPY INTO completed in %v", time.Since(startCopy))
 	config.Debug("[DEST] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), float64(totalRows)/time.Since(startTotal).Seconds())
 	return nil
+}
+
+func snowflakeParquetWriterProperties() (*parquet.WriterProperties, pqarrow.ArrowWriterProperties) {
+	writerProps := parquet.NewWriterProperties(
+		parquet.WithCompression(compress.Codecs.Snappy),
+		parquet.WithBatchSize(64*1024),
+	)
+	arrowProps := pqarrow.NewArrowWriterProperties(
+		pqarrow.WithAllocator(memory.DefaultAllocator),
+		pqarrow.WithStoreSchema(),
+	)
+	return writerProps, arrowProps
+}
+
+func buildCopyIntoSQL(fullTable, stageName, loadID string) string {
+	return fmt.Sprintf("COPY INTO %s FROM @%s/%s FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE",
+		fullTable, stageName, loadID)
 }
 
 func (d *SnowflakeDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
