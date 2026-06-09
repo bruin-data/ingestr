@@ -49,7 +49,7 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		return "BOOL"
-	case schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
+	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
 		return "INT64"
 	case schema.TypeFloat32, schema.TypeFloat64:
 		return "FLOAT64"

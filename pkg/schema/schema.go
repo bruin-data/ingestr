@@ -9,6 +9,7 @@ type DataType int
 const (
 	TypeUnknown DataType = iota
 	TypeBoolean
+	TypeInt8
 	TypeInt16
 	TypeInt32
 	TypeInt64
@@ -31,6 +32,8 @@ func (d DataType) String() string {
 	switch d {
 	case TypeBoolean:
 		return "boolean"
+	case TypeInt8:
+		return "int8"
 	case TypeInt16:
 		return "int16"
 	case TypeInt32:
@@ -114,6 +117,8 @@ func DataTypeToArrowType(col Column) arrow.DataType {
 		return UnknownArrowType
 	case TypeBoolean:
 		return arrow.FixedWidthTypes.Boolean
+	case TypeInt8:
+		return arrow.PrimitiveTypes.Int8
 	case TypeInt16:
 		return arrow.PrimitiveTypes.Int16
 	case TypeInt32:

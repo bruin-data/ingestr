@@ -775,6 +775,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 			return 1
 		}
 		return 0
+	case *array.Int8:
+		return a.Value(idx)
 	case *array.Int16:
 		return a.Value(idx)
 	case *array.Int32:

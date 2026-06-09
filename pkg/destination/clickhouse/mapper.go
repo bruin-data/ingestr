@@ -19,6 +19,8 @@ func mapBaseType(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		return "Bool"
+	case schema.TypeInt8:
+		return "Int8"
 	case schema.TypeInt16:
 		return "Int16"
 	case schema.TypeInt32:

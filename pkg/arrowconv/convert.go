@@ -182,6 +182,38 @@ func AppendValue(builder array.Builder, val interface{}) {
 			b.AppendNull()
 		}
 
+	case *array.Int8Builder:
+		switch v := val.(type) {
+		case int8:
+			b.Append(v)
+		case int16:
+			b.Append(int8(v))
+		case int32:
+			b.Append(int8(v))
+		case int64:
+			b.Append(int8(v))
+		case int:
+			b.Append(int8(v))
+		case float64:
+			b.Append(int8(v))
+		case uint8:
+			b.Append(int8(v))
+		case string:
+			if i, err := strconv.ParseInt(v, 10, 8); err == nil {
+				b.Append(int8(i))
+			} else {
+				b.AppendNull()
+			}
+		case json.Number:
+			if i, err := v.Int64(); err == nil {
+				b.Append(int8(i))
+			} else {
+				b.AppendNull()
+			}
+		default:
+			b.AppendNull()
+		}
+
 	case *array.Int16Builder:
 		switch v := val.(type) {
 		case int16:

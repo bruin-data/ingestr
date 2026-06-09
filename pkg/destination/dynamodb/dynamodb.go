@@ -189,7 +189,7 @@ func (d *DynamoDBDestination) createTable(ctx context.Context, table string, sch
 
 func schemaTypeToDynamoDBScalar(dt schema.DataType) types.ScalarAttributeType {
 	switch dt {
-	case schema.TypeInt16, schema.TypeInt32, schema.TypeInt64,
+	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64,
 		schema.TypeFloat32, schema.TypeFloat64, schema.TypeDecimal:
 		return types.ScalarAttributeTypeN
 	default:

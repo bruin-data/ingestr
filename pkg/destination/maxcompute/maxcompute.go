@@ -558,6 +558,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 	switch a := arr.(type) {
 	case *array.Boolean:
 		return a.Value(idx)
+	case *array.Int8:
+		return a.Value(idx)
 	case *array.Int16:
 		return a.Value(idx)
 	case *array.Int32:
