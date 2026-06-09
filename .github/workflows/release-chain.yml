@@ -22,6 +22,12 @@ on:
 permissions:
   contents: read
 
+# Only one release chain at a time — queue, don't cancel (avoids two runs racing on
+# tag snapshots and the same bump branch).
+concurrency:
+  group: release-chain
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
