@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -376,6 +377,9 @@ func (s *SendGridSource) fetchSingle(ctx context.Context, table string, tc table
 	}
 
 	items := extractItems(body, tc.dataKey)
+	if len(items) >= tc.pageSize {
+		fmt.Fprintf(os.Stderr, "[WARNING] sendgrid %s returned a full page of %d records; this endpoint does not support pagination, so any records beyond the page limit are not retrieved. Narrow --interval-start/--interval-end to capture all data.\n", table, tc.pageSize)
+	}
 	return sendFiltered(table, tc, items, opts, results)
 }
 
