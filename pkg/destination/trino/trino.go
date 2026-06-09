@@ -520,6 +520,13 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 		scheme = "https"
 	}
 
+	translateAliases(query)
+
+	customClient, err := buildAndRegisterCustomClient(query)
+	if err != nil {
+		return "", "", "", err
+	}
+
 	userinfo := url.PathEscape(username)
 	if hasPassword {
 		userinfo = url.PathEscape(username) + ":" + url.PathEscape(password)
@@ -528,8 +535,12 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 	dsn = fmt.Sprintf("%s://%s@%s:%s?catalog=%s&schema=%s",
 		scheme, userinfo, host, port, catalog, schemaName)
 
+	if customClient != "" {
+		dsn += "&custom_client=" + url.QueryEscape(customClient)
+	}
+
 	for key, values := range query {
-		if key == "secure" || key == "SSL" || key == "http_scheme" {
+		if isReservedURIKey(key) {
 			continue
 		}
 		for _, v := range values {
@@ -538,6 +549,22 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 	}
 
 	return dsn, catalog, schemaName, nil
+}
+
+// isReservedURIKey lists query parameters consumed by parseTrinoURI itself —
+// they must not be forwarded verbatim into the driver DSN.
+func isReservedURIKey(key string) bool {
+	switch key {
+	case "secure", "SSL", "http_scheme":
+		return true
+	case "cert", "key", "http_headers", "verify":
+		return true
+	case "custom_client":
+		// We register our own client; never forward a user-supplied value
+		// because the name would not match a registered key.
+		return true
+	}
+	return false
 }
 
 func (d *TrinoDestination) parseTableName(table string) (catalog, schemaName, tableName string) {

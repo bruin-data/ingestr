@@ -10,7 +10,7 @@ import (
 
 func TestBuildMergeSQL(t *testing.T) {
 	t.Run("non_cdc", func(t *testing.T) {
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "name", "updated_at"})
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, "")
 
 		assert.Contains(t, sql, `MERGE INTO "TARGET_SCHEMA"."TARGET_TBL" AS target`)
 		assert.Contains(t, sql, `FROM "STAGING_SCHEMA"."STAGING_TBL"`)
@@ -25,15 +25,22 @@ func TestBuildMergeSQL(t *testing.T) {
 		assert.NotContains(t, sql, "_CDC_DELETED")
 	})
 
+	t.Run("non_cdc_with_incremental_key", func(t *testing.T) {
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, "updated_at")
+
+		assert.Contains(t, sql, `ORDER BY "UPDATED_AT" DESC`)
+		assert.NotContains(t, sql, "ORDER BY (SELECT NULL)")
+	})
+
 	t.Run("non_cdc_all_pk_columns", func(t *testing.T) {
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id"})
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id"}, "")
 		assert.NotContains(t, sql, "WHEN MATCHED THEN")
 		assert.Contains(t, sql, "WHEN NOT MATCHED THEN")
 	})
 
 	t.Run("cdc", func(t *testing.T) {
 		columns := []string{"id", "name", "value", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns)
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
 
 		assert.Contains(t, sql, `ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC`)
 		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = false THEN`)
@@ -46,7 +53,7 @@ func TestBuildMergeSQL(t *testing.T) {
 
 	t.Run("cdc_only_pk_and_metadata", func(t *testing.T) {
 		columns := []string{"id", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns)
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
 
 		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = false THEN`)
 		assert.Contains(t, sql, `target."_CDC_LSN" = source."_CDC_LSN"`)

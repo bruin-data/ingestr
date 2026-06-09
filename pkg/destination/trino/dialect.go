@@ -8,12 +8,10 @@ import (
 )
 
 func init() {
-	dialect := &Dialect{}
-	schemaevolution.RegisterDialect("trino", dialect)
-	schemaevolution.RegisterDialect("athena", dialect)
+	schemaevolution.RegisterDialect("trino", &Dialect{})
 }
 
-// Dialect implements the schemaevolution.Dialect interface for Trino/Athena.
+// Dialect implements the schemaevolution.Dialect interface for Trino.
 type Dialect struct{}
 
 func (d *Dialect) Name() string {

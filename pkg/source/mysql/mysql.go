@@ -269,7 +269,15 @@ func (s *MySQLSource) read(ctx context.Context, table string, tableSchema *schem
 	startTotal := time.Now()
 	config.Debug("[SOURCE] Starting read from %s", table)
 
-	columns := filterColumns(tableSchema.Columns, opts.ExcludeColumns)
+	schemaToUse := tableSchema
+	if opts.Schema != nil {
+		schemaToUse = opts.Schema
+		config.Debug("[SOURCE] Using provided schema (%d columns)", len(schemaToUse.Columns))
+	} else {
+		config.Debug("[SOURCE] Using pre-fetched schema (%d columns)", len(schemaToUse.Columns))
+	}
+
+	columns := filterColumns(schemaToUse.Columns, opts.ExcludeColumns)
 	arrowSchema := buildArrowSchema(columns)
 
 	batchSize := opts.PageSize

@@ -97,17 +97,17 @@ func ApplyContract(contract SchemaContract, comparison *SchemaComparison) *Contr
 func describeChange(change SchemaChange) string {
 	switch change.Type {
 	case ChangeAddColumn:
-		return fmt.Sprintf("new column detected (type: %s)", dataTypeName(change.NewColumn.DataType))
+		return fmt.Sprintf("new column detected (type: %s)", change.NewColumn.DataType)
 	case ChangeWidenType:
 		if change.OldColumn != nil {
-			return fmt.Sprintf("type change from %s to %s", dataTypeName(change.OldColumn.DataType), dataTypeName(change.NewColumn.DataType))
+			return fmt.Sprintf("type change from %s to %s", change.OldColumn.DataType, change.NewColumn.DataType)
 		}
-		return fmt.Sprintf("type widened to %s", dataTypeName(change.NewColumn.DataType))
+		return fmt.Sprintf("type widened to %s", change.NewColumn.DataType)
 	case ChangeOverrideType:
 		if change.OldColumn != nil {
-			return fmt.Sprintf("type override from %s to %s", dataTypeName(change.OldColumn.DataType), dataTypeName(change.NewColumn.DataType))
+			return fmt.Sprintf("type override from %s to %s", change.OldColumn.DataType, change.NewColumn.DataType)
 		}
-		return fmt.Sprintf("type override to %s", dataTypeName(change.NewColumn.DataType))
+		return fmt.Sprintf("type override to %s", change.NewColumn.DataType)
 	case ChangeRemoveColumn:
 		return "column removed from source (future values will be NULL)"
 	default:

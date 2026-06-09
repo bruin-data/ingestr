@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	_ "github.com/microsoft/go-mssqldb"
+	mssqldb "github.com/microsoft/go-mssqldb"
 	_ "github.com/microsoft/go-mssqldb/azuread"
 )
 
@@ -25,8 +26,9 @@ const (
 )
 
 type MSSQLSource struct {
-	db  *sql.DB
-	uri string
+	db             *sql.DB
+	uri            string
+	guidConversion bool
 }
 
 func NewMSSQLSource() *MSSQLSource {
@@ -38,7 +40,7 @@ func (s *MSSQLSource) Schemes() []string {
 }
 
 func (s *MSSQLSource) Connect(ctx context.Context, uri string) error {
-	connStr, driverName, err := uriToConnString(uri)
+	connStr, driverName, err := URIToConnString(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse SQL Server URI: %w", err)
 	}
@@ -60,14 +62,15 @@ func (s *MSSQLSource) Connect(ctx context.Context, uri string) error {
 
 	s.db = db
 	s.uri = uri
+	s.guidConversion = guidConversionEnabled(connStr)
 	return nil
 }
 
-// uriToConnString converts SQL Server and Azure SQL URIs to the connection
+// URIToConnString converts SQL Server and Azure SQL URIs to the connection
 // string format expected by go-mssqldb.
 // URI format: mssql://user:pass@host:port/database?param=value
 // Conn string format: sqlserver://user:pass@host:port?database=db&param=value
-func uriToConnString(uri string) (string, string, error) {
+func URIToConnString(uri string) (string, string, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
 		return "", "", err
@@ -210,6 +213,21 @@ func fedAuthFromAuthentication(authentication string) string {
 func isServicePrincipalFedAuth(fedAuth string) bool {
 	return strings.EqualFold(fedAuth, "ActiveDirectoryServicePrincipal") ||
 		strings.EqualFold(fedAuth, "ActiveDirectoryApplication")
+}
+
+func guidConversionEnabled(connStr string) bool {
+	u, err := url.Parse(connStr)
+	if err != nil {
+		return false
+	}
+
+	raw, ok := normalizeQueryParamCI(u.Query(), "guid conversion")
+	if !ok || raw == "" {
+		return false
+	}
+
+	enabled, err := strconv.ParseBool(raw)
+	return err == nil && enabled
 }
 
 func (s *MSSQLSource) Close(ctx context.Context) error {
@@ -374,7 +392,15 @@ func (s *MSSQLSource) read(ctx context.Context, table string, tableSchema *schem
 	startTotal := time.Now()
 	config.Debug("[SOURCE] Starting read from %s", table)
 
-	columns := filterColumns(tableSchema.Columns, opts.ExcludeColumns)
+	schemaToUse := tableSchema
+	if opts.Schema != nil {
+		schemaToUse = opts.Schema
+		config.Debug("[SOURCE] Using provided schema (%d columns)", len(schemaToUse.Columns))
+	} else {
+		config.Debug("[SOURCE] Using pre-fetched schema (%d columns)", len(schemaToUse.Columns))
+	}
+
+	columns := filterColumns(schemaToUse.Columns, opts.ExcludeColumns)
 	arrowSchema := buildArrowSchema(columns)
 
 	batchSize := opts.PageSize
@@ -403,7 +429,7 @@ func (s *MSSQLSource) read(ctx context.Context, table string, tableSchema *schem
 
 		for {
 			startBatch := time.Now()
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, s.guidConversion)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -467,7 +493,7 @@ func (s *MSSQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 		arrowSchema := buildArrowSchema(columns)
 
 		for {
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, s.guidConversion)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -561,7 +587,7 @@ func quoteTable(table string) string {
 	return fmt.Sprintf("[%s]", table)
 }
 
-func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) (arrow.RecordBatch, int64, error) {
+func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, guidConversion bool) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(columns))
 
@@ -586,6 +612,16 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 
 		for i, dest := range scanDest {
 			val := *dest.(*interface{})
+			if columns[i].DataType == schema.TypeUUID {
+				var err error
+				val, err = normalizeUUIDValue(val, guidConversion)
+				if err != nil {
+					for _, b := range builders {
+						b.Release()
+					}
+					return nil, 0, fmt.Errorf("failed to convert uniqueidentifier column %q: %w", columns[i].Name, err)
+				}
+			}
 			arrowconv.AppendValue(builders[i], val)
 		}
 		rowCount++
@@ -621,4 +657,48 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 	}
 
 	return record, rowCount, nil
+}
+
+func normalizeUUIDValue(val interface{}, guidConversion bool) (interface{}, error) {
+	switch v := val.(type) {
+	case nil:
+		return nil, nil
+	case []byte:
+		return formatUUIDBytes(v, guidConversion)
+	case mssqldb.UniqueIdentifier:
+		return v.String(), nil
+	case *mssqldb.UniqueIdentifier:
+		if v == nil {
+			return nil, nil
+		}
+		return v.String(), nil
+	case mssqldb.NullUniqueIdentifier:
+		if !v.Valid {
+			return nil, nil
+		}
+		return v.UUID.String(), nil
+	case *mssqldb.NullUniqueIdentifier:
+		if v == nil || !v.Valid {
+			return nil, nil
+		}
+		return v.UUID.String(), nil
+	default:
+		return val, nil
+	}
+}
+
+func formatUUIDBytes(raw []byte, guidConversion bool) (string, error) {
+	if len(raw) != 16 {
+		return "", fmt.Errorf("invalid uniqueidentifier length %d", len(raw))
+	}
+
+	if guidConversion {
+		return fmt.Sprintf("%X-%X-%X-%X-%X", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:]), nil
+	}
+
+	var uuid mssqldb.UniqueIdentifier
+	if err := uuid.Scan(raw); err != nil {
+		return "", err
+	}
+	return uuid.String(), nil
 }

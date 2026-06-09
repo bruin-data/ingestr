@@ -10,7 +10,7 @@ var DebugMode bool
 
 func Debug(format string, args ...interface{}) {
 	if DebugMode {
-		fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, args...))
+		fmt.Printf("%s\tDEBUG\t%s\n", time.Now().Format("2006-01-02T15:04:05.000Z0700"), fmt.Sprintf(format, args...))
 	}
 }
 
@@ -122,7 +122,11 @@ func (c *IngestConfig) Validate() error {
 
 // IsCDCSource returns true if the source URI is a CDC source.
 func (c *IngestConfig) IsCDCSource() bool {
-	return strings.HasPrefix(c.SourceURI, "postgres+cdc://") || strings.HasPrefix(c.SourceURI, "postgresql+cdc://")
+	schemeEnd := strings.Index(c.SourceURI, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(c.SourceURI[:schemeEnd]), "+cdc")
 }
 
 type ValidationError struct {

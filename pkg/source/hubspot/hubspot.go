@@ -172,7 +172,7 @@ func parseHubspotURI(uri string) (string, error) {
 
 	rest := strings.TrimPrefix(uri, "hubspot://")
 	if rest == "" || rest == "?" {
-		return "", fmt.Errorf("api_key is required in hubspot URI")
+		return "", fmt.Errorf("api_key or service_key is required in hubspot URI")
 	}
 
 	rest = strings.TrimPrefix(rest, "?")
@@ -183,11 +183,18 @@ func parseHubspotURI(uri string) (string, error) {
 	}
 
 	apiKey := values.Get("api_key")
-	if apiKey == "" {
-		return "", fmt.Errorf("api_key is required in hubspot URI")
-	}
+	serviceKey := values.Get("service_key")
 
-	return apiKey, nil
+	switch {
+	case apiKey != "" && serviceKey != "" && apiKey != serviceKey:
+		return "", fmt.Errorf("provide either api_key or service_key in hubspot URI, not both")
+	case apiKey != "":
+		return apiKey, nil
+	case serviceKey != "":
+		return serviceKey, nil
+	default:
+		return "", fmt.Errorf("api_key or service_key is required in hubspot URI")
+	}
 }
 
 func (s *Hubspotsource) Close(ctx context.Context) error {
