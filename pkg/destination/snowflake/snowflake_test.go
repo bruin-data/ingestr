@@ -200,7 +200,7 @@ func TestSnowflakeParquetWriterTimestampLogicalTypes(t *testing.T) {
 	builder := array.NewRecordBuilder(mem, arrowSchema)
 	builder.Field(0).(*array.TimestampBuilder).Append(arrow.Timestamp(1717245296789123))
 	builder.Field(1).(*array.TimestampBuilder).Append(arrow.Timestamp(1717245296789123))
-	record := builder.NewRecord()
+	record := builder.NewRecordBatch()
 	builder.Release()
 	defer record.Release()
 
