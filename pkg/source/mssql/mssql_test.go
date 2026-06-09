@@ -169,7 +169,7 @@ func TestBuildSelectQueryPreservesColumnCasing(t *testing.T) {
 }
 
 func TestGuidConversionEnabled(t *testing.T) {
-	connStr, _, err := uriToConnString("mssql://sa:pass@localhost/db?guid+conversion=true")
+	connStr, _, err := URIToConnString("mssql://sa:pass@localhost/db?guid+conversion=true")
 	if err != nil {
 		t.Fatalf("uriToConnString error: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestGuidConversionEnabled(t *testing.T) {
 		t.Fatal("expected guid conversion to be enabled")
 	}
 
-	connStr, _, err = uriToConnString("mssql://sa:pass@localhost/db?guid+conversion=false")
+	connStr, _, err = URIToConnString("mssql://sa:pass@localhost/db?guid+conversion=false")
 	if err != nil {
 		t.Fatalf("uriToConnString error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestGuidConversionEnabled(t *testing.T) {
 		t.Fatal("expected guid conversion to be disabled")
 	}
 
-	connStr, _, err = uriToConnString("mssql://sa:pass@localhost/db?GUID+CONVERSION=1")
+	connStr, _, err = URIToConnString("mssql://sa:pass@localhost/db?GUID+CONVERSION=1")
 	if err != nil {
 		t.Fatalf("uriToConnString error: %v", err)
 	}
