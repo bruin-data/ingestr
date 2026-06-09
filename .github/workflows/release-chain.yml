@@ -1,0 +1,186 @@
+name: Release Chain (ingestr → bruin → orchestrator + airflow)
+
+# Runs the release chain and reports each step into one Slack thread.
+# Secrets: RELEASE_TOKEN (PAT: repo+workflow, all 4 repos), SLACK_BOT_TOKEN (xoxb, chat:write).
+
+on:
+  workflow_dispatch:
+    inputs:
+      slack_channel:
+        description: "Slack channel ID to post into"
+        required: true
+      slack_thread_ts:
+        description: "Slack thread ts to reply under (blank = new thread)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Simulate: Slack messages only, no dispatch/PR/merge/release"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL: ${{ inputs.slack_channel }}
+      THREAD_TS: ${{ inputs.slack_thread_ts }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      APPROVAL_TIMEOUT_MIN: "90"
+      RUN_TIMEOUT_MIN: "90"
+    steps:
+      - name: Run release chain
+        run: |
+          set -Eeuo pipefail
+          git config --global user.name  release-bot
+          git config --global user.email release-bot@users.noreply.github.com
+          JOB_DEADLINE=$(( $(date +%s) + 350*60 ))
+
+          # Post to the run's Slack thread (first call opens it).
+          slack() {
+            local r
+            r=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+              -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H 'Content-type: application/json' \
+              --data "$(jq -n --arg c "$SLACK_CHANNEL" --arg t "$1" --arg ts "$THREAD_TS" \
+                '{channel:$c,text:$t}+(if $ts=="" then {} else {thread_ts:$ts} end)')" || true)
+            [ -z "$THREAD_TS" ] && THREAD_TS=$(jq -r '.ts // empty' <<<"$r" 2>/dev/null || true)
+            return 0
+          }
+          fail() { trap - ERR; slack "❌ $1"; echo "FAIL: $1" >&2; exit 1; }
+          trap 'fail "unexpected error (line $LINENO)"' ERR
+
+          dry()    { [ "${DRY_RUN:-false}" = "true" ]; }
+          budget() { [ "$(date +%s)" -lt "$JOB_DEADLINE" ] || fail "time budget exhausted (~360m cap) — re-run when approvals are ready"; }
+          tags()   { gh api "repos/$1/tags" --paginate --jq '.[].name' | sort; }
+          runs()   { gh run list --repo "$1" --workflow "$2" --limit 50 --json databaseId -q '.[].databaseId' | sort; }
+          have()   { grep -qF "$2" "$1" || fail "$3"; }
+          clone()  { git clone -q --depth 1 "https://x-access-token:${RELEASE_TOKEN}@github.com/$1.git" "$2"; }
+
+          # Wait for a NEW run of <workflow> (id not in <before-ids>) to succeed.
+          wait_run() {
+            local repo="$1" wf="$2" before="$3" id="" start end
+            start=$(date +%s)
+            until id=$(comm -13 <(printf '%s\n' "$before") <(runs "$repo" "$wf") | sort -n | tail -1); [ -n "$id" ]; do
+              [ $(( $(date +%s) - start )) -ge 900 ] && fail "$repo: no new '$wf' run in 15m"
+              sleep 10
+            done
+            slack "⏳ $repo: $wf run $id"
+            end=$(( $(date +%s) + RUN_TIMEOUT_MIN*60 ))
+            while :; do
+              budget
+              case "$(gh run view "$id" --repo "$repo" --json status,conclusion -q '.status+"/"+(.conclusion//"")' 2>/dev/null || echo)" in
+                completed/success) return 0 ;;
+                completed/*)       fail "$repo '$wf' run failed — https://github.com/$repo/actions/runs/$id" ;;
+              esac
+              [ "$(date +%s)" -ge "$end" ] && fail "$repo '$wf' run $id stuck >${RUN_TIMEOUT_MIN}m — https://github.com/$repo/actions/runs/$id"
+              sleep 30
+            done
+          }
+
+          # Dispatch "Bump Version", wait for it + the "Release" run; sets NEW_TAG.
+          release_repo() {
+            local repo="$1" before bump rel after
+            before=$(tags "$repo"); bump=$(runs "$repo" "Bump Version"); rel=$(runs "$repo" "Release")
+            gh workflow run "Bump Version" --repo "$repo" --ref main >/dev/null
+            slack "⏳ $repo: Bump Version dispatched"
+            wait_run "$repo" "Bump Version" "$bump"
+            after=$(tags "$repo")
+            NEW_TAG=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | sort -V | tail -1)
+            [ -n "$NEW_TAG" ] || fail "$repo: no new tag after bump (no new commits?)"
+            wait_run "$repo" "Release" "$rel"
+          }
+
+          # Commit already-edited <dir>, open PR; sets PR_NUM, PR_URL.
+          open_pr() {
+            local repo="$1" dir="$2" br="$3" title="$4" body="$5"
+            git -C "$dir" checkout -qb "$br"
+            git -C "$dir" diff --quiet && fail "$repo: no changes to commit (already at target?)"
+            git -C "$dir" commit -qam "$title"
+            git -C "$dir" push -q -u origin "$br"
+            PR_URL=$(gh pr create --repo "$repo" --base main --head "$br" --title "$title" --body "$body")
+            PR_NUM=$(gh pr view "$br" --repo "$repo" --json number -q .number)
+            slack "🔗 $repo PR #$PR_NUM — $PR_URL  🛎️ needs approval"
+          }
+
+          # Wait for a non-author approval, then merge and confirm.
+          approve_merge() {
+            local repo="$1" pr="$2" end st i
+            end=$(( $(date +%s) + APPROVAL_TIMEOUT_MIN*60 ))
+            while :; do
+              budget
+              st=$(gh pr view "$pr" --repo "$repo" --json state,reviewDecision -q '.state+"/"+(.reviewDecision//"")' 2>/dev/null || echo)
+              [[ "$st" == */APPROVED ]] && break
+              [[ "$st" == CLOSED/* ]]  && fail "$repo PR #$pr closed without approval"
+              [ "$(date +%s)" -ge "$end" ] && fail "$repo PR #$pr approval timeout"
+              sleep 30
+            done
+            gh pr merge "$pr" --repo "$repo" --merge
+            for i in $(seq 24); do   # confirm merge settled (~2m)
+              [ "$(gh pr view "$pr" --repo "$repo" --json merged -q .merged 2>/dev/null || echo)" = true ] && break
+              sleep 5
+            done
+            [ "$(gh pr view "$pr" --repo "$repo" --json merged -q .merged)" = true ] || fail "$repo PR #$pr did not merge"
+            slack "🔀 $repo PR #$pr merged"
+          }
+
+          ###################### run ######################
+          slack "🚀 Release chain started"
+          dry && slack "🧪 DRY-RUN: Slack only — no dispatch, PR, merge, or release"
+
+          # Phase 1 — release ingestr
+          slack "1️⃣ releasing ingestr"
+          if dry; then NEW_TAG="v0.0.0"; else release_repo bruin-data/ingestr; fi
+          ITAG=$NEW_TAG; IVER=${ITAG#v}
+          slack "🔖 ingestr $ITAG"
+
+          # Phase 2 — bump ingestr in bruin
+          slack "2️⃣ bumping ingestr → $ITAG in bruin"
+          if ! dry; then
+            clone bruin-data/bruin bruin
+            sed -i "s|IngestrVersionV1 = \"[^\"]*\"|IngestrVersionV1 = \"$IVER\"|" bruin/pkg/python/uv.go
+            have bruin/pkg/python/uv.go "IngestrVersionV1 = \"$IVER\"" "bruin: uv.go not updated"
+            open_pr bruin-data/bruin bruin "bump-ingestr-$ITAG" "Bump ingestr to $ITAG" "Updates IngestrVersionV1 to $IVER."
+            approve_merge bruin-data/bruin "$PR_NUM"
+          fi
+
+          # Phase 3 — release bruin
+          slack "3️⃣ releasing bruin"
+          if dry; then NEW_TAG="v0.0.0"; else release_repo bruin-data/bruin; fi
+          BTAG=$NEW_TAG
+          slack "🔖 bruin $BTAG"
+
+          # Phase 4 — bump bruin in orchestrator + airflow
+          slack "4️⃣ bumping bruin → $BTAG in orchestrator + airflow"
+          if ! dry; then
+            clone bruin-data/orchestrator orchestrator
+            sed -i "s|bruinImageTag: .*|bruinImageTag: $BTAG|" orchestrator/deployment/values.yaml
+            have orchestrator/deployment/values.yaml "bruinImageTag: $BTAG" "orchestrator: values.yaml not updated"
+            open_pr bruin-data/orchestrator orchestrator "bump-bruin-$BTAG" "Bump bruin to $BTAG" "Updates bruinImageTag to $BTAG."
+            ORCH_PR=$PR_NUM
+
+            clone bruin-data/airflow airflow
+            echo "$BTAG" > airflow/src/core/BRUIN_VERSION.txt
+            sed -i "s|ghcr.io/bruin-data/bruin:v[0-9][0-9.]*|ghcr.io/bruin-data/bruin:$BTAG|g" airflow/src/ingestr/expected_seed_spec.yml
+            sed -i "s|registry.digitalocean.com/bruin/python:v[0-9][0-9.]*|registry.digitalocean.com/bruin/python:$BTAG|g" \
+              airflow/src/python/expected_gitsyncv4_ssh_for_buraktestpipeline.yml \
+              airflow/src/python/expected_materialization_gitsyncv4_password.yml \
+              airflow/src/python/expected_materialization_gitsyncv4_ssh.yml
+            have airflow/src/core/BRUIN_VERSION.txt "$BTAG" "airflow: BRUIN_VERSION.txt not updated"
+            have airflow/src/ingestr/expected_seed_spec.yml "bruin:$BTAG" "airflow: seed_spec not updated"
+            for x in gitsyncv4_ssh_for_buraktestpipeline materialization_gitsyncv4_password materialization_gitsyncv4_ssh; do
+              have "airflow/src/python/expected_$x.yml" "python:$BTAG" "airflow: expected_$x not updated"
+            done
+            open_pr bruin-data/airflow airflow "bump-bruin-$BTAG" "Bump bruin to $BTAG" "Updates bruin image refs to $BTAG."
+
+            approve_merge bruin-data/orchestrator "$ORCH_PR"
+            approve_merge bruin-data/airflow "$PR_NUM"
+          fi
+
+          slack "✅ Done: ingestr $ITAG → bruin $BTAG → orchestrator + airflow"
