@@ -145,6 +145,32 @@ func IsFloat(dt arrow.DataType) bool {
 	}
 }
 
+// appendInt8/appendInt16/appendInt32 narrow an int64 into a fixed-width
+// builder, appending a null instead of silently truncating out-of-range values.
+func appendInt8(b *array.Int8Builder, i int64) {
+	if i >= math.MinInt8 && i <= math.MaxInt8 {
+		b.Append(int8(i))
+	} else {
+		b.AppendNull()
+	}
+}
+
+func appendInt16(b *array.Int16Builder, i int64) {
+	if i >= math.MinInt16 && i <= math.MaxInt16 {
+		b.Append(int16(i))
+	} else {
+		b.AppendNull()
+	}
+}
+
+func appendInt32(b *array.Int32Builder, i int64) {
+	if i >= math.MinInt32 && i <= math.MaxInt32 {
+		b.Append(int32(i))
+	} else {
+		b.AppendNull()
+	}
+}
+
 func AppendValue(builder array.Builder, val interface{}) {
 	if val == nil {
 		builder.AppendNull()
@@ -184,24 +210,17 @@ func AppendValue(builder array.Builder, val interface{}) {
 		}
 
 	case *array.Int8Builder:
-		appendInt8 := func(i int64) {
-			if i >= math.MinInt8 && i <= math.MaxInt8 {
-				b.Append(int8(i))
-			} else {
-				b.AppendNull()
-			}
-		}
 		switch v := val.(type) {
 		case int8:
 			b.Append(v)
 		case int16:
-			appendInt8(int64(v))
+			appendInt8(b, int64(v))
 		case int32:
-			appendInt8(int64(v))
+			appendInt8(b, int64(v))
 		case int64:
-			appendInt8(v)
+			appendInt8(b, v)
 		case int:
-			appendInt8(int64(v))
+			appendInt8(b, int64(v))
 		case float64:
 			if v >= math.MinInt8 && v <= math.MaxInt8 {
 				b.Append(int8(v))
@@ -209,7 +228,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 				b.AppendNull()
 			}
 		case uint8:
-			appendInt8(int64(v))
+			appendInt8(b, int64(v))
 		case string:
 			if i, err := strconv.ParseInt(v, 10, 8); err == nil {
 				b.Append(int8(i))
@@ -218,7 +237,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 			}
 		case json.Number:
 			if i, err := v.Int64(); err == nil {
-				appendInt8(i)
+				appendInt8(b, i)
 			} else {
 				b.AppendNull()
 			}
@@ -231,17 +250,21 @@ func AppendValue(builder array.Builder, val interface{}) {
 		case int16:
 			b.Append(v)
 		case int32:
-			b.Append(int16(v))
+			appendInt16(b, int64(v))
 		case int64:
-			b.Append(int16(v))
+			appendInt16(b, v)
 		case int:
-			b.Append(int16(v))
+			appendInt16(b, int64(v))
 		case float64:
-			b.Append(int16(v))
+			if v >= math.MinInt16 && v <= math.MaxInt16 {
+				b.Append(int16(v))
+			} else {
+				b.AppendNull()
+			}
 		case uint8:
 			b.Append(int16(v))
 		case uint16:
-			b.Append(int16(v))
+			appendInt16(b, int64(v))
 		case int8:
 			b.Append(int16(v))
 		case string:
@@ -252,7 +275,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 			}
 		case json.Number:
 			if i, err := v.Int64(); err == nil {
-				b.Append(int16(i))
+				appendInt16(b, i)
 			} else {
 				b.AppendNull()
 			}
@@ -265,9 +288,9 @@ func AppendValue(builder array.Builder, val interface{}) {
 		case int32:
 			b.Append(v)
 		case int:
-			b.Append(int32(v))
+			appendInt32(b, int64(v))
 		case int64:
-			b.Append(int32(v))
+			appendInt32(b, v)
 		case int8:
 			b.Append(int32(v))
 		case int16:
@@ -277,9 +300,13 @@ func AppendValue(builder array.Builder, val interface{}) {
 		case uint16:
 			b.Append(int32(v))
 		case uint32:
-			b.Append(int32(v))
+			appendInt32(b, int64(v))
 		case float64:
-			b.Append(int32(v))
+			if v >= math.MinInt32 && v <= math.MaxInt32 {
+				b.Append(int32(v))
+			} else {
+				b.AppendNull()
+			}
 		case string:
 			if i, err := strconv.ParseInt(v, 10, 32); err == nil {
 				b.Append(int32(i))
@@ -288,7 +315,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 			}
 		case json.Number:
 			if i, err := v.Int64(); err == nil {
-				b.Append(int32(i))
+				appendInt32(b, i)
 			} else {
 				b.AppendNull()
 			}
@@ -317,7 +344,11 @@ func AppendValue(builder array.Builder, val interface{}) {
 		case uint32:
 			b.Append(int64(v))
 		case uint64:
-			b.Append(int64(v))
+			if v <= math.MaxInt64 {
+				b.Append(int64(v))
+			} else {
+				b.AppendNull()
+			}
 		case string:
 			if i, err := strconv.ParseInt(v, 10, 64); err == nil {
 				b.Append(i)
