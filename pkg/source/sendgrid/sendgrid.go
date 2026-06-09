@@ -18,67 +18,118 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
-/*
-SendGrid source design notes (official Twilio SendGrid docs are the source of truth):
-  - Authentication uses Web API v3 bearer API keys. Docs: https://www.twilio.com/docs/sendgrid/for-developers/sending-email/api-getting-started
-  - messages uses GET /v3/messages. The API requires query syntax and caps limit at 1000; it does not document cursor/offset pagination, so ingestr returns one page. Docs: https://www.twilio.com/docs/sendgrid/api-reference/email-activity/filter-all-messages
-  - messages interval sync uses Email Activity query syntax on last_event_time. BETWEEN is documented for date ranges; >= and <= are documented operators. Docs: https://www.twilio.com/docs/sendgrid/for-developers/sending-email/getting-started-email-activity-api
-  - global_stats uses GET /v3/stats with start_date, optional end_date, aggregated_by, limit, and offset. Docs: https://www.twilio.com/docs/sendgrid/api-reference/stats/retrieve-global-email-statistics
-  - bounces uses GET /v3/suppression/bounces with inclusive start_time/end_time Unix timestamps and offset pagination. Docs: https://www.twilio.com/docs/sendgrid/api-reference/bounces-api/retrieve-all-bounces
-  - lists uses GET /v3/marketing/lists with page_size/page_token and _metadata.next. Docs: https://www.twilio.com/docs/sendgrid/api-reference/lists/get-all-lists
-  - single_sends uses the current Marketing Campaigns Single Sends endpoint, not obsolete legacy campaigns, and client-side filters updated_at because the list endpoint documents no time filter. Docs: https://www.twilio.com/docs/sendgrid/api-reference/single-sends/get-all-single-sends
-  - Nested objects and arrays are sent unchanged as JSON values; arrowconv serializes them as JSON strings, matching max_table_nesting=0 behavior.
-  - No table has independent documented child-resource fanout, so parallelism is intentionally off for the initial implementation.
-*/
-
 const (
 	baseURL = "https://api.sendgrid.com/v3"
 
 	maxMessagesPageSize    = 1000
 	maxStatsPageSize       = 500
 	maxBouncesPageSize     = 500
-	maxMarketingPageSize   = 1000
+	maxListsPageSize       = 1000 // GET /marketing/lists allows up to 1000
+	maxSingleSendsPageSize = 100  // GET /marketing/singlesends caps page_size at 100
 	maxPages               = 10000
+
 	defaultActivityStart   = "1970-01-01T00:00:00Z"
 	defaultStatsAggregated = "day"
 
 	// SendGrid Email Activity API is documented at 6 req/min: (6 * 0.8) / 60 = 0.08 req/sec.
 	emailActivityRateLimit = 0.08
-	// SendGrid Web API v3 documents endpoint-specific rate-limit headers, but no global numeric limit.
+	// SendGrid Web API v3 documents endpoint-specific rate-limit headers but no global numeric limit.
 	// Keep a conservative local cap for non-Email-Activity endpoints and rely on retries for 429s.
 	generalRateLimit = 5.0
 	rateLimitBurst   = 5
 )
 
+type paginationStyle int
+
+const (
+	paginateSingle paginationStyle = iota // one request, no pagination (messages)
+	paginateOffset                        // limit + offset, top-level array response (global_stats, bounces)
+	paginateToken                         // page_size + page_token via _metadata.next (lists, single_sends)
+)
+
+type filterMode int
+
+const (
+	filterNone            filterMode = iota
+	filterActivityQuery              // messages: Email Activity query on last_event_time
+	filterStatsDateRange             // global_stats: start_date/end_date query params (requires --interval-start)
+	filterBounceUnixRange            // bounces: start_time/end_time Unix query params
+	filterClientSide                 // single_sends: client-side filter on incrementalKey
+)
+
+type rateLimitTier int
+
+const (
+	tierGeneral rateLimitTier = iota
+	tierEmailActivity
+)
+
+type tableConfig struct {
+	endpoint       string
+	dataKey        string // JSON key holding the array; "" means the response itself is the array
+	primaryKeys    []string
+	incrementalKey string
+	strategy       config.IncrementalStrategy
+	pageSize       int
+	pagination     paginationStyle
+	filter         filterMode
+	tier           rateLimitTier
+}
+
 var supportedTables = map[string]tableConfig{
 	"messages": {
+		endpoint:       "/messages",
+		dataKey:        "messages",
 		primaryKeys:    []string{"msg_id"},
 		incrementalKey: "last_event_time",
 		strategy:       config.StrategyMerge,
-		rateLimitTier:  "email_activity",
+		pageSize:       maxMessagesPageSize,
+		pagination:     paginateSingle,
+		filter:         filterActivityQuery,
+		tier:           tierEmailActivity,
 	},
 	"global_stats": {
+		endpoint:       "/stats",
+		dataKey:        "",
 		primaryKeys:    []string{"date"},
 		incrementalKey: "date",
 		strategy:       config.StrategyMerge,
-		rateLimitTier:  "general",
+		pageSize:       maxStatsPageSize,
+		pagination:     paginateOffset,
+		filter:         filterStatsDateRange,
+		tier:           tierGeneral,
 	},
 	"bounces": {
+		endpoint:       "/suppression/bounces",
+		dataKey:        "",
 		primaryKeys:    []string{"email", "created"},
 		incrementalKey: "created",
 		strategy:       config.StrategyMerge,
-		rateLimitTier:  "general",
+		pageSize:       maxBouncesPageSize,
+		pagination:     paginateOffset,
+		filter:         filterBounceUnixRange,
+		tier:           tierGeneral,
 	},
 	"lists": {
-		primaryKeys:   []string{"id"},
-		strategy:      config.StrategyReplace,
-		rateLimitTier: "general",
+		endpoint:    "/marketing/lists",
+		dataKey:     "result",
+		primaryKeys: []string{"id"},
+		strategy:    config.StrategyReplace,
+		pageSize:    maxListsPageSize,
+		pagination:  paginateToken,
+		filter:      filterNone,
+		tier:        tierGeneral,
 	},
 	"single_sends": {
+		endpoint:       "/marketing/singlesends",
+		dataKey:        "result",
 		primaryKeys:    []string{"id"},
 		incrementalKey: "updated_at",
 		strategy:       config.StrategyMerge,
-		rateLimitTier:  "general",
+		pageSize:       maxSingleSendsPageSize,
+		pagination:     paginateToken,
+		filter:         filterClientSide,
+		tier:           tierGeneral,
 	},
 }
 
@@ -86,13 +137,6 @@ var validAggregations = map[string]bool{
 	"day":   true,
 	"week":  true,
 	"month": true,
-}
-
-type tableConfig struct {
-	primaryKeys    []string
-	incrementalKey string
-	strategy       config.IncrementalStrategy
-	rateLimitTier  string
 }
 
 type credentials struct {
@@ -208,13 +252,13 @@ func (s *SendGridSource) GetTable(ctx context.Context, req source.TableRequest) 
 	if !isValidTable(tableName) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", req.Name, supportedTableList())
 	}
-	cfg := supportedTables[tableName]
+	tc := supportedTables[tableName]
 
 	return &source.DynamicSourceTable{
 		TableName:           tableName,
-		TablePrimaryKeys:    cfg.primaryKeys,
-		TableIncrementalKey: cfg.incrementalKey,
-		TableStrategy:       cfg.strategy,
+		TablePrimaryKeys:    tc.primaryKeys,
+		TableIncrementalKey: tc.incrementalKey,
+		TableStrategy:       tc.strategy,
 		KnownSchema:         false,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			return nil, fmt.Errorf("sendgrid source does not have a predefined schema; schema inference is required")
@@ -245,23 +289,14 @@ func (s *SendGridSource) read(ctx context.Context, table string, opts source.Rea
 	go func() {
 		defer close(results)
 
-		var err error
-		switch table {
-		case "messages":
-			err = s.readMessages(ctx, opts, results)
-		case "global_stats":
-			err = s.readGlobalStats(ctx, opts, results)
-		case "bounces":
-			err = s.readBounces(ctx, opts, results)
-		case "lists":
-			err = s.readLists(ctx, opts, results)
-		case "single_sends":
-			err = s.readSingleSends(ctx, opts, results)
-		default:
-			err = fmt.Errorf("unsupported table: %s", table)
+		tc, ok := supportedTables[table]
+		if !ok {
+			results <- source.RecordBatchResult{Err: fmt.Errorf("unsupported table: %s", table)}
+			return
 		}
 
-		if err != nil {
+		config.Debug("[SENDGRID] reading %s", table)
+		if err := s.fetch(ctx, table, tc, opts, results); err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -269,147 +304,117 @@ func (s *SendGridSource) read(ctx context.Context, table string, opts source.Rea
 	return results, nil
 }
 
-func (s *SendGridSource) readMessages(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[SENDGRID] reading messages")
+func (s *SendGridSource) clientForTier(tier rateLimitTier) *ingestrhttp.Client {
+	if tier == tierEmailActivity {
+		return s.activityClient
+	}
+	return s.client
+}
 
-	query := s.buildMessagesQuery(opts)
-	var response messagesResponse
-	resp, err := s.activityClient.R(ctx).
-		SetQueryParam("limit", strconv.Itoa(maxMessagesPageSize)).
-		SetQueryParam("query", query).
-		Get("/messages")
+func (s *SendGridSource) fetch(ctx context.Context, table string, tc tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	params, err := s.serverParams(tc, opts)
 	if err != nil {
-		return fmt.Errorf("failed to fetch sendgrid messages from /messages: %w", err)
-	}
-	if !resp.IsSuccess() {
-		return fmt.Errorf("sendgrid messages request to /messages failed with status %d: %s", resp.StatusCode(), resp.String())
-	}
-	if err := decodeJSON(resp.Body(), &response); err != nil {
-		return fmt.Errorf("failed to parse sendgrid messages response from /messages: %w", err)
+		return err
 	}
 
-	return sendItems("messages", response.Messages, opts, results)
+	switch tc.pagination {
+	case paginateSingle:
+		return s.fetchSingle(ctx, table, tc, params, opts, results)
+	case paginateOffset:
+		return s.fetchOffset(ctx, table, tc, params, opts, results)
+	case paginateToken:
+		return s.fetchToken(ctx, table, tc, params, opts, results)
+	default:
+		return fmt.Errorf("sendgrid %s: unknown pagination style", table)
+	}
 }
 
-func (s *SendGridSource) readGlobalStats(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[SENDGRID] reading global_stats")
+// serverParams builds the server-side query parameters for a table based on its filter mode.
+func (s *SendGridSource) serverParams(tc tableConfig, opts source.ReadOptions) (map[string]string, error) {
+	params := map[string]string{}
 
-	if opts.IntervalStart == nil {
-		return fmt.Errorf("sendgrid global_stats requires --interval-start because /stats requires start_date")
-	}
-
-	startDate := opts.IntervalStart.UTC().Format("2006-01-02")
-	endDate := time.Now().UTC().Format("2006-01-02")
-	if opts.IntervalEnd != nil {
-		endDate = opts.IntervalEnd.UTC().Format("2006-01-02")
-	}
-
-	offset := 0
-	for page := 1; page <= maxPages; page++ {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	switch tc.filter {
+	case filterActivityQuery:
+		params["query"] = s.buildMessagesQuery(opts)
+	case filterStatsDateRange:
+		if opts.IntervalStart == nil {
+			return nil, fmt.Errorf("sendgrid global_stats requires --interval-start because /stats requires start_date")
 		}
-
-		var items []map[string]interface{}
-		resp, err := s.client.R(ctx).
-			SetQueryParam("start_date", startDate).
-			SetQueryParam("end_date", endDate).
-			SetQueryParam("aggregated_by", s.statsAggregatedBy).
-			SetQueryParam("limit", strconv.Itoa(maxStatsPageSize)).
-			SetQueryParam("offset", strconv.Itoa(offset)).
-			Get("/stats")
-		if err != nil {
-			return fmt.Errorf("failed to fetch sendgrid global_stats from /stats: %w", err)
+		params["start_date"] = opts.IntervalStart.UTC().Format("2006-01-02")
+		params["end_date"] = time.Now().UTC().Format("2006-01-02")
+		if opts.IntervalEnd != nil {
+			params["end_date"] = opts.IntervalEnd.UTC().Format("2006-01-02")
 		}
-		if !resp.IsSuccess() {
-			return fmt.Errorf("sendgrid global_stats request to /stats failed with status %d: %s", resp.StatusCode(), resp.String())
-		}
-		if err := decodeJSON(resp.Body(), &items); err != nil {
-			return fmt.Errorf("failed to parse sendgrid global_stats response from /stats: %w", err)
-		}
-
-		if err := sendItems("global_stats", items, opts, results); err != nil {
-			return err
-		}
-		if len(items) < maxStatsPageSize {
-			return nil
-		}
-		offset += maxStatsPageSize
-	}
-
-	config.Debug("[SENDGRID] maxPages guard reached for global_stats")
-	return nil
-}
-
-func (s *SendGridSource) readBounces(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[SENDGRID] reading bounces")
-
-	offset := 0
-	for page := 1; page <= maxPages; page++ {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		req := s.client.R(ctx).
-			SetQueryParam("limit", strconv.Itoa(maxBouncesPageSize)).
-			SetQueryParam("offset", strconv.Itoa(offset))
+		params["aggregated_by"] = s.statsAggregatedBy
+	case filterBounceUnixRange:
 		if opts.IntervalStart != nil {
-			req.SetQueryParam("start_time", strconv.FormatInt(opts.IntervalStart.UTC().Unix(), 10))
+			params["start_time"] = strconv.FormatInt(opts.IntervalStart.UTC().Unix(), 10)
 		}
 		if opts.IntervalEnd != nil {
-			req.SetQueryParam("end_time", strconv.FormatInt(opts.IntervalEnd.UTC().Unix(), 10))
+			params["end_time"] = strconv.FormatInt(opts.IntervalEnd.UTC().Unix(), 10)
 		}
-
-		var items []map[string]interface{}
-		resp, err := req.Get("/suppression/bounces")
-		if err != nil {
-			return fmt.Errorf("failed to fetch sendgrid bounces from /suppression/bounces: %w", err)
-		}
-		if !resp.IsSuccess() {
-			return fmt.Errorf("sendgrid bounces request to /suppression/bounces failed with status %d: %s", resp.StatusCode(), resp.String())
-		}
-		if err := decodeJSON(resp.Body(), &items); err != nil {
-			return fmt.Errorf("failed to parse sendgrid bounces response from /suppression/bounces: %w", err)
-		}
-
-		if err := sendItems("bounces", items, opts, results); err != nil {
-			return err
-		}
-		if len(items) < maxBouncesPageSize {
-			return nil
-		}
-		offset += maxBouncesPageSize
 	}
 
-	config.Debug("[SENDGRID] maxPages guard reached for bounces")
+	return params, nil
+}
+
+// fetchSingle issues one request (no pagination) and sends the resulting items.
+func (s *SendGridSource) fetchSingle(ctx context.Context, table string, tc tableConfig, params map[string]string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	req := s.clientForTier(tc.tier).R(ctx).
+		SetQueryParam("limit", strconv.Itoa(tc.pageSize)).
+		SetQueryParams(params)
+
+	body, err := s.doRequest(table, tc, req)
+	if err != nil {
+		return err
+	}
+
+	items := extractItems(body, tc.dataKey)
+	return sendFiltered(table, tc, items, opts, results)
+}
+
+// fetchOffset paginates with limit+offset over a top-level array response.
+func (s *SendGridSource) fetchOffset(ctx context.Context, table string, tc tableConfig, params map[string]string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	offset := 0
+	for page := 1; page <= maxPages; page++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		req := s.clientForTier(tc.tier).R(ctx).
+			SetQueryParam("limit", strconv.Itoa(tc.pageSize)).
+			SetQueryParam("offset", strconv.Itoa(offset)).
+			SetQueryParams(params)
+
+		body, err := s.doRequest(table, tc, req)
+		if err != nil {
+			return err
+		}
+
+		items := extractItems(body, tc.dataKey)
+		if err := sendFiltered(table, tc, items, opts, results); err != nil {
+			return err
+		}
+		if len(items) < tc.pageSize {
+			return nil
+		}
+		offset += tc.pageSize
+	}
+
+	config.Debug("[SENDGRID] maxPages guard reached for %s", table)
 	return nil
 }
 
-func (s *SendGridSource) readLists(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[SENDGRID] reading lists")
-	return s.paginateAndSend(ctx, paginationConfig{
-		table:       "lists",
-		endpoint:    "/marketing/lists",
-		pageSize:    maxMarketingPageSize,
-		filterField: "",
-	}, opts, results)
-}
-
-func (s *SendGridSource) readSingleSends(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[SENDGRID] reading single_sends")
-	return s.paginateAndSend(ctx, paginationConfig{
-		table:       "single_sends",
-		endpoint:    "/marketing/singlesends",
-		pageSize:    maxMarketingPageSize,
-		filterField: "updated_at",
-	}, opts, results)
-}
-
-func (s *SendGridSource) paginateAndSend(ctx context.Context, cfg paginationConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+// fetchToken paginates with page_size+page_token, following _metadata.next.
+func (s *SendGridSource) fetchToken(ctx context.Context, table string, tc tableConfig, params map[string]string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	pageToken := ""
 	for page := 1; page <= maxPages; page++ {
 		select {
@@ -418,40 +423,65 @@ func (s *SendGridSource) paginateAndSend(ctx context.Context, cfg paginationConf
 		default:
 		}
 
-		req := s.client.R(ctx).SetQueryParam("page_size", strconv.Itoa(cfg.pageSize))
+		req := s.clientForTier(tc.tier).R(ctx).
+			SetQueryParam("page_size", strconv.Itoa(tc.pageSize)).
+			SetQueryParams(params)
 		if pageToken != "" {
 			req.SetQueryParam("page_token", pageToken)
 		}
 
-		var response resultResponse
-		resp, err := req.Get(cfg.endpoint)
+		body, err := s.doRequest(table, tc, req)
 		if err != nil {
-			return fmt.Errorf("failed to fetch sendgrid %s from %s: %w", cfg.table, cfg.endpoint, err)
-		}
-		if !resp.IsSuccess() {
-			return fmt.Errorf("sendgrid %s request to %s failed with status %d: %s", cfg.table, cfg.endpoint, resp.StatusCode(), resp.String())
-		}
-		if err := decodeJSON(resp.Body(), &response); err != nil {
-			return fmt.Errorf("failed to parse sendgrid %s response from %s: %w", cfg.table, cfg.endpoint, err)
-		}
-
-		items := response.Result
-		if cfg.filterField != "" {
-			items = filterItemsByInterval(items, cfg.filterField, opts.IntervalStart, opts.IntervalEnd)
-		}
-		if err := sendItems(cfg.table, items, opts, results); err != nil {
 			return err
 		}
 
-		nextToken := nextPageToken(response.Metadata.Next)
-		if nextToken == "" {
+		items := extractItems(body, tc.dataKey)
+		if err := sendFiltered(table, tc, items, opts, results); err != nil {
+			return err
+		}
+
+		pageToken = nextPageToken(body)
+		if pageToken == "" {
 			return nil
 		}
-		pageToken = nextToken
 	}
 
-	config.Debug("[SENDGRID] maxPages guard reached for %s", cfg.table)
+	config.Debug("[SENDGRID] maxPages guard reached for %s", table)
 	return nil
+}
+
+// doRequest performs the GET, checks the status, and decodes the JSON body into a map.
+// Top-level array responses (dataKey == "") are wrapped under the "" key so extractItems can read them.
+func (s *SendGridSource) doRequest(table string, tc tableConfig, req *ingestrhttp.Request) (map[string]interface{}, error) {
+	resp, err := req.Get(tc.endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch sendgrid %s from %s: %w", table, tc.endpoint, err)
+	}
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("sendgrid %s request to %s failed with status %d: %s", table, tc.endpoint, resp.StatusCode(), resp.String())
+	}
+
+	if tc.dataKey == "" {
+		var arr []interface{}
+		if err := jsonUseNumber(resp.Body(), &arr); err != nil {
+			return nil, fmt.Errorf("failed to parse sendgrid %s response from %s: %w", table, tc.endpoint, err)
+		}
+		return map[string]interface{}{"": arr}, nil
+	}
+
+	var body map[string]interface{}
+	if err := jsonUseNumber(resp.Body(), &body); err != nil {
+		return nil, fmt.Errorf("failed to parse sendgrid %s response from %s: %w", table, tc.endpoint, err)
+	}
+	return body, nil
+}
+
+// sendFiltered applies client-side interval filtering when configured, then sends the batch.
+func sendFiltered(table string, tc tableConfig, items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if tc.filter == filterClientSide && tc.incrementalKey != "" {
+		items = filterByTimestamp(items, tc.incrementalKey, opts.IntervalStart, opts.IntervalEnd)
+	}
+	return sendBatch(table, items, opts, results)
 }
 
 func (s *SendGridSource) buildMessagesQuery(opts source.ReadOptions) string {
@@ -475,7 +505,27 @@ func (s *SendGridSource) buildMessagesQuery(opts source.ReadOptions) string {
 	return strings.Join(clauses, " AND ")
 }
 
-func sendItems(table string, items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func extractItems(body map[string]interface{}, dataKey string) []map[string]interface{} {
+	raw, ok := body[dataKey]
+	if !ok {
+		return nil
+	}
+
+	arr, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+
+	items := make([]map[string]interface{}, 0, len(arr))
+	for _, v := range arr {
+		if m, ok := v.(map[string]interface{}); ok {
+			items = append(items, m)
+		}
+	}
+	return items
+}
+
+func sendBatch(table string, items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	if len(items) == 0 {
 		return nil
 	}
@@ -490,7 +540,7 @@ func sendItems(table string, items []map[string]interface{}, opts source.ReadOpt
 	return nil
 }
 
-func filterItemsByInterval(items []map[string]interface{}, field string, start, end *time.Time) []map[string]interface{} {
+func filterByTimestamp(items []map[string]interface{}, field string, start, end *time.Time) []map[string]interface{} {
 	if start == nil && end == nil {
 		return items
 	}
@@ -536,14 +586,21 @@ func parseItemTime(value interface{}) (time.Time, bool) {
 	}
 }
 
-func decodeJSON(body []byte, target interface{}) error {
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	return decoder.Decode(target)
+// jsonUseNumber decodes JSON with UseNumber to preserve large integer precision.
+func jsonUseNumber(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
 }
 
-func nextPageToken(nextURL string) string {
-	if nextURL == "" {
+// nextPageToken extracts the page_token query parameter from a _metadata.next URL.
+func nextPageToken(body map[string]interface{}) string {
+	meta, ok := body["_metadata"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	nextURL, ok := meta["next"].(string)
+	if !ok || nextURL == "" {
 		return ""
 	}
 	parsed, err := url.Parse(nextURL)
@@ -555,26 +612,6 @@ func nextPageToken(nextURL string) string {
 
 func formatMessageTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
-}
-
-type paginationConfig struct {
-	table       string
-	endpoint    string
-	pageSize    int
-	filterField string
-}
-
-type messagesResponse struct {
-	Messages []map[string]interface{} `json:"messages"`
-}
-
-type resultResponse struct {
-	Result   []map[string]interface{} `json:"result"`
-	Metadata metadata                 `json:"_metadata"`
-}
-
-type metadata struct {
-	Next string `json:"next"`
 }
 
 var _ source.Source = (*SendGridSource)(nil)
