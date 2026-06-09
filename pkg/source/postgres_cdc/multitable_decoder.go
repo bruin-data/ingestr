@@ -444,20 +444,21 @@ func (d *MultiTableDecoder) changesToBatch(changes []Change, tableSchema *schema
 	syncedAt := time.Now().UTC()
 	sourceColCount := len(tableSchema.Columns) - 3 // Exclude CDC columns
 
-	for _, change := range changes {
+	for i, change := range changes {
 		// Append source column values
-		for i := 0; i < sourceColCount; i++ {
+		for colIdx := 0; colIdx < sourceColCount; colIdx++ {
 			var val interface{}
-			if i < len(change.Values) {
-				val = change.Values[i]
+			if colIdx < len(change.Values) {
+				val = change.Values[colIdx]
 			}
-			arrowconv.AppendValue(builders[i], val)
+			arrowconv.AppendValue(builders[colIdx], val)
 		}
 
 		// Append CDC columns
 		builders[sourceColCount].(*array.StringBuilder).Append(FormatLSN(change.LSN))
 		builders[sourceColCount+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
-		builders[sourceColCount+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
+		perRowSyncedAt := syncedAt.Add(time.Duration(i) * time.Microsecond)
+		builders[sourceColCount+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))
 	}
 
 	arrays := make([]arrow.Array, len(builders))

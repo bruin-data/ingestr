@@ -40,7 +40,7 @@ func (s *MSSQLSource) Schemes() []string {
 }
 
 func (s *MSSQLSource) Connect(ctx context.Context, uri string) error {
-	connStr, driverName, err := uriToConnString(uri)
+	connStr, driverName, err := URIToConnString(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse SQL Server URI: %w", err)
 	}
@@ -66,11 +66,11 @@ func (s *MSSQLSource) Connect(ctx context.Context, uri string) error {
 	return nil
 }
 
-// uriToConnString converts SQL Server and Azure SQL URIs to the connection
+// URIToConnString converts SQL Server and Azure SQL URIs to the connection
 // string format expected by go-mssqldb.
 // URI format: mssql://user:pass@host:port/database?param=value
 // Conn string format: sqlserver://user:pass@host:port?database=db&param=value
-func uriToConnString(uri string) (string, string, error) {
+func URIToConnString(uri string) (string, string, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
 		return "", "", err

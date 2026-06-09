@@ -94,7 +94,7 @@ func TestURIToConnString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			connStr, driverName, err := uriToConnString(tt.uri)
+			connStr, driverName, err := URIToConnString(tt.uri)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (connStr=%q)", connStr)
