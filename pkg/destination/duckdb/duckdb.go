@@ -990,7 +990,7 @@ func buildUpdateSet(columns []string, targetAlias, sourceAlias string, cdcMerge 
 }
 
 func cdcUnchangedColJSONNeedle(colName string) string {
-	b, _ := json.Marshal(colName)
+	b, _ := json.Marshal([]string{colName})
 	return strings.ReplaceAll(string(b), "'", "''")
 }
 

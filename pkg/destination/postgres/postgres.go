@@ -491,15 +491,30 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			pkList, selectCols, quotedStagingTable, orderBy,
 		)
 
-		// Step 1: Upsert latest non-deleted rows (data changes)
+		// Step 1: Upsert latest non-deleted rows (data changes).
+		// Use UPDATE ... FROM + INSERT instead of ON CONFLICT so
+		// la."_cdc_unchanged_cols" is read once per row, not once per column.
+		onTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "la")
+		unchangedRef := fmt.Sprintf(`la."%s"`, destination.CDCUnchangedColsColumn)
 		upsertSQL := fmt.Sprintf(
-			`WITH %s INSERT INTO %s (%s) SELECT %s FROM latest_active ON CONFLICT (%s) DO UPDATE SET %s`,
+			`WITH %s, updated AS (
+				UPDATE %s AS target SET %s
+				FROM latest_active la
+				WHERE %s
+				RETURNING 1
+			)
+			INSERT INTO %s (%s)
+			SELECT %s FROM latest_active la
+			WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 			latestActive,
+			quotedTargetTable,
+			buildCDCConflictUpdateSet(nonPKColumns, "target", "la", unchangedRef),
+			onTargetCondition,
 			quotedTargetTable,
 			strings.Join(destQuoted, ", "),
 			strings.Join(destQuoted, ", "),
-			strings.Join(quotedPKs, ", "),
-			buildCDCConflictUpdateSet(nonPKColumns, quotedTargetTable, buildCDCUnchangedColsRef(opts.PrimaryKeys)),
+			quotedTargetTable,
+			onTargetCondition,
 		)
 		config.Debug("[MERGE] Executing upsert for non-deleted rows: %s", upsertSQL)
 
@@ -510,14 +525,14 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 		// Step 2: Mark deletes only when the latest change is a delete
 		onLatestCondition := buildJoinCondition(opts.PrimaryKeys, "deleted", "latest")
-		onTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "deleted")
+		onDeleteTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "deleted")
 		updateDeletedSQL := fmt.Sprintf(
 			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true`,
 			latestAll,
 			latestDeleted,
 			quotedTargetTable,
 			onLatestCondition,
-			onTargetCondition,
+			onDeleteTargetCondition,
 		)
 		config.Debug("[MERGE] Executing UPDATE for deleted rows: %s", updateDeletedSQL)
 
@@ -926,29 +941,17 @@ func buildConflictUpdateSet(columns []string) string {
 	return strings.Join(sets, ", ")
 }
 
-func buildCDCUnchangedColsRef(primaryKeys []string) string {
-	conditions := make([]string, len(primaryKeys))
-	for i, pk := range primaryKeys {
-		conditions[i] = fmt.Sprintf(`la."%s" = EXCLUDED."%s"`, pk, pk)
-	}
-	return fmt.Sprintf(
-		`(SELECT la."%s" FROM latest_active la WHERE %s)`,
-		destination.CDCUnchangedColsColumn,
-		strings.Join(conditions, " AND "),
-	)
-}
-
-func buildCDCConflictUpdateSet(columns []string, quotedTable string, unchangedRef string) string {
+func buildCDCConflictUpdateSet(columns []string, targetAlias, sourceAlias, unchangedRef string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
 		if destination.IsCDCMetaColumn(col) {
-			sets[i] = fmt.Sprintf(`"%s" = EXCLUDED."%s"`, col, col)
+			sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
 			continue
 		}
 		sets[i] = cdcMergeAssign(
 			col,
-			fmt.Sprintf(`%s."%s"`, quotedTable, col),
-			fmt.Sprintf(`EXCLUDED."%s"`, col),
+			fmt.Sprintf(`%s."%s"`, targetAlias, col),
+			fmt.Sprintf(`%s."%s"`, sourceAlias, col),
 			unchangedRef,
 		)
 	}
