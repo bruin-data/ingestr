@@ -97,5 +97,5 @@ func (d *Dialect) TypeName(col schema.Column) string {
 }
 
 func (d *Dialect) QuoteIdentifier(name string) string {
-	return fmt.Sprintf("`%s`", name)
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
 }

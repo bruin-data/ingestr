@@ -147,7 +147,7 @@ func (d *Dialect) MapDataType(dbType string) (schema.DataType, int, int, schema.
 }
 
 func (d *Dialect) QuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(strings.ToUpper(name), `"`, `""`))
 }
 
 func (d *Dialect) ParsePrimaryKeyResult(rawValue interface{}) []string {

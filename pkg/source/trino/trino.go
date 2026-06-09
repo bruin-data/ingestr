@@ -281,14 +281,18 @@ func (s *TrinoSource) parseTableName(table string) (catalog, schemaName, tableNa
 	}
 }
 
+func quoteIdentifier(name string) string {
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
+}
+
 func (s *TrinoSource) buildSelectQuery(table string, columns []schema.Column, opts source.ReadOptions) string {
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
-		colNames[i] = fmt.Sprintf(`"%s"`, col.Name)
+		colNames[i] = quoteIdentifier(col.Name)
 	}
 
 	catalog, schemaName, tableName := s.parseTableName(table)
-	fqn := fmt.Sprintf(`"%s"."%s"."%s"`, catalog, schemaName, tableName)
+	fqn := fmt.Sprintf("%s.%s.%s", quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(tableName))
 
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), fqn)
 
@@ -296,10 +300,10 @@ func (s *TrinoSource) buildSelectQuery(table string, columns []schema.Column, op
 	if opts.IncrementalKey != "" {
 		incrementalCol := findColumn(columns, opts.IncrementalKey)
 		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf(`"%s" >= %s`, opts.IncrementalKey, formatIncrementalLiteral(incrementalCol, *opts.IntervalStart)))
+			conditions = append(conditions, fmt.Sprintf(`%s >= %s`, quoteIdentifier(opts.IncrementalKey), formatIncrementalLiteral(incrementalCol, *opts.IntervalStart)))
 		}
 		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf(`"%s" <= %s`, opts.IncrementalKey, formatIncrementalLiteral(incrementalCol, *opts.IntervalEnd)))
+			conditions = append(conditions, fmt.Sprintf(`%s <= %s`, quoteIdentifier(opts.IncrementalKey), formatIncrementalLiteral(incrementalCol, *opts.IntervalEnd)))
 		}
 	}
 
