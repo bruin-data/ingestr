@@ -7,5 +7,8 @@
   "devDependencies": {
     "rollup": "^4.59.0",
     "vitepress": "^1.6.3"
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
   }
 }
