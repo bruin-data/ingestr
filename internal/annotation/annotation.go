@@ -34,6 +34,7 @@ const ingestrType = "ingestr"
 const (
 	StepExtract      = "extract"       // source read (SELECT) — only meaningful for warehouse sources
 	StepDDL          = "ddl"           // PrepareTable: create target/staging tables
+	StepEvolve       = "evolve"        // ApplyEvolution: ALTER existing table to match new source schema
 	StepLoad         = "load"          // Write/WriteParallel: bulk-load rows
 	StepMerge        = "merge"         // MergeTable
 	StepDeleteInsert = "delete_insert" // DeleteInsertTable
@@ -46,7 +47,7 @@ const (
 // ingestr classifies each query by ETL phase via the "type" value:
 //
 //	ingestr_extract   — read from the source: the SELECT a warehouse source runs
-//	ingestr_load      — move data in:   ddl, load, swap, truncate, cleanup
+//	ingestr_load      — move data in:   ddl, evolve, load, swap, truncate, cleanup
 //	ingestr_transform — apply strategy: merge, delete_insert, scd2
 const (
 	typeIngestrExtract   = "ingestr_extract"
@@ -61,7 +62,7 @@ func typeForStep(step string) string {
 		return typeIngestrExtract
 	case StepMerge, StepDeleteInsert, StepSCD2:
 		return typeIngestrTransform
-	case StepDDL, StepLoad, StepSwap, StepCleanup, StepTruncate:
+	case StepDDL, StepEvolve, StepLoad, StepSwap, StepCleanup, StepTruncate:
 		return typeIngestrLoad
 	default:
 		return ingestrType
