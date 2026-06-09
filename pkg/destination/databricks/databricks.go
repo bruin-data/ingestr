@@ -164,7 +164,7 @@ func (d *DatabricksDestination) ensureSchemaExists(ctx context.Context, schemaNa
 		return nil
 	}
 
-	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS `%s`.`%s`", d.catalog, schemaName)
+	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.%s", quoteIdentifier(d.catalog), quoteIdentifier(schemaName))
 	if err := d.executeStatement(ctx, createSchemaSQL); err != nil {
 		config.LogFailedQuery(createSchemaSQL, err)
 		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
@@ -175,8 +175,8 @@ func (d *DatabricksDestination) ensureSchemaExists(ctx context.Context, schemaNa
 
 func (d *DatabricksDestination) ensureVolumeExists(ctx context.Context, schemaName string) error {
 	createVolumeSQL := fmt.Sprintf(
-		"CREATE VOLUME IF NOT EXISTS `%s`.`%s`.`files`",
-		d.catalog, schemaName,
+		"CREATE VOLUME IF NOT EXISTS %s.%s.`files`",
+		quoteIdentifier(d.catalog), quoteIdentifier(schemaName),
 	)
 	if err := d.executeStatement(ctx, createVolumeSQL); err != nil {
 		config.LogFailedQuery(createVolumeSQL, err)

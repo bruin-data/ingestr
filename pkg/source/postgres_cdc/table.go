@@ -282,9 +282,6 @@ func parseTableName(table string) (string, string) {
 }
 
 func quoteIdentifier(name string) string {
-	if strings.HasPrefix(name, `"`) && strings.HasSuffix(name, `"`) {
-		return name
-	}
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
