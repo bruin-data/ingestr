@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"reflect"
 	"sort"
@@ -205,7 +206,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 				b.AppendNull()
 			}
 		case json.Number:
-			if i, err := v.Int64(); err == nil && i >= -128 && i <= 127 {
+			if i, err := v.Int64(); err == nil && i >= math.MinInt8 && i <= math.MaxInt8 {
 				b.Append(int8(i))
 			} else {
 				b.AppendNull()
