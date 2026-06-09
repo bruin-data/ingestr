@@ -171,7 +171,7 @@ func TestBuildSelectQueryPreservesColumnCasing(t *testing.T) {
 func TestGuidConversionEnabled(t *testing.T) {
 	connStr, _, err := URIToConnString("mssql://sa:pass@localhost/db?guid+conversion=true")
 	if err != nil {
-		t.Fatalf("uriToConnString error: %v", err)
+		t.Fatalf("URIToConnString error: %v", err)
 	}
 	if !guidConversionEnabled(connStr) {
 		t.Fatal("expected guid conversion to be enabled")
@@ -179,7 +179,7 @@ func TestGuidConversionEnabled(t *testing.T) {
 
 	connStr, _, err = URIToConnString("mssql://sa:pass@localhost/db?guid+conversion=false")
 	if err != nil {
-		t.Fatalf("uriToConnString error: %v", err)
+		t.Fatalf("URIToConnString error: %v", err)
 	}
 	if guidConversionEnabled(connStr) {
 		t.Fatal("expected guid conversion to be disabled")
@@ -187,7 +187,7 @@ func TestGuidConversionEnabled(t *testing.T) {
 
 	connStr, _, err = URIToConnString("mssql://sa:pass@localhost/db?GUID+CONVERSION=1")
 	if err != nil {
-		t.Fatalf("uriToConnString error: %v", err)
+		t.Fatalf("URIToConnString error: %v", err)
 	}
 	if !guidConversionEnabled(connStr) {
 		t.Fatal("expected case-insensitive guid conversion to be enabled")

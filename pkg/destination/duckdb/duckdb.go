@@ -17,6 +17,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/databuffer"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -232,6 +233,15 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 		ingestOpts.DBSchema = schemaName
 	}
 
+	destTableSchema, err := d.getTableSchemaLocked(ctx, opts.Table)
+	if err != nil {
+		return fmt.Errorf("failed to read destination schema for %s: %w", opts.Table, err)
+	}
+	var targetArrowSchema *arrow.Schema
+	if destTableSchema != nil {
+		targetArrowSchema = destTableSchema.ToArrowSchema()
+	}
+
 	// Optional periodic CHECKPOINT to bound DuckDB's WAL/buffer pool growth
 	// during large ingests. Off by default. Set INGESTR_DUCKDB_CHECKPOINT_ROWS=<n>
 	// to checkpoint after every n rows (-1 = after every batch).
@@ -258,10 +268,23 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 			continue
 		}
 
+		batch := res.Batch
+		if targetArrowSchema != nil && !arrowSchemasMatchColumnOrder(batch.Schema(), targetArrowSchema) {
+			aligned, alignErr := databuffer.CastRecordToSchema(batch, targetArrowSchema, true)
+			if alignErr != nil {
+				batch.Release()
+				return fmt.Errorf("failed to align batch to destination schema: %w", alignErr)
+			}
+			batch = aligned
+		}
+
 		// Use standard Arrow RecordReader for each batch
-		reader, readerErr := array.NewRecordReader(res.Batch.Schema(), []arrow.RecordBatch{res.Batch})
+		reader, readerErr := array.NewRecordReader(batch.Schema(), []arrow.RecordBatch{batch})
 		if readerErr != nil {
-			res.Batch.Release()
+			batch.Release()
+			if batch != res.Batch {
+				res.Batch.Release()
+			}
 			return fmt.Errorf("failed to create record reader: %w", readerErr)
 		}
 
@@ -270,13 +293,19 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 
 		if ingestErr != nil {
 			config.Debug("[DUCKDB] IngestStream error: %v", ingestErr)
-			res.Batch.Release()
+			batch.Release()
+			if batch != res.Batch {
+				res.Batch.Release()
+			}
 			return fmt.Errorf("failed to ingest batch: %w", ingestErr)
 		}
 
-		totalRows += res.Batch.NumRows()
-		rowsSinceCheckpoint += res.Batch.NumRows()
-		res.Batch.Release()
+		totalRows += batch.NumRows()
+		rowsSinceCheckpoint += batch.NumRows()
+		batch.Release()
+		if batch != res.Batch {
+			res.Batch.Release()
+		}
 
 		shouldCheckpoint := checkpointEvery == -1 ||
 			(checkpointEvery > 0 && rowsSinceCheckpoint >= checkpointEvery)
@@ -743,12 +772,32 @@ func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 	return "", nil
 }
 
+func arrowSchemasMatchColumnOrder(batchSchema, targetSchema *arrow.Schema) bool {
+	if batchSchema.NumFields() != targetSchema.NumFields() {
+		return false
+	}
+	for i := 0; i < batchSchema.NumFields(); i++ {
+		batchField := batchSchema.Field(i)
+		targetField := targetSchema.Field(i)
+		if batchField.Name != targetField.Name {
+			return false
+		}
+		if !arrow.TypeEqual(batchField.Type, targetField.Type) {
+			return false
+		}
+	}
+	return true
+}
+
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *DuckDBDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := parseSchemaTable(table)
-
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.getTableSchemaLocked(ctx, table)
+}
+
+func (d *DuckDBDestination) getTableSchemaLocked(ctx context.Context, table string) (*schema.TableSchema, error) {
+	schemaName, tableName := parseSchemaTable(table)
 
 	query := fmt.Sprintf("DESCRIBE %s", destination.QuoteTableName(table))
 	stmt, err := d.conn.NewStatement()

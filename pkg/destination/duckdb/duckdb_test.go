@@ -639,6 +639,73 @@ func TestWrite_BasicData(t *testing.T) {
 	}
 }
 
+func TestWrite_AlignsBatchToDestinationColumnOrder(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "active", DataType: schema.TypeBoolean},
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString},
+		},
+	}
+
+	err := dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:     "users",
+		Schema:    tableSchema,
+		DropFirst: true,
+	})
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `ALTER TABLE users ADD COLUMN email VARCHAR`)
+	require.NoError(t, err)
+
+	mem := memory.NewGoAllocator()
+	sourceSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "active", Type: arrow.FixedWidthTypes.Boolean, Nullable: true},
+		{Name: "email", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	activeBuilder := array.NewBooleanBuilder(mem)
+	emailBuilder := array.NewStringBuilder(mem)
+	idBuilder := array.NewInt64Builder(mem)
+	nameBuilder := array.NewStringBuilder(mem)
+
+	activeBuilder.Append(true)
+	emailBuilder.Append("charlie@example.com")
+	idBuilder.Append(3)
+	nameBuilder.Append("charlie")
+
+	record := array.NewRecordBatch(sourceSchema, []arrow.Array{
+		activeBuilder.NewArray(),
+		emailBuilder.NewArray(),
+		idBuilder.NewArray(),
+		nameBuilder.NewArray(),
+	}, 1)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: record}
+	close(records)
+
+	err = dest.Write(ctx, records, destination.WriteOptions{Table: "users"})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+	var id int64
+	var name string
+	var email string
+	var active bool
+	err = db.QueryRowContext(ctx, "SELECT id, name, email, active FROM users").Scan(&id, &name, &email, &active)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), id)
+	assert.Equal(t, "charlie", name)
+	assert.Equal(t, "charlie@example.com", email)
+	assert.True(t, active)
+}
+
 func TestMergeTable(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)
