@@ -1,7 +1,3 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
 **ingestr** is a Go-based data ingestion CLI that transfers data between databases and formats. It uses Apache Arrow for in-memory data representation and ADBC (Arrow Database Connectivity) for database interactions.
@@ -37,6 +33,8 @@ go run . ingest --source-uri=<uri> --dest-uri=<uri> --source-table=<table>
 make format                   # gci + gofumpt + go vet + golangci-lint
 make lint                     # Linters only
 ```
+
+Always run `make format`, `make lint` and `make test` when you are done with making your changes, ensure they pass.
 
 ## Architecture Overview
 
@@ -86,13 +84,6 @@ The ADBC source uses a Dialect interface to abstract database-specific behavior:
 - **DatasetAwareDialect**: For databases like BigQuery that embed schema in query paths
 - **DatasetConnector**: For databases requiring `dataset_id` in connection string (BigQuery)
 - **SchemaProvider**: Optional interface for native API schema fetching (faster than SQL)
-
-Located in `pkg/source/adbc/`:
-- `source.go`: Generic ADBC source implementation
-- `dialect.go`: Dialect interface definitions
-- `driver.go`: ADBC driver management and dbc tool integration
-- `query.go`: SQL query builder with column filtering and incremental logic
-- `batch.go`: Arrow record batch conversion from `sql.Rows`
 
 Database-specific dialects in `pkg/source/{database}/dialect.go`:
 - `duckdb/dialect.go`

@@ -60,6 +60,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
         link: "/",
         items: [
           { text: "Quickstart", link: "/getting-started/quickstart.md" },
+          { text: "Python SDK", link: "/getting-started/python-sdk.md" },
           { text: "Core Concepts", link: "/getting-started/core-concepts.md" },
           {
             text: "Incremental Loading",

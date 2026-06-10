@@ -10,6 +10,7 @@ authors = [
 dynamic = ["version"]
 description = "ingestr is a command-line application that ingests data from various sources and stores them in any database."
 readme = "README.md"
+requires-python = ">=3.7"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -24,7 +25,11 @@ classifiers = [
 Homepage = "https://github.com/bruin-data/ingestr"
 Issues = "https://github.com/bruin-data/ingestr/issues"
 
+[project.optional-dependencies]
+sdk = ["pyarrow>=10"]
+
 [tool.hatch.build.targets.wheel]
+packages = ["ingestr"]
 shared-scripts = { "bin/ingestr" = "ingestr" }
 bypass-selection = true
 
