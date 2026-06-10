@@ -555,7 +555,6 @@ func (d *OneLakeDestination) rewriteTableWithRetry(ctx context.Context, targetTa
 	}
 	defer releaseBatches(sBatches)
 
-	dataFile := fmt.Sprintf("part-00000-%s.c000.snappy.parquet", uuid.New().String())
 	var lastConflict error
 	for attempt := 0; attempt < maxDeltaCommitAttempts; attempt++ {
 		tDir, tSnap, tBatches, err := d.readTable(ctx, targetTable, readOp)
@@ -569,6 +568,10 @@ func (d *OneLakeDestination) rewriteTableWithRetry(ctx context.Context, targetTa
 			return err
 		}
 
+		// Delta data files are immutable, so each attempt writes a fresh file
+		// rather than overwriting the previous attempt's object. Files left by
+		// conflicting attempts are unreferenced and reclaimed by VACUUM.
+		dataFile := fmt.Sprintf("part-00000-%s.c000.snappy.parquet", uuid.New().String())
 		rewrite, err := d.uploadRewriteData(ctx, tDir, dataFile, result)
 		releaseBatches(result)
 		if err != nil {
