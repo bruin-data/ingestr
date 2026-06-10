@@ -54,17 +54,28 @@ SendGrid source allows ingesting the following sources into separate tables:
 
 Use one of these as the `--source-table` parameter in the `ingestr ingest` command.
 
-## Incremental loading
+## Examples
 
-SendGrid handles incrementality differently per table:
+Ingest weekly aggregated statistics from a given start date (`global_stats` requires `--interval-start`):
 
-- `messages`: With both bounds, ingestr filters `last_event_time BETWEEN TIMESTAMP "<start>" AND TIMESTAMP "<end>"`; with a single bound it uses `>=` or `<=`. The endpoint has no documented pagination, so ingestr requests one page with `limit=1000` and warns if a full page is returned.
-- `global_stats`: Requires `--interval-start` because SendGrid requires `start_date`. If `--interval-end` is omitted, the current UTC date is used. Dates are sent as `YYYY-MM-DD` with `aggregated_by` from the URI.
-- `bounces`: Uses SendGrid's inclusive Unix timestamp filters `start_time`/`end_time` when intervals are provided; without them, all bounces are paged through.
-- `single_sends`: SendGrid documents no server-side time filter for the list endpoint, so ingestr pages through all results and applies the interval filter on `updated_at` client-side.
-- `lists`: Replace-only; SendGrid does not expose an update timestamp in the list response.
+```sh
+ingestr ingest \
+  --source-uri 'sendgrid://?api_key=SG.xxxxxx&stats_aggregated_by=week' \
+  --source-table 'global_stats' \
+  --dest-uri duckdb:///sendgrid.duckdb \
+  --dest-table 'sendgrid.global_stats' \
+  --interval-start 2024-01-01
+```
 
-When no interval is provided, `bounces`, `lists`, and `single_sends` fetch all available records, `messages` returns the first page of up to 1000 records, and `global_stats` returns an error because `start_date` is required.
+Ingest only bounced messages of a subuser, using a custom Email Activity query and the `on-behalf-of` header (note the query value is URL-encoded — `status="bounce"`):
+
+```sh
+ingestr ingest \
+  --source-uri 'sendgrid://?api_key=SG.xxxxxx&on_behalf_of=my-subuser&email_activity_query=status%3D%22bounce%22' \
+  --source-table 'messages' \
+  --dest-uri duckdb:///sendgrid.duckdb \
+  --dest-table 'sendgrid.messages'
+```
 
 ## Notes
 
