@@ -14,13 +14,13 @@ func TestParsePaddleURI(t *testing.T) {
 	}{
 		{
 			name:    "valid key",
-			uri:     "paddle://?api_key=pdl_live_apikey_123",
-			wantKey: "pdl_live_apikey_123",
+			uri:     "paddle://?api_key=test123",
+			wantKey: "test123",
 		},
 		{
 			name:    "api_key with special characters",
-			uri:     "paddle://?api_key=pdl_live_apikey_abc_DEF_123",
-			wantKey: "pdl_live_apikey_abc_DEF_123",
+			uri:     "paddle://?api_key=test_KEY_123",
+			wantKey: "test_KEY_123",
 		},
 		{
 			name:      "missing api_key",
@@ -63,8 +63,8 @@ func TestBaseURLForKey(t *testing.T) {
 		key  string
 		want string
 	}{
-		{"pdl_live_apikey_123", prodBaseURL},
-		{"pdl_sdbx_apikey_123", sandboxBaseURL},
+		{"pdl_live_xxx", prodBaseURL},
+		{"pdl_sdbx_xxx", sandboxBaseURL},
 		{"unprefixed", prodBaseURL},
 	}
 	for _, tt := range tests {

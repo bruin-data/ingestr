@@ -30,7 +30,7 @@ ingestr ingest \
 
 ## Tables
 
-Paddle source allows ingesting the following resources into separate tables:
+Paddle source allows ingesting the following resources:
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 | ----- | -- | ------- | ------------ | ------- |
