@@ -16,6 +16,7 @@ var (
 	fixedStringRe   = regexp.MustCompile(`(?i)FixedString\s*\(\s*(\d+)\s*\)`)
 	enumRegex       = regexp.MustCompile(`(?i)Enum(?:8|16)\s*\(`)
 	datetime64Regex = regexp.MustCompile(`(?i)DateTime64\s*\(\s*(\d+)`)
+	datetimeRegex   = regexp.MustCompile(`(?i)^DateTime\s*(?:\(.+\))?$`)
 )
 
 func MapClickHouseToDataType(chType string) (schema.DataType, int, int, schema.DataType) {
@@ -33,8 +34,8 @@ func MapClickHouseToDataType(chType string) (schema.DataType, int, int, schema.D
 
 	// Handle Array(T)
 	if matches := arrayRegex.FindStringSubmatch(chType); len(matches) == 2 {
-		elemType, _, _, _ := MapClickHouseToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapClickHouseToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	// Handle Decimal types with precision/scale
@@ -58,7 +59,7 @@ func MapClickHouseToDataType(chType string) (schema.DataType, int, int, schema.D
 	}
 
 	// Handle DateTime64 with precision
-	if datetime64Regex.MatchString(chType) {
+	if datetime64Regex.MatchString(chType) || datetimeRegex.MatchString(chType) {
 		return schema.TypeTimestamp, 0, 0, schema.TypeUnknown
 	}
 

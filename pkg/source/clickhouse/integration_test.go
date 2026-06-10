@@ -12,10 +12,16 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/testutil"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
+	chsource "github.com/bruin-data/ingestr/pkg/source/clickhouse"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -279,6 +285,78 @@ func TestClickHouseSource_ToDuckDB_Merge(t *testing.T) {
 	assert.Equal(t, "User_6", string(nameRaw), "expected new row with id=6")
 }
 
+func TestClickHouseSource_ReadArrayTypes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	container, uri, err := startClickHouseContainer(ctx)
+	if err != nil {
+		t.Skipf("failed to start ClickHouse container: %v", err)
+	}
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	sourceTable := fmt.Sprintf("source_array_types_%d", time.Now().UnixNano())
+	first := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	second := time.Date(2024, 1, 2, 13, 30, 0, 0, time.UTC)
+	setupClickHouseArrayTypesTable(t, ctx, uri, sourceTable, first, second)
+	defer cleanupClickHouseTable(ctx, uri, sourceTable)
+
+	src := chsource.NewClickHouseSource()
+	require.NoError(t, src.Connect(ctx, uri))
+	defer func() { _ = src.Close(ctx) }()
+
+	table, err := src.GetTable(ctx, source.TableRequest{Name: sourceTable})
+	require.NoError(t, err)
+
+	tableSchema, err := table.GetSchema(ctx)
+	require.NoError(t, err)
+	require.Len(t, tableSchema.Columns, 11)
+	requireArrayColumn(t, tableSchema.Columns[1], schema.TypeTimestamp, 0, 0)
+	requireArrayColumn(t, tableSchema.Columns[2], schema.TypeTimestamp, 0, 0)
+	requireArrayColumn(t, tableSchema.Columns[3], schema.TypeString, 0, 0)
+	requireArrayColumn(t, tableSchema.Columns[4], schema.TypeInt32, 0, 0)
+	requireArrayColumn(t, tableSchema.Columns[5], schema.TypeBoolean, 0, 0)
+	requireArrayColumn(t, tableSchema.Columns[6], schema.TypeDecimal, 18, 5)
+	requireArrayColumn(t, tableSchema.Columns[7], schema.TypeUUID, 0, 0)
+	requireArrayColumn(t, tableSchema.Columns[8], schema.TypeString, 0, 0)
+	requireArrayColumn(t, tableSchema.Columns[9], schema.TypeString, 0, 0)
+	requireArrayColumn(t, tableSchema.Columns[10], schema.TypeString, 0, 0)
+
+	records, err := table.Read(ctx, source.ReadOptions{PageSize: 10})
+	require.NoError(t, err)
+
+	var batch arrow.RecordBatch
+	for res := range records {
+		require.NoError(t, res.Err)
+		if batch == nil {
+			batch = res.Batch
+			continue
+		}
+		res.Batch.Release()
+	}
+	require.NotNil(t, batch)
+	defer batch.Release()
+
+	require.Equal(t, int64(1), batch.NumRows())
+	requireTimestampList(t, batch.Column(1), []*time.Time{&first, &second})
+	requireTimestampList(t, batch.Column(2), []*time.Time{&first, nil, &second})
+	requireStringList(t, batch.Column(3), []*string{stringPtr("alpha"), nil, stringPtr("omega")})
+	requireInt32List(t, batch.Column(4), []*int32{int32Ptr(1), nil, int32Ptr(65535)})
+	requireBoolList(t, batch.Column(5), []*bool{boolPtr(true), nil, boolPtr(false)})
+	requireDecimalList(t, batch.Column(6), []string{"1234567", "", "8900001"})
+	requireStringList(t, batch.Column(7), []*string{
+		stringPtr("11111111-1111-1111-1111-111111111111"),
+		nil,
+		stringPtr("22222222-2222-2222-2222-222222222222"),
+	})
+	requireStringList(t, batch.Column(8), []*string{stringPtr("127.0.0.1"), nil, stringPtr("8.8.8.8")})
+	requireStringList(t, batch.Column(9), []*string{stringPtr("Click\x00\x00\x00\x00\x00"), nil, stringPtr("House\x00\x00\x00\x00\x00")})
+	requireStringList(t, batch.Column(10), []*string{stringPtr("click"), nil, stringPtr("house")})
+}
+
 func countDuckDBRows(t *testing.T, dbPath, table string) int {
 	t.Helper()
 	db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", dbPath))
@@ -369,6 +447,158 @@ func setupClickHouseSourceTableWithTimestamp(t *testing.T, ctx context.Context, 
 		require.NoError(t, err)
 	}
 }
+
+func setupClickHouseArrayTypesTable(t *testing.T, ctx context.Context, uri string, table string, first, second time.Time) {
+	t.Helper()
+
+	opts, err := clickhouse.ParseDSN(uri)
+	require.NoError(t, err)
+
+	db := clickhouse.OpenDB(opts)
+	defer func() { _ = db.Close() }()
+
+	createSQL := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id UInt8,
+			offer_departure Array(DateTime),
+			nullable_departure Array(Nullable(DateTime)),
+			tags Array(Nullable(String)),
+			scores Array(Nullable(UInt16)),
+			flags Array(Nullable(Bool)),
+			prices Array(Nullable(Decimal(18,5))),
+			uuids Array(Nullable(UUID)),
+			ips Array(Nullable(IPv4)),
+			fixed_names Array(Nullable(FixedString(10))),
+			event_types Array(Nullable(Enum8('click' = 1, 'house' = 2)))
+		) ENGINE = MergeTree()
+		ORDER BY id
+	`, table)
+
+	_, err = db.ExecContext(ctx, createSQL)
+	require.NoError(t, err)
+
+	insertSQL := fmt.Sprintf(
+		`INSERT INTO %s VALUES (
+			1,
+			[toDateTime('%s'), toDateTime('%s')],
+			[toDateTime('%s'), NULL, toDateTime('%s')],
+			['alpha', NULL, 'omega'],
+			[1, NULL, 65535],
+			[true, NULL, false],
+			[toDecimal64(12.34567, 5), NULL, toDecimal64(89.00001, 5)],
+			[toUUID('11111111-1111-1111-1111-111111111111'), NULL, toUUID('22222222-2222-2222-2222-222222222222')],
+			[toIPv4('127.0.0.1'), NULL, toIPv4('8.8.8.8')],
+			['Click', NULL, 'House'],
+			['click', NULL, 'house']
+		)`,
+		table,
+		first.Format("2006-01-02 15:04:05"),
+		second.Format("2006-01-02 15:04:05"),
+		first.Format("2006-01-02 15:04:05"),
+		second.Format("2006-01-02 15:04:05"),
+	)
+	_, err = db.ExecContext(ctx, insertSQL)
+	require.NoError(t, err)
+}
+
+func requireArrayColumn(t *testing.T, col schema.Column, arrayType schema.DataType, precision, scale int) {
+	t.Helper()
+	require.Equal(t, schema.TypeArray, col.DataType)
+	require.Equal(t, arrayType, col.ArrayType)
+	require.Equal(t, precision, col.Precision)
+	require.Equal(t, scale, col.Scale)
+}
+
+func requireTimestampList(t *testing.T, col arrow.Array, want []*time.Time) {
+	t.Helper()
+	list, ok := col.(*array.List)
+	require.True(t, ok)
+	require.False(t, list.IsNull(0))
+	values := list.ListValues().(*array.Timestamp)
+	require.Equal(t, len(want), values.Len())
+	for i, expected := range want {
+		if expected == nil {
+			assert.True(t, values.IsNull(i))
+			continue
+		}
+		assert.False(t, values.IsNull(i))
+		assert.Equal(t, arrow.Timestamp(expected.UnixMicro()), values.Value(i))
+	}
+}
+
+func requireStringList(t *testing.T, col arrow.Array, want []*string) {
+	t.Helper()
+	list, ok := col.(*array.List)
+	require.True(t, ok)
+	require.False(t, list.IsNull(0))
+	values := list.ListValues().(*array.String)
+	require.Equal(t, len(want), values.Len())
+	for i, expected := range want {
+		if expected == nil {
+			assert.True(t, values.IsNull(i))
+			continue
+		}
+		assert.False(t, values.IsNull(i))
+		assert.Equal(t, *expected, values.Value(i))
+	}
+}
+
+func requireInt32List(t *testing.T, col arrow.Array, want []*int32) {
+	t.Helper()
+	list, ok := col.(*array.List)
+	require.True(t, ok)
+	require.False(t, list.IsNull(0))
+	values := list.ListValues().(*array.Int32)
+	require.Equal(t, len(want), values.Len())
+	for i, expected := range want {
+		if expected == nil {
+			assert.True(t, values.IsNull(i))
+			continue
+		}
+		assert.False(t, values.IsNull(i))
+		assert.Equal(t, *expected, values.Value(i))
+	}
+}
+
+func requireBoolList(t *testing.T, col arrow.Array, want []*bool) {
+	t.Helper()
+	list, ok := col.(*array.List)
+	require.True(t, ok)
+	require.False(t, list.IsNull(0))
+	values := list.ListValues().(*array.Boolean)
+	require.Equal(t, len(want), values.Len())
+	for i, expected := range want {
+		if expected == nil {
+			assert.True(t, values.IsNull(i))
+			continue
+		}
+		assert.False(t, values.IsNull(i))
+		assert.Equal(t, *expected, values.Value(i))
+	}
+}
+
+func requireDecimalList(t *testing.T, col arrow.Array, wantRawScaled []string) {
+	t.Helper()
+	list, ok := col.(*array.List)
+	require.True(t, ok)
+	require.False(t, list.IsNull(0))
+	values := list.ListValues().(*array.Decimal128)
+	require.Equal(t, len(wantRawScaled), values.Len())
+	for i, expected := range wantRawScaled {
+		if expected == "" {
+			assert.True(t, values.IsNull(i))
+			continue
+		}
+		assert.False(t, values.IsNull(i))
+		assert.Equal(t, expected, decimal128.Num(values.Value(i)).BigInt().String())
+	}
+}
+
+func stringPtr(v string) *string { return &v }
+
+func int32Ptr(v int32) *int32 { return &v }
+
+func boolPtr(v bool) *bool { return &v }
 
 func insertClickHouseSimpleRow(t *testing.T, ctx context.Context, uri string, table string, id int, name string, score float64, active bool) {
 	t.Helper()

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"math/big"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
 
@@ -439,47 +441,7 @@ func nativeScanTarget(chType string, nullable bool) interface{} {
 	}
 
 	if m := arrayRegex.FindStringSubmatch(t); len(m) == 2 {
-		elem := strings.TrimSpace(m[1])
-		for {
-			if mm := nullableRegex.FindStringSubmatch(elem); len(mm) == 2 {
-				elem = strings.TrimSpace(mm[1])
-				continue
-			}
-			if mm := lowCardRegex.FindStringSubmatch(elem); len(mm) == 2 {
-				elem = strings.TrimSpace(mm[1])
-				continue
-			}
-			break
-		}
-		switch strings.ToUpper(elem) {
-		case "INT8":
-			return new([]int8)
-		case "INT16":
-			return new([]int16)
-		case "INT32":
-			return new([]int32)
-		case "INT64":
-			return new([]int64)
-		case "UINT8":
-			return new([]uint8)
-		case "UINT16":
-			return new([]uint16)
-		case "UINT32":
-			return new([]uint32)
-		case "UINT64":
-			return new([]uint64)
-		case "INT128", "UINT128", "INT256", "UINT256":
-			return new([]*big.Int)
-		case "FLOAT32":
-			return new([]float32)
-		case "FLOAT64":
-			return new([]float64)
-		case "STRING":
-			return new([]string)
-		case "BOOL", "BOOLEAN":
-			return new([]bool)
-		}
-		return nil
+		return nativeArrayScanTarget(m[1])
 	}
 
 	switch strings.ToUpper(t) {
@@ -515,6 +477,81 @@ func nativeScanTarget(chType string, nullable bool) interface{} {
 		return new(*big.Int)
 	}
 	return nil
+}
+
+func nativeArrayScanTarget(chType string) interface{} {
+	elem, nullable := unwrapClickHouseType(chType)
+	upperElem := strings.ToUpper(elem)
+
+	if enumRegex.MatchString(elem) || fixedStringRe.MatchString(elem) {
+		return arrayScanTarget[string](nullable)
+	}
+	if decimalRegex.MatchString(elem) {
+		return arrayScanTarget[decimal.Decimal](nullable)
+	}
+	if datetime64Regex.MatchString(elem) || datetimeRegex.MatchString(elem) || upperElem == "DATE" || upperElem == "DATE32" {
+		return arrayScanTarget[time.Time](nullable)
+	}
+
+	switch upperElem {
+	case "BOOL", "BOOLEAN":
+		return arrayScanTarget[bool](nullable)
+	case "INT8", "TINYINT":
+		return arrayScanTarget[int8](nullable)
+	case "INT16", "SMALLINT":
+		return arrayScanTarget[int16](nullable)
+	case "INT32", "INT", "INTEGER":
+		return arrayScanTarget[int32](nullable)
+	case "INT64", "BIGINT":
+		return arrayScanTarget[int64](nullable)
+	case "UINT8":
+		return arrayScanTarget[uint8](nullable)
+	case "UINT16":
+		return arrayScanTarget[uint16](nullable)
+	case "UINT32":
+		return arrayScanTarget[uint32](nullable)
+	case "UINT64":
+		return arrayScanTarget[uint64](nullable)
+	case "INT128", "UINT128", "INT256", "UINT256":
+		return new([]*big.Int)
+	case "FLOAT32", "FLOAT":
+		return arrayScanTarget[float32](nullable)
+	case "FLOAT64", "DOUBLE":
+		return arrayScanTarget[float64](nullable)
+	case "STRING", "JSON", "OBJECT":
+		return arrayScanTarget[string](nullable)
+	case "IPV4", "IPV6":
+		return arrayScanTarget[net.IP](nullable)
+	case "UUID":
+		return arrayScanTarget[uuid.UUID](nullable)
+	}
+
+	return nil
+}
+
+func unwrapClickHouseType(chType string) (string, bool) {
+	t := strings.TrimSpace(chType)
+	nullable := false
+	for {
+		if m := nullableRegex.FindStringSubmatch(t); len(m) == 2 {
+			t = strings.TrimSpace(m[1])
+			nullable = true
+			continue
+		}
+		if m := lowCardRegex.FindStringSubmatch(t); len(m) == 2 {
+			t = strings.TrimSpace(m[1])
+			continue
+		}
+		break
+	}
+	return t, nullable
+}
+
+func arrayScanTarget[T any](nullable bool) interface{} {
+	if nullable {
+		return new([]*T)
+	}
+	return new([]T)
 }
 
 func createTypedScanTargets(columns []schema.Column, rawTypes []string) []interface{} {
@@ -681,6 +718,7 @@ func extractValue(target interface{}) interface{} {
 		}
 		return **v
 	case *[]byte:
+		// byte is an alias for uint8, so this also handles Array(UInt8).
 		return *v
 	case *time.Time:
 		return *v
@@ -698,25 +736,65 @@ func extractValue(target interface{}) interface{} {
 		return *v
 	case *[]string:
 		return *v
+	case *[]*string:
+		return *v
 	case *[]bool:
+		return *v
+	case *[]*bool:
 		return *v
 	case *[]int8:
 		return *v
+	case *[]*int8:
+		return *v
 	case *[]int16:
+		return *v
+	case *[]*int16:
 		return *v
 	case *[]int32:
 		return *v
+	case *[]*int32:
+		return *v
 	case *[]int64:
+		return *v
+	case *[]*int64:
+		return *v
+	case *[]*uint8:
 		return *v
 	case *[]uint16:
 		return *v
+	case *[]*uint16:
+		return *v
 	case *[]uint32:
+		return *v
+	case *[]*uint32:
 		return *v
 	case *[]uint64:
 		return *v
+	case *[]*uint64:
+		return *v
+	case *[]time.Time:
+		return *v
+	case *[]*time.Time:
+		return *v
 	case *[]float32:
 		return *v
+	case *[]*float32:
+		return *v
 	case *[]float64:
+		return *v
+	case *[]*float64:
+		return *v
+	case *[]decimal.Decimal:
+		return *v
+	case *[]*decimal.Decimal:
+		return *v
+	case *[]uuid.UUID:
+		return *v
+	case *[]*uuid.UUID:
+		return *v
+	case *[]net.IP:
+		return *v
+	case *[]*net.IP:
 		return *v
 	case *[]*big.Int:
 		return *v
