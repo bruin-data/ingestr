@@ -10,9 +10,9 @@ import (
 
 var (
 	decimalRegex    = regexp.MustCompile(`(?i)Decimal(?:32|64|128|256)?\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)`)
-	arrayRegex      = regexp.MustCompile(`(?i)Array\s*\(\s*(.+)\s*\)`)
-	nullableRegex   = regexp.MustCompile(`(?i)Nullable\s*\(\s*(.+)\s*\)`)
-	lowCardRegex    = regexp.MustCompile(`(?i)LowCardinality\s*\(\s*(.+)\s*\)`)
+	arrayRegex      = regexp.MustCompile(`(?i)^Array\s*\(\s*(.+)\s*\)$`)
+	nullableRegex   = regexp.MustCompile(`(?i)^Nullable\s*\(\s*(.+)\s*\)$`)
+	lowCardRegex    = regexp.MustCompile(`(?i)^LowCardinality\s*\(\s*(.+)\s*\)$`)
 	fixedStringRe   = regexp.MustCompile(`(?i)FixedString\s*\(\s*(\d+)\s*\)`)
 	enumRegex       = regexp.MustCompile(`(?i)Enum(?:8|16)\s*\(`)
 	datetime64Regex = regexp.MustCompile(`(?i)DateTime64\s*\(\s*(\d+)`)
