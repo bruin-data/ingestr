@@ -235,8 +235,9 @@ func (d *MongoDBDestination) MergeTable(ctx context.Context, opts destination.Me
 	if isCDC {
 		// Process changes in LSN order so the per-PK composition below sees the
 		// latest change last (LSN strings are fixed-width and sort
-		// lexicographically).
-		findOpts.SetSort(bson.D{{Key: destination.CDCLSNColumn, Value: 1}, {Key: destination.CDCSyncedAtColumn, Value: 1}})
+		// lexicographically). Deletes sort after other changes with the same
+		// LSN so a tied delete wins, mirroring destination.CDCLatestOverallOrderBy.
+		findOpts.SetSort(bson.D{{Key: destination.CDCLSNColumn, Value: 1}, {Key: destination.CDCDeletedColumn, Value: 1}})
 	}
 
 	cursor, err := stagingCol.Find(ctx, bson.D{}, findOpts)

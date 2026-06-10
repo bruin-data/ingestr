@@ -481,9 +481,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// latest change for that PK is a delete (preserving row data).
 		pkList := strings.Join(quotedPKs, ", ")
 		selectCols := strings.Join(quotedColumns, ", ")
-		// CDC LSN strings are fixed-width per source (Postgres %08X/%08X,
-		// SQL Server hex:hex:op), so plain text ordering matches LSN order.
-		orderByParts := append(append([]string{}, quotedPKs...), `"_cdc_lsn" DESC`, `"_cdc_synced_at" DESC`)
+		orderByParts := append(append([]string{}, quotedPKs...), destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier))
 		orderBy := strings.Join(orderByParts, ", ")
 
 		latestActive := fmt.Sprintf(

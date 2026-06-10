@@ -1602,10 +1602,11 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 		stagingRef := fmt.Sprintf("%s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable))
 		fmt.Fprintf(
 			&sql,
-			"USING (SELECT %s FROM (SELECT * FROM %s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC, `_cdc_deleted` DESC) = 1) AS la LEFT JOIN (SELECT * FROM %s WHERE `_cdc_deleted` = false QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC) = 1) AS act ON %s) AS s\n",
+			"USING (SELECT %s FROM (SELECT * FROM %s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) = 1) AS la LEFT JOIN (SELECT * FROM %s WHERE `_cdc_deleted` = false QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC) = 1) AS act ON %s) AS s\n",
 			strings.Join(selectCols, ", "),
 			stagingRef,
 			strings.Join(pkPartition, ", "),
+			destination.CDCLatestOverallOrderBy(quoteIdentifier),
 			stagingRef,
 			strings.Join(pkPartition, ", "),
 			strings.Join(laActJoin, " AND "),

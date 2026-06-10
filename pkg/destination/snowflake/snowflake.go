@@ -495,10 +495,13 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 				where,
 			)
 		}
+		quoteActual := func(col string) string {
+			return quoteIdentifier(actualColumnName(allColumns, col))
+		}
 		composedSource := fmt.Sprintf(
 			"(SELECT %s FROM %s AS la LEFT JOIN %s AS act ON %s)",
 			strings.Join(selectCols, ", "),
-			dedup("", fmt.Sprintf("%s DESC, %s DESC", cdcLSN, cdcDeleted)),
+			dedup("", destination.CDCLatestOverallOrderBy(quoteActual)),
 			dedup(fmt.Sprintf(" WHERE %s = false", cdcDeleted), cdcLSN+" DESC"),
 			strings.Join(laActJoin, " AND "),
 		)

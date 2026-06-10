@@ -379,7 +379,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	isCDC := destination.HasCDCDeletedColumn(columns)
 	dedupOrderBy := "(SELECT NULL)"
 	if isCDC {
-		dedupOrderBy = "`_cdc_lsn` DESC, `_cdc_synced_at` DESC"
+		dedupOrderBy = destination.CDCLatestOverallOrderBy(quoteColumn)
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = quoteColumns([]string{opts.IncrementalKey})[0] + " DESC"
 	}

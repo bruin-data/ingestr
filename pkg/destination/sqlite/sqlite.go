@@ -442,7 +442,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	isCDC := destination.HasCDCDeletedColumn(columns)
 	dedupOrderBy := "(SELECT NULL)"
 	if isCDC {
-		dedupOrderBy = `"_cdc_lsn" DESC, "_cdc_synced_at" DESC`
+		dedupOrderBy = destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier)
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
 	}

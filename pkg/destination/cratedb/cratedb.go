@@ -331,7 +331,7 @@ func (d *CrateDBDestination) mergeCDC(ctx context.Context, quotedTargetTable, qu
 			colList, colList, pkList, orderBy, quotedStagingTable, where,
 		)
 	}
-	latestAll := dedup("", `"_cdc_lsn" DESC, "_cdc_synced_at" DESC`)
+	latestAll := dedup("", destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier))
 	latestActive := dedup(` WHERE "_cdc_deleted" = false`, `"_cdc_lsn" DESC`)
 
 	upsertActiveSQL := fmt.Sprintf(

@@ -492,10 +492,11 @@ func (d *DynamoDBDestination) MergeTable(ctx context.Context, opts destination.M
 // existing items only; unknown rows are not materialized from a bare delete.
 func (d *DynamoDBDestination) mergeCDC(ctx context.Context, opts destination.MergeOptions) error {
 	type cdcEntry struct {
-		latest    map[string]types.AttributeValue
-		latestLSN string
-		active    map[string]types.AttributeValue
-		activeLSN string
+		latest        map[string]types.AttributeValue
+		latestLSN     string
+		latestDeleted bool
+		active        map[string]types.AttributeValue
+		activeLSN     string
 	}
 	entries := map[string]*cdcEntry{}
 
@@ -533,11 +534,13 @@ func (d *DynamoDBDestination) mergeCDC(ctx context.Context, opts destination.Mer
 				entries[key] = entry
 			}
 			lsn := itemLSN(item)
-			if entry.latest == nil || lsn > entry.latestLSN {
+			deleted := itemDeleted(item)
+			if entry.latest == nil || destination.CDCSupersedes(lsn, deleted, entry.latestLSN, entry.latestDeleted) {
 				entry.latest = item
 				entry.latestLSN = lsn
+				entry.latestDeleted = deleted
 			}
-			if !itemDeleted(item) && (entry.active == nil || lsn > entry.activeLSN) {
+			if !deleted && (entry.active == nil || lsn > entry.activeLSN) {
 				entry.active = item
 				entry.activeLSN = lsn
 			}

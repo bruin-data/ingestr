@@ -378,10 +378,11 @@ func (d *CassandraDestination) MergeTable(ctx context.Context, opts destination.
 // from a bare delete image.
 func (d *CassandraDestination) mergeCDC(ctx context.Context, targetRef, selectSQL, insertSQL string, opts destination.MergeOptions) error {
 	type cdcEntry struct {
-		latest    map[string]interface{}
-		latestLSN string
-		active    map[string]interface{}
-		activeLSN string
+		latest        map[string]interface{}
+		latestLSN     string
+		latestDeleted bool
+		active        map[string]interface{}
+		activeLSN     string
 	}
 	entries := map[string]*cdcEntry{}
 
@@ -405,9 +406,10 @@ func (d *CassandraDestination) mergeCDC(ctx context.Context, targetRef, selectSQ
 		}
 		lsn, _ := row[destination.CDCLSNColumn].(string)
 		deleted, _ := row[destination.CDCDeletedColumn].(bool)
-		if entry.latest == nil || lsn > entry.latestLSN {
+		if entry.latest == nil || destination.CDCSupersedes(lsn, deleted, entry.latestLSN, entry.latestDeleted) {
 			entry.latest = row
 			entry.latestLSN = lsn
+			entry.latestDeleted = deleted
 		}
 		if !deleted && (entry.active == nil || lsn > entry.activeLSN) {
 			entry.active = row

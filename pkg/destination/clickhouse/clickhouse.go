@@ -317,14 +317,14 @@ func buildCDCMergeInsert(targetDB, targetName, stagingDB, stagingName string, co
 	target := fmt.Sprintf("%s.%s", quoteIdentifier(targetDB), quoteIdentifier(targetName))
 
 	return fmt.Sprintf(
-		"INSERT INTO %s (%s) SELECT %s FROM (SELECT * FROM %s ORDER BY `_cdc_lsn` DESC, `_cdc_synced_at` DESC LIMIT 1 BY %s) AS la "+
+		"INSERT INTO %s (%s) SELECT %s FROM (SELECT * FROM %s ORDER BY %s LIMIT 1 BY %s) AS la "+
 			"LEFT JOIN (SELECT * FROM %s WHERE `_cdc_deleted` = false ORDER BY `_cdc_lsn` DESC LIMIT 1 BY %s) AS act ON %s "+
 			"LEFT JOIN (SELECT * FROM %s FINAL) AS t ON %s "+
 			"WHERE la.`_cdc_deleted` = false OR act.`_cdc_lsn` != '' OR t.`_cdc_lsn` != ''",
 		target,
 		strings.Join(quotedColumns, ", "),
 		strings.Join(selectCols, ", "),
-		staging, pkList,
+		staging, destination.CDCLatestOverallOrderBy(quoteIdentifier), pkList,
 		staging, pkList, joinOn("la", "act"),
 		target, joinOn("la", "t"),
 	)

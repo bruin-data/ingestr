@@ -521,7 +521,7 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 	composedSource := fmt.Sprintf(
 		"(SELECT %s FROM %s AS la LEFT JOIN %s AS act ON %s)",
 		strings.Join(selectCols, ", "),
-		dedup("", "[_cdc_lsn] DESC, [_cdc_synced_at] DESC"),
+		dedup("", destination.CDCLatestOverallOrderBy(quoteColumn)),
 		dedup(" WHERE [_cdc_deleted] = 0", "[_cdc_lsn] DESC"),
 		strings.Join(laActJoin, " AND "),
 	)
