@@ -113,6 +113,11 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 
 			destTable := job.GetDestTableName(ti.Name)
 
+			if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
+				errChan <- fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
+				return
+			}
+
 			if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 				Table:       destTable,
 				Schema:      ti.Schema,
