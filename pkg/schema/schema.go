@@ -151,7 +151,7 @@ func DataTypeToArrowType(col Column) arrow.DataType {
 	case TypeTimestampTZ:
 		return &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
 	case TypeArray:
-		elemType := DataTypeToArrowType(Column{DataType: col.ArrayType})
+		elemType := DataTypeToArrowType(Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale})
 		return arrow.ListOf(elemType)
 	default:
 		return arrow.BinaryTypes.String
