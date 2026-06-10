@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     libc6-dev \
+    unixodbc-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -39,6 +40,7 @@ FROM debian:bookworm-slim
 # Install minimal runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    unixodbc \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security

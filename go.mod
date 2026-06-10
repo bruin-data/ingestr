@@ -16,6 +16,7 @@ require (
 	github.com/InfluxCommunity/influxdb3-go/v2 v2.13.0
 	github.com/SAP/go-hdb v1.16.2
 	github.com/alecthomas/chroma/v2 v2.23.1
+	github.com/alexbrainman/odbc v0.0.0-20250601004241-49e6b2bc0cf0
 	github.com/aliyun/aliyun-odps-go-sdk v0.4.22
 	github.com/apache/arrow-adbc/go/adbc v1.9.0
 	github.com/apache/arrow-go/v18 v18.5.1
