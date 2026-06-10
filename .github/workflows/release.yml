@@ -30,6 +30,10 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+      - name: Install uv
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run test suite
         run: make ${{ matrix.suite }}
 
