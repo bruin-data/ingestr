@@ -247,13 +247,18 @@ func (d *ClickHouseDestination) MergeTable(ctx context.Context, opts destination
 
 	quotedColumns := quoteColumns(opts.Columns)
 
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s.%s (%s) SELECT %s FROM %s.%s",
-		quoteIdentifier(targetDB), quoteIdentifier(targetName),
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
-	)
+	var insertSQL string
+	if destination.HasCDCDeletedColumn(opts.Columns) && len(opts.PrimaryKeys) > 0 {
+		insertSQL = buildCDCMergeInsert(targetDB, targetName, stagingDB, stagingName, opts.Columns, opts.PrimaryKeys)
+	} else {
+		insertSQL = fmt.Sprintf(
+			"INSERT INTO %s.%s (%s) SELECT %s FROM %s.%s",
+			quoteIdentifier(targetDB), quoteIdentifier(targetName),
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedColumns, ", "),
+			quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
+		)
+	}
 	config.Debug("[CLICKHOUSE MERGE] Executing INSERT: %s", insertSQL)
 
 	if err := d.conn.Exec(ctx, insertSQL); err != nil {
@@ -269,6 +274,77 @@ func (d *ClickHouseDestination) MergeTable(ctx context.Context, opts destination
 
 	config.Debug("[CLICKHOUSE MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+// buildCDCMergeInsert composes one row per PK for ReplacingMergeTree: data
+// columns come from the latest non-deleted change in staging, falling back to
+// the current target row for delete-only windows; CDC columns and the deleted
+// flag come from the latest change overall. Rows inserted and deleted within
+// one window materialize as soft-deleted; a delete-only window for an unknown
+// row is skipped. ClickHouse LEFT JOIN fills misses with type defaults (not
+// NULLs), so existence checks compare _cdc_lsn against the empty string.
+func buildCDCMergeInsert(targetDB, targetName, stagingDB, stagingName string, columns, primaryKeys []string) string {
+	pkMap := make(map[string]bool, len(primaryKeys))
+	quotedPKs := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+		quotedPKs[i] = quoteIdentifier(pk)
+	}
+	pkList := strings.Join(quotedPKs, ", ")
+
+	joinOn := func(left, right string) string {
+		conds := make([]string, len(quotedPKs))
+		for i, pk := range quotedPKs {
+			conds[i] = fmt.Sprintf("%s.%s = %s.%s", left, pk, right, pk)
+		}
+		return strings.Join(conds, " AND ")
+	}
+
+	quotedColumns := make([]string, len(columns))
+	selectCols := make([]string, len(columns))
+	for i, col := range columns {
+		quoted := quoteIdentifier(col)
+		quotedColumns[i] = quoted
+		switch {
+		case pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col):
+			selectCols[i] = "la." + quoted
+		default:
+			selectCols[i] = fmt.Sprintf("if(act.`_cdc_lsn` != '', act.%s, t.%s)", quoted, quoted)
+		}
+	}
+
+	staging := fmt.Sprintf("%s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName))
+	target := fmt.Sprintf("%s.%s", quoteIdentifier(targetDB), quoteIdentifier(targetName))
+
+	return fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM (SELECT * FROM %s ORDER BY `_cdc_lsn` DESC, `_cdc_synced_at` DESC LIMIT 1 BY %s) AS la "+
+			"LEFT JOIN (SELECT * FROM %s WHERE `_cdc_deleted` = false ORDER BY `_cdc_lsn` DESC LIMIT 1 BY %s) AS act ON %s "+
+			"LEFT JOIN (SELECT * FROM %s FINAL) AS t ON %s "+
+			"WHERE la.`_cdc_deleted` = false OR act.`_cdc_lsn` != '' OR t.`_cdc_lsn` != ''",
+		target,
+		strings.Join(quotedColumns, ", "),
+		strings.Join(selectCols, ", "),
+		staging, pkList,
+		staging, pkList, joinOn("la", "act"),
+		target, joinOn("la", "t"),
+	)
+}
+
+func (d *ClickHouseDestination) SupportsCDCMerge() bool { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
+func (d *ClickHouseDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	db, name := d.parseTableName(table)
+	query := fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s.%s", quoteIdentifier(db), quoteIdentifier(name))
+
+	var maxLSN string
+	if err := d.conn.QueryRow(ctx, query).Scan(&maxLSN); err != nil {
+		if strings.Contains(err.Error(), "UNKNOWN_TABLE") || strings.Contains(err.Error(), "doesn't exist") {
+			return "", nil
+		}
+		return "", err
+	}
+	return maxLSN, nil
 }
 
 func (d *ClickHouseDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {

@@ -51,12 +51,26 @@ func TestBuildMergeSQL(t *testing.T) {
 		columns := []string{"id", "name", "value", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
 
-		assert.Contains(t, sql, `ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC`)
-		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = false THEN`)
+		// Composed source: data columns from the latest non-deleted change,
+		// CDC columns from the latest change overall.
+		assert.Contains(t, sql, `SELECT la."ID", act."NAME", act."VALUE", la."_CDC_LSN", la."_CDC_DELETED", la."_CDC_SYNCED_AT", act."_CDC_LSN" IS NOT NULL AS "__ingestr_has_active"`)
+		assert.Contains(t, sql, `ORDER BY "_CDC_LSN" DESC, "_CDC_SYNCED_AT" DESC`)
+		assert.Contains(t, sql, `WHERE "_CDC_DELETED" = false`)
+		assert.Contains(t, sql, `WHEN MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
 		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
 		assert.Contains(t, sql, `target."_CDC_DELETED" = true, target."_CDC_LSN" = source."_CDC_LSN", target."_CDC_SYNCED_AT" = source."_CDC_SYNCED_AT"`)
-		assert.Contains(t, sql, `WHEN NOT MATCHED AND source."_CDC_DELETED" = false THEN`)
-		assert.NotContains(t, sql, `WHEN NOT MATCHED AND source."_CDC_DELETED" = true`)
+		assert.Contains(t, sql, `WHEN NOT MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
+		assert.NotContains(t, sql, "WHEN NOT MATCHED THEN\n")
+	})
+
+	t.Run("cdc_uppercased_columns", func(t *testing.T) {
+		// The naming layer commonly uppercases columns for Snowflake; CDC
+		// detection must be case-insensitive.
+		columns := []string{"ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT"}
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"ID"}, columns, "")
+
+		assert.Contains(t, sql, `"__ingestr_has_active"`)
+		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
 		assert.NotContains(t, sql, "WHEN NOT MATCHED THEN\n")
 	})
 
@@ -64,11 +78,11 @@ func TestBuildMergeSQL(t *testing.T) {
 		columns := []string{"id", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
 
-		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = false THEN`)
+		assert.Contains(t, sql, `WHEN MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
 		assert.Contains(t, sql, `target."_CDC_LSN" = source."_CDC_LSN"`)
 		assert.NotContains(t, sql, `target."NAME" = source."NAME"`)
 		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
-		assert.Contains(t, sql, `WHEN NOT MATCHED AND source."_CDC_DELETED" = false THEN`)
+		assert.Contains(t, sql, `WHEN NOT MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
 	})
 }
 

@@ -434,21 +434,36 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 
-	// Build dedup subquery to handle duplicate PKs in staging. When an
-	// incremental key is set the latest row per PK wins; otherwise arbitrary.
+	// Build dedup subquery to handle duplicate PKs in staging. For CDC data the
+	// latest change per PK wins (LSN strings are fixed-width and sort
+	// lexicographically); otherwise, when an incremental key is set the latest
+	// row per PK wins, else arbitrary.
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
+	isCDC := destination.HasCDCDeletedColumn(columns)
 	dedupOrderBy := "(SELECT NULL)"
-	if opts.IncrementalKey != "" {
+	if isCDC {
+		dedupOrderBy = `"_cdc_lsn" DESC, "_cdc_synced_at" DESC`
+	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
 	}
-	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedPKs, ", "),
-		dedupOrderBy,
-		destination.QuoteTableName(opts.StagingTable),
-	)
+	dedupSource := func(where string) string {
+		return fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			destination.QuoteTableName(opts.StagingTable),
+			where,
+		)
+	}
+
+	// For CDC, upsert from the latest non-deleted change per PK so a delete
+	// followed by nothing doesn't clobber row data; deletes are applied below.
+	upsertSource := dedupSource("")
+	if isCDC {
+		upsertSource = dedupSource(` WHERE "_cdc_deleted" = 0`)
+	}
 
 	// UPDATE existing records using SQLite syntax
 	if len(nonPKColumns) > 0 {
@@ -456,7 +471,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 			`UPDATE %s SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
 			buildUpdateSetSQLite(nonPKColumns, "source"),
-			dedupSource,
+			upsertSource,
 			buildJoinConditionSQLite(opts.PrimaryKeys, quotedTargetTable, "source"),
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
@@ -473,7 +488,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		quotedTargetTable,
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedColumns, ", "),
-		dedupSource,
+		upsertSource,
 		quotedTargetTable,
 		buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source"),
 	)
@@ -482,6 +497,23 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
 		return fmt.Errorf("failed to insert new records: %w", err)
+	}
+
+	if isCDC {
+		// Mark rows deleted only when the latest change for the PK is a delete,
+		// carrying the delete's LSN so resume picks up after it.
+		markDeletedSQL := fmt.Sprintf(
+			`UPDATE %s SET "_cdc_deleted" = 1, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = 1`,
+			quotedTargetTable,
+			dedupSource(""),
+			buildJoinConditionSQLite(opts.PrimaryKeys, quotedTargetTable, "source"),
+		)
+		config.Debug("[MERGE] Executing CDC delete marking: %s", markDeletedSQL)
+
+		if _, err := tx.ExecContext(ctx, markDeletedSQL); err != nil {
+			config.LogFailedQuery(markDeletedSQL, err)
+			return fmt.Errorf("failed to mark deleted records: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -679,6 +711,25 @@ func (d *SQLiteDestination) SupportsSCD2Strategy() bool { return true }
 
 // SupportsAtomicSwap returns true as SQLite supports atomic table renames.
 func (d *SQLiteDestination) SupportsAtomicSwap() bool { return true }
+
+func (d *SQLiteDestination) SupportsCDCMerge() bool { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
+func (d *SQLiteDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	var maxLSN sql.NullString
+	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, destination.QuoteTableName(table))
+	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return "", nil
+		}
+		return "", err
+	}
+	if !maxLSN.Valid {
+		return "", nil
+	}
+	return maxLSN.String, nil
+}
 
 // GetScheme returns the primary URI scheme for SQLite.
 func (d *SQLiteDestination) GetScheme() string { return "sqlite" }

@@ -193,6 +193,113 @@ func TestMSSQLCDC_SnapshotAndIncremental_DuckDB(t *testing.T) {
 	assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM items_dest WHERE id = 5 AND name = 'item5' AND value = 555 AND NOT "_cdc_deleted"`), "insert+update in one window must keep the updated value")
 }
 
+// applyMSSQLCDCAdversarialChanges applies the standard change window covering
+// every same-PK composition case, then waits until the capture job has
+// harvested all change rows (3 seed inserts + 11 window rows).
+func applyMSSQLCDCAdversarialChanges(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+
+	for _, stmt := range []string{
+		`UPDATE dbo.items SET value = 150 WHERE id = 1`,
+		`DELETE FROM dbo.items WHERE id = 2`,
+		`UPDATE dbo.items SET name = N'item3_final', value = 999 WHERE id = 3`,
+		`DELETE FROM dbo.items WHERE id = 3`,
+		`INSERT INTO dbo.items (id, name, value) VALUES (5, N'item5', 500)`,
+		`UPDATE dbo.items SET value = 555 WHERE id = 5`,
+		`INSERT INTO dbo.items (id, name, value) VALUES (6, N'item6', 600)`,
+		`DELETE FROM dbo.items WHERE id = 6`,
+	} {
+		_, err := db.ExecContext(ctx, stmt)
+		require.NoError(t, err)
+	}
+	waitForMSSQLCDCRows(t, ctx, db, "dbo_items", 14)
+}
+
+// verifyMSSQLCDCEndState checks the canonical end state after the adversarial
+// window through a database/sql connection to the destination.
+func verifyMSSQLCDCEndState(t *testing.T, db *sql.DB, table string) {
+	t.Helper()
+
+	queryCount := func(query string) int {
+		var n int
+		require.NoError(t, db.QueryRow(query).Scan(&n))
+		return n
+	}
+
+	assert.Equal(t, 5, queryCount(`SELECT COUNT(*) FROM `+table), "total rows")
+	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM `+table+` WHERE id = 1 AND value = 150 AND _cdc_deleted = false`), "plain update")
+	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM `+table+` WHERE id = 2 AND value = 200 AND _cdc_deleted = true`), "plain delete keeps last values")
+	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM `+table+` WHERE id = 3 AND name = 'item3_final' AND value = 999 AND _cdc_deleted = true`), "update+delete in one window")
+	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM `+table+` WHERE id = 5 AND value = 555 AND _cdc_deleted = false`), "insert+update in one window")
+	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM `+table+` WHERE id = 6 AND value = 600 AND _cdc_deleted = true`), "insert+delete in one window materializes soft-deleted")
+}
+
+func TestMSSQLCDC_SnapshotAndIncremental_SQLite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	dbName, db := setupMSSQLCDCDatabase(t, ctx)
+	createMSSQLCDCItemsTable(t, ctx, db)
+	waitForMSSQLCDCRows(t, ctx, db, "dbo_items", 3)
+
+	tmpDir, err := os.MkdirTemp("", "mssql_cdc_sqlite_*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	sqlitePath := tmpDir + "/test.db"
+
+	cfg := &config.IngestConfig{
+		SourceURI:   mssqlURIForDatabase(t, mssqlDest.uri, "mssql+cdc", dbName, map[string]string{"mode": "batch"}),
+		SourceTable: "dbo.items",
+		DestURI:     "sqlite:///" + sqlitePath,
+		DestTable:   "items_dest",
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	applyMSSQLCDCAdversarialChanges(t, ctx, db)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	dest, err := sql.Open("sqlite3", sqlitePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dest.Close() })
+	verifyMSSQLCDCEndState(t, dest, "items_dest")
+}
+
+func TestMSSQLCDC_SnapshotAndIncremental_MySQL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	if mysqlDest.uri == "" {
+		t.Skip("shared mysql container not available")
+	}
+
+	ctx := context.Background()
+	dbName, db := setupMSSQLCDCDatabase(t, ctx)
+	createMSSQLCDCItemsTable(t, ctx, db)
+	waitForMSSQLCDCRows(t, ctx, db, "dbo_items", 3)
+
+	destTable := fmt.Sprintf("items_dest_%s", uniqueSuffix())
+	cfg := &config.IngestConfig{
+		SourceURI:   mssqlURIForDatabase(t, mssqlDest.uri, "mssql+cdc", dbName, map[string]string{"mode": "batch"}),
+		SourceTable: "dbo.items",
+		DestURI:     mysqlDest.uri,
+		DestTable:   destTable,
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	applyMSSQLCDCAdversarialChanges(t, ctx, db)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	dest, err := sql.Open("mysql", mysqlDSN(mysqlDest.uri))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = dest.Exec("DROP TABLE IF EXISTS " + destTable)
+		_ = dest.Close()
+	})
+	verifyMSSQLCDCEndState(t, dest, destTable)
+}
+
 func TestMSSQLCDC_SnapshotAndIncremental_Postgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
