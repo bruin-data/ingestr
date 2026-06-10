@@ -443,7 +443,20 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
 	startOp := time.Now()
 
-	// Staging table is always in ingestr_staging schema
+	deleteSQL, insertSQL, atomicSQL := d.buildDeleteInsertSQL(opts)
+	config.Debug("[DATABRICKS] Executing DELETE: %s", deleteSQL)
+	config.Debug("[DATABRICKS] Executing INSERT: %s", insertSQL)
+
+	if err := d.executeStatement(ctx, atomicSQL); err != nil {
+		config.LogFailedQuery(atomicSQL, err)
+		return fmt.Errorf("failed to execute atomic delete+insert: %w", err)
+	}
+
+	config.Debug("[DATABRICKS] Delete+Insert completed in %v", time.Since(startOp))
+	return nil
+}
+
+func (d *DatabricksDestination) buildDeleteInsertSQL(opts destination.DeleteInsertOptions) (string, string, string) {
 	_, stagingName := d.parseTableName(opts.StagingTable)
 	targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
@@ -457,26 +470,13 @@ func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts dest
 		"DELETE FROM %s WHERE %s >= %s AND %s <= %s",
 		targetFull, quoteIdentifier(opts.IncrementalKey), startVal, quoteIdentifier(opts.IncrementalKey), endVal,
 	)
-	config.Debug("[DATABRICKS] Executing DELETE: %s", deleteSQL)
-
-	if err := d.executeStatement(ctx, deleteSQL); err != nil {
-		config.LogFailedQuery(deleteSQL, err)
-		return fmt.Errorf("failed to delete records: %w", err)
-	}
 
 	colList := strings.Join(quoteColumns(opts.Columns), ", ")
-	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
 	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingFull, quoteIdentifier(opts.IncrementalKey))
 	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetFull, colList, selectClause)
-	config.Debug("[DATABRICKS] Executing INSERT: %s", insertSQL)
 
-	if err := d.executeStatement(ctx, insertSQL); err != nil {
-		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert records: %w", err)
-	}
-
-	config.Debug("[DATABRICKS] Delete+Insert completed in %v", time.Since(startOp))
-	return nil
+	atomicSQL := fmt.Sprintf("BEGIN ATOMIC\n  %s;\n  %s;\nEND;", deleteSQL, insertSQL)
+	return deleteSQL, insertSQL, atomicSQL
 }
 
 func (d *DatabricksDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
@@ -525,24 +525,8 @@ func (d *DatabricksDestination) Exec(ctx context.Context, sql string, args ...in
 }
 
 func (d *DatabricksDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
-	return &databricksTransaction{dest: d, ctx: ctx}, nil
-}
-
-type databricksTransaction struct {
-	dest *DatabricksDestination
-	ctx  context.Context
-}
-
-func (t *databricksTransaction) Exec(ctx context.Context, sql string, args ...interface{}) error {
-	return t.dest.Exec(ctx, sql, args...)
-}
-
-func (t *databricksTransaction) Commit(ctx context.Context) error {
-	return nil
-}
-
-func (t *databricksTransaction) Rollback(ctx context.Context) error {
-	return nil
+	_ = ctx
+	return nil, errors.New("databricks destination does not support transactions")
 }
 
 func (d *DatabricksDestination) SupportsReplaceStrategy() bool      { return true }

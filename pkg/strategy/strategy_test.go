@@ -99,6 +99,7 @@ type fakeDestination struct {
 	deleteInsertErr   error
 	waitErr           error
 	dropErrByTable    map[string]error
+	noDeleteInsert    bool
 }
 
 func (d *fakeDestination) Schemes() []string                             { return nil }
@@ -117,7 +118,7 @@ func (d *fakeDestination) BeginTransaction(ctx context.Context) (destination.Tra
 func (d *fakeDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *fakeDestination) SupportsAppendStrategy() bool       { return true }
 func (d *fakeDestination) SupportsMergeStrategy() bool        { return true }
-func (d *fakeDestination) SupportsDeleteInsertStrategy() bool { return true }
+func (d *fakeDestination) SupportsDeleteInsertStrategy() bool { return !d.noDeleteInsert }
 func (d *fakeDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *fakeDestination) SupportsAtomicSwap() bool           { return true }
 func (d *fakeDestination) GetScheme() string                  { return "fake" }

@@ -3,12 +3,16 @@ package onelake
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/datalakeerror"
+	datalakefile "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -29,7 +33,12 @@ const (
 	modeFiles
 )
 
-const defaultLayout = "{load_id}.{file_id}.{ext}"
+const (
+	defaultLayout          = "{load_id}.{file_id}.{ext}"
+	maxDeltaCommitAttempts = 5
+)
+
+var errDeltaCommitConflict = errors.New("delta commit version already exists")
 
 // OneLakeDestination writes data to a Microsoft Fabric OneLake lakehouse. It can
 // target the lakehouse "Tables" area (written as a Delta table so it is queryable
@@ -38,6 +47,8 @@ type OneLakeDestination struct {
 	workspace string
 	lakehouse string
 	client    *adlsutil.DataLakeClient
+	cred      azcore.TokenCredential
+	sasToken  string
 	layout    string
 
 	mu          sync.Mutex
@@ -107,6 +118,8 @@ func (d *OneLakeDestination) Connect(ctx context.Context, uri string) error {
 
 	d.workspace = parsed.workspace
 	d.lakehouse = parsed.lakehouse
+	d.cred = nil
+	d.sasToken = parsed.sasToken
 	d.layout = parsed.layout
 	if d.layout == "" {
 		d.layout = defaultLayout
@@ -119,6 +132,7 @@ func (d *OneLakeDestination) Connect(ctx context.Context, uri string) error {
 		if err != nil {
 			return err
 		}
+		d.cred = cred
 		d.client = adlsutil.NewDataLakeClientWithToken(adlsutil.OneLakeAccountName, adlsutil.OneLakeDNSSuffix, cred)
 	}
 
@@ -320,33 +334,115 @@ func (d *OneLakeDestination) writeTablesMode(ctx context.Context, data []byte) e
 	adds := []deltaAddFile{{Path: dataFile, Size: int64(len(data))}}
 	nowMillis := time.Now().UnixMilli()
 
+	for attempt := 0; attempt < maxDeltaCommitAttempts; attempt++ {
+		version, err := d.nextDeltaVersion(ctx, logDir)
+		if err != nil {
+			return err
+		}
+
+		var commit []byte
+		if version == 0 {
+			commit, err = buildInitialCommit(cols, adds, uuid.New().String(), nowMillis)
+		} else {
+			commit, err = buildAppendCommit(adds, nowMillis)
+		}
+		if err != nil {
+			return err
+		}
+
+		if err := d.uploadDeltaCommit(ctx, logDir, version, commit); err != nil {
+			if errors.Is(err, errDeltaCommitConflict) {
+				config.Debug("[ONELAKE] Delta commit version %d already exists; retrying append commit", version)
+				continue
+			}
+			return err
+		}
+		config.Debug("[ONELAKE] Committed delta version %d to %s", version, tableDir)
+		return nil
+	}
+
+	return fmt.Errorf("failed to commit delta table after %d attempts: %w", maxDeltaCommitAttempts, errDeltaCommitConflict)
+}
+
+func (d *OneLakeDestination) uploadDeltaCommit(ctx context.Context, logDir string, version int64, commit []byte) error {
+	commitPath := logDir + "/" + commitFileName(version)
+	if err := d.client.EnsureDirectories(ctx, d.workspace, logDir); err != nil {
+		return fmt.Errorf("failed to prepare delta log directory: %w", err)
+	}
+
+	tempPath := deltaCommitTempPath(logDir)
+	if err := d.client.UploadBuffer(ctx, d.workspace, tempPath, commit); err != nil {
+		return fmt.Errorf("failed to upload temporary delta commit %s: %w", tempPath, err)
+	}
+
+	tempFileClient, err := d.newOneLakeFileClient(tempPath)
+	if err != nil {
+		return err
+	}
+
+	if _, err := tempFileClient.Rename(ctx, commitPath, deltaCommitRenameOptions()); err != nil {
+		if _, deleteErr := tempFileClient.Delete(ctx, nil); deleteErr != nil {
+			config.Debug("[ONELAKE] Failed to delete temporary delta commit %s: %v", tempPath, deleteErr)
+		}
+		if isDeltaCommitConflict(err) {
+			return errDeltaCommitConflict
+		}
+		return fmt.Errorf("failed to publish delta commit %s: %w", commitPath, err)
+	}
+	return nil
+}
+
+func (d *OneLakeDestination) newOneLakeFileClient(path string) (*datalakefile.Client, error) {
+	pathURL, err := adlsutil.PathURLWithSuffix(adlsutil.OneLakeAccountName, adlsutil.OneLakeDNSSuffix, d.workspace, path)
+	if err != nil {
+		return nil, err
+	}
+	if d.sasToken != "" {
+		return datalakefile.NewClientWithNoCredential(adlsutil.AppendSASToken(pathURL, d.sasToken), nil)
+	}
+	if d.cred == nil {
+		return nil, fmt.Errorf("OneLake destination is not connected")
+	}
+	return datalakefile.NewClient(pathURL, d.cred, nil)
+}
+
+func deltaCommitRenameOptions() *datalakefile.RenameOptions {
+	etagAny := azcore.ETagAny
+	return &datalakefile.RenameOptions{
+		AccessConditions: &datalakefile.AccessConditions{
+			ModifiedAccessConditions: &datalakefile.ModifiedAccessConditions{
+				IfNoneMatch: &etagAny,
+			},
+		},
+	}
+}
+
+func deltaCommitTempPath(logDir string) string {
+	tableDir := strings.TrimSuffix(logDir, "/_delta_log")
+	return tableDir + "/_bruin_delta_tmp/" + uuid.New().String() + ".tmp"
+}
+
+func isDeltaCommitConflict(err error) bool {
+	return datalakeerror.HasCode(
+		err,
+		datalakeerror.ConditionNotMet,
+		datalakeerror.PathAlreadyExists,
+		datalakeerror.ResourceAlreadyExists,
+	)
+}
+
+func (d *OneLakeDestination) nextDeltaVersion(ctx context.Context, logDir string) (int64, error) {
 	version := int64(0)
-	var commit []byte
 	if !d.dropFirst {
 		versions, err := d.client.ListLogVersions(ctx, d.workspace, logDir)
 		if err != nil {
-			return fmt.Errorf("failed to inspect delta log: %w", err)
+			return 0, fmt.Errorf("failed to inspect delta log: %w", err)
 		}
 		if len(versions) > 0 {
 			version = versions[len(versions)-1] + 1
 		}
 	}
-
-	if version == 0 {
-		commit, err = buildInitialCommit(cols, adds, uuid.New().String(), nowMillis)
-	} else {
-		commit, err = buildAppendCommit(adds, nowMillis)
-	}
-	if err != nil {
-		return err
-	}
-
-	commitPath := logDir + "/" + commitFileName(version)
-	if err := d.client.UploadBuffer(ctx, d.workspace, commitPath, commit); err != nil {
-		return fmt.Errorf("failed to write delta commit: %w", err)
-	}
-	config.Debug("[ONELAKE] Committed delta version %d to %s", version, tableDir)
-	return nil
+	return version, nil
 }
 
 // columns returns the schema columns, deriving them from the Arrow schema when an
@@ -435,73 +531,97 @@ func (d *OneLakeDestination) readTable(ctx context.Context, table, op string) (s
 }
 
 func (d *OneLakeDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
-	tDir, tSnap, tBatches, err := d.readTable(ctx, opts.TargetTable, "merge")
-	if err != nil {
-		return err
-	}
-	defer releaseBatches(tBatches)
-	_, _, sBatches, err := d.readTable(ctx, opts.StagingTable, "merge")
-	if err != nil {
-		return err
-	}
-	defer releaseBatches(sBatches)
-
-	merged, err := mergeBatches(ctx, tBatches, sBatches, opts.PrimaryKeys)
-	if err != nil {
-		return err
-	}
-	defer releaseBatches(merged)
-
-	return d.commitRewrite(ctx, tDir, tSnap, merged, "MERGE")
+	return d.rewriteTableWithRetry(ctx, opts.TargetTable, opts.StagingTable, "merge", "MERGE", func(target, staging []arrow.RecordBatch) ([]arrow.RecordBatch, error) {
+		return mergeBatches(ctx, target, staging, opts.PrimaryKeys)
+	})
 }
 
 func (d *OneLakeDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
-	tDir, tSnap, tBatches, err := d.readTable(ctx, opts.TargetTable, "delete+insert")
-	if err != nil {
-		return err
-	}
-	defer releaseBatches(tBatches)
-	_, _, sBatches, err := d.readTable(ctx, opts.StagingTable, "delete+insert")
-	if err != nil {
-		return err
-	}
-	defer releaseBatches(sBatches)
-
-	result, err := deleteInsertBatches(ctx, tBatches, sBatches, opts)
-	if err != nil {
-		return err
-	}
-	defer releaseBatches(result)
-
-	return d.commitRewrite(ctx, tDir, tSnap, result, "DELETE+INSERT")
+	return d.rewriteTableWithRetry(ctx, opts.TargetTable, opts.StagingTable, "delete+insert", "DELETE+INSERT", func(target, staging []arrow.RecordBatch) ([]arrow.RecordBatch, error) {
+		return deleteInsertBatches(ctx, target, staging, opts)
+	})
 }
 
 func (d *OneLakeDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
-	tDir, tSnap, tBatches, err := d.readTable(ctx, opts.TargetTable, "scd2")
-	if err != nil {
-		return err
-	}
-	defer releaseBatches(tBatches)
-	_, _, sBatches, err := d.readTable(ctx, opts.StagingTable, "scd2")
+	return d.rewriteTableWithRetry(ctx, opts.TargetTable, opts.StagingTable, "scd2", "SCD2", func(target, staging []arrow.RecordBatch) ([]arrow.RecordBatch, error) {
+		return scd2Batches(ctx, target, staging, opts)
+	})
+}
+
+func (d *OneLakeDestination) rewriteTableWithRetry(ctx context.Context, targetTable, stagingTable, readOp, commitOp string, transform func(target, staging []arrow.RecordBatch) ([]arrow.RecordBatch, error)) error {
+	_, _, sBatches, err := d.readTable(ctx, stagingTable, readOp)
 	if err != nil {
 		return err
 	}
 	defer releaseBatches(sBatches)
 
-	result, err := scd2Batches(ctx, tBatches, sBatches, opts)
-	if err != nil {
+	dataFile := fmt.Sprintf("part-00000-%s.c000.snappy.parquet", uuid.New().String())
+	var lastConflict error
+	for attempt := 0; attempt < maxDeltaCommitAttempts; attempt++ {
+		tDir, tSnap, tBatches, err := d.readTable(ctx, targetTable, readOp)
+		if err != nil {
+			return err
+		}
+
+		result, err := transform(tBatches, sBatches)
+		releaseBatches(tBatches)
+		if err != nil {
+			return err
+		}
+
+		rewrite, err := d.uploadRewriteData(ctx, tDir, dataFile, result)
+		releaseBatches(result)
+		if err != nil {
+			return err
+		}
+
+		err = d.commitRewrite(ctx, tDir, tSnap, rewrite, commitOp)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errDeltaCommitConflict) {
+			lastConflict = err
+			config.Debug("[ONELAKE] Delta commit conflict during %s; retrying from latest snapshot", readOp)
+			continue
+		}
 		return err
 	}
-	defer releaseBatches(result)
 
-	return d.commitRewrite(ctx, tDir, tSnap, result, "SCD2")
+	return fmt.Errorf("failed to commit %s after %d attempts: %w", readOp, maxDeltaCommitAttempts, lastConflict)
 }
 
-// commitRewrite writes the given batches as a single new Parquet data file and
-// commits a new Delta version that removes the prior data files and adds the new
-// one (copy-on-write). If the table did not exist, it writes version 0.
-func (d *OneLakeDestination) commitRewrite(ctx context.Context, tableDir string, snap *deltaSnapshot, batches []arrow.RecordBatch, operation string) error {
-	if len(batches) == 0 && (snap == nil || !snap.exists) {
+type rewriteData struct {
+	adds []deltaAddFile
+	cols []schema.Column
+}
+
+func (d *OneLakeDestination) uploadRewriteData(ctx context.Context, tableDir, dataFile string, batches []arrow.RecordBatch) (*rewriteData, error) {
+	if len(batches) == 0 {
+		return &rewriteData{}, nil
+	}
+
+	data, arrowSchema, err := writeBatchesToParquet(batches)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.client.UploadBuffer(ctx, d.workspace, tableDir+"/"+dataFile, data); err != nil {
+		return nil, fmt.Errorf("failed to upload data file: %w", err)
+	}
+
+	return &rewriteData{
+		adds: []deltaAddFile{{Path: dataFile, Size: int64(len(data))}},
+		cols: arrowSchemaToColumns(arrowSchema),
+	}, nil
+}
+
+// commitRewrite commits a new Delta version that removes the prior data files
+// and adds the prepared rewrite data file (copy-on-write). If the table did not
+// exist and the rewrite has no rows, it writes nothing.
+func (d *OneLakeDestination) commitRewrite(ctx context.Context, tableDir string, snap *deltaSnapshot, rewrite *rewriteData, operation string) error {
+	if rewrite == nil {
+		rewrite = &rewriteData{}
+	}
+	if len(rewrite.adds) == 0 && (snap == nil || !snap.exists) {
 		config.Debug("[ONELAKE] %s produced no rows and table does not exist; nothing to do", operation)
 		return nil
 	}
@@ -513,21 +633,6 @@ func (d *OneLakeDestination) commitRewrite(ctx context.Context, tableDir string,
 		removePaths = snap.activeFiles
 	}
 
-	var adds []deltaAddFile
-	var cols []schema.Column
-	if len(batches) > 0 {
-		data, arrowSchema, err := writeBatchesToParquet(batches)
-		if err != nil {
-			return err
-		}
-		dataFile := fmt.Sprintf("part-00000-%s.c000.snappy.parquet", uuid.New().String())
-		if err := d.client.UploadBuffer(ctx, d.workspace, tableDir+"/"+dataFile, data); err != nil {
-			return fmt.Errorf("failed to upload data file: %w", err)
-		}
-		adds = append(adds, deltaAddFile{Path: dataFile, Size: int64(len(data))})
-		cols = arrowSchemaToColumns(arrowSchema)
-	}
-
 	version := int64(0)
 	if snap != nil && snap.exists {
 		version = snap.version + 1
@@ -536,16 +641,16 @@ func (d *OneLakeDestination) commitRewrite(ctx context.Context, tableDir string,
 	var commit []byte
 	var err error
 	if version == 0 {
-		commit, err = buildInitialCommit(cols, adds, uuid.New().String(), nowMillis)
+		commit, err = buildInitialCommit(rewrite.cols, rewrite.adds, uuid.New().String(), nowMillis)
 	} else {
-		commit, err = buildRewriteCommit(removePaths, adds, operation, nowMillis)
+		commit, err = buildRewriteCommit(removePaths, rewrite.adds, operation, nowMillis)
 	}
 	if err != nil {
 		return err
 	}
 
-	if err := d.client.UploadBuffer(ctx, d.workspace, logDir+"/"+commitFileName(version), commit); err != nil {
-		return fmt.Errorf("failed to write delta commit: %w", err)
+	if err := d.uploadDeltaCommit(ctx, logDir, version, commit); err != nil {
+		return err
 	}
 	config.Debug("[ONELAKE] %s committed delta version %d to %s", operation, version, tableDir)
 	return nil

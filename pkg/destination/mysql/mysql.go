@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"hash/fnv"
 	"net/url"
 	"strings"
 	"time"
@@ -431,7 +432,25 @@ func (d *MySQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 
 	quotedColumns := quoteColumns(opts.Columns)
 
-	tx, err := d.db.BeginTx(ctx, nil)
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	releaseLock, err := acquireDeleteInsertLock(ctx, conn, opts.TargetTable)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := releaseLock(releaseCtx); err != nil {
+			config.Debug("[DELETE+INSERT] Warning: failed to release target table lock: %v", err)
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -465,6 +484,34 @@ func (d *MySQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 
 	config.Debug("[DELETE+INSERT] Delete+Insert completed in %v", time.Since(startOp))
 	return nil
+}
+
+func acquireDeleteInsertLock(ctx context.Context, conn *sql.Conn, targetTable string) (func(context.Context) error, error) {
+	lockName := deleteInsertLockName(targetTable)
+	var acquired sql.NullInt64
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 60)", lockName).Scan(&acquired); err != nil {
+		return nil, fmt.Errorf("failed to acquire target table lock: %w", err)
+	}
+	if !acquired.Valid || acquired.Int64 != 1 {
+		return nil, fmt.Errorf("timed out acquiring target table lock")
+	}
+
+	return func(ctx context.Context) error {
+		var released sql.NullInt64
+		if err := conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", lockName).Scan(&released); err != nil {
+			return fmt.Errorf("failed to release target table lock: %w", err)
+		}
+		if !released.Valid || released.Int64 != 1 {
+			return fmt.Errorf("target table lock was not released")
+		}
+		return nil
+	}, nil
+}
+
+func deleteInsertLockName(targetTable string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(targetTable))
+	return fmt.Sprintf("ingestr_di_%016x", h.Sum64())
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.

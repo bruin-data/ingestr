@@ -3,10 +3,12 @@ package bigquery
 import (
 	"bufio"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +27,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	"google.golang.org/api/option"
 )
+
+var queryJobJitter = randomQueryJobJitter
 
 const (
 	stagedGCSObjectChunkSize   = 32 * 1024 * 1024
@@ -754,12 +758,13 @@ func isRetryableLoadJobError(err error) bool {
 		strings.Contains(msg, "exceeded rate limits") ||
 		strings.Contains(msg, "jobbackenderror") ||
 		strings.Contains(msg, "backenderror") ||
-		strings.Contains(msg, "not found: dataset")
+		strings.Contains(msg, "not found: dataset") ||
+		isBigQueryConcurrentUpdateError(err)
 }
 
 func isRetryableLoadJobReason(reason string, message string) bool {
 	switch strings.ToLower(reason) {
-	case "ratelimitexceeded", "quotaexceeded", "backenderror", "jobbackenderror":
+	case "ratelimitexceeded", "quotaexceeded", "backenderror", "jobbackenderror", "aborted":
 		return true
 	}
 
@@ -768,7 +773,40 @@ func isRetryableLoadJobReason(reason string, message string) bool {
 		return true
 	}
 	return strings.Contains(msg, "exceeded rate limits") ||
-		strings.Contains(msg, "retrying the job may solve the problem")
+		strings.Contains(msg, "retrying the job may solve the problem") ||
+		strings.Contains(msg, "could not serialize access") ||
+		strings.Contains(msg, "concurrent update") ||
+		strings.Contains(msg, "transaction is aborted")
+}
+
+func retryDelayForQueryJob(attempt int, err error) time.Duration {
+	delay := time.Duration(attempt) * time.Second
+	if !isBigQueryConcurrentUpdateError(err) {
+		return delay
+	}
+
+	return delay + queryJobJitter(time.Duration(attempt+1)*time.Second)
+}
+
+func randomQueryJobJitter(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	n, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(max)))
+	if err != nil {
+		return time.Duration(time.Now().UnixNano() % int64(max))
+	}
+	return time.Duration(n.Int64())
+}
+
+func isBigQueryConcurrentUpdateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "could not serialize access") ||
+		strings.Contains(msg, "concurrent update") ||
+		strings.Contains(msg, "transaction is aborted")
 }
 
 func sleepWithContextForLoadJob(ctx context.Context, d time.Duration) error {

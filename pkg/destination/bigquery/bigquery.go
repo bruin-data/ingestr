@@ -23,9 +23,11 @@ import (
 )
 
 const (
-	defaultWriteParallelism   = 4
-	exactRowCountWaitTimeout  = 30 * time.Second
-	exactRowCountPollInterval = 1 * time.Second
+	defaultWriteParallelism            = 4
+	exactRowCountWaitTimeout           = 30 * time.Second
+	exactRowCountPollInterval          = 1 * time.Second
+	queryJobMaxAttempts                = 4
+	deleteInsertTransactionMaxAttempts = 8
 )
 
 type bigQueryLoadMethod string
@@ -959,7 +961,18 @@ func (d *BigQueryDestination) Exec(ctx context.Context, sql string, args ...inte
 // BigQuery jobs are atomic — failed jobs do not commit partial work — so
 // retrying on the reasons checked by isRetryableLoadJobError is safe.
 func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opLabel string) (*bigquery.Job, error) {
-	const maxAttempts = 4
+	return d.runQueryJobWithRetryAttempts(ctx, sql, opLabel, queryJobMaxAttempts)
+}
+
+func (d *BigQueryDestination) runTransactionScriptWithRetry(ctx context.Context, sql, opLabel string) (*bigquery.Job, error) {
+	return d.runQueryJobWithRetryAttempts(ctx, sql, opLabel, deleteInsertTransactionMaxAttempts)
+}
+
+func (d *BigQueryDestination) runQueryJobWithRetryAttempts(ctx context.Context, sql, opLabel string, maxAttempts int) (*bigquery.Job, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = queryJobMaxAttempts
+	}
+
 	var (
 		lastJob *bigquery.Job
 		lastErr error
@@ -975,7 +988,7 @@ func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opL
 			if attempt < maxAttempts && isRetryableLoadJobError(err) {
 				lastErr = err
 				config.Debug("[%s] Retrying after start error: %v", opLabel, err)
-				if sleepErr := sleepWithContextForLoadJob(ctx, time.Duration(attempt)*time.Second); sleepErr != nil {
+				if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); sleepErr != nil {
 					return nil, sleepErr
 				}
 				continue
@@ -989,7 +1002,7 @@ func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opL
 			if attempt < maxAttempts && isRetryableLoadJobError(err) {
 				lastErr = err
 				config.Debug("[%s] Retrying after wait error: %v", opLabel, err)
-				if sleepErr := sleepWithContextForLoadJob(ctx, time.Duration(attempt)*time.Second); sleepErr != nil {
+				if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); sleepErr != nil {
 					return job, sleepErr
 				}
 				continue
@@ -1000,7 +1013,7 @@ func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opL
 			if attempt < maxAttempts && isRetryableLoadJobError(err) {
 				lastErr = err
 				config.Debug("[%s] Retrying after job error: %v", opLabel, err)
-				if sleepErr := sleepWithContextForLoadJob(ctx, time.Duration(attempt)*time.Second); sleepErr != nil {
+				if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); sleepErr != nil {
 					return job, sleepErr
 				}
 				continue
@@ -1233,6 +1246,27 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 		return fmt.Errorf("invalid target table name: %w", err)
 	}
 
+	deleteSQL, insertSQL := d.buildDeleteInsertStatements(stagingDataset, stagingTableName, targetDataset, targetTableName, opts)
+	transactionSQL := buildBigQueryTransactionScript(deleteSQL, insertSQL)
+
+	config.Debug("[DELETE+INSERT] Executing transaction")
+	config.Debug("[DELETE+INSERT] DELETE: %s", deleteSQL)
+	config.Debug("[DELETE+INSERT] INSERT: %s", insertSQL)
+
+	job, err := d.runTransactionScriptWithRetry(ctx, transactionSQL, "DELETE+INSERT")
+	if err != nil {
+		config.LogFailedQuery(transactionSQL, err)
+		if job == nil {
+			return fmt.Errorf("failed to start delete+insert transaction job: %w", err)
+		}
+		return fmt.Errorf("delete+insert transaction job failed (job %s): %w", jobRef(job), err)
+	}
+
+	config.Debug("[DELETE+INSERT] Delete+Insert completed successfully (job %s)", jobRef(job))
+	return nil
+}
+
+func (d *BigQueryDestination) buildDeleteInsertStatements(stagingDataset, stagingTableName, targetDataset, targetTableName string, opts destination.DeleteInsertOptions) (string, string) {
 	startVal := formatBigQueryValue(opts.IntervalStart, opts.IncrementalKeyType)
 	endVal := formatBigQueryValue(opts.IntervalEnd, opts.IncrementalKeyType)
 
@@ -1242,12 +1276,6 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 		quoteIdentifier(opts.IncrementalKey), startVal,
 		quoteIdentifier(opts.IncrementalKey), endVal,
 	)
-
-	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
-
-	if err := d.Exec(ctx, deleteSQL); err != nil {
-		return fmt.Errorf("failed to delete records: %w", err)
-	}
 
 	quotedCols := make([]string, len(opts.Columns))
 	for i, col := range opts.Columns {
@@ -1274,14 +1302,7 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 		selectClause,
 	)
 
-	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
-
-	if err := d.Exec(ctx, insertSQL); err != nil {
-		return fmt.Errorf("failed to insert records: %w", err)
-	}
-
-	config.Debug("[DELETE+INSERT] Delete+Insert completed successfully")
-	return nil
+	return deleteSQL, insertSQL
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
@@ -1619,11 +1640,71 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 	return sql.String()
 }
 
-// BeginTransaction begins a transaction.
-func (d *BigQueryDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
-	// BigQuery doesn't support traditional transactions
-	// Use MergeTable method instead for merge operations
-	return nil, errors.New("transactions not supported for BigQuery - use MergeTable for merge operations")
+func buildBigQueryTransactionScript(statements ...string) string {
+	var sql strings.Builder
+	sql.WriteString("BEGIN TRANSACTION;\n")
+	for _, statement := range statements {
+		statement = strings.TrimSpace(statement)
+		if statement == "" {
+			continue
+		}
+		sql.WriteString(statement)
+		if !strings.HasSuffix(statement, ";") {
+			sql.WriteString(";")
+		}
+		sql.WriteString("\n")
+	}
+	sql.WriteString("COMMIT TRANSACTION;")
+	return sql.String()
+}
+
+// BeginTransaction begins a BigQuery multi-statement transaction.
+func (d *BigQueryDestination) BeginTransaction(_ context.Context) (destination.Transaction, error) {
+	return &bigQueryTransaction{destination: d}, nil
+}
+
+type bigQueryTransaction struct {
+	destination *BigQueryDestination
+	statements  []string
+	closed      bool
+}
+
+func (t *bigQueryTransaction) Exec(_ context.Context, sql string, args ...interface{}) error {
+	if t.closed {
+		return errors.New("transaction is already closed")
+	}
+	if len(args) > 0 {
+		return errors.New("BigQuery transaction does not support positional query args")
+	}
+	t.statements = append(t.statements, sql)
+	return nil
+}
+
+func (t *bigQueryTransaction) Commit(ctx context.Context) error {
+	if t.closed {
+		return errors.New("transaction is already closed")
+	}
+	t.closed = true
+	if len(t.statements) == 0 {
+		return nil
+	}
+
+	transactionSQL := buildBigQueryTransactionScript(t.statements...)
+	job, err := t.destination.runTransactionScriptWithRetry(ctx, transactionSQL, "transaction")
+	if err != nil {
+		config.LogFailedQuery(transactionSQL, err)
+		if job == nil {
+			return fmt.Errorf("failed to start transaction job: %w", err)
+		}
+		return fmt.Errorf("transaction job failed (job %s): %w", jobRef(job), err)
+	}
+	return nil
+}
+
+func (t *bigQueryTransaction) Rollback(_ context.Context) error {
+	t.closed = true
+	t.statements = nil
+	return nil
 }
 
 // DropTable drops a table if it exists.

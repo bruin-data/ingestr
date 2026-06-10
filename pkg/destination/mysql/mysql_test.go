@@ -394,3 +394,14 @@ func TestMySQLDestination_StrategySupport(t *testing.T) {
 	assert.True(t, dest.SupportsDeleteInsertStrategy())
 	assert.True(t, dest.SupportsAtomicSwap())
 }
+
+func TestDeleteInsertLockName(t *testing.T) {
+	first := deleteInsertLockName("analytics.orders")
+	second := deleteInsertLockName("analytics.orders")
+	other := deleteInsertLockName("analytics.customers")
+
+	assert.Equal(t, first, second)
+	assert.NotEqual(t, first, other)
+	assert.LessOrEqual(t, len(first), 64)
+	assert.Contains(t, first, "ingestr_di_")
+}

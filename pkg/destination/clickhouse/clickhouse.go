@@ -3,6 +3,7 @@ package clickhouse
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -273,56 +274,17 @@ func (d *ClickHouseDestination) MergeTable(ctx context.Context, opts destination
 func (d *ClickHouseDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
 	startOp := time.Now()
 
-	stagingDB, stagingName := d.parseTableName(opts.StagingTable)
-	targetDB, targetName := d.parseTableName(opts.TargetTable)
+	deleteSQL, insertSQL, targetDB, targetName := d.buildDeleteInsertStatements(opts)
 
-	quotedColumns := quoteColumns(opts.Columns)
-
-	deleteSQL := fmt.Sprintf(
-		"ALTER TABLE %s.%s DELETE WHERE %s >= '%v' AND %s <= '%v'",
-		quoteIdentifier(targetDB), quoteIdentifier(targetName), quoteIdentifier(opts.IncrementalKey), opts.IntervalStart, quoteIdentifier(opts.IncrementalKey), opts.IntervalEnd,
-	)
 	config.Debug("[CLICKHOUSE DELETE+INSERT] Executing DELETE: %s", deleteSQL)
-
 	if err := d.conn.Exec(ctx, deleteSQL); err != nil {
 		config.LogFailedQuery(deleteSQL, err)
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
-	waitSQL := fmt.Sprintf(
-		"SELECT count() FROM system.mutations WHERE database = '%s' AND table = '%s' AND is_done = 0",
-		targetDB, targetName,
-	)
-	for i := 0; i < 60; i++ {
-		rows, err := d.conn.Query(ctx, waitSQL)
-		if err != nil {
-			break
-		}
-		var count uint64
-		if rows.Next() {
-			if err := rows.Scan(&count); err != nil {
-				_ = rows.Close()
-				break
-			}
-		}
-		if err := rows.Close(); err != nil {
-			break
-		}
-		if count == 0 {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	d.waitForMutations(ctx, targetDB, targetName)
 
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s.%s (%s) SELECT %s FROM %s.%s",
-		quoteIdentifier(targetDB), quoteIdentifier(targetName),
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
-	)
 	config.Debug("[CLICKHOUSE DELETE+INSERT] Executing INSERT: %s", insertSQL)
-
 	if err := d.conn.Exec(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
 		return fmt.Errorf("failed to insert records: %w", err)
@@ -494,27 +456,8 @@ func (d *ClickHouseDestination) Exec(ctx context.Context, sql string, args ...in
 }
 
 func (d *ClickHouseDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
-	return &clickhouseTransaction{conn: d.conn}, nil
-}
-
-type clickhouseTransaction struct {
-	conn driver.Conn
-}
-
-func (t *clickhouseTransaction) Exec(ctx context.Context, sql string, args ...interface{}) error {
-	err := t.conn.Exec(ctx, sql, args...)
-	if err != nil {
-		config.LogFailedQuery(sql, err)
-	}
-	return err
-}
-
-func (t *clickhouseTransaction) Commit(ctx context.Context) error {
-	return nil
-}
-
-func (t *clickhouseTransaction) Rollback(ctx context.Context) error {
-	return nil
+	_ = ctx
+	return nil, errors.New("clickhouse destination does not support transactions")
 }
 
 func (d *ClickHouseDestination) SupportsReplaceStrategy() bool      { return true }
@@ -816,6 +759,75 @@ func mapDataTypeForColumn(col schema.Column, isPrimaryKey bool) string {
 
 func buildInsertSQL(database, table string, columns []string) string {
 	return fmt.Sprintf("INSERT INTO %s.%s (%s)", quoteIdentifier(database), quoteIdentifier(table), strings.Join(quoteColumns(columns), ", "))
+}
+
+func (d *ClickHouseDestination) buildDeleteInsertStatements(opts destination.DeleteInsertOptions) (string, string, string, string) {
+	stagingDB, stagingName := d.parseTableName(opts.StagingTable)
+	targetDB, targetName := d.parseTableName(opts.TargetTable)
+
+	quotedColumns := quoteColumns(opts.Columns)
+	colList := strings.Join(quotedColumns, ", ")
+	stagingFQN := fmt.Sprintf("%s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName))
+	targetFQN := fmt.Sprintf("%s.%s", quoteIdentifier(targetDB), quoteIdentifier(targetName))
+	incrementalKey := quoteIdentifier(opts.IncrementalKey)
+
+	deleteSQL := fmt.Sprintf(
+		"ALTER TABLE %s DELETE WHERE %s >= %s AND %s <= %s",
+		targetFQN,
+		incrementalKey,
+		formatClickHouseLiteral(opts.IntervalStart, opts.IncrementalKeyType),
+		incrementalKey,
+		formatClickHouseLiteral(opts.IntervalEnd, opts.IncrementalKeyType),
+	)
+
+	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingFQN, incrementalKey)
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetFQN, colList, selectClause)
+
+	return deleteSQL, insertSQL, targetDB, targetName
+}
+
+func formatClickHouseLiteral(value interface{}, dataType schema.DataType) string {
+	switch v := value.(type) {
+	case time.Time:
+		switch dataType {
+		case schema.TypeDate:
+			return fmt.Sprintf("toDate('%s')", v.Format("2006-01-02"))
+		case schema.TypeTimestamp, schema.TypeTimestampTZ:
+			return fmt.Sprintf("toDateTime64('%s', 6)", v.Format("2006-01-02 15:04:05.000000"))
+		default:
+			return fmt.Sprintf("'%s'", escapeClickHouseString(v.Format(time.RFC3339Nano)))
+		}
+	case string:
+		switch dataType {
+		case schema.TypeDate:
+			return fmt.Sprintf("toDate('%s')", escapeClickHouseString(v))
+		case schema.TypeTimestamp, schema.TypeTimestampTZ:
+			return fmt.Sprintf("toDateTime64('%s', 6)", escapeClickHouseString(v))
+		case schema.TypeString, schema.TypeUUID:
+			return fmt.Sprintf("'%s'", escapeClickHouseString(v))
+		default:
+			return fmt.Sprintf("'%s'", escapeClickHouseString(v))
+		}
+	case bool:
+		if v {
+			return "1"
+		}
+		return "0"
+	}
+
+	switch dataType {
+	case schema.TypeString, schema.TypeUUID:
+		return fmt.Sprintf("'%s'", escapeClickHouseString(fmt.Sprint(value)))
+	default:
+		return fmt.Sprint(value)
+	}
+}
+
+func escapeClickHouseString(value string) string {
+	return strings.NewReplacer(
+		`\`, `\\`,
+		`'`, `\'`,
+	).Replace(value)
 }
 
 func quoteColumns(columns []string) []string {

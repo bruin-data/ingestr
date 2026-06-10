@@ -304,14 +304,36 @@ func TestSupportsStrategies(t *testing.T) {
 	}
 }
 
-func TestBeginTransaction_NotSupported(t *testing.T) {
+func TestBeginTransaction_ReturnsScriptTransaction(t *testing.T) {
 	dest := NewBigQueryDestination()
-	_, err := dest.BeginTransaction(context.Background())
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	tx, err := dest.BeginTransaction(context.Background())
+	if err != nil {
+		t.Fatalf("BeginTransaction returned error: %v", err)
 	}
-	if !contains(err.Error(), "transactions not supported") {
-		t.Fatalf("unexpected error: %v", err)
+
+	bqTx, ok := tx.(*bigQueryTransaction)
+	if !ok {
+		t.Fatalf("transaction type = %T, want *bigQueryTransaction", tx)
+	}
+
+	if err := bqTx.Exec(context.Background(), "DELETE FROM `p`.`d`.`t` WHERE TRUE"); err != nil {
+		t.Fatalf("Exec returned error: %v", err)
+	}
+	if err := bqTx.Exec(context.Background(), "INSERT INTO `p`.`d`.`t` SELECT * FROM `p`.`d`.`s`"); err != nil {
+		t.Fatalf("Exec returned error: %v", err)
+	}
+
+	got := buildBigQueryTransactionScript(bqTx.statements...)
+	want := "BEGIN TRANSACTION;\n" +
+		"DELETE FROM `p`.`d`.`t` WHERE TRUE;\n" +
+		"INSERT INTO `p`.`d`.`t` SELECT * FROM `p`.`d`.`s`;\n" +
+		"COMMIT TRANSACTION;"
+	if got != want {
+		t.Fatalf("transaction script =\n%s\nwant:\n%s", got, want)
+	}
+
+	if err := bqTx.Exec(context.Background(), "SELECT 1", 1); err == nil || !contains(err.Error(), "does not support positional query args") {
+		t.Fatalf("Exec with args error = %v", err)
 	}
 }
 
@@ -762,6 +784,32 @@ func TestFormatBigQueryValue(t *testing.T) {
 				t.Fatalf("formatBigQueryValue(%T) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBuildDeleteInsertTransactionScript(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.projectID = "my-project"
+
+	opts := destination.DeleteInsertOptions{
+		StagingTable:       "staging_ds.staging_tbl",
+		TargetTable:        "target_ds.target_tbl",
+		IncrementalKey:     "ts",
+		IncrementalKeyType: schema.TypeInt64,
+		IntervalStart:      int64(1),
+		IntervalEnd:        int64(10),
+		Columns:            []string{"id", "ts", "name"},
+		PrimaryKeys:        []string{"id"},
+	}
+
+	deleteSQL, insertSQL := dest.buildDeleteInsertStatements("staging_ds", "staging_tbl", "target_ds", "target_tbl", opts)
+	got := buildBigQueryTransactionScript(deleteSQL, insertSQL)
+	want := "BEGIN TRANSACTION;\n" +
+		"DELETE FROM `my-project`.`target_ds`.`target_tbl` WHERE `ts` >= 1 AND `ts` <= 10;\n" +
+		"INSERT INTO `my-project`.`target_ds`.`target_tbl` (`id`, `ts`, `name`) SELECT `id`, `ts`, `name` FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `ts` DESC) = 1;\n" +
+		"COMMIT TRANSACTION;"
+	if got != want {
+		t.Fatalf("transaction script =\n%s\nwant:\n%s", got, want)
 	}
 }
 

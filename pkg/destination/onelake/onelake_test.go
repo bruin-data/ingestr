@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -263,6 +264,25 @@ func TestBuildAppendCommit(t *testing.T) {
 	// No protocol/metaData on append commits.
 	_, hasProtocol := lines[0]["protocol"]
 	assert.False(t, hasProtocol)
+}
+
+func TestDeltaCommitRenameOptionsUsesIfNoneMatchAny(t *testing.T) {
+	t.Parallel()
+
+	opts := deltaCommitRenameOptions()
+	require.NotNil(t, opts.AccessConditions)
+	require.NotNil(t, opts.AccessConditions.ModifiedAccessConditions)
+	require.NotNil(t, opts.AccessConditions.ModifiedAccessConditions.IfNoneMatch)
+	assert.Equal(t, azcore.ETagAny, *opts.AccessConditions.ModifiedAccessConditions.IfNoneMatch)
+}
+
+func TestDeltaCommitTempPathStaysOutsideDeltaLog(t *testing.T) {
+	t.Parallel()
+
+	got := deltaCommitTempPath("lakehouse.Lakehouse/Tables/orders/_delta_log")
+	assert.Contains(t, got, "lakehouse.Lakehouse/Tables/orders/_bruin_delta_tmp/")
+	assert.NotContains(t, got, "/_delta_log/")
+	assert.True(t, strings.HasSuffix(got, ".tmp"))
 }
 
 func TestCommitFileName(t *testing.T) {
