@@ -22,7 +22,7 @@ Here's a sample command that copies Paddle customers into a DuckDB database:
 
 ```sh
 ingestr ingest \
-  --source-uri 'paddle://?api_key=pdl_live_apikey_12345' \
+  --source-uri 'paddle://?api_key=pdl_live_xxx' \
   --source-table 'customers' \
   --dest-uri duckdb:///paddle.duckdb \
   --dest-table 'dest.customers'
@@ -47,7 +47,7 @@ Use these exact names as the `--source-table` parameter in the `ingestr ingest` 
 
 ```sh
 ingestr ingest \
-  --source-uri 'paddle://?api_key=pdl_live_apikey_12345' \
+  --source-uri 'paddle://?api_key=pdl_live_xxx' \
   --source-table 'transactions' \
   --dest-uri duckdb:///paddle.duckdb \
   --dest-table 'dest.transactions' \
