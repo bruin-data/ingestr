@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import ingestr
+import ingestr._data as ingestr_data
 
 try:
     import pyarrow as pa
@@ -330,6 +331,33 @@ class IngestrPackageTest(unittest.TestCase):
         self.assertEqual(got.to_pylist(), [{"id": 1, "score": 1.5}, {"id": 2, "score": 2.5}])
 
     @unittest.skipIf(pa is None, "pyarrow is required for SDK data ingestion tests")
+    def test_stream_transport_skips_empty_record_batches(self):
+        fake = None
+
+        def popen(*args, **kwargs):
+            nonlocal fake
+            fake = FakePopen(*args, **kwargs)
+            return fake
+
+        schema = pa.schema([("id", pa.int64())])
+        empty = pa.RecordBatch.from_pylist([], schema=schema)
+        non_empty = pa.RecordBatch.from_pylist([{"id": 1}], schema=schema)
+
+        with patch("ingestr._data.binary_path", return_value="/tmp/ingestr"):
+            with patch("subprocess.Popen", side_effect=popen):
+                ingestr_data._ingest_stream(
+                    [empty, non_empty],
+                    pa=pa,
+                    schema=schema,
+                    dest_uri="sqlite:///tmp/out.db",
+                    dest_table="main.rows",
+                    source_table="python_data",
+                )
+
+        batches = list(pa.ipc.open_stream(pa.BufferReader(fake.stdin_buffer.getvalue())))
+        self.assertEqual([batch.num_rows for batch in batches], [1])
+
+    @unittest.skipIf(pa is None, "pyarrow is required for SDK data ingestion tests")
     def test_ingest_can_use_mmap_transport(self):
         captured = {}
 
@@ -357,6 +385,36 @@ class IngestrPackageTest(unittest.TestCase):
         self.assertEqual(captured["rows"], [{"id": 1}, {"id": 2}])
 
     @unittest.skipIf(pa is None, "pyarrow is required for SDK data ingestion tests")
+    def test_mmap_transport_skips_empty_record_batches(self):
+        captured = {}
+        schema = pa.schema([("id", pa.int64())])
+        empty = pa.RecordBatch.from_pylist([], schema=schema)
+        non_empty = pa.RecordBatch.from_pylist([{"id": 1}], schema=schema)
+
+        def fake_ingest(**kwargs):
+            captured.update(kwargs)
+            prefix = "mmap://"
+            self.assertTrue(kwargs["source_uri"].startswith(prefix))
+            path = kwargs["source_uri"][len(prefix):]
+            reader = pa.ipc.open_file(path)
+            captured["batch_lengths"] = [reader.get_batch(i).num_rows for i in range(reader.num_record_batches)]
+            return subprocess.CompletedProcess(["/tmp/ingestr"], 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("ingestr._data._cli_ingest", side_effect=fake_ingest):
+                ingestr_data._ingest_mmap(
+                    [empty, non_empty],
+                    pa=pa,
+                    schema=schema,
+                    dest_uri="sqlite:///tmp/out.db",
+                    dest_table="main.rows",
+                    source_table="python_data",
+                    temp_dir=tmp,
+                )
+
+        self.assertEqual(captured["batch_lengths"], [1])
+
+    @unittest.skipIf(pa is None, "pyarrow is required for SDK data ingestion tests")
     def test_mmap_transport_rejects_managed_process_input(self):
         with self.assertRaisesRegex(ValueError, "stdin/input are managed"):
             ingestr.ingest(
@@ -374,6 +432,26 @@ class IngestrPackageTest(unittest.TestCase):
                 transport="mmap",
                 stdin=subprocess.PIPE,
             )
+
+    @unittest.skipIf(pa is None, "pyarrow is required for SDK data ingestion tests")
+    def test_context_manager_preserves_result_when_stream_close_fails(self):
+        fake = None
+
+        def popen(*args, **kwargs):
+            nonlocal fake
+            fake = FakePopen(*args, **kwargs)
+            fake.returncode = 1
+            return fake
+
+        with patch("ingestr._data.binary_path", return_value="/tmp/ingestr"):
+            with patch("subprocess.Popen", side_effect=popen):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    with ingestr.ingest(dest_uri="sqlite:///tmp/out.db", dest_table="main.rows") as send:
+                        send({"id": 1})
+
+        self.assertTrue(send._closed)
+        self.assertIsNotNone(send.result)
+        self.assertEqual(send.result.returncode, 1)
 
     @unittest.skipIf(pa is None, "pyarrow is required for SDK data ingestion tests")
     def test_ingest_normalizes_common_python_row_values(self):

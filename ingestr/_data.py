@@ -185,9 +185,7 @@ class IngestSession:
 
         assert self._writer is not None
         try:
-            for batch in batches:
-                if batch is not None and batch.num_rows > 0:
-                    self._writer.write_batch(batch)
+            _write_non_empty_batches(self._writer, batches)
         except BrokenPipeError as exc:
             self._writer_error = exc
             self.close()
@@ -254,6 +252,7 @@ class IngestSession:
         returncode = self._proc.wait()
         stdout, stderr = self._drainer.collect() if self._drainer is not None else (None, None)
         completed = subprocess.CompletedProcess(self._command, returncode, stdout, stderr)
+        self.result = completed
 
         if self._stream_check and completed.returncode:
             raise subprocess.CalledProcessError(completed.returncode, self._command, output=stdout, stderr=stderr)
@@ -399,8 +398,7 @@ def _ingest_stream(
     writer_error: Optional[BaseException] = None
     try:
         with pa.ipc.new_stream(proc.stdin, schema) as writer:
-            for batch in batches:
-                writer.write_batch(batch)
+            _write_non_empty_batches(writer, batches)
     except BrokenPipeError as exc:
         writer_error = exc
     except BaseException:
@@ -444,8 +442,7 @@ def _ingest_mmap(
 
     with _temporary_arrow_file(temp_dir=temp_dir, keep=keep_temp_file) as path:
         with pa.ipc.new_file(path, schema) as writer:
-            for batch in batches:
-                writer.write_batch(batch)
+            _write_non_empty_batches(writer, batches)
 
         return _cli_ingest(
             source_uri=f"mmap://{path}",
@@ -647,6 +644,12 @@ def _peek_first_batch(batches: Iterable[Any]) -> tuple[Optional[Any], Iterator[A
 def _prepend(first: Any, rest: Iterable[Any]) -> Iterator[Any]:
     yield first
     yield from rest
+
+
+def _write_non_empty_batches(writer: Any, batches: Iterable[Any]) -> None:
+    for batch in batches:
+        if batch is not None and batch.num_rows > 0:
+            writer.write_batch(batch)
 
 
 def _looks_like_pandas_dataframe(value: Any) -> bool:
