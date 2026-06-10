@@ -31,9 +31,7 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
       - name: Install uv
-        run: |
-          python3 -m pip install --user uv
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        uses: astral-sh/setup-uv@v8.2.0
       - name: Run test suite
         run: make ${{ matrix.suite }}
 

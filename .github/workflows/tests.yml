@@ -52,9 +52,7 @@ jobs:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
       - name: Install uv
-        run: |
-          python3 -m pip install --user uv
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        uses: astral-sh/setup-uv@v8.2.0
       - run: make test
 
   end2end:
