@@ -198,8 +198,9 @@ func (s *IndeedSource) GetTable(ctx context.Context, req source.TableRequest) (s
 	case "account":
 		primaryKeys = []string{"employerId", "jobSourceId"}
 	case "traffic_stats":
-		primaryKeys = []string{"date"}
+		// No PK: report has no row identity (multi-row per date by job × platform); merge would collapse them.
 		incrementalKey = "date"
+		strategy = config.StrategyDeleteInsert
 	}
 
 	return &source.DynamicSourceTable{
