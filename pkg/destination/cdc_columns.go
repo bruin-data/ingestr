@@ -1,7 +1,7 @@
 package destination
 
 import (
-	"slices"
+	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
@@ -19,12 +19,17 @@ func CDCMetadataColumns() []string {
 }
 
 func IsCDCMetaColumn(col string) bool {
-	return slices.Contains(CDCMetadataColumns(), col)
+	for _, c := range CDCMetadataColumns() {
+		if strings.EqualFold(c, col) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsCDCStagingOnlyColumn reports columns used during CDC merge but not persisted on the destination.
 func IsCDCStagingOnlyColumn(col string) bool {
-	return col == CDCUnchangedColsColumn
+	return strings.EqualFold(col, CDCUnchangedColsColumn)
 }
 
 // DestinationColumns returns columns that should exist on the destination table.

@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -417,7 +416,7 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		pkMap[strings.ToLower(pk)] = true
 	}
 
-	cdcMerge := slices.Contains(allColumns, destination.CDCDeletedColumn)
+	cdcMerge := containsFold(allColumns, destination.CDCDeletedColumn)
 	unchangedRef := "source." + quoteIdentifier(destination.CDCUnchangedColsColumn)
 	var updateSets []string
 	for _, col := range destColumns {
@@ -449,7 +448,7 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		quotedPKList[i] = quoteIdentifier(pk)
 	}
 
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+	hasCDCDeleted := containsFold(allColumns, destination.CDCDeletedColumn)
 
 	dedupOrderBy := "(SELECT NULL)"
 	if hasCDCDeleted {
@@ -965,9 +964,21 @@ func formatSnowflakeValue(v interface{}) string {
 }
 
 func cdcMergeAssign(colName, colQuoted, targetExpr, sourceExpr, unchangedColsExpr string) string {
-	colLit := strings.ReplaceAll(colName, "'", "''")
+	// The source emits _cdc_unchanged_cols using the source column names (e.g. lower case).
+	// The merge column name may be folded to upper case when the schema is read
+	// back from the destination on an incremental run, so compare case-insensitively.
+	colLit := strings.ReplaceAll(strings.ToLower(colName), "'", "''")
 	return fmt.Sprintf(
-		"%s = IFF(ARRAY_CONTAINS(TO_VARIANT('%s'), TRY_PARSE_JSON(%s)), %s, %s)",
+		"%s = IFF(ARRAY_CONTAINS(TO_VARIANT('%s'), TRY_PARSE_JSON(LOWER(%s))), %s, %s)",
 		colQuoted, colLit, unchangedColsExpr, targetExpr, sourceExpr,
 	)
+}
+
+func containsFold(items []string, target string) bool {
+	for _, item := range items {
+		if strings.EqualFold(item, target) {
+			return true
+		}
+	}
+	return false
 }

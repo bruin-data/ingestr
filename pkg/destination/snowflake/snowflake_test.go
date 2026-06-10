@@ -51,6 +51,20 @@ func TestBuildMergeSQL(t *testing.T) {
 		assert.NotContains(t, sql, "WHEN NOT MATCHED THEN\n")
 	})
 
+	t.Run("cdc_resume_uppercased_columns", func(t *testing.T) {
+		// On an incremental/resume run the schema is read back from Snowflake, which folds
+		// unquoted identifiers to upper case, while the staging-only _cdc_unchanged_cols is
+		// appended from the source schema in lower case. CDC detection must stay case-insensitive
+		// so the unchanged-column preservation (IFF/ARRAY_CONTAINS) is still emitted.
+		columns := []string{"ID", "NAME", "CONFIG_DATA", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_cdc_unchanged_cols"}
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
+
+		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = false THEN`)
+		assert.Contains(t, sql, `"CONFIG_DATA" = IFF(ARRAY_CONTAINS(TO_VARIANT('config_data'), TRY_PARSE_JSON(LOWER(source."_CDC_UNCHANGED_COLS"))), target."CONFIG_DATA", source."CONFIG_DATA")`)
+		// staging-only column must not be persisted on the destination
+		assert.NotContains(t, sql, `INSERT (`+`"ID", "NAME", "CONFIG_DATA", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_CDC_UNCHANGED_COLS"`)
+	})
+
 	t.Run("cdc_only_pk_and_metadata", func(t *testing.T) {
 		columns := []string{"id", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
