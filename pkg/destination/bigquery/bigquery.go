@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1570,7 +1569,7 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 	}
 
 	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 
 	var sql strings.Builder
 	fmt.Fprintf(&sql, "MERGE %s.%s.%s AS t\n", quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTable))

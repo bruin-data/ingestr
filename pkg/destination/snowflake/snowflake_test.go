@@ -54,7 +54,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		// Composed source: data columns from the latest non-deleted change,
 		// CDC columns from the latest change overall.
 		assert.Contains(t, sql, `SELECT la."ID", act."NAME", act."VALUE", la."_CDC_LSN", la."_CDC_DELETED", la."_CDC_SYNCED_AT", act."_CDC_LSN" IS NOT NULL AS "__ingestr_has_active"`)
-		assert.Contains(t, sql, `ORDER BY "_CDC_LSN" DESC, "_CDC_SYNCED_AT" DESC`)
+		assert.Contains(t, sql, `ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC`)
 		assert.Contains(t, sql, `WHERE "_CDC_DELETED" = false`)
 		assert.Contains(t, sql, `WHEN MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
 		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
