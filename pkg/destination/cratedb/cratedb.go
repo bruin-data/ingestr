@@ -3,6 +3,7 @@ package cratedb
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -291,45 +292,7 @@ func (d *CrateDBDestination) MergeTable(ctx context.Context, opts destination.Me
 }
 
 func (d *CrateDBDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
-	startOp := time.Now()
-
-	d.refreshTable(ctx, opts.StagingTable)
-
-	quotedColumns := quoteColumns(opts.Columns)
-	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
-	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
-
-	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE %s >= $1 AND %s <= $2`,
-		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
-	)
-	config.Debug("[CRATEDB DELETE+INSERT] Executing DELETE: %s", deleteSQL)
-
-	if _, err := d.pool.Exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
-		config.LogFailedQuery(deleteSQL, err)
-		return fmt.Errorf("failed to delete records: %w", err)
-	}
-
-	d.refreshTable(ctx, opts.TargetTable)
-
-	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s`,
-		quotedTargetTable,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		quotedStagingTable,
-	)
-	config.Debug("[CRATEDB DELETE+INSERT] Executing INSERT: %s", insertSQL)
-
-	if _, err := d.pool.Exec(ctx, insertSQL); err != nil {
-		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert records: %w", err)
-	}
-
-	d.refreshTable(ctx, opts.TargetTable)
-
-	config.Debug("[CRATEDB DELETE+INSERT] Completed in %v", time.Since(startOp))
-	return nil
+	return errors.New("delete+insert strategy is not supported for cratedb destination")
 }
 
 func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
@@ -488,23 +451,8 @@ func (d *CrateDBDestination) Exec(ctx context.Context, sql string, args ...any) 
 }
 
 func (d *CrateDBDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
-	return &noopTransaction{pool: d.pool}, nil
+	return nil, errors.New("transactions are not supported for cratedb destination")
 }
-
-type noopTransaction struct {
-	pool *pgxpool.Pool
-}
-
-func (t *noopTransaction) Exec(ctx context.Context, sql string, args ...any) error {
-	_, err := t.pool.Exec(ctx, sql, args...)
-	if err != nil {
-		config.LogFailedQuery(sql, err)
-	}
-	return err
-}
-
-func (t *noopTransaction) Commit(_ context.Context) error   { return nil }
-func (t *noopTransaction) Rollback(_ context.Context) error { return nil }
 
 func (d *CrateDBDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseSchemaTable(table)
@@ -555,7 +503,7 @@ func (d *CrateDBDestination) GetScheme() string                  { return "crate
 func (d *CrateDBDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *CrateDBDestination) SupportsAppendStrategy() bool       { return true }
 func (d *CrateDBDestination) SupportsMergeStrategy() bool        { return true }
-func (d *CrateDBDestination) SupportsDeleteInsertStrategy() bool { return true }
+func (d *CrateDBDestination) SupportsDeleteInsertStrategy() bool { return false }
 func (d *CrateDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *CrateDBDestination) SupportsAtomicSwap() bool           { return false }
 

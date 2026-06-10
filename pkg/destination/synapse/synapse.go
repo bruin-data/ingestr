@@ -474,10 +474,7 @@ func (d *SynapseDestination) DeleteInsertTable(ctx context.Context, opts destina
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE %s >= @p1 AND %s <= @p2",
-		quoteTable(opts.TargetTable), quoteColumn(opts.IncrementalKey), quoteColumn(opts.IncrementalKey),
-	)
+	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, opts.IncrementalKey)
 	config.Debug("[Synapse DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -502,6 +499,13 @@ func (d *SynapseDestination) DeleteInsertTable(ctx context.Context, opts destina
 
 	config.Debug("[Synapse DELETE+INSERT] Delete+Insert completed in %v", time.Since(startOp))
 	return nil
+}
+
+func buildDeleteInsertDeleteSQL(targetTable, incrementalKey string) string {
+	return fmt.Sprintf(
+		"DELETE FROM %s WITH (TABLOCKX, HOLDLOCK) WHERE %s >= @p1 AND %s <= @p2",
+		quoteTable(targetTable), quoteColumn(incrementalKey), quoteColumn(incrementalKey),
+	)
 }
 
 func (d *SynapseDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {

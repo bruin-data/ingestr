@@ -498,8 +498,18 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "bigquery aborted transaction reason",
+			err:  gcbq.Error{Reason: "aborted", Message: "Transaction is aborted due to concurrent update"},
+			want: true,
+		},
+		{
 			name: "bigquery backend error message hint",
 			err:  gcbq.Error{Reason: "", Message: "The job encountered an error during execution. Retrying the job may solve the problem."},
+			want: true,
+		},
+		{
+			name: "bigquery concurrent update message",
+			err:  gcbq.Error{Reason: "invalidQuery", Message: "Could not serialize access to table due to concurrent update"},
 			want: true,
 		},
 		{
@@ -541,6 +551,35 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 				t.Fatalf("isRetryableLoadJobError() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRetryDelayForQueryJobAddsJitterForConcurrentUpdates(t *testing.T) {
+	oldJitter := queryJobJitter
+	defer func() { queryJobJitter = oldJitter }()
+
+	var gotMax time.Duration
+	queryJobJitter = func(max time.Duration) time.Duration {
+		gotMax = max
+		return 123 * time.Millisecond
+	}
+
+	err := gcbq.Error{Reason: "aborted", Message: "Could not serialize access due to concurrent update"}
+	delay := retryDelayForQueryJob(2, err)
+	if gotMax != 3*time.Second {
+		t.Fatalf("jitter max = %v, want 3s", gotMax)
+	}
+	if delay != 2*time.Second+123*time.Millisecond {
+		t.Fatalf("delay = %v, want 2.123s", delay)
+	}
+
+	gotMax = 0
+	delay = retryDelayForQueryJob(2, gcbq.Error{Reason: "backendError", Message: "backend"})
+	if gotMax != 0 {
+		t.Fatalf("jitter called for non-concurrent error with max %v", gotMax)
+	}
+	if delay != 2*time.Second {
+		t.Fatalf("non-concurrent delay = %v, want 2s", delay)
 	}
 }
 

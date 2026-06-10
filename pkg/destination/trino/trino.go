@@ -3,6 +3,7 @@ package trino
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -296,38 +297,7 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)`,
 }
 
 func (d *TrinoDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
-	startOp := time.Now()
-
-	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
-	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
-
-	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingCatalog), quoteIdentifier(stagingSchema), quoteIdentifier(stagingName))
-	targetFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(targetName))
-
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE %s >= '%v' AND %s <= '%v'",
-		targetFQN, quoteIdentifier(opts.IncrementalKey), opts.IntervalStart, quoteIdentifier(opts.IncrementalKey), opts.IntervalEnd,
-	)
-	config.Debug("[TRINO DELETE+INSERT] Executing DELETE: %s", deleteSQL)
-
-	if _, err := d.db.ExecContext(ctx, deleteSQL); err != nil {
-		config.LogFailedQuery(deleteSQL, err)
-		return fmt.Errorf("failed to delete records: %w", err)
-	}
-
-	colList := strings.Join(quoteColumns(opts.Columns), ", ")
-	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
-	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingFQN, quoteColumns([]string{opts.IncrementalKey})[0])
-	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetFQN, colList, selectClause)
-	config.Debug("[TRINO DELETE+INSERT] Executing INSERT: %s", insertSQL)
-
-	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
-		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert records: %w", err)
-	}
-
-	config.Debug("[TRINO DELETE+INSERT] Delete+Insert completed in %v", time.Since(startOp))
-	return nil
+	return errors.New("delete+insert strategy is not supported for trino destination")
 }
 
 func (d *TrinoDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
@@ -445,27 +415,14 @@ func (d *TrinoDestination) Exec(ctx context.Context, sqlStr string, args ...inte
 }
 
 func (d *TrinoDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
-	return &trinoTransaction{}, nil
-}
-
-type trinoTransaction struct{}
-
-func (t *trinoTransaction) Exec(ctx context.Context, sql string, args ...interface{}) error {
-	return nil
-}
-
-func (t *trinoTransaction) Commit(ctx context.Context) error {
-	return nil
-}
-
-func (t *trinoTransaction) Rollback(ctx context.Context) error {
-	return nil
+	_ = ctx
+	return nil, errors.New("trino destination does not support transactions")
 }
 
 func (d *TrinoDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *TrinoDestination) SupportsAppendStrategy() bool       { return true }
 func (d *TrinoDestination) SupportsMergeStrategy() bool        { return true }
-func (d *TrinoDestination) SupportsDeleteInsertStrategy() bool { return true }
+func (d *TrinoDestination) SupportsDeleteInsertStrategy() bool { return false }
 func (d *TrinoDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *TrinoDestination) SupportsAtomicSwap() bool           { return false }
 

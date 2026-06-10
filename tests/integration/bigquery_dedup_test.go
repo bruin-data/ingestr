@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -322,6 +323,90 @@ func TestBigQuery_DeleteInsertTable_DedupsDuplicateStagingPKs(t *testing.T) {
 	))
 	require.Len(t, rows, 1)
 	require.EqualValues(t, 3, rows[0][0], "expected 3 distinct ids inside the delete-insert window")
+}
+
+func TestBigQuery_DeleteInsertTable_ConcurrentWritersDoNotDuplicate(t *testing.T) {
+	dest, client, project, dataset := bqDedupSetup(t)
+	ctx := context.Background()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	targetTbl := fmt.Sprintf("dedup_di_concurrent_target_%s", suffix)
+	stagingTbls := []string{
+		fmt.Sprintf("dedup_di_concurrent_staging_a_%s", suffix),
+		fmt.Sprintf("dedup_di_concurrent_staging_b_%s", suffix),
+		fmt.Sprintf("dedup_di_concurrent_staging_c_%s", suffix),
+	}
+	allTables := append([]string{targetTbl}, stagingTbls...)
+	defer bqDropTables(ctx, client, dataset, allTables...)
+	defer func() { _ = dest.Close(ctx) }()
+
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+		"CREATE TABLE `%s.%s.%s` (id INT64, ts INT64, name STRING)",
+		project, dataset, targetTbl,
+	)))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO `+"`%s.%s.%s`"+` VALUES
+		(99, 999, 'outside-window'),
+		(1, 100, 'stale-a'),
+		(2, 101, 'stale-b'),
+		(3, 102, 'stale-c')`, project, dataset, targetTbl)))
+
+	for i, tbl := range stagingTbls {
+		require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+			"CREATE TABLE `%s.%s.%s` (id INT64, ts INT64, name STRING)",
+			project, dataset, tbl,
+		)))
+		require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO `+"`%s.%s.%s`"+` VALUES
+			(1, 100, 'writer-%d-a-old'),
+			(1, 110, 'writer-%d-a-new'),
+			(2, 101, 'writer-%d-b-old'),
+			(2, 111, 'writer-%d-b-new'),
+			(3, 102, 'writer-%d-c')`, project, dataset, tbl, i, i, i, i, i)))
+	}
+
+	start := make(chan struct{})
+	errCh := make(chan error, len(stagingTbls))
+	var wg sync.WaitGroup
+	for _, tbl := range stagingTbls {
+		wg.Add(1)
+		go func(stagingTbl string) {
+			defer wg.Done()
+			<-start
+			errCh <- dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+				StagingTable:       dataset + "." + stagingTbl,
+				TargetTable:        dataset + "." + targetTbl,
+				IncrementalKey:     "ts",
+				IncrementalKeyType: schema.TypeInt64,
+				IntervalStart:      int64(0),
+				IntervalEnd:        int64(200),
+				Columns:            []string{"id", "ts", "name"},
+				PrimaryKeys:        []string{"id"},
+			})
+		}(tbl)
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+
+	rows := bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT COUNT(*) FROM `%s.%s.%s`", project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1)
+	require.EqualValues(t, 4, rows[0][0], "expected three interval rows plus one outside-window row")
+
+	rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT id, COUNT(*) FROM `%s.%s.%s` WHERE ts BETWEEN 0 AND 200 GROUP BY id HAVING COUNT(*) > 1",
+		project, dataset, targetTbl,
+	))
+	require.Empty(t, rows, "concurrent delete-insert writers must not leave duplicate primary keys")
+
+	rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT name FROM `%s.%s.%s` WHERE id = 99", project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1, "outside-window row must survive concurrent delete-insert")
+	require.Equal(t, "outside-window", rows[0][0])
 }
 
 func TestBigQuery_MergeTable_NullSafeCompositePrimaryKey(t *testing.T) {

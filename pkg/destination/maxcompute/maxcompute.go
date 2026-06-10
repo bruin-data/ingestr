@@ -242,7 +242,8 @@ func (d *MaxComputeDestination) BeginTransaction(ctx context.Context) (destinati
 		}
 		return &sqlTransaction{tx: tx}, nil
 	}
-	return &maxComputeTransaction{dest: d}, nil
+	_ = ctx
+	return nil, errors.New("MaxCompute destination does not support transactions")
 }
 
 func (d *MaxComputeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
@@ -628,24 +629,6 @@ func containsFold(values []string, needle string) bool {
 		}
 	}
 	return false
-}
-
-type maxComputeTransaction struct {
-	dest *MaxComputeDestination
-}
-
-func (t *maxComputeTransaction) Exec(ctx context.Context, sql string, args ...interface{}) error {
-	return t.dest.Exec(ctx, sql, args...)
-}
-
-func (t *maxComputeTransaction) Commit(ctx context.Context) error {
-	_ = ctx
-	return nil
-}
-
-func (t *maxComputeTransaction) Rollback(ctx context.Context) error {
-	_ = ctx
-	return nil
 }
 
 type sqlTransaction struct {

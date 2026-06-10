@@ -206,6 +206,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
+        <td>MaxCompute</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
         <td>Microsoft Fabric</td>
         <td>✅</td>
         <td>✅</td>

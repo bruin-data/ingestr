@@ -176,6 +176,9 @@ A few important notes about the `delete+insert` strategy:
 - it does not guarantee the order of the rows in the destination table, as it will delete and insert the rows in the destination table.
 - it does not deduplicate the rows in the destination table, as it will delete and insert the rows in the destination table, which means you may have multiple rows with the same `incremental_key` in the destination table.
 
+> [!WARNING]
+> **Breaking change:** `delete+insert` is no longer supported for **CrateDB** and **Trino** destinations. These platforms cannot make the delete and insert steps atomic (CrateDB commits every statement immediately despite accepting `BEGIN`/`START TRANSACTION`; Trino transaction support depends on the catalog connector), so ingestr previously ran them as two non-atomic statements that could leave the table in a partially-updated state on failure or under concurrent runs. ingestr now fails this strategy up front for these destinations instead of loading data unsafely. Use `merge` or `replace` instead. See the [CrateDB](/supported-sources/cratedb) and [Trino](/supported-sources/trino) destination notes for details.
+
 ### Example
 Let's assume you had the following source table:
 | id | name | updated_at |

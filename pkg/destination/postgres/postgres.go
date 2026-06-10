@@ -575,6 +575,13 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
+	lockSQL := buildDeleteInsertLockSQL(quotedTargetTable)
+	config.Debug("[DELETE+INSERT] Locking target table: %s", lockSQL)
+	if _, err := tx.Exec(ctx, lockSQL); err != nil {
+		config.LogFailedQuery(lockSQL, err)
+		return fmt.Errorf("failed to lock target table: %w", err)
+	}
+
 	deleteSQL := fmt.Sprintf(
 		`DELETE FROM %s WHERE %s >= $1 AND %s <= $2`,
 		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
@@ -608,6 +615,10 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 
 	config.Debug("[DELETE+INSERT] Delete+Insert completed in %v", time.Since(startOp))
 	return nil
+}
+
+func buildDeleteInsertLockSQL(quotedTargetTable string) string {
+	return fmt.Sprintf("LOCK TABLE %s IN EXCLUSIVE MODE", quotedTargetTable)
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
