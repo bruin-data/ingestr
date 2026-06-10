@@ -69,7 +69,8 @@ test-python:
 	@if command -v uv >/dev/null 2>&1; then \
 		uv run --extra sdk python tests/python/test_ingestr_package.py; \
 	else \
-		python3 -m pip install --user uv && python3 -m uv run --extra sdk python tests/python/test_ingestr_package.py; \
+		echo "uv not found; install uv to run Python SDK tests"; \
+		exit 1; \
 	fi
 
 test-integration: generate

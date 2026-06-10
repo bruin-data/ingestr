@@ -335,7 +335,9 @@ class IngestrPackageTest(unittest.TestCase):
 
         def fake_ingest(**kwargs):
             captured.update(kwargs)
-            path = kwargs["source_uri"].removeprefix("mmap://")
+            prefix = "mmap://"
+            self.assertTrue(kwargs["source_uri"].startswith(prefix))
+            path = kwargs["source_uri"][len(prefix):]
             captured["rows"] = pa.ipc.open_file(path).read_all().to_pylist()
             return subprocess.CompletedProcess(["/tmp/ingestr"], 0)
 

@@ -82,6 +82,37 @@ func TestArrowStreamSourceCanOnlyReadOnce(t *testing.T) {
 	require.ErrorContains(t, err, "can only be read once")
 }
 
+func TestArrowStreamSourceSkipsBatchesWhenAllColumnsExcluded(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeTestStream(t, &buf)
+
+	ctx := context.Background()
+	src := NewArrowStreamSourceWithReader(&buf)
+	require.NoError(t, src.Connect(ctx, "arrow-stream://-"))
+	t.Cleanup(func() { _ = src.Close(ctx) })
+
+	table, err := src.GetTable(ctx, source.TableRequest{Name: "events"})
+	require.NoError(t, err)
+
+	results, err := table.Read(ctx, source.ReadOptions{
+		ExcludeColumns: []string{"id", "name", "score", "is_active"},
+	})
+	require.NoError(t, err)
+
+	var batches int
+	for result := range results {
+		require.NoError(t, result.Err)
+		if result.Batch != nil {
+			batches++
+			result.Batch.Release()
+		}
+	}
+
+	assert.Zero(t, batches)
+}
+
 func writeTestStream(t *testing.T, buf *bytes.Buffer) {
 	t.Helper()
 

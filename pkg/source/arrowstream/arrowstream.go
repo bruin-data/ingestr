@@ -261,7 +261,7 @@ func applyExcludeColumns(record arrow.RecordBatch, exclude map[string]struct{}) 
 	}
 
 	if len(keptCols) == 0 {
-		return array.NewRecordBatch(arrow.NewSchema([]arrow.Field{}, nil), nil, record.NumRows()), false
+		return array.NewRecordBatch(arrow.NewSchema([]arrow.Field{}, nil), nil, 0), false
 	}
 
 	recordSchema := arrow.NewSchema(keptFields, nil)
