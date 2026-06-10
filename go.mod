@@ -21,6 +21,7 @@ require (
 	github.com/apache/arrow-go/v18 v18.5.1
 	github.com/apache/cassandra-gocql-driver/v2 v2.1.1
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
+	github.com/aws/aws-msk-iam-sasl-signer-go v1.0.4
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.6
