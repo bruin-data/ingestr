@@ -645,12 +645,17 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 	if err != nil {
 		return "", err
 	}
-	if snapshotLSN == "" || isZeroLSN(snapshotLSN) {
-		minLSN, minErr := s.minLSN(ctx, meta)
-		if minErr != nil {
-			return "", minErr
-		}
-		if minLSN != "" && !isZeroLSN(minLSN) {
+	// The harvest watermark (fn_cdc_get_max_lsn) can lag behind the capture
+	// instance's min LSN, e.g. for a freshly enabled table. Stamping the
+	// snapshot below min LSN would invalidate the next run's resume check and
+	// force an endless re-snapshot loop, so clamp up to the instance min LSN.
+	// Both bounds precede any post-snapshot change, so this never skips data.
+	minLSN, err := s.minLSN(ctx, meta)
+	if err != nil {
+		return "", err
+	}
+	if minLSN != "" && !isZeroLSN(minLSN) {
+		if snapshotLSN == "" || isZeroLSN(snapshotLSN) || compareLSNHex(minLSN, snapshotLSN) > 0 {
 			snapshotLSN = minLSN
 		}
 	}
@@ -695,9 +700,18 @@ func (s *MSSQLCDCSource) maxLSNFromQueryer(ctx context.Context, q queryer) (stri
 	return normalizeLSNHex(lsn.String), nil
 }
 
+// minLSN returns the capture instance's low-watermark LSN. It reads
+// cdc.change_tables.start_lsn directly instead of sys.fn_cdc_get_min_lsn
+// because the latter returns NULL until the capture job first processes the
+// instance, while start_lsn is set at enable time. Cleanup raises start_lsn,
+// so it carries the same change-retention semantics.
 func (s *MSSQLCDCSource) minLSN(ctx context.Context, meta tableMetadata) (string, error) {
 	var lsn sql.NullString
-	if err := s.db.QueryRowContext(ctx, "SELECT CONVERT(varchar(20), sys.fn_cdc_get_min_lsn(@p1), 2)", meta.CaptureInstance).Scan(&lsn); err != nil {
+	err := s.db.QueryRowContext(ctx, "SELECT CONVERT(varchar(20), start_lsn, 2) FROM cdc.change_tables WHERE capture_instance = @p1 AND end_lsn IS NULL", meta.CaptureInstance).Scan(&lsn)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
 		return "", fmt.Errorf("failed to get SQL Server CDC min LSN for %s: %w", tableName(meta), err)
 	}
 	if !lsn.Valid {

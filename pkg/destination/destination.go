@@ -148,6 +148,15 @@ type AtomicCommitWriter interface {
 	SupportsAtomicCommitWrites() bool
 }
 
+// MultiTableNamer is an optional interface for destinations whose table names
+// cannot embed a multi-table source's qualified name verbatim (e.g. BigQuery
+// table IDs cannot contain dots). It maps a source table name like
+// "dbo.orders" plus the configured destination schema to a destination table
+// name. Destinations without this interface get "<destSchema>.<sourceTable>".
+type MultiTableNamer interface {
+	DestTableName(destSchema, sourceTable string) string
+}
+
 // ExactRowCountWaiter is an optional interface for destinations that can
 // verify when a table has become query-consistent at an exact row count.
 type ExactRowCountWaiter interface {

@@ -817,9 +817,12 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	}
 
 	tableDestNames := make(map[string]string)
+	namer, _ := p.dest.(destination.MultiTableNamer)
 	for _, table := range tables {
 		destName := table.Name
-		if table.DestSchema != "" {
+		if namer != nil {
+			destName = namer.DestTableName(table.DestSchema, table.Name)
+		} else if table.DestSchema != "" {
 			// TODO(turtledev): When a publication in a non-public
 			// schema is created, the tables names may (?) have a schema.
 			//
