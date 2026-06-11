@@ -566,10 +566,10 @@ func buildSelectQueryFromTableRef(tableRef string, columns []schema.Column, opts
 	if opts.IncrementalKey != "" {
 		incrementalKey := quoteIdent(normalizeDb2Ident(opts.IncrementalKey))
 		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf("%s >= '%s'", incrementalKey, opts.IntervalStart.Format("2006-01-02 15:04:05")))
+			conditions = append(conditions, fmt.Sprintf("%s >= '%s'", incrementalKey, formatDb2TimestampLiteral(*opts.IntervalStart)))
 		}
 		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf("%s <= '%s'", incrementalKey, opts.IntervalEnd.Format("2006-01-02 15:04:05")))
+			conditions = append(conditions, fmt.Sprintf("%s <= '%s'", incrementalKey, formatDb2TimestampLiteral(*opts.IntervalEnd)))
 		}
 	}
 
@@ -592,6 +592,10 @@ func quoteSchemaTable(table string, tableSchema *schema.TableSchema) string {
 		return quoteIdent(tableSchema.Name)
 	}
 	return quoteIdent(tableSchema.Schema) + "." + quoteIdent(tableSchema.Name)
+}
+
+func formatDb2TimestampLiteral(t time.Time) string {
+	return t.Format("2006-01-02 15:04:05.000000")
 }
 
 func quoteTable(table string) string {

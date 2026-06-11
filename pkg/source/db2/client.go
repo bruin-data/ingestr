@@ -159,8 +159,13 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		secmec = secmecEncryptedUserPassword
 	}
 
+	secchk, err := c.packSECCHK(secmec, sectkn)
+	if err != nil {
+		return err
+	}
+
 	curID = 1
-	if curID, err = writeRequestDSS(c.conn, c.packSECCHK(secmec, sectkn), curID, false, false); err != nil {
+	if curID, err = writeRequestDSS(c.conn, secchk, curID, false, false); err != nil {
 		return err
 	}
 	if _, err = writeRequestDSS(c.conn, packACCRDB(c.database), curID, false, true); err != nil {
@@ -344,24 +349,47 @@ func (c *db2Client) refreshDeadline(ctx context.Context) {
 	_ = conn.SetDeadline(deadline)
 }
 
-func (c *db2Client) packSECCHK(secmec int, sectkn []byte) []byte {
+func (c *db2Client) packSECCHK(secmec int, sectkn []byte) ([]byte, error) {
 	body := bytes.NewBuffer(nil)
 	body.Write(packUint(cpSECMEC, secmec, 2))
-	body.Write(mustPackString(cpRDBNAM, c.database, "cp500"))
-	if secmec == secmecEncryptedUserPassword {
-		user, err := encryptCredential(sectkn, c.private, mustEncode(c.user, "cp500"))
-		if err == nil {
-			body.Write(packBinary(cpSECTKN, user))
-		}
-		password, err := encryptCredential(sectkn, c.private, mustEncode(c.password, "cp500"))
-		if err == nil {
-			body.Write(packBinary(cpSECTKN, password))
-		}
-	} else {
-		body.Write(mustPackString(cpUSRID, c.user, "cp500"))
-		body.Write(mustPackString(cpPASSWORD, c.password, "cp500"))
+	rdbName, err := packString(cpRDBNAM, c.database, "cp500")
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode database name: %w", err)
 	}
-	return packDSSObject(cpSECCHK, body.Bytes())
+	body.Write(rdbName)
+	if secmec == secmecEncryptedUserPassword {
+		encodedUser, err := encodeString(c.user, "cp500")
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode user: %w", err)
+		}
+		user, err := encryptCredential(sectkn, c.private, encodedUser)
+		if err != nil {
+			return nil, fmt.Errorf("credential encryption failed for user: %w", err)
+		}
+		body.Write(packBinary(cpSECTKN, user))
+
+		encodedPassword, err := encodeString(c.password, "cp500")
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode password: %w", err)
+		}
+		password, err := encryptCredential(sectkn, c.private, encodedPassword)
+		if err != nil {
+			return nil, fmt.Errorf("credential encryption failed for password: %w", err)
+		}
+		body.Write(packBinary(cpSECTKN, password))
+	} else {
+		user, err := packString(cpUSRID, c.user, "cp500")
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode user: %w", err)
+		}
+		body.Write(user)
+		password, err := packString(cpPASSWORD, c.password, "cp500")
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode password: %w", err)
+		}
+		body.Write(password)
+	}
+	return packDSSObject(cpSECCHK, body.Bytes()), nil
 }
 
 func (c *db2Client) packPKGNAMCSN(statementNumber uint16) []byte {
@@ -480,14 +508,6 @@ func padDatabaseName(database string) string {
 
 func mustPackString(codePoint uint16, value string, encoding string) []byte {
 	out, err := packString(codePoint, value, encoding)
-	if err != nil {
-		panic(err)
-	}
-	return out
-}
-
-func mustEncode(value string, encoding string) []byte {
-	out, err := encodeString(value, encoding)
 	if err != nil {
 		panic(err)
 	}

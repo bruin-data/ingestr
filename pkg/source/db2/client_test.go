@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -19,6 +20,38 @@ func TestReadDRDAFieldNonNullableDecimal(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "123.45", value.(interface{ String() string }).String())
+}
+
+func TestReadDRDAFieldTimestampTruncatesToMicroseconds(t *testing.T) {
+	value, err := readDRDAField(bytes.NewReader([]byte("2024-01-02-03.04.05.123456789012")), drdaField{
+		typeCode: drdaTypeTimestamp,
+		params:   lengthParams(len("2024-01-02-03.04.05.123456789012")),
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.UTC), value)
+}
+
+func TestPackSECCHKReturnsEncryptionError(t *testing.T) {
+	client := &db2Client{
+		database: "TESTDB",
+		user:     "db2inst1",
+		password: "password",
+		private:  big.NewInt(2),
+	}
+
+	_, err := client.packSECCHK(secmecEncryptedUserPassword, []byte("short-token"))
+
+	require.ErrorContains(t, err, "credential encryption failed for user")
+	require.ErrorContains(t, err, "expected 32-byte security token")
+}
+
+func TestCP500EncodingUsesCodePage500(t *testing.T) {
+	encoded, err := encodeString("[]{}@#$", "cp500")
+
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x4a, 0x5a, 0xc0, 0xd0, 0x7c, 0x7b, 0x5b}, encoded)
+	require.Equal(t, "[]{}@#$", decodeString(encoded, "cp500"))
 }
 
 func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
@@ -85,4 +118,10 @@ func writeTestDSS(conn net.Conn, codePoint uint16, object []byte, chained bool) 
 
 	_, err := conn.Write(packet)
 	return err
+}
+
+func lengthParams(length int) []byte {
+	out := make([]byte, 2)
+	binary.BigEndian.PutUint16(out, uint16(length))
+	return out
 }

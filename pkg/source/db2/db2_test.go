@@ -23,8 +23,8 @@ func TestParseDb2URI(t *testing.T) {
 }
 
 func TestBuildSelectQuery(t *testing.T) {
-	start := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
-	end := time.Date(2024, 1, 3, 3, 4, 5, 0, time.UTC)
+	start := time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.UTC)
+	end := time.Date(2024, 1, 3, 3, 4, 5, 1000, time.UTC)
 
 	query := buildSelectQuery("analytics.orders", []schema.Column{
 		{Name: "ID"},
@@ -36,7 +36,7 @@ func TestBuildSelectQuery(t *testing.T) {
 		Limit:          10,
 	})
 
-	require.Equal(t, `SELECT "ID", "AMOUNT""USD" FROM "ANALYTICS"."ORDERS" WHERE "UPDATED_AT" >= '2024-01-02 03:04:05' AND "UPDATED_AT" <= '2024-01-03 03:04:05' FETCH FIRST 10 ROWS ONLY`, query)
+	require.Equal(t, `SELECT "ID", "AMOUNT""USD" FROM "ANALYTICS"."ORDERS" WHERE "UPDATED_AT" >= '2024-01-02 03:04:05.123456' AND "UPDATED_AT" <= '2024-01-03 03:04:05.000001' FETCH FIRST 10 ROWS ONLY`, query)
 }
 
 func TestBuildSelectQueryForSchema(t *testing.T) {

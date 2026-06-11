@@ -347,10 +347,7 @@ func readDRDAField(stream *bytes.Reader, field drdaField) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		value := string(data)
-		if len(value) >= 26 {
-			value = value[:26]
-		}
+		value := normalizeDb2Timestamp(string(data))
 		t, err := time.Parse("2006-01-02-15.04.05.999999", value)
 		if err != nil {
 			return strings.TrimSpace(string(data)), nil
@@ -453,6 +450,14 @@ func decodePackedDecimal(data []byte, scale int) (decimal.Decimal, error) {
 		v = v.Neg()
 	}
 	return v, nil
+}
+
+func normalizeDb2Timestamp(value string) string {
+	value = strings.TrimSpace(value)
+	if dot := strings.LastIndex(value, "."); dot != -1 && len(value) > dot+7 {
+		return value[:dot+7]
+	}
+	return value
 }
 
 func parseVarchar(b []byte) (string, []byte) {

@@ -42,6 +42,8 @@ func encryptCredential(serverToken []byte, private *big.Int, plaintext []byte) (
 	}
 
 	key := session[12:20]
+	// DRDA encrypted user/password authentication requires DES-CBC and derives
+	// the IV from the server token. Use TLS when server authenticity matters.
 	iv := serverToken[12:20]
 
 	block, err := des.NewCipher(key)

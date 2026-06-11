@@ -7,10 +7,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-
-	"golang.org/x/text/encoding"
-	"golang.org/x/text/encoding/charmap"
-	"golang.org/x/text/encoding/ianaindex"
 )
 
 type dssPacket struct {
@@ -78,11 +74,7 @@ func packNullString(value string) []byte {
 func encodeString(value string, encoding string) ([]byte, error) {
 	switch strings.ToLower(encoding) {
 	case "cp500":
-		enc, err := cp500Encoding()
-		if err != nil {
-			return nil, err
-		}
-		return enc.NewEncoder().Bytes([]byte(value))
+		return encodeCP500(value)
 	case "utf-8", "utf8":
 		return []byte(value), nil
 	default:
@@ -93,24 +85,9 @@ func encodeString(value string, encoding string) ([]byte, error) {
 func decodeString(value []byte, encoding string) string {
 	switch strings.ToLower(encoding) {
 	case "cp500":
-		enc, err := cp500Encoding()
-		if err != nil {
-			return string(value)
-		}
-		decoded, err := enc.NewDecoder().Bytes(value)
-		if err == nil {
-			return string(decoded)
-		}
+		return decodeCP500(value)
 	}
 	return string(value)
-}
-
-func cp500Encoding() (encoding.Encoding, error) {
-	enc, err := ianaindex.IANA.Encoding("cp500")
-	if err == nil && enc != nil {
-		return enc, nil
-	}
-	return charmap.CodePage037, nil
 }
 
 func writeRequestDSS(w io.Writer, object []byte, correlationID uint16, nextDSSHasSameID bool, lastPacket bool) (uint16, error) {
