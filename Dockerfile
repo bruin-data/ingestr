@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=1 go build -v \
     -ldflags="-s -w -X github.com/bruin-data/ingestr/cmd.Version=${VERSION} -X main.commit=${BRANCH_NAME}" \
-    -o /src/bin/gong .
+    -o /src/bin/ingestr .
 
 FROM debian:bookworm-slim
 
@@ -42,14 +42,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
-RUN useradd --create-home --shell /bin/bash gong
+RUN useradd --create-home --shell /bin/bash ingestr
 
 # Switch to non-root user
-USER gong
-WORKDIR /home/gong
+USER ingestr
+WORKDIR /home/ingestr
 
 # Copy the built binary from builder stage
-COPY --from=builder /src/bin/gong /usr/local/bin/gong
+COPY --from=builder /src/bin/ingestr /usr/local/bin/ingestr
 
 # Set entrypoint
-CMD ["gong"]
+CMD ["ingestr"]
