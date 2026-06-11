@@ -84,13 +84,15 @@ func TestCP500EncodingUsesCodePage500(t *testing.T) {
 	require.Equal(t, "[]{}@#$", decodeString(encoded, "cp500"))
 }
 
-func TestPackPKGNAMCSNEncodesCP500(t *testing.T) {
+func TestPackPKGNAMCSNUsesCatalogBytes(t *testing.T) {
 	client := &db2Client{database: padDatabaseName("[")}
 
-	packet, err := client.packPKGNAMCSN(65)
+	packet, err := client.packPKGNAMCSN(db2PackageSectionQuery)
 
 	require.NoError(t, err)
-	require.Equal(t, byte(0x4a), packet[4])
+	require.Equal(t, byte('['), packet[4])
+	require.Equal(t, []byte(db2PackageToken), packet[4+18+18+18:4+18+18+18+8])
+	require.Equal(t, []byte{0x00, db2PackageSectionQuery}, packet[len(packet)-2:])
 }
 
 func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {

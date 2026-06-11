@@ -24,6 +24,13 @@ type db2Client struct {
 	mu       sync.Mutex
 }
 
+const (
+	db2PackageSectionQuery = 64
+	db2PackageSectionSet   = 1
+	db2PackageName         = "SYSSH200"
+	db2PackageToken        = "SYSLVL01"
+)
+
 type db2StreamHandler struct {
 	Columns func([]db2Column) error
 	Rows    func([][]any) error
@@ -417,18 +424,15 @@ func (c *db2Client) packSECCHK(secmec int, sectkn []byte) ([]byte, error) {
 }
 
 func (c *db2Client) packPKGNAMCSN(statementNumber uint16) ([]byte, error) {
-	pkg := fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, "NULLID", "SYSSH200", "SYSLVL01")
-	raw, err := encodeCP500(pkg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode package name: %w", err)
-	}
+	// PKGNAMCSN names pre-bound CLI packages by their catalog bytes; the consistency token is binary.
+	raw := []byte(fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, "NULLID", db2PackageName, db2PackageToken))
 	raw = append(raw, byte(statementNumber>>8), byte(statementNumber))
 	return packBinary(cpPKGNAMCSN, raw), nil
 }
 
 func (c *db2Client) packPRPSQLSTT() ([]byte, error) {
 	body := bytes.NewBuffer(nil)
-	pkg, err := c.packPKGNAMCSN(65)
+	pkg, err := c.packPKGNAMCSN(db2PackageSectionQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +443,7 @@ func (c *db2Client) packPRPSQLSTT() ([]byte, error) {
 
 func (c *db2Client) packEXCSQLIMM() ([]byte, error) {
 	body := bytes.NewBuffer(nil)
-	pkg, err := c.packPKGNAMCSN(65)
+	pkg, err := c.packPKGNAMCSN(db2PackageSectionQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -449,7 +453,7 @@ func (c *db2Client) packEXCSQLIMM() ([]byte, error) {
 }
 
 func (c *db2Client) packEXCSQLSET() ([]byte, error) {
-	pkg, err := c.packPKGNAMCSN(1)
+	pkg, err := c.packPKGNAMCSN(db2PackageSectionSet)
 	if err != nil {
 		return nil, err
 	}
@@ -458,7 +462,7 @@ func (c *db2Client) packEXCSQLSET() ([]byte, error) {
 
 func (c *db2Client) packOPNQRY() ([]byte, error) {
 	body := bytes.NewBuffer(nil)
-	pkg, err := c.packPKGNAMCSN(65)
+	pkg, err := c.packPKGNAMCSN(db2PackageSectionQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +475,7 @@ func (c *db2Client) packOPNQRY() ([]byte, error) {
 
 func (c *db2Client) packCNTQRY(qryInsID uint64) ([]byte, error) {
 	body := bytes.NewBuffer(nil)
-	pkg, err := c.packPKGNAMCSN(65)
+	pkg, err := c.packPKGNAMCSN(db2PackageSectionQuery)
 	if err != nil {
 		return nil, err
 	}
