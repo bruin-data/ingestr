@@ -257,6 +257,15 @@ func (d *CrateDBDestination) MergeTable(ctx context.Context, opts destination.Me
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
+	if destination.HasCDCDeletedColumn(columns) && len(opts.PrimaryKeys) > 0 {
+		if err := d.mergeCDC(ctx, quotedTargetTable, quotedStagingTable, columns, opts.PrimaryKeys); err != nil {
+			return err
+		}
+		d.refreshTable(ctx, opts.TargetTable)
+		config.Debug("[CRATEDB MERGE] CDC merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	var upsertSQL string
 	if len(nonPKColumns) == 0 {
 		upsertSQL = fmt.Sprintf(
@@ -289,6 +298,107 @@ func (d *CrateDBDestination) MergeTable(ctx context.Context, opts destination.Me
 
 	config.Debug("[CRATEDB MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+// mergeCDC applies CDC staging data deterministically. CrateDB has no
+// UPDATE ... FROM, so it runs three upserts: (1) latest non-deleted change per
+// PK, (2) full row for PKs whose latest change is a delete but that carry row
+// data from an earlier change in the window (update/insert then delete), and
+// (3) CDC-columns-only marking for delete-only windows, restricted via an
+// inner join to rows already present in the target so unknown rows are not
+// materialized from a bare delete image.
+func (d *CrateDBDestination) mergeCDC(ctx context.Context, quotedTargetTable, quotedStagingTable string, columns, primaryKeys []string) error {
+	pkMap := make(map[string]bool, len(primaryKeys))
+	quotedPKs := quoteColumns(primaryKeys)
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+	pkList := strings.Join(quotedPKs, ", ")
+	quotedColumns := quoteColumns(columns)
+	colList := strings.Join(quotedColumns, ", ")
+	nonPKColumns := filterColumns(columns, primaryKeys)
+
+	joinOn := func(left, right string) string {
+		conds := make([]string, len(quotedPKs))
+		for i, pk := range quotedPKs {
+			conds[i] = fmt.Sprintf("%s.%s = %s.%s", left, pk, right, pk)
+		}
+		return strings.Join(conds, " AND ")
+	}
+	dedup := func(where, orderBy string) string {
+		return fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+			colList, colList, pkList, orderBy, quotedStagingTable, where,
+		)
+	}
+	latestAll := dedup("", destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier))
+	latestActive := dedup(` WHERE "_cdc_deleted" = false`, `"_cdc_lsn" DESC`)
+
+	upsertActiveSQL := fmt.Sprintf(
+		`INSERT INTO %s (%s) SELECT %s FROM %s AS act ON CONFLICT (%s) DO UPDATE SET %s`,
+		quotedTargetTable, colList,
+		prefixColumns(quotedColumns, "act"),
+		latestActive, pkList, buildConflictUpdateSet(nonPKColumns),
+	)
+
+	composed := make([]string, len(columns))
+	for i, col := range columns {
+		alias := "act"
+		if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+			alias = "la"
+		}
+		composed[i] = alias + "." + quotedColumns[i]
+	}
+	upsertDeletedWithDataSQL := fmt.Sprintf(
+		`INSERT INTO %s (%s) SELECT %s FROM %s AS la JOIN %s AS act ON %s WHERE la."_cdc_deleted" = true ON CONFLICT (%s) DO UPDATE SET %s`,
+		quotedTargetTable, colList,
+		strings.Join(composed, ", "),
+		latestAll, latestActive, joinOn("la", "act"), pkList, buildConflictUpdateSet(nonPKColumns),
+	)
+
+	markDeletedSQL := fmt.Sprintf(
+		`INSERT INTO %s (%s) SELECT %s FROM %s AS la JOIN %s AS t ON %s LEFT JOIN %s AS act ON %s WHERE la."_cdc_deleted" = true AND act."_cdc_lsn" IS NULL ON CONFLICT (%s) DO UPDATE SET "_cdc_deleted" = excluded."_cdc_deleted", "_cdc_lsn" = excluded."_cdc_lsn", "_cdc_synced_at" = excluded."_cdc_synced_at"`,
+		quotedTargetTable, colList,
+		prefixColumns(quotedColumns, "la"),
+		latestAll, quotedTargetTable, joinOn("la", "t"), latestActive, joinOn("la", "act"), pkList,
+	)
+
+	for _, sql := range []string{upsertActiveSQL, upsertDeletedWithDataSQL, markDeletedSQL} {
+		config.Debug("[CRATEDB MERGE] Executing CDC statement: %s", sql)
+		if _, err := d.pool.Exec(ctx, sql); err != nil {
+			config.LogFailedQuery(sql, err)
+			return fmt.Errorf("failed to apply CDC merge: %w", err)
+		}
+	}
+	return nil
+}
+
+func prefixColumns(quotedColumns []string, alias string) string {
+	prefixed := make([]string, len(quotedColumns))
+	for i, col := range quotedColumns {
+		prefixed[i] = alias + "." + col
+	}
+	return strings.Join(prefixed, ", ")
+}
+
+func (d *CrateDBDestination) SupportsCDCMerge() bool { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
+func (d *CrateDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	d.refreshTable(ctx, table)
+
+	var maxLSN *string
+	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, destination.QuoteTableName(table))
+	if err := d.pool.QueryRow(ctx, query).Scan(&maxLSN); err != nil {
+		if strings.Contains(err.Error(), "unknown") || strings.Contains(err.Error(), "RelationUnknown") {
+			return "", nil
+		}
+		return "", err
+	}
+	if maxLSN == nil {
+		return "", nil
+	}
+	return *maxLSN, nil
 }
 
 func (d *CrateDBDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {

@@ -183,6 +183,11 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			stagingTable := GenerateStagingTableName(destTable, "merge", job.Config.StagingDataset)
 			isCDC := hasCDCColumns(ti.Schema)
 
+			if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
+				errChan <- fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
+				return
+			}
+
 			if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 				Table:       destTable,
 				Schema:      ti.Schema,

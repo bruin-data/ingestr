@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -154,6 +156,13 @@ func (d *PostgresDestination) ensureSchemaExists(ctx context.Context, schemaName
 
 	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", destination.QuoteIdentifier(schemaName))
 	if _, err := d.pool.Exec(ctx, createSchemaSQL); err != nil {
+		// IF NOT EXISTS is not race-safe: concurrent creators (e.g. multi-table
+		// CDC preparing staging tables in parallel) can both pass the existence
+		// check and one loses with a duplicate error. Treat that as success.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && (pgErr.Code == "23505" || pgErr.Code == "42P06") {
+			return nil
+		}
 		config.LogFailedQuery(createSchemaSQL, err)
 		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
 	}
@@ -472,7 +481,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// latest change for that PK is a delete (preserving row data).
 		pkList := strings.Join(quotedPKs, ", ")
 		selectCols := strings.Join(quotedColumns, ", ")
-		orderByParts := append(append([]string{}, quotedPKs...), `"_cdc_lsn"::pg_lsn DESC`, `"_cdc_synced_at" DESC`)
+		orderByParts := append(append([]string{}, quotedPKs...), destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier))
 		orderBy := strings.Join(orderByParts, ", ")
 
 		latestActive := fmt.Sprintf(

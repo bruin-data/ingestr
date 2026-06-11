@@ -408,11 +408,7 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
 
-	columns := opts.Columns
-	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
-
-	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns, opts.IncrementalKey)
+	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
@@ -424,10 +420,27 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	return nil
 }
 
-func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string, incrementalKey string) string {
+func buildMergeSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey string) string {
+	quotedColumns := quoteColumns(columns)
+	nonPKColumns := filterColumns(columns, primaryKeys)
+	isCDC := destination.HasCDCDeletedColumn(columns)
+
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
+	}
+
+	insertCols := strings.Join(quotedColumns, ", ")
+	sourceCols := make([]string, len(quotedColumns))
+	for i, col := range quotedColumns {
+		sourceCols[i] = "source." + col
+	}
+
+	quotedPKs := quoteColumns(primaryKeys)
+	pkPartition := strings.Join(quotedPKs, ", ")
+
+	if isCDC {
+		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, onConditions, insertCols, sourceCols, pkPartition)
 	}
 
 	var updateSet string
@@ -439,15 +452,8 @@ func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns,
 		updateSet = fmt.Sprintf("WHEN MATCHED THEN UPDATE SET %s", strings.Join(updates, ", "))
 	}
 
-	insertCols := strings.Join(quotedColumns, ", ")
-	sourceCols := make([]string, len(quotedColumns))
-	for i, col := range quotedColumns {
-		sourceCols[i] = "source." + col
-	}
-
 	// Build dedup subquery to handle duplicate PKs in staging. When an
 	// incremental key is set the latest row per PK wins; otherwise arbitrary.
-	quotedPKs := quoteColumns(primaryKeys)
 	dedupOrderBy := "(SELECT NULL)"
 	if incrementalKey != "" {
 		dedupOrderBy = quoteColumns([]string{incrementalKey})[0] + " DESC"
@@ -456,7 +462,7 @@ func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns,
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
 		insertCols,
 		insertCols,
-		strings.Join(quotedPKs, ", "),
+		pkPartition,
 		dedupOrderBy,
 		quoteTable(stagingTable),
 	)
@@ -476,6 +482,75 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 	)
 
 	return sql
+}
+
+// buildCDCMergeSQL builds a CDC-aware MERGE: data columns come from the latest
+// non-deleted change per PK (so a trailing delete keeps the last update's
+// values), CDC columns and the deleted flag from the latest change overall.
+// Rows inserted and deleted within one window materialize as soft-deleted.
+// T-SQL allows only one UPDATE among WHEN MATCHED clauses, so the "delete-only
+// window keeps existing row data" rule is expressed with CASE instead of a
+// second clause.
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns, onConditions []string, insertCols string, sourceCols []string, pkPartition string) string {
+	pkMap := make(map[string]bool, len(primaryKeys))
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	laActJoin := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		laActJoin[i] = fmt.Sprintf("la.%s = act.%s", quoteColumn(pk), quoteColumn(pk))
+	}
+
+	selectCols := make([]string, 0, len(columns)+1)
+	for _, col := range columns {
+		alias := "act"
+		if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+			alias = "la"
+		}
+		selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteColumn(col)))
+	}
+	selectCols = append(selectCols, "CASE WHEN act.[_cdc_lsn] IS NOT NULL THEN 1 ELSE 0 END AS [__ingestr_has_active]")
+
+	dedup := func(where, orderBy string) string {
+		return fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+			insertCols, insertCols, pkPartition, orderBy, quoteTable(stagingTable), where,
+		)
+	}
+	composedSource := fmt.Sprintf(
+		"(SELECT %s FROM %s AS la LEFT JOIN %s AS act ON %s)",
+		strings.Join(selectCols, ", "),
+		dedup("", destination.CDCLatestOverallOrderBy(quoteColumn)),
+		dedup(" WHERE [_cdc_deleted] = 0", "[_cdc_lsn] DESC"),
+		strings.Join(laActJoin, " AND "),
+	)
+
+	hasRowData := "(source.[_cdc_deleted] = 0 OR source.[__ingestr_has_active] = 1)"
+	updates := make([]string, len(nonPKColumns))
+	for i, col := range nonPKColumns {
+		quoted := quoteColumn(col)
+		if destination.IsCDCColumn(col) {
+			updates[i] = fmt.Sprintf("target.%s = source.%s", quoted, quoted)
+		} else {
+			updates[i] = fmt.Sprintf("target.%s = CASE WHEN %s THEN source.%s ELSE target.%s END", quoted, hasRowData, quoted, quoted)
+		}
+	}
+
+	return fmt.Sprintf(
+		`MERGE %s AS target
+USING %s AS source
+ON %s
+WHEN MATCHED THEN UPDATE SET %s
+WHEN NOT MATCHED AND %s THEN INSERT (%s) VALUES (%s);`,
+		quoteTable(targetTable),
+		composedSource,
+		strings.Join(onConditions, " AND "),
+		strings.Join(updates, ", "),
+		hasRowData,
+		insertCols,
+		strings.Join(sourceCols, ", "),
+	)
 }
 
 func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
@@ -659,6 +734,24 @@ func (d *MSSQLDestination) SupportsMergeStrategy() bool        { return true }
 func (d *MSSQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MSSQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MSSQLDestination) SupportsAtomicSwap() bool           { return true }
+func (d *MSSQLDestination) SupportsCDCMerge() bool             { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
+func (d *MSSQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	var maxLSN sql.NullString
+	query := fmt.Sprintf("SELECT MAX([_cdc_lsn]) FROM %s", quoteTable(table))
+	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)
+	if err != nil {
+		if strings.Contains(err.Error(), "Invalid object name") {
+			return "", nil
+		}
+		return "", err
+	}
+	if !maxLSN.Valid {
+		return "", nil
+	}
+	return maxLSN.String, nil
+}
 
 func (d *MSSQLDestination) GetScheme() string { return "mssql" }
 

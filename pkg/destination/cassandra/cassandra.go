@@ -99,6 +99,12 @@ func (d *CassandraDestination) PrepareTable(ctx context.Context, opts destinatio
 	if len(pks) == 0 {
 		pks = opts.Schema.PrimaryKeys
 	}
+	if opts.CDCMode {
+		// CDC staging holds multiple change rows per source PK, which a
+		// PK-keyed table would silently collapse (CQL INSERT is an upsert).
+		// Add the LSN as a clustering key; LSNs are unique per change row.
+		pks = append(append([]string{}, pks...), destination.CDCLSNColumn)
+	}
 	createSQL, err := buildCreateTableSQL(tableRef, opts.Schema.Columns, pks)
 	if err != nil {
 		return err
@@ -333,6 +339,10 @@ func (d *CassandraDestination) MergeTable(ctx context.Context, opts destination.
 		strings.Join(placeholders, ", "),
 	)
 
+	if destination.HasCDCDeletedColumn(opts.Columns) && len(opts.PrimaryKeys) > 0 {
+		return d.mergeCDC(ctx, targetRef, selectSQL, insertSQL, opts)
+	}
+
 	iter := d.session.Query(selectSQL).IterContext(ctx)
 
 	var merged int64
@@ -357,6 +367,130 @@ func (d *CassandraDestination) MergeTable(ctx context.Context, opts destination.
 
 	config.Debug("[CASSANDRA DEST] Merge complete: %d rows upserted into %s", merged, opts.TargetTable)
 	return nil
+}
+
+// mergeCDC composes one row per PK from CDC staging data: row data comes from
+// the latest non-deleted change (so a trailing delete keeps the last update's
+// values), CDC columns and the deleted flag from the latest change overall.
+// Scan order is token order, so the latest change per PK is tracked by
+// comparing the fixed-width LSN strings. Delete-only windows update CDC
+// columns on existing rows only (IF EXISTS); unknown rows are not materialized
+// from a bare delete image.
+func (d *CassandraDestination) mergeCDC(ctx context.Context, targetRef, selectSQL, insertSQL string, opts destination.MergeOptions) error {
+	type cdcEntry struct {
+		latest        map[string]interface{}
+		latestLSN     string
+		latestDeleted bool
+		active        map[string]interface{}
+		activeLSN     string
+	}
+	entries := map[string]*cdcEntry{}
+
+	iter := d.session.Query(selectSQL).IterContext(ctx)
+	for {
+		row := make(map[string]interface{}, len(opts.Columns))
+		if !iter.MapScan(row) {
+			break
+		}
+
+		keyParts := make([]string, len(opts.PrimaryKeys))
+		for i, pk := range opts.PrimaryKeys {
+			keyParts[i] = fmt.Sprintf("%v", row[pk])
+		}
+		key := strings.Join(keyParts, "\x00")
+
+		entry, ok := entries[key]
+		if !ok {
+			entry = &cdcEntry{}
+			entries[key] = entry
+		}
+		lsn, _ := row[destination.CDCLSNColumn].(string)
+		deleted, _ := row[destination.CDCDeletedColumn].(bool)
+		if entry.latest == nil || destination.CDCSupersedes(lsn, deleted, entry.latestLSN, entry.latestDeleted) {
+			entry.latest = row
+			entry.latestLSN = lsn
+			entry.latestDeleted = deleted
+		}
+		if !deleted && (entry.active == nil || lsn > entry.activeLSN) {
+			entry.active = row
+			entry.activeLSN = lsn
+		}
+	}
+	if err := iter.Close(); err != nil {
+		return fmt.Errorf("failed to scan Cassandra staging table: %w", err)
+	}
+
+	pkConds := make([]string, len(opts.PrimaryKeys))
+	for i, pk := range opts.PrimaryKeys {
+		pkConds[i] = cassandrautil.QuoteIdentifier(pk) + " = ?"
+	}
+	markDeletedSQL := fmt.Sprintf(
+		"UPDATE %s SET %s = ?, %s = ?, %s = ? WHERE %s IF EXISTS",
+		targetRef,
+		cassandrautil.QuoteIdentifier(destination.CDCDeletedColumn),
+		cassandrautil.QuoteIdentifier(destination.CDCLSNColumn),
+		cassandrautil.QuoteIdentifier(destination.CDCSyncedAtColumn),
+		strings.Join(pkConds, " AND "),
+	)
+
+	var merged int64
+	for _, entry := range entries {
+		if entry.active == nil {
+			values := []interface{}{
+				entry.latest[destination.CDCDeletedColumn],
+				entry.latest[destination.CDCLSNColumn],
+				entry.latest[destination.CDCSyncedAtColumn],
+			}
+			for _, pk := range opts.PrimaryKeys {
+				values = append(values, entry.latest[pk])
+			}
+			if err := d.session.Query(markDeletedSQL, values...).ExecContext(ctx); err != nil {
+				return fmt.Errorf("failed to mark CDC delete during merge: %w", err)
+			}
+			merged++
+			continue
+		}
+
+		row := entry.active
+		row[destination.CDCDeletedColumn] = entry.latest[destination.CDCDeletedColumn]
+		row[destination.CDCLSNColumn] = entry.latest[destination.CDCLSNColumn]
+		row[destination.CDCSyncedAtColumn] = entry.latest[destination.CDCSyncedAtColumn]
+
+		values := make([]interface{}, len(opts.Columns))
+		for i, col := range opts.Columns {
+			values[i] = row[col]
+		}
+		if err := d.session.Query(insertSQL, values...).ExecContext(ctx); err != nil {
+			return fmt.Errorf("failed to upsert Cassandra CDC row during merge: %w", err)
+		}
+		merged++
+	}
+
+	config.Debug("[CASSANDRA DEST] CDC merge complete: %d rows applied to %s", merged, opts.TargetTable)
+	return nil
+}
+
+func (d *CassandraDestination) SupportsCDCMerge() bool { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
+func (d *CassandraDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	tableRef, err := cassandrautil.QuoteTable(d.keyspace, table)
+	if err != nil {
+		return "", err
+	}
+
+	var maxLSN *string
+	query := fmt.Sprintf("SELECT MAX(%s) FROM %s", cassandrautil.QuoteIdentifier(destination.CDCLSNColumn), tableRef)
+	if err := d.session.Query(query).ScanContext(ctx, &maxLSN); err != nil {
+		if strings.Contains(err.Error(), "unconfigured table") || strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "keyspace") {
+			return "", nil
+		}
+		return "", err
+	}
+	if maxLSN == nil {
+		return "", nil
+	}
+	return *maxLSN, nil
 }
 
 func (d *CassandraDestination) DeleteInsertTable(_ context.Context, _ destination.DeleteInsertOptions) error {

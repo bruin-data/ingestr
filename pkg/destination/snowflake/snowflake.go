@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -445,15 +444,86 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		quotedPKList[i] = quoteIdentifier(pk)
 	}
 
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+	// Column names may have been case-mapped by the naming layer (Snowflake
+	// commonly uppercases), so CDC columns must be detected case-insensitively
+	// and referenced by their actual names.
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 
 	dedupOrderBy := "(SELECT NULL)"
-	if hasCDCDeleted {
-		dedupOrderBy = fmt.Sprintf("%s DESC, %s DESC",
-			quoteIdentifier("_cdc_lsn"),
-			quoteIdentifier("_cdc_deleted"))
-	} else if incrementalKey != "" {
+	if incrementalKey != "" {
 		dedupOrderBy = quoteIdentifier(incrementalKey) + " DESC"
+	}
+
+	var mergeSQL strings.Builder
+	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFull)
+
+	if hasCDCDeleted {
+		// CDC mode: compose the merge source from two per-PK dedups of staging:
+		// data columns come from the latest non-deleted change (so a trailing
+		// delete doesn't discard the last update's values), while the CDC
+		// columns and deleted flag come from the latest change overall. This
+		// also materializes rows inserted and deleted within one sync window
+		// as soft-deleted rows, storing the delete's LSN for resume.
+		cdcLSN := quoteIdentifier(actualColumnName(allColumns, destination.CDCLSNColumn))
+		cdcDeleted := quoteIdentifier(actualColumnName(allColumns, destination.CDCDeletedColumn))
+		cdcSyncedAt := quoteIdentifier(actualColumnName(allColumns, destination.CDCSyncedAtColumn))
+
+		laActJoin := make([]string, len(primaryKeys))
+		for i, pk := range primaryKeys {
+			quoted := quoteIdentifier(pk)
+			laActJoin[i] = fmt.Sprintf("(la.%s = act.%s OR (la.%s IS NULL AND act.%s IS NULL))", quoted, quoted, quoted, quoted)
+		}
+
+		selectCols := make([]string, 0, len(allColumns)+1)
+		for _, col := range allColumns {
+			alias := "act"
+			if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+				alias = "la"
+			}
+			selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteIdentifier(col)))
+		}
+		selectCols = append(selectCols, fmt.Sprintf("act.%s IS NOT NULL AS \"__ingestr_has_active\"", cdcLSN))
+
+		dedup := func(where, orderBy string) string {
+			return fmt.Sprintf(
+				`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+				strings.Join(quotedCols, ", "),
+				strings.Join(quotedCols, ", "),
+				strings.Join(quotedPKList, ", "),
+				orderBy,
+				stagingFull,
+				where,
+			)
+		}
+		quoteActual := func(col string) string {
+			return quoteIdentifier(actualColumnName(allColumns, col))
+		}
+		composedSource := fmt.Sprintf(
+			"(SELECT %s FROM %s AS la LEFT JOIN %s AS act ON %s)",
+			strings.Join(selectCols, ", "),
+			dedup("", destination.CDCLatestOverallOrderBy(quoteActual)),
+			dedup(fmt.Sprintf(" WHERE %s = false", cdcDeleted), cdcLSN+" DESC"),
+			strings.Join(laActJoin, " AND "),
+		)
+
+		fmt.Fprintf(&mergeSQL, "USING %s AS source\n", composedSource)
+		fmt.Fprintf(&mergeSQL, "ON %s\n", onClause)
+
+		hasRowData := fmt.Sprintf("(source.%s = false OR source.\"__ingestr_has_active\")", cdcDeleted)
+		if len(updateSets) > 0 {
+			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s THEN\n", hasRowData)
+			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+		}
+
+		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = true THEN\n", cdcDeleted)
+		fmt.Fprintf(&mergeSQL, "  UPDATE SET target.%s = true, target.%s = source.%s, target.%s = source.%s\n",
+			cdcDeleted, cdcLSN, cdcLSN, cdcSyncedAt, cdcSyncedAt)
+
+		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND %s THEN\n", hasRowData)
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+
+		return mergeSQL.String()
 	}
 
 	dedupSource := fmt.Sprintf(
@@ -465,27 +535,10 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		stagingFull,
 	)
 
-	var mergeSQL strings.Builder
-	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFull)
 	fmt.Fprintf(&mergeSQL, "USING %s AS source\n", dedupSource)
 	fmt.Fprintf(&mergeSQL, "ON %s\n", onClause)
 
-	if hasCDCDeleted {
-		if len(updateSets) > 0 {
-			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = false THEN\n", quoteIdentifier("_cdc_deleted"))
-			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
-		}
-
-		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = true THEN\n", quoteIdentifier("_cdc_deleted"))
-		fmt.Fprintf(&mergeSQL, "  UPDATE SET target.%s = true, target.%s = source.%s, target.%s = source.%s\n",
-			quoteIdentifier("_cdc_deleted"),
-			quoteIdentifier("_cdc_lsn"), quoteIdentifier("_cdc_lsn"),
-			quoteIdentifier("_cdc_synced_at"), quoteIdentifier("_cdc_synced_at"))
-
-		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND source.%s = false THEN\n", quoteIdentifier("_cdc_deleted"))
-		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
-	} else {
+	{
 		if len(updateSets) > 0 {
 			mergeSQL.WriteString("WHEN MATCHED THEN\n")
 			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
@@ -497,6 +550,16 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	}
 
 	return mergeSQL.String()
+}
+
+// actualColumnName resolves the case-mapped name of a logical column.
+func actualColumnName(columns []string, name string) string {
+	for _, col := range columns {
+		if strings.EqualFold(col, name) {
+			return col
+		}
+	}
+	return name
 }
 
 func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {

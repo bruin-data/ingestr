@@ -371,27 +371,42 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Build dedup subquery to handle duplicate PKs in staging. When an
-	// incremental key is set the latest row per PK wins; otherwise arbitrary.
+	// Build dedup subquery to handle duplicate PKs in staging. For CDC data the
+	// latest change per PK wins (LSN strings are fixed-width and sort
+	// lexicographically); otherwise, when an incremental key is set the latest
+	// row per PK wins, else arbitrary.
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
+	isCDC := destination.HasCDCDeletedColumn(columns)
 	dedupOrderBy := "(SELECT NULL)"
-	if opts.IncrementalKey != "" {
+	if isCDC {
+		dedupOrderBy = destination.CDCLatestOverallOrderBy(quoteColumn)
+	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = quoteColumns([]string{opts.IncrementalKey})[0] + " DESC"
 	}
-	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedPKs, ", "),
-		dedupOrderBy,
-		quoteTable(opts.StagingTable),
-	)
+	dedupSource := func(where string) string {
+		return fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			quoteTable(opts.StagingTable),
+			where,
+		)
+	}
+
+	// For CDC, upsert from the latest non-deleted change per PK so a delete
+	// followed by nothing doesn't clobber row data; deletes are applied below.
+	upsertSource := dedupSource("")
+	if isCDC {
+		upsertSource = dedupSource(" WHERE `_cdc_deleted` = 0")
+	}
 
 	if len(nonPKColumns) > 0 {
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target INNER JOIN %s ON %s SET %s`,
 			quoteTable(opts.TargetTable),
-			dedupSource,
+			upsertSource,
 			buildJoinCondition(opts.PrimaryKeys, "target", "source"),
 			buildUpdateSet(nonPKColumns, "target", "source"),
 		)
@@ -408,7 +423,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		quoteTable(opts.TargetTable),
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedColumns, ", "),
-		dedupSource,
+		upsertSource,
 		quoteTable(opts.TargetTable),
 		buildJoinCondition(opts.PrimaryKeys, "target", "source"),
 	)
@@ -417,6 +432,23 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
 		return fmt.Errorf("failed to insert new records: %w", err)
+	}
+
+	if isCDC {
+		// Mark rows deleted only when the latest change for the PK is a delete,
+		// carrying the delete's LSN so resume picks up after it.
+		markDeletedSQL := fmt.Sprintf(
+			"UPDATE %s AS target INNER JOIN %s ON %s SET target.`_cdc_deleted` = 1, target.`_cdc_lsn` = source.`_cdc_lsn`, target.`_cdc_synced_at` = source.`_cdc_synced_at` WHERE source.`_cdc_deleted` = 1",
+			quoteTable(opts.TargetTable),
+			dedupSource(""),
+			buildJoinCondition(opts.PrimaryKeys, "target", "source"),
+		)
+		config.Debug("[MERGE] Executing CDC delete marking: %s", markDeletedSQL)
+
+		if _, err := tx.ExecContext(ctx, markDeletedSQL); err != nil {
+			config.LogFailedQuery(markDeletedSQL, err)
+			return fmt.Errorf("failed to mark deleted records: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -650,6 +682,24 @@ func (d *MySQLDestination) SupportsMergeStrategy() bool        { return true }
 func (d *MySQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MySQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MySQLDestination) SupportsAtomicSwap() bool           { return true }
+func (d *MySQLDestination) SupportsCDCMerge() bool             { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
+func (d *MySQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	var maxLSN sql.NullString
+	query := fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s", quoteTable(table))
+	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)
+	if err != nil {
+		if strings.Contains(err.Error(), "doesn't exist") {
+			return "", nil
+		}
+		return "", err
+	}
+	if !maxLSN.Valid {
+		return "", nil
+	}
+	return maxLSN.String, nil
+}
 
 func (d *MySQLDestination) GetScheme() string { return "mysql" }
 
