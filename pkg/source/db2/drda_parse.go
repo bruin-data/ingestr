@@ -340,7 +340,7 @@ func readDRDAField(stream *bytes.Reader, field drdaField) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return strings.ReplaceAll(string(data), ".", ":"), nil
+		return normalizeDb2Time(string(data)), nil
 	case drdaTypeTimestamp, drdaTypeNTimestamp:
 		ln := int(binary.BigEndian.Uint16(field.params))
 		data, err := readBytes(stream, ln)
@@ -348,7 +348,7 @@ func readDRDAField(stream *bytes.Reader, field drdaField) (any, error) {
 			return nil, err
 		}
 		value := normalizeDb2Timestamp(string(data))
-		t, err := time.Parse("2006-01-02-15.04.05.999999", value)
+		t, err := time.Parse("2006-01-02-15.04.05.000000", value)
 		if err != nil {
 			return strings.TrimSpace(string(data)), nil
 		}
@@ -454,10 +454,46 @@ func decodePackedDecimal(data []byte, scale int) (decimal.Decimal, error) {
 
 func normalizeDb2Timestamp(value string) string {
 	value = strings.TrimSpace(value)
-	if dot := strings.LastIndex(value, "."); dot != -1 && len(value) > dot+7 {
-		return value[:dot+7]
+	const baseLen = len("2006-01-02-15.04.05")
+	if len(value) == baseLen {
+		return value + ".000000"
+	}
+	if len(value) > baseLen && value[baseLen] == '.' {
+		fraction := value[baseLen+1:]
+		if len(fraction) > 6 {
+			fraction = fraction[:6]
+		}
+		if len(fraction) < 6 {
+			fraction += strings.Repeat("0", 6-len(fraction))
+		}
+		return value[:baseLen+1] + fraction
 	}
 	return value
+}
+
+func normalizeDb2Time(value string) string {
+	value = strings.TrimSpace(value)
+	const baseLen = len("15.04.05")
+	if len(value) < baseLen {
+		return strings.ReplaceAll(value, ".", ":")
+	}
+
+	base := strings.ReplaceAll(value[:baseLen], ".", ":")
+	if len(value) == baseLen {
+		return base
+	}
+	if value[baseLen] != '.' {
+		return strings.ReplaceAll(value, ".", ":")
+	}
+
+	fraction := value[baseLen+1:]
+	if len(fraction) > 6 {
+		fraction = fraction[:6]
+	}
+	if len(fraction) < 6 {
+		fraction += strings.Repeat("0", 6-len(fraction))
+	}
+	return base + "." + fraction
 }
 
 func parseVarchar(b []byte) (string, []byte) {

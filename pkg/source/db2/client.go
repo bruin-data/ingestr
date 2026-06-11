@@ -89,13 +89,21 @@ func (c *db2Client) Stream(ctx context.Context, query string, handler db2StreamH
 
 	curID := uint16(1)
 	var err error
-	if curID, err = writeRequestDSS(c.conn, c.packPRPSQLSTT(), curID, true, false); err != nil {
+	prpSQLSTT, err := c.packPRPSQLSTT()
+	if err != nil {
+		return err
+	}
+	if curID, err = writeRequestDSS(c.conn, prpSQLSTT, curID, true, false); err != nil {
 		return err
 	}
 	if curID, err = writeRequestDSS(c.conn, packSQLSTT(query), curID, false, false); err != nil {
 		return err
 	}
-	if _, err = writeRequestDSS(c.conn, c.packOPNQRY(), curID, false, true); err != nil {
+	opnQRY, err := c.packOPNQRY()
+	if err != nil {
+		return err
+	}
+	if _, err = writeRequestDSS(c.conn, opnQRY, curID, false, true); err != nil {
 		return err
 	}
 	return c.parseResponse(ctx, handler)
@@ -109,7 +117,11 @@ func (c *db2Client) Exec(ctx context.Context, query string) error {
 
 	curID := uint16(1)
 	var err error
-	if curID, err = writeRequestDSS(c.conn, c.packEXCSQLIMM(), curID, true, false); err != nil {
+	excSQLIMM, err := c.packEXCSQLIMM()
+	if err != nil {
+		return err
+	}
+	if curID, err = writeRequestDSS(c.conn, excSQLIMM, curID, true, false); err != nil {
 		return err
 	}
 	if curID, err = writeRequestDSS(c.conn, packSQLSTT(query), curID, false, false); err != nil {
@@ -226,7 +238,11 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 
 			for packet.moreData {
 				c.refreshDeadline(ctx)
-				if _, err := writeRequestDSS(c.conn, c.packCNTQRY(qryInsID), cntCorrelationID, false, true); err != nil {
+				cntQRY, err := c.packCNTQRY(qryInsID)
+				if err != nil {
+					return err
+				}
+				if _, err := writeRequestDSS(c.conn, cntQRY, cntCorrelationID, false, true); err != nil {
 					return err
 				}
 				c.refreshDeadline(ctx)
@@ -292,7 +308,11 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 		if needCNTQRY {
 			needCNTQRY = false
 			c.refreshDeadline(ctx)
-			if _, err := writeRequestDSS(c.conn, c.packCNTQRY(qryInsID), cntCorrelationID, false, true); err != nil {
+			cntQRY, err := c.packCNTQRY(qryInsID)
+			if err != nil {
+				return err
+			}
+			if _, err := writeRequestDSS(c.conn, cntQRY, cntCorrelationID, false, true); err != nil {
 				return err
 			}
 			chained = true
@@ -313,7 +333,11 @@ func (c *db2Client) setClientVariables(ctx context.Context) error {
 	if curID, err = writeRequestDSS(c.conn, packEXCSATMGRLVLLS(), curID, false, false); err != nil {
 		return err
 	}
-	if curID, err = writeRequestDSS(c.conn, c.packEXCSQLSET(), curID, true, false); err != nil {
+	excSQLSET, err := c.packEXCSQLSET()
+	if err != nil {
+		return err
+	}
+	if curID, err = writeRequestDSS(c.conn, excSQLSET, curID, true, false); err != nil {
 		return err
 	}
 	if curID, err = writeRequestDSS(c.conn, packSQLSTT("SET CLIENT WRKSTNNAME 'ingestr'"), curID, true, false); err != nil {
@@ -392,49 +416,72 @@ func (c *db2Client) packSECCHK(secmec int, sectkn []byte) ([]byte, error) {
 	return packDSSObject(cpSECCHK, body.Bytes()), nil
 }
 
-func (c *db2Client) packPKGNAMCSN(statementNumber uint16) []byte {
+func (c *db2Client) packPKGNAMCSN(statementNumber uint16) ([]byte, error) {
 	pkg := fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, "NULLID", "SYSSH200", "SYSLVL01")
-	raw := []byte(pkg)
+	raw, err := encodeCP500(pkg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode package name: %w", err)
+	}
 	raw = append(raw, byte(statementNumber>>8), byte(statementNumber))
-	return packBinary(cpPKGNAMCSN, raw)
+	return packBinary(cpPKGNAMCSN, raw), nil
 }
 
-func (c *db2Client) packPRPSQLSTT() []byte {
+func (c *db2Client) packPRPSQLSTT() ([]byte, error) {
 	body := bytes.NewBuffer(nil)
-	body.Write(c.packPKGNAMCSN(65))
+	pkg, err := c.packPKGNAMCSN(65)
+	if err != nil {
+		return nil, err
+	}
+	body.Write(pkg)
 	body.Write(packBinary(cpRTNSQLDA, []byte{0xf1}))
-	return packDSSObject(cpPRPSQLSTT, body.Bytes())
+	return packDSSObject(cpPRPSQLSTT, body.Bytes()), nil
 }
 
-func (c *db2Client) packEXCSQLIMM() []byte {
+func (c *db2Client) packEXCSQLIMM() ([]byte, error) {
 	body := bytes.NewBuffer(nil)
-	body.Write(c.packPKGNAMCSN(65))
+	pkg, err := c.packPKGNAMCSN(65)
+	if err != nil {
+		return nil, err
+	}
+	body.Write(pkg)
 	body.Write(packBinary(cpRDBCMTOK, []byte{0xf1}))
-	return packDSSObject(cpEXCSQLIMM, body.Bytes())
+	return packDSSObject(cpEXCSQLIMM, body.Bytes()), nil
 }
 
-func (c *db2Client) packEXCSQLSET() []byte {
-	return packDSSObject(cpEXCSQLSET, c.packPKGNAMCSN(1))
+func (c *db2Client) packEXCSQLSET() ([]byte, error) {
+	pkg, err := c.packPKGNAMCSN(1)
+	if err != nil {
+		return nil, err
+	}
+	return packDSSObject(cpEXCSQLSET, pkg), nil
 }
 
-func (c *db2Client) packOPNQRY() []byte {
+func (c *db2Client) packOPNQRY() ([]byte, error) {
 	body := bytes.NewBuffer(nil)
-	body.Write(c.packPKGNAMCSN(65))
+	pkg, err := c.packPKGNAMCSN(65)
+	if err != nil {
+		return nil, err
+	}
+	body.Write(pkg)
 	body.Write(packUint(cpQRYBLKSZ, 65535, 4))
 	body.Write(packUint(cpMAXBLKEXT, 65535, 2))
 	body.Write(packBinary(cpQRYCLSIMP, []byte{0x01}))
-	return packDSSObject(cpOPNQRY, body.Bytes())
+	return packDSSObject(cpOPNQRY, body.Bytes()), nil
 }
 
-func (c *db2Client) packCNTQRY(qryInsID uint64) []byte {
+func (c *db2Client) packCNTQRY(qryInsID uint64) ([]byte, error) {
 	body := bytes.NewBuffer(nil)
-	body.Write(c.packPKGNAMCSN(65))
+	pkg, err := c.packPKGNAMCSN(65)
+	if err != nil {
+		return nil, err
+	}
+	body.Write(pkg)
 	body.Write(packUint(cpQRYBLKSZ, 65535, 4))
 	insID := make([]byte, 8)
 	binary.BigEndian.PutUint64(insID, qryInsID)
 	body.Write(packBinary(cpQRYINSID, insID))
 	body.Write(packBinary(cpRTNEXTDTA, []byte{0x02}))
-	return packDSSObject(cpCNTQRY, body.Bytes())
+	return packDSSObject(cpCNTQRY, body.Bytes()), nil
 }
 
 func packEXCSAT() []byte {

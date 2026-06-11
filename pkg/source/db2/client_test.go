@@ -32,6 +32,36 @@ func TestReadDRDAFieldTimestampTruncatesToMicroseconds(t *testing.T) {
 	require.Equal(t, time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.UTC), value)
 }
 
+func TestReadDRDAFieldTimestampPadsToMicroseconds(t *testing.T) {
+	value, err := readDRDAField(bytes.NewReader([]byte("2024-01-02-03.04.05.1")), drdaField{
+		typeCode: drdaTypeTimestamp,
+		params:   lengthParams(len("2024-01-02-03.04.05.1")),
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, time.Date(2024, 1, 2, 3, 4, 5, 100000000, time.UTC), value)
+}
+
+func TestReadDRDAFieldTimeNormalizesSeparators(t *testing.T) {
+	value, err := readDRDAField(bytes.NewReader([]byte("03.04.05")), drdaField{
+		typeCode: drdaTypeTime,
+		params:   lengthParams(len("03.04.05")),
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "03:04:05", value)
+}
+
+func TestReadDRDAFieldTimePreservesFraction(t *testing.T) {
+	value, err := readDRDAField(bytes.NewReader([]byte("03.04.05.1")), drdaField{
+		typeCode: drdaTypeTime,
+		params:   lengthParams(len("03.04.05.1")),
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "03:04:05.100000", value)
+}
+
 func TestPackSECCHKReturnsEncryptionError(t *testing.T) {
 	client := &db2Client{
 		database: "TESTDB",
@@ -52,6 +82,15 @@ func TestCP500EncodingUsesCodePage500(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte{0x4a, 0x5a, 0xc0, 0xd0, 0x7c, 0x7b, 0x5b}, encoded)
 	require.Equal(t, "[]{}@#$", decodeString(encoded, "cp500"))
+}
+
+func TestPackPKGNAMCSNEncodesCP500(t *testing.T) {
+	client := &db2Client{database: padDatabaseName("[")}
+
+	packet, err := client.packPKGNAMCSN(65)
+
+	require.NoError(t, err)
+	require.Equal(t, byte(0x4a), packet[4])
 }
 
 func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
