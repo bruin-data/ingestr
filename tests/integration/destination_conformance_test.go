@@ -343,7 +343,6 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             cratedbBackend(),
 			mergeCapable:           true,
-			deleteInsertCapable:    true,
 			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false,

@@ -30,6 +30,8 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
       - name: Run test suite
         run: make ${{ matrix.suite }}
 

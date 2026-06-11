@@ -1,8 +1,11 @@
 package trino
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/bruin-data/ingestr/pkg/destination"
 )
 
 func TestParseTrinoURI(t *testing.T) {
@@ -129,5 +132,35 @@ func TestParseTrinoURI_CertWithoutKey(t *testing.T) {
 	_, _, _, err := parseTrinoURI("trino://host:443/cat?cert=/etc/ssl/client.pem")
 	if err == nil {
 		t.Fatal("expected error when cert is provided without key, got nil")
+	}
+}
+
+func TestDeleteInsertUnsupported(t *testing.T) {
+	t.Parallel()
+
+	dest := NewTrinoDestination()
+	if dest.SupportsDeleteInsertStrategy() {
+		t.Fatal("SupportsDeleteInsertStrategy() = true, want false")
+	}
+
+	err := dest.DeleteInsertTable(context.Background(), destination.DeleteInsertOptions{})
+	if err == nil || !strings.Contains(err.Error(), "delete+insert strategy is not supported") {
+		t.Fatalf("DeleteInsertTable() error = %v, want unsupported error", err)
+	}
+}
+
+func TestBeginTransactionUnsupported(t *testing.T) {
+	t.Parallel()
+
+	dest := NewTrinoDestination()
+	tx, err := dest.BeginTransaction(context.Background())
+	if err == nil {
+		t.Fatal("BeginTransaction() error = nil, want unsupported error")
+	}
+	if tx != nil {
+		t.Fatalf("BeginTransaction() tx = %#v, want nil", tx)
+	}
+	if !strings.Contains(err.Error(), "does not support transactions") {
+		t.Fatalf("BeginTransaction() error = %v, want transaction unsupported error", err)
 	}
 }

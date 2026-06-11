@@ -13,7 +13,7 @@ NO_COLOR=\033[0m
 OK_COLOR=\033[32;01m
 ERROR_COLOR=\033[31;01m
 
-.PHONY: all clean test build deps generate licenses licenses-check lint format lint-ci format-ci test-ci setup
+.PHONY: all clean test test-python build deps generate licenses licenses-check lint format lint-ci format-ci test-ci setup
 
 all: clean deps test build
 
@@ -62,6 +62,16 @@ run: build
 test: generate
 	@echo "$(OK_COLOR)==> Running unit tests$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -short -race -cover -timeout 5m ./...
+	@$(MAKE) test-python
+
+test-python:
+	@echo "$(OK_COLOR)==> Running Python SDK tests$(NO_COLOR)"
+	@if command -v uv >/dev/null 2>&1; then \
+		uv run --extra sdk python tests/python/test_ingestr_package.py; \
+	else \
+		echo "uv not found; install uv to run Python SDK tests"; \
+		exit 1; \
+	fi
 
 test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"

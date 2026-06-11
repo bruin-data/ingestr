@@ -413,28 +413,43 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 	cdcMerge := slices.Contains(opts.Columns, destination.CDCDeletedColumn)
 
-	// Build dedup subquery to handle duplicate PKs in staging. When an
-	// incremental key is set the latest row per PK wins; otherwise arbitrary.
+	// Build dedup subquery to handle duplicate PKs in staging. For CDC data the
+	// latest change per PK wins (LSN strings are fixed-width and sort
+	// lexicographically); otherwise, when an incremental key is set the latest
+	// row per PK wins, else arbitrary.
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
+	isCDC := destination.HasCDCDeletedColumn(columns)
 	dedupOrderBy := "(SELECT NULL)"
-	if opts.IncrementalKey != "" {
+	if isCDC {
+		dedupOrderBy = destination.CDCLatestOverallOrderBy(quoteIdentifier)
+	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
 	}
-	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
-		strings.Join(stagingQuoted, ", "),
-		strings.Join(stagingQuoted, ", "),
-		strings.Join(quotedPKs, ", "),
-		dedupOrderBy,
-		destination.QuoteTableName(opts.StagingTable),
-	)
+	dedupSource := func(where string) string {
+		return fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			destination.QuoteTableName(opts.StagingTable),
+			where,
+		)
+	}
+
+	// For CDC, upsert from the latest non-deleted change per PK so a delete
+	// followed by nothing doesn't clobber row data; deletes are applied below.
+	upsertSource := dedupSource("")
+	if isCDC {
+		upsertSource = dedupSource(` WHERE "_cdc_deleted" = false`)
+	}
 
 	if len(nonPKColumns) > 0 {
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
-			buildUpdateSet(nonPKColumns, "target", "source", cdcMerge),
-			dedupSource,
+			buildUpdateSet(nonPKColumns, "source"),
+			upsertSource,
 			onCondition,
 		)
 		config.Debug("[DUCKDB MERGE] Executing UPDATE: %s", updateSQL)
@@ -447,9 +462,9 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	insertSQL := fmt.Sprintf(
 		`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 		quotedTargetTable,
-		strings.Join(destQuoted, ", "),
-		strings.Join(destQuoted, ", "),
-		dedupSource,
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedColumns, ", "),
+		upsertSource,
 		quotedTargetTable,
 		onCondition,
 	)
@@ -457,6 +472,22 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	if err := d.exec(ctx, insertSQL); err != nil {
 		return fmt.Errorf("failed to insert new records: %w", err)
+	}
+
+	if isCDC {
+		// Mark rows deleted only when the latest change for the PK is a delete,
+		// carrying the delete's LSN so resume picks up after it.
+		markDeletedSQL := fmt.Sprintf(
+			`UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = true`,
+			quotedTargetTable,
+			dedupSource(""),
+			onCondition,
+		)
+		config.Debug("[DUCKDB MERGE] Executing CDC delete marking: %s", markDeletedSQL)
+
+		if err := d.exec(ctx, markDeletedSQL); err != nil {
+			return fmt.Errorf("failed to mark deleted records: %w", err)
+		}
 	}
 
 	if err := d.exec(ctx, "COMMIT"); err != nil {
@@ -695,6 +726,7 @@ func (d *DuckDBDestination) SupportsMergeStrategy() bool        { return true }
 func (d *DuckDBDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DuckDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *DuckDBDestination) SupportsAtomicSwap() bool           { return true }
+func (d *DuckDBDestination) SupportsCDCMerge() bool             { return true }
 
 // GetScheme returns the primary URI scheme for DuckDB.
 func (d *DuckDBDestination) GetScheme() string { return "duckdb" }

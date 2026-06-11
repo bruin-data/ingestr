@@ -781,3 +781,89 @@ func TestPostgresCDC_IncrementalResume_DuckDB(t *testing.T) {
 	assert.NotEqual(t, firstMaxLSN, secondMaxLSN, "LSN should have advanced after incremental sync")
 	t.Logf("Second run max LSN: %v", secondMaxLSN)
 }
+
+// TestPostgresCDC_MultiTable_SchemaEvolution reproduces issue #766: a column
+// added at the source between multi-table CDC runs must be added to the
+// destination table via schema evolution before the merge.
+func TestPostgresCDC_MultiTable_SchemaEvolution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	if pgDest.uri == "" {
+		t.Skip("shared postgres dest container not available")
+	}
+
+	ctx := context.Background()
+
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+
+	_, err = srcPool.Exec(ctx, `CREATE TABLE public.products (
+		id INT PRIMARY KEY,
+		name VARCHAR(100)
+	)`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `CREATE TABLE public.customers (
+		id INT PRIMARY KEY,
+		email VARCHAR(100)
+	)`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.products (id, name) VALUES (1, 'widget'), (2, 'gadget')`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.customers (id, email) VALUES (1, 'a@example.com')`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `CREATE PUBLICATION evo_pub FOR TABLE public.products, public.customers`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `ALTER USER testuser REPLICATION`)
+	require.NoError(t, err)
+
+	destSchema := uniqueSchemaName(t, "cdc_evo")
+	ensurePostgresSchema(t, ctx, pgDest.uri, destSchema)
+	t.Cleanup(func() { dropPostgresSchema(t, ctx, pgDest.uri, destSchema) })
+
+	cfg := &config.IngestConfig{
+		SourceURI: "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+			"&publication=evo_pub&mode=batch&dest_schema=" + destSchema,
+		DestURI: pgDest.uri,
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	pg, err := sql.Open("pgx", pgDest.uri)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pg.Close() })
+
+	var count int
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q.products`, destSchema)).Scan(&count))
+	assert.Equal(t, 2, count, "products snapshot")
+
+	// Evolve the source schema and write rows that use the new column.
+	_, err = srcPool.Exec(ctx, `ALTER TABLE public.products ADD COLUMN category VARCHAR(50)`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `UPDATE public.products SET category = 'tools' WHERE id = 1`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.products (id, name, category) VALUES (3, 'doohickey', 'misc')`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.customers (id, email) VALUES (2, 'b@example.com')`)
+	require.NoError(t, err)
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	var category string
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT category FROM %q.products WHERE id = 1`, destSchema)).Scan(&category),
+		"destination should have gained the category column via schema evolution")
+	assert.Equal(t, "tools", category)
+
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT category FROM %q.products WHERE id = 3`, destSchema)).Scan(&category))
+	assert.Equal(t, "misc", category)
+
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q.products`, destSchema)).Scan(&count))
+	assert.Equal(t, 3, count)
+
+	// The untouched table must keep working alongside the evolved one.
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q.customers`, destSchema)).Scan(&count))
+	assert.Equal(t, 2, count)
+}

@@ -1,9 +1,12 @@
 package clickhouse
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -38,6 +41,26 @@ func TestValidateEngineType(t *testing.T) {
 				t.Errorf("mergeTree: got %v, want %v", gotMergeTree, tt.wantMergeTree)
 			}
 		})
+	}
+}
+
+func TestStrategySupport(t *testing.T) {
+	t.Parallel()
+	dest := NewClickHouseDestination()
+	if !dest.SupportsReplaceStrategy() {
+		t.Fatal("replace strategy should be supported")
+	}
+	if !dest.SupportsAppendStrategy() {
+		t.Fatal("append strategy should be supported")
+	}
+	if !dest.SupportsMergeStrategy() {
+		t.Fatal("merge strategy should be supported")
+	}
+	if !dest.SupportsDeleteInsertStrategy() {
+		t.Fatal("delete+insert strategy should be supported")
+	}
+	if !dest.SupportsSCD2Strategy() {
+		t.Fatal("scd2 strategy should be supported")
 	}
 }
 
@@ -247,5 +270,83 @@ func TestBuildCreateTableSQL_Engine(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildDeleteInsertStatements(t *testing.T) {
+	t.Parallel()
+
+	dest := &ClickHouseDestination{database: "default"}
+	start := time.Date(2026, 1, 2, 3, 4, 5, 6000, time.UTC)
+	end := time.Date(2026, 1, 3, 4, 5, 6, 7000, time.UTC)
+
+	deleteSQL, insertSQL, targetDB, targetName := dest.buildDeleteInsertStatements(destination.DeleteInsertOptions{
+		StagingTable:       "analytics.events_staging",
+		TargetTable:        "analytics.events",
+		IncrementalKey:     "event_time",
+		IncrementalKeyType: schema.TypeTimestamp,
+		IntervalStart:      start,
+		IntervalEnd:        end,
+		Columns:            []string{"id", "name", "event_time"},
+		PrimaryKeys:        []string{"id"},
+	})
+
+	if targetDB != "analytics" || targetName != "events" {
+		t.Fatalf("target = %s.%s, want analytics.events", targetDB, targetName)
+	}
+
+	wantDelete := "ALTER TABLE `analytics`.`events` DELETE WHERE `event_time` >= toDateTime64('2026-01-02 03:04:05.000006', 6) AND `event_time` <= toDateTime64('2026-01-03 04:05:06.000007', 6)"
+	if deleteSQL != wantDelete {
+		t.Fatalf("delete SQL = %q, want %q", deleteSQL, wantDelete)
+	}
+
+	wantParts := []string{
+		"INSERT INTO `analytics`.`events` (`id`, `name`, `event_time`)",
+		"ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `event_time` DESC)",
+		"FROM `analytics`.`events_staging`",
+		"WHERE __bruin_dedup_rn = 1",
+	}
+	for _, part := range wantParts {
+		if !strings.Contains(insertSQL, part) {
+			t.Fatalf("insert SQL missing %q:\n%s", part, insertSQL)
+		}
+	}
+}
+
+func TestFormatClickHouseLiteralTimeFallbackIsQuoted(t *testing.T) {
+	t.Parallel()
+
+	value := time.Date(2026, 1, 2, 3, 4, 5, 6000, time.UTC)
+
+	got := formatClickHouseLiteral(value, schema.TypeString)
+	want := "'2026-01-02T03:04:05.000006Z'"
+	if got != want {
+		t.Fatalf("literal = %q, want %q", got, want)
+	}
+}
+
+func TestFormatClickHouseLiteralStringFallbackIsQuotedAndEscaped(t *testing.T) {
+	t.Parallel()
+
+	got := formatClickHouseLiteral("2026-01-02' OR 1=1 --", schema.TypeJSON)
+	want := "'2026-01-02\\' OR 1=1 --'"
+	if got != want {
+		t.Fatalf("literal = %q, want %q", got, want)
+	}
+}
+
+func TestBeginTransactionUnsupported(t *testing.T) {
+	t.Parallel()
+
+	dest := NewClickHouseDestination()
+	tx, err := dest.BeginTransaction(context.Background())
+	if err == nil {
+		t.Fatal("BeginTransaction() error = nil, want unsupported error")
+	}
+	if tx != nil {
+		t.Fatalf("BeginTransaction() tx = %#v, want nil", tx)
+	}
+	if !strings.Contains(err.Error(), "does not support transactions") {
+		t.Fatalf("BeginTransaction() error = %v, want transaction unsupported error", err)
 	}
 }

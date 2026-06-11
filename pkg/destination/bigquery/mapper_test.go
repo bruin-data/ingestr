@@ -445,3 +445,48 @@ func TestSplitTableName(t *testing.T) {
 		})
 	}
 }
+
+func TestDestTableName(t *testing.T) {
+	tests := []struct {
+		name        string
+		destSchema  string
+		sourceTable string
+		datasetID   string
+		want        string
+	}{
+		{
+			name:        "qualified_source_with_dest_schema",
+			destSchema:  "raw",
+			sourceTable: "dbo.orders",
+			want:        "raw.dbo_orders",
+		},
+		{
+			name:        "falls_back_to_uri_dataset",
+			sourceTable: "dbo.orders",
+			datasetID:   "mydataset",
+			want:        "mydataset.dbo_orders",
+		},
+		{
+			name:        "unqualified_source",
+			destSchema:  "raw",
+			sourceTable: "orders",
+			want:        "raw.orders",
+		},
+		{
+			name:        "no_dataset_anywhere",
+			sourceTable: "dbo.orders",
+			want:        "dbo_orders",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dest := NewBigQueryDestination()
+			dest.datasetID = tt.datasetID
+			got := dest.DestTableName(tt.destSchema, tt.sourceTable)
+			if got != tt.want {
+				t.Errorf("DestTableName(%q, %q) = %q, want %q", tt.destSchema, tt.sourceTable, got, tt.want)
+			}
+		})
+	}
+}

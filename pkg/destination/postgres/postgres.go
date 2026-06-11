@@ -2,7 +2,7 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -16,6 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -155,6 +156,13 @@ func (d *PostgresDestination) ensureSchemaExists(ctx context.Context, schemaName
 
 	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", destination.QuoteIdentifier(schemaName))
 	if _, err := d.pool.Exec(ctx, createSchemaSQL); err != nil {
+		// IF NOT EXISTS is not race-safe: concurrent creators (e.g. multi-table
+		// CDC preparing staging tables in parallel) can both pass the existence
+		// check and one loses with a duplicate error. Treat that as success.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && (pgErr.Code == "23505" || pgErr.Code == "42P06") {
+			return nil
+		}
 		config.LogFailedQuery(createSchemaSQL, err)
 		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
 	}
@@ -474,8 +482,8 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// We upsert the latest non-deleted row per PK, then mark deletes only if the
 		// latest change for that PK is a delete (preserving row data).
 		pkList := strings.Join(quotedPKs, ", ")
-		selectCols := strings.Join(stagingQuoted, ", ")
-		orderByParts := append(append([]string{}, quotedPKs...), `"_cdc_lsn"::pg_lsn DESC`, `"_cdc_synced_at" DESC`)
+		selectCols := strings.Join(quotedColumns, ", ")
+		orderByParts := append(append([]string{}, quotedPKs...), destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier))
 		orderBy := strings.Join(orderByParts, ", ")
 
 		latestActive := fmt.Sprintf(
@@ -593,6 +601,13 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
+	lockSQL := buildDeleteInsertLockSQL(quotedTargetTable)
+	config.Debug("[DELETE+INSERT] Locking target table: %s", lockSQL)
+	if _, err := tx.Exec(ctx, lockSQL); err != nil {
+		config.LogFailedQuery(lockSQL, err)
+		return fmt.Errorf("failed to lock target table: %w", err)
+	}
+
 	deleteSQL := fmt.Sprintf(
 		`DELETE FROM %s WHERE %s >= $1 AND %s <= $2`,
 		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
@@ -626,6 +641,10 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 
 	config.Debug("[DELETE+INSERT] Delete+Insert completed in %v", time.Since(startOp))
 	return nil
+}
+
+func buildDeleteInsertLockSQL(quotedTargetTable string) string {
+	return fmt.Sprintf("LOCK TABLE %s IN EXCLUSIVE MODE", quotedTargetTable)
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.

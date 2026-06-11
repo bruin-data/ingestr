@@ -33,6 +33,8 @@ func deltaTypeFor(col schema.Column) any {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		return "boolean"
+	case schema.TypeInt8:
+		return "byte"
 	case schema.TypeInt16:
 		return "short"
 	case schema.TypeInt32:

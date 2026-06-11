@@ -1,14 +1,17 @@
 package maxcompute
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/aliyun/aliyun-odps-go-sdk/odps/restclient"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/destination"
 )
 
 func TestExtractValueDefaultUsesRowValue(t *testing.T) {
@@ -47,5 +50,35 @@ func TestIsNotFoundErrorRequiresTypedHTTP404(t *testing.T) {
 	}
 	if isNotFoundError(errors.New("DNS: host not found")) {
 		t.Fatal("isNotFoundError should not match arbitrary not found text")
+	}
+}
+
+func TestBeginTransactionUnsupportedWithoutEmulator(t *testing.T) {
+	t.Parallel()
+
+	dest := NewMaxComputeDestination()
+	tx, err := dest.BeginTransaction(context.Background())
+	if err == nil {
+		t.Fatal("BeginTransaction() error = nil, want unsupported error")
+	}
+	if tx != nil {
+		t.Fatalf("BeginTransaction() tx = %#v, want nil", tx)
+	}
+	if !strings.Contains(err.Error(), "does not support transactions") {
+		t.Fatalf("BeginTransaction() error = %v, want transaction unsupported error", err)
+	}
+}
+
+func TestDeleteInsertUnsupported(t *testing.T) {
+	t.Parallel()
+
+	dest := NewMaxComputeDestination()
+	if dest.SupportsDeleteInsertStrategy() {
+		t.Fatal("SupportsDeleteInsertStrategy() = true, want false")
+	}
+
+	err := dest.DeleteInsertTable(context.Background(), destination.DeleteInsertOptions{})
+	if err == nil || !strings.Contains(err.Error(), "does not support delete+insert strategy") {
+		t.Fatalf("DeleteInsertTable() error = %v, want unsupported error", err)
 	}
 }

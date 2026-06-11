@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -23,9 +22,11 @@ import (
 )
 
 const (
-	defaultWriteParallelism   = 4
-	exactRowCountWaitTimeout  = 30 * time.Second
-	exactRowCountPollInterval = 1 * time.Second
+	defaultWriteParallelism            = 4
+	exactRowCountWaitTimeout           = 30 * time.Second
+	exactRowCountPollInterval          = 1 * time.Second
+	queryJobMaxAttempts                = 4
+	deleteInsertTransactionMaxAttempts = 8
 )
 
 type bigQueryLoadMethod string
@@ -959,7 +960,18 @@ func (d *BigQueryDestination) Exec(ctx context.Context, sql string, args ...inte
 // BigQuery jobs are atomic — failed jobs do not commit partial work — so
 // retrying on the reasons checked by isRetryableLoadJobError is safe.
 func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opLabel string) (*bigquery.Job, error) {
-	const maxAttempts = 4
+	return d.runQueryJobWithRetryAttempts(ctx, sql, opLabel, queryJobMaxAttempts)
+}
+
+func (d *BigQueryDestination) runTransactionScriptWithRetry(ctx context.Context, sql, opLabel string) (*bigquery.Job, error) {
+	return d.runQueryJobWithRetryAttempts(ctx, sql, opLabel, deleteInsertTransactionMaxAttempts)
+}
+
+func (d *BigQueryDestination) runQueryJobWithRetryAttempts(ctx context.Context, sql, opLabel string, maxAttempts int) (*bigquery.Job, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = queryJobMaxAttempts
+	}
+
 	var (
 		lastJob *bigquery.Job
 		lastErr error
@@ -975,7 +987,7 @@ func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opL
 			if attempt < maxAttempts && isRetryableLoadJobError(err) {
 				lastErr = err
 				config.Debug("[%s] Retrying after start error: %v", opLabel, err)
-				if sleepErr := sleepWithContextForLoadJob(ctx, time.Duration(attempt)*time.Second); sleepErr != nil {
+				if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); sleepErr != nil {
 					return nil, sleepErr
 				}
 				continue
@@ -989,7 +1001,7 @@ func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opL
 			if attempt < maxAttempts && isRetryableLoadJobError(err) {
 				lastErr = err
 				config.Debug("[%s] Retrying after wait error: %v", opLabel, err)
-				if sleepErr := sleepWithContextForLoadJob(ctx, time.Duration(attempt)*time.Second); sleepErr != nil {
+				if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); sleepErr != nil {
 					return job, sleepErr
 				}
 				continue
@@ -1000,7 +1012,7 @@ func (d *BigQueryDestination) runQueryJobWithRetry(ctx context.Context, sql, opL
 			if attempt < maxAttempts && isRetryableLoadJobError(err) {
 				lastErr = err
 				config.Debug("[%s] Retrying after job error: %v", opLabel, err)
-				if sleepErr := sleepWithContextForLoadJob(ctx, time.Duration(attempt)*time.Second); sleepErr != nil {
+				if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); sleepErr != nil {
 					return job, sleepErr
 				}
 				continue
@@ -1233,6 +1245,27 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 		return fmt.Errorf("invalid target table name: %w", err)
 	}
 
+	deleteSQL, insertSQL := d.buildDeleteInsertStatements(stagingDataset, stagingTableName, targetDataset, targetTableName, opts)
+	transactionSQL := buildBigQueryTransactionScript(deleteSQL, insertSQL)
+
+	config.Debug("[DELETE+INSERT] Executing transaction")
+	config.Debug("[DELETE+INSERT] DELETE: %s", deleteSQL)
+	config.Debug("[DELETE+INSERT] INSERT: %s", insertSQL)
+
+	job, err := d.runTransactionScriptWithRetry(ctx, transactionSQL, "DELETE+INSERT")
+	if err != nil {
+		config.LogFailedQuery(transactionSQL, err)
+		if job == nil {
+			return fmt.Errorf("failed to start delete+insert transaction job: %w", err)
+		}
+		return fmt.Errorf("delete+insert transaction job failed (job %s): %w", jobRef(job), err)
+	}
+
+	config.Debug("[DELETE+INSERT] Delete+Insert completed successfully (job %s)", jobRef(job))
+	return nil
+}
+
+func (d *BigQueryDestination) buildDeleteInsertStatements(stagingDataset, stagingTableName, targetDataset, targetTableName string, opts destination.DeleteInsertOptions) (string, string) {
 	startVal := formatBigQueryValue(opts.IntervalStart, opts.IncrementalKeyType)
 	endVal := formatBigQueryValue(opts.IntervalEnd, opts.IncrementalKeyType)
 
@@ -1242,12 +1275,6 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 		quoteIdentifier(opts.IncrementalKey), startVal,
 		quoteIdentifier(opts.IncrementalKey), endVal,
 	)
-
-	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
-
-	if err := d.Exec(ctx, deleteSQL); err != nil {
-		return fmt.Errorf("failed to delete records: %w", err)
-	}
 
 	quotedCols := make([]string, len(opts.Columns))
 	for i, col := range opts.Columns {
@@ -1274,14 +1301,7 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 		selectClause,
 	)
 
-	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
-
-	if err := d.Exec(ctx, insertSQL); err != nil {
-		return fmt.Errorf("failed to insert records: %w", err)
-	}
-
-	config.Debug("[DELETE+INSERT] Delete+Insert completed successfully")
-	return nil
+	return deleteSQL, insertSQL
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
@@ -1559,20 +1579,48 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 		sourceCols[i] = castSourceCol(col, castMap)
 	}
 
+	// Check if this is CDC mode (has _cdc_deleted column)
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+
 	var sql strings.Builder
 	fmt.Fprintf(&sql, "MERGE %s.%s.%s AS t\n", quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTable))
 
 	if hasCDCDeleted && len(primaryKeys) > 0 {
-		// CDC mode: deduplicate staging table by PKs, keeping the latest change per row.
-		// This handles cases where the same row appears in both the snapshot and WAL stream.
+		// CDC mode: compose the merge source from two per-PK dedups of staging:
+		// data columns come from the latest non-deleted change (so a trailing
+		// delete doesn't discard the last update's values), while the CDC
+		// columns and deleted flag come from the latest change overall. This
+		// also materializes rows that were inserted and deleted within one sync
+		// window as soft-deleted rows, storing the delete's LSN for resume.
 		pkPartition := make([]string, len(primaryKeys))
+		laActJoin := make([]string, len(primaryKeys))
 		for i, pk := range primaryKeys {
-			pkPartition[i] = quoteIdentifier(pk)
+			quoted := quoteIdentifier(pk)
+			pkPartition[i] = quoted
+			laActJoin[i] = fmt.Sprintf("(la.%s = act.%s OR (la.%s IS NULL AND act.%s IS NULL))", quoted, quoted, quoted, quoted)
 		}
+
+		selectCols := make([]string, 0, len(allColumns)+1)
+		for _, col := range allColumns {
+			alias := "act"
+			if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+				alias = "la"
+			}
+			selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteIdentifier(col)))
+		}
+		selectCols = append(selectCols, "act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active`")
+
+		stagingRef := fmt.Sprintf("%s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable))
 		fmt.Fprintf(
 			&sql,
-			"USING (SELECT * FROM %s.%s.%s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC, `_cdc_deleted` DESC) = 1) AS s\n",
-			quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable), strings.Join(pkPartition, ", "),
+			"USING (SELECT %s FROM (SELECT * FROM %s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) = 1) AS la LEFT JOIN (SELECT * FROM %s WHERE `_cdc_deleted` = false QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC) = 1) AS act ON %s) AS s\n",
+			strings.Join(selectCols, ", "),
+			stagingRef,
+			strings.Join(pkPartition, ", "),
+			destination.CDCLatestOverallOrderBy(quoteIdentifier),
+			stagingRef,
+			strings.Join(pkPartition, ", "),
+			strings.Join(laActJoin, " AND "),
 		)
 	} else {
 		pkPartition := make([]string, len(primaryKeys))
@@ -1596,20 +1644,25 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 	fmt.Fprintf(&sql, "ON %s\n", onClause)
 
 	if hasCDCDeleted {
-		// CDC mode: handle deleted rows specially (only update CDC columns to preserve original data)
-
-		// WHEN MATCHED AND NOT deleted: full update
+		// Full update whenever the window has a non-deleted change carrying row
+		// data; for deleted PKs this applies the last active values together
+		// with the delete marking. Clause order matters: BigQuery executes the
+		// first matching WHEN clause.
 		if len(updateSets) > 0 {
-			sql.WriteString("WHEN MATCHED AND s.`_cdc_deleted` = false THEN\n")
+			sql.WriteString("WHEN MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n")
 			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
 		}
 
-		// WHEN MATCHED AND deleted: only update CDC columns (preserve original data)
+		// Delete-only window for an existing row: update CDC columns and keep
+		// the row data as-is (the delete change carries no usable row image for
+		// all sources).
 		sql.WriteString("WHEN MATCHED AND s.`_cdc_deleted` = true THEN\n")
 		sql.WriteString("  UPDATE SET t.`_cdc_deleted` = true, t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_synced_at` = s.`_cdc_synced_at`\n")
 
-		// WHEN NOT MATCHED AND NOT deleted: insert
-		sql.WriteString("WHEN NOT MATCHED AND s.`_cdc_deleted` = false THEN\n")
+		// Insert new rows, including ones already deleted within the window
+		// (materialized as soft-deleted). A delete-only window for an unknown
+		// row has no data to materialize and is skipped.
+		sql.WriteString("WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n")
 		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
 		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
 	} else {
@@ -1627,11 +1680,71 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 	return sql.String()
 }
 
-// BeginTransaction begins a transaction.
-func (d *BigQueryDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
-	// BigQuery doesn't support traditional transactions
-	// Use MergeTable method instead for merge operations
-	return nil, errors.New("transactions not supported for BigQuery - use MergeTable for merge operations")
+func buildBigQueryTransactionScript(statements ...string) string {
+	var sql strings.Builder
+	sql.WriteString("BEGIN TRANSACTION;\n")
+	for _, statement := range statements {
+		statement = strings.TrimSpace(statement)
+		if statement == "" {
+			continue
+		}
+		sql.WriteString(statement)
+		if !strings.HasSuffix(statement, ";") {
+			sql.WriteString(";")
+		}
+		sql.WriteString("\n")
+	}
+	sql.WriteString("COMMIT TRANSACTION;")
+	return sql.String()
+}
+
+// BeginTransaction begins a BigQuery multi-statement transaction.
+func (d *BigQueryDestination) BeginTransaction(_ context.Context) (destination.Transaction, error) {
+	return &bigQueryTransaction{destination: d}, nil
+}
+
+type bigQueryTransaction struct {
+	destination *BigQueryDestination
+	statements  []string
+	closed      bool
+}
+
+func (t *bigQueryTransaction) Exec(_ context.Context, sql string, args ...interface{}) error {
+	if t.closed {
+		return errors.New("transaction is already closed")
+	}
+	if len(args) > 0 {
+		return errors.New("BigQuery transaction does not support positional query args")
+	}
+	t.statements = append(t.statements, sql)
+	return nil
+}
+
+func (t *bigQueryTransaction) Commit(ctx context.Context) error {
+	if t.closed {
+		return errors.New("transaction is already closed")
+	}
+	t.closed = true
+	if len(t.statements) == 0 {
+		return nil
+	}
+
+	transactionSQL := buildBigQueryTransactionScript(t.statements...)
+	job, err := t.destination.runTransactionScriptWithRetry(ctx, transactionSQL, "transaction")
+	if err != nil {
+		config.LogFailedQuery(transactionSQL, err)
+		if job == nil {
+			return fmt.Errorf("failed to start transaction job: %w", err)
+		}
+		return fmt.Errorf("transaction job failed (job %s): %w", jobRef(job), err)
+	}
+	return nil
+}
+
+func (t *bigQueryTransaction) Rollback(_ context.Context) error {
+	t.closed = true
+	t.statements = nil
+	return nil
 }
 
 // DropTable drops a table if it exists.
@@ -1813,6 +1926,22 @@ func isAlreadyExistsError(err error) bool {
 // contains checks if a string contains a substring
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && containsHelper(s, substr))
+}
+
+// DestTableName maps a multi-table source name like "dbo.orders" to a valid
+// BigQuery "dataset.table" name: BigQuery table IDs cannot contain dots, so
+// the source's schema qualifier is folded into the table name. The dataset is
+// the configured dest_schema, falling back to the dataset from the URI.
+func (d *BigQueryDestination) DestTableName(destSchema, sourceTable string) string {
+	dataset := destSchema
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	table := strings.ReplaceAll(sourceTable, ".", "_")
+	if dataset == "" {
+		return table
+	}
+	return dataset + "." + table
 }
 
 func (d *BigQueryDestination) SupportsCDCMerge() bool {

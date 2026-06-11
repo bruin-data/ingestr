@@ -127,7 +127,9 @@ Temporary Items
 
 
 bin
-ingestr
+/ingestr
+!/ingestr/
+!/ingestr/**
 __pycache__/
 .bruin.yml
 !templates/*/.bruin.yml

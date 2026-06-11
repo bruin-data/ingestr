@@ -1,11 +1,13 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -75,6 +77,36 @@ func TestParseKafkaURI(t *testing.T) {
 				}
 				if cfg.BatchTimeout != 10*time.Second {
 					t.Errorf("BatchTimeout = %v, want %v", cfg.BatchTimeout, 10*time.Second)
+				}
+			},
+		},
+		{
+			name: "OAUTHBEARER MSK IAM URI",
+			uri:  "kafka://?bootstrap_servers=b1:9098&group_id=g1&sasl_mechanisms=OAUTHBEARER&aws_region=us-east-1&aws_role_arn=arn:aws:iam::123456789012:role/msk&aws_role_session_name=ingestr&aws_profile=default&aws_access_key_id=AKID&aws_secret_access_key=SECRET&aws_session_token=TOKEN",
+			check: func(t *testing.T, cfg kafkaConfig) {
+				if cfg.SASLMechanism != "OAUTHBEARER" {
+					t.Errorf("SASLMechanism = %q, want %q", cfg.SASLMechanism, "OAUTHBEARER")
+				}
+				if cfg.AWSRegion != "us-east-1" {
+					t.Errorf("AWSRegion = %q, want %q", cfg.AWSRegion, "us-east-1")
+				}
+				if cfg.AWSRoleArn != "arn:aws:iam::123456789012:role/msk" {
+					t.Errorf("AWSRoleArn = %q, want %q", cfg.AWSRoleArn, "arn:aws:iam::123456789012:role/msk")
+				}
+				if cfg.AWSRoleSessionName != "ingestr" {
+					t.Errorf("AWSRoleSessionName = %q, want %q", cfg.AWSRoleSessionName, "ingestr")
+				}
+				if cfg.AWSProfile != "default" {
+					t.Errorf("AWSProfile = %q, want %q", cfg.AWSProfile, "default")
+				}
+				if cfg.AWSAccessKeyID != "AKID" {
+					t.Errorf("AWSAccessKeyID = %q, want %q", cfg.AWSAccessKeyID, "AKID")
+				}
+				if cfg.AWSSecretAccessKey != "SECRET" {
+					t.Errorf("AWSSecretAccessKey = %q, want %q", cfg.AWSSecretAccessKey, "SECRET")
+				}
+				if cfg.AWSSessionToken != "TOKEN" {
+					t.Errorf("AWSSessionToken = %q, want %q", cfg.AWSSessionToken, "TOKEN")
 				}
 			},
 		},
@@ -343,22 +375,103 @@ func TestBuildDialer_SASL_SSL(t *testing.T) {
 	}
 }
 
+func TestBuildDialer_OAuthBearer(t *testing.T) {
+	s := &KafkaSource{
+		cfg: kafkaConfig{
+			BootstrapServers: "b1:9098",
+			GroupID:          "test",
+			SASLMechanism:    "OAUTHBEARER",
+			AWSRegion:        "us-east-1",
+		},
+	}
+
+	dialer, err := s.buildDialer()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dialer.SASLMechanism == nil {
+		t.Fatal("SASL mechanism should be set for OAUTHBEARER")
+	}
+	if dialer.SASLMechanism.Name() != "OAUTHBEARER" {
+		t.Errorf("mechanism name = %q, want OAUTHBEARER", dialer.SASLMechanism.Name())
+	}
+	if dialer.TLS == nil {
+		t.Error("TLS should be auto-enabled for OAUTHBEARER")
+	}
+}
+
+func TestBuildDialer_OAuthBearer_MissingRegion(t *testing.T) {
+	s := &KafkaSource{
+		cfg: kafkaConfig{
+			BootstrapServers: "b1:9098",
+			GroupID:          "test",
+			SASLMechanism:    "OAUTHBEARER",
+		},
+	}
+
+	oldDebugMode := config.DebugMode
+	config.DebugMode = true
+	t.Cleanup(func() {
+		config.DebugMode = oldDebugMode
+	})
+
+	output := captureStdout(t, func() {
+		if _, err := s.buildDialer(); err == nil {
+			t.Fatal("expected error for OAUTHBEARER without aws_region")
+		}
+	})
+	if strings.Contains(output, "TLS auto-enabled") {
+		t.Fatalf("debug output = %q, should not log TLS auto-enable for invalid OAUTHBEARER config", output)
+	}
+}
+
+func TestBuildDialer_OAuthBearer_PlaintextEscapeHatch(t *testing.T) {
+	s := &KafkaSource{
+		cfg: kafkaConfig{
+			BootstrapServers: "b1:9092",
+			GroupID:          "test",
+			SASLMechanism:    "OAUTHBEARER",
+			SecurityProtocol: "SASL_PLAINTEXT",
+			AWSRegion:        "us-east-1",
+		},
+	}
+
+	dialer, err := s.buildDialer()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dialer.SASLMechanism == nil {
+		t.Fatal("SASL mechanism should be set for OAUTHBEARER")
+	}
+	if dialer.TLS != nil {
+		t.Error("TLS should not be auto-enabled when SASL_PLAINTEXT is explicitly set")
+	}
+}
+
 func TestBuildSASLMechanism(t *testing.T) {
 	tests := []struct {
-		name      string
-		mechanism string
-		wantErr   bool
+		name    string
+		cfg     kafkaConfig
+		wantErr bool
 	}{
-		{name: "PLAIN", mechanism: "PLAIN"},
-		{name: "SCRAM-SHA-256", mechanism: "SCRAM-SHA-256"},
-		{name: "SCRAM-SHA-512", mechanism: "SCRAM-SHA-512"},
-		{name: "lowercase plain", mechanism: "plain"},
-		{name: "unsupported", mechanism: "OAUTHBEARER", wantErr: true},
+		{name: "PLAIN", cfg: kafkaConfig{SASLMechanism: "PLAIN", SASLUsername: "user", SASLPassword: "pass"}},
+		{name: "SCRAM-SHA-256", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-256", SASLUsername: "user", SASLPassword: "pass"}},
+		{name: "SCRAM-SHA-512", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-512", SASLUsername: "user", SASLPassword: "pass"}},
+		{name: "lowercase plain", cfg: kafkaConfig{SASLMechanism: "plain", SASLUsername: "user", SASLPassword: "pass"}},
+		{name: "PLAIN missing username", cfg: kafkaConfig{SASLMechanism: "PLAIN", SASLPassword: "pass"}, wantErr: true},
+		{name: "PLAIN missing password", cfg: kafkaConfig{SASLMechanism: "PLAIN", SASLUsername: "user"}, wantErr: true},
+		{name: "SCRAM-SHA-256 missing username", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-256", SASLPassword: "pass"}, wantErr: true},
+		{name: "SCRAM-SHA-256 missing password", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-256", SASLUsername: "user"}, wantErr: true},
+		{name: "SCRAM-SHA-512 missing username", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-512", SASLPassword: "pass"}, wantErr: true},
+		{name: "SCRAM-SHA-512 missing password", cfg: kafkaConfig{SASLMechanism: "SCRAM-SHA-512", SASLUsername: "user"}, wantErr: true},
+		{name: "OAUTHBEARER", cfg: kafkaConfig{SASLMechanism: "OAUTHBEARER", AWSRegion: "us-east-1"}},
+		{name: "OAUTHBEARER missing region", cfg: kafkaConfig{SASLMechanism: "OAUTHBEARER"}, wantErr: true},
+		{name: "unsupported", cfg: kafkaConfig{SASLMechanism: "GSSAPI"}, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := buildSASLMechanism(tt.mechanism, "user", "pass")
+			m, err := buildSASLMechanism(tt.cfg)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -373,6 +486,35 @@ func TestBuildSASLMechanism(t *testing.T) {
 			}
 		})
 	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+	}()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stdout pipe: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close stdout reader: %v", err)
+	}
+	return buf.String()
 }
 
 func TestGetTable(t *testing.T) {

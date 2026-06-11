@@ -60,6 +60,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
         link: "/",
         items: [
           { text: "Quickstart", link: "/getting-started/quickstart.md" },
+          { text: "Python SDK", link: "/getting-started/python-sdk.md" },
           { text: "Core Concepts", link: "/getting-started/core-concepts.md" },
           {
             text: "Incremental Loading",
@@ -200,6 +201,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Mixpanel", link: "/supported-sources/mixpanel.md" },
               { text: "Monday", link: "/supported-sources/monday.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
+              { text: "Paddle", link: "/supported-sources/paddle.md" },
               { text: "Personio", link: "/supported-sources/personio.md" },
               { text: "PhantomBuster", link: "/supported-sources/phantombuster.md" },
               { text: "Pinterest", link: "/supported-sources/pinterest.md" },

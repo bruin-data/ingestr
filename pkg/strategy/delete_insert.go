@@ -34,6 +34,10 @@ func (s *DeleteInsertStrategy) RequiresIncrementalKey() bool {
 }
 
 func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) error {
+	if !job.Destination.SupportsDeleteInsertStrategy() {
+		return fmt.Errorf("destination %s does not support delete+insert strategy", job.Destination.GetScheme())
+	}
+
 	stagingTable := GenerateStagingTableName(job.Config.DestTable, "di", job.Config.StagingDataset)
 	fmt.Printf("[DELETE+INSERT] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 

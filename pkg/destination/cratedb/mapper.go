@@ -10,7 +10,7 @@ func mapDataTypeToCrateDB(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		return "BOOLEAN"
-	case schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
+	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
 		return "BIGINT"
 	case schema.TypeFloat32, schema.TypeFloat64:
 		return "DOUBLE PRECISION"

@@ -8,22 +8,23 @@ import (
 // Higher index = wider type.
 var wideningOrder = map[schema.DataType]int{
 	schema.TypeBoolean:     0,
-	schema.TypeInt16:       1,
-	schema.TypeInt32:       2,
-	schema.TypeInt64:       3,
-	schema.TypeFloat32:     4,
-	schema.TypeFloat64:     5,
-	schema.TypeDecimal:     6,
-	schema.TypeDate:        7,
-	schema.TypeTime:        8,
-	schema.TypeTimestamp:   9,
-	schema.TypeTimestampTZ: 10,
-	schema.TypeBinary:      10,
-	schema.TypeUUID:        10,
-	schema.TypeInterval:    10,
-	schema.TypeArray:       10,
-	schema.TypeString:      11,
-	schema.TypeJSON:        12,
+	schema.TypeInt8:        1,
+	schema.TypeInt16:       2,
+	schema.TypeInt32:       3,
+	schema.TypeInt64:       4,
+	schema.TypeFloat32:     5,
+	schema.TypeFloat64:     6,
+	schema.TypeDecimal:     7,
+	schema.TypeDate:        8,
+	schema.TypeTime:        9,
+	schema.TypeTimestamp:   10,
+	schema.TypeTimestampTZ: 11,
+	schema.TypeBinary:      11,
+	schema.TypeUUID:        11,
+	schema.TypeInterval:    11,
+	schema.TypeArray:       11,
+	schema.TypeString:      12,
+	schema.TypeJSON:        13,
 }
 
 // wideningPaths defines valid type widening paths.
@@ -31,6 +32,7 @@ var wideningOrder = map[schema.DataType]int{
 var wideningPaths = map[schema.DataType][]schema.DataType{
 	schema.TypeBoolean: {schema.TypeString, schema.TypeJSON},
 
+	schema.TypeInt8:    {schema.TypeInt16, schema.TypeInt32, schema.TypeInt64, schema.TypeFloat64, schema.TypeDecimal, schema.TypeString, schema.TypeJSON},
 	schema.TypeInt16:   {schema.TypeInt32, schema.TypeInt64, schema.TypeFloat64, schema.TypeDecimal, schema.TypeString, schema.TypeJSON},
 	schema.TypeInt32:   {schema.TypeInt64, schema.TypeFloat64, schema.TypeDecimal, schema.TypeString, schema.TypeJSON},
 	schema.TypeInt64:   {schema.TypeFloat64, schema.TypeDecimal, schema.TypeString, schema.TypeJSON},

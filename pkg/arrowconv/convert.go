@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"reflect"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/shopspring/decimal"
 )
 
 // ItemsToArrowRecordWithSchema builds an Arrow RecordBatch from items and a given schema,
@@ -144,6 +146,32 @@ func IsFloat(dt arrow.DataType) bool {
 	}
 }
 
+// appendInt8/appendInt16/appendInt32 narrow an int64 into a fixed-width
+// builder, appending a null instead of silently truncating out-of-range values.
+func appendInt8(b *array.Int8Builder, i int64) {
+	if i >= math.MinInt8 && i <= math.MaxInt8 {
+		b.Append(int8(i))
+	} else {
+		b.AppendNull()
+	}
+}
+
+func appendInt16(b *array.Int16Builder, i int64) {
+	if i >= math.MinInt16 && i <= math.MaxInt16 {
+		b.Append(int16(i))
+	} else {
+		b.AppendNull()
+	}
+}
+
+func appendInt32(b *array.Int32Builder, i int64) {
+	if i >= math.MinInt32 && i <= math.MaxInt32 {
+		b.Append(int32(i))
+	} else {
+		b.AppendNull()
+	}
+}
+
 func AppendValue(builder array.Builder, val interface{}) {
 	if val == nil {
 		builder.AppendNull()
@@ -182,22 +210,62 @@ func AppendValue(builder array.Builder, val interface{}) {
 			b.AppendNull()
 		}
 
+	case *array.Int8Builder:
+		switch v := val.(type) {
+		case int8:
+			b.Append(v)
+		case int16:
+			appendInt8(b, int64(v))
+		case int32:
+			appendInt8(b, int64(v))
+		case int64:
+			appendInt8(b, v)
+		case int:
+			appendInt8(b, int64(v))
+		case float64:
+			if v >= math.MinInt8 && v <= math.MaxInt8 {
+				b.Append(int8(v))
+			} else {
+				b.AppendNull()
+			}
+		case uint8:
+			appendInt8(b, int64(v))
+		case string:
+			if i, err := strconv.ParseInt(v, 10, 8); err == nil {
+				b.Append(int8(i))
+			} else {
+				b.AppendNull()
+			}
+		case json.Number:
+			if i, err := v.Int64(); err == nil {
+				appendInt8(b, i)
+			} else {
+				b.AppendNull()
+			}
+		default:
+			b.AppendNull()
+		}
+
 	case *array.Int16Builder:
 		switch v := val.(type) {
 		case int16:
 			b.Append(v)
 		case int32:
-			b.Append(int16(v))
+			appendInt16(b, int64(v))
 		case int64:
-			b.Append(int16(v))
+			appendInt16(b, v)
 		case int:
-			b.Append(int16(v))
+			appendInt16(b, int64(v))
 		case float64:
-			b.Append(int16(v))
+			if v >= math.MinInt16 && v <= math.MaxInt16 {
+				b.Append(int16(v))
+			} else {
+				b.AppendNull()
+			}
 		case uint8:
 			b.Append(int16(v))
 		case uint16:
-			b.Append(int16(v))
+			appendInt16(b, int64(v))
 		case int8:
 			b.Append(int16(v))
 		case string:
@@ -208,7 +276,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 			}
 		case json.Number:
 			if i, err := v.Int64(); err == nil {
-				b.Append(int16(i))
+				appendInt16(b, i)
 			} else {
 				b.AppendNull()
 			}
@@ -221,9 +289,9 @@ func AppendValue(builder array.Builder, val interface{}) {
 		case int32:
 			b.Append(v)
 		case int:
-			b.Append(int32(v))
+			appendInt32(b, int64(v))
 		case int64:
-			b.Append(int32(v))
+			appendInt32(b, v)
 		case int8:
 			b.Append(int32(v))
 		case int16:
@@ -233,9 +301,13 @@ func AppendValue(builder array.Builder, val interface{}) {
 		case uint16:
 			b.Append(int32(v))
 		case uint32:
-			b.Append(int32(v))
+			appendInt32(b, int64(v))
 		case float64:
-			b.Append(int32(v))
+			if v >= math.MinInt32 && v <= math.MaxInt32 {
+				b.Append(int32(v))
+			} else {
+				b.AppendNull()
+			}
 		case string:
 			if i, err := strconv.ParseInt(v, 10, 32); err == nil {
 				b.Append(int32(i))
@@ -244,7 +316,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 			}
 		case json.Number:
 			if i, err := v.Int64(); err == nil {
-				b.Append(int32(i))
+				appendInt32(b, i)
 			} else {
 				b.AppendNull()
 			}
@@ -273,7 +345,11 @@ func AppendValue(builder array.Builder, val interface{}) {
 		case uint32:
 			b.Append(int64(v))
 		case uint64:
-			b.Append(int64(v))
+			if v <= math.MaxInt64 {
+				b.Append(int64(v))
+			} else {
+				b.AppendNull()
+			}
 		case string:
 			if i, err := strconv.ParseInt(v, 10, 64); err == nil {
 				b.Append(i)
@@ -516,6 +592,13 @@ func AppendValue(builder array.Builder, val interface{}) {
 		switch v := val.(type) {
 		case decimal128.Num:
 			b.Append(v)
+		case decimal.Decimal:
+			num, err := decimal128.FromString(v.String(), dt.Precision, dt.Scale)
+			if err != nil {
+				b.AppendNull()
+			} else {
+				b.Append(num)
+			}
 		case string:
 			v = strings.TrimSpace(v)
 			if v == "" {
@@ -558,6 +641,55 @@ func AppendValue(builder array.Builder, val interface{}) {
 			} else {
 				b.Append(num)
 			}
+		case int8:
+			num, err := decimal128.FromString(strconv.FormatInt(int64(v), 10), dt.Precision, dt.Scale)
+			if err != nil {
+				b.AppendNull()
+			} else {
+				b.Append(num)
+			}
+		case int16:
+			num, err := decimal128.FromString(strconv.FormatInt(int64(v), 10), dt.Precision, dt.Scale)
+			if err != nil {
+				b.AppendNull()
+			} else {
+				b.Append(num)
+			}
+		case int32:
+			num, err := decimal128.FromString(strconv.FormatInt(int64(v), 10), dt.Precision, dt.Scale)
+			if err != nil {
+				b.AppendNull()
+			} else {
+				b.Append(num)
+			}
+		case uint8:
+			num, err := decimal128.FromString(strconv.FormatUint(uint64(v), 10), dt.Precision, dt.Scale)
+			if err != nil {
+				b.AppendNull()
+			} else {
+				b.Append(num)
+			}
+		case uint16:
+			num, err := decimal128.FromString(strconv.FormatUint(uint64(v), 10), dt.Precision, dt.Scale)
+			if err != nil {
+				b.AppendNull()
+			} else {
+				b.Append(num)
+			}
+		case uint32:
+			num, err := decimal128.FromString(strconv.FormatUint(uint64(v), 10), dt.Precision, dt.Scale)
+			if err != nil {
+				b.AppendNull()
+			} else {
+				b.Append(num)
+			}
+		case uint64:
+			num, err := decimal128.FromString(strconv.FormatUint(v, 10), dt.Precision, dt.Scale)
+			if err != nil {
+				b.AppendNull()
+			} else {
+				b.Append(num)
+			}
 		case []byte:
 			s := strings.TrimSpace(string(v))
 			if s == "" {
@@ -595,136 +727,44 @@ func AppendValue(builder array.Builder, val interface{}) {
 }
 
 func appendListValue(b *array.ListBuilder, val interface{}) {
-	switch v := val.(type) {
-	case []string:
-		b.Append(true)
-		vb := b.ValueBuilder().(*array.StringBuilder)
-		for _, s := range v {
-			vb.Append(s)
-		}
-	case []bool:
-		b.Append(true)
-		vb := b.ValueBuilder().(*array.BooleanBuilder)
-		for _, n := range v {
-			vb.Append(n)
-		}
-	default:
-		appendListNumeric(b, val)
-	}
-}
-
-func appendListNumeric(b *array.ListBuilder, val interface{}) {
-	if bigs, ok := val.([]*big.Int); ok {
-		vb, isDecimal := b.ValueBuilder().(*array.Decimal128Builder)
-		if !isDecimal {
-			b.AppendNull()
-			return
-		}
-		b.Append(true)
-		for _, bi := range bigs {
-			if bi == nil {
-				vb.AppendNull()
-			} else {
-				vb.Append(decimal128.FromBigInt(bi))
-			}
-		}
-		return
-	}
-
 	rv := reflect.ValueOf(val)
 	if rv.Kind() != reflect.Slice {
 		b.AppendNull()
 		return
 	}
-	elemKind := rv.Type().Elem().Kind()
-	asInt64 := func(i int) (int64, bool) {
-		e := rv.Index(i)
-		switch elemKind {
-		case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			return e.Int(), true
-		case reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			return int64(e.Uint()), true
-		case reflect.Float32, reflect.Float64:
-			return int64(e.Float()), true
-		}
-		return 0, false
-	}
-	asFloat64 := func(i int) (float64, bool) {
-		e := rv.Index(i)
-		switch elemKind {
-		case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			return float64(e.Int()), true
-		case reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			return float64(e.Uint()), true
-		case reflect.Float32, reflect.Float64:
-			return e.Float(), true
-		}
-		return 0, false
-	}
 
-	n := rv.Len()
-	switch vb := b.ValueBuilder().(type) {
-	case *array.Int16Builder:
-		b.Append(true)
-		for i := 0; i < n; i++ {
-			if x, ok := asInt64(i); ok {
-				vb.Append(int16(x))
-			} else {
-				vb.AppendNull()
-			}
+	b.Append(true)
+	vb := b.ValueBuilder()
+	for i := 0; i < rv.Len(); i++ {
+		elem, ok := listElementValue(rv.Index(i))
+		if !ok {
+			vb.AppendNull()
+			continue
 		}
-	case *array.Int32Builder:
-		b.Append(true)
-		for i := 0; i < n; i++ {
-			if x, ok := asInt64(i); ok {
-				vb.Append(int32(x))
-			} else {
-				vb.AppendNull()
-			}
-		}
-	case *array.Int64Builder:
-		b.Append(true)
-		for i := 0; i < n; i++ {
-			if x, ok := asInt64(i); ok {
-				vb.Append(x)
-			} else {
-				vb.AppendNull()
-			}
-		}
-	case *array.Float32Builder:
-		b.Append(true)
-		for i := 0; i < n; i++ {
-			if x, ok := asFloat64(i); ok {
-				vb.Append(float32(x))
-			} else {
-				vb.AppendNull()
-			}
-		}
-	case *array.Float64Builder:
-		b.Append(true)
-		for i := 0; i < n; i++ {
-			if x, ok := asFloat64(i); ok {
-				vb.Append(x)
-			} else {
-				vb.AppendNull()
-			}
-		}
-	case *array.Decimal128Builder:
-		b.Append(true)
-		for i := 0; i < n; i++ {
-			e := rv.Index(i)
-			switch elemKind {
-			case reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-				vb.Append(decimal128.FromBigInt(new(big.Int).SetUint64(e.Uint())))
-			case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				vb.Append(decimal128.FromBigInt(big.NewInt(e.Int())))
-			default:
-				vb.AppendNull()
-			}
-		}
-	default:
-		b.AppendNull()
+		AppendValue(vb, elem)
 	}
+}
+
+func listElementValue(v reflect.Value) (interface{}, bool) {
+	if !v.IsValid() {
+		return nil, false
+	}
+	if v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return nil, false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil, false
+		}
+		if v.Type() == reflect.TypeOf((*big.Int)(nil)) {
+			return v.Interface(), true
+		}
+		v = v.Elem()
+	}
+	return v.Interface(), true
 }
 
 func AppendJSONStringValue(b *array.StringBuilder, val interface{}) {

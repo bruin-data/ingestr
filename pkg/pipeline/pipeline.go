@@ -314,7 +314,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
 	var evolutionPlan *schemaevolution.EvolutionPlan
 	if resolvedStrategy != config.StrategyReplace {
-		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, destSchema)
+		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, p.config.DestTable, destSchema)
 		if err != nil {
 			return fmt.Errorf("schema evolution failed: %w", err)
 		}
@@ -822,9 +822,12 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	}
 
 	tableDestNames := make(map[string]string)
+	namer, _ := p.dest.(destination.MultiTableNamer)
 	for _, table := range tables {
 		destName := table.Name
-		if table.DestSchema != "" {
+		if namer != nil {
+			destName = namer.DestTableName(table.DestSchema, table.Name)
+		} else if table.DestSchema != "" {
 			// TODO(turtledev): When a publication in a non-public
 			// schema is created, the tables names may (?) have a schema.
 			//
@@ -836,6 +839,24 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			destName = table.DestSchema + "." + table.Name
 		}
 		tableDestNames[table.Name] = destName
+	}
+
+	// Schema contract handling: build a per-table evolution plan so destination
+	// tables gain columns added at the source (skip for replace, which drops and
+	// recreates). Plans are built sequentially because evolveSchemaIfNeeded
+	// keeps comparison state on the pipeline; strategies apply them per table.
+	var evolutionPlans map[string]*schemaevolution.EvolutionPlan
+	if resolvedStrategy != config.StrategyReplace {
+		evolutionPlans = make(map[string]*schemaevolution.EvolutionPlan)
+		for _, table := range tables {
+			plan, err := p.evolveSchemaIfNeeded(ctx, tableDestNames[table.Name], table.Schema)
+			if err != nil {
+				return fmt.Errorf("schema evolution failed for table %s: %w", table.Name, err)
+			}
+			if plan != nil {
+				evolutionPlans[table.Name] = plan
+			}
+		}
 	}
 
 	// For CDC sources, query per-table max LSNs for resume
@@ -868,6 +889,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		TableDestNames: tableDestNames,
 		Tracker:        tracker,
 		CDCResumeLSNs:  cdcResumeLSNs,
+		EvolutionPlans: evolutionPlans,
 	}
 
 	if err := mtStrat.ExecuteMultiTable(ctx, job); err != nil {
@@ -879,9 +901,9 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 // evolveSchemaIfNeeded inspects the destination's current schema and builds an
 // EvolutionPlan describing how it should change to accommodate sourceSchema.
-func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
+func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, sourceSchema *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
 	// Get destination table schema (nil if table doesn't exist)
-	destSchema, err := p.dest.GetTableSchema(ctx, p.config.DestTable)
+	destSchema, err := p.dest.GetTableSchema(ctx, destTable)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get destination schema: %w", err)
 	}
@@ -1020,7 +1042,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 
 	// Generate migration using the FILTERED schema comparison (after contract filtering)
 	// This ensures we only apply allowed changes (e.g., new columns in discard_value mode)
-	migration, err := schemaevolution.GenerateMigration(p.filteredSchemaComparison, dialect, p.config.DestTable)
+	migration, err := schemaevolution.GenerateMigration(p.filteredSchemaComparison, dialect, destTable)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate migration: %w", err)
 	}

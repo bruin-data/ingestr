@@ -304,14 +304,36 @@ func TestSupportsStrategies(t *testing.T) {
 	}
 }
 
-func TestBeginTransaction_NotSupported(t *testing.T) {
+func TestBeginTransaction_ReturnsScriptTransaction(t *testing.T) {
 	dest := NewBigQueryDestination()
-	_, err := dest.BeginTransaction(context.Background())
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	tx, err := dest.BeginTransaction(context.Background())
+	if err != nil {
+		t.Fatalf("BeginTransaction returned error: %v", err)
 	}
-	if !contains(err.Error(), "transactions not supported") {
-		t.Fatalf("unexpected error: %v", err)
+
+	bqTx, ok := tx.(*bigQueryTransaction)
+	if !ok {
+		t.Fatalf("transaction type = %T, want *bigQueryTransaction", tx)
+	}
+
+	if err := bqTx.Exec(context.Background(), "DELETE FROM `p`.`d`.`t` WHERE TRUE"); err != nil {
+		t.Fatalf("Exec returned error: %v", err)
+	}
+	if err := bqTx.Exec(context.Background(), "INSERT INTO `p`.`d`.`t` SELECT * FROM `p`.`d`.`s`"); err != nil {
+		t.Fatalf("Exec returned error: %v", err)
+	}
+
+	got := buildBigQueryTransactionScript(bqTx.statements...)
+	want := "BEGIN TRANSACTION;\n" +
+		"DELETE FROM `p`.`d`.`t` WHERE TRUE;\n" +
+		"INSERT INTO `p`.`d`.`t` SELECT * FROM `p`.`d`.`s`;\n" +
+		"COMMIT TRANSACTION;"
+	if got != want {
+		t.Fatalf("transaction script =\n%s\nwant:\n%s", got, want)
+	}
+
+	if err := bqTx.Exec(context.Background(), "SELECT 1", 1); err == nil || !contains(err.Error(), "does not support positional query args") {
+		t.Fatalf("Exec with args error = %v", err)
 	}
 }
 
@@ -765,6 +787,32 @@ func TestFormatBigQueryValue(t *testing.T) {
 	}
 }
 
+func TestBuildDeleteInsertTransactionScript(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.projectID = "my-project"
+
+	opts := destination.DeleteInsertOptions{
+		StagingTable:       "staging_ds.staging_tbl",
+		TargetTable:        "target_ds.target_tbl",
+		IncrementalKey:     "ts",
+		IncrementalKeyType: schema.TypeInt64,
+		IntervalStart:      int64(1),
+		IntervalEnd:        int64(10),
+		Columns:            []string{"id", "ts", "name"},
+		PrimaryKeys:        []string{"id"},
+	}
+
+	deleteSQL, insertSQL := dest.buildDeleteInsertStatements("staging_ds", "staging_tbl", "target_ds", "target_tbl", opts)
+	got := buildBigQueryTransactionScript(deleteSQL, insertSQL)
+	want := "BEGIN TRANSACTION;\n" +
+		"DELETE FROM `my-project`.`target_ds`.`target_tbl` WHERE `ts` >= 1 AND `ts` <= 10;\n" +
+		"INSERT INTO `my-project`.`target_ds`.`target_tbl` (`id`, `ts`, `name`) SELECT `id`, `ts`, `name` FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `ts` DESC) = 1;\n" +
+		"COMMIT TRANSACTION;"
+	if got != want {
+		t.Fatalf("transaction script =\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func TestParseAlterColumnTypeSQL(t *testing.T) {
 	table, column, newType, ok := parseAlterColumnTypeSQL("ALTER TABLE my_dataset.my_table ALTER COLUMN `age` SET DATA TYPE STRING")
 	if !ok {
@@ -988,6 +1036,33 @@ func TestBuildMergeSQL(t *testing.T) {
 		}
 		if !contains(sql, "(t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))") {
 			t.Fatalf("sql missing null-safe on clause for non-cast pk:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_mode", func(t *testing.T) {
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}, nil, "")
+
+		if !contains(sql, "SELECT la.`id`, act.`name`, la.`_cdc_lsn`, la.`_cdc_deleted`, la.`_cdc_synced_at`, act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active`") {
+			t.Fatalf("sql missing composed source columns (data from latest active, CDC from latest overall):\n%s", sql)
+		}
+		if !contains(sql, "ORDER BY `_cdc_lsn` DESC, `_cdc_deleted` DESC) = 1) AS la") {
+			t.Fatalf("sql missing latest-overall dedup:\n%s", sql)
+		}
+		if !contains(sql, "WHERE `_cdc_deleted` = false QUALIFY ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `_cdc_lsn` DESC) = 1) AS act") {
+			t.Fatalf("sql missing latest-active dedup:\n%s", sql)
+		}
+		if !contains(sql, "WHEN MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n  UPDATE SET t.`name` = s.`name`") {
+			t.Fatalf("sql missing full update for active or update-then-deleted rows:\n%s", sql)
+		}
+		if !contains(sql, "WHEN MATCHED AND s.`_cdc_deleted` = true THEN\n  UPDATE SET t.`_cdc_deleted` = true, t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_synced_at` = s.`_cdc_synced_at`") {
+			t.Fatalf("sql missing CDC-only update for delete-only windows:\n%s", sql)
+		}
+		if !contains(sql, "WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n  INSERT (`id`, `name`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)") {
+			t.Fatalf("sql missing insert clause materializing insert-then-deleted rows:\n%s", sql)
+		}
+		if contains(sql, "WHEN NOT MATCHED AND s.`_cdc_deleted` = false THEN") {
+			t.Fatalf("sql still has the old insert clause that drops insert-then-deleted rows:\n%s", sql)
 		}
 	})
 }

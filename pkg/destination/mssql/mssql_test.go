@@ -35,6 +35,14 @@ func TestBuildCreateTableSQL_CapsLongStringPrimaryKeyLength(t *testing.T) {
 	assertContains(t, sql, "[name] NVARCHAR(1000)")
 }
 
+func TestBuildDeleteInsertDeleteSQLUsesTableLock(t *testing.T) {
+	sql := buildDeleteInsertDeleteSQL("dbo.events", "updated_at")
+
+	assertContains(t, sql, "DELETE FROM [dbo].[events] WITH (TABLOCKX, HOLDLOCK)")
+	assertContains(t, sql, "[updated_at] >= @p1")
+	assertContains(t, sql, "[updated_at] <= @p2")
+}
+
 func TestDialectTypeNameUsesDestinationTypeMapping(t *testing.T) {
 	dialect := &Dialect{}
 	columns := []schema.Column{
