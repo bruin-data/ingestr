@@ -426,13 +426,20 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		pkMap[strings.ToLower(pk)] = true
 	}
 
-	cdcMerge := containsFold(allColumns, destination.CDCDeletedColumn)
+	// Column names may have been case-mapped by the naming layer (Snowflake
+	// commonly uppercases), so CDC columns must be detected case-insensitively
+	// and referenced by their actual names.
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	hasUnchangedCols := containsFold(allColumns, destination.CDCUnchangedColsColumn)
 	unchangedRef := "source." + quoteIdentifier(destination.CDCUnchangedColsColumn)
 	var updateSets []string
 	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
 			q := quoteIdentifier(col)
-			if cdcMerge && !destination.IsCDCMetaColumn(col) {
+			if hasCDCDeleted && hasUnchangedCols && !destination.IsCDCMetaColumn(col) {
 				updateSets = append(updateSets, cdcMergeAssign(
 					col, q, "target."+q, "source."+q, unchangedRef,
 				))
@@ -457,11 +464,6 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	for i, pk := range primaryKeys {
 		quotedPKList[i] = quoteIdentifier(pk)
 	}
-
-	// Column names may have been case-mapped by the naming layer (Snowflake
-	// commonly uppercases), so CDC columns must be detected case-insensitively
-	// and referenced by their actual names.
-	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 
 	dedupOrderBy := "(SELECT NULL)"
 	if incrementalKey != "" {
@@ -501,8 +503,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		dedup := func(where, orderBy string) string {
 			return fmt.Sprintf(
 				`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-				strings.Join(quotedCols, ", "),
-				strings.Join(quotedCols, ", "),
+				strings.Join(stagingQuoted, ", "),
+				strings.Join(stagingQuoted, ", "),
 				strings.Join(quotedPKList, ", "),
 				orderBy,
 				stagingFull,
@@ -534,16 +536,16 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 			cdcDeleted, cdcLSN, cdcLSN, cdcSyncedAt, cdcSyncedAt)
 
 		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND %s THEN\n", hasRowData)
-		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 
 		return mergeSQL.String()
 	}
 
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
+		strings.Join(stagingQuoted, ", "),
+		strings.Join(stagingQuoted, ", "),
 		strings.Join(quotedPKList, ", "),
 		dedupOrderBy,
 		stagingFull,

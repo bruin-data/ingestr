@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1554,14 +1555,19 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 		pkMap[strings.ToLower(pk)] = true
 	}
 
-	hasCDCDeleted := slices.Contains(allColumns, destination.CDCDeletedColumn)
+	// Check if this is CDC mode (has _cdc_deleted column)
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	hasUnchangedCols := slices.Contains(allColumns, destination.CDCUnchangedColsColumn)
 
 	unchangedRef := fmt.Sprintf("s.%s", quoteIdentifier(destination.CDCUnchangedColsColumn))
 	var updateSets []string
 	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
 			src := castSourceCol(col, castMap)
-			if hasCDCDeleted && !destination.IsCDCMetaColumn(col) {
+			if hasCDCDeleted && hasUnchangedCols && !destination.IsCDCMetaColumn(col) {
 				updateSets = append(updateSets, cdcMergeAssign(
 					col, fmt.Sprintf("t.%s", quoteIdentifier(col)), src, unchangedRef,
 				))
@@ -1578,9 +1584,6 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 		quotedCols[i] = quoteIdentifier(col)
 		sourceCols[i] = castSourceCol(col, castMap)
 	}
-
-	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 
 	var sql strings.Builder
 	fmt.Fprintf(&sql, "MERGE %s.%s.%s AS t\n", quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTable))

@@ -82,10 +82,21 @@ func TestBuildMergeSQL(t *testing.T) {
 		columns := []string{"ID", "NAME", "CONFIG_DATA", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_cdc_unchanged_cols"}
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
 
-		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = false THEN`)
+		assert.Contains(t, sql, `WHEN MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
 		assert.Contains(t, sql, `"CONFIG_DATA" = IFF(ARRAY_CONTAINS(TO_VARIANT('config_data'), TRY_PARSE_JSON(LOWER(source."_CDC_UNCHANGED_COLS"))), target."CONFIG_DATA", source."CONFIG_DATA")`)
 		// staging-only column must not be persisted on the destination
-		assert.NotContains(t, sql, `INSERT (`+`"ID", "NAME", "CONFIG_DATA", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_CDC_UNCHANGED_COLS"`)
+		assert.Contains(t, sql, "INSERT (\"ID\", \"NAME\", \"CONFIG_DATA\", \"_CDC_LSN\", \"_CDC_DELETED\", \"_CDC_SYNCED_AT\")\n")
+		assert.NotContains(t, sql, `INSERT ("ID", "NAME", "CONFIG_DATA", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_CDC_UNCHANGED_COLS")`)
+	})
+
+	t.Run("cdc_without_unchanged_cols_column", func(t *testing.T) {
+		// Sources that materialize full change rows (e.g. SQL Server CDC) emit
+		// no _cdc_unchanged_cols; the merge must not reference it.
+		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
+
+		assert.NotContains(t, sql, "_CDC_UNCHANGED_COLS")
+		assert.Contains(t, sql, `target."NAME" = source."NAME"`)
 	})
 
 	t.Run("cdc_only_pk_and_metadata", func(t *testing.T) {

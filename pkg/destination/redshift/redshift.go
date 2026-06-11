@@ -178,12 +178,16 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 	}
 
 	hasCDCDeleted := slices.Contains(allColumns, destination.CDCDeletedColumn)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	hasUnchangedCols := slices.Contains(allColumns, destination.CDCUnchangedColsColumn)
 
 	unchangedRef := fmt.Sprintf("source.%s", destination.QuoteIdentifier(destination.CDCUnchangedColsColumn))
 	var updateSets []string
 	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
-			if hasCDCDeleted && !destination.IsCDCMetaColumn(col) {
+			if hasCDCDeleted && hasUnchangedCols && !destination.IsCDCMetaColumn(col) {
 				updateSets = append(updateSets, cdcMergeAssign(
 					col,
 					fmt.Sprintf("target.%s", destination.QuoteIdentifier(col)),

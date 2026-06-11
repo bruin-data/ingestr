@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -466,6 +467,10 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 	// Check if this is CDC mode (has _cdc_deleted column)
 	hasCDCDeleted := slices.Contains(stagingColumns, destination.CDCDeletedColumn)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	hasUnchangedCols := slices.Contains(stagingColumns, destination.CDCUnchangedColsColumn)
 
 	// Begin transaction for atomic merge
 	tx, err := d.pool.Begin(ctx)
@@ -482,7 +487,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// We upsert the latest non-deleted row per PK, then mark deletes only if the
 		// latest change for that PK is a delete (preserving row data).
 		pkList := strings.Join(quotedPKs, ", ")
-		selectCols := strings.Join(quotedColumns, ", ")
+		selectCols := strings.Join(stagingQuoted, ", ")
 		orderByParts := append(append([]string{}, quotedPKs...), destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier))
 		orderBy := strings.Join(orderByParts, ", ")
 
@@ -503,7 +508,10 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// Use UPDATE ... FROM + INSERT instead of ON CONFLICT so
 		// la."_cdc_unchanged_cols" is read once per row, not once per column.
 		onTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "la")
-		unchangedRef := fmt.Sprintf(`la."%s"`, destination.CDCUnchangedColsColumn)
+		unchangedRef := ""
+		if hasUnchangedCols {
+			unchangedRef = fmt.Sprintf(`la."%s"`, destination.CDCUnchangedColsColumn)
+		}
 		upsertSQL := fmt.Sprintf(
 			`WITH %s, updated AS (
 				UPDATE %s AS target SET %s
@@ -963,7 +971,7 @@ func buildConflictUpdateSet(columns []string) string {
 func buildCDCConflictUpdateSet(columns []string, targetAlias, sourceAlias, unchangedRef string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		if destination.IsCDCMetaColumn(col) {
+		if destination.IsCDCMetaColumn(col) || unchangedRef == "" {
 			sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
 			continue
 		}
