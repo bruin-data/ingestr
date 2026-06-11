@@ -418,7 +418,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	// lexicographically); otherwise, when an incremental key is set the latest
 	// row per PK wins, else arbitrary.
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
-	isCDC := destination.HasCDCDeletedColumn(columns)
+	isCDC := destination.HasCDCDeletedColumn(stagingColumns)
 	dedupOrderBy := "(SELECT NULL)"
 	if isCDC {
 		dedupOrderBy = destination.CDCLatestOverallOrderBy(quoteIdentifier)
@@ -428,8 +428,8 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	dedupSource := func(where string) string {
 		return fmt.Sprintf(
 			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedColumns, ", "),
+			strings.Join(stagingQuoted, ", "),
+			strings.Join(stagingQuoted, ", "),
 			strings.Join(quotedPKs, ", "),
 			dedupOrderBy,
 			destination.QuoteTableName(opts.StagingTable),
@@ -448,7 +448,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
-			buildUpdateSet(nonPKColumns, "source"),
+			buildUpdateSet(nonPKColumns, "target", "source", cdcMerge),
 			upsertSource,
 			onCondition,
 		)
@@ -462,8 +462,8 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	insertSQL := fmt.Sprintf(
 		`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 		quotedTargetTable,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
+		strings.Join(destQuoted, ", "),
+		strings.Join(destQuoted, ", "),
 		upsertSource,
 		quotedTargetTable,
 		onCondition,

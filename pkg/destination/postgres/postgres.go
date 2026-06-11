@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -482,7 +483,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// We upsert the latest non-deleted row per PK, then mark deletes only if the
 		// latest change for that PK is a delete (preserving row data).
 		pkList := strings.Join(quotedPKs, ", ")
-		selectCols := strings.Join(quotedColumns, ", ")
+		selectCols := strings.Join(stagingQuoted, ", ")
 		orderByParts := append(append([]string{}, quotedPKs...), destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier))
 		orderBy := strings.Join(orderByParts, ", ")
 

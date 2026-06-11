@@ -501,8 +501,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		dedup := func(where, orderBy string) string {
 			return fmt.Sprintf(
 				`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-				strings.Join(quotedCols, ", "),
-				strings.Join(quotedCols, ", "),
+				strings.Join(stagingQuoted, ", "),
+				strings.Join(stagingQuoted, ", "),
 				strings.Join(quotedPKList, ", "),
 				orderBy,
 				stagingFull,
@@ -534,16 +534,16 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 			cdcDeleted, cdcLSN, cdcLSN, cdcSyncedAt, cdcSyncedAt)
 
 		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND %s THEN\n", hasRowData)
-		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 
 		return mergeSQL.String()
 	}
 
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
+		strings.Join(destQuoted, ", "),
+		strings.Join(destQuoted, ", "),
 		strings.Join(quotedPKList, ", "),
 		dedupOrderBy,
 		stagingFull,

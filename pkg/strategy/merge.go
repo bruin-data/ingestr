@@ -117,21 +117,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
-	}); err != nil {  dedupSource := fmt.Sprintf(
-472
-    `(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-473
-    strings.Join(stagingQuoted, ", "),
-474
-    strings.Join(stagingQuoted, ", "),
-475
-    strings.Join(quotedPKList, ", "),
-476
-    dedupOrderBy,
-477
-    stagingFull,
-478
-  )
+	}); err != nil {
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}
 
