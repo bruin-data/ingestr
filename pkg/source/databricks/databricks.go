@@ -346,9 +346,12 @@ func (s *DatabricksSource) buildRecordBatch(alloc memory.Allocator, arrowSchema 
 				continue
 			}
 			val := row[i]
-			if val == "" || val == "null" || val == "NULL" {
+			switch val {
+			case "":
+				builder.AppendEmptyValue()
+			case "null", "NULL":
 				builder.AppendNull()
-			} else {
+			default:
 				arrowconv.AppendValue(builder, val)
 			}
 		}
