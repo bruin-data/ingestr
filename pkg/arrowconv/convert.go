@@ -727,6 +727,15 @@ func AppendValue(builder array.Builder, val interface{}) {
 }
 
 func appendListValue(b *array.ListBuilder, val interface{}) {
+	if s, ok := val.(string); ok {
+		values, ok := parseJSONStringArray(s)
+		if !ok {
+			b.AppendNull()
+			return
+		}
+		val = values
+	}
+
 	rv := reflect.ValueOf(val)
 	if rv.Kind() != reflect.Slice {
 		b.AppendNull()
@@ -743,6 +752,27 @@ func appendListValue(b *array.ListBuilder, val interface{}) {
 		}
 		AppendValue(vb, elem)
 	}
+}
+
+func parseJSONStringArray(s string) ([]interface{}, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, false
+	}
+	if s[0] != '[' {
+		return nil, false
+	}
+
+	var values []interface{}
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	if err := dec.Decode(&values); err != nil {
+		return nil, false
+	}
+	if dec.More() {
+		return nil, false
+	}
+	return values, true
 }
 
 func listElementValue(v reflect.Value) (interface{}, bool) {
