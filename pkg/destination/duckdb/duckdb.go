@@ -2,10 +2,12 @@ package duckdb
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -388,9 +390,11 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
 
-	columns := opts.Columns
-	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	stagingColumns := opts.Columns
+	destColumns := destination.DestinationColumns(stagingColumns)
+	stagingQuoted := quoteColumns(stagingColumns)
+	destQuoted := quoteColumns(destColumns)
+	nonPKColumns := filterColumns(destColumns, opts.PrimaryKeys)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -413,7 +417,11 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	// lexicographically); otherwise, when an incremental key is set the latest
 	// row per PK wins, else arbitrary.
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
-	isCDC := destination.HasCDCDeletedColumn(columns)
+	isCDC := destination.HasCDCDeletedColumn(stagingColumns)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	applyUnchangedCols := isCDC && slices.Contains(stagingColumns, destination.CDCUnchangedColsColumn)
 	dedupOrderBy := "(SELECT NULL)"
 	if isCDC {
 		dedupOrderBy = destination.CDCLatestOverallOrderBy(quoteIdentifier)
@@ -423,8 +431,8 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	dedupSource := func(where string) string {
 		return fmt.Sprintf(
 			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedColumns, ", "),
+			strings.Join(stagingQuoted, ", "),
+			strings.Join(stagingQuoted, ", "),
 			strings.Join(quotedPKs, ", "),
 			dedupOrderBy,
 			destination.QuoteTableName(opts.StagingTable),
@@ -443,7 +451,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
-			buildUpdateSet(nonPKColumns, "source"),
+			buildUpdateSet(nonPKColumns, "target", "source", applyUnchangedCols),
 			upsertSource,
 			onCondition,
 		)
@@ -457,8 +465,8 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	insertSQL := fmt.Sprintf(
 		`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 		quotedTargetTable,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
+		strings.Join(destQuoted, ", "),
+		strings.Join(destQuoted, ", "),
 		upsertSource,
 		quotedTargetTable,
 		onCondition,
@@ -722,6 +730,7 @@ func (d *DuckDBDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DuckDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *DuckDBDestination) SupportsAtomicSwap() bool           { return true }
 func (d *DuckDBDestination) SupportsCDCMerge() bool             { return true }
+func (d *DuckDBDestination) SupportsCDCUnchangedCols() bool     { return true }
 
 // GetScheme returns the primary URI scheme for DuckDB.
 func (d *DuckDBDestination) GetScheme() string { return "duckdb" }
@@ -1002,12 +1011,35 @@ func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	return strings.Join(conditions, " AND ")
 }
 
-func buildUpdateSet(columns []string, sourceAlias string) string {
+func buildUpdateSet(columns []string, targetAlias, sourceAlias string, cdcMerge bool) string {
+	unchangedRef := fmt.Sprintf(`%s.%s`, sourceAlias, quoteIdentifier(destination.CDCUnchangedColsColumn))
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf(`%s = %s.%s`, quoteIdentifier(col), sourceAlias, quoteIdentifier(col))
+		if cdcMerge && !destination.IsCDCMetaColumn(col) {
+			sets[i] = cdcMergeAssign(
+				col,
+				fmt.Sprintf(`%s.%s`, targetAlias, quoteIdentifier(col)),
+				fmt.Sprintf(`%s.%s`, sourceAlias, quoteIdentifier(col)),
+				unchangedRef,
+			)
+		} else {
+			sets[i] = fmt.Sprintf(`%s = %s.%s`, quoteIdentifier(col), sourceAlias, quoteIdentifier(col))
+		}
 	}
 	return strings.Join(sets, ", ")
+}
+
+func cdcUnchangedColJSONNeedle(colName string) string {
+	b, _ := json.Marshal([]string{colName})
+	return strings.ReplaceAll(string(b), "'", "''")
+}
+
+func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	needle := cdcUnchangedColJSONNeedle(col)
+	return fmt.Sprintf(
+		`"%s" = CASE WHEN json_contains(%s, '%s') THEN %s ELSE %s END`,
+		col, unchangedColsExpr, needle, targetExpr, sourceExpr,
+	)
 }
 
 // buildChangeConditions builds change detection conditions using IS DISTINCT FROM.

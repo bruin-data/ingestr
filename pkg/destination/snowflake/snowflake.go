@@ -408,6 +408,7 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 }
 
 func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string) string {
+	destColumns := destination.DestinationColumns(allColumns)
 	stagingSchema, stagingName := parseSchemaTable(stagingTable)
 	targetSchema, targetName := parseSchemaTable(targetTable)
 
@@ -425,29 +426,44 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		pkMap[strings.ToLower(pk)] = true
 	}
 
+	// Column names may have been case-mapped by the naming layer (Snowflake
+	// commonly uppercases), so CDC columns must be detected case-insensitively
+	// and referenced by their actual names.
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	hasUnchangedCols := containsFold(allColumns, destination.CDCUnchangedColsColumn)
+	unchangedRef := "source." + quoteIdentifier(destination.CDCUnchangedColsColumn)
 	var updateSets []string
-	for _, col := range allColumns {
+	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
-			updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", quoteIdentifier(col), quoteIdentifier(col)))
+			q := quoteIdentifier(col)
+			if hasCDCDeleted && hasUnchangedCols && !destination.IsCDCMetaColumn(col) {
+				updateSets = append(updateSets, cdcMergeAssign(
+					col, q, "target."+q, "source."+q, unchangedRef,
+				))
+			} else {
+				updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", q, q))
+			}
 		}
 	}
 
-	quotedCols := make([]string, len(allColumns))
-	sourceCols := make([]string, len(allColumns))
+	stagingQuoted := make([]string, len(allColumns))
 	for i, col := range allColumns {
-		quotedCols[i] = quoteIdentifier(col)
-		sourceCols[i] = "source." + quoteIdentifier(col)
+		stagingQuoted[i] = quoteIdentifier(col)
+	}
+	destQuoted := make([]string, len(destColumns))
+	destSourceCols := make([]string, len(destColumns))
+	for i, col := range destColumns {
+		destQuoted[i] = quoteIdentifier(col)
+		destSourceCols[i] = "source." + quoteIdentifier(col)
 	}
 
 	quotedPKList := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		quotedPKList[i] = quoteIdentifier(pk)
 	}
-
-	// Column names may have been case-mapped by the naming layer (Snowflake
-	// commonly uppercases), so CDC columns must be detected case-insensitively
-	// and referenced by their actual names.
-	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 
 	dedupOrderBy := "(SELECT NULL)"
 	if incrementalKey != "" {
@@ -487,8 +503,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		dedup := func(where, orderBy string) string {
 			return fmt.Sprintf(
 				`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-				strings.Join(quotedCols, ", "),
-				strings.Join(quotedCols, ", "),
+				strings.Join(stagingQuoted, ", "),
+				strings.Join(stagingQuoted, ", "),
 				strings.Join(quotedPKList, ", "),
 				orderBy,
 				stagingFull,
@@ -520,16 +536,16 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 			cdcDeleted, cdcLSN, cdcLSN, cdcSyncedAt, cdcSyncedAt)
 
 		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND %s THEN\n", hasRowData)
-		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 
 		return mergeSQL.String()
 	}
 
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
+		strings.Join(stagingQuoted, ", "),
+		strings.Join(stagingQuoted, ", "),
 		strings.Join(quotedPKList, ", "),
 		dedupOrderBy,
 		stagingFull,
@@ -545,8 +561,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		}
 
 		mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
-		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 	}
 
 	return mergeSQL.String()
@@ -830,6 +846,8 @@ func (d *SnowflakeDestination) GetMaxCDCLSN(ctx context.Context, table string) (
 
 func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
 
+func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }
+
 func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseSchemaTable(table)
 
@@ -1021,4 +1039,24 @@ func formatSnowflakeValue(v interface{}) string {
 	default:
 		return fmt.Sprintf("'%v'", val)
 	}
+}
+
+func cdcMergeAssign(colName, colQuoted, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	// The source emits _cdc_unchanged_cols using the source column names (e.g. lower case).
+	// The merge column name may be folded to upper case when the schema is read
+	// back from the destination on an incremental run, so compare case-insensitively.
+	colLit := strings.ReplaceAll(strings.ToLower(colName), "'", "''")
+	return fmt.Sprintf(
+		"%s = IFF(ARRAY_CONTAINS(TO_VARIANT('%s'), TRY_PARSE_JSON(LOWER(%s))), %s, %s)",
+		colQuoted, colLit, unchangedColsExpr, targetExpr, sourceExpr,
+	)
+}
+
+func containsFold(items []string, target string) bool {
+	for _, item := range items {
+		if strings.EqualFold(item, target) {
+			return true
+		}
+	}
+	return false
 }

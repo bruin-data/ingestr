@@ -558,6 +558,9 @@ func (d *DynamoDBDestination) mergeCDC(ctx context.Context, opts destination.Mer
 
 		item := make(map[string]types.AttributeValue, len(entry.active))
 		for k, v := range entry.active {
+			if destination.IsCDCStagingOnlyColumn(k) {
+				continue
+			}
 			item[k] = v
 		}
 		item[destination.CDCLSNColumn] = entry.latest[destination.CDCLSNColumn]

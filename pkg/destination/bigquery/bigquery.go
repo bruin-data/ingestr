@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1540,6 +1541,7 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 
 // buildMergeSQL constructs a BigQuery MERGE statement
 func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string) string {
+	destColumns := destination.DestinationColumns(allColumns)
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		sourceCol := castSourceCol(pk, castMap)
@@ -1553,23 +1555,35 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 		pkMap[strings.ToLower(pk)] = true
 	}
 
+	// Check if this is CDC mode (has _cdc_deleted column)
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	hasUnchangedCols := slices.Contains(allColumns, destination.CDCUnchangedColsColumn)
+
+	unchangedRef := fmt.Sprintf("s.%s", quoteIdentifier(destination.CDCUnchangedColsColumn))
 	var updateSets []string
-	for _, col := range allColumns {
+	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
-			updateSets = append(updateSets, fmt.Sprintf("t.%s = %s", quoteIdentifier(col), castSourceCol(col, castMap)))
+			src := castSourceCol(col, castMap)
+			if hasCDCDeleted && hasUnchangedCols && !destination.IsCDCMetaColumn(col) {
+				updateSets = append(updateSets, cdcMergeAssign(
+					col, fmt.Sprintf("t.%s", quoteIdentifier(col)), src, unchangedRef,
+				))
+			} else {
+				updateSets = append(updateSets, fmt.Sprintf("t.%s = %s", quoteIdentifier(col), src))
+			}
 		}
 	}
 
 	// Build INSERT columns and values
-	quotedCols := make([]string, len(allColumns))
-	sourceCols := make([]string, len(allColumns))
-	for i, col := range allColumns {
+	quotedCols := make([]string, len(destColumns))
+	sourceCols := make([]string, len(destColumns))
+	for i, col := range destColumns {
 		quotedCols[i] = quoteIdentifier(col)
 		sourceCols[i] = castSourceCol(col, castMap)
 	}
-
-	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 
 	var sql strings.Builder
 	fmt.Fprintf(&sql, "MERGE %s.%s.%s AS t\n", quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTable))
@@ -1933,6 +1947,8 @@ func (d *BigQueryDestination) DestTableName(destSchema, sourceTable string) stri
 	return dataset + "." + table
 }
 
+func (d *BigQueryDestination) SupportsCDCUnchangedCols() bool { return true }
+
 func (d *BigQueryDestination) SupportsCDCMerge() bool {
 	return true
 }
@@ -1991,4 +2007,15 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	// The source emits _cdc_unchanged_cols with source-side column names; the
+	// merge column may carry different casing (e.g. when the schema is read
+	// back from an existing destination table), so compare case-insensitively.
+	colLit := strings.ReplaceAll(strings.ToLower(col), "'", "''")
+	return fmt.Sprintf(
+		"t.`%s` = IF('%s' IN UNNEST(IFNULL(JSON_EXTRACT_STRING_ARRAY(LOWER(%s)), [])), %s, %s)",
+		col, colLit, unchangedColsExpr, targetExpr, sourceExpr,
+	)
 }

@@ -45,11 +45,12 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 
 	// Extend schema with SCD columns
 	extendedSchema := extendSchemaWithSCDColumns(job.Schema)
+	destExtendedSchema := extendSchemaWithSCDColumns(destination.DestinationTableSchema(job.Schema))
 
 	// Ensure destination table exists with extended schema (don't drop it)
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       job.Config.DestTable,
-		Schema:      extendedSchema,
+		Schema:      destExtendedSchema,
 		DropFirst:   false,
 		PrimaryKeys: nil, // SCD2 tables shouldn't have PKs since we have multiple versions
 		PartitionBy: job.Config.PartitionBy,

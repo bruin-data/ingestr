@@ -326,26 +326,38 @@ func TestBuildUpdateSet(t *testing.T) {
 	tests := []struct {
 		name        string
 		columns     []string
+		targetAlias string
 		sourceAlias string
+		cdcMerge    bool
 		expected    string
 	}{
 		{
 			name:        "single_column",
 			columns:     []string{"name"},
+			targetAlias: "target",
 			sourceAlias: "source",
 			expected:    `"name" = source."name"`,
 		},
 		{
 			name:        "multiple_columns",
 			columns:     []string{"name", "email", "age"},
+			targetAlias: "target",
 			sourceAlias: "s",
 			expected:    `"name" = s."name", "email" = s."email", "age" = s."age"`,
+		},
+		{
+			name:        "cdc_unchanged_cols",
+			columns:     []string{"config_data"},
+			targetAlias: "target",
+			sourceAlias: "source",
+			cdcMerge:    true,
+			expected:    `"config_data" = CASE WHEN json_contains(source."_cdc_unchanged_cols", '["config_data"]') THEN target."config_data" ELSE source."config_data" END`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildUpdateSet(tt.columns, tt.sourceAlias)
+			result := buildUpdateSet(tt.columns, tt.targetAlias, tt.sourceAlias, tt.cdcMerge)
 			if result != tt.expected {
 				t.Errorf("buildUpdateSet = %s, want %s", result, tt.expected)
 			}

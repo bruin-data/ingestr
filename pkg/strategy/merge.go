@@ -45,10 +45,12 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		}
 	}
 
+	destSchema := destination.DestinationTableSchema(job.Schema)
+
 	// Ensure destination table exists (don't drop it)
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       job.Config.DestTable,
-		Schema:      job.Schema,
+		Schema:      destSchema,
 		DropFirst:   false,
 		PrimaryKeys: job.Config.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
@@ -131,7 +133,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		StagingTable: stagingTable,
 		TargetTable:  job.Config.DestTable,
 		PrimaryKeys:  job.Config.PrimaryKeys,
-		Columns:      job.Schema.ColumnNames(),
+		Columns:      destination.MergeColumnsFor(job.Destination, job.Schema.ColumnNames()),
 	}); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
@@ -183,6 +185,8 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			stagingTable := GenerateStagingTableName(destTable, "merge", job.Config.StagingDataset)
 			isCDC := hasCDCColumns(ti.Schema)
 
+			tableDestSchema := destination.DestinationTableSchema(ti.Schema)
+
 			if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
 				errChan <- fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
 				return
@@ -190,7 +194,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 
 			if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 				Table:       destTable,
-				Schema:      ti.Schema,
+				Schema:      tableDestSchema,
 				DropFirst:   false,
 				PrimaryKeys: ti.PrimaryKeys,
 			}); err != nil {
@@ -282,7 +286,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				StagingTable: stagingTable,
 				TargetTable:  destTable,
 				PrimaryKeys:  ti.PrimaryKeys,
-				Columns:      ti.Schema.ColumnNames(),
+				Columns:      destination.MergeColumnsFor(job.Destination, ti.Schema.ColumnNames()),
 			}); err != nil {
 				mergeErrChan <- fmt.Errorf("failed to merge table %s: %w", ti.Name, err)
 				return

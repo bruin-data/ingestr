@@ -308,6 +308,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
+	// Capture the schema before evolution: on incremental runs against an
+	// existing table, evolution replaces destSchema with FinalSchema, which is
+	// built from the destination's columns and therefore drops staging-only
+	// CDC columns (e.g. _cdc_unchanged_cols). StagingIngestSchema below
+	// re-appends them from this snapshot so staging keeps carrying them.
+	fullSchema := destSchema
+
 	// Schema contract handling: evolve destination schema if needed (skip for replace strategy)
 	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
 	var evolutionPlan *schemaevolution.EvolutionPlan
@@ -320,6 +327,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			destSchema = evolutionPlan.FinalSchema
 		}
 	}
+
+	// Staging mirrors the destination schema, with staging-only CDC columns retained.
+	ingestSchema := destination.StagingIngestSchema(fullSchema, destSchema)
 
 	if inferBuffer != nil {
 		bufferTarget := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
@@ -346,13 +356,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	// Primary key columns must be NOT NULL
-	pkSet := make(map[string]bool, len(destSchema.PrimaryKeys))
-	for _, pk := range destSchema.PrimaryKeys {
+	pkSet := make(map[string]bool, len(ingestSchema.PrimaryKeys))
+	for _, pk := range ingestSchema.PrimaryKeys {
 		pkSet[pk] = true
 	}
-	for i := range destSchema.Columns {
-		if pkSet[destSchema.Columns[i].Name] {
-			destSchema.Columns[i].Nullable = false
+	for i := range ingestSchema.Columns {
+		if pkSet[ingestSchema.Columns[i].Name] {
+			ingestSchema.Columns[i].Nullable = false
 		}
 	}
 
@@ -377,10 +387,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			return fmt.Errorf("invalid mask configuration: %w", err)
 		}
 		if m.HasMasks() {
-			if err := m.ValidateColumns(destSchema); err != nil {
+			if err := m.ValidateColumns(ingestSchema); err != nil {
 				return fmt.Errorf("invalid mask configuration: %w", err)
 			}
-			m.ApplyToSchema(destSchema)
+			m.ApplyToSchema(ingestSchema)
 			columnMasker = m
 		}
 	}
@@ -389,7 +399,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		Config:              &resolvedConfig,
 		Table:               table,
 		Destination:         dest,
-		Schema:              destSchema,
+		Schema:              ingestSchema,
 		SourceSchema:        originalSourceSchema,
 		Tracker:             jobTracker,
 		BufferedRecords:     bufferedRecords,
@@ -927,9 +937,9 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 		config.Debug("[SCHEMA EVOLUTION] Applying %d column type overrides", len(overrides))
 	}
 
-	// Compare schemas with overrides
+	// Compare schemas with overrides. Staging-only CDC columns are not persisted on the destination.
 	opts := &schemaevolution.CompareOptions{Overrides: overrides}
-	comparison, err := schemaevolution.Compare(sourceSchema, destSchema, opts)
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
 	}

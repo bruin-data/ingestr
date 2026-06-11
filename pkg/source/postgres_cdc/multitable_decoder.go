@@ -387,7 +387,7 @@ func (d *MultiTableDecoder) parseTupleData(data []byte, rel *RelationInfo, table
 		case tupleDataNull:
 			values[i] = nil
 		case tupleDataUnchanged:
-			values[i] = nil
+			values[i] = tupleUnchangedMarker
 		case tupleDataText:
 			if len(data) < 4 {
 				return nil, fmt.Errorf("text length truncated")
@@ -402,7 +402,7 @@ func (d *MultiTableDecoder) parseTupleData(data []byte, rel *RelationInfo, table
 			data = data[length:]
 
 			// Convert text to appropriate type based on schema column
-			if int(i) < len(tableSchema.Columns)-3 { // Exclude CDC columns
+			if int(i) < sourceColumnCount(tableSchema) {
 				col := tableSchema.Columns[i]
 				values[i] = convertTextValue(textVal, col)
 			} else {
@@ -442,23 +442,18 @@ func (d *MultiTableDecoder) changesToBatch(changes []Change, tableSchema *schema
 	}
 
 	syncedAt := time.Now().UTC()
-	sourceColCount := len(tableSchema.Columns) - 3 // Exclude CDC columns
+	nSource := sourceColumnCount(tableSchema)
 
 	for i, change := range changes {
-		// Append source column values
-		for colIdx := 0; colIdx < sourceColCount; colIdx++ {
-			var val interface{}
-			if colIdx < len(change.Values) {
-				val = change.Values[colIdx]
-			}
-			arrowconv.AppendValue(builders[colIdx], val)
+		for colIdx := 0; colIdx < nSource; colIdx++ {
+			arrowconv.AppendValue(builders[colIdx], resolveColumnValue(change, colIdx))
 		}
 
-		// Append CDC columns
-		builders[sourceColCount].(*array.StringBuilder).Append(FormatLSN(change.LSN))
-		builders[sourceColCount+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
+		builders[nSource].(*array.StringBuilder).Append(FormatLSN(change.LSN))
+		builders[nSource+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
 		perRowSyncedAt := syncedAt.Add(time.Duration(i) * time.Microsecond)
-		builders[sourceColCount+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))
+		builders[nSource+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))
+		builders[nSource+3].(*array.StringBuilder).Append(unchangedColumnsJSON(change, tableSchema.Columns, nSource))
 	}
 
 	arrays := make([]arrow.Array, len(builders))

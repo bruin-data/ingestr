@@ -134,6 +134,7 @@ func TestDecoderHandleRelation(t *testing.T) {
 			{Name: CDCLSNColumn, DataType: schema.TypeString},
 			{Name: CDCDeletedColumn, DataType: schema.TypeBoolean},
 			{Name: CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+			{Name: CDCUnchangedColsColumn, DataType: schema.TypeString},
 		},
 	}
 
@@ -204,6 +205,7 @@ func TestDecoderBeginAndCommit(t *testing.T) {
 			{Name: CDCLSNColumn, DataType: schema.TypeString},
 			{Name: CDCDeletedColumn, DataType: schema.TypeBoolean},
 			{Name: CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+			{Name: CDCUnchangedColsColumn, DataType: schema.TypeString},
 		},
 	}
 
@@ -220,6 +222,51 @@ func TestDecoderBeginAndCommit(t *testing.T) {
 	batch, err := decoder.handleCommit()
 	require.NoError(t, err)
 	assert.Nil(t, batch)
+}
+
+func TestResolveColumnValue(t *testing.T) {
+	t.Run("unchanged uses old tuple on update", func(t *testing.T) {
+		change := Change{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+			OldValues: []interface{}{int32(1), `{"testCases":[1,2,3]}`, "pending"},
+		}
+		assert.Equal(t, `{"testCases":[1,2,3]}`, resolveColumnValue(change, 1))
+		assert.Equal(t, "done", resolveColumnValue(change, 2))
+	})
+
+	t.Run("unchanged without old tuple becomes nil", func(t *testing.T) {
+		change := Change{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), tupleUnchangedMarker},
+			OldValues: []interface{}{int32(1)},
+		}
+		assert.Nil(t, resolveColumnValue(change, 1))
+	})
+
+	t.Run("explicit null stays nil", func(t *testing.T) {
+		change := Change{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), nil},
+			OldValues: []interface{}{int32(1), `{"keep":true}`},
+		}
+		assert.Nil(t, resolveColumnValue(change, 1))
+	})
+}
+
+func TestUnchangedColumnsJSON(t *testing.T) {
+	cols := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt32},
+		{Name: "config_data", DataType: schema.TypeString},
+		{Name: "status", DataType: schema.TypeString},
+	}
+	change := Change{
+		Operation: "UPDATE",
+		Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+		OldValues: []interface{}{int32(1), `{"big":true}`, "pending"},
+	}
+	assert.Equal(t, `["config_data"]`, unchangedColumnsJSON(change, cols, 3))
+	assert.Equal(t, "[]", unchangedColumnsJSON(Change{Operation: "INSERT", Values: []interface{}{int32(1)}}, cols, 3))
 }
 
 func TestNewDecoder(t *testing.T) {

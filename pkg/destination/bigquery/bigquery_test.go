@@ -1065,6 +1065,38 @@ func TestBuildMergeSQL(t *testing.T) {
 			t.Fatalf("sql still has the old insert clause that drops insert-then-deleted rows:\n%s", sql)
 		}
 	})
+
+	t.Run("cdc_mode_unchanged_cols_cased_columns", func(t *testing.T) {
+		// The source emits _cdc_unchanged_cols with source-side (lower-case)
+		// column names; a destination table created with cased columns must
+		// still match them, so the containment check compares lower-cased.
+		columns := []string{"id", "Name", "CONFIG_DATA", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at", "_cdc_unchanged_cols"}
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, columns, nil, "")
+
+		if !contains(sql, "t.`CONFIG_DATA` = IF('config_data' IN UNNEST(IFNULL(JSON_EXTRACT_STRING_ARRAY(LOWER(s.`_cdc_unchanged_cols`)), [])), t.`CONFIG_DATA`, s.`CONFIG_DATA`)") {
+			t.Fatalf("sql missing case-normalized unchanged-cols preservation:\n%s", sql)
+		}
+		if !contains(sql, "t.`Name` = IF('name' IN UNNEST(") {
+			t.Fatalf("sql missing lower-cased literal for cased column:\n%s", sql)
+		}
+		// staging-only column must not be persisted on the destination
+		if !contains(sql, "INSERT (`id`, `Name`, `CONFIG_DATA`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)\n") {
+			t.Fatalf("sql INSERT list should exclude _cdc_unchanged_cols:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_mode_without_unchanged_cols_column", func(t *testing.T) {
+		// Sources that materialize full change rows (e.g. SQL Server CDC) emit
+		// no _cdc_unchanged_cols; the merge must not reference it.
+		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, columns, nil, "")
+
+		if contains(sql, "_cdc_unchanged_cols") {
+			t.Fatalf("sql must not reference _cdc_unchanged_cols when absent:\n%s", sql)
+		}
+	})
 }
 
 func TestBuildBigQueryDedupSelect_StringShape(t *testing.T) {

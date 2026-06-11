@@ -67,7 +67,7 @@ func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *Ingesti
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       targetTable,
-		Schema:      job.Schema,
+		Schema:      destination.DestinationTableSchema(job.Schema),
 		DropFirst:   false,
 		PrimaryKeys: job.Config.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
@@ -139,7 +139,7 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       targetTable,
-		Schema:      job.Schema,
+		Schema:      destination.DestinationTableSchema(job.Schema),
 		DropFirst:   false,
 		PrimaryKeys: job.Config.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,

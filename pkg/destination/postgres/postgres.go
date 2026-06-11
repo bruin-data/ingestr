@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -457,13 +458,19 @@ func (t *pgTransaction) Rollback(ctx context.Context) error {
 func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
 
-	columns := opts.Columns
-	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	stagingColumns := opts.Columns
+	destColumns := destination.DestinationColumns(stagingColumns)
+	stagingQuoted := quoteColumns(stagingColumns)
+	destQuoted := quoteColumns(destColumns)
+	nonPKColumns := filterColumns(destColumns, opts.PrimaryKeys)
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 
 	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := slices.Contains(columns, "_cdc_deleted")
+	hasCDCDeleted := slices.Contains(stagingColumns, destination.CDCDeletedColumn)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	hasUnchangedCols := slices.Contains(stagingColumns, destination.CDCUnchangedColsColumn)
 
 	// Begin transaction for atomic merge
 	tx, err := d.pool.Begin(ctx)
@@ -480,7 +487,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// We upsert the latest non-deleted row per PK, then mark deletes only if the
 		// latest change for that PK is a delete (preserving row data).
 		pkList := strings.Join(quotedPKs, ", ")
-		selectCols := strings.Join(quotedColumns, ", ")
+		selectCols := strings.Join(stagingQuoted, ", ")
 		orderByParts := append(append([]string{}, quotedPKs...), destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier))
 		orderBy := strings.Join(orderByParts, ", ")
 
@@ -497,15 +504,33 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			pkList, selectCols, quotedStagingTable, orderBy,
 		)
 
-		// Step 1: Upsert latest non-deleted rows (data changes)
+		// Step 1: Upsert latest non-deleted rows (data changes).
+		// Use UPDATE ... FROM + INSERT instead of ON CONFLICT so
+		// la."_cdc_unchanged_cols" is read once per row, not once per column.
+		onTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "la")
+		unchangedRef := ""
+		if hasUnchangedCols {
+			unchangedRef = fmt.Sprintf(`la."%s"`, destination.CDCUnchangedColsColumn)
+		}
 		upsertSQL := fmt.Sprintf(
-			`WITH %s INSERT INTO %s (%s) SELECT %s FROM latest_active ON CONFLICT (%s) DO UPDATE SET %s`,
+			`WITH %s, updated AS (
+				UPDATE %s AS target SET %s
+				FROM latest_active la
+				WHERE %s
+				RETURNING 1
+			)
+			INSERT INTO %s (%s)
+			SELECT %s FROM latest_active la
+			WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 			latestActive,
 			quotedTargetTable,
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedPKs, ", "),
-			buildConflictUpdateSet(nonPKColumns),
+			buildCDCConflictUpdateSet(nonPKColumns, "target", "la", unchangedRef),
+			onTargetCondition,
+			quotedTargetTable,
+			strings.Join(destQuoted, ", "),
+			strings.Join(destQuoted, ", "),
+			quotedTargetTable,
+			onTargetCondition,
 		)
 		config.Debug("[MERGE] Executing upsert for non-deleted rows: %s", upsertSQL)
 
@@ -516,14 +541,14 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 		// Step 2: Mark deletes only when the latest change is a delete
 		onLatestCondition := buildJoinCondition(opts.PrimaryKeys, "deleted", "latest")
-		onTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "deleted")
+		onDeleteTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "deleted")
 		updateDeletedSQL := fmt.Sprintf(
 			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true`,
 			latestAll,
 			latestDeleted,
 			quotedTargetTable,
 			onLatestCondition,
-			onTargetCondition,
+			onDeleteTargetCondition,
 		)
 		config.Debug("[MERGE] Executing UPDATE for deleted rows: %s", updateDeletedSQL)
 
@@ -545,9 +570,9 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		upsertSQL := fmt.Sprintf(
 			`INSERT INTO %s (%s) SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s ON CONFLICT (%s) DO UPDATE SET %s`,
 			quotedTargetTable,
-			strings.Join(quotedColumns, ", "),
+			strings.Join(destQuoted, ", "),
 			pkList,
-			strings.Join(quotedColumns, ", "),
+			strings.Join(destQuoted, ", "),
 			quotedStagingTable,
 			orderBy,
 			pkList,
@@ -789,6 +814,8 @@ func (d *PostgresDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 	return *maxLSN, nil
 }
 
+func (d *PostgresDestination) SupportsCDCUnchangedCols() bool { return true }
+
 func (d *PostgresDestination) SupportsCDCMerge() bool {
 	return true
 }
@@ -941,6 +968,36 @@ func buildConflictUpdateSet(columns []string) string {
 		sets[i] = fmt.Sprintf(`%s = EXCLUDED.%s`, destination.QuoteIdentifier(col), destination.QuoteIdentifier(col))
 	}
 	return strings.Join(sets, ", ")
+}
+
+func buildCDCConflictUpdateSet(columns []string, targetAlias, sourceAlias, unchangedRef string) string {
+	sets := make([]string, len(columns))
+	for i, col := range columns {
+		if destination.IsCDCMetaColumn(col) || unchangedRef == "" {
+			sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
+			continue
+		}
+		sets[i] = cdcMergeAssign(
+			col,
+			fmt.Sprintf(`%s."%s"`, targetAlias, col),
+			fmt.Sprintf(`%s."%s"`, sourceAlias, col),
+			unchangedRef,
+		)
+	}
+	return strings.Join(sets, ", ")
+}
+
+func cdcUnchangedColsJSONLiteral(colName string) string {
+	b, _ := json.Marshal([]string{colName})
+	return strings.ReplaceAll(string(b), "'", "''")
+}
+
+func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	lit := cdcUnchangedColsJSONLiteral(col)
+	return fmt.Sprintf(
+		`"%s" = CASE WHEN %s::jsonb @> '%s'::jsonb THEN %s ELSE %s END`,
+		col, unchangedColsExpr, lit, targetExpr, sourceExpr,
+	)
 }
 
 // buildChangeConditions builds change detection conditions using IS DISTINCT FROM.

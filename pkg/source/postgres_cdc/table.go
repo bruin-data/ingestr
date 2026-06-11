@@ -15,13 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// CDC metadata column names
-const (
-	CDCLSNColumn      = "_cdc_lsn"
-	CDCDeletedColumn  = "_cdc_deleted"
-	CDCSyncedAtColumn = "_cdc_synced_at"
-)
-
 // FormatLSN formats an LSN as zero-padded hex (e.g. "00000000/0001FA40").
 // This ensures correct lexicographic ordering when stored as strings,
 // which is critical for SQL MAX(_cdc_lsn) queries in destinations.
@@ -263,6 +256,11 @@ func addCDCColumns(tableSchema *schema.TableSchema) *schema.TableSchema {
 		{
 			Name:     CDCSyncedAtColumn,
 			DataType: schema.TypeTimestampTZ,
+			Nullable: false,
+		},
+		{
+			Name:     CDCUnchangedColsColumn,
+			DataType: schema.TypeString,
 			Nullable: false,
 		},
 	}

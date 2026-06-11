@@ -20,6 +20,7 @@ func TestMultiTableDecoderChangesToBatchSequencesSyncedAt(t *testing.T) {
 			{Name: CDCLSNColumn, DataType: schema.TypeString},
 			{Name: CDCDeletedColumn, DataType: schema.TypeBoolean},
 			{Name: CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+			{Name: CDCUnchangedColsColumn, DataType: schema.TypeString},
 		},
 	}
 

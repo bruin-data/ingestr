@@ -2,12 +2,6 @@ package destination
 
 import "strings"
 
-const (
-	CDCLSNColumn      = "_cdc_lsn"
-	CDCDeletedColumn  = "_cdc_deleted"
-	CDCSyncedAtColumn = "_cdc_synced_at"
-)
-
 func HasCDCDeletedColumn(columns []string) bool {
 	for _, col := range columns {
 		if strings.EqualFold(col, CDCDeletedColumn) {

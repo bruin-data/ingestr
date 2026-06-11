@@ -2,6 +2,7 @@ package redshift
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -163,6 +164,8 @@ func (d *RedshiftDestination) MergeTable(ctx context.Context, opts destination.M
 }
 
 func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
+	destColumns := destination.DestinationColumns(allColumns)
+
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf(`target.%s = source.%s`, destination.QuoteIdentifier(pk), destination.QuoteIdentifier(pk))
@@ -174,21 +177,39 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		pkMap[strings.ToLower(pk)] = true
 	}
 
+	hasCDCDeleted := slices.Contains(allColumns, destination.CDCDeletedColumn)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	hasUnchangedCols := slices.Contains(allColumns, destination.CDCUnchangedColsColumn)
+
+	unchangedRef := fmt.Sprintf("source.%s", destination.QuoteIdentifier(destination.CDCUnchangedColsColumn))
 	var updateSets []string
-	for _, col := range allColumns {
+	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
-			updateSets = append(updateSets, fmt.Sprintf(`%s = source.%s`, destination.QuoteIdentifier(col), destination.QuoteIdentifier(col)))
+			if hasCDCDeleted && hasUnchangedCols && !destination.IsCDCMetaColumn(col) {
+				updateSets = append(updateSets, cdcMergeAssign(
+					col,
+					fmt.Sprintf("target.%s", destination.QuoteIdentifier(col)),
+					fmt.Sprintf("source.%s", destination.QuoteIdentifier(col)),
+					unchangedRef,
+				))
+			} else {
+				updateSets = append(updateSets, fmt.Sprintf(`%s = source.%s`, destination.QuoteIdentifier(col), destination.QuoteIdentifier(col)))
+			}
 		}
 	}
 
-	quotedCols := make([]string, len(allColumns))
-	sourceCols := make([]string, len(allColumns))
+	stagingQuoted := make([]string, len(allColumns))
 	for i, col := range allColumns {
-		quotedCols[i] = destination.QuoteIdentifier(col)
-		sourceCols[i] = fmt.Sprintf(`source.%s`, destination.QuoteIdentifier(col))
+		stagingQuoted[i] = destination.QuoteIdentifier(col)
 	}
-
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
+	destQuoted := make([]string, len(destColumns))
+	destSourceCols := make([]string, len(destColumns))
+	for i, col := range destColumns {
+		destQuoted[i] = destination.QuoteIdentifier(col)
+		destSourceCols[i] = fmt.Sprintf("source.%s", destination.QuoteIdentifier(col))
+	}
 
 	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKsForPartition := make([]string, len(primaryKeys))
@@ -197,8 +218,8 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 	}
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
+		strings.Join(stagingQuoted, ", "),
+		strings.Join(stagingQuoted, ", "),
 		strings.Join(quotedPKsForPartition, ", "),
 		destination.QuoteTableName(stagingTable),
 	)
@@ -218,8 +239,8 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		sql.WriteString(`  UPDATE SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at"` + "\n")
 
 		sql.WriteString(`WHEN NOT MATCHED AND source."_cdc_deleted" = false THEN` + "\n")
-		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 	} else {
 		if len(updateSets) > 0 {
 			sql.WriteString("WHEN MATCHED THEN\n")
@@ -227,13 +248,32 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		}
 
 		sql.WriteString("WHEN NOT MATCHED THEN\n")
-		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 	}
 
 	return sql.String()
 }
 
+func (d *RedshiftDestination) SupportsCDCUnchangedCols() bool { return true }
+
 func (d *RedshiftDestination) SupportsCDCMerge() bool {
 	return true
+}
+
+// cdcMergeAssign emulates a JSON array-contains check with CHARINDEX because
+// Redshift lacks a native equivalent. It matches the quoted element preceded
+// by '[' (first element) or ',' (any later element), which is only correct
+// because _cdc_unchanged_cols is always produced by json.Marshal and is
+// therefore compact: no whitespace after '[' or ','. The needle includes the
+// element's closing quote, so prefix collisions ("col" vs "colour") cannot
+// match.
+func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	member, _ := json.Marshal(col)
+	first := strings.ReplaceAll("["+string(member), "'", "''")
+	second := strings.ReplaceAll(","+string(member), "'", "''")
+	return fmt.Sprintf(
+		`"%s" = CASE WHEN CHARINDEX('%s', COALESCE(%s, '[]')) > 0 OR CHARINDEX('%s', COALESCE(%s, '[]')) > 0 THEN %s ELSE %s END`,
+		col, first, unchangedColsExpr, second, unchangedColsExpr, targetExpr, sourceExpr,
+	)
 }
