@@ -83,7 +83,7 @@ jobs:
 
   release-unix:
     runs-on: depot-ubuntu-latest
-    needs: [prepare-linux, prepare-darwin, integration-tests, docker-build]
+    needs: [prepare-linux, prepare-darwin, integration-tests, docker-test]
     steps:
       - uses: actions/checkout@v4
         with:
