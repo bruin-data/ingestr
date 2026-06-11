@@ -15,7 +15,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/source"
-	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -115,8 +114,10 @@ func startDb2IntegrationContainer(t *testing.T, ctx context.Context) (testcontai
 			"ENABLE_ORACLE_COMPAT": "false",
 		}),
 		testcontainers.WithExposedPorts("50000/tcp"),
-		testcontainers.WithHostConfigModifier(func(hostConfig *dockercontainer.HostConfig) {
-			hostConfig.Privileged = true
+		testcontainers.CustomizeRequest(testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{
+				Privileged: true,
+			},
 		}),
 		testcontainers.WithWaitStrategyAndDeadline(
 			8*time.Minute,
