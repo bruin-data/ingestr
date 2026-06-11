@@ -308,6 +308,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
+	// Capture the schema before evolution: on incremental runs against an
+	// existing table, evolution replaces destSchema with FinalSchema, which is
+	// built from the destination's columns and therefore drops staging-only
+	// CDC columns (e.g. _cdc_unchanged_cols). StagingIngestSchema below
+	// re-appends them from this snapshot so staging keeps carrying them.
 	fullSchema := destSchema
 
 	// Schema contract handling: evolve destination schema if needed (skip for replace strategy)

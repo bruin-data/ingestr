@@ -2010,9 +2010,12 @@ func containsHelper(s, substr string) bool {
 }
 
 func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
-	colLit := strings.ReplaceAll(col, "'", "''")
+	// The source emits _cdc_unchanged_cols with source-side column names; the
+	// merge column may carry different casing (e.g. when the schema is read
+	// back from an existing destination table), so compare case-insensitively.
+	colLit := strings.ReplaceAll(strings.ToLower(col), "'", "''")
 	return fmt.Sprintf(
-		"t.`%s` = IF('%s' IN UNNEST(IFNULL(JSON_EXTRACT_STRING_ARRAY(%s), [])), %s, %s)",
+		"t.`%s` = IF('%s' IN UNNEST(IFNULL(JSON_EXTRACT_STRING_ARRAY(LOWER(%s)), [])), %s, %s)",
 		col, colLit, unchangedColsExpr, targetExpr, sourceExpr,
 	)
 }

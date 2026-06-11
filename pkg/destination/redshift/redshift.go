@@ -261,6 +261,13 @@ func (d *RedshiftDestination) SupportsCDCMerge() bool {
 	return true
 }
 
+// cdcMergeAssign emulates a JSON array-contains check with CHARINDEX because
+// Redshift lacks a native equivalent. It matches the quoted element preceded
+// by '[' (first element) or ',' (any later element), which is only correct
+// because _cdc_unchanged_cols is always produced by json.Marshal and is
+// therefore compact: no whitespace after '[' or ','. The needle includes the
+// element's closing quote, so prefix collisions ("col" vs "colour") cannot
+// match.
 func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
 	member, _ := json.Marshal(col)
 	first := strings.ReplaceAll("["+string(member), "'", "''")
