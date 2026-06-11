@@ -22,11 +22,14 @@ func TestParseDb2URI(t *testing.T) {
 	require.Equal(t, 7*time.Second, cfg.Timeout)
 }
 
-func TestBuildSelectQuery(t *testing.T) {
+func TestBuildSelectQueryForSchemaWithFilters(t *testing.T) {
 	start := time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.UTC)
 	end := time.Date(2024, 1, 3, 3, 4, 5, 1000, time.UTC)
 
-	query := buildSelectQuery("analytics.orders", []schema.Column{
+	query := buildSelectQueryForSchema("orders", &schema.TableSchema{
+		Schema: "ANALYTICS",
+		Name:   "ORDERS",
+	}, []schema.Column{
 		{Name: "ID"},
 		{Name: `AMOUNT"USD`},
 	}, source.ReadOptions{

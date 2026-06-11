@@ -201,7 +201,7 @@ func parseQRYDSC(obj []byte) ([]drdaField, error) {
 		return nil, fmt.Errorf("empty QRYDSC")
 	}
 	ln := int(obj[0])
-	if ln > len(obj) {
+	if ln < 1 || ln > len(obj) {
 		return nil, fmt.Errorf("invalid QRYDSC length: %d", ln)
 	}
 	body := obj[1:ln]

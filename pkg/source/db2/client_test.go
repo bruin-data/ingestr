@@ -145,6 +145,38 @@ func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
 	}
 }
 
+func TestRefreshDeadlineZeroTimeoutClearsDeadline(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	require.NoError(t, clientConn.SetDeadline(time.Now().Add(-time.Second)))
+
+	client := &db2Client{
+		conn:    clientConn,
+		timeout: 0,
+	}
+	client.refreshDeadline(context.Background())
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := serverConn.Write([]byte{0x2a})
+		writeDone <- err
+	}()
+
+	buf := make([]byte, 1)
+	_, err := clientConn.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x2a), buf[0])
+	require.NoError(t, <-writeDone)
+}
+
+func TestParseQRYDSCRejectsZeroLength(t *testing.T) {
+	_, err := parseQRYDSC([]byte{0})
+
+	require.ErrorContains(t, err, "invalid QRYDSC length: 0")
+}
+
 func writeTestDSS(conn net.Conn, codePoint uint16, object []byte, chained bool) error {
 	body := packDSSObject(codePoint, object)
 	packet := make([]byte, 6+len(body))

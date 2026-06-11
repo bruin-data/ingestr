@@ -546,10 +546,6 @@ func sendDb2Error(ctx context.Context, results chan<- source.RecordBatchResult, 
 	}
 }
 
-func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOptions) string {
-	return buildSelectQueryFromTableRef(quoteTable(table), columns, opts)
-}
-
 func buildSelectQueryForSchema(table string, tableSchema *schema.TableSchema, columns []schema.Column, opts source.ReadOptions) string {
 	return buildSelectQueryFromTableRef(quoteSchemaTable(table, tableSchema), columns, opts)
 }

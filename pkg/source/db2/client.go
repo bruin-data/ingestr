@@ -373,8 +373,11 @@ func (c *db2Client) refreshDeadline(ctx context.Context) {
 	if conn == nil {
 		return
 	}
-	deadline := time.Now().Add(c.timeout)
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+	var deadline time.Time
+	if c.timeout > 0 {
+		deadline = time.Now().Add(c.timeout)
+	}
+	if ctxDeadline, ok := ctx.Deadline(); ok && (deadline.IsZero() || ctxDeadline.Before(deadline)) {
 		deadline = ctxDeadline
 	}
 	_ = conn.SetDeadline(deadline)
