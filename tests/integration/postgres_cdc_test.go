@@ -867,3 +867,77 @@ func TestPostgresCDC_MultiTable_SchemaEvolution(t *testing.T) {
 	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q.customers`, destSchema)).Scan(&count))
 	assert.Equal(t, 2, count)
 }
+
+// TestPostgresCDC_UnawareDestination_SQLite pins the contract that the
+// staging-only _cdc_unchanged_cols column never reaches the merge SQL of
+// destinations that don't consume it. A TOAST-sized payload forces the
+// decoder to emit unchanged markers; without column filtering the SQLite
+// merge would reference a column the target table doesn't have.
+func TestPostgresCDC_UnawareDestination_SQLite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+
+	payload, err := json.Marshal(map[string]interface{}{"padding": strings.Repeat("x", 8*1024)})
+	require.NoError(t, err)
+
+	_, err = srcPool.Exec(ctx, `CREATE TABLE public.toast_items (
+		id INT PRIMARY KEY,
+		config_data JSONB NOT NULL,
+		status TEXT NOT NULL
+	)`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.toast_items (id, config_data, status) VALUES (1, $1::jsonb, 'pending')`, string(payload))
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `CREATE PUBLICATION sqlite_toast_pub FOR TABLE public.toast_items`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `ALTER USER testuser REPLICATION`)
+	require.NoError(t, err)
+
+	tmpDir, err := os.MkdirTemp("", "pg_cdc_sqlite_*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	sqlitePath := tmpDir + "/test.db"
+
+	cfg := &config.IngestConfig{
+		SourceURI:           "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=sqlite_toast_pub&mode=batch",
+		DestURI:             "sqlite:///" + sqlitePath,
+		SourceTable:         "public.toast_items",
+		DestTable:           "toast_items_dest",
+		PrimaryKeys:         []string{"id"},
+		IncrementalStrategy: "merge",
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	// Partial update: config_data stays TOASTed-unchanged, so the change row
+	// carries an unchanged marker for it.
+	_, err = srcPool.Exec(ctx, `UPDATE public.toast_items SET status = 'completed' WHERE id = 1`)
+	require.NoError(t, err)
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	dest, err := sql.Open("sqlite3", sqlitePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dest.Close() })
+
+	var status string
+	require.NoError(t, dest.QueryRow(`SELECT status FROM toast_items_dest WHERE id = 1`).Scan(&status))
+	assert.Equal(t, "completed", status, "changed column must be applied")
+
+	var count int
+	require.NoError(t, dest.QueryRow(`SELECT COUNT(*) FROM toast_items_dest`).Scan(&count))
+	assert.Equal(t, 1, count)
+
+	// The staging-only column must not exist on the destination table.
+	require.NoError(t, dest.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('toast_items_dest') WHERE name = '_cdc_unchanged_cols'`).Scan(&count))
+	assert.Equal(t, 0, count, "_cdc_unchanged_cols must stay staging-only")
+}

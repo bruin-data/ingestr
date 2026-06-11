@@ -133,7 +133,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		StagingTable: stagingTable,
 		TargetTable:  job.Config.DestTable,
 		PrimaryKeys:  job.Config.PrimaryKeys,
-		Columns:      job.Schema.ColumnNames(),
+		Columns:      destination.MergeColumnsFor(job.Destination, job.Schema.ColumnNames()),
 	}); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
@@ -286,7 +286,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				StagingTable: stagingTable,
 				TargetTable:  destTable,
 				PrimaryKeys:  ti.PrimaryKeys,
-				Columns:      ti.Schema.ColumnNames(),
+				Columns:      destination.MergeColumnsFor(job.Destination, ti.Schema.ColumnNames()),
 			}); err != nil {
 				mergeErrChan <- fmt.Errorf("failed to merge table %s: %w", ti.Name, err)
 				return

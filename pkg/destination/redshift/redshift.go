@@ -255,6 +255,8 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 	return sql.String()
 }
 
+func (d *RedshiftDestination) SupportsCDCUnchangedCols() bool { return true }
+
 func (d *RedshiftDestination) SupportsCDCMerge() bool {
 	return true
 }

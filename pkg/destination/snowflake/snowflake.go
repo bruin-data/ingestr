@@ -846,6 +846,8 @@ func (d *SnowflakeDestination) GetMaxCDCLSN(ctx context.Context, table string) (
 
 func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
 
+func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }
+
 func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseSchemaTable(table)
 

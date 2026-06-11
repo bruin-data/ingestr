@@ -1947,6 +1947,8 @@ func (d *BigQueryDestination) DestTableName(destSchema, sourceTable string) stri
 	return dataset + "." + table
 }
 
+func (d *BigQueryDestination) SupportsCDCUnchangedCols() bool { return true }
+
 func (d *BigQueryDestination) SupportsCDCMerge() bool {
 	return true
 }

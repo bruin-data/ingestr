@@ -32,6 +32,25 @@ func IsCDCStagingOnlyColumn(col string) bool {
 	return strings.EqualFold(col, CDCUnchangedColsColumn)
 }
 
+// CDCUnchangedColsAware is an optional interface for destinations whose CDC
+// merge consumes the staging-only _cdc_unchanged_cols column to preserve
+// unchanged (e.g. Postgres TOAST) values. Destinations without it get the
+// staging-only column filtered out of MergeOptions.Columns so their merge
+// SQL never references a column the target table doesn't have.
+type CDCUnchangedColsAware interface {
+	SupportsCDCUnchangedCols() bool
+}
+
+// MergeColumnsFor returns the columns a destination's MergeTable should
+// operate on: the full staging column list for destinations that consume
+// staging-only CDC columns, the destination-table columns otherwise.
+func MergeColumnsFor(dest Destination, columns []string) []string {
+	if aware, ok := dest.(CDCUnchangedColsAware); ok && aware.SupportsCDCUnchangedCols() {
+		return columns
+	}
+	return DestinationColumns(columns)
+}
+
 // DestinationColumns returns columns that should exist on the destination table.
 func DestinationColumns(columns []string) []string {
 	if len(columns) == 0 {

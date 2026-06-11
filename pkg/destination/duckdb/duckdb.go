@@ -730,6 +730,7 @@ func (d *DuckDBDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DuckDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *DuckDBDestination) SupportsAtomicSwap() bool           { return true }
 func (d *DuckDBDestination) SupportsCDCMerge() bool             { return true }
+func (d *DuckDBDestination) SupportsCDCUnchangedCols() bool     { return true }
 
 // GetScheme returns the primary URI scheme for DuckDB.
 func (d *DuckDBDestination) GetScheme() string { return "duckdb" }

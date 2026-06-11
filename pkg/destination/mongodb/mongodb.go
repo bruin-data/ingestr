@@ -273,6 +273,7 @@ func (d *MongoDBDestination) MergeTable(ctx context.Context, opts destination.Me
 		}
 
 		delete(doc, "_id")
+		delete(doc, destination.CDCUnchangedColsColumn)
 
 		if isCDC {
 			key := fmt.Sprintf("%v", filter)

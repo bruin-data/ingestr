@@ -814,6 +814,8 @@ func (d *PostgresDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 	return *maxLSN, nil
 }
 
+func (d *PostgresDestination) SupportsCDCUnchangedCols() bool { return true }
+
 func (d *PostgresDestination) SupportsCDCMerge() bool {
 	return true
 }
