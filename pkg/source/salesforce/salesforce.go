@@ -255,21 +255,26 @@ type tableMeta struct {
 }
 
 var salesforceTableMeta = map[string]tableMeta{
-	"user":                     {"User", config.StrategyReplace, nil, ""},
-	"user_role":                {"UserRole", config.StrategyReplace, nil, ""},
-	"opportunity":              {"Opportunity", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"opportunity_line_item":    {"OpportunityLineItem", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"opportunity_contact_role": {"OpportunityContactRole", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 	"account":                  {"Account", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"contact":                  {"Contact", config.StrategyReplace, []string{"Id"}, ""},
-	"lead":                     {"Lead", config.StrategyReplace, []string{"Id"}, ""},
 	"campaign":                 {"Campaign", config.StrategyReplace, []string{"Id"}, ""},
+	"campaign_history":         {"CampaignHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
 	"campaign_member":          {"CampaignMember", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"product":                  {"Product2", config.StrategyReplace, []string{"Id"}, ""},
+	"contact":                  {"Contact", config.StrategyReplace, []string{"Id"}, ""},
+	"contact_history":          {"ContactHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
+	"event":                    {"Event", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"lead":                     {"Lead", config.StrategyReplace, []string{"Id"}, ""},
+	"lead_history":             {"LeadHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
+	"opportunity":              {"Opportunity", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"opportunity_contact_role": {"OpportunityContactRole", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"opportunity_history":      {"OpportunityHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
+	"opportunity_line_item":    {"OpportunityLineItem", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 	"pricebook":                {"Pricebook2", config.StrategyReplace, []string{"Id"}, ""},
 	"pricebook_entry":          {"PricebookEntry", config.StrategyReplace, []string{"Id"}, ""},
+	"product":                  {"Product2", config.StrategyReplace, []string{"Id"}, ""},
 	"task":                     {"Task", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"event":                    {"Event", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"user":                     {"User", config.StrategyReplace, nil, ""},
+	"user_history":             {"UserHistory", config.StrategyAppend, []string{"Id"}, "CreatedDate"},
+	"user_role":                {"UserRole", config.StrategyReplace, nil, ""},
 }
 
 func (s *salesforceSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
@@ -301,7 +306,15 @@ func (s *salesforceSource) GetTable(ctx context.Context, req source.TableRequest
 	// the object's datetime fields at read time.
 	if req.IncrementalKey != "" {
 		replicationKey = req.IncrementalKey
-		strategy = config.StrategyMerge
+		
+		// History tables are append only so merge strategy is not applicable
+		// Exclude custom history tables to avoid conflicts with standard history tables
+		if strings.HasSuffix(tableName, "_history") && !strings.HasPrefix(tableName, "custom:") {
+			strategy = config.StrategyAppend
+		} else {
+			strategy = config.StrategyMerge
+		}
+
 		// Merge requires primary keys. Every Salesforce object exposes an "Id"
 		// field, so fall back to it when neither the table metadata nor the
 		// caller supplied explicit PKs.
