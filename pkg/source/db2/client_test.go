@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,17 @@ func TestReadDRDAFieldTimestampPadsToMicroseconds(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, time.Date(2024, 1, 2, 3, 4, 5, 100000000, time.UTC), value)
+}
+
+func TestReadDRDAFieldTimestampReturnsErrorForMalformedValue(t *testing.T) {
+	raw := "not-a-timestamp"
+	value, err := readDRDAField(bytes.NewReader([]byte(raw)), drdaField{
+		typeCode: drdaTypeTimestamp,
+		params:   lengthParams(len(raw)),
+	})
+
+	require.ErrorContains(t, err, "invalid Db2 timestamp")
+	require.Nil(t, value)
 }
 
 func TestReadDRDAFieldTimeNormalizesSeparators(t *testing.T) {
@@ -177,8 +189,23 @@ func TestParseQRYDSCRejectsZeroLength(t *testing.T) {
 	require.ErrorContains(t, err, "invalid QRYDSC length: 0")
 }
 
+func TestPackDSSObjectRejectsOversizedBody(t *testing.T) {
+	_, err := packDSSObject(cpSQLSTT, make([]byte, maxDSSObjectBodyLength+1))
+
+	require.ErrorContains(t, err, "body too large")
+}
+
+func TestPackSQLSTTRejectsOversizedQuery(t *testing.T) {
+	_, err := packSQLSTT(strings.Repeat("x", maxDSSObjectBodyLength))
+
+	require.ErrorContains(t, err, "body too large")
+}
+
 func writeTestDSS(conn net.Conn, codePoint uint16, object []byte, chained bool) error {
-	body := packDSSObject(codePoint, object)
+	body, err := packDSSObject(codePoint, object)
+	if err != nil {
+		return err
+	}
 	packet := make([]byte, 6+len(body))
 	binary.BigEndian.PutUint16(packet[0:2], uint16(len(packet)))
 	packet[2] = 0xd0
@@ -189,7 +216,7 @@ func writeTestDSS(conn net.Conn, codePoint uint16, object []byte, chained bool) 
 	binary.BigEndian.PutUint16(packet[4:6], 1)
 	copy(packet[6:], body)
 
-	_, err := conn.Write(packet)
+	_, err = conn.Write(packet)
 	return err
 }
 

@@ -18,11 +18,27 @@ type dssPacket struct {
 	moreData      bool
 }
 
-func packDSSObject(codePoint uint16, body []byte) []byte {
+const (
+	maxDSSLength           = 0xffff
+	maxDSSObjectBodyLength = maxDSSLength - 10
+)
+
+func packDSSObject(codePoint uint16, body []byte) ([]byte, error) {
+	if len(body) > maxDSSObjectBodyLength {
+		return nil, fmt.Errorf("DSS object 0x%04x body too large: %d bytes exceeds %d", codePoint, len(body), maxDSSObjectBodyLength)
+	}
 	out := make([]byte, 4+len(body))
 	binary.BigEndian.PutUint16(out[0:2], uint16(len(out)))
 	binary.BigEndian.PutUint16(out[2:4], codePoint)
 	copy(out[4:], body)
+	return out, nil
+}
+
+func mustPackDSSObject(codePoint uint16, body []byte) []byte {
+	out, err := packDSSObject(codePoint, body)
+	if err != nil {
+		panic(err)
+	}
 	return out
 }
 
@@ -93,6 +109,9 @@ func decodeString(value []byte, encoding string) string {
 func writeRequestDSS(w io.Writer, object []byte, correlationID uint16, nextDSSHasSameID bool, lastPacket bool) (uint16, error) {
 	if len(object) < 4 {
 		return correlationID, fmt.Errorf("invalid DSS object")
+	}
+	if len(object)+6 > maxDSSLength {
+		return correlationID, fmt.Errorf("DSS packet too large: %d bytes exceeds %d", len(object)+6, maxDSSLength)
 	}
 
 	codePoint := binary.BigEndian.Uint16(object[2:4])

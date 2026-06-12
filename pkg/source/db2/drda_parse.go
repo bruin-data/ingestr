@@ -350,7 +350,7 @@ func readDRDAField(stream *bytes.Reader, field drdaField) (any, error) {
 		value := normalizeDb2Timestamp(string(data))
 		t, err := time.Parse("2006-01-02-15.04.05.000000", value)
 		if err != nil {
-			return strings.TrimSpace(string(data)), nil
+			return nil, fmt.Errorf("invalid Db2 timestamp %q: %w", strings.TrimSpace(string(data)), err)
 		}
 		return t, nil
 	case drdaTypeBoolean, drdaTypeNBoolean:

@@ -103,7 +103,11 @@ func (c *db2Client) Stream(ctx context.Context, query string, handler db2StreamH
 	if curID, err = writeRequestDSS(c.conn, prpSQLSTT, curID, true, false); err != nil {
 		return err
 	}
-	if curID, err = writeRequestDSS(c.conn, packSQLSTT(query), curID, false, false); err != nil {
+	sqlSTT, err := packSQLSTT(query)
+	if err != nil {
+		return err
+	}
+	if curID, err = writeRequestDSS(c.conn, sqlSTT, curID, false, false); err != nil {
 		return err
 	}
 	opnQRY, err := c.packOPNQRY()
@@ -131,7 +135,11 @@ func (c *db2Client) Exec(ctx context.Context, query string) error {
 	if curID, err = writeRequestDSS(c.conn, excSQLIMM, curID, true, false); err != nil {
 		return err
 	}
-	if curID, err = writeRequestDSS(c.conn, packSQLSTT(query), curID, false, false); err != nil {
+	sqlSTT, err := packSQLSTT(query)
+	if err != nil {
+		return err
+	}
+	if curID, err = writeRequestDSS(c.conn, sqlSTT, curID, false, false); err != nil {
 		return err
 	}
 	if _, err = writeRequestDSS(c.conn, packRDBCMM(), curID, false, true); err != nil {
@@ -347,10 +355,18 @@ func (c *db2Client) setClientVariables(ctx context.Context) error {
 	if curID, err = writeRequestDSS(c.conn, excSQLSET, curID, true, false); err != nil {
 		return err
 	}
-	if curID, err = writeRequestDSS(c.conn, packSQLSTT("SET CLIENT WRKSTNNAME 'ingestr'"), curID, true, false); err != nil {
+	sqlSTT, err := packSQLSTT("SET CLIENT WRKSTNNAME 'ingestr'")
+	if err != nil {
 		return err
 	}
-	if curID, err = writeRequestDSS(c.conn, packSQLSTT("SET CURRENT LOCALE LC_CTYPE='en_US'"), curID, false, false); err != nil {
+	if curID, err = writeRequestDSS(c.conn, sqlSTT, curID, true, false); err != nil {
+		return err
+	}
+	sqlSTT, err = packSQLSTT("SET CURRENT LOCALE LC_CTYPE='en_US'")
+	if err != nil {
+		return err
+	}
+	if curID, err = writeRequestDSS(c.conn, sqlSTT, curID, false, false); err != nil {
 		return err
 	}
 	if _, err = writeRequestDSS(c.conn, packRDBCMM(), curID, false, true); err != nil {
@@ -423,7 +439,7 @@ func (c *db2Client) packSECCHK(secmec int, sectkn []byte) ([]byte, error) {
 		}
 		body.Write(password)
 	}
-	return packDSSObject(cpSECCHK, body.Bytes()), nil
+	return packDSSObject(cpSECCHK, body.Bytes())
 }
 
 func (c *db2Client) packPKGNAMCSN(statementNumber uint16) ([]byte, error) {
@@ -441,7 +457,7 @@ func (c *db2Client) packPRPSQLSTT() ([]byte, error) {
 	}
 	body.Write(pkg)
 	body.Write(packBinary(cpRTNSQLDA, []byte{0xf1}))
-	return packDSSObject(cpPRPSQLSTT, body.Bytes()), nil
+	return packDSSObject(cpPRPSQLSTT, body.Bytes())
 }
 
 func (c *db2Client) packEXCSQLIMM() ([]byte, error) {
@@ -452,7 +468,7 @@ func (c *db2Client) packEXCSQLIMM() ([]byte, error) {
 	}
 	body.Write(pkg)
 	body.Write(packBinary(cpRDBCMTOK, []byte{0xf1}))
-	return packDSSObject(cpEXCSQLIMM, body.Bytes()), nil
+	return packDSSObject(cpEXCSQLIMM, body.Bytes())
 }
 
 func (c *db2Client) packEXCSQLSET() ([]byte, error) {
@@ -460,7 +476,7 @@ func (c *db2Client) packEXCSQLSET() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return packDSSObject(cpEXCSQLSET, pkg), nil
+	return packDSSObject(cpEXCSQLSET, pkg)
 }
 
 func (c *db2Client) packOPNQRY() ([]byte, error) {
@@ -473,7 +489,7 @@ func (c *db2Client) packOPNQRY() ([]byte, error) {
 	body.Write(packUint(cpQRYBLKSZ, 65535, 4))
 	body.Write(packUint(cpMAXBLKEXT, 65535, 2))
 	body.Write(packBinary(cpQRYCLSIMP, []byte{0x01}))
-	return packDSSObject(cpOPNQRY, body.Bytes()), nil
+	return packDSSObject(cpOPNQRY, body.Bytes())
 }
 
 func (c *db2Client) packCNTQRY(qryInsID uint64) ([]byte, error) {
@@ -488,7 +504,7 @@ func (c *db2Client) packCNTQRY(qryInsID uint64) ([]byte, error) {
 	binary.BigEndian.PutUint64(insID, qryInsID)
 	body.Write(packBinary(cpQRYINSID, insID))
 	body.Write(packBinary(cpRTNEXTDTA, []byte{0x02}))
-	return packDSSObject(cpCNTQRY, body.Bytes()), nil
+	return packDSSObject(cpCNTQRY, body.Bytes())
 }
 
 func packEXCSAT() []byte {
@@ -505,11 +521,11 @@ func packEXCSAT() []byte {
 		int(cpUNICODE), 1208,
 	})))
 	body.Write(mustPackString(cpSRVCLSNM, "ingestr", "cp500"))
-	return packDSSObject(cpEXCSAT, body.Bytes())
+	return mustPackDSSObject(cpEXCSAT, body.Bytes())
 }
 
 func packEXCSATMGRLVLLS() []byte {
-	return packDSSObject(cpEXCSAT, packBinary(cpMGRLVLLS, mgrLevels([]int{int(cpCCSIDMGR), 1208})))
+	return mustPackDSSObject(cpEXCSAT, packBinary(cpMGRLVLLS, mgrLevels([]int{int(cpCCSIDMGR), 1208})))
 }
 
 func packACCSEC(database string, secmec int, sectkn []byte) []byte {
@@ -519,7 +535,7 @@ func packACCSEC(database string, secmec int, sectkn []byte) []byte {
 	if len(sectkn) > 0 {
 		body.Write(packBinary(cpSECTKN, sectkn))
 	}
-	return packDSSObject(cpACCSEC, body.Bytes())
+	return mustPackDSSObject(cpACCSEC, body.Bytes())
 }
 
 func packACCRDB(database string) []byte {
@@ -530,10 +546,10 @@ func packACCRDB(database string) []byte {
 	body.Write(mustPackString(cpTYPDEFNAM, "QTDSQLX86", "cp500"))
 	body.Write(packBinary(cpCRRTKN, mustHex("d5c6f0f0f0f0f0f12ec3f0c1f50155630d5a11")))
 	body.Write(packBinary(cpTYPDEFOVR, mustHex("0006119c04b80006119d04b00006119e04b8")))
-	return packDSSObject(cpACCRDB, body.Bytes())
+	return mustPackDSSObject(cpACCRDB, body.Bytes())
 }
 
-func packSQLSTT(sql string) []byte {
+func packSQLSTT(sql string) ([]byte, error) {
 	body := bytes.NewBuffer(nil)
 	body.Write(packNullString(sql))
 	body.Write([]byte{0xff})
@@ -541,7 +557,7 @@ func packSQLSTT(sql string) []byte {
 }
 
 func packRDBCMM() []byte {
-	return packDSSObject(cpRDBCMM, nil)
+	return mustPackDSSObject(cpRDBCMM, nil)
 }
 
 func mgrLevels(values []int) []byte {
