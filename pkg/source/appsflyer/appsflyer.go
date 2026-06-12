@@ -363,7 +363,7 @@ func fixKey(key string) string {
 }
 
 func excludeMetricsForDateRange(metrics []string, toDate string) []string {
-	now := time.Now()
+	now := time.Now().UTC()
 	endDate, err := time.ParseInLocation("2006-01-02", toDate, now.Location())
 	if err != nil {
 		return nil
