@@ -168,6 +168,140 @@ func TestBuildSelectQueryPreservesColumnCasing(t *testing.T) {
 	}
 }
 
+func TestParseTableNameSupportsMultipartIdentifiers(t *testing.T) {
+	tests := []struct {
+		name       string
+		table      string
+		wantSchema string
+		wantTable  string
+	}{
+		{
+			name:       "unqualified table defaults schema",
+			table:      "users",
+			wantSchema: "dbo",
+			wantTable:  "users",
+		},
+		{
+			name:       "schema qualified table",
+			table:      "sales.orders",
+			wantSchema: "sales",
+			wantTable:  "orders",
+		},
+		{
+			name:       "database qualified table",
+			table:      "RemoteDB.dbo.orders",
+			wantSchema: "dbo",
+			wantTable:  "orders",
+		},
+		{
+			name:       "linked server qualified table",
+			table:      "LINKED_SRV.RemoteDB.dbo.my_table",
+			wantSchema: "dbo",
+			wantTable:  "my_table",
+		},
+		{
+			name:       "bracketed identifiers with dots",
+			table:      "[LINKED_SRV].[RemoteDB].[erp.schema].[my.table]",
+			wantSchema: "erp.schema",
+			wantTable:  "my.table",
+		},
+		{
+			name:       "escaped bracket in identifier",
+			table:      "[LINKED]]SRV].[RemoteDB].[dbo].[my]]table]",
+			wantSchema: "dbo",
+			wantTable:  "my]table",
+		},
+		{
+			name:       "empty schema segment defaults schema",
+			table:      "RemoteDB..orders",
+			wantSchema: "dbo",
+			wantTable:  "orders",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotSchema, gotTable := parseTableName(tt.table)
+			if gotSchema != tt.wantSchema {
+				t.Errorf("schema = %q, want %q", gotSchema, tt.wantSchema)
+			}
+			if gotTable != tt.wantTable {
+				t.Errorf("table = %q, want %q", gotTable, tt.wantTable)
+			}
+		})
+	}
+}
+
+func TestQuoteTableSupportsMultipartIdentifiers(t *testing.T) {
+	tests := []struct {
+		name  string
+		table string
+		want  string
+	}{
+		{
+			name:  "unqualified table",
+			table: "users",
+			want:  "[users]",
+		},
+		{
+			name:  "schema qualified table",
+			table: "dbo.notes",
+			want:  "[dbo].[notes]",
+		},
+		{
+			name:  "linked server qualified table",
+			table: "LINKED_SRV.RemoteDB.dbo.my_table",
+			want:  "[LINKED_SRV].[RemoteDB].[dbo].[my_table]",
+		},
+		{
+			name:  "bracketed identifiers with dots",
+			table: "[LINKED_SRV].[RemoteDB].[erp.schema].[my.table]",
+			want:  "[LINKED_SRV].[RemoteDB].[erp.schema].[my.table]",
+		},
+		{
+			name:  "escaped bracket in identifier",
+			table: "[LINKED]]SRV].[RemoteDB].[dbo].[my]]table]",
+			want:  "[LINKED]]SRV].[RemoteDB].[dbo].[my]]table]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := quoteTable(tt.table); got != tt.want {
+				t.Errorf("quoteTable(%q) = %q, want %q", tt.table, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildSelectQuerySupportsLinkedServerTable(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id"},
+		{Name: "CreatedAt"},
+	}
+
+	query := buildSelectQuery("LINKED_SRV.RemoteDB.dbo.my_table", columns, source.ReadOptions{Limit: 10})
+	want := "SELECT TOP 10 [id], [CreatedAt] FROM [LINKED_SRV].[RemoteDB].[dbo].[my_table]"
+	if query != want {
+		t.Fatalf("query = %q, want %q", query, want)
+	}
+}
+
+func TestSchemaMetadataQueriesUseCatalogPrefix(t *testing.T) {
+	tableRef := parseMSSQLTableRef("LINKED_SRV.RemoteDB.dbo.my_table")
+	columnsQuery, pkQuery := schemaMetadataQueries(tableRef)
+
+	if !strings.Contains(columnsQuery, "FROM [LINKED_SRV].[RemoteDB].INFORMATION_SCHEMA.COLUMNS") {
+		t.Fatalf("columns query does not use linked-server information schema: %s", columnsQuery)
+	}
+	if !strings.Contains(pkQuery, "FROM [LINKED_SRV].[RemoteDB].INFORMATION_SCHEMA.TABLE_CONSTRAINTS") {
+		t.Fatalf("pk query does not use linked-server table constraints: %s", pkQuery)
+	}
+	if !strings.Contains(pkQuery, "JOIN [LINKED_SRV].[RemoteDB].INFORMATION_SCHEMA.KEY_COLUMN_USAGE") {
+		t.Fatalf("pk query does not use linked-server key column usage: %s", pkQuery)
+	}
+}
+
 func TestGuidConversionEnabled(t *testing.T) {
 	connStr, _, err := URIToConnString("mssql://sa:pass@localhost/db?guid+conversion=true")
 	if err != nil {

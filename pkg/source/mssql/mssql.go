@@ -280,20 +280,9 @@ func (s *MSSQLSource) GetTable(ctx context.Context, req source.TableRequest) (so
 }
 
 func (s *MSSQLSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := parseTableName(table)
-
-	query := `
-		SELECT
-			COLUMN_NAME,
-			DATA_TYPE,
-			IS_NULLABLE,
-			NUMERIC_PRECISION,
-			NUMERIC_SCALE,
-			CHARACTER_MAXIMUM_LENGTH
-		FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
-		ORDER BY ORDINAL_POSITION
-	`
+	tableRef := parseMSSQLTableRef(table)
+	schemaName, tableName := tableRef.schemaName, tableRef.tableName
+	query, pkQuery := schemaMetadataQueries(tableRef)
 
 	rows, err := s.db.QueryContext(ctx, query, schemaName, tableName)
 	if err != nil {
@@ -346,19 +335,6 @@ func (s *MSSQLSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 		return nil, fmt.Errorf("table %s not found or has no columns", table)
 	}
 
-	// Get primary keys
-	pkQuery := `
-		SELECT c.COLUMN_NAME
-		FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-		JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE c
-			ON tc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
-			AND tc.TABLE_SCHEMA = c.TABLE_SCHEMA
-		WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-			AND tc.TABLE_SCHEMA = @p1
-			AND tc.TABLE_NAME = @p2
-		ORDER BY c.ORDINAL_POSITION
-	`
-
 	var primaryKeys []string
 	pkRows, err := s.db.QueryContext(ctx, pkQuery, schemaName, tableName)
 	if err == nil {
@@ -386,6 +362,36 @@ func (s *MSSQLSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 		Columns:     columns,
 		PrimaryKeys: primaryKeys,
 	}, nil
+}
+
+func schemaMetadataQueries(tableRef mssqlTableRef) (string, string) {
+	infoSchema := tableRef.informationSchemaQualifier()
+	columnsQuery := fmt.Sprintf(`
+		SELECT
+			COLUMN_NAME,
+			DATA_TYPE,
+			IS_NULLABLE,
+			NUMERIC_PRECISION,
+			NUMERIC_SCALE,
+			CHARACTER_MAXIMUM_LENGTH
+		FROM %s.COLUMNS
+		WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
+		ORDER BY ORDINAL_POSITION
+	`, infoSchema)
+
+	pkQuery := fmt.Sprintf(`
+		SELECT c.COLUMN_NAME
+		FROM %s.TABLE_CONSTRAINTS tc
+		JOIN %s.KEY_COLUMN_USAGE c
+			ON tc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
+			AND tc.TABLE_SCHEMA = c.TABLE_SCHEMA
+		WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+			AND tc.TABLE_SCHEMA = @p1
+			AND tc.TABLE_NAME = @p2
+		ORDER BY c.ORDINAL_POSITION
+	`, infoSchema, infoSchema)
+
+	return columnsQuery, pkQuery
 }
 
 func (s *MSSQLSource) read(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -508,13 +514,93 @@ func (s *MSSQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 	return results, nil
 }
 
+type mssqlTableRef struct {
+	parts        []string
+	catalogParts []string
+	schemaName   string
+	tableName    string
+}
+
 func parseTableName(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+	tableRef := parseMSSQLTableRef(table)
+	return tableRef.schemaName, tableRef.tableName
+}
+
+func parseMSSQLTableRef(table string) mssqlTableRef {
+	parts := splitMSSQLIdentifierPath(table)
+	tableName := parts[len(parts)-1]
+	schemaName := "dbo"
+	if len(parts) > 1 && parts[len(parts)-2] != "" {
+		schemaName = parts[len(parts)-2]
 	}
-	// SQL Server default schema is dbo
-	return "dbo", table
+
+	var catalogParts []string
+	if len(parts) > 2 {
+		catalogParts = parts[:len(parts)-2]
+	}
+
+	return mssqlTableRef{
+		parts:        parts,
+		catalogParts: catalogParts,
+		schemaName:   schemaName,
+		tableName:    tableName,
+	}
+}
+
+func (r mssqlTableRef) informationSchemaQualifier() string {
+	if len(r.catalogParts) == 0 {
+		return "INFORMATION_SCHEMA"
+	}
+	return quoteIdentifierPath(r.catalogParts) + ".INFORMATION_SCHEMA"
+}
+
+func splitMSSQLIdentifierPath(path string) []string {
+	path = strings.TrimSpace(path)
+	var rawParts []string
+	var current strings.Builder
+	inBracket := false
+
+	for i := 0; i < len(path); i++ {
+		ch := path[i]
+		if inBracket {
+			current.WriteByte(ch)
+			if ch == ']' {
+				if i+1 < len(path) && path[i+1] == ']' {
+					i++
+					current.WriteByte(path[i])
+					continue
+				}
+				inBracket = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '[':
+			inBracket = true
+			current.WriteByte(ch)
+		case '.':
+			rawParts = append(rawParts, current.String())
+			current.Reset()
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	rawParts = append(rawParts, current.String())
+
+	parts := make([]string, len(rawParts))
+	for i, part := range rawParts {
+		parts[i] = normalizeMSSQLIdentifierPart(part)
+	}
+	return parts
+}
+
+func normalizeMSSQLIdentifierPart(part string) string {
+	part = strings.TrimSpace(part)
+	if len(part) >= 2 && part[0] == '[' && part[len(part)-1] == ']' {
+		return strings.ReplaceAll(part[1:len(part)-1], "]]", "]")
+	}
+	return part
 }
 
 func filterColumns(columns []schema.Column, exclude []string) []schema.Column {
@@ -580,11 +666,19 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 }
 
 func quoteTable(table string) string {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return fmt.Sprintf("[%s].[%s]", strings.ReplaceAll(parts[0], "]", "]]"), strings.ReplaceAll(parts[1], "]", "]]"))
+	tableRef := parseMSSQLTableRef(table)
+	return quoteIdentifierPath(tableRef.parts)
+}
+
+func quoteIdentifierPath(parts []string) string {
+	quoted := make([]string, len(parts))
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		quoted[i] = quoteColumn(part)
 	}
-	return fmt.Sprintf("[%s]", strings.ReplaceAll(table, "]", "]]"))
+	return strings.Join(quoted, ".")
 }
 
 func quoteColumn(name string) string {
