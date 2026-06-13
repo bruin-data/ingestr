@@ -263,6 +263,11 @@ func TestQuoteTableSupportsMultipartIdentifiers(t *testing.T) {
 			table: "[LINKED]]SRV].[RemoteDB].[dbo].[my]]table]",
 			want:  "[LINKED]]SRV].[RemoteDB].[dbo].[my]]table]",
 		},
+		{
+			name:  "empty schema segment",
+			table: "RemoteDB..orders",
+			want:  "[RemoteDB]..[orders]",
+		},
 	}
 
 	for _, tt := range tests {
@@ -271,6 +276,16 @@ func TestQuoteTableSupportsMultipartIdentifiers(t *testing.T) {
 				t.Errorf("quoteTable(%q) = %q, want %q", tt.table, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestInformationSchemaQualifierSkipsEmptyCatalogParts(t *testing.T) {
+	tableRef := parseMSSQLTableRef("LINKED_SRV..dbo.my_table")
+
+	got := tableRef.informationSchemaQualifier()
+	want := "[LINKED_SRV].INFORMATION_SCHEMA"
+	if got != want {
+		t.Fatalf("information schema qualifier = %q, want %q", got, want)
 	}
 }
 

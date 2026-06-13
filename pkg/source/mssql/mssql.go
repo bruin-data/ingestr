@@ -551,7 +551,11 @@ func (r mssqlTableRef) informationSchemaQualifier() string {
 	if len(r.catalogParts) == 0 {
 		return "INFORMATION_SCHEMA"
 	}
-	return quoteIdentifierPath(r.catalogParts) + ".INFORMATION_SCHEMA"
+	quotedCatalog := quoteCatalogIdentifierPath(r.catalogParts)
+	if quotedCatalog == "" {
+		return "INFORMATION_SCHEMA"
+	}
+	return quotedCatalog + ".INFORMATION_SCHEMA"
 }
 
 func splitMSSQLIdentifierPath(path string) []string {
@@ -670,13 +674,28 @@ func quoteTable(table string) string {
 	return quoteIdentifierPath(tableRef.parts)
 }
 
+// quoteIdentifierPath joins parts as bracket-quoted SQL Server identifiers.
+// Empty parts are kept as empty strings so two-dot notation (e.g. [db]..[table])
+// round-trips correctly when tableRef.parts is passed directly.
 func quoteIdentifierPath(parts []string) string {
-	quoted := make([]string, len(parts))
-	for i, part := range parts {
+	quoted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			quoted = append(quoted, "")
+			continue
+		}
+		quoted = append(quoted, quoteColumn(part))
+	}
+	return strings.Join(quoted, ".")
+}
+
+func quoteCatalogIdentifierPath(parts []string) string {
+	quoted := make([]string, 0, len(parts))
+	for _, part := range parts {
 		if part == "" {
 			continue
 		}
-		quoted[i] = quoteColumn(part)
+		quoted = append(quoted, quoteColumn(part))
 	}
 	return strings.Join(quoted, ".")
 }
