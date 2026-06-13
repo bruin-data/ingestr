@@ -196,6 +196,73 @@ func TestMSSQLSource_TableToSQLite_CustomSchemaFiltersAndExcludeColumns(t *testi
 	assert.LessOrEqual(t, maxTS, "2024-01-01 00:40:00", "interval end filter should be applied")
 }
 
+func TestMSSQLSource_TableToSQLite_DatabaseQualifiedTable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	if mssqlDest.uri == "" {
+		t.Skip("MSSQL container not available")
+	}
+
+	ctx := context.Background()
+	adminDB := openMSSQLTestDB(t, mssqlDest.uri)
+	t.Cleanup(func() { _ = adminDB.Close() })
+
+	dbName := fmt.Sprintf("qualified_%s", uniqueSuffix())
+	quotedDBName := strings.ReplaceAll(dbName, "]", "]]")
+	_, err := adminDB.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE [%s]", quotedDBName))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("ALTER DATABASE [%s] SET SINGLE_USER WITH ROLLBACK IMMEDIATE", quotedDBName))
+		_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("DROP DATABASE [%s]", quotedDBName))
+	})
+
+	sourceDB := openMSSQLTestDB(t, mssqlURIForDatabase(t, mssqlDest.uri, "mssql", dbName, nil))
+	t.Cleanup(func() { _ = sourceDB.Close() })
+
+	tableName := "database_qualified_source"
+	_, err = sourceDB.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE %s (
+		id INT PRIMARY KEY,
+		name NVARCHAR(100) NOT NULL
+	)`, quoteTableMSSQL("dbo."+tableName)))
+	require.NoError(t, err)
+
+	_, err = sourceDB.ExecContext(
+		ctx,
+		fmt.Sprintf("INSERT INTO %s (id, name) VALUES (@p1, @p2), (@p3, @p4)", quoteTableMSSQL("dbo."+tableName)),
+		1, "alpha",
+		2, "bravo",
+	)
+	require.NoError(t, err)
+
+	tmpFile, err := os.CreateTemp("", "mssql_source_qualified_*.db")
+	require.NoError(t, err)
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+	cfg := &config.IngestConfig{
+		SourceURI:           mssqlDest.uri,
+		SourceTable:         dbName + ".dbo." + tableName,
+		DestURI:             fmt.Sprintf("sqlite:///%s", tmpFile.Name()),
+		DestTable:           "qualified_rows",
+		IncrementalStrategy: config.StrategyReplace,
+	}
+	require.NoError(t, cfg.Validate())
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	destDB, err := sql.Open("sqlite3", tmpFile.Name())
+	require.NoError(t, err)
+	defer func() { _ = destDB.Close() }()
+
+	var count int
+	require.NoError(t, destDB.QueryRow("SELECT COUNT(*) FROM qualified_rows").Scan(&count))
+	assert.Equal(t, 2, count)
+
+	var name string
+	require.NoError(t, destDB.QueryRow("SELECT name FROM qualified_rows WHERE id = 2").Scan(&name))
+	assert.Equal(t, "bravo", name)
+}
+
 func TestAzureSQLSourceScheme_SQLServerContainerToSQLite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
