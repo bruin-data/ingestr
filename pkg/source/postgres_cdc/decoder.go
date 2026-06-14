@@ -193,6 +193,23 @@ func (d *Decoder) handleBegin(data []byte, lsn pglogrepl.LSN) error {
 	return nil
 }
 
+// CurrentTxLSN returns the LSN of the transaction currently being decoded. It
+// remains valid after a COMMIT until the next BEGIN, so callers can read the
+// LSN of the batch just returned by Decode.
+func (d *Decoder) CurrentTxLSN() pglogrepl.LSN {
+	return d.currentTxLSN
+}
+
+// InFlightTxLSN returns the LSN of a transaction whose changes have been
+// decoded but not yet emitted (BEGIN seen, COMMIT not yet processed). The bool
+// is false when no transaction is mid-flight.
+func (d *Decoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
+	if len(d.pendingChanges) == 0 {
+		return 0, false
+	}
+	return d.currentTxLSN, true
+}
+
 func (d *Decoder) handleCommit() (arrow.RecordBatch, error) {
 	if len(d.pendingChanges) == 0 {
 		return nil, nil

@@ -1,9 +1,11 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -55,6 +57,11 @@ type kafkaConfig struct {
 
 type KafkaSource struct {
 	cfg kafkaConfig
+
+	// streamReader holds the live consumer-group reader in streaming mode so
+	// CommitStream can commit offsets after the pipeline has flushed.
+	mu           sync.Mutex
+	streamReader *kafkago.Reader
 }
 
 func NewKafkaSource() *KafkaSource {
@@ -64,6 +71,64 @@ func NewKafkaSource() *KafkaSource {
 func (s *KafkaSource) HandlesIncrementality() bool {
 	return false
 }
+
+// SupportsStreaming reports that Kafka can be consumed continuously.
+func (s *KafkaSource) SupportsStreaming() bool {
+	return true
+}
+
+// DefaultStreamingStrategy returns merge keyed on the envelope msg_id so
+// at-least-once redeliveries (e.g. after a group rebalance) are idempotent
+// rather than producing duplicate rows or violating the msg_id primary key.
+func (s *KafkaSource) DefaultStreamingStrategy() config.IncrementalStrategy {
+	return config.StrategyMerge
+}
+
+// CommitStream commits the per-partition offsets captured in the token after
+// the pipeline has durably written the corresponding messages.
+func (s *KafkaSource) CommitStream(ctx context.Context, token any) error {
+	msgs, ok := token.(map[int]kafkago.Message)
+	if !ok {
+		return fmt.Errorf("kafka: unexpected commit token type %T", token)
+	}
+	s.mu.Lock()
+	reader := s.streamReader
+	s.mu.Unlock()
+	if reader == nil {
+		return fmt.Errorf("kafka: no active streaming reader to commit")
+	}
+	flat := make([]kafkago.Message, 0, len(msgs))
+	for _, m := range msgs {
+		flat = append(flat, m)
+	}
+	if len(flat) == 0 {
+		return nil
+	}
+	if err := reader.CommitMessages(ctx, flat...); err != nil {
+		return fmt.Errorf("kafka: failed to commit offsets: %w", err)
+	}
+	return nil
+}
+
+// streamingEnvelopeSchema is the fixed schema for streaming Kafka ingestion:
+// a primary-key message id plus a JSON column with the key, value, and metadata.
+func streamingEnvelopeSchema(topic string) *schema.TableSchema {
+	return &schema.TableSchema{
+		Name: topic,
+		Columns: []schema.Column{
+			{Name: "msg_id", DataType: schema.TypeString, Nullable: false, IsPrimaryKey: true},
+			{Name: "data", DataType: schema.TypeJSON, Nullable: true},
+			// Monotonic per-key source position (Kafka offset). Used as the merge
+			// incremental key so the latest record per msg_id wins within a flush
+			// cycle. Same key => same partition => offsets are ordered.
+			{Name: streamOrderColumn, DataType: schema.TypeInt64, Nullable: false},
+		},
+		PrimaryKeys:    []string{"msg_id"},
+		IncrementalKey: streamOrderColumn,
+	}
+}
+
+const streamOrderColumn = "_ingestr_order"
 
 func (s *KafkaSource) Schemes() []string {
 	return []string{"kafka"}
@@ -94,6 +159,28 @@ func (s *KafkaSource) GetTable(ctx context.Context, req source.TableRequest) (so
 		strategy = config.StrategyReplace
 	}
 
+	// Streaming mode has no inferable schema (the stream never ends), so every
+	// message is projected into a fixed msg_id + data envelope.
+	if req.Streaming {
+		primaryKeys := req.PrimaryKeys
+		if len(primaryKeys) == 0 {
+			primaryKeys = []string{"msg_id"}
+		}
+		return &source.DynamicSourceTable{
+			TableName:           topicName,
+			TablePrimaryKeys:    primaryKeys,
+			TableIncrementalKey: req.IncrementalKey,
+			TableStrategy:       strategy,
+			KnownSchema:         true,
+			SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
+				return streamingEnvelopeSchema(topicName), nil
+			},
+			ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+				return s.readStreaming(ctx, topicName, opts)
+			},
+		}, nil
+	}
+
 	return &source.DynamicSourceTable{
 		TableName:           topicName,
 		TablePrimaryKeys:    req.PrimaryKeys,
@@ -107,6 +194,103 @@ func (s *KafkaSource) GetTable(ctx context.Context, req source.TableRequest) (so
 			return s.read(ctx, topicName, opts)
 		},
 	}, nil
+}
+
+// readStreaming consumes the topic continuously via a consumer-group reader,
+// committing offsets only after the pipeline durably writes each flush (so
+// delivery is at-least-once). It uses FetchMessage (not ReadMessage) so offsets
+// are never auto-committed before the data is durable.
+func (s *KafkaSource) readStreaming(ctx context.Context, topic string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	dialer, err := s.buildDialer()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build kafka dialer: %w", err)
+	}
+
+	if opts.IntervalStart != nil {
+		fmt.Printf("Warning: --interval-start is ignored for streaming Kafka; the consumer group's committed offsets determine the start position\n")
+	}
+
+	reader := kafkago.NewReader(kafkago.ReaderConfig{
+		Brokers:     strings.Split(s.cfg.BootstrapServers, ","),
+		GroupID:     s.cfg.GroupID,
+		Topic:       topic,
+		Dialer:      dialer,
+		MinBytes:    1,
+		MaxBytes:    10e6,
+		StartOffset: kafkago.FirstOffset, // only used when the group has no committed offset
+	})
+
+	s.mu.Lock()
+	s.streamReader = reader
+	s.mu.Unlock()
+
+	results := make(chan source.RecordBatchResult, 8)
+
+	go func() {
+		defer close(results)
+		defer func() { _ = reader.Close() }()
+		defer func() {
+			s.mu.Lock()
+			s.streamReader = nil
+			s.mu.Unlock()
+		}()
+
+		envelopeCols := streamingEnvelopeSchema(topic).Columns
+		batch := make([]map[string]interface{}, 0, s.cfg.BatchSize)
+		latest := make(map[int]kafkago.Message) // per-partition highest message seen, for committing
+
+		flush := func() bool {
+			if len(batch) == 0 {
+				return true
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, envelopeCols, opts.ExcludeColumns)
+			if err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert kafka messages to Arrow: %w", err)}
+				return false
+			}
+			// Cumulative token: a copy of the per-partition offsets emitted so far.
+			token := make(map[int]kafkago.Message, len(latest))
+			for p, m := range latest {
+				token[p] = kafkago.Message{Topic: m.Topic, Partition: m.Partition, Offset: m.Offset}
+			}
+			results <- source.RecordBatchResult{Batch: record, CommitToken: token}
+			batch = batch[:0]
+			return true
+		}
+
+		for {
+			fetchCtx, cancel := context.WithTimeout(ctx, s.cfg.BatchTimeout)
+			msg, err := reader.FetchMessage(fetchCtx)
+			cancel()
+
+			if err != nil {
+				if ctx.Err() != nil {
+					flush()
+					return
+				}
+				if errors.Is(err, context.DeadlineExceeded) {
+					// Idle: flush any partial batch and keep consuming.
+					if !flush() {
+						return
+					}
+					continue
+				}
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to fetch from topic %s: %w", topic, err)}
+				return
+			}
+
+			batch = append(batch, messageToEnvelope(msg))
+			latest[msg.Partition] = msg
+
+			if len(batch) >= s.cfg.BatchSize {
+				if !flush() {
+					return
+				}
+			}
+		}
+	}()
+
+	return results, nil
 }
 
 func (s *KafkaSource) read(ctx context.Context, topic string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -305,6 +489,12 @@ func (s *KafkaSource) readPartition(
 	return nil
 }
 
+var (
+	_ source.Source          = (*KafkaSource)(nil)
+	_ source.StreamingSource = (*KafkaSource)(nil)
+	_ source.StreamCommitter = (*KafkaSource)(nil)
+)
+
 func messageToItem(msg kafkago.Message) map[string]interface{} {
 	var keyStr interface{}
 	if msg.Key != nil {
@@ -333,6 +523,36 @@ func messageToItem(msg kafkago.Message) map[string]interface{} {
 	return map[string]interface{}{
 		"_kafka":        kafkaMeta,
 		"_kafka_msg_id": msgID,
+	}
+}
+
+// messageToEnvelope projects a Kafka message into the streaming envelope:
+// a primary-key msg_id and a JSON data column holding the key, value, and
+// metadata. The value is decoded as JSON so it nests as a structured object
+// (parity with the RabbitMQ envelope); non-JSON values fall back to a string.
+func messageToEnvelope(msg kafkago.Message) map[string]interface{} {
+	item := messageToItem(msg)
+	msgID, _ := item["_kafka_msg_id"].(string)
+
+	meta, _ := item["_kafka"].(map[string]interface{})
+	if meta != nil {
+		var body any
+		dec := json.NewDecoder(bytes.NewReader(msg.Value))
+		dec.UseNumber()
+		if err := dec.Decode(&body); err != nil {
+			body = string(msg.Value)
+		}
+		meta["data"] = body
+	}
+
+	encoded, err := json.Marshal(meta)
+	if err != nil {
+		encoded = fmt.Appendf(nil, "%q", string(msg.Value))
+	}
+	return map[string]interface{}{
+		"msg_id":          msgID,
+		"data":            string(encoded),
+		streamOrderColumn: msg.Offset,
 	}
 }
 

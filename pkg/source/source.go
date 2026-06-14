@@ -22,12 +22,18 @@ type ReadOptions struct {
 	CDCSlotSuffix  string              // Optional: suffix for auto-generated replication slot names (dest-aware)
 	FullRefresh    bool
 	Columns        string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
+	Streaming      bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
 }
 
 type RecordBatchResult struct {
 	Batch     arrow.RecordBatch
 	Err       error
 	TableName string // Source table name for multi-table sources (empty for single-table)
+
+	// CommitToken is an opaque, cumulative position marker for streaming mode.
+	// Committing a token via StreamCommitter acknowledges everything emitted up
+	// to and including the batch that carried it. Nil means no feedback needed.
+	CommitToken any
 }
 
 // TableRequest contains user-provided configuration for table instantiation.
@@ -37,6 +43,7 @@ type TableRequest struct {
 	IncrementalKey string                     // User-specified incremental key (validated by source)
 	PrimaryKeys    []string                   // User-specified PKs (used only if source doesn't define them)
 	Strategy       config.IncrementalStrategy // User-specified strategy (used only if source doesn't define it)
+	Streaming      bool                       // Table will be read in streaming mode (--stream)
 }
 
 // Source represents a data source that can provide tables.
@@ -81,6 +88,24 @@ type MultiTableReadOptions struct {
 	ReadOptions
 	Tables        []string          // Filter to specific tables (empty = all tables)
 	CDCResumeLSNs map[string]string // Per-table CDC resume LSNs: table name → max LSN already processed
+}
+
+// StreamingSource is an optional capability for sources that support
+// continuous ingestion via the --stream flag.
+type StreamingSource interface {
+	SupportsStreaming() bool
+
+	// DefaultStreamingStrategy is the write strategy used in streaming mode
+	// when the user doesn't specify one (merge for CDC, append for brokers).
+	DefaultStreamingStrategy() config.IncrementalStrategy
+}
+
+// StreamCommitter is an optional capability for streaming sources that need
+// durability feedback. After each successful flush the pipeline calls
+// CommitStream with the CommitToken of the last flushed batch; tokens are
+// cumulative, so committing a token acknowledges everything emitted up to it.
+type StreamCommitter interface {
+	CommitStream(ctx context.Context, token any) error
 }
 
 // MultiTableSource represents a source that emits data from multiple tables.

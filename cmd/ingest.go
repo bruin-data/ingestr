@@ -181,6 +181,23 @@ func IngestCommand() *cli.Command {
 				Usage:   "Enable debug logging",
 				Sources: cli.EnvVars("DEBUG", "INGESTR_DEBUG"),
 			},
+			&cli.BoolFlag{
+				Name:    "stream",
+				Usage:   "Continuously ingest from the source, flushing to the destination on an interval or record-count trigger (CDC and message-broker sources only)",
+				Sources: cli.EnvVars("INGESTR_STREAM"),
+			},
+			&cli.DurationFlag{
+				Name:    "flush-interval",
+				Usage:   "How often to flush buffered records to the destination in streaming mode",
+				Value:   30 * time.Second,
+				Sources: cli.EnvVars("INGESTR_FLUSH_INTERVAL"),
+			},
+			&cli.IntFlag{
+				Name:    "flush-records",
+				Usage:   "Flush to the destination when this many records are buffered in streaming mode",
+				Value:   50000,
+				Sources: cli.EnvVars("INGESTR_FLUSH_RECORDS"),
+			},
 			&cli.StringFlag{
 				Name:    "query-annotations",
 				Usage:   "JSON object of caller annotation keys (e.g. {\"pipeline\":\"p\",\"asset\":\"a\"}) merged into the '-- @bruin.config' comment on destination queries (QUERY_TAG on Snowflake) for cost attribution. ingestr always annotates with its own keys (type, ingestr_step); this flag adds the caller's keys on top.",
@@ -226,6 +243,19 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.StagingBucket = c.String("staging-bucket")
 	cfg.StagingDataset = c.String("staging-dataset")
 	cfg.QueryAnnotations = c.String("query-annotations")
+	cfg.Stream = c.Bool("stream")
+	cfg.FlushInterval = c.Duration("flush-interval")
+	cfg.FlushRecords = int(c.Int("flush-records"))
+
+	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
+		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")
+	}
+	// In streaming mode the source decides the default strategy (merge for CDC,
+	// append for brokers); only treat the strategy as a user override when the
+	// flag was explicitly set, since it defaults to "replace".
+	if cfg.Stream && !c.IsSet("incremental-strategy") {
+		cfg.IncrementalStrategy = ""
+	}
 
 	if clusterBy := c.String("cluster-by"); clusterBy != "" {
 		// Split by comma to support multiple clustering columns
@@ -259,8 +289,10 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		return err
 	}
 
-	if _, err := strategy.Get(cfg.IncrementalStrategy); err != nil {
-		return err
+	if cfg.IncrementalStrategy != "" {
+		if _, err := strategy.Get(cfg.IncrementalStrategy); err != nil {
+			return err
+		}
 	}
 
 	trackCommandRunning(ctx, "ingest", ingestTelemetryProperties(cfg))
@@ -271,6 +303,12 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	}
 
 	if ctx.Err() != nil {
+		// In streaming mode, cancellation (SIGINT/SIGTERM) is the normal way to
+		// stop; the pipeline has already flushed pending data.
+		if cfg.Stream {
+			color.Green("Streaming ingestion stopped.")
+			return nil
+		}
 		return ctx.Err()
 	}
 

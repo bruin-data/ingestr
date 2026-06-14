@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIngestConfigValidate_NoInferenceRequiresColumns(t *testing.T) {
@@ -31,5 +32,91 @@ func TestIngestConfigValidate_NoInferenceWithColumns(t *testing.T) {
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestIngestConfigValidate_Stream(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name    string
+		mutate  func(c *IngestConfig)
+		wantErr string
+	}{
+		{
+			name:   "valid defaults",
+			mutate: func(c *IngestConfig) {},
+		},
+		{
+			name:    "full refresh rejected",
+			mutate:  func(c *IngestConfig) { c.FullRefresh = true },
+			wantErr: "full-refresh",
+		},
+		{
+			name:    "interval end rejected",
+			mutate:  func(c *IngestConfig) { c.IntervalEnd = &now },
+			wantErr: "interval-end",
+		},
+		{
+			name:    "sql limit rejected",
+			mutate:  func(c *IngestConfig) { c.SQLLimit = 100 },
+			wantErr: "sql-limit",
+		},
+		{
+			name:    "non-positive flush interval rejected",
+			mutate:  func(c *IngestConfig) { c.FlushInterval = 0 },
+			wantErr: "flush-interval",
+		},
+		{
+			name:    "non-positive flush records rejected",
+			mutate:  func(c *IngestConfig) { c.FlushRecords = -1 },
+			wantErr: "flush-records",
+		},
+		{
+			name:    "replace strategy rejected",
+			mutate:  func(c *IngestConfig) { c.IncrementalStrategy = StrategyReplace },
+			wantErr: "incremental-strategy",
+		},
+		{
+			name:    "scd2 strategy rejected",
+			mutate:  func(c *IngestConfig) { c.IncrementalStrategy = StrategySCD2 },
+			wantErr: "incremental-strategy",
+		},
+		{
+			name:   "merge strategy allowed",
+			mutate: func(c *IngestConfig) { c.IncrementalStrategy = StrategyMerge },
+		},
+		{
+			name:   "append strategy allowed",
+			mutate: func(c *IngestConfig) { c.IncrementalStrategy = StrategyAppend },
+		},
+		{
+			name:   "empty strategy allowed",
+			mutate: func(c *IngestConfig) { c.IncrementalStrategy = "" },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://localhost:5432/db"
+			cfg.DestURI = "duckdb://out.duckdb"
+			cfg.Stream = true
+			cfg.IncrementalStrategy = ""
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected validation error containing %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
 	}
 }

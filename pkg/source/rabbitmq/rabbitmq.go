@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -25,11 +26,71 @@ const (
 
 type RabbitMQSource struct {
 	conn *amqp.Connection
+
+	// streamCh holds the live consumer channel in streaming mode so CommitStream
+	// can acknowledge deliveries after the pipeline has flushed them.
+	mu       sync.Mutex
+	streamCh *amqp.Channel
 }
 
 func NewRabbitMQSource() *RabbitMQSource {
 	return &RabbitMQSource{}
 }
+
+// SupportsStreaming reports that RabbitMQ can be consumed continuously.
+func (s *RabbitMQSource) SupportsStreaming() bool {
+	return true
+}
+
+// DefaultStreamingStrategy returns merge keyed on the envelope msg_id. Brokers
+// deliver at-least-once, so the same message (same msg_id) can be redelivered
+// after a restart; merge makes that idempotent (effectively-once) instead of
+// piling up duplicate rows or violating the msg_id primary key.
+func (s *RabbitMQSource) DefaultStreamingStrategy() config.IncrementalStrategy {
+	return config.StrategyMerge
+}
+
+// CommitStream acknowledges all deliveries up to and including the given tag.
+// The pipeline calls this only after the batch carrying the tag has been
+// durably written, giving at-least-once delivery.
+func (s *RabbitMQSource) CommitStream(_ context.Context, token any) error {
+	tag, ok := token.(uint64)
+	if !ok {
+		return fmt.Errorf("rabbitmq: unexpected commit token type %T", token)
+	}
+	// Hold the lock across Ack so it cannot race with the consumer goroutine
+	// clearing and closing the channel on shutdown (both guarded by s.mu).
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.streamCh == nil {
+		return fmt.Errorf("rabbitmq: no active streaming consumer to acknowledge")
+	}
+	if err := s.streamCh.Ack(tag, true); err != nil {
+		return fmt.Errorf("rabbitmq: failed to ack up to delivery tag %d: %w", tag, err)
+	}
+	return nil
+}
+
+// streamingEnvelopeSchema is the fixed schema used for schema-less broker
+// sources in streaming mode: a primary-key message id plus a JSON column
+// holding the decoded body and metadata.
+func streamingEnvelopeSchema(queue string) *schema.TableSchema {
+	return &schema.TableSchema{
+		Name: queue,
+		Columns: []schema.Column{
+			{Name: "msg_id", DataType: schema.TypeString, Nullable: false, IsPrimaryKey: true},
+			{Name: "data", DataType: schema.TypeJSON, Nullable: true},
+			// Monotonic per-consumer source position (AMQP delivery tag). Used as
+			// the merge incremental key so the latest record per msg_id wins
+			// within a flush cycle.
+			{Name: streamOrderColumn, DataType: schema.TypeInt64, Nullable: false},
+		},
+		PrimaryKeys:    []string{"msg_id"},
+		IncrementalKey: streamOrderColumn,
+	}
+}
+
+const streamOrderColumn = "_ingestr_order"
 
 func (s *RabbitMQSource) Schemes() []string {
 	return []string{"amqp", "amqps"}
@@ -75,6 +136,28 @@ func (s *RabbitMQSource) GetTable(_ context.Context, req source.TableRequest) (s
 		strategy = config.StrategyReplace
 	}
 
+	// In streaming mode the queue has no inferable schema (the stream never
+	// ends), so we project every message into a fixed msg_id + data envelope.
+	if req.Streaming {
+		primaryKeys := req.PrimaryKeys
+		if len(primaryKeys) == 0 {
+			primaryKeys = []string{"msg_id"}
+		}
+		return &source.DynamicSourceTable{
+			TableName:           queueName,
+			TablePrimaryKeys:    primaryKeys,
+			TableIncrementalKey: req.IncrementalKey,
+			TableStrategy:       strategy,
+			KnownSchema:         true,
+			SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
+				return streamingEnvelopeSchema(queueName), nil
+			},
+			ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+				return s.read(ctx, queueName, opts)
+			},
+		}, nil
+	}
+
 	return &source.DynamicSourceTable{
 		TableName:           queueName,
 		TablePrimaryKeys:    req.PrimaryKeys,
@@ -101,7 +184,17 @@ func (s *RabbitMQSource) read(ctx context.Context, queue string, opts source.Rea
 		batchSize = defaultBatchSize
 	}
 
-	if err := ch.Qos(batchSize, 0, false); err != nil {
+	streaming := opts.Streaming
+
+	// In streaming mode the pipeline acks (via CommitStream) only after a flush,
+	// so the un-acked window can exceed any prefetch limit. Unlimited prefetch
+	// (0) avoids stalling the consumer; backpressure comes from the bounded
+	// results channel. Non-streaming acks per batch, so batchSize prefetch is fine.
+	prefetch := batchSize
+	if streaming {
+		prefetch = 0
+	}
+	if err := ch.Qos(prefetch, 0, false); err != nil {
 		_ = ch.Close()
 		return nil, fmt.Errorf("failed to set QoS: %w", err)
 	}
@@ -120,11 +213,34 @@ func (s *RabbitMQSource) read(ctx context.Context, queue string, opts source.Rea
 		return nil, fmt.Errorf("failed to start consuming from queue %s: %w", queue, err)
 	}
 
+	if streaming {
+		s.mu.Lock()
+		s.streamCh = ch
+		s.mu.Unlock()
+	}
+
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
 		defer close(results)
-		defer func() { _ = ch.Close() }()
+		if streaming {
+			// Clear and close the channel under the lock so a concurrent
+			// CommitStream (which acks under the same lock) never touches a
+			// closing channel.
+			defer func() {
+				s.mu.Lock()
+				s.streamCh = nil
+				_ = ch.Close()
+				s.mu.Unlock()
+			}()
+		} else {
+			defer func() { _ = ch.Close() }()
+		}
+
+		var envelopeCols []schema.Column
+		if streaming {
+			envelopeCols = streamingEnvelopeSchema(queue).Columns
+		}
 
 		batch := make([]map[string]any, 0, batchSize)
 		var lastDeliveryTag uint64
@@ -146,22 +262,37 @@ func (s *RabbitMQSource) read(ctx context.Context, queue string, opts source.Rea
 			timer.Reset(defaultBatchTimeout)
 		}
 
+		// flush emits the accumulated batch. In streaming mode it attaches the
+		// highest delivery tag as a cumulative CommitToken and does NOT ack;
+		// the pipeline acks via CommitStream after the data is durable. In
+		// non-streaming mode it acks immediately after emitting.
 		flush := func() bool {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, envelopeCols, opts.ExcludeColumns)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert RabbitMQ messages to Arrow: %w", err)}
 				return false
 			}
 
-			results <- source.RecordBatchResult{Batch: record}
+			res := source.RecordBatchResult{Batch: record}
+			if streaming {
+				res.CommitToken = lastDeliveryTag
+			}
+			results <- res
 
-			if err := ch.Ack(lastDeliveryTag, true); err != nil {
-				config.Debug("[RABBITMQ] Failed to ack messages up to tag %d: %v", lastDeliveryTag, err)
+			if !streaming {
+				if err := ch.Ack(lastDeliveryTag, true); err != nil {
+					config.Debug("[RABBITMQ] Failed to ack messages up to tag %d: %v", lastDeliveryTag, err)
+				}
 			}
 
 			batchNum++
 			config.Debug("[RABBITMQ] Batch %d: %d messages (total: %d)", batchNum, len(batch), totalRead)
 			return true
+		}
+
+		appendMsg := deliveryToItem
+		if streaming {
+			appendMsg = deliveryToEnvelope
 		}
 
 		for {
@@ -180,7 +311,7 @@ func (s *RabbitMQSource) read(ctx context.Context, queue string, opts source.Rea
 					return
 				}
 
-				batch = append(batch, deliveryToItem(msg))
+				batch = append(batch, appendMsg(msg))
 				lastDeliveryTag = msg.DeliveryTag
 				totalRead++
 				receivedSinceLastTick = true
@@ -209,7 +340,8 @@ func (s *RabbitMQSource) read(ctx context.Context, queue string, opts source.Rea
 					receivedSinceLastTick = false
 					continue
 				}
-				if !receivedSinceLastTick {
+				// In streaming mode never exit on idle; keep consuming.
+				if !streaming && !receivedSinceLastTick {
 					config.Debug("[RABBITMQ] No new messages received, finishing read (total: %d)", totalRead)
 					return
 				}
@@ -260,6 +392,24 @@ func deliveryToItem(msg amqp.Delivery) map[string]any {
 	return item
 }
 
+// deliveryToEnvelope projects a message into the streaming envelope schema:
+// a primary-key msg_id and a JSON data column holding the decoded body and
+// metadata (everything deliveryToItem would have produced, minus msg_id).
+func deliveryToEnvelope(msg amqp.Delivery) map[string]any {
+	item := deliveryToItem(msg)
+	msgID, _ := item["msg_id"].(string)
+	delete(item, "msg_id")
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		encoded = fmt.Appendf(nil, "%q", string(msg.Body))
+	}
+	return map[string]any{
+		"msg_id":          msgID,
+		"data":            string(encoded),
+		streamOrderColumn: int64(msg.DeliveryTag),
+	}
+}
+
 func generateMsgID(msg amqp.Delivery) string {
 	if msg.MessageId != "" {
 		return msg.MessageId
@@ -284,4 +434,8 @@ func sanitizeURI(uri string) string {
 	return uri
 }
 
-var _ source.Source = (*RabbitMQSource)(nil)
+var (
+	_ source.Source          = (*RabbitMQSource)(nil)
+	_ source.StreamingSource = (*RabbitMQSource)(nil)
+	_ source.StreamCommitter = (*RabbitMQSource)(nil)
+)

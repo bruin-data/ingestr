@@ -21,10 +21,12 @@ type Replicator struct {
 	decoder       *Decoder
 	clientXLogPos pglogrepl.LSN
 	standbyTimer  time.Time
+	lastMessageAt time.Time
 	started       bool
+	streaming     bool
 }
 
-func NewReplicator(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, startLSN pglogrepl.LSN) (*Replicator, error) {
+func NewReplicator(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, startLSN pglogrepl.LSN, streaming bool) (*Replicator, error) {
 	schemaName, tblName := parseTableName(tableName)
 
 	decoder := NewDecoder(tableSchema, schemaName, tblName)
@@ -38,8 +40,18 @@ func NewReplicator(src *PostgresCDCSource, tableName string, tableSchema *schema
 		decoder:       decoder,
 		clientXLogPos: startLSN,
 		standbyTimer:  time.Now(),
+		lastMessageAt: time.Now(),
 		started:       false,
+		streaming:     streaming,
 	}, nil
+}
+
+// PendingLowWater reports the lowest LSN of an in-flight transaction whose
+// changes have not yet been emitted. The single-table replicator emits each
+// transaction's batch immediately, so only an undecoded (BEGIN-without-COMMIT)
+// transaction can be pending.
+func (r *Replicator) PendingLowWater() (pglogrepl.LSN, bool) {
+	return r.decoder.InFlightTxLSN()
 }
 
 func (r *Replicator) Start(ctx context.Context) error {
@@ -83,65 +95,81 @@ func (r *Replicator) CurrentLSN() pglogrepl.LSN {
 	return r.clientXLogPos
 }
 
-// NextBatch returns the next decoded batch, if any. The hadActivity flag
-// distinguishes a genuine idle period (receive timeout / nil message) from
-// WAL activity that produced no batch yet (keepalives, buffered Begin/Insert/
-// Update/Delete messages awaiting a Commit). Callers use it to avoid flushing
-// the batch accumulator after every transaction.
-func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, bool, error) {
+func (r *Replicator) standbyStatus() pglogrepl.StandbyStatusUpdate {
+	var committed pglogrepl.LSN
+	if r.streaming && r.source.pos != nil {
+		committed = r.source.pos.Committed()
+	}
+	return standbyUpdate(r.streaming, r.clientXLogPos, committed, r.startLSN)
+}
+
+// NextBatch returns the next decoded batch, if any, with the LSN of the
+// transaction that produced it. The hadActivity flag distinguishes a genuine
+// idle period (receive timeout / nil message) from WAL activity that produced
+// no batch yet (keepalives, buffered Begin/Insert/Update/Delete messages
+// awaiting a Commit). Callers use it to avoid flushing the batch accumulator
+// after every transaction.
+func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, pglogrepl.LSN, bool, error) {
 	// Start replication if not yet started
 	if !r.started {
 		if err := r.Start(ctx); err != nil {
-			return nil, false, err
+			return nil, 0, false, err
 		}
 	}
 
-	// Send standby status periodically
+	// Send standby status periodically. A send failure means the replication
+	// connection is broken, so surface it rather than spinning on dead reads.
 	if time.Since(r.standbyTimer) > 10*time.Second {
 		err := pglogrepl.SendStandbyStatusUpdate(
 			ctx,
 			r.source.replConn,
-			pglogrepl.StandbyStatusUpdate{
-				WALWritePosition: r.clientXLogPos,
-			},
+			r.standbyStatus(),
 		)
 		if err != nil {
-			config.Debug("[CDC] Failed to send standby status: %v", err)
+			return nil, 0, false, fmt.Errorf("failed to send standby status (replication connection lost): %w", err)
 		}
 		r.standbyTimer = time.Now()
 	}
 
-	// Set a short deadline for receiving messages
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	// Bound a single receive so the loop can react to cancellation and flush
+	// idle batches. See receiveTimeout for why this is not sub-second.
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, receiveTimeout)
 	defer cancel()
 
 	msg, err := r.source.replConn.ReceiveMessage(ctxWithTimeout)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, false, ctx.Err()
+			return nil, 0, false, ctx.Err()
 		}
-		// Timeout is expected when no data is available
+		// Timeout is expected when no data is available. But total silence for
+		// longer than deadConnectionTimeout (no data and no keepalives) means a
+		// dead or half-open connection that the per-call read timeout would mask forever.
 		if ctxWithTimeout.Err() != nil {
-			return nil, false, nil
+			if time.Since(r.lastMessageAt) > deadConnectionTimeout {
+				return nil, 0, false, fmt.Errorf("no message from server for %s; replication connection appears dead", deadConnectionTimeout)
+			}
+			return nil, 0, false, nil
 		}
-		return nil, false, fmt.Errorf("failed to receive message: %w", err)
+		return nil, 0, false, fmt.Errorf("failed to receive message: %w", err)
 	}
 
+	r.lastMessageAt = time.Now()
+
 	if msg == nil {
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
 
 	switch msg := msg.(type) {
 	case *pgproto3.CopyData:
 		if len(msg.Data) == 0 {
-			return nil, true, nil // Received a message, even if empty
+			return nil, 0, true, nil // Received a message, even if empty
 		}
 
 		switch msg.Data[0] {
 		case pglogrepl.PrimaryKeepaliveMessageByteID:
 			pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
 			if err != nil {
-				return nil, true, fmt.Errorf("failed to parse keepalive: %w", err)
+				return nil, 0, true, fmt.Errorf("failed to parse keepalive: %w", err)
 			}
 
 			if pkm.ReplyRequested {
@@ -155,21 +183,21 @@ func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.Record
 		case pglogrepl.XLogDataByteID:
 			xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
 			if err != nil {
-				return nil, true, fmt.Errorf("failed to parse xlog data: %w", err)
+				return nil, 0, true, fmt.Errorf("failed to parse xlog data: %w", err)
 			}
 
 			batch, err := r.decoder.Decode(xld.WALData, xld.WALStart)
 			if err != nil {
-				return nil, true, fmt.Errorf("failed to decode WAL data: %w", err)
+				return nil, 0, true, fmt.Errorf("failed to decode WAL data: %w", err)
 			}
 
 			if xld.WALStart > r.clientXLogPos {
 				r.clientXLogPos = xld.WALStart
 			}
 
-			return batch, true, nil
+			return batch, r.decoder.CurrentTxLSN(), true, nil
 		}
 	}
 
-	return nil, true, nil // Received some message type we don't handle
+	return nil, 0, true, nil // Received some message type we don't handle
 }
