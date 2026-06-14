@@ -543,7 +543,7 @@ func messageToItem(msg kafkago.Message) map[string]interface{} {
 // (parity with the RabbitMQ envelope); non-JSON values fall back to a string.
 func messageToEnvelope(msg kafkago.Message) map[string]interface{} {
 	item := messageToItem(msg)
-	msgID, _ := item["_kafka_msg_id"].(string)
+	msgID := streamMsgID(msg)
 
 	meta, _ := item["_kafka"].(map[string]interface{})
 	if meta != nil {
@@ -565,6 +565,20 @@ func messageToEnvelope(msg kafkago.Message) map[string]interface{} {
 		"data":            string(encoded),
 		streamOrderColumn: msg.Offset,
 	}
+}
+
+// streamMsgID derives the streaming envelope's primary key. For keyed messages
+// it is stable per key (so the merge keeps the latest record per key —
+// changelog/compaction semantics). For keyless messages it includes the offset
+// so every message gets a distinct id; otherwise all keyless messages on a
+// partition would collide on one id and the merge would keep only the last per
+// flush window (silent data loss). topic/partition/offset is stable across
+// redeliveries, so at-least-once dedup still works.
+func streamMsgID(msg kafkago.Message) string {
+	if len(msg.Key) > 0 {
+		return generateMsgID(msg.Topic, msg.Partition, msg.Offset, string(msg.Key))
+	}
+	return fmt.Sprintf("%s:%d:%d", msg.Topic, msg.Partition, msg.Offset)
 }
 
 func generateMsgID(topic string, partition int, offset int64, key interface{}) string {

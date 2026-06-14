@@ -237,6 +237,30 @@ func TestGenerateMsgID_NilKey(t *testing.T) {
 	}
 }
 
+func TestStreamMsgID(t *testing.T) {
+	// Keyless messages must get distinct ids per offset (otherwise the merge
+	// envelope collapses every keyless message on a partition into one row).
+	a := streamMsgID(kafkago.Message{Topic: "t", Partition: 0, Offset: 1})
+	b := streamMsgID(kafkago.Message{Topic: "t", Partition: 0, Offset: 2})
+	if a == b {
+		t.Errorf("keyless messages at different offsets share msg_id: %q", a)
+	}
+	// Same offset (e.g. a redelivery) is stable so at-least-once dedup works.
+	if a2 := streamMsgID(kafkago.Message{Topic: "t", Partition: 0, Offset: 1}); a != a2 {
+		t.Errorf("keyless msg_id not stable for the same offset: %q != %q", a, a2)
+	}
+
+	// Keyed messages dedup by key regardless of offset (last-value-per-key).
+	k1 := streamMsgID(kafkago.Message{Topic: "t", Partition: 0, Offset: 10, Key: []byte("k")})
+	k2 := streamMsgID(kafkago.Message{Topic: "t", Partition: 0, Offset: 11, Key: []byte("k")})
+	if k1 != k2 {
+		t.Errorf("keyed messages with the same key should share msg_id: %q != %q", k1, k2)
+	}
+	if kOther := streamMsgID(kafkago.Message{Topic: "t", Partition: 0, Offset: 12, Key: []byte("k2")}); k1 == kOther {
+		t.Error("different keys should produce different msg_ids")
+	}
+}
+
 func TestMessageToItem(t *testing.T) {
 	ts := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 	msg := kafkago.Message{
