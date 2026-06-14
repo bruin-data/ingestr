@@ -95,7 +95,12 @@ func (s *KafkaSource) CommitStream(ctx context.Context, token any) error {
 	reader := s.streamReader
 	s.mu.Unlock()
 	if reader == nil {
-		return fmt.Errorf("kafka: no active streaming reader to commit")
+		// The reader was already closed (e.g. a final flush racing shutdown).
+		// The data is durably written, so skipping the offset commit is safe
+		// under at-least-once: the group re-reads from its last committed
+		// position on the next start.
+		config.Debug("[KAFKA] CommitStream: no active reader, skipping offset commit")
+		return nil
 	}
 	flat := make([]kafkago.Message, 0, len(msgs))
 	for _, m := range msgs {
@@ -145,6 +150,15 @@ func (s *KafkaSource) Connect(ctx context.Context, uri string) error {
 }
 
 func (s *KafkaSource) Close(ctx context.Context) error {
+	// The streaming reader outlives its fetch goroutine so the pipeline's final
+	// flush can commit offsets; it is closed here, after Run has returned.
+	s.mu.Lock()
+	r := s.streamReader
+	s.streamReader = nil
+	s.mu.Unlock()
+	if r != nil {
+		return r.Close()
+	}
 	return nil
 }
 
@@ -227,13 +241,10 @@ func (s *KafkaSource) readStreaming(ctx context.Context, topic string, opts sour
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
+		// Only close the results channel here; the reader is kept open (and
+		// s.streamReader set) so the pipeline's final flush after cancellation
+		// can still commit offsets via CommitStream. Close() closes the reader.
 		defer close(results)
-		defer func() { _ = reader.Close() }()
-		defer func() {
-			s.mu.Lock()
-			s.streamReader = nil
-			s.mu.Unlock()
-		}()
 
 		envelopeCols := streamingEnvelopeSchema(topic).Columns
 		batch := make([]map[string]interface{}, 0, s.cfg.BatchSize)

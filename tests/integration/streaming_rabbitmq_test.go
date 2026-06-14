@@ -132,6 +132,82 @@ func TestRabbitMQ_Streaming(t *testing.T) {
 	assert.Equal(t, before, rowCount(), "no messages should be redelivered after acknowledgment")
 }
 
+// TestRabbitMQ_StreamingShutdownFlushesPending verifies that cancelling a
+// stream that still has un-flushed buffered data exits cleanly and acks during
+// the final flush (regression test: the consumer channel must outlive its
+// goroutine so CommitStream can ack at shutdown).
+func TestRabbitMQ_StreamingShutdownFlushesPending(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	rmqURI := sharedRabbitMQURI(t)
+	queueName := fmt.Sprintf("stream_shutdown_%d", time.Now().UnixNano())
+	publishStreamMessages(t, rmqURI, queueName, 1, 40)
+
+	destContainer, err := postgres.Run(
+		ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("destdb"), postgres.WithUsername("destuser"), postgres.WithPassword("destpass"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").WithOccurrence(2).WithStartupTimeout(30*time.Second),
+		),
+	)
+	require.NoError(t, err)
+	defer func() { _ = destContainer.Terminate(ctx) }()
+	destConnString, err := destContainer.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+	destPool, err := pgxpool.New(ctx, destConnString)
+	require.NoError(t, err)
+	defer destPool.Close()
+
+	rowCount := func() int {
+		var n int
+		if err := destPool.QueryRow(ctx, `SELECT count(*) FROM public.events`).Scan(&n); err != nil {
+			return -1
+		}
+		return n
+	}
+
+	// Long interval + high record cap so nothing flushes until shutdown.
+	cfg := &config.IngestConfig{
+		SourceURI: rmqURI, SourceTable: queueName, DestURI: destConnString, DestTable: "public.events",
+		Stream: true, FlushInterval: 60 * time.Second, FlushRecords: 1_000_000, Progress: config.ProgressLog,
+	}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	runErr := make(chan error, 1)
+	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+
+	// Let the consumer drain the queue into its buffer (un-acked, un-flushed).
+	require.Eventually(t, func() bool { return queueDepth(t, rmqURI, queueName) == 0 }, 30*time.Second, 500*time.Millisecond,
+		"messages should be consumed into the buffer")
+	time.Sleep(2 * time.Second)
+	require.Equal(t, 0, rowCount(), "no flush should have happened yet (long interval)")
+
+	// Cancel with data still buffered: the final flush must write and ack.
+	cancelStream()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			require.ErrorIs(t, err, context.Canceled, "shutdown with pending data must exit cleanly, not error on commit")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("pipeline did not exit within 30s of cancellation")
+	}
+
+	assert.Equal(t, 40, rowCount(), "final flush should have written all buffered messages")
+	require.Eventually(t, func() bool { return queueDepth(t, rmqURI, queueName) == 0 }, 15*time.Second, 500*time.Millisecond,
+		"queue must stay drained — the final flush acked the messages")
+
+	// No redelivery on a fresh run: confirms the shutdown ack actually committed.
+	ctx2, cancel2 := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel2()
+	_ = pipeline.New(cfg).Run(ctx2)
+	assert.Equal(t, 40, rowCount(), "no messages should be redelivered after the shutdown ack")
+}
+
 // publishStreamMessages publishes count messages with unique, sequential
 // message IDs starting at startID (msg-<startID>..msg-<startID+count-1>).
 func publishStreamMessages(t *testing.T, uri, queueName string, startID, count int) {

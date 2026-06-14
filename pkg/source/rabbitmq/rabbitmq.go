@@ -63,7 +63,12 @@ func (s *RabbitMQSource) CommitStream(_ context.Context, token any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.streamCh == nil {
-		return fmt.Errorf("rabbitmq: no active streaming consumer to acknowledge")
+		// The channel was already closed (e.g. a final flush racing shutdown).
+		// Messages are durably written; skipping the ack is safe under
+		// at-least-once — RabbitMQ re-delivers the un-acked tail on the next
+		// consumer start.
+		config.Debug("[RABBITMQ] CommitStream: no active channel, skipping ack")
+		return nil
 	}
 	if err := s.streamCh.Ack(tag, true); err != nil {
 		return fmt.Errorf("rabbitmq: failed to ack up to delivery tag %d: %w", tag, err)
@@ -108,6 +113,15 @@ func (s *RabbitMQSource) Connect(ctx context.Context, uri string) error {
 }
 
 func (s *RabbitMQSource) Close(_ context.Context) error {
+	// Close the streaming consumer channel (kept open past its goroutine so the
+	// final flush could ack) before tearing down the connection.
+	s.mu.Lock()
+	if s.streamCh != nil {
+		_ = s.streamCh.Close()
+		s.streamCh = nil
+	}
+	s.mu.Unlock()
+
 	if s.conn != nil {
 		err := s.conn.Close()
 		if err != nil {
@@ -223,17 +237,10 @@ func (s *RabbitMQSource) read(ctx context.Context, queue string, opts source.Rea
 
 	go func() {
 		defer close(results)
-		if streaming {
-			// Clear and close the channel under the lock so a concurrent
-			// CommitStream (which acks under the same lock) never touches a
-			// closing channel.
-			defer func() {
-				s.mu.Lock()
-				s.streamCh = nil
-				_ = ch.Close()
-				s.mu.Unlock()
-			}()
-		} else {
+		// In streaming mode the channel stays open (and s.streamCh set) after
+		// this goroutine exits so the pipeline's final flush can still ack via
+		// CommitStream; Close() closes it. Non-streaming closes it here.
+		if !streaming {
 			defer func() { _ = ch.Close() }()
 		}
 
