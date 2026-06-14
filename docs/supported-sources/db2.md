@@ -5,11 +5,7 @@ ingestr supports IBM Db2 as a source.
 
 ## Installation
 
-To use IBM Db2 with ingestr, you need to install the `ibm-db` add-on as well. You can do this by running:
-
-```bash
-pip install ingestr[ibm-db]
-```
+Db2 source support is built into the ingestr binary. It does not require the IBM CLI driver, CGO, or a separate Python add-on.
 
 ## URI format
 The URI format for DB2 is as follows:
@@ -25,4 +21,7 @@ URI parameters:
 - `port`: The port number the database server is listening
 - `database-name`: the name of the database to connect to
 
-The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's Db2 dialect [here](https://github.com/ibmdb/python-ibmdbsa?tab=readme-ov-file#connecting).
+Optional query parameters:
+- `schema`: default schema to use for unqualified table names. If omitted, ingestr uses the username uppercased.
+- `ssl`: set to `true` or `1` to connect with TLS.
+- `timeout`: connection/read timeout in seconds.
