@@ -298,7 +298,9 @@ def check_tool_available(name: str, tool_cfg: dict) -> bool:
         return (PROJECT_ROOT / binary).exists()
     requires = tool_cfg.get("requires")
     if requires:
-        return shutil.which(requires) is not None
+        if isinstance(requires, str):
+            requires = [requires]
+        return all(shutil.which(tool) is not None for tool in requires)
     return True
 
 
@@ -406,6 +408,7 @@ def build_tool_command(
     dst_uri: str, dst_table: str,
     src_type: str, dst_type: str,
     src_cfg_name: str, dst_cfg_name: str,
+    rows: int | None = None,
 ) -> str:
     if tool_name == "gong":
         binary = PROJECT_ROOT / tool_cfg.get("binary", "bin/gong")
@@ -485,6 +488,20 @@ def build_tool_command(
             f" --source-table '{src_table}'"
             f" --dest-uri {shell_uri_arg(dst_uri)}"
             f" --dest-table '{dst_table}'"
+        )
+
+    if tool_name == "spark":
+        script = BENCH_DIR / tool_cfg.get("script", "scripts/bench_spark.py")
+        rows_arg = f" --rows {rows}" if rows else ""
+        return (
+            f"BENCH_ROWS={rows or ''} SPARK_LOCAL_IP=127.0.0.1 {uv_python_command(script, '3.11')}"
+            f" --source-type {shlex.quote(src_type)}"
+            f" {uri_option('--source-uri', src_uri)}"
+            f" --source-table '{src_table}'"
+            f" --dest-type {shlex.quote(dst_type)}"
+            f" {uri_option('--dest-uri', dst_uri)}"
+            f" --dest-table '{dst_table}'"
+            f"{rows_arg}"
         )
 
     raise ValueError(f"Unknown tool: {tool_name}")
@@ -649,6 +666,7 @@ def run_benchmarks(
                 dst["uri"], dst_table,
                 src["type"], dst["type"],
                 src_name, dst_name,
+                rows,
             )
             names.append(tool_name)
             cmds.append(cmd)
@@ -939,6 +957,7 @@ def run_tool_once(
     dst_uri: str, dst_table: str,
     src_type: str, dst_type: str,
     src_cfg_name: str, dst_cfg_name: str,
+    rows: int | None = None,
 ) -> int:
     cmd = build_tool_command(
         tool_name, tool_cfg,
@@ -946,6 +965,7 @@ def run_tool_once(
         dst_uri, dst_table,
         src_type, dst_type,
         src_cfg_name, dst_cfg_name,
+        rows,
     )
     result = subprocess.run(
         ["bash", "-c", cmd],
@@ -1014,6 +1034,7 @@ def run_validation(
                 dst["uri"], dst_table,
                 src["type"], dst["type"],
                 src_name, dst_name,
+                rows,
             )
 
             if rc != 0:
@@ -1315,6 +1336,8 @@ def main():
             available_tools.append(tool_name)
         else:
             req = tool_cfg.get("requires", tool_cfg.get("binary", "?"))
+            if isinstance(req, list):
+                req = ", ".join(req)
             console.print(f"  [dim]Tool '{tool_name}' skipped ({req} not found)[/dim]")
 
     if not available_tools:
