@@ -4,6 +4,7 @@ package connredact
 import (
 	"errors"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -52,29 +53,36 @@ type redactedErr struct {
 func (e *redactedErr) Error() string { return e.msg }
 func (e *redactedErr) Unwrap() error { return e.err }
 
-func uriReplacements(uri string) []string {
+type replacement struct{ needle, label string }
+
+func uriReplacements(uri string) []replacement {
 	u, perr := url.Parse(uri)
 	if perr != nil {
 		return nil
 	}
-	var r []string
+	var r []replacement
 	if h := u.Hostname(); h != "" {
-		r = append(r, h, "<host>")
+		r = append(r, replacement{h, "<host>"})
 	}
 	if u.User != nil {
 		if name := u.User.Username(); name != "" {
-			r = append(r, name, "<user>")
+			r = append(r, replacement{name, "<user>"})
 		}
 		if pass, ok := u.User.Password(); ok && pass != "" {
-			r = append(r, pass, "<password>")
+			r = append(r, replacement{pass, "<password>"})
 		}
 	}
+	// Replace longest substrings first so that a needle which contains another
+	// (e.g. host "prod" inside password "prod_secret") doesn't get partially
+	// rewritten — which would prevent the longer match from firing and leak
+	// the tail of the password.
+	sort.Slice(r, func(i, j int) bool { return len(r[i].needle) > len(r[j].needle) })
 	return r
 }
 
-func applyReplacements(s string, repls []string) string {
-	for i := 0; i+1 < len(repls); i += 2 {
-		s = strings.ReplaceAll(s, repls[i], repls[i+1])
+func applyReplacements(s string, repls []replacement) string {
+	for _, r := range repls {
+		s = strings.ReplaceAll(s, r.needle, r.label)
 	}
 	return s
 }

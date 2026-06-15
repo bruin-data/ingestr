@@ -71,6 +71,18 @@ func TestRedact_NonPgxStripsURISubstrings(t *testing.T) {
 	}
 }
 
+// Greptile P2: if the password starts with the hostname (e.g. host "prod",
+// password "prod_secret"), naive in-order replacement rewrites the host first
+// and leaves the "_secret" tail visible. Longest-first ordering prevents that.
+func TestRedact_OverlappingHostAndPassword(t *testing.T) {
+	uri := "mysql://user:prod_secret@prod/db"
+	raw := errors.New("auth failed for prod_secret on host prod")
+	got := Redact(uri, raw).Error()
+	if strings.Contains(got, "prod_secret") || strings.Contains(got, "_secret") {
+		t.Errorf("password tail leaked: %s", got)
+	}
+}
+
 func TestRedact_KeepsDriverDetail(t *testing.T) {
 	uri := "mysql://leaky_user:hunter2@db.example.invalid:3306/leaky_db"
 	got := Redact(uri, errors.New("dial tcp: lookup db.example.invalid: no such host")).Error()
