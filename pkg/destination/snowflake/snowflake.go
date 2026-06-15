@@ -17,6 +17,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
@@ -45,7 +46,7 @@ func (d *SnowflakeDestination) Schemes() []string {
 func (d *SnowflakeDestination) Connect(ctx context.Context, uri string) error {
 	auth, err := sfauth.ParseURI(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse Snowflake URI: %w", err)
+		return fmt.Errorf("failed to parse Snowflake URI: %w", connredact.Redact(uri, err))
 	}
 
 	d.account = auth.Account
@@ -57,12 +58,12 @@ func (d *SnowflakeDestination) Connect(ctx context.Context, uri string) error {
 
 	dsn, err := auth.ToDSN()
 	if err != nil {
-		return fmt.Errorf("failed to create Snowflake DSN: %w", err)
+		return fmt.Errorf("failed to create Snowflake DSN: %w", connredact.Redact(uri, err))
 	}
 
 	db, err := sql.Open("snowflake", dsn)
 	if err != nil {
-		return fmt.Errorf("failed to open Snowflake connection: %w", err)
+		return fmt.Errorf("failed to open Snowflake connection: %w", connredact.Redact(uri, err))
 	}
 
 	db.SetMaxOpenConns(16)
@@ -71,7 +72,7 @@ func (d *SnowflakeDestination) Connect(ctx context.Context, uri string) error {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("failed to ping Snowflake: %w", err)
+		return fmt.Errorf("failed to ping Snowflake: %w", connredact.Redact(uri, err))
 	}
 
 	d.db = db

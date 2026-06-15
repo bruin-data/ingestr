@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -37,12 +38,12 @@ const defaultFetchSize = 100000
 func (s *HanaSource) Connect(ctx context.Context, uri string) error {
 	dsn, dbName, err := uriToDSN(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse HANA URI: %w", err)
+		return fmt.Errorf("failed to parse HANA URI: %w", connredact.Redact(uri, err))
 	}
 
 	connector, err := hdbdriver.NewDSNConnector(dsn)
 	if err != nil {
-		return fmt.Errorf("failed to create HANA connector: %w", err)
+		return fmt.Errorf("failed to create HANA connector: %w", connredact.Redact(uri, err))
 	}
 	connector.SetFetchSize(defaultFetchSize)
 	connector.SetBufferSize(1 << 20) // 1MB network read buffer
@@ -55,14 +56,14 @@ func (s *HanaSource) Connect(ctx context.Context, uri string) error {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("failed to ping HANA: %w", err)
+		return fmt.Errorf("failed to ping HANA: %w", connredact.Redact(uri, err))
 	}
 
 	if dbName != "" {
 		safeName := strings.ReplaceAll(dbName, "\"", "\"\"")
 		if _, err := db.ExecContext(ctx, fmt.Sprintf("SET SCHEMA \"%s\"", safeName)); err != nil {
 			_ = db.Close()
-			return fmt.Errorf("failed to set schema %s: %w", dbName, err)
+			return fmt.Errorf("failed to set schema %s: %w", dbName, connredact.Redact(uri, err))
 		}
 	}
 

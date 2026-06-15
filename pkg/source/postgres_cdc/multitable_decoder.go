@@ -9,6 +9,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -197,7 +198,7 @@ func (d *MultiTableDecoder) handleCommit() ([]DecodedBatch, error) {
 
 		batch, err := d.changesToBatch(changes, tableSchema)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert changes for table %s: %w", tableName, err)
+			return nil, fmt.Errorf("failed to convert changes for table %s: %w", tableName, connredact.Redact("", err))
 		}
 		if batch != nil {
 			batches = append(batches, DecodedBatch{

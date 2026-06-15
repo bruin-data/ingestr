@@ -10,6 +10,7 @@ import (
 
 	influxdb3 "github.com/InfluxCommunity/influxdb3-go/v2/influxdb3"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -58,7 +59,7 @@ func (s *InfluxDBSource) Connect(ctx context.Context, uri string) error {
 			Database:     bucket,
 		})
 		if err != nil {
-			return fmt.Errorf("failed to create InfluxDB v3 client: %w", err)
+			return fmt.Errorf("failed to create InfluxDB v3 client: %w", connredact.Redact(uri, err))
 		}
 		s.v3Client = client
 	} else {
@@ -72,10 +73,10 @@ func (s *InfluxDBSource) Connect(ctx context.Context, uri string) error {
 
 		ok, err := s.v2Client.Ping(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to ping InfluxDB: %w", err)
+			return fmt.Errorf("failed to ping InfluxDB: %w", connredact.Redact(uri, err))
 		}
 		if !ok {
-			return fmt.Errorf("InfluxDB server at %s is not reachable", hostURL)
+			return fmt.Errorf("InfluxDB server is not reachable")
 		}
 	}
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -67,7 +68,7 @@ func (r *Replicator) Start(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to start replication: %w", err)
+		return fmt.Errorf("failed to start replication: %w", connredact.Redact(r.source.uri, err))
 	}
 
 	r.started = true
@@ -124,7 +125,7 @@ func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.Record
 		if ctxWithTimeout.Err() != nil {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("failed to receive message: %w", err)
+		return nil, false, fmt.Errorf("failed to receive message: %w", connredact.Redact(r.source.uri, err))
 	}
 
 	if msg == nil {
@@ -141,7 +142,7 @@ func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.Record
 		case pglogrepl.PrimaryKeepaliveMessageByteID:
 			pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
 			if err != nil {
-				return nil, true, fmt.Errorf("failed to parse keepalive: %w", err)
+				return nil, true, fmt.Errorf("failed to parse keepalive: %w", connredact.Redact(r.source.uri, err))
 			}
 
 			if pkm.ReplyRequested {
@@ -155,12 +156,12 @@ func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.Record
 		case pglogrepl.XLogDataByteID:
 			xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
 			if err != nil {
-				return nil, true, fmt.Errorf("failed to parse xlog data: %w", err)
+				return nil, true, fmt.Errorf("failed to parse xlog data: %w", connredact.Redact(r.source.uri, err))
 			}
 
 			batch, err := r.decoder.Decode(xld.WALData, xld.WALStart)
 			if err != nil {
-				return nil, true, fmt.Errorf("failed to decode WAL data: %w", err)
+				return nil, true, fmt.Errorf("failed to decode WAL data: %w", connredact.Redact(r.source.uri, err))
 			}
 
 			if xld.WALStart > r.clientXLogPos {

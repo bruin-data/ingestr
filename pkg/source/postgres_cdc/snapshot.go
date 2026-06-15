@@ -11,6 +11,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -66,14 +67,14 @@ func (s *Snapshot) Execute(ctx context.Context, results chan<- source.RecordBatc
 	// Check if slot already exists (from a previous failed run)
 	existingLSN, exists, err := checkSlotExists(ctx, s.source.queryPool, s.slotName)
 	if err != nil {
-		return 0, "", fmt.Errorf("failed to check existing slot: %w", err)
+		return 0, "", fmt.Errorf("failed to check existing slot: %w", connredact.Redact(s.source.uri, err))
 	}
 
 	if exists {
 		// Slot exists from previous run - drop it and recreate to get fresh snapshot
 		config.Debug("[CDC] Dropping existing slot %s to get fresh snapshot", s.slotName)
 		if err := s.dropSlot(ctx); err != nil {
-			return 0, "", fmt.Errorf("failed to drop existing slot: %w", err)
+			return 0, "", fmt.Errorf("failed to drop existing slot: %w", connredact.Redact(s.source.uri, err))
 		}
 		config.Debug("[CDC] Previous slot LSN was: %s", existingLSN)
 	}
@@ -94,12 +95,12 @@ func (s *Snapshot) Execute(ctx context.Context, results chan<- source.RecordBatc
 		},
 	)
 	if err != nil {
-		return 0, "", fmt.Errorf("failed to create replication slot: %w", err)
+		return 0, "", fmt.Errorf("failed to create replication slot: %w", connredact.Redact(s.source.uri, err))
 	}
 
 	snapshotLSN, err := pglogrepl.ParseLSN(result.ConsistentPoint)
 	if err != nil {
-		return 0, "", fmt.Errorf("failed to parse LSN: %w", err)
+		return 0, "", fmt.Errorf("failed to parse LSN: %w", connredact.Redact(s.source.uri, err))
 	}
 
 	config.Debug("[CDC] Persistent replication slot created: %s, LSN: %s, Snapshot: %s",
@@ -107,7 +108,7 @@ func (s *Snapshot) Execute(ctx context.Context, results chan<- source.RecordBatc
 
 	// Use the snapshot for consistent read
 	if err := s.readWithSnapshot(ctx, result.SnapshotName, snapshotLSN, results, opts); err != nil {
-		return 0, "", fmt.Errorf("failed to read with snapshot: %w", err)
+		return 0, "", fmt.Errorf("failed to read with snapshot: %w", connredact.Redact(s.source.uri, err))
 	}
 
 	return snapshotLSN, s.slotName, nil
@@ -143,7 +144,7 @@ func (s *Snapshot) dropSlot(ctx context.Context) error {
 func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
 	conn, err := s.source.queryPool.Acquire(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to acquire connection: %w", err)
+		return fmt.Errorf("failed to acquire connection: %w", connredact.Redact(s.source.uri, err))
 	}
 	defer conn.Release()
 
@@ -152,14 +153,14 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 		IsoLevel: pgx.RepeatableRead,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", connredact.Redact(s.source.uri, err))
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Set transaction snapshot
 	_, err = tx.Exec(ctx, fmt.Sprintf("SET TRANSACTION SNAPSHOT '%s'", snapshotName))
 	if err != nil {
-		return fmt.Errorf("failed to set transaction snapshot: %w", err)
+		return fmt.Errorf("failed to set transaction snapshot: %w", connredact.Redact(s.source.uri, err))
 	}
 
 	config.Debug("[CDC] Reading snapshot data from %s", s.tableName)
@@ -176,7 +177,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 
 	rows, err := tx.Query(ctx, query)
 	if err != nil {
-		return fmt.Errorf("failed to query: %w", err)
+		return fmt.Errorf("failed to query: %w", connredact.Redact(s.source.uri, err))
 	}
 	defer func() { rows.Close() }()
 
@@ -197,7 +198,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	for {
 		record, count, err := s.rowsToBatch(rows, arrowSchema, sourceColumns, batchSize, lsnStr, syncedAt)
 		if err != nil {
-			return fmt.Errorf("failed to convert rows to batch: %w", err)
+			return fmt.Errorf("failed to convert rows to batch: %w", connredact.Redact(s.source.uri, err))
 		}
 
 		if count == 0 {
@@ -231,7 +232,7 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 			for _, b := range builders {
 				b.Release()
 			}
-			return nil, 0, fmt.Errorf("failed to get values: %w", err)
+			return nil, 0, fmt.Errorf("failed to get values: %w", connredact.Redact("", err))
 		}
 
 		// Append source column values
@@ -262,7 +263,7 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 		for _, b := range builders {
 			b.Release()
 		}
-		return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+		return nil, 0, fmt.Errorf("error iterating rows: %w", connredact.Redact("", err))
 	}
 
 	arrays := make([]arrow.Array, len(builders))

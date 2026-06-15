@@ -14,6 +14,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -40,24 +41,24 @@ func (d *CrateDBDestination) Connect(ctx context.Context, uri string) error {
 
 	poolConfig, err := pgxpool.ParseConfig(pgURI)
 	if err != nil {
-		return fmt.Errorf("failed to parse connection string: %w", err)
+		return fmt.Errorf("failed to parse connection string: %w", connredact.Redact(uri, err))
 	}
 
 	host := poolConfig.ConnConfig.Host
 	password := poolConfig.ConnConfig.Password
 	if password == "" && host != "localhost" && host != "127.0.0.1" && host != "::1" {
-		return fmt.Errorf("password is required for non-local CrateDB connections (host: %s)", host)
+		return fmt.Errorf("password is required for non-local CrateDB connections")
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
-		return fmt.Errorf("failed to connect to cratedb: %w", err)
+		return fmt.Errorf("failed to connect to cratedb: %w", connredact.Redact(uri, err))
 	}
 
 	var one int
 	if err := pool.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
 		pool.Close()
-		return fmt.Errorf("failed to ping cratedb: %w", err)
+		return fmt.Errorf("failed to ping cratedb: %w", connredact.Redact(uri, err))
 	}
 
 	d.pool = pool
@@ -79,7 +80,7 @@ func (d *CrateDBDestination) PrepareTable(ctx context.Context, opts destination.
 
 	schemaName, _ := parseSchemaTable(opts.Table)
 	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
-		return fmt.Errorf("failed to ensure schema exists: %w", err)
+		return fmt.Errorf("failed to ensure schema exists: %w", connredact.Redact(d.uri, err))
 	}
 
 	if opts.DropFirst {
@@ -87,7 +88,7 @@ func (d *CrateDBDestination) PrepareTable(ctx context.Context, opts destination.
 		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(opts.Table))
 		if _, err := d.pool.Exec(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
-			return fmt.Errorf("failed to drop table: %w", err)
+			return fmt.Errorf("failed to drop table: %w", connredact.Redact(d.uri, err))
 		}
 		config.Debug("[CRATEDB] DROP TABLE took %v", time.Since(startDrop))
 	}
@@ -96,7 +97,7 @@ func (d *CrateDBDestination) PrepareTable(ctx context.Context, opts destination.
 	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, opts.PrimaryKeys)
 	if _, err := d.pool.Exec(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
-		return fmt.Errorf("failed to create table: %w", err)
+		return fmt.Errorf("failed to create table: %w", connredact.Redact(d.uri, err))
 	}
 	config.Debug("[CRATEDB] CREATE TABLE took %v", time.Since(startCreate))
 
@@ -231,7 +232,7 @@ func (d *CrateDBDestination) writeRecordBatch(ctx context.Context, record arrow.
 
 		if _, err := d.pool.Exec(ctx, insertSQL, columnArrays...); err != nil {
 			config.LogFailedQuery(insertSQL, err)
-			return written, fmt.Errorf("failed to insert rows: %w", err)
+			return written, fmt.Errorf("failed to insert rows: %w", connredact.Redact(d.uri, err))
 		}
 
 		written += int64(batchRows)
@@ -291,7 +292,7 @@ func (d *CrateDBDestination) MergeTable(ctx context.Context, opts destination.Me
 
 	if _, err := d.pool.Exec(ctx, upsertSQL); err != nil {
 		config.LogFailedQuery(upsertSQL, err)
-		return fmt.Errorf("failed to upsert records: %w", err)
+		return fmt.Errorf("failed to upsert records: %w", connredact.Redact(d.uri, err))
 	}
 
 	d.refreshTable(ctx, opts.TargetTable)
@@ -367,7 +368,7 @@ func (d *CrateDBDestination) mergeCDC(ctx context.Context, quotedTargetTable, qu
 		config.Debug("[CRATEDB MERGE] Executing CDC statement: %s", sql)
 		if _, err := d.pool.Exec(ctx, sql); err != nil {
 			config.LogFailedQuery(sql, err)
-			return fmt.Errorf("failed to apply CDC merge: %w", err)
+			return fmt.Errorf("failed to apply CDC merge: %w", connredact.Redact(d.uri, err))
 		}
 	}
 	return nil
@@ -459,7 +460,7 @@ func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD
 
 		if _, err := d.pool.Exec(ctx, updateSQL, opts.Timestamp); err != nil {
 			config.LogFailedQuery(updateSQL, err)
-			return fmt.Errorf("failed to close changed records: %w", err)
+			return fmt.Errorf("failed to close changed records: %w", connredact.Redact(d.uri, err))
 		}
 	}
 
@@ -483,7 +484,7 @@ func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD
 
 		if _, err := d.pool.Exec(ctx, softDeleteSQL, opts.Timestamp); err != nil {
 			config.LogFailedQuery(softDeleteSQL, err)
-			return fmt.Errorf("failed to soft-delete missing records: %w", err)
+			return fmt.Errorf("failed to soft-delete missing records: %w", connredact.Redact(d.uri, err))
 		}
 	}
 
@@ -519,7 +520,7 @@ func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD
 
 	if _, err := d.pool.Exec(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert new versions: %w", err)
+		return fmt.Errorf("failed to insert new versions: %w", connredact.Redact(d.uri, err))
 	}
 
 	d.refreshTable(ctx, opts.TargetTable)
@@ -533,7 +534,7 @@ func (d *CrateDBDestination) DropTable(ctx context.Context, table string) error 
 	_, err := d.pool.Exec(ctx, dropSQL)
 	if err != nil {
 		config.LogFailedQuery(dropSQL, err)
-		return fmt.Errorf("failed to drop table %s: %w", table, err)
+		return fmt.Errorf("failed to drop table %s: %w", table, connredact.Redact(d.uri, err))
 	}
 	config.Debug("[CRATEDB] Dropped table: %s", table)
 	return nil
@@ -545,7 +546,7 @@ func (d *CrateDBDestination) TruncateTable(ctx context.Context, table string) er
 	deleteSQL := fmt.Sprintf("DELETE FROM %s", destination.QuoteTableName(table))
 	if _, err := d.pool.Exec(ctx, deleteSQL); err != nil {
 		config.LogFailedQuery(deleteSQL, err)
-		return fmt.Errorf("failed to truncate table %s: %w", table, err)
+		return fmt.Errorf("failed to truncate table %s: %w", table, connredact.Redact(d.uri, err))
 	}
 	d.refreshTable(ctx, table)
 	config.Debug("[CRATEDB] Truncated table: %s", table)
@@ -575,7 +576,7 @@ func (d *CrateDBDestination) GetTableSchema(ctx context.Context, table string) (
 
 	rows, err := d.pool.Query(ctx, query, schemaName, tableName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query table schema: %w", err)
+		return nil, fmt.Errorf("failed to query table schema: %w", connredact.Redact(d.uri, err))
 	}
 	defer rows.Close()
 
@@ -583,7 +584,7 @@ func (d *CrateDBDestination) GetTableSchema(ctx context.Context, table string) (
 	for rows.Next() {
 		var colName, dataType, isNullable string
 		if err := rows.Scan(&colName, &dataType, &isNullable); err != nil {
-			return nil, fmt.Errorf("failed to scan column: %w", err)
+			return nil, fmt.Errorf("failed to scan column: %w", connredact.Redact(d.uri, err))
 		}
 
 		col := schema.Column{
@@ -595,7 +596,7 @@ func (d *CrateDBDestination) GetTableSchema(ctx context.Context, table string) (
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
+		return nil, fmt.Errorf("error iterating rows: %w", connredact.Redact(d.uri, err))
 	}
 
 	if len(columns) == 0 {

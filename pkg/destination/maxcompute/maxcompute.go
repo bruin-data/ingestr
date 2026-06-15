@@ -18,6 +18,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/maxcomputeutil"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -44,12 +45,12 @@ func (d *MaxComputeDestination) Schemes() []string {
 func (d *MaxComputeDestination) Connect(ctx context.Context, rawURI string) error {
 	cfg, opts, err := maxcomputeutil.ParseURI(rawURI)
 	if err != nil {
-		return fmt.Errorf("failed to parse MaxCompute URI: %w", err)
+		return fmt.Errorf("failed to parse MaxCompute URI: %w", connredact.Redact(rawURI, err))
 	}
 
 	db, err := sql.Open("odps", cfg.FormatDsn())
 	if err != nil {
-		return fmt.Errorf("failed to open MaxCompute connection: %w", err)
+		return fmt.Errorf("failed to open MaxCompute connection: %w", connredact.Redact(rawURI, err))
 	}
 
 	odpsIns := cfg.GenOdps()

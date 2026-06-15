@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -35,12 +36,12 @@ func (d *MySQLDestination) Schemes() []string {
 func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 	dsn, database, err := uriToDSN(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse MySQL URI: %w", err)
+		return fmt.Errorf("failed to parse MySQL URI: %w", connredact.Redact(uri, err))
 	}
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		return fmt.Errorf("failed to open MySQL connection: %w", err)
+		return fmt.Errorf("failed to open MySQL connection: %w", connredact.Redact(uri, err))
 	}
 
 	db.SetMaxOpenConns(10)
@@ -49,7 +50,7 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("failed to ping MySQL: %w", err)
+		return fmt.Errorf("failed to ping MySQL: %w", connredact.Redact(uri, err))
 	}
 
 	d.db = db

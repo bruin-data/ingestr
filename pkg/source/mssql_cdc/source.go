@@ -14,6 +14,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -77,17 +78,17 @@ func (s *MSSQLCDCSource) Schemes() []string {
 func (s *MSSQLCDCSource) Connect(ctx context.Context, uri string) error {
 	cdcConfig, normalizedURI, err := parseURIConfig(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse SQL Server CDC config: %w", err)
+		return fmt.Errorf("failed to parse SQL Server CDC config: %w", connredact.Redact(uri, err))
 	}
 
 	connStr, driverName, err := mssql.URIToConnString(normalizedURI)
 	if err != nil {
-		return fmt.Errorf("failed to parse SQL Server URI: %w", err)
+		return fmt.Errorf("failed to parse SQL Server URI: %w", connredact.Redact(uri, err))
 	}
 
 	db, err := sql.Open(driverName, connStr)
 	if err != nil {
-		return fmt.Errorf("failed to open SQL Server connection: %w", err)
+		return fmt.Errorf("failed to open SQL Server connection: %w", connredact.Redact(uri, err))
 	}
 
 	db.SetMaxOpenConns(10)
@@ -96,13 +97,13 @@ func (s *MSSQLCDCSource) Connect(ctx context.Context, uri string) error {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("failed to ping SQL Server: %w", err)
+		return fmt.Errorf("failed to ping SQL Server: %w", connredact.Redact(uri, err))
 	}
 
 	var cdcEnabled bool
 	if err := db.QueryRowContext(ctx, "SELECT CAST(is_cdc_enabled AS bit) FROM sys.databases WHERE database_id = DB_ID()").Scan(&cdcEnabled); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("failed to check SQL Server CDC status: %w", err)
+		return fmt.Errorf("failed to check SQL Server CDC status: %w", connredact.Redact(uri, err))
 	}
 	if !cdcEnabled {
 		_ = db.Close()

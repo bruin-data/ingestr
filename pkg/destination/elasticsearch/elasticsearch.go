@@ -19,6 +19,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -76,12 +77,12 @@ func (d *ElasticsearchDestination) Connect(ctx context.Context, uri string) erro
 
 	client, err := elasticsearch.NewClient(esCfg)
 	if err != nil {
-		return fmt.Errorf("failed to create elasticsearch client: %w", err)
+		return fmt.Errorf("failed to create elasticsearch client: %w", connredact.Redact(uri, err))
 	}
 
 	res, err := client.Info(client.Info.WithContext(ctx))
 	if err != nil {
-		return fmt.Errorf("failed to connect to elasticsearch: %w", err)
+		return fmt.Errorf("failed to connect to elasticsearch: %w", connredact.Redact(uri, err))
 	}
 	defer func() { _ = res.Body.Close() }()
 

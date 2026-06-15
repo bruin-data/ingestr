@@ -9,6 +9,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -48,19 +49,19 @@ func (s *ADBCSource) Connect(ctx context.Context, uri string) error {
 	// 2. Build connection string using dialect
 	connStr, err := s.dialect.BuildConnectionString(uri)
 	if err != nil {
-		return fmt.Errorf("failed to build connection string: %w", err)
+		return fmt.Errorf("failed to build connection string: %w", connredact.Redact(uri, err))
 	}
 
 	// 3. Open connection via ADBC sqldriver
 	db, err := sql.Open(ADBCDriverName, connStr)
 	if err != nil {
-		return fmt.Errorf("failed to open %s connection: %w", s.dialect.Name(), err)
+		return fmt.Errorf("failed to open %s connection: %w", s.dialect.Name(), connredact.Redact(uri, err))
 	}
 
 	// 4. Verify connection
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("failed to ping %s: %w", s.dialect.Name(), err)
+		return fmt.Errorf("failed to ping %s: %w", s.dialect.Name(), connredact.Redact(uri, err))
 	}
 
 	s.db = db

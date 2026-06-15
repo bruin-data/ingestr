@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -48,23 +49,23 @@ func (s *PostgresCDCSource) Schemes() []string {
 func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	cdcConfig, normalizedURI, err := parseURIConfig(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse CDC config: %w", err)
+		return fmt.Errorf("failed to parse CDC config: %w", connredact.Redact(uri, err))
 	}
 
 	// Create query pool for regular SQL operations
 	pgConfig, err := pgxpool.ParseConfig(normalizedURI)
 	if err != nil {
-		return fmt.Errorf("failed to parse connection string: %w", err)
+		return fmt.Errorf("failed to parse connection string: %w", connredact.Redact(uri, err))
 	}
 
 	queryPool, err := pgxpool.NewWithConfig(ctx, pgConfig)
 	if err != nil {
-		return fmt.Errorf("failed to connect to postgres: %w", err)
+		return fmt.Errorf("failed to connect to postgres: %w", connredact.Redact(uri, err))
 	}
 
 	if err := queryPool.Ping(ctx); err != nil {
 		queryPool.Close()
-		return fmt.Errorf("failed to ping postgres: %w", err)
+		return fmt.Errorf("failed to ping postgres: %w", connredact.Redact(uri, err))
 	}
 
 	// Auto-create publication if not specified
@@ -72,7 +73,7 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 		cdcConfig.Publication = "ingestr_publication"
 		if err := ensurePublicationExists(ctx, queryPool, cdcConfig.Publication); err != nil {
 			queryPool.Close()
-			return fmt.Errorf("failed to create publication: %w", err)
+			return fmt.Errorf("failed to create publication: %w", connredact.Redact(uri, err))
 		}
 	}
 
@@ -81,7 +82,7 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	replConn, err := pgconn.Connect(ctx, replConnStr)
 	if err != nil {
 		queryPool.Close()
-		return fmt.Errorf("failed to create replication connection: %w", err)
+		return fmt.Errorf("failed to create replication connection: %w", connredact.Redact(uri, err))
 	}
 
 	s.queryPool = queryPool
@@ -97,7 +98,7 @@ func (s *PostgresCDCSource) Close(ctx context.Context) error {
 
 	if s.replConn != nil {
 		if err := s.replConn.Close(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close replication connection: %w", err))
+			errs = append(errs, fmt.Errorf("failed to close replication connection: %w", connredact.Redact(s.uri, err)))
 		}
 	}
 
@@ -138,7 +139,7 @@ func parseURIConfig(uri string) (CDCConfig, string, error) {
 
 	parsed, err := url.Parse(normalizedURI)
 	if err != nil {
-		return cfg, "", fmt.Errorf("failed to parse URI: %w", err)
+		return cfg, "", fmt.Errorf("failed to parse URI: %w", connredact.Redact(uri, err))
 	}
 
 	query := parsed.Query()
@@ -172,7 +173,7 @@ func ensurePublicationExists(ctx context.Context, pool *pgxpool.Pool, pubName st
 	var exists bool
 	err := pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = $1)", pubName).Scan(&exists)
 	if err != nil {
-		return fmt.Errorf("failed to check publication existence: %w", err)
+		return fmt.Errorf("failed to check publication existence: %w", connredact.Redact("", err))
 	}
 
 	if exists {
@@ -191,7 +192,7 @@ func ensurePublicationExists(ctx context.Context, pool *pgxpool.Pool, pubName st
 			config.Debug("[CDC] Publication %s was created by another instance (concurrent race)", pubName)
 			return nil
 		}
-		return fmt.Errorf("failed to create publication: %w", err)
+		return fmt.Errorf("failed to create publication: %w", connredact.Redact("", err))
 	}
 
 	config.Debug("[CDC] Publication %s created successfully", pubName)
@@ -208,7 +209,7 @@ func buildReplicationConnString(uri string) string {
 	query.Set("replication", "database")
 	parsed.RawQuery = query.Encode()
 
-	config.Debug("[CDC] Replication connection string: %s", parsed.String())
+	config.Debug("[CDC] Built replication connection string (details redacted)")
 
 	return parsed.String()
 }
@@ -228,7 +229,7 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 	var pubAllTables bool
 	err := s.queryPool.QueryRow(ctx, "SELECT puballtables FROM pg_publication WHERE pubname = $1", s.cdcConfig.Publication).Scan(&pubAllTables)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check publication type: %w", err)
+		return nil, fmt.Errorf("failed to check publication type: %w", connredact.Redact(s.uri, err))
 	}
 
 	config.Debug("[CDC] Publication %s puballtables=%v", s.cdcConfig.Publication, pubAllTables)
@@ -259,7 +260,7 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 		rows, err = s.queryPool.Query(ctx, query, s.cdcConfig.Publication)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to query publication tables: %w", err)
+		return nil, fmt.Errorf("failed to query publication tables: %w", connredact.Redact(s.uri, err))
 	}
 	defer func() { rows.Close() }()
 
@@ -267,7 +268,7 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 	for rows.Next() {
 		var schemaName, tableName string
 		if err := rows.Scan(&schemaName, &tableName); err != nil {
-			return nil, fmt.Errorf("failed to scan row: %w", err)
+			return nil, fmt.Errorf("failed to scan row: %w", connredact.Redact(s.uri, err))
 		}
 
 		fullName := tableName
@@ -278,7 +279,7 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 		// Get schema for this table
 		tableSchema, err := getTableSchema(ctx, s.queryPool, fullName)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get schema for table %s: %w", fullName, err)
+			return nil, fmt.Errorf("failed to get schema for table %s: %w", fullName, connredact.Redact(s.uri, err))
 		}
 
 		// Add CDC metadata columns
@@ -295,7 +296,7 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
+		return nil, fmt.Errorf("error iterating rows: %w", connredact.Redact(s.uri, err))
 	}
 
 	if len(tables) == 0 {

@@ -18,6 +18,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -43,17 +44,17 @@ func (d *ClickHouseDestination) Schemes() []string {
 func (d *ClickHouseDestination) Connect(ctx context.Context, uri string) error {
 	opts, database, engineType, engineSettings, err := parseClickHouseURI(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse ClickHouse URI: %w", err)
+		return fmt.Errorf("failed to parse ClickHouse URI: %w", connredact.Redact(uri, err))
 	}
 
 	conn, err := clickhouse.Open(opts)
 	if err != nil {
-		return fmt.Errorf("failed to open ClickHouse connection: %w", err)
+		return fmt.Errorf("failed to open ClickHouse connection: %w", connredact.Redact(uri, err))
 	}
 
 	if err := conn.Ping(ctx); err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("failed to ping ClickHouse: %w", err)
+		return fmt.Errorf("failed to ping ClickHouse: %w", connredact.Redact(uri, err))
 	}
 
 	d.conn = conn

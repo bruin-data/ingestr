@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -38,7 +39,7 @@ func (s *RabbitMQSource) Schemes() []string {
 func (s *RabbitMQSource) Connect(ctx context.Context, uri string) error {
 	conn, err := amqp.Dial(uri)
 	if err != nil {
-		return fmt.Errorf("failed to connect to RabbitMQ: %w", err)
+		return fmt.Errorf("failed to connect to RabbitMQ: %w", connredact.Redact(uri, err))
 	}
 
 	s.conn = conn

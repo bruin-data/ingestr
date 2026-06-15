@@ -16,6 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/internal/cassandrautil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -44,13 +45,13 @@ func (d *CassandraDestination) Connect(ctx context.Context, uri string) error {
 
 	session, err := cassandrautil.NewCluster(cfg).CreateSession()
 	if err != nil {
-		return fmt.Errorf("failed to open Cassandra connection: %w", err)
+		return fmt.Errorf("failed to open Cassandra connection: %w", connredact.Redact(uri, err))
 	}
 
 	var version string
 	if err := session.Query("SELECT release_version FROM system.local").ScanContext(ctx, &version); err != nil {
 		session.Close()
-		return fmt.Errorf("failed to ping Cassandra: %w", err)
+		return fmt.Errorf("failed to ping Cassandra: %w", connredact.Redact(uri, err))
 	}
 
 	d.session = session

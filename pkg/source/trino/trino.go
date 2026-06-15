@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -36,17 +37,17 @@ func (s *TrinoSource) Schemes() []string {
 func (s *TrinoSource) Connect(ctx context.Context, uri string) error {
 	dsn, catalog, schemaName, err := parseTrinoURI(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse Trino URI: %w", err)
+		return fmt.Errorf("failed to parse Trino URI: %w", connredact.Redact(uri, err))
 	}
 
 	db, err := sql.Open("trino", dsn)
 	if err != nil {
-		return fmt.Errorf("failed to open Trino connection: %w", err)
+		return fmt.Errorf("failed to open Trino connection: %w", connredact.Redact(uri, err))
 	}
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("failed to ping Trino: %w", err)
+		return fmt.Errorf("failed to ping Trino: %w", connredact.Redact(uri, err))
 	}
 
 	s.db = db

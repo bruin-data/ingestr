@@ -8,6 +8,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/source/postgres"
@@ -36,7 +37,7 @@ func NewCDCTable(src *PostgresCDCSource, req source.TableRequest) (*CDCTable, er
 	// Fetch schema from database
 	tableSchema, err := getTableSchema(ctx, src.queryPool, req.Name)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get schema: %w", err)
+		return nil, fmt.Errorf("failed to get schema: %w", connredact.Redact(src.uri, err))
 	}
 
 	// Add CDC metadata columns to schema
@@ -102,7 +103,7 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 		// Start reading
 		batches, err := reader.Read(ctx, opts)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to start CDC read: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to start CDC read: %w", connredact.Redact(t.source.uri, err))}
 			return
 		}
 
@@ -147,7 +148,7 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 
 	rows, err := pool.Query(ctx, query, schemaName, tableName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query schema: %w", err)
+		return nil, fmt.Errorf("failed to query schema: %w", connredact.Redact("", err))
 	}
 	defer func() { rows.Close() }()
 
@@ -157,7 +158,7 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 		var numericPrecision, numericScale, charMaxLen *int
 
 		if err := rows.Scan(&columnName, &dataType, &isNullable, &numericPrecision, &numericScale, &charMaxLen, &udtName); err != nil {
-			return nil, fmt.Errorf("failed to scan row: %w", err)
+			return nil, fmt.Errorf("failed to scan row: %w", connredact.Redact("", err))
 		}
 
 		pgType := dataType
@@ -197,7 +198,7 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
+		return nil, fmt.Errorf("error iterating rows: %w", connredact.Redact("", err))
 	}
 
 	if len(columns) == 0 {

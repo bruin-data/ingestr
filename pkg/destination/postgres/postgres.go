@@ -13,6 +13,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -45,17 +46,17 @@ func (d *PostgresDestination) Connect(ctx context.Context, uri string) error {
 
 	config, err := pgxpool.ParseConfig(normalizedURI)
 	if err != nil {
-		return fmt.Errorf("failed to parse connection string: %w", err)
+		return fmt.Errorf("failed to parse connection string: %w", connredact.Redact(uri, err))
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
-		return fmt.Errorf("failed to connect to postgres: %w", err)
+		return fmt.Errorf("failed to connect to postgres: %w", connredact.Redact(uri, err))
 	}
 
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return fmt.Errorf("failed to ping postgres: %w", err)
+		return fmt.Errorf("failed to ping postgres: %w", connredact.Redact(uri, err))
 	}
 
 	d.pool = pool
@@ -77,7 +78,7 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 
 	schemaName, _ := parseSchemaTable(opts.Table)
 	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
-		return fmt.Errorf("failed to ensure schema exists: %w", err)
+		return fmt.Errorf("failed to ensure schema exists: %w", connredact.Redact(d.uri, err))
 	}
 
 	if opts.DropFirst {
@@ -85,7 +86,7 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(opts.Table))
 		if _, err := d.pool.Exec(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
-			return fmt.Errorf("failed to drop table: %w", err)
+			return fmt.Errorf("failed to drop table: %w", connredact.Redact(d.uri, err))
 		}
 		config.Debug("[DEST] DROP TABLE took %v", time.Since(startDrop))
 	}
@@ -94,13 +95,13 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, opts.PrimaryKeys)
 	if _, err := d.pool.Exec(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
-		return fmt.Errorf("failed to create table: %w", err)
+		return fmt.Errorf("failed to create table: %w", connredact.Redact(d.uri, err))
 	}
 	config.Debug("[DEST] CREATE TABLE took %v", time.Since(startCreate))
 
 	if !opts.DropFirst && len(opts.PrimaryKeys) > 0 {
 		if err := d.ensurePrimaryKey(ctx, opts.Table, opts.PrimaryKeys); err != nil {
-			return fmt.Errorf("failed to ensure primary key: %w", err)
+			return fmt.Errorf("failed to ensure primary key: %w", connredact.Redact(d.uri, err))
 		}
 	}
 
@@ -118,7 +119,7 @@ func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, table string
 			AND constraint_type = 'PRIMARY KEY'
 		)`, schemaName, tableName).Scan(&hasPK)
 	if err != nil {
-		return fmt.Errorf("failed to check primary key: %w", err)
+		return fmt.Errorf("failed to check primary key: %w", connredact.Redact(d.uri, err))
 	}
 	if hasPK {
 		return nil
@@ -131,7 +132,7 @@ func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, table string
 	alterSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", quoted, strings.Join(quotedKeys, ", "))
 	if _, err := d.pool.Exec(ctx, alterSQL); err != nil {
 		config.LogFailedQuery(alterSQL, err)
-		return fmt.Errorf("failed to add primary key: %w", err)
+		return fmt.Errorf("failed to add primary key: %w", connredact.Redact(d.uri, err))
 	}
 	config.Debug("[DEST] Added PRIMARY KEY to existing table %s", table)
 	return nil
@@ -149,7 +150,7 @@ func (d *PostgresDestination) ensureSchemaExists(ctx context.Context, schemaName
 	if err := d.pool.QueryRow(ctx,
 		"SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)",
 		schemaName).Scan(&exists); err != nil {
-		return fmt.Errorf("failed to check if schema %s exists: %w", schemaName, err)
+		return fmt.Errorf("failed to check if schema %s exists: %w", schemaName, connredact.Redact(d.uri, err))
 	}
 	if exists {
 		return nil
@@ -165,7 +166,7 @@ func (d *PostgresDestination) ensureSchemaExists(ctx context.Context, schemaName
 			return nil
 		}
 		config.LogFailedQuery(createSchemaSQL, err)
-		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
+		return fmt.Errorf("failed to create schema %s: %w", schemaName, connredact.Redact(d.uri, err))
 	}
 	config.Debug("[DEST] Ensured schema exists: %s", schemaName)
 	return nil
@@ -225,7 +226,7 @@ func (d *PostgresDestination) Write(ctx context.Context, records <-chan source.R
 		record.Release()
 
 		if err != nil {
-			return fmt.Errorf("failed to copy data: %w", err)
+			return fmt.Errorf("failed to copy data: %w", connredact.Redact(d.uri, err))
 		}
 
 		totalRows += copyCount
@@ -361,7 +362,7 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", connredact.Redact(d.uri, err))
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -373,35 +374,35 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 		// Replace strategy only PrepareTables the staging side, so the target
 		// schema may not exist yet. Ensure it before SET SCHEMA.
 		if err := d.ensureSchemaExists(ctx, targetSchema); err != nil {
-			return fmt.Errorf("failed to ensure target schema exists: %w", err)
+			return fmt.Errorf("failed to ensure target schema exists: %w", connredact.Redact(d.uri, err))
 		}
 		setSchemaSQL := fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s",
 			destination.QuoteTableName(stagingTable),
 			destination.QuoteIdentifier(targetSchema))
 		if _, err = tx.Exec(ctx, setSchemaSQL); err != nil {
 			config.LogFailedQuery(setSchemaSQL, err)
-			return fmt.Errorf("failed to move staging table to target schema: %w", err)
+			return fmt.Errorf("failed to move staging table to target schema: %w", connredact.Redact(d.uri, err))
 		}
 		stagingTable = targetSchema + "." + stagingName
 	}
 
 	_, err = tx.Exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", destination.QuoteTableName(targetTable), destination.QuoteIdentifier(oldName)))
 	if err != nil {
-		return fmt.Errorf("failed to rename existing target table %s: %w", targetTable, err)
+		return fmt.Errorf("failed to rename existing target table %s: %w", targetTable, connredact.Redact(d.uri, err))
 	}
 
 	renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", destination.QuoteTableName(stagingTable), destination.QuoteIdentifier(targetName))
 	if _, err = tx.Exec(ctx, renameSQL); err != nil {
 		config.LogFailedQuery(renameSQL, err)
-		return fmt.Errorf("failed to rename staging to target: %w", err)
+		return fmt.Errorf("failed to rename staging to target: %w", connredact.Redact(d.uri, err))
 	}
 
 	if _, err = tx.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(oldTable))); err != nil {
-		return fmt.Errorf("failed to drop old table %s: %w", oldTable, err)
+		return fmt.Errorf("failed to drop old table %s: %w", oldTable, connredact.Redact(d.uri, err))
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit swap: %w", err)
+		return fmt.Errorf("failed to commit swap: %w", connredact.Redact(d.uri, err))
 	}
 
 	config.Debug("[DEST] Table swap completed in %v", time.Since(startSwap))
@@ -475,7 +476,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 	// Begin transaction for atomic merge
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", connredact.Redact(d.uri, err))
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -536,7 +537,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 		if _, err := tx.Exec(ctx, upsertSQL); err != nil {
 			config.LogFailedQuery(upsertSQL, err)
-			return fmt.Errorf("failed to upsert non-deleted records: %w", err)
+			return fmt.Errorf("failed to upsert non-deleted records: %w", connredact.Redact(d.uri, err))
 		}
 
 		// Step 2: Mark deletes only when the latest change is a delete
@@ -554,7 +555,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 		if _, err := tx.Exec(ctx, updateDeletedSQL); err != nil {
 			config.LogFailedQuery(updateDeletedSQL, err)
-			return fmt.Errorf("failed to update deleted records: %w", err)
+			return fmt.Errorf("failed to update deleted records: %w", connredact.Redact(d.uri, err))
 		}
 	} else {
 		// Non-CDC mode: efficient upsert using INSERT ... ON CONFLICT.
@@ -582,12 +583,12 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 		if _, err := tx.Exec(ctx, upsertSQL); err != nil {
 			config.LogFailedQuery(upsertSQL, err)
-			return fmt.Errorf("failed to upsert records: %w", err)
+			return fmt.Errorf("failed to upsert records: %w", connredact.Redact(d.uri, err))
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return fmt.Errorf("failed to commit transaction: %w", connredact.Redact(d.uri, err))
 	}
 
 	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
@@ -602,7 +603,7 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", connredact.Redact(d.uri, err))
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -613,7 +614,7 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 	config.Debug("[DELETE+INSERT] Locking target table: %s", lockSQL)
 	if _, err := tx.Exec(ctx, lockSQL); err != nil {
 		config.LogFailedQuery(lockSQL, err)
-		return fmt.Errorf("failed to lock target table: %w", err)
+		return fmt.Errorf("failed to lock target table: %w", connredact.Redact(d.uri, err))
 	}
 
 	deleteSQL := fmt.Sprintf(
@@ -624,7 +625,7 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 
 	if _, err := tx.Exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
 		config.LogFailedQuery(deleteSQL, err)
-		return fmt.Errorf("failed to delete records: %w", err)
+		return fmt.Errorf("failed to delete records: %w", connredact.Redact(d.uri, err))
 	}
 
 	colList := strings.Join(quotedColumns, ", ")
@@ -640,11 +641,11 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 
 	if _, err := tx.Exec(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert records: %w", err)
+		return fmt.Errorf("failed to insert records: %w", connredact.Redact(d.uri, err))
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return fmt.Errorf("failed to commit transaction: %w", connredact.Redact(d.uri, err))
 	}
 
 	config.Debug("[DELETE+INSERT] Delete+Insert completed in %v", time.Since(startOp))
@@ -661,7 +662,7 @@ func (d *PostgresDestination) SCD2Table(ctx context.Context, opts destination.SC
 
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", connredact.Redact(d.uri, err))
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -692,7 +693,7 @@ func (d *PostgresDestination) SCD2Table(ctx context.Context, opts destination.SC
 
 	if _, err := tx.Exec(ctx, updateSQL); err != nil {
 		config.LogFailedQuery(updateSQL, err)
-		return fmt.Errorf("failed to close changed records: %w", err)
+		return fmt.Errorf("failed to close changed records: %w", connredact.Redact(d.uri, err))
 	}
 
 	// Step 2: Soft-delete missing records (only if no incremental_key)
@@ -712,7 +713,7 @@ func (d *PostgresDestination) SCD2Table(ctx context.Context, opts destination.SC
 
 		if _, err := tx.Exec(ctx, softDeleteSQL, opts.Timestamp); err != nil {
 			config.LogFailedQuery(softDeleteSQL, err)
-			return fmt.Errorf("failed to soft-delete missing records: %w", err)
+			return fmt.Errorf("failed to soft-delete missing records: %w", connredact.Redact(d.uri, err))
 		}
 	}
 
@@ -740,11 +741,11 @@ func (d *PostgresDestination) SCD2Table(ctx context.Context, opts destination.SC
 
 	if _, err := tx.Exec(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert new versions: %w", err)
+		return fmt.Errorf("failed to insert new versions: %w", connredact.Redact(d.uri, err))
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return fmt.Errorf("failed to commit transaction: %w", connredact.Redact(d.uri, err))
 	}
 
 	config.Debug("[POSTGRES SCD2] SCD2 merge completed in %v", time.Since(startOp))
@@ -757,7 +758,7 @@ func (d *PostgresDestination) DropTable(ctx context.Context, table string) error
 	_, err := d.pool.Exec(ctx, dropSQL)
 	if err != nil {
 		config.LogFailedQuery(dropSQL, err)
-		return fmt.Errorf("failed to drop table %s: %w", table, err)
+		return fmt.Errorf("failed to drop table %s: %w", table, connredact.Redact(d.uri, err))
 	}
 	config.Debug("[DEST] Dropped table: %s", table)
 	return nil
@@ -768,7 +769,7 @@ func (d *PostgresDestination) TruncateTable(ctx context.Context, table string) e
 	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s", destination.QuoteTableName(table))
 	if _, err := d.pool.Exec(ctx, truncateSQL); err != nil {
 		config.LogFailedQuery(truncateSQL, err)
-		return fmt.Errorf("failed to truncate table %s: %w", table, err)
+		return fmt.Errorf("failed to truncate table %s: %w", table, connredact.Redact(d.uri, err))
 	}
 	config.Debug("[DEST] Truncated table: %s", table)
 	return nil
@@ -835,7 +836,7 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 	rows, err := d.pool.Query(ctx, query, schemaName, tableName)
 	if err != nil {
 		config.LogFailedQuery(query, err)
-		return nil, fmt.Errorf("failed to query table schema: %w", err)
+		return nil, fmt.Errorf("failed to query table schema: %w", connredact.Redact(d.uri, err))
 	}
 	defer rows.Close()
 
@@ -845,7 +846,7 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 		var numPrecision, numScale, charMaxLen *int
 
 		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen, &udtName); err != nil {
-			return nil, fmt.Errorf("failed to scan column: %w", err)
+			return nil, fmt.Errorf("failed to scan column: %w", connredact.Redact(d.uri, err))
 		}
 
 		col := schema.Column{
@@ -868,7 +869,7 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
+		return nil, fmt.Errorf("error iterating rows: %w", connredact.Redact(d.uri, err))
 	}
 
 	if len(columns) == 0 {

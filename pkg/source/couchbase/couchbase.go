@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -97,7 +98,7 @@ func (s *CouchbaseSource) Connect(ctx context.Context, uri string) error {
 
 	cluster, err := gocb.Connect(cfg.connectionString, opts)
 	if err != nil {
-		return fmt.Errorf("failed to connect to Couchbase: %w", err)
+		return fmt.Errorf("failed to connect to Couchbase: %w", connredact.Redact(uri, err))
 	}
 
 	deadline := 30 * time.Second
@@ -108,7 +109,7 @@ func (s *CouchbaseSource) Connect(ctx context.Context, uri string) error {
 	}
 	if err := cluster.WaitUntilReady(deadline, nil); err != nil {
 		_ = cluster.Close(nil)
-		return fmt.Errorf("couchbase cluster not ready: %w", err)
+		return fmt.Errorf("couchbase cluster not ready: %w", connredact.Redact(uri, err))
 	}
 
 	s.cluster = cluster

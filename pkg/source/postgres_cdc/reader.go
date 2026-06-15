@@ -7,6 +7,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
@@ -46,12 +47,12 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 				config.Debug("[CDC] Resuming from LSN: %s (skipping snapshot)", opts.CDCResumeLSN)
 				resumeLSN, err := pglogrepl.ParseLSN(opts.CDCResumeLSN)
 				if err != nil {
-					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to parse resume LSN: %w", err)}
+					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to parse resume LSN: %w", connredact.Redact(r.source.uri, err))}
 					return
 				}
 
 				if err := r.streamChanges(ctx, resumeLSN, slotName, results, opts); err != nil {
-					results <- source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", err)}
+					results <- source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", connredact.Redact(r.source.uri, err))}
 					return
 				}
 				return
@@ -64,13 +65,13 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 		config.Debug("[CDC] Starting snapshot phase for %s", r.tableName)
 		snapshot, err := NewSnapshot(r.source, r.tableName, r.tableSchema, r.cdcConfig, opts.CDCSlotSuffix)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to create snapshot: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to create snapshot: %w", connredact.Redact(r.source.uri, err))}
 			return
 		}
 
 		snapshotLSN, slotName, err := snapshot.Execute(ctx, results, opts)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", connredact.Redact(r.source.uri, err))}
 			return
 		}
 
@@ -78,7 +79,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 
 		// Phase 2: Stream changes from snapshot LSN using the same slot
 		if err := r.streamChanges(ctx, snapshotLSN, slotName, results, opts); err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", connredact.Redact(r.source.uri, err))}
 			return
 		}
 	}()
@@ -93,11 +94,11 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 		var lsnStr string
 		err := r.source.queryPool.QueryRow(ctx, "SELECT pg_current_wal_lsn()::text").Scan(&lsnStr)
 		if err != nil {
-			return fmt.Errorf("failed to get current WAL LSN: %w", err)
+			return fmt.Errorf("failed to get current WAL LSN: %w", connredact.Redact(r.source.uri, err))
 		}
 		targetLSN, err = pglogrepl.ParseLSN(lsnStr)
 		if err != nil {
-			return fmt.Errorf("failed to parse current WAL LSN: %w", err)
+			return fmt.Errorf("failed to parse current WAL LSN: %w", connredact.Redact(r.source.uri, err))
 		}
 		config.Debug("[CDC] Batch mode: will stream until LSN %s", targetLSN)
 	}
@@ -110,7 +111,7 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 
 	repl, err := NewReplicator(r.source, r.tableName, r.tableSchema, cdcConfigWithSlot, startLSN)
 	if err != nil {
-		return fmt.Errorf("failed to create replicator: %w", err)
+		return fmt.Errorf("failed to create replicator: %w", connredact.Redact(r.source.uri, err))
 	}
 	defer func() { _ = repl.Close(ctx) }()
 
@@ -148,7 +149,7 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetL
 		batch, hadActivity, err := repl.NextBatch(ctx, batchSize)
 		if err != nil {
 			accum.flushAll(results)
-			return fmt.Errorf("failed to get next batch: %w", err)
+			return fmt.Errorf("failed to get next batch: %w", connredact.Redact("", err))
 		}
 
 		if batch != nil && batch.NumRows() > 0 {

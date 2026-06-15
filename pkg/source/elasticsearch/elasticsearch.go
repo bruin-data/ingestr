@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -85,12 +86,12 @@ func (s *ElasticsearchSource) Connect(ctx context.Context, uri string) error {
 
 	client, err := elasticsearch.NewTypedClient(esCfg)
 	if err != nil {
-		return fmt.Errorf("failed to create elasticsearch client: %w", err)
+		return fmt.Errorf("failed to create elasticsearch client: %w", connredact.Redact(uri, err))
 	}
 
 	_, err = client.Info().Do(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to connect to elasticsearch: %w", err)
+		return fmt.Errorf("failed to connect to elasticsearch: %w", connredact.Redact(uri, err))
 	}
 
 	s.client = client

@@ -10,6 +10,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -35,24 +36,24 @@ func (s *CrateDBSource) Connect(ctx context.Context, uri string) error {
 
 	pgConfig, err := pgxpool.ParseConfig(pgURI)
 	if err != nil {
-		return fmt.Errorf("failed to parse connection string: %w", err)
+		return fmt.Errorf("failed to parse connection string: %w", connredact.Redact(uri, err))
 	}
 
 	host := pgConfig.ConnConfig.Host
 	password := pgConfig.ConnConfig.Password
 	if password == "" && host != "localhost" && host != "127.0.0.1" && host != "::1" {
-		return fmt.Errorf("password is required for non-local CrateDB connections (host: %s)", host)
+		return fmt.Errorf("password is required for non-local CrateDB connections")
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, pgConfig)
 	if err != nil {
-		return fmt.Errorf("failed to connect to cratedb: %w", err)
+		return fmt.Errorf("failed to connect to cratedb: %w", connredact.Redact(uri, err))
 	}
 
 	var one int
 	if err := pool.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
 		pool.Close()
-		return fmt.Errorf("failed to ping cratedb: %w", err)
+		return fmt.Errorf("failed to ping cratedb: %w", connredact.Redact(uri, err))
 	}
 
 	s.pool = pool
@@ -82,7 +83,7 @@ func (s *CrateDBSource) GetTable(ctx context.Context, req source.TableRequest) (
 
 	tableSchema, err := s.getSchema(ctx, req.Name)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get schema: %w", err)
+		return nil, fmt.Errorf("failed to get schema: %w", connredact.Redact(s.uri, err))
 	}
 
 	pks := req.PrimaryKeys
@@ -123,7 +124,7 @@ func (s *CrateDBSource) getSchema(ctx context.Context, table string) (*schema.Ta
 
 	rows, err := s.pool.Query(ctx, query, schemaName, tableName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query schema: %w", err)
+		return nil, fmt.Errorf("failed to query schema: %w", connredact.Redact(s.uri, err))
 	}
 	defer rows.Close()
 
@@ -132,7 +133,7 @@ func (s *CrateDBSource) getSchema(ctx context.Context, table string) (*schema.Ta
 		var columnName, dataType, isNullable string
 
 		if err := rows.Scan(&columnName, &dataType, &isNullable); err != nil {
-			return nil, fmt.Errorf("failed to scan row: %w", err)
+			return nil, fmt.Errorf("failed to scan row: %w", connredact.Redact(s.uri, err))
 		}
 
 		dt, precision, scale, arrayType := MapCrateDBToDataType(dataType)
@@ -150,7 +151,7 @@ func (s *CrateDBSource) getSchema(ctx context.Context, table string) (*schema.Ta
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
+		return nil, fmt.Errorf("error iterating rows: %w", connredact.Redact(s.uri, err))
 	}
 
 	if len(columns) == 0 {
@@ -221,7 +222,7 @@ func (s *CrateDBSource) read(ctx context.Context, table string, tableSchema *sch
 		startConn := time.Now()
 		conn, err := s.pool.Acquire(ctx)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", connredact.Redact(s.uri, err))}
 			return
 		}
 		defer conn.Release()
@@ -232,7 +233,7 @@ func (s *CrateDBSource) read(ctx context.Context, table string, tableSchema *sch
 		startQuery := time.Now()
 		rows, err := conn.Query(ctx, query)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to query: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to query: %w", connredact.Redact(s.uri, err))}
 			return
 		}
 		defer rows.Close()
@@ -279,7 +280,7 @@ func (s *CrateDBSource) ExecuteCustomQuery(ctx context.Context, query string, op
 
 		conn, err := s.pool.Acquire(ctx)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", connredact.Redact(s.uri, err))}
 			return
 		}
 		defer conn.Release()
@@ -287,7 +288,7 @@ func (s *CrateDBSource) ExecuteCustomQuery(ctx context.Context, query string, op
 		config.Debug("[SOURCE] Executing custom query: %s", query)
 		rows, err := conn.Query(ctx, query)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", connredact.Redact(s.uri, err))}
 			return
 		}
 		defer rows.Close()
@@ -423,7 +424,7 @@ func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []
 			for _, b := range builders {
 				b.Release()
 			}
-			return nil, 0, fmt.Errorf("failed to get values: %w", err)
+			return nil, 0, fmt.Errorf("failed to get values: %w", connredact.Redact("", err))
 		}
 
 		for i, val := range values {
@@ -447,7 +448,7 @@ func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []
 		for _, b := range builders {
 			b.Release()
 		}
-		return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+		return nil, 0, fmt.Errorf("error iterating rows: %w", connredact.Redact("", err))
 	}
 
 	arrays := make([]arrow.Array, len(builders))

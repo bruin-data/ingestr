@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -37,14 +38,14 @@ func (s *FabricSource) Schemes() []string {
 func (s *FabricSource) Connect(ctx context.Context, uri string) error {
 	connStr, err := uriToConnString(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse Fabric URI: %w", err)
+		return fmt.Errorf("failed to parse Fabric URI: %w", connredact.Redact(uri, err))
 	}
 
 	// Fabric Warehouse only supports Microsoft Entra ID authentication, handled
 	// by the azuread driver ("azuresql"), not the plain "sqlserver" driver.
 	db, err := sql.Open("azuresql", connStr)
 	if err != nil {
-		return fmt.Errorf("failed to open Fabric connection: %w", err)
+		return fmt.Errorf("failed to open Fabric connection: %w", connredact.Redact(uri, err))
 	}
 
 	db.SetMaxOpenConns(10)
@@ -53,7 +54,7 @@ func (s *FabricSource) Connect(ctx context.Context, uri string) error {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("failed to ping Fabric: %w", err)
+		return fmt.Errorf("failed to ping Fabric: %w", connredact.Redact(uri, err))
 	}
 
 	s.db = db

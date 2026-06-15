@@ -11,6 +11,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -43,17 +44,17 @@ func (s *PostgresSource) Connect(ctx context.Context, uri string) error {
 
 	pgConfig, err := pgxpool.ParseConfig(normalizedURI)
 	if err != nil {
-		return fmt.Errorf("failed to parse connection string: %w", err)
+		return fmt.Errorf("failed to parse connection string: %w", connredact.Redact(uri, err))
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, pgConfig)
 	if err != nil {
-		return fmt.Errorf("failed to connect to postgres: %w", err)
+		return fmt.Errorf("failed to connect to postgres: %w", connredact.Redact(uri, err))
 	}
 
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return fmt.Errorf("failed to ping postgres: %w", err)
+		return fmt.Errorf("failed to ping postgres: %w", connredact.Redact(uri, err))
 	}
 
 	s.pool = pool
@@ -84,7 +85,7 @@ func (s *PostgresSource) GetTable(ctx context.Context, req source.TableRequest) 
 	// Fetch schema from database
 	tableSchema, err := s.getSchema(ctx, req.Name)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get schema: %w", err)
+		return nil, fmt.Errorf("failed to get schema: %w", connredact.Redact(s.uri, err))
 	}
 
 	// Auto-detect primary keys from database if user didn't provide
@@ -133,7 +134,7 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 
 	rows, err := s.pool.Query(ctx, query, schemaName, tableName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query schema: %w", err)
+		return nil, fmt.Errorf("failed to query schema: %w", connredact.Redact(s.uri, err))
 	}
 	defer rows.Close()
 
@@ -143,7 +144,7 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 		var numericPrecision, numericScale, charMaxLen *int
 
 		if err := rows.Scan(&columnName, &dataType, &isNullable, &numericPrecision, &numericScale, &charMaxLen, &udtName); err != nil {
-			return nil, fmt.Errorf("failed to scan row: %w", err)
+			return nil, fmt.Errorf("failed to scan row: %w", connredact.Redact(s.uri, err))
 		}
 
 		pgType := dataType
@@ -183,7 +184,7 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
+		return nil, fmt.Errorf("error iterating rows: %w", connredact.Redact(s.uri, err))
 	}
 
 	if len(columns) == 0 {
@@ -256,7 +257,7 @@ func (s *PostgresSource) read(ctx context.Context, table string, tableSchema *sc
 		startConn := time.Now()
 		conn, err := s.pool.Acquire(ctx)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", connredact.Redact(s.uri, err))}
 			return
 		}
 		defer conn.Release()
@@ -267,7 +268,7 @@ func (s *PostgresSource) read(ctx context.Context, table string, tableSchema *sc
 		startQuery := time.Now()
 		rows, err := conn.Query(ctx, query)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to query: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to query: %w", connredact.Redact(s.uri, err))}
 			return
 		}
 		defer rows.Close()
@@ -314,7 +315,7 @@ func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, o
 
 		conn, err := s.pool.Acquire(ctx)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", connredact.Redact(s.uri, err))}
 			return
 		}
 		defer conn.Release()
@@ -322,7 +323,7 @@ func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, o
 		config.Debug("[SOURCE] Executing custom query: %s", query)
 		rows, err := conn.Query(ctx, query)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", connredact.Redact(s.uri, err))}
 			return
 		}
 		defer rows.Close()
@@ -460,7 +461,7 @@ func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []
 			for _, b := range builders {
 				b.Release()
 			}
-			return nil, 0, fmt.Errorf("failed to get values: %w", err)
+			return nil, 0, fmt.Errorf("failed to get values: %w", connredact.Redact("", err))
 		}
 
 		for i, val := range values {
@@ -484,7 +485,7 @@ func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []
 		for _, b := range builders {
 			b.Release()
 		}
-		return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+		return nil, 0, fmt.Errorf("error iterating rows: %w", connredact.Redact("", err))
 	}
 
 	arrays := make([]arrow.Array, len(builders))

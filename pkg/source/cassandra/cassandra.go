@@ -11,6 +11,7 @@ import (
 	gocql "github.com/apache/cassandra-gocql-driver/v2"
 	"github.com/bruin-data/ingestr/internal/cassandrautil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -41,13 +42,13 @@ func (s *CassandraSource) Connect(ctx context.Context, uri string) error {
 
 	session, err := cassandrautil.NewCluster(cfg).CreateSession()
 	if err != nil {
-		return fmt.Errorf("failed to open Cassandra connection: %w", err)
+		return fmt.Errorf("failed to open Cassandra connection: %w", connredact.Redact(uri, err))
 	}
 
 	var version string
 	if err := session.Query("SELECT release_version FROM system.local").ScanContext(ctx, &version); err != nil {
 		session.Close()
-		return fmt.Errorf("failed to ping Cassandra: %w", err)
+		return fmt.Errorf("failed to ping Cassandra: %w", connredact.Redact(uri, err))
 	}
 
 	s.session = session

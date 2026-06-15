@@ -16,6 +16,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -46,7 +47,7 @@ func (s *SpannerSource) Connect(ctx context.Context, uri string) error {
 
 	client, err := spanner.NewClientWithConfig(ctx, dbPath, spanner.ClientConfig{Logger: silentLogger}, opts...)
 	if err != nil {
-		return fmt.Errorf("failed to connect to spanner: %w", err)
+		return fmt.Errorf("failed to connect to spanner: %w", connredact.Redact(uri, err))
 	}
 
 	s.client = client

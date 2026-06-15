@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -37,12 +38,12 @@ func (s *Db2Source) Schemes() []string {
 func (s *Db2Source) Connect(ctx context.Context, uri string) error {
 	cfg, err := parseDb2URI(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse Db2 URI: %w", err)
+		return fmt.Errorf("failed to parse Db2 URI: %w", connredact.Redact(uri, err))
 	}
 
 	client, err := dialDb2(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("failed to connect to Db2: %w", err)
+		return fmt.Errorf("failed to connect to Db2: %w", connredact.Redact(uri, err))
 	}
 
 	s.client = client

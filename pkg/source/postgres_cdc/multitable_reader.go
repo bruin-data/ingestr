@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 )
@@ -78,7 +79,7 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 		if needsSnapshot {
 			config.Debug("[CDC] Multi-table: performing full snapshot (some tables have no existing data)")
 			if err := r.executeSnapshot(ctx, results, opts); err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)}
+				results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", connredact.Redact(r.source.uri, err))}
 				return
 			}
 		}
@@ -89,7 +90,7 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 			var err error
 			startLSN, err = r.getSlotLSN(ctx, slotName)
 			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get slot LSN: %w", err)}
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get slot LSN: %w", connredact.Redact(r.source.uri, err))}
 				return
 			}
 		} else {
@@ -102,14 +103,14 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 			var err error
 			targetLSN, err = r.getCurrentWALLSN(ctx)
 			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get current WAL LSN: %w", err)}
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get current WAL LSN: %w", connredact.Redact(r.source.uri, err))}
 				return
 			}
 			config.Debug("[CDC] Batch mode: will stream until LSN %s", targetLSN)
 		}
 
 		if err := r.streamChanges(ctx, startLSN, targetLSN, slotName, results, opts); err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", err)}
+			results <- source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", connredact.Redact(r.source.uri, err))}
 			return
 		}
 	}()
@@ -172,13 +173,13 @@ func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<
 	// Check if slot already exists
 	_, exists, err := checkSlotExists(ctx, r.source.queryPool, slotName)
 	if err != nil {
-		return fmt.Errorf("failed to check existing slot: %w", err)
+		return fmt.Errorf("failed to check existing slot: %w", connredact.Redact(r.source.uri, err))
 	}
 
 	if exists {
 		config.Debug("[CDC] Dropping existing slot %s to get fresh snapshot", slotName)
 		if err := r.dropSlot(ctx, slotName); err != nil {
-			return fmt.Errorf("failed to drop existing slot: %w", err)
+			return fmt.Errorf("failed to drop existing slot: %w", connredact.Redact(r.source.uri, err))
 		}
 	}
 
@@ -197,12 +198,12 @@ func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create replication slot: %w", err)
+		return fmt.Errorf("failed to create replication slot: %w", connredact.Redact(r.source.uri, err))
 	}
 
 	snapshotLSN, err := pglogrepl.ParseLSN(result.ConsistentPoint)
 	if err != nil {
-		return fmt.Errorf("failed to parse LSN: %w", err)
+		return fmt.Errorf("failed to parse LSN: %w", connredact.Redact(r.source.uri, err))
 	}
 
 	config.Debug("[CDC] Replication slot created: %s, LSN: %s, Snapshot: %s",
@@ -266,7 +267,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	// Create multi-table replicator
 	repl, err := NewMultiTableReplicator(r.source, r.tables, cdcConfigWithSlot, startLSN, r)
 	if err != nil {
-		return fmt.Errorf("failed to create replicator: %w", err)
+		return fmt.Errorf("failed to create replicator: %w", connredact.Redact(r.source.uri, err))
 	}
 	defer func() { _ = repl.Close(ctx) }()
 
@@ -290,7 +291,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		batch, tableName, hadActivity, err := repl.NextBatch(ctx, batchSize)
 		if err != nil {
 			accum.flushAll(results)
-			return fmt.Errorf("failed to get next batch: %w", err)
+			return fmt.Errorf("failed to get next batch: %w", connredact.Redact(r.source.uri, err))
 		}
 
 		if batch != nil && batch.NumRows() > 0 {

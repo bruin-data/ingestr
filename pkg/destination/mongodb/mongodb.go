@@ -16,6 +16,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/connredact"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -43,12 +44,12 @@ func (d *MongoDBDestination) Connect(ctx context.Context, uri string) error {
 	clientOpts := options.Client().ApplyURI(uri)
 	client, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {
-		return fmt.Errorf("failed to connect to MongoDB: %w", err)
+		return fmt.Errorf("failed to connect to MongoDB: %w", connredact.Redact(uri, err))
 	}
 
 	if err := client.Ping(ctx, nil); err != nil {
 		_ = client.Disconnect(ctx)
-		return fmt.Errorf("failed to ping MongoDB: %w", err)
+		return fmt.Errorf("failed to ping MongoDB: %w", connredact.Redact(uri, err))
 	}
 
 	d.client = client
