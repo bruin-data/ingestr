@@ -30,6 +30,14 @@ func Redact(uri string, err error) error {
 		}
 		return &redactedErr{err: err, msg: msg}
 	}
+	// A *pgconn.PgError not wrapped in a ConnectError comes from a live
+	// connection — the server originated the message and doesn't know our URI
+	// host/user/password, so substring stripping would only false-positive
+	// (e.g. a hostname "orders" inside the column name "orders_id").
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return err
+	}
 	if uri == "" {
 		return err
 	}

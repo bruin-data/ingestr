@@ -71,6 +71,24 @@ func TestRedact_NonPgxStripsURISubstrings(t *testing.T) {
 	}
 }
 
+// Greptile P2: post-connection query errors (PgError not inside a
+// ConnectError) must pass through unchanged. The server-side message can't
+// contain our URI host/user/password, so substring stripping would only
+// false-positive when a coincidental substring overlap exists (e.g.
+// hostname "orders" inside the column name "orders_id").
+func TestRedact_LiveConnectionPgErrorPassesThrough(t *testing.T) {
+	uri := "postgres://alice:hunter2@orders.db.example.com:5432/orders_db"
+	pgErr := &pgconn.PgError{
+		Severity: "ERROR",
+		Code:     "42703",
+		Message:  `column "orders_id" does not exist`,
+	}
+	got := Redact(uri, pgErr).Error()
+	if !strings.Contains(got, "orders_id") {
+		t.Errorf("expected column name preserved verbatim, got: %s", got)
+	}
+}
+
 // Greptile P2: if the password starts with the hostname (e.g. host "prod",
 // password "prod_secret"), naive in-order replacement rewrites the host first
 // and leaves the "_secret" tail visible. Longest-first ordering prevents that.
