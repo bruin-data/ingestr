@@ -26,11 +26,18 @@ func Redact(uri string, err error) error {
 		msg := "failed to connect"
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
-			msg += ": " + pgErr.Error()
+			// Connect-time PgErrors (auth failure, missing database, missing
+			// role) embed the username/database/role from our URI verbatim,
+			// e.g. `password authentication failed for user "alice"`. Strip
+			// those before appending.
+			msg += ": " + applyReplacements(pgErr.Error(), uriReplacements(uri))
 		}
 		return &redactedErr{err: err, msg: msg}
 	}
-	// Live-connection PgError — server text, never contains URI fields.
+	// Live-connection PgError — server text from a successful connection
+	// (column/table/constraint errors etc.), structurally can't contain URI
+	// fields, and substring scan here would false-positive on coincidental
+	// overlaps (e.g. hostname "orders" inside the column name "orders_id").
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		return err
