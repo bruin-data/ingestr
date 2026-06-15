@@ -1078,7 +1078,7 @@ func validateRecoveredQueryJob(job *bigquery.Job, sql string) error {
 	if !ok {
 		return fmt.Errorf("existing job is %T, not a query job", cfg)
 	}
-	if queryCfg.Q != sql {
+	if !queryJobSQLMatches(queryCfg.Q, sql) {
 		return fmt.Errorf(
 			"existing job SQL does not match retried query (existing=%q expected=%q)",
 			queryJobSQLSnippet(queryCfg.Q),
@@ -1086,6 +1086,25 @@ func validateRecoveredQueryJob(job *bigquery.Job, sql string) error {
 		)
 	}
 	return nil
+}
+
+func queryJobSQLMatches(existing, expected string) bool {
+	if existing == expected {
+		return true
+	}
+	return stripLeadingQueryAnnotation(existing) == stripLeadingQueryAnnotation(expected)
+}
+
+func stripLeadingQueryAnnotation(sql string) string {
+	trimmed := strings.TrimLeft(sql, " \t\r\n")
+	if !strings.HasPrefix(trimmed, "-- @bruin.config: ") {
+		return sql
+	}
+	_, rest, ok := strings.Cut(trimmed, "\n")
+	if !ok {
+		return sql
+	}
+	return rest
 }
 
 func queryJobSQLSnippet(sql string) string {

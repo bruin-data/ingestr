@@ -370,6 +370,43 @@ func TestRecoverDuplicateQueryJobReportsSQLMismatch(t *testing.T) {
 	}
 }
 
+func TestRecoverDuplicateQueryJobAllowsDifferentAnnotation(t *testing.T) {
+	ctx := context.Background()
+	const expectedSQL = "-- @bruin.config: {\"request_id\":\"expected\"}\nSELECT 1"
+	const existingSQL = "-- @bruin.config: {\"request_id\":\"existing\"}\nSELECT 1"
+	const jobID = "ingestr_test"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/jobs/") {
+			writeBigQueryTestJob(w, jobID, existingSQL)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:    client,
+		projectID: "test-project",
+		location:  "US",
+	}
+
+	job, err := dest.recoverDuplicateQueryJob(ctx, jobID, expectedSQL)
+	if err != nil {
+		t.Fatalf("recoverDuplicateQueryJob() error = %v", err)
+	}
+	if job == nil {
+		t.Fatal("recoverDuplicateQueryJob() returned nil job")
+	}
+}
+
 func writeBigQueryTestJob(w http.ResponseWriter, jobID, sql string) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"jobReference": map[string]string{
