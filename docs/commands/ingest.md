@@ -48,33 +48,16 @@ The `interval-start` and `interval-end` options support various datetime formats
 
 ## Streaming ingestion
 
-The `--stream` flag turns `ingest` into a long-running process that continuously
-pulls changes from the source and flushes them to the destination, rather than
-running once and exiting. It is supported by:
+The `--stream` flag turns `ingest` into a long-running process that continuously pulls changes from the source and flushes them to the destination, rather than running once and exiting. It is supported by:
 
-- **CDC sources** (`postgres+cdc`, `mssql+cdc`): captures every insert, update,
-  and delete across all tables in the publication/capture set and applies them
-  with the `merge` strategy.
-- **Message brokers** (`kafka`, `amqp`): consumes messages into a fixed envelope
-  schema — a `msg_id` primary key, a JSON `data` column holding the decoded body and
-  metadata, and an `_ingestr_order` column (source offset / delivery tag) — and
-  applies them with `merge` keyed on `msg_id`, keeping the latest record per key
-  within each flush window. Schema inference is skipped (a never-ending stream
-  has no end to infer from).
+- **CDC sources** (`postgres+cdc`, `mssql+cdc`): captures every insert, update, and delete across all tables in the publication/capture set and applies them with the `merge` strategy.
+- **Message brokers** (`kafka`, `amqp`): consumes messages into a fixed envelope schema — a `msg_id` primary key, a JSON `data` column holding the decoded body and metadata, and an `_ingestr_order` column (source offset / delivery tag) — and applies them with `merge` keyed on `msg_id`, keeping the latest record per key within each flush window. Schema inference is skipped (a never-ending stream has no end to infer from).
 
-A flush happens whenever **either** `--flush-interval` (default 30s) **or**
-`--flush-records` (default 50000) is reached, whichever comes first.
-`--flush-records` is the memory bound: records are buffered until a flush.
+A flush happens whenever **either** `--flush-interval` (default 30s) **or** `--flush-records` (default 50000) is reached, whichever comes first. `--flush-records` is the memory bound: records are buffered until a flush.
 
-Each flush writes the buffered records, merges them into the destination, and
-only then confirms the source position as durable. This gives **at-least-once
-delivery**: a crash before a flush completes re-delivers the un-flushed changes
-on restart, and the `merge` (by primary key / `msg_id`) makes replays
-idempotent. The stream resumes automatically — CDC from the destination's last
-recorded LSN, brokers from their committed offset / unacknowledged messages.
+Each flush writes the buffered records, merges them into the destination, and only then confirms the source position as durable. This gives **at-least-once delivery**: a crash before a flush completes re-delivers the un-flushed changes on restart, and the `merge` (by primary key / `msg_id`) makes replays idempotent. The stream resumes automatically — CDC from the destination's last recorded LSN, brokers from their committed offset / unacknowledged messages.
 
-Stop a stream with `Ctrl+C` (SIGINT) or SIGTERM; ingestr performs a final flush
-of buffered data and exits cleanly.
+Stop a stream with `Ctrl+C` (SIGINT) or SIGTERM; ingestr performs a final flush of buffered data and exits cleanly.
 
 ```bash
 # Stream all changes from a Postgres publication into BigQuery, flushing
@@ -88,10 +71,7 @@ ingestr ingest \
 ```
 
 > [!INFO]
-> Schema changes are picked up at startup. If the source schema changes while a
-> stream is running, restart the stream to apply the new schema. Run streaming
-> ingestion under a supervisor (systemd, Kubernetes, etc.) so it restarts after
-> transient source/destination outages.
+> Schema changes are picked up at startup. If the source schema changes while a stream is running, restart the stream to apply the new schema. Run streaming ingestion under a supervisor (systemd, Kubernetes, etc.) so it restarts after transient source/destination outages.
 
 ## General flags
 
