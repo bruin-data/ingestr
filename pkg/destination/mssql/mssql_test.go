@@ -43,6 +43,21 @@ func TestBuildDeleteInsertDeleteSQLUsesTableLock(t *testing.T) {
 	assertContains(t, sql, "[updated_at] <= @p2")
 }
 
+func TestRowsPerSecondAllowsZeroDuration(t *testing.T) {
+	if got := rowsPerSecond(10, 0); got != 0 {
+		t.Fatalf("rowsPerSecond with zero duration = %v, want 0", got)
+	}
+	if got := rowsPerSecond(10, time.Second); got != 10 {
+		t.Fatalf("rowsPerSecond = %v, want 10", got)
+	}
+}
+
+func TestBuildTableIsEmptyForUpdateSQLLocksTarget(t *testing.T) {
+	sql := buildTableIsEmptyForUpdateSQL("dbo.events")
+
+	assertContains(t, sql, "FROM [dbo].[events] WITH (TABLOCKX, HOLDLOCK)")
+}
+
 func TestBuildInsertDedupSQLUsesTableLockAndDedupsPrimaryKey(t *testing.T) {
 	sql := buildInsertDedupSQL(
 		"dbo.events",

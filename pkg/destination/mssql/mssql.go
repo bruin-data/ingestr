@@ -227,15 +227,17 @@ func (d *MSSQLDestination) writeSerialBatches(ctx context.Context, records <-cha
 		}
 
 		totalRows += rows
-		rate := float64(rows) / time.Since(startBatch).Seconds()
+		batchDuration := time.Since(startBatch)
+		rate := rowsPerSecond(rows, batchDuration)
 		config.Debug("[MSSQL] Batch %d: %d rows in %v (%.0f rows/sec, total: %d)",
-			batchNum, rows, time.Since(startBatch), rate, totalRows)
+			batchNum, rows, batchDuration, rate, totalRows)
 
 		result.Batch.Release()
 	}
 
-	totalRate := float64(totalRows) / time.Since(startTime).Seconds()
-	config.Debug("[MSSQL] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTime), totalRate)
+	totalDuration := time.Since(startTime)
+	totalRate := rowsPerSecond(totalRows, totalDuration)
+	config.Debug("[MSSQL] Total: %d rows written in %v (%.0f rows/sec)", totalRows, totalDuration, totalRate)
 	return nil
 }
 
@@ -316,16 +318,24 @@ func (d *MSSQLDestination) writeParallelBatches(ctx context.Context, records <-c
 
 		totalRows += res.rows
 		config.Debug("[MSSQL] Batch %d: %d rows in %v (%.0f rows/sec, total: %d)",
-			res.batchNum, res.rows, res.duration, float64(res.rows)/res.duration.Seconds(), totalRows)
+			res.batchNum, res.rows, res.duration, rowsPerSecond(res.rows, res.duration), totalRows)
 	}
 
 	if firstErr != nil {
 		return fmt.Errorf("parallel write failed: %w", firstErr)
 	}
 
-	totalRate := float64(totalRows) / time.Since(startTime).Seconds()
-	config.Debug("[MSSQL] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTime), totalRate)
+	totalDuration := time.Since(startTime)
+	totalRate := rowsPerSecond(totalRows, totalDuration)
+	config.Debug("[MSSQL] Total: %d rows written in %v (%.0f rows/sec)", totalRows, totalDuration, totalRate)
 	return nil
+}
+
+func rowsPerSecond(rows int64, duration time.Duration) float64 {
+	if duration <= 0 {
+		return 0
+	}
+	return float64(rows) / duration.Seconds()
 }
 
 func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string, tableSchema *schema.TableSchema) (int64, error) {
@@ -508,15 +518,12 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	startMerge := time.Now()
 
 	if len(opts.PrimaryKeys) > 0 && !destination.HasCDCDeletedColumn(opts.Columns) {
-		empty, err := d.tableIsEmpty(ctx, opts.TargetTable)
+		insertSQL := buildInsertDedupSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
+		inserted, err := d.insertIntoEmptyTarget(ctx, opts.TargetTable, opts.PrimaryKeys, insertSQL)
 		if err != nil {
-			return fmt.Errorf("failed to check target table before merge: %w", err)
+			return err
 		}
-		if empty {
-			insertSQL := buildInsertDedupSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
-			if err := d.insertIntoEmptyTarget(ctx, opts.TargetTable, opts.PrimaryKeys, insertSQL); err != nil {
-				return err
-			}
+		if inserted {
 			config.Debug("[MERGE] Deduplicated insert completed in %v", time.Since(startMerge))
 			return nil
 		}
@@ -534,10 +541,10 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	return nil
 }
 
-func (d *MSSQLDestination) tableIsEmpty(ctx context.Context, table string) (bool, error) {
-	query := fmt.Sprintf("SELECT TOP (1) 1 FROM %s", quoteTable(table))
+func tableIsEmptyForUpdate(ctx context.Context, tx *sql.Tx, table string) (bool, error) {
+	query := buildTableIsEmptyForUpdateSQL(table)
 	var v int
-	if err := d.db.QueryRowContext(ctx, query).Scan(&v); err != nil {
+	if err := tx.QueryRowContext(ctx, query).Scan(&v); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return true, nil
 		}
@@ -547,10 +554,14 @@ func (d *MSSQLDestination) tableIsEmpty(ctx context.Context, table string) (bool
 	return false, nil
 }
 
-func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTable string, primaryKeys []string, insertSQL string) error {
+func buildTableIsEmptyForUpdateSQL(table string) string {
+	return fmt.Sprintf("SELECT TOP (1) 1 FROM %s WITH (TABLOCKX, HOLDLOCK)", quoteTable(table))
+}
+
+func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTable string, primaryKeys []string, insertSQL string) (bool, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to begin deduplicated insert transaction: %w", err)
+		return false, fmt.Errorf("failed to begin deduplicated insert transaction: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -559,32 +570,40 @@ func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTabl
 		}
 	}()
 
+	empty, err := tableIsEmptyForUpdate(ctx, tx, targetTable)
+	if err != nil {
+		return false, fmt.Errorf("failed to check target table before merge: %w", err)
+	}
+	if !empty {
+		return false, nil
+	}
+
 	var pkName string
 	var droppedPK bool
 	if isNormalisedStagingTable(targetTable) {
 		pkName, droppedPK, err = dropPrimaryKeyIfExists(ctx, tx, targetTable)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 
 	config.Debug("[MERGE] Empty target, executing deduplicated INSERT: %s", insertSQL)
 	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert deduplicated records: %w", err)
+		return false, fmt.Errorf("failed to insert deduplicated records: %w", err)
 	}
 
 	if droppedPK {
 		if err := addPrimaryKey(ctx, tx, targetTable, pkName, primaryKeys); err != nil {
-			return err
+			return false, err
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit deduplicated insert transaction: %w", err)
+		return false, fmt.Errorf("failed to commit deduplicated insert transaction: %w", err)
 	}
 	committed = true
-	return nil
+	return true, nil
 }
 
 func isNormalisedStagingTable(table string) bool {
