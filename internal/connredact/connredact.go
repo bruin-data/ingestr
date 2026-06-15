@@ -30,10 +30,7 @@ func Redact(uri string, err error) error {
 		}
 		return &redactedErr{err: err, msg: msg}
 	}
-	// A *pgconn.PgError not wrapped in a ConnectError comes from a live
-	// connection — the server originated the message and doesn't know our URI
-	// host/user/password, so substring stripping would only false-positive
-	// (e.g. a hostname "orders" inside the column name "orders_id").
+	// Live-connection PgError — server text, never contains URI fields.
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		return err
@@ -80,10 +77,7 @@ func uriReplacements(uri string) []replacement {
 			r = append(r, replacement{pass, "<password>"})
 		}
 	}
-	// Replace longest substrings first so that a needle which contains another
-	// (e.g. host "prod" inside password "prod_secret") doesn't get partially
-	// rewritten — which would prevent the longer match from firing and leak
-	// the tail of the password.
+	// Longest first — prevents partial rewrite when one needle contains another.
 	sort.Slice(r, func(i, j int) bool { return len(r[i].needle) > len(r[j].needle) })
 	return r
 }
