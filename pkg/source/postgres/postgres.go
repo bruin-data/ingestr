@@ -191,23 +191,35 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 	}
 
 	pkQuery := `
-		SELECT a.attname
-		FROM pg_index i
-		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-		WHERE i.indrelid = format('%I.%I', $1, $2)::regclass
-		AND i.indisprimary
+		SELECT kcu.column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_catalog = kcu.constraint_catalog
+			AND tc.constraint_schema = kcu.constraint_schema
+			AND tc.constraint_name = kcu.constraint_name
+			AND tc.table_schema = kcu.table_schema
+			AND tc.table_name = kcu.table_name
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+			AND tc.table_schema = $1
+			AND tc.table_name = $2
+		ORDER BY kcu.ordinal_position
 	`
 
 	var primaryKeys []string
 	pkRows, err := s.pool.Query(ctx, pkQuery, schemaName, tableName)
-	if err == nil {
-		defer pkRows.Close()
-		for pkRows.Next() {
-			var pkName string
-			if err := pkRows.Scan(&pkName); err == nil {
-				primaryKeys = append(primaryKeys, pkName)
-			}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query primary keys: %w", err)
+	}
+	defer pkRows.Close()
+	for pkRows.Next() {
+		var pkName string
+		if err := pkRows.Scan(&pkName); err != nil {
+			return nil, fmt.Errorf("failed to scan primary key row: %w", err)
 		}
+		primaryKeys = append(primaryKeys, pkName)
+	}
+	if err := pkRows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating primary key rows: %w", err)
 	}
 
 	for i := range columns {
