@@ -67,6 +67,7 @@ type Decoder struct {
 	targetRelID    uint32
 	pendingChanges []Change
 	currentTxLSN   pglogrepl.LSN
+	rowFillState   map[string][]interface{}
 }
 
 func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *Decoder {
@@ -75,6 +76,7 @@ func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *
 		targetSchema: schemaName,
 		targetTable:  tableName,
 		relations:    make(map[uint32]*RelationInfo),
+		rowFillState: make(map[string][]interface{}),
 	}
 }
 
@@ -335,7 +337,7 @@ func (d *Decoder) handleDelete(data []byte) error {
 }
 
 func (d *Decoder) applyIntraBatchFill() {
-	applyIntraBatchFill(d.pendingChanges, d.tableSchema)
+	applyIntraBatchFill(d.pendingChanges, d.tableSchema, d.rowFillState)
 }
 
 func (d *Decoder) compactPendingChanges() {
@@ -398,7 +400,7 @@ func (d *Decoder) compactPendingChanges() {
 }
 
 func (d *Decoder) pkKey(change Change, pkIndices []int, changeIndex int) string {
-	return changePKKey(change, pkIndices, changeIndex)
+	return pkKeyFromRow(change.Values, change.OldValues, pkIndices, changeIndex)
 }
 
 func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{}, error) {

@@ -292,9 +292,44 @@ func TestApplyIntraBatchFill(t *testing.T) {
 				OldValues: []interface{}{int32(1)},
 			},
 		}
-		applyIntraBatchFill(changes, tableSchema)
+		state := make(map[string][]interface{})
+		applyIntraBatchFill(changes, tableSchema, state)
 		assert.Equal(t, `{"big":true}`, resolveColumnValue(changes[1], 1))
 		assert.Equal(t, "done", resolveColumnValue(changes[1], 2))
+	})
+
+	t.Run("fills across separate transaction commits", func(t *testing.T) {
+		state := make(map[string][]interface{})
+		insert := []Change{{
+			Operation: "INSERT",
+			Values:    []interface{}{int32(1), `{"big":true}`, "pending"},
+		}}
+		applyIntraBatchFill(insert, tableSchema, state)
+
+		update := []Change{{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+			OldValues: []interface{}{int32(1)},
+		}}
+		applyIntraBatchFill(update, tableSchema, state)
+		assert.Equal(t, `{"big":true}`, resolveColumnValue(update[0], 1))
+	})
+
+	t.Run("pk update carries unchanged toast from old key", func(t *testing.T) {
+		state := make(map[string][]interface{})
+		insert := []Change{{
+			Operation: "INSERT",
+			Values:    []interface{}{int32(1), `{"keep":true}`, "pending"},
+		}}
+		applyIntraBatchFill(insert, tableSchema, state)
+
+		update := []Change{{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(2), tupleUnchangedMarker, "done"},
+			OldValues: []interface{}{int32(1)},
+		}}
+		applyIntraBatchFill(update, tableSchema, state)
+		assert.Equal(t, `{"keep":true}`, resolveColumnValue(update[0], 1))
 	})
 
 	t.Run("chains multiple unchanged updates", func(t *testing.T) {
@@ -314,7 +349,8 @@ func TestApplyIntraBatchFill(t *testing.T) {
 				OldValues: []interface{}{int32(1)},
 			},
 		}
-		applyIntraBatchFill(changes, tableSchema)
+		state := make(map[string][]interface{})
+		applyIntraBatchFill(changes, tableSchema, state)
 		assert.Equal(t, `{"v":1}`, resolveColumnValue(changes[2], 1))
 		assert.Equal(t, "c", resolveColumnValue(changes[2], 2))
 	})
@@ -331,7 +367,8 @@ func TestApplyIntraBatchFill(t *testing.T) {
 				OldValues: []interface{}{int32(1), `{"from":"old"}`, "pending"},
 			},
 		}
-		applyIntraBatchFill(changes, tableSchema)
+		state := make(map[string][]interface{})
+		applyIntraBatchFill(changes, tableSchema, state)
 		assert.Equal(t, `{"from":"old"}`, resolveColumnValue(changes[1], 1))
 	})
 }

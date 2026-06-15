@@ -557,6 +557,12 @@ func TestPostgresCDC_IntraBatchInsertUpdatePreservesUnchangedJSONB(t *testing.T)
 	})
 	require.NoError(t, err)
 
+	const (
+		sourceTable = "public.test_intra_batch_toast"
+		destTable   = "public.test_intra_batch_toast_dest"
+		publication = "test_intra_batch_pub"
+	)
+
 	_, err = sourcePool.Exec(ctx, `
 		CREATE TABLE public.test_intra_batch_toast (
 			id SERIAL PRIMARY KEY,
@@ -568,15 +574,6 @@ func TestPostgresCDC_IntraBatchInsertUpdatePreservesUnchangedJSONB(t *testing.T)
 	_, err = sourcePool.Exec(ctx, `CREATE PUBLICATION test_intra_batch_pub FOR TABLE public.test_intra_batch_toast`)
 	require.NoError(t, err)
 	_, err = sourcePool.Exec(ctx, `ALTER USER testuser REPLICATION`)
-	require.NoError(t, err)
-
-	_, err = sourcePool.Exec(
-		ctx,
-		`INSERT INTO public.test_intra_batch_toast (config_data, result_data) VALUES ($1::jsonb, 'pending')`,
-		string(configPayload),
-	)
-	require.NoError(t, err)
-	_, err = sourcePool.Exec(ctx, `UPDATE public.test_intra_batch_toast SET result_data = 'completed' WHERE id = 1`)
 	require.NoError(t, err)
 
 	destContainer, err := postgres.Run(
@@ -597,16 +594,43 @@ func TestPostgresCDC_IntraBatchInsertUpdatePreservesUnchangedJSONB(t *testing.T)
 	destConnString, err := destContainer.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
 
-	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_intra_batch_pub&mode=batch"
+	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=" + publication + "&mode=batch"
 	cfg := &config.IngestConfig{
 		SourceURI:           cdcSourceURI,
 		DestURI:             destConnString,
-		SourceTable:         "public.test_intra_batch_toast",
-		DestTable:           "public.test_intra_batch_toast_dest",
+		SourceTable:         sourceTable,
+		DestTable:           destTable,
 		PrimaryKeys:         []string{"id"},
 		IncrementalStrategy: "merge",
 	}
 
+	// Baseline sync on an empty table: creates the replication slot and streams
+	// to the current LSN without snapshotting any rows onto the destination.
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	slotName := cdcReplicationSlotName(sourceTable, publication, cfg.CDCSlotSuffix)
+	var resumeLSN string
+	err = sourcePool.QueryRow(ctx, `
+		SELECT confirmed_flush_lsn::text
+		FROM pg_replication_slots
+		WHERE slot_name = $1
+	`, slotName).Scan(&resumeLSN)
+	require.NoError(t, err)
+	require.NotEmpty(t, resumeLSN)
+
+	// Autocommit INSERT then partial UPDATE (separate transactions). The batch
+	// accumulator merges both into one downstream batch while the destination
+	// row does not exist yet.
+	_, err = sourcePool.Exec(
+		ctx,
+		`INSERT INTO public.test_intra_batch_toast (config_data, result_data) VALUES ($1::jsonb, 'pending')`,
+		string(configPayload),
+	)
+	require.NoError(t, err)
+	_, err = sourcePool.Exec(ctx, `UPDATE public.test_intra_batch_toast SET result_data = 'completed' WHERE id = 1`)
+	require.NoError(t, err)
+
+	cfg.CDCResumeLSN = resumeLSN
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
 	var sourceConfig, destConfig string
@@ -628,7 +652,7 @@ func TestPostgresCDC_IntraBatchInsertUpdatePreservesUnchangedJSONB(t *testing.T)
 	require.NoError(t, err)
 
 	assert.Equal(t, sourceLen, destLen, "testCases array length should match")
-	assert.Equal(t, sourceConfig, destConfig, "unchanged JSONB payload should be preserved when INSERT and partial UPDATE land in the same batch")
+	assert.Equal(t, sourceConfig, destConfig, "unchanged JSONB payload should be preserved when INSERT and partial UPDATE land in the same staging batch")
 
 	var resultData string
 	err = destPool.QueryRow(ctx, `SELECT result_data FROM public.test_intra_batch_toast_dest WHERE id = 1`).Scan(&resultData)
@@ -1043,4 +1067,15 @@ func TestPostgresCDC_UnawareDestination_SQLite(t *testing.T) {
 	// The staging-only column must not exist on the destination table.
 	require.NoError(t, dest.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('toast_items_dest') WHERE name = '_cdc_unchanged_cols'`).Scan(&count))
 	assert.Equal(t, 0, count, "_cdc_unchanged_cols must stay staging-only")
+}
+
+func cdcReplicationSlotName(tableName, publication, suffix string) string {
+	name := fmt.Sprintf("ingestr_%s_%s", strings.ReplaceAll(tableName, ".", "_"), publication)
+	if suffix != "" {
+		name = fmt.Sprintf("%s_%s", name, suffix)
+	}
+	if len(name) > 63 {
+		return name[:63]
+	}
+	return name
 }

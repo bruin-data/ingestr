@@ -44,8 +44,8 @@ func resolveColumnValueBase(change Change, colIdx int) interface{} {
 	return nil
 }
 
-func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
-	if len(changes) < 2 || tableSchema == nil {
+func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema, state map[string][]interface{}) {
+	if len(changes) == 0 || tableSchema == nil || state == nil {
 		return
 	}
 
@@ -55,11 +55,10 @@ func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
 	}
 
 	nSource := sourceColumnCount(tableSchema)
-	state := make(map[string][]interface{})
 
 	for i := range changes {
 		change := &changes[i]
-		key := changePKKey(*change, pkIndices, i)
+		lookupKey, storeKey := fillStateKeys(*change, pkIndices, i)
 
 		batchFill := make([]interface{}, nSource)
 		hasFill := false
@@ -70,7 +69,7 @@ func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
 			if resolveColumnValueBase(*change, colIdx) != nil {
 				continue
 			}
-			if prior, ok := state[key]; ok && colIdx < len(prior) && prior[colIdx] != nil {
+			if prior, ok := state[lookupKey]; ok && colIdx < len(prior) && prior[colIdx] != nil {
 				batchFill[colIdx] = prior[colIdx]
 				hasFill = true
 			}
@@ -80,7 +79,7 @@ func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
 		}
 
 		if change.Operation == "DELETE" {
-			delete(state, key)
+			delete(state, storeKey)
 			continue
 		}
 
@@ -88,8 +87,41 @@ func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
 		for colIdx := 0; colIdx < nSource; colIdx++ {
 			resolved[colIdx] = resolveColumnValue(*change, colIdx)
 		}
-		state[key] = resolved
+		state[storeKey] = resolved
+		if lookupKey != storeKey {
+			delete(state, lookupKey)
+		}
 	}
+}
+
+func fillStateKeys(change Change, pkIndices []int, changeIndex int) (lookupKey, storeKey string) {
+	storeKey = pkKeyFromRow(change.Values, change.OldValues, pkIndices, changeIndex)
+	lookupKey = storeKey
+	if change.Operation == "UPDATE" && pkValueChanged(change, pkIndices) {
+		lookupKey = pkKeyFromRow(change.OldValues, change.OldValues, pkIndices, changeIndex)
+	}
+	return lookupKey, storeKey
+}
+
+func pkValueChanged(change Change, pkIndices []int) bool {
+	if change.Operation != "UPDATE" {
+		return false
+	}
+	for _, idx := range pkIndices {
+		old := columnValueAt(change.OldValues, idx)
+		new := columnValueAt(change.Values, idx)
+		if fmt.Sprintf("%v", old) != fmt.Sprintf("%v", new) {
+			return true
+		}
+	}
+	return false
+}
+
+func columnValueAt(values []interface{}, idx int) interface{} {
+	if idx < len(values) {
+		return values[idx]
+	}
+	return nil
 }
 
 func pkColumnIndices(columns []schema.Column, primaryKeys []string) []int {
@@ -113,15 +145,12 @@ func pkColumnIndices(columns []schema.Column, primaryKeys []string) []int {
 	return indices
 }
 
-func changePKKey(change Change, pkIndices []int, changeIndex int) string {
+func pkKeyFromRow(values, oldValues []interface{}, pkIndices []int, changeIndex int) string {
 	parts := make([]string, len(pkIndices))
 	for i, idx := range pkIndices {
-		var val interface{}
-		if idx < len(change.Values) {
-			val = change.Values[idx]
-		}
-		if val == nil && idx < len(change.OldValues) {
-			val = change.OldValues[idx]
+		val := columnValueAt(values, idx)
+		if val == nil {
+			val = columnValueAt(oldValues, idx)
 		}
 		if val == nil {
 			return fmt.Sprintf("row-%d", changeIndex)
