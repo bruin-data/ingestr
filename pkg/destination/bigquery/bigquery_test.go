@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +20,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
+	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 )
 
 func duckdbCompatible(sql string) string {
@@ -89,6 +94,396 @@ func TestNewBigQueryDestination(t *testing.T) {
 	dest := NewBigQueryDestination()
 	if dest == nil {
 		t.Fatal("NewBigQueryDestination returned nil")
+	}
+}
+
+func TestRunQueryJobWithRetryRecoversDuplicateJobInsert(t *testing.T) {
+	ctx := context.Background()
+	const sql = "SELECT 1"
+
+	var insertCalls int
+	var jobGetCalls int
+	var queryResultsCalls int
+	var gotJobID string
+	var gotSQL string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/projects/test-project/jobs"):
+			insertCalls++
+			var req struct {
+				JobReference struct {
+					ProjectID string `json:"projectId"`
+					JobID     string `json:"jobId"`
+					Location  string `json:"location"`
+				} `json:"jobReference"`
+				Configuration struct {
+					Query struct {
+						Query string `json:"query"`
+					} `json:"query"`
+				} `json:"configuration"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			gotJobID = req.JobReference.JobID
+			gotSQL = req.Configuration.Query.Query
+
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    http.StatusConflict,
+					"message": fmt.Sprintf("Already Exists: Job test-project:US.%s", gotJobID),
+					"status":  "ALREADY_EXISTS",
+					"errors": []map[string]string{
+						{
+							"domain":  "global",
+							"message": fmt.Sprintf("Already Exists: Job test-project:US.%s", gotJobID),
+							"reason":  "duplicate",
+						},
+					},
+				},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/jobs/"):
+			jobGetCalls++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference": map[string]string{
+					"projectId": "test-project",
+					"jobId":     gotJobID,
+					"location":  "US",
+				},
+				"configuration": map[string]interface{}{
+					"query": map[string]interface{}{
+						"query":        gotSQL,
+						"useLegacySql": false,
+					},
+				},
+				"status": map[string]string{
+					"state": "DONE",
+				},
+				"statistics": map[string]interface{}{
+					"query": map[string]string{
+						"statementType": "SELECT",
+					},
+				},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/queries/"):
+			queryResultsCalls++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference": map[string]string{
+					"projectId": "test-project",
+					"jobId":     gotJobID,
+					"location":  "US",
+				},
+				"jobComplete": true,
+				"totalRows":   "0",
+				"schema": map[string]interface{}{
+					"fields": []interface{}{},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:    client,
+		projectID: "test-project",
+		location:  "US",
+	}
+
+	job, err := dest.runQueryJobWithRetryAttempts(ctx, sql, "MERGE", 1)
+	if err != nil {
+		t.Fatalf("runQueryJobWithRetryAttempts() error = %v", err)
+	}
+	if job == nil {
+		t.Fatal("runQueryJobWithRetryAttempts() returned nil job")
+	}
+	if job.ID() != gotJobID {
+		t.Fatalf("job.ID() = %q, want %q", job.ID(), gotJobID)
+	}
+	if !strings.HasPrefix(gotJobID, "ingestr_") {
+		t.Fatalf("job ID = %q, want ingestr_ prefix", gotJobID)
+	}
+	if !strings.Contains(gotSQL, sql) {
+		t.Fatalf("submitted SQL = %q, want it to contain %q", gotSQL, sql)
+	}
+	if insertCalls != 1 {
+		t.Fatalf("insertCalls = %d, want 1", insertCalls)
+	}
+	if jobGetCalls == 0 {
+		t.Fatal("expected duplicate recovery to fetch the existing job")
+	}
+	if queryResultsCalls != 1 {
+		t.Fatalf("queryResultsCalls = %d, want 1", queryResultsCalls)
+	}
+}
+
+func TestRunQueryJobWithRetryUsesRemainingAttemptsAfterDuplicateRecoveryFailure(t *testing.T) {
+	ctx := context.Background()
+	const sql = "SELECT 1"
+
+	var insertCalls int
+	var jobGetCalls int
+	var queryResultsCalls int
+	var gotJobID string
+	var gotSQL string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/projects/test-project/jobs"):
+			insertCalls++
+			var req struct {
+				JobReference struct {
+					JobID string `json:"jobId"`
+				} `json:"jobReference"`
+				Configuration struct {
+					Query struct {
+						Query string `json:"query"`
+					} `json:"query"`
+				} `json:"configuration"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			gotJobID = req.JobReference.JobID
+			gotSQL = req.Configuration.Query.Query
+
+			if insertCalls == 1 {
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    http.StatusConflict,
+						"message": fmt.Sprintf("Already Exists: Job test-project:US.%s", gotJobID),
+						"errors": []map[string]string{
+							{
+								"domain":  "global",
+								"message": fmt.Sprintf("Already Exists: Job test-project:US.%s", gotJobID),
+								"reason":  "duplicate",
+							},
+						},
+					},
+				})
+				return
+			}
+
+			writeBigQueryTestJob(w, gotJobID, gotSQL)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/jobs/"):
+			jobGetCalls++
+			if jobGetCalls == 1 {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    http.StatusNotFound,
+						"message": "Not found: Job",
+					},
+				})
+				return
+			}
+			writeBigQueryTestJob(w, gotJobID, gotSQL)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/queries/"):
+			queryResultsCalls++
+			writeBigQueryTestQueryResults(w, gotJobID)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:    client,
+		projectID: "test-project",
+		location:  "US",
+	}
+
+	job, err := dest.runQueryJobWithRetryAttempts(ctx, sql, "MERGE", 2)
+	if err != nil {
+		t.Fatalf("runQueryJobWithRetryAttempts() error = %v", err)
+	}
+	if job == nil {
+		t.Fatal("runQueryJobWithRetryAttempts() returned nil job")
+	}
+	if insertCalls != 2 {
+		t.Fatalf("insertCalls = %d, want 2", insertCalls)
+	}
+	if jobGetCalls != 2 {
+		t.Fatalf("jobGetCalls = %d, want 2", jobGetCalls)
+	}
+	if queryResultsCalls != 1 {
+		t.Fatalf("queryResultsCalls = %d, want 1", queryResultsCalls)
+	}
+}
+
+func TestRecoverDuplicateQueryJobReportsSQLMismatch(t *testing.T) {
+	ctx := context.Background()
+	const expectedSQL = "SELECT 1"
+	const existingSQL = "SELECT 2"
+	const jobID = "ingestr_test"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/jobs/") {
+			writeBigQueryTestJob(w, jobID, existingSQL)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:    client,
+		projectID: "test-project",
+		location:  "US",
+	}
+
+	_, err = dest.recoverDuplicateQueryJob(ctx, jobID, expectedSQL)
+	if err == nil {
+		t.Fatal("recoverDuplicateQueryJob() error = nil, want mismatch")
+	}
+	if !strings.Contains(err.Error(), `existing="SELECT 2"`) || !strings.Contains(err.Error(), `expected="SELECT 1"`) {
+		t.Fatalf("recoverDuplicateQueryJob() error = %q, want existing and expected SQL snippets", err)
+	}
+}
+
+func TestRecoverDuplicateQueryJobAllowsDifferentAnnotation(t *testing.T) {
+	ctx := context.Background()
+	const expectedSQL = "-- @bruin.config: {\"request_id\":\"expected\"}\nSELECT 1"
+	const existingSQL = "-- @bruin.config: {\"request_id\":\"existing\"}\nSELECT 1"
+	const jobID = "ingestr_test"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/jobs/") {
+			writeBigQueryTestJob(w, jobID, existingSQL)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:    client,
+		projectID: "test-project",
+		location:  "US",
+	}
+
+	job, err := dest.recoverDuplicateQueryJob(ctx, jobID, expectedSQL)
+	if err != nil {
+		t.Fatalf("recoverDuplicateQueryJob() error = %v", err)
+	}
+	if job == nil {
+		t.Fatal("recoverDuplicateQueryJob() returned nil job")
+	}
+}
+
+func writeBigQueryTestJob(w http.ResponseWriter, jobID, sql string) {
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"jobReference": map[string]string{
+			"projectId": "test-project",
+			"jobId":     jobID,
+			"location":  "US",
+		},
+		"configuration": map[string]interface{}{
+			"query": map[string]interface{}{
+				"query":        sql,
+				"useLegacySql": false,
+			},
+		},
+		"status": map[string]string{
+			"state": "DONE",
+		},
+		"statistics": map[string]interface{}{
+			"query": map[string]string{
+				"statementType": "SELECT",
+			},
+		},
+	})
+}
+
+func writeBigQueryTestQueryResults(w http.ResponseWriter, jobID string) {
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"jobReference": map[string]string{
+			"projectId": "test-project",
+			"jobId":     jobID,
+			"location":  "US",
+		},
+		"jobComplete": true,
+		"totalRows":   "0",
+		"schema": map[string]interface{}{
+			"fields": []interface{}{},
+		},
+	})
+}
+
+func TestIsBigQueryDuplicateJobError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "googleapi duplicate job",
+			err: &googleapi.Error{
+				Code:    http.StatusConflict,
+				Message: "Already Exists: Job test:US.job",
+				Errors: []googleapi.ErrorItem{
+					{Reason: "duplicate", Message: "Already Exists: Job test:US.job"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "string duplicate job",
+			err:  errors.New("googleapi: Error 409: Already Exists: Job bruin-internal-dwh:US.w61mnz2N9xQMtY2nzHLeEotitcQ, duplicate"),
+			want: true,
+		},
+		{
+			name: "table already exists is not duplicate job",
+			err: &googleapi.Error{
+				Code:    http.StatusConflict,
+				Message: "Already Exists: Table test.dataset.table",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBigQueryDuplicateJobError(tt.err); got != tt.want {
+				t.Fatalf("isBigQueryDuplicateJobError() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
