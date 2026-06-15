@@ -2,9 +2,12 @@ package bigquery
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -18,6 +21,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
@@ -978,22 +982,35 @@ func (d *BigQueryDestination) runQueryJobWithRetryAttempts(ctx context.Context, 
 		lastErr error
 	)
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		query := d.client.Query(annotation.Prepend(ctx, sql))
+		annotatedSQL := annotation.Prepend(ctx, sql)
+		jobID := newBigQueryQueryJobID()
+		query := d.client.Query(annotatedSQL)
+		query.JobID = jobID
+		query.ProjectID = d.projectID
 		if d.location != "" {
 			query.Location = d.location
 		}
 
 		job, err := query.Run(ctx)
 		if err != nil {
-			if attempt < maxAttempts && isRetryableLoadJobError(err) {
-				lastErr = err
-				config.Debug("[%s] Retrying after start error: %v", opLabel, err)
-				if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); sleepErr != nil {
-					return nil, sleepErr
+			if isBigQueryDuplicateJobError(err) {
+				recoveredJob, recoverErr := d.recoverDuplicateQueryJob(ctx, jobID, annotatedSQL)
+				if recoverErr != nil {
+					return nil, fmt.Errorf("failed to recover duplicate %s job %s: %w", opLabel, jobID, recoverErr)
 				}
-				continue
+				config.Debug("[%s] Recovered duplicate job insert as existing job %s", opLabel, jobRef(recoveredJob))
+				job = recoveredJob
+			} else {
+				if attempt < maxAttempts && isRetryableLoadJobError(err) {
+					lastErr = err
+					config.Debug("[%s] Retrying after start error: %v", opLabel, err)
+					if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); sleepErr != nil {
+						return nil, sleepErr
+					}
+					continue
+				}
+				return nil, err
 			}
-			return nil, err
 		}
 		lastJob = job
 
@@ -1031,6 +1048,68 @@ func (d *BigQueryDestination) runQueryJobWithRetryAttempts(ctx context.Context, 
 		return lastJob, lastErr
 	}
 	return lastJob, fmt.Errorf("%s job exhausted retries", opLabel)
+}
+
+func (d *BigQueryDestination) recoverDuplicateQueryJob(ctx context.Context, jobID, sql string) (*bigquery.Job, error) {
+	job, err := d.client.JobFromProject(ctx, d.projectID, jobID, d.location)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRecoveredQueryJob(job, sql); err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+func validateRecoveredQueryJob(job *bigquery.Job, sql string) error {
+	cfg, err := job.Config()
+	if err != nil {
+		return err
+	}
+	queryCfg, ok := cfg.(*bigquery.QueryConfig)
+	if !ok {
+		return fmt.Errorf("existing job is %T, not a query job", cfg)
+	}
+	if queryCfg.Q != sql {
+		return errors.New("existing job SQL does not match retried query")
+	}
+	return nil
+}
+
+func newBigQueryQueryJobID() string {
+	var b [16]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return fmt.Sprintf("ingestr_%d", time.Now().UnixNano())
+	}
+	return "ingestr_" + hex.EncodeToString(b[:])
+}
+
+func isBigQueryDuplicateJobError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && apiErr != nil {
+		if apiErr.Code != http.StatusConflict {
+			return false
+		}
+		msg := strings.ToLower(apiErr.Message)
+		if strings.Contains(msg, "already exists: job") {
+			return true
+		}
+		for _, item := range apiErr.Errors {
+			if strings.EqualFold(item.Reason, "duplicate") && strings.Contains(strings.ToLower(item.Message), "job") {
+				return true
+			}
+		}
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "error 409") &&
+		strings.Contains(msg, "already exists: job") &&
+		strings.Contains(msg, "duplicate")
 }
 
 func isBigQueryAlterTypeRewriteCandidate(sql string, err error) bool {
