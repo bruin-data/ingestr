@@ -996,7 +996,15 @@ func (d *BigQueryDestination) runQueryJobWithRetryAttempts(ctx context.Context, 
 			if isBigQueryDuplicateJobError(err) {
 				recoveredJob, recoverErr := d.recoverDuplicateQueryJob(ctx, jobID, annotatedSQL)
 				if recoverErr != nil {
-					return nil, fmt.Errorf("failed to recover duplicate %s job %s: %w", opLabel, jobID, recoverErr)
+					lastErr = fmt.Errorf("failed to recover duplicate %s job %s: %w", opLabel, jobID, recoverErr)
+					if attempt < maxAttempts {
+						config.Debug("[%s] Retrying after duplicate recovery error: %v", opLabel, lastErr)
+						if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, recoverErr)); sleepErr != nil {
+							return nil, sleepErr
+						}
+						continue
+					}
+					return nil, lastErr
 				}
 				config.Debug("[%s] Recovered duplicate job insert as existing job %s", opLabel, jobRef(recoveredJob))
 				job = recoveredJob
@@ -1071,9 +1079,22 @@ func validateRecoveredQueryJob(job *bigquery.Job, sql string) error {
 		return fmt.Errorf("existing job is %T, not a query job", cfg)
 	}
 	if queryCfg.Q != sql {
-		return errors.New("existing job SQL does not match retried query")
+		return fmt.Errorf(
+			"existing job SQL does not match retried query (existing=%q expected=%q)",
+			queryJobSQLSnippet(queryCfg.Q),
+			queryJobSQLSnippet(sql),
+		)
 	}
 	return nil
+}
+
+func queryJobSQLSnippet(sql string) string {
+	const limit = 256
+	runes := []rune(strings.TrimSpace(sql))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit]) + "..."
 }
 
 func newBigQueryQueryJobID() string {
