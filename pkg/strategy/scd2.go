@@ -121,10 +121,11 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 		records = job.Tracker.Wrap(records)
 	}
 
-	// Write to staging table using parallel writes
+	// Write to staging table using parallel writes. The write schema must match
+	// the staging table, which was created with the SCD columns
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            stagingTable,
-		Schema:           job.Schema,
+		Schema:           extendedSchema,
 		Parallelism:      parallelism,
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
