@@ -3,7 +3,6 @@ package connredact
 
 import (
 	"errors"
-	"fmt"
 	"net/url"
 	"strings"
 
@@ -19,15 +18,16 @@ func Redact(uri string, err error) error {
 	}
 	var parseErr *pgconn.ParseConfigError
 	if errors.As(err, &parseErr) {
-		return errors.New("invalid connection string")
+		return &redactedErr{err: err, msg: "invalid connection string"}
 	}
 	var connErr *pgconn.ConnectError
 	if errors.As(err, &connErr) {
+		msg := "failed to connect"
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
-			return fmt.Errorf("failed to connect: %w", pgErr)
+			msg += ": " + pgErr.Error()
 		}
-		return errors.New("failed to connect")
+		return &redactedErr{err: err, msg: msg}
 	}
 	if uri == "" {
 		return err

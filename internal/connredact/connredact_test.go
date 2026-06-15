@@ -87,6 +87,36 @@ func TestRedact_PreservesChain(t *testing.T) {
 	}
 }
 
+func TestRedact_PreservesPgxChainForErrorsAs(t *testing.T) {
+	// ConnectError path: caller can still type-assert the pgx error after Redact.
+	cfg, err := pgconn.ParseConfig("postgres://leaky_user:hunter2@db.example.invalid:5432/leaky_db?connect_timeout=1")
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, connectErr := pgconn.ConnectConfig(ctx, cfg)
+	if connectErr == nil {
+		t.Fatal("expected connect to fail")
+	}
+	wrapped := Redact("", connectErr)
+	var ce *pgconn.ConnectError
+	if !errors.As(wrapped, &ce) {
+		t.Errorf("errors.As should still find *pgconn.ConnectError; got %T (%s)", wrapped, wrapped)
+	}
+
+	// ParseConfigError path: caller can still type-assert.
+	_, perr := pgconn.ParseConfig("postgres://x:y@h/d?sslmode=bogus")
+	if perr == nil {
+		t.Fatal("expected ParseConfig to fail")
+	}
+	wrappedP := Redact("", perr)
+	var pe *pgconn.ParseConfigError
+	if !errors.As(wrappedP, &pe) {
+		t.Errorf("errors.As should still find *pgconn.ParseConfigError; got %T (%s)", wrappedP, wrappedP)
+	}
+}
+
 func TestRedact_PassesThroughOtherErrors(t *testing.T) {
 	if got := Redact("", errors.New("x")); got.Error() != "x" {
 		t.Errorf("expected passthrough, got: %v", got)
