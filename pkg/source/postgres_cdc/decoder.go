@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -57,6 +56,7 @@ type Change struct {
 	LSN       pglogrepl.LSN
 	Values    []interface{}
 	OldValues []interface{} // For UPDATE/DELETE with replica identity
+	batchFill []interface{} // intra-batch fill for unchanged TOAST cols without old tuple
 }
 
 type Decoder struct {
@@ -199,6 +199,7 @@ func (d *Decoder) handleCommit() (arrow.RecordBatch, error) {
 		return nil, nil
 	}
 
+	d.applyIntraBatchFill()
 	d.compactPendingChanges()
 
 	batch, err := d.changesToBatch()
@@ -333,6 +334,10 @@ func (d *Decoder) handleDelete(data []byte) error {
 	return nil
 }
 
+func (d *Decoder) applyIntraBatchFill() {
+	applyIntraBatchFill(d.pendingChanges, d.tableSchema)
+}
+
 func (d *Decoder) compactPendingChanges() {
 	if len(d.pendingChanges) < 2 {
 		return
@@ -393,21 +398,7 @@ func (d *Decoder) compactPendingChanges() {
 }
 
 func (d *Decoder) pkKey(change Change, pkIndices []int, changeIndex int) string {
-	parts := make([]string, len(pkIndices))
-	for i, idx := range pkIndices {
-		var val interface{}
-		if idx < len(change.Values) {
-			val = change.Values[idx]
-		}
-		if val == nil && idx < len(change.OldValues) {
-			val = change.OldValues[idx]
-		}
-		if val == nil {
-			return fmt.Sprintf("row-%d", changeIndex)
-		}
-		parts[i] = fmt.Sprintf("%T:%v", val, val)
-	}
-	return strings.Join(parts, "|")
+	return changePKKey(change, pkIndices, changeIndex)
 }
 
 func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{}, error) {

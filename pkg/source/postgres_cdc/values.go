@@ -2,6 +2,8 @@ package postgres_cdc
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
@@ -16,6 +18,16 @@ func isTupleUnchanged(v interface{}) bool {
 }
 
 func resolveColumnValue(change Change, colIdx int) interface{} {
+	if v := resolveColumnValueBase(change, colIdx); v != nil || !columnIsUnchanged(change, colIdx) {
+		return v
+	}
+	if change.batchFill != nil && colIdx < len(change.batchFill) {
+		return change.batchFill[colIdx]
+	}
+	return nil
+}
+
+func resolveColumnValueBase(change Change, colIdx int) interface{} {
 	var val interface{}
 	if colIdx < len(change.Values) {
 		val = change.Values[colIdx]
@@ -30,6 +42,93 @@ func resolveColumnValue(change Change, colIdx int) interface{} {
 		}
 	}
 	return nil
+}
+
+func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
+	if len(changes) < 2 || tableSchema == nil {
+		return
+	}
+
+	pkIndices := pkColumnIndices(tableSchema.Columns, tableSchema.PrimaryKeys)
+	if len(pkIndices) == 0 {
+		return
+	}
+
+	nSource := sourceColumnCount(tableSchema)
+	state := make(map[string][]interface{})
+
+	for i := range changes {
+		change := &changes[i]
+		key := changePKKey(*change, pkIndices, i)
+
+		batchFill := make([]interface{}, nSource)
+		hasFill := false
+		for colIdx := 0; colIdx < nSource; colIdx++ {
+			if !columnIsUnchanged(*change, colIdx) {
+				continue
+			}
+			if resolveColumnValueBase(*change, colIdx) != nil {
+				continue
+			}
+			if prior, ok := state[key]; ok && colIdx < len(prior) && prior[colIdx] != nil {
+				batchFill[colIdx] = prior[colIdx]
+				hasFill = true
+			}
+		}
+		if hasFill {
+			change.batchFill = batchFill
+		}
+
+		if change.Operation == "DELETE" {
+			delete(state, key)
+			continue
+		}
+
+		resolved := make([]interface{}, nSource)
+		for colIdx := 0; colIdx < nSource; colIdx++ {
+			resolved[colIdx] = resolveColumnValue(*change, colIdx)
+		}
+		state[key] = resolved
+	}
+}
+
+func pkColumnIndices(columns []schema.Column, primaryKeys []string) []int {
+	if len(primaryKeys) == 0 {
+		return nil
+	}
+	indices := make([]int, 0, len(primaryKeys))
+	for _, pk := range primaryKeys {
+		idx := -1
+		for colIdx, col := range columns {
+			if col.Name == pk {
+				idx = colIdx
+				break
+			}
+		}
+		if idx < 0 {
+			return nil
+		}
+		indices = append(indices, idx)
+	}
+	return indices
+}
+
+func changePKKey(change Change, pkIndices []int, changeIndex int) string {
+	parts := make([]string, len(pkIndices))
+	for i, idx := range pkIndices {
+		var val interface{}
+		if idx < len(change.Values) {
+			val = change.Values[idx]
+		}
+		if val == nil && idx < len(change.OldValues) {
+			val = change.OldValues[idx]
+		}
+		if val == nil {
+			return fmt.Sprintf("row-%d", changeIndex)
+		}
+		parts[i] = fmt.Sprintf("%T:%v", val, val)
+	}
+	return strings.Join(parts, "|")
 }
 
 func columnIsUnchanged(change Change, colIdx int) bool {

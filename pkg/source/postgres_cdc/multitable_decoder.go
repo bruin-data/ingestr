@@ -195,6 +195,8 @@ func (d *MultiTableDecoder) handleCommit() ([]DecodedBatch, error) {
 			continue
 		}
 
+		applyIntraBatchFill(changes, tableSchema)
+
 		batch, err := d.changesToBatch(changes, tableSchema)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert changes for table %s: %w", tableName, err)

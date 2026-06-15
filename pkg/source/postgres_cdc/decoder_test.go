@@ -269,6 +269,82 @@ func TestUnchangedColumnsJSON(t *testing.T) {
 	assert.Equal(t, "[]", unchangedColumnsJSON(Change{Operation: "INSERT", Values: []interface{}{int32(1)}}, cols, 3))
 }
 
+func TestApplyIntraBatchFill(t *testing.T) {
+	cols := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt32},
+		{Name: "config_data", DataType: schema.TypeString},
+		{Name: "status", DataType: schema.TypeString},
+	}
+	tableSchema := &schema.TableSchema{
+		Columns:     append(cols, cdcMetaColumns()...),
+		PrimaryKeys: []string{"id"},
+	}
+
+	t.Run("insert then partial update fills unchanged from batch", func(t *testing.T) {
+		changes := []Change{
+			{
+				Operation: "INSERT",
+				Values:    []interface{}{int32(1), `{"big":true}`, "pending"},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"big":true}`, resolveColumnValue(changes[1], 1))
+		assert.Equal(t, "done", resolveColumnValue(changes[1], 2))
+	})
+
+	t.Run("chains multiple unchanged updates", func(t *testing.T) {
+		changes := []Change{
+			{
+				Operation: "INSERT",
+				Values:    []interface{}{int32(1), `{"v":1}`, "a"},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "b"},
+				OldValues: []interface{}{int32(1)},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "c"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"v":1}`, resolveColumnValue(changes[2], 1))
+		assert.Equal(t, "c", resolveColumnValue(changes[2], 2))
+	})
+
+	t.Run("old tuple still preferred over batch state", func(t *testing.T) {
+		changes := []Change{
+			{
+				Operation: "INSERT",
+				Values:    []interface{}{int32(1), `{"from":"insert"}`, "pending"},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+				OldValues: []interface{}{int32(1), `{"from":"old"}`, "pending"},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"from":"old"}`, resolveColumnValue(changes[1], 1))
+	})
+}
+
+func cdcMetaColumns() []schema.Column {
+	return []schema.Column{
+		{Name: CDCLSNColumn, DataType: schema.TypeString},
+		{Name: CDCDeletedColumn, DataType: schema.TypeBoolean},
+		{Name: CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+		{Name: CDCUnchangedColsColumn, DataType: schema.TypeString},
+	}
+}
+
 func TestNewDecoder(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Name:   "orders",
