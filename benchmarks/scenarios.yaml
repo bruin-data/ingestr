@@ -181,3 +181,13 @@ tools:
       - destination_type: bigquery
       - destination_type: snowflake
       - destination_type: mssql
+
+  spark:
+    script: scripts/bench_spark.py
+    requires:
+      - uv
+      - java
+    skip:
+      - source_type: mongodb
+      - destination_type: bigquery
+      - destination_type: snowflake

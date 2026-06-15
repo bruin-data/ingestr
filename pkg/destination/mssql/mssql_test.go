@@ -43,6 +43,32 @@ func TestBuildDeleteInsertDeleteSQLUsesTableLock(t *testing.T) {
 	assertContains(t, sql, "[updated_at] <= @p2")
 }
 
+func TestBuildInsertDedupSQLUsesTableLockAndDedupsPrimaryKey(t *testing.T) {
+	sql := buildInsertDedupSQL(
+		"dbo.events",
+		"_bruin_staging.events_raw",
+		[]string{"id"},
+		[]string{"id", "name", "updated_at"},
+		"updated_at",
+	)
+
+	assertContains(t, sql, "INSERT INTO [dbo].[events] WITH (TABLOCK) ([id], [name], [updated_at])")
+	assertContains(t, sql, "ROW_NUMBER() OVER (PARTITION BY [id] ORDER BY [updated_at] DESC)")
+	assertContains(t, sql, "FROM [_bruin_staging].[events_raw]")
+}
+
+func TestBuildInsertDedupSQLAllowsNoIncrementalKey(t *testing.T) {
+	sql := buildInsertDedupSQL(
+		"dbo.events",
+		"_bruin_staging.events_raw",
+		[]string{"id"},
+		[]string{"id", "name"},
+		"",
+	)
+
+	assertContains(t, sql, "ROW_NUMBER() OVER (PARTITION BY [id] ORDER BY (SELECT NULL))")
+}
+
 func TestDialectTypeNameUsesDestinationTypeMapping(t *testing.T) {
 	dialect := &Dialect{}
 	columns := []schema.Column{
