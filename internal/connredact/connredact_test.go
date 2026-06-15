@@ -101,6 +101,26 @@ func TestRedact_OverlappingHostAndPassword(t *testing.T) {
 	}
 }
 
+// mongo replica-set URIs put multiple hosts in the same field
+// (mongodb://h1:27017,h2:27017,h3:27017/db). The driver's server-selection
+// error dumps the entire topology, so every replica host must be redacted —
+// not just the first one.
+func TestRedact_MultiHostMongo(t *testing.T) {
+	uri := "mongodb://user:pass@replica1.example.com:27017,replica2.example.com:27017,replica3.example.com:27017/inventory?replicaSet=rs0"
+	raw := errors.New(
+		"server selection error: current topology: { Servers: [" +
+			"{ Addr: replica1.example.com:27017, ... }, " +
+			"{ Addr: replica2.example.com:27017, ... }, " +
+			"{ Addr: replica3.example.com:27017, ... } ] }",
+	)
+	got := Redact(uri, raw).Error()
+	for _, leak := range []string{"replica1.example.com", "replica2.example.com", "replica3.example.com"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("replica host %q still in redacted output: %s", leak, got)
+		}
+	}
+}
+
 func TestRedact_KeepsDriverDetail(t *testing.T) {
 	uri := "mysql://leaky_user:hunter2@db.example.invalid:3306/leaky_db"
 	got := Redact(uri, errors.New("dial tcp: lookup db.example.invalid: no such host")).Error()

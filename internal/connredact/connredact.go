@@ -3,6 +3,7 @@ package connredact
 
 import (
 	"errors"
+	"net"
 	"net/url"
 	"sort"
 	"strings"
@@ -73,8 +74,16 @@ func uriReplacements(uri string) []replacement {
 		return nil
 	}
 	var r []replacement
-	if h := u.Hostname(); h != "" {
-		r = append(r, replacement{h, "<host>"})
+	// u.Host may be comma-separated (mongo replica sets: host1:p1,host2:p2,...).
+	// u.Hostname() only handles single-host strings.
+	for _, hp := range strings.Split(u.Host, ",") {
+		h, _, err := net.SplitHostPort(strings.TrimSpace(hp))
+		if err != nil {
+			h = strings.TrimSpace(hp)
+		}
+		if h != "" {
+			r = append(r, replacement{h, "<host>"})
+		}
 	}
 	if u.User != nil {
 		if name := u.User.Username(); name != "" {
