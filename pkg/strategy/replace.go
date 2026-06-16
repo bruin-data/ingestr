@@ -315,6 +315,8 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 		return fmt.Errorf("failed to read from multi-table source: %w", err)
 	}
 
+	records = job.ApplyBatchTransformation(records)
+
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
 	}

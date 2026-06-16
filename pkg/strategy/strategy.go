@@ -48,6 +48,9 @@ type IngestionJob struct {
 	// ColumnMasker replaces values in user-specified columns (e.g. passwords).
 	ColumnMasker *transformer.ColumnMasker
 
+	// WhitespaceTrimmer trims string values when --trim-whitespace is enabled.
+	WhitespaceTrimmer *transformer.WhitespaceTrimmer
+
 	// EvolutionPlan holds the deferred schema evolution to apply on the destination.
 	EvolutionPlan *schemaevolution.EvolutionPlan
 }
@@ -89,6 +92,9 @@ type MultiTableIngestionJob struct {
 	Tracker        progress.Tracker
 	CDCResumeLSNs  map[string]string                         // Per-table CDC resume LSNs: source table → max LSN already processed
 	EvolutionPlans map[string]*schemaevolution.EvolutionPlan // Per-table schema evolution plans: source table → plan
+
+	// WhitespaceTrimmer trims string values when --trim-whitespace is enabled.
+	WhitespaceTrimmer *transformer.WhitespaceTrimmer
 }
 
 // ApplyEvolutionFor applies the pending schema evolution plan for a source table.
@@ -107,6 +113,13 @@ func (j *MultiTableIngestionJob) GetDestTableName(sourceTable string) string {
 		return mapping
 	}
 	return sourceTable
+}
+
+func (j *MultiTableIngestionJob) ApplyBatchTransformation(records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {
+	if j.WhitespaceTrimmer != nil {
+		records = transformer.Wrap(records, j.WhitespaceTrimmer)
+	}
+	return records
 }
 
 // MultiTableStrategy extends WriteStrategy for multi-table sources.
@@ -141,6 +154,10 @@ func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-c
 	// Apply column renaming (if configured)
 	if j.ColumnRenamer != nil && j.ColumnRenamer.HasRenames() {
 		records = transformer.Wrap(records, j.ColumnRenamer)
+	}
+
+	if j.WhitespaceTrimmer != nil {
+		records = transformer.Wrap(records, j.WhitespaceTrimmer)
 	}
 
 	// Apply column masking

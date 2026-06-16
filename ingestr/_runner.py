@@ -82,6 +82,7 @@ def ingest(
     columns: Optional[str] = None,
     no_inference: bool = False,
     mask: Optional[Union[str, Sequence[str]]] = None,
+    trim_whitespace: bool = False,
     pipelines_dir: Optional[PathLike] = None,
     staging_bucket: Optional[str] = None,
     staging_dataset: Optional[str] = None,
@@ -121,6 +122,7 @@ def ingest(
         columns=columns,
         no_inference=no_inference,
         mask=mask,
+        trim_whitespace=trim_whitespace,
         pipelines_dir=pipelines_dir,
         staging_bucket=staging_bucket,
         staging_dataset=staging_dataset,
@@ -159,6 +161,7 @@ def build_ingest_args(
     columns: Optional[str] = None,
     no_inference: bool = False,
     mask: Optional[Union[str, Sequence[str]]] = None,
+    trim_whitespace: bool = False,
     pipelines_dir: Optional[PathLike] = None,
     staging_bucket: Optional[str] = None,
     staging_dataset: Optional[str] = None,
@@ -195,6 +198,7 @@ def build_ingest_args(
     _append_option(args, "columns", columns)
     _append_bool(args, "no-inference", no_inference)
     _append_repeated(args, "mask", mask)
+    _append_bool(args, "trim-whitespace", trim_whitespace)
     _append_option(args, "pipelines-dir", pipelines_dir)
     _append_option(args, "staging-bucket", staging_bucket)
     _append_option(args, "staging-dataset", staging_dataset)
