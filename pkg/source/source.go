@@ -62,6 +62,10 @@ type SourceTable interface {
 	Read(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error)
 }
 
+type PrimaryKeyUniquenessProvider interface {
+	PrimaryKeysUnique() bool
+}
+
 // PartitionedTable is an optional interface that a SourceTable can implement
 // to declare a partition key for the destination table.
 type PartitionedTable interface {

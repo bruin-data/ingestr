@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
 func singleBatchRecords(t *testing.T, rows ...int64) <-chan source.RecordBatchResult {
@@ -169,6 +171,167 @@ func TestReplaceStrategy_Execute_HappyPath(t *testing.T) {
 	}
 	if len(dest.waitCalls) != 0 {
 		t.Fatalf("expected no WaitForExactRowCount calls for empty write, got %v", dest.waitCalls)
+	}
+}
+
+func TestReplaceStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing.T) {
+	job, src, dest := minimalJob()
+	src.primaryKeysUnique = true
+	src.readCh = mustClosedRecords()
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.prepareCalls) != 1 {
+		t.Fatalf("expected 1 PrepareTable call, got %d", len(dest.prepareCalls))
+	}
+	if got := dest.prepareCalls[0].PrimaryKeys; len(got) != 1 || got[0] != "id" {
+		t.Fatalf("staging table should keep primary keys on the fast path, got %v", got)
+	}
+	if len(dest.mergeCalls) != 0 {
+		t.Fatalf("expected no MergeTable calls on unique-PK fast path, got %d", len(dest.mergeCalls))
+	}
+	if len(dest.swapCalls) != 1 || dest.swapCalls[0][0] != dest.prepareCalls[0].Table {
+		t.Fatalf("expected staging table to be swapped directly, got swaps=%v prepares=%v", dest.swapCalls, dest.prepareCalls)
+	}
+}
+
+func TestReplaceStrategy_Execute_DedupsWhenUniqueSourcePrimaryKeysExcluded(t *testing.T) {
+	job, src, dest := minimalJob()
+	src.primaryKeys = []string{"tenant_id", "id"}
+	src.primaryKeysUnique = true
+	src.readCh = mustClosedRecords()
+	job.SourceSchema = &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	}
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.prepareCalls) != 2 {
+		t.Fatalf("expected dedup path with 2 PrepareTable calls, got %d", len(dest.prepareCalls))
+	}
+	if got := dest.prepareCalls[0].PrimaryKeys; len(got) != 0 {
+		t.Fatalf("raw staging table should be PK-free when part of the source PK was excluded, got %v", got)
+	}
+	if len(dest.mergeCalls) != 1 {
+		t.Fatalf("expected MergeTable call for dedup path, got %d", len(dest.mergeCalls))
+	}
+}
+
+func TestReplaceStrategy_Execute_DedupsWhenPrimaryKeyRenameCollapses(t *testing.T) {
+	job, src, dest := minimalJob()
+	src.primaryKeys = []string{"userId", "UserID"}
+	src.primaryKeysUnique = true
+	src.readCh = mustClosedRecords()
+	job.Config.PrimaryKeys = []string{"user_id"}
+	job.SourceSchema = &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "userId", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "UserID", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"userId", "UserID"},
+	}
+	job.Schema = &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "user_id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"user_id"},
+	}
+	job.ColumnRenamer = transformer.NewColumnRenamer(map[string]string{
+		"userId": "user_id",
+		"UserID": "user_id",
+	})
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.prepareCalls) != 2 {
+		t.Fatalf("expected dedup path with 2 PrepareTable calls, got %d", len(dest.prepareCalls))
+	}
+	if got := dest.prepareCalls[0].PrimaryKeys; len(got) != 0 {
+		t.Fatalf("raw staging table should be PK-free when PK renames collapse, got %v", got)
+	}
+	if len(dest.mergeCalls) != 1 {
+		t.Fatalf("expected MergeTable call for dedup path, got %d", len(dest.mergeCalls))
+	}
+}
+
+func TestReplaceStrategy_Execute_DedupsWhenNonPrimaryKeyRenamesToPrimaryKey(t *testing.T) {
+	job, src, dest := minimalJob()
+	src.primaryKeysUnique = true
+	src.readCh = mustClosedRecords()
+	job.SourceSchema = &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "ID", DataType: schema.TypeInt64, Nullable: true},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	}
+	job.Schema = &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	}
+	job.ColumnRenamer = transformer.NewColumnRenamer(map[string]string{
+		"ID": "id",
+	})
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.prepareCalls) != 2 {
+		t.Fatalf("expected dedup path with 2 PrepareTable calls, got %d", len(dest.prepareCalls))
+	}
+	if got := dest.prepareCalls[0].PrimaryKeys; len(got) != 0 {
+		t.Fatalf("raw staging table should be PK-free when a non-PK renames to a PK, got %v", got)
+	}
+	if len(dest.mergeCalls) != 1 {
+		t.Fatalf("expected MergeTable call for dedup path, got %d", len(dest.mergeCalls))
+	}
+}
+
+func TestReplaceStrategy_Execute_DedupsWhenPrimaryKeyIsMasked(t *testing.T) {
+	job, src, dest := minimalJob()
+	src.primaryKeysUnique = true
+	src.readCh = mustClosedRecords()
+
+	masker, err := transformer.NewColumnMasker([]string{"id:redact"})
+	if err != nil {
+		t.Fatalf("NewColumnMasker returned error: %v", err)
+	}
+	job.ColumnMasker = masker
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.prepareCalls) != 2 {
+		t.Fatalf("expected dedup path with 2 PrepareTable calls, got %d", len(dest.prepareCalls))
+	}
+	if got := dest.prepareCalls[0].PrimaryKeys; len(got) != 0 {
+		t.Fatalf("raw staging table should be PK-free when a PK is masked, got %v", got)
+	}
+	if len(dest.mergeCalls) != 1 {
+		t.Fatalf("expected MergeTable call for dedup path, got %d", len(dest.mergeCalls))
 	}
 }
 

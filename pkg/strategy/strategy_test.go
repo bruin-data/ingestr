@@ -24,12 +24,13 @@ import (
 type fakeSourceTable struct {
 	mu sync.Mutex
 
-	name           string
-	primaryKeys    []string
-	incrementalKey string
-	strategy       config.IncrementalStrategy
-	hasKnownSchema bool
-	tableSchema    *schema.TableSchema
+	name              string
+	primaryKeys       []string
+	primaryKeysUnique bool
+	incrementalKey    string
+	strategy          config.IncrementalStrategy
+	hasKnownSchema    bool
+	tableSchema       *schema.TableSchema
 
 	readCalled bool
 	readOpts   source.ReadOptions
@@ -44,6 +45,10 @@ func (t *fakeSourceTable) Name() string {
 
 func (t *fakeSourceTable) PrimaryKeys() []string {
 	return t.primaryKeys
+}
+
+func (t *fakeSourceTable) PrimaryKeysUnique() bool {
+	return t.primaryKeysUnique
 }
 
 func (t *fakeSourceTable) IncrementalKey() string {
@@ -80,14 +85,15 @@ type fakeDestination struct {
 
 	calls []string
 
-	prepareCalls []destination.PrepareOptions
-	writeCalls   []destination.WriteOptions
-	swapCalls    [][2]string
-	mergeCalls   []destination.MergeOptions
-	diCalls      []destination.DeleteInsertOptions
-	dropCalls    []string
-	execCalls    []execCall
-	waitCalls    []struct {
+	prepareCalls  []destination.PrepareOptions
+	writeCalls    []destination.WriteOptions
+	swapCalls     [][2]string
+	mergeCalls    []destination.MergeOptions
+	diCalls       []destination.DeleteInsertOptions
+	dropCalls     []string
+	execCalls     []execCall
+	truncateCalls []string
+	waitCalls     []struct {
 		Table        string
 		ExpectedRows int64
 	}
@@ -97,6 +103,7 @@ type fakeDestination struct {
 	swapErr           error
 	mergeErr          error
 	deleteInsertErr   error
+	truncateErr       error
 	waitErr           error
 	dropErrByTable    map[string]error
 	noDeleteInsert    bool
@@ -204,6 +211,15 @@ func (d *fakeDestination) DropTable(ctx context.Context, table string) error {
 	}
 	d.mu.Unlock()
 	return err
+}
+
+func (d *fakeDestination) TruncateTable(ctx context.Context, table string) error {
+	d.mu.Lock()
+	d.calls = append(d.calls, "TruncateTable")
+	d.truncateCalls = append(d.truncateCalls, table)
+	truncateErr := d.truncateErr
+	d.mu.Unlock()
+	return truncateErr
 }
 
 func (d *fakeDestination) WaitForExactRowCount(ctx context.Context, table string, expectedRows int64) error {
