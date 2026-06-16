@@ -24,6 +24,15 @@ type MultiTableCDCReader struct {
 }
 
 func NewMultiTableCDCReader(src *PostgresCDCSource, tables []source.SourceTableInfo, cdcConfig CDCConfig, resumeLSNs map[string]string, slotSuffix string) *MultiTableCDCReader {
+	// Reconcile each table's effective merge keys into its schema so the decoder,
+	// compaction, and unchanged-TOAST fill all key off the same keys the
+	// destination merge uses. SourceTableInfo.PrimaryKeys is authoritative and
+	// may carry user-provided keys that the schema's detected keys lack.
+	for i := range tables {
+		if len(tables[i].PrimaryKeys) > 0 && tables[i].Schema != nil {
+			tables[i].Schema.PrimaryKeys = tables[i].PrimaryKeys
+		}
+	}
 	return &MultiTableCDCReader{
 		source:        src,
 		tables:        tables,
@@ -279,9 +288,11 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	accum := newBatchAccumulator(batchSize)
 	pkByTable := make(map[string][]string, len(r.tables))
 	for _, t := range r.tables {
-		if t.Schema != nil {
-			pkByTable[t.Name] = t.Schema.PrimaryKeys
+		pks := t.PrimaryKeys
+		if len(pks) == 0 && t.Schema != nil {
+			pks = t.Schema.PrimaryKeys
 		}
+		pkByTable[t.Name] = pks
 	}
 	accum.transform = func(tableName string, batch arrow.RecordBatch) arrow.RecordBatch {
 		return forwardFillUnchanged(batch, pkByTable[tableName])
