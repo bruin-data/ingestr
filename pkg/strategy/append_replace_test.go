@@ -360,6 +360,24 @@ func TestReplaceStrategy_Execute_DedupsWhenPrimaryKeyIsMasked(t *testing.T) {
 	}
 }
 
+func TestReplaceStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
+	job, src, _ := minimalJob()
+	job.Config.IncrementalStrategy = config.StrategyReplace
+	job.Config.FullRefresh = true
+	src.readCh = mustClosedRecords()
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if !src.readOpts.FullRefresh {
+		t.Fatalf("ReadOptions.FullRefresh = false, want true")
+	}
+}
+
 func TestReplaceStrategy_Execute_WriteFails_DropsStaging(t *testing.T) {
 	job, src, dest := minimalJob()
 	src.readCh = mustClosedRecords()

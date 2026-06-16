@@ -748,7 +748,6 @@ func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 	defer func() { _ = stmt.Close() }()
 
 	if err := stmt.SetSqlQuery(query); err != nil {
-		// Table doesn't exist
 		if strings.Contains(err.Error(), "does not exist") ||
 			strings.Contains(err.Error(), "Catalog Error") {
 			return "", nil
@@ -758,7 +757,6 @@ func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 
 	reader, _, err := stmt.ExecuteQuery(ctx)
 	if err != nil {
-		// Table doesn't exist or column doesn't exist
 		if strings.Contains(err.Error(), "does not exist") ||
 			strings.Contains(err.Error(), "Catalog Error") ||
 			strings.Contains(err.Error(), "not found") {

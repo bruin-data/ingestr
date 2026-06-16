@@ -134,6 +134,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		Schema:         job.SourceSchema,
 		CDCResumeLSN:   job.Config.CDCResumeLSN,  // For CDC incremental resume
 		CDCSlotSuffix:  job.Config.CDCSlotSuffix, // Destination-aware slot suffix
+		FullRefresh:    job.Config.FullRefresh,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)
@@ -260,6 +261,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			PageSize:      job.Config.PageSize,
 			Limit:         job.Config.SQLLimit,
 			CDCSlotSuffix: job.Config.CDCSlotSuffix,
+			FullRefresh:   job.Config.FullRefresh,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})

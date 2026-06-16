@@ -61,6 +61,20 @@ func createMSSQLCTItemsTable(t *testing.T, ctx context.Context, db *sql.DB) {
 	require.NoError(t, err)
 }
 
+func createEmptyMSSQLCTItemsTable(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+
+	_, err := db.ExecContext(ctx, `CREATE TABLE dbo.items (
+		id INT NOT NULL PRIMARY KEY,
+		name NVARCHAR(100) NOT NULL,
+		value INT NULL
+	)`)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `ALTER TABLE dbo.items ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = OFF)`)
+	require.NoError(t, err)
+}
+
 func TestMSSQLChangeTracking_SnapshotAndIncremental_DuckDB(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -89,6 +103,15 @@ func TestMSSQLChangeTracking_SnapshotAndIncremental_DuckDB(t *testing.T) {
 		defer func() { _ = duck.Close() }()
 
 		var v int64
+		require.NoError(t, duck.QueryRow(query).Scan(&v))
+		return v
+	}
+	queryDuckString := func(query string) string {
+		duck, err := sql.Open("adbc_generic", "driver=duckdb;path="+duckdbPath)
+		require.NoError(t, err)
+		defer func() { _ = duck.Close() }()
+
+		var v string
 		require.NoError(t, duck.QueryRow(query).Scan(&v))
 		return v
 	}
@@ -124,7 +147,55 @@ func TestMSSQLChangeTracking_SnapshotAndIncremental_DuckDB(t *testing.T) {
 
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
+	var currentCTVersion int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT CHANGE_TRACKING_CURRENT_VERSION()`).Scan(&currentCTVersion))
+
 	assert.EqualValues(t, 4, queryDuckCount(`SELECT COUNT(*) FROM items_dest`), "insert+delete inside one CT window should not create a destination row")
 	assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM items_dest WHERE id = 3 AND name = 'item3' AND value = 300 AND "_cdc_deleted"`), "CT delete only carries PKs, so existing row data is preserved")
 	assert.EqualValues(t, 0, queryDuckCount(`SELECT COUNT(*) FROM items_dest WHERE id = 5`))
+	assert.Less(t, queryDuckString(`SELECT MAX("_cdc_lsn") FROM items_dest`), fmt.Sprintf("%020d", currentCTVersion), "row-level Change Tracking cursor does not advance for changes that materialize no destination row")
+}
+
+func TestMSSQLChangeTracking_EmptyTableSnapshot_DuckDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	dbName, db := setupMSSQLCTDatabase(t, ctx)
+	createEmptyMSSQLCTItemsTable(t, ctx, db)
+
+	tmpDir, err := os.MkdirTemp("", "mssql_ct_empty_duckdb_*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	duckdbPath := tmpDir + "/test.duckdb"
+
+	cfg := &config.IngestConfig{
+		SourceURI:   mssqlURIForDatabase(t, mssqlDest.uri, "mssql+ct", dbName, nil),
+		SourceTable: "dbo.items",
+		DestURI:     "duckdb:///" + duckdbPath,
+		DestTable:   "items_empty_dest",
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	queryDuckCount := func(query string) int64 {
+		duck, err := sql.Open("adbc_generic", "driver=duckdb;path="+duckdbPath)
+		require.NoError(t, err)
+		defer func() { _ = duck.Close() }()
+
+		var v int64
+		require.NoError(t, duck.QueryRow(query).Scan(&v))
+		return v
+	}
+
+	assert.EqualValues(t, 0, queryDuckCount(`SELECT COUNT(*) FROM items_empty_dest`))
+
+	_, err = db.ExecContext(ctx, `INSERT INTO dbo.items (id, name, value) VALUES (1, N'item1', 100)`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM dbo.items WHERE id = 1`)
+	require.NoError(t, err)
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	assert.EqualValues(t, 0, queryDuckCount(`SELECT COUNT(*) FROM items_empty_dest`), "insert+delete on an empty table should not create a destination row")
 }

@@ -716,11 +716,15 @@ func (d *SQLiteDestination) SupportsCDCMerge() bool { return true }
 
 // GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
 func (d *SQLiteDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	if err := d.ensureSchemaAttached(ctx, schemaOf(table)); err != nil {
+		return "", err
+	}
+
 	var maxLSN sql.NullString
 	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, destination.QuoteTableName(table))
 	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)
 	if err != nil {
-		if strings.Contains(err.Error(), "no such table") {
+		if strings.Contains(err.Error(), "no such table") || strings.Contains(err.Error(), "no such column") {
 			return "", nil
 		}
 		return "", err

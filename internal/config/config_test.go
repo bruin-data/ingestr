@@ -120,3 +120,61 @@ func TestIngestConfigValidate_Stream(t *testing.T) {
 		})
 	}
 }
+
+func TestIngestConfigValidate_ChangeTrackingRejectsSQLLimit(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SourceURI = "mssql+ct://example:1433/app"
+	cfg.SourceTable = "dbo.users"
+	cfg.DestURI = "duckdb:///tmp/out.duckdb"
+	cfg.SQLLimit = 10
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "sql-limit") {
+		t.Fatalf("expected sql-limit validation error, got %v", err)
+	}
+}
+
+func TestIngestConfigValidate_ChangeTrackingRejectsExplicitReplace(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SourceURI = "mssql+ct://example:1433/app"
+	cfg.SourceTable = "dbo.users"
+	cfg.DestURI = "duckdb:///tmp/out.duckdb"
+	cfg.IncrementalStrategy = StrategyReplace
+	cfg.IncrementalStrategyExplicit = true
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "incremental-strategy") {
+		t.Fatalf("expected incremental-strategy validation error, got %v", err)
+	}
+}
+
+func TestIngestConfigValidate_ChangeTrackingAllowsDefaultReplace(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SourceURI = "mssql+ct://example:1433/app"
+	cfg.SourceTable = "dbo.users"
+	cfg.DestURI = "duckdb:///tmp/out.duckdb"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestIngestConfigValidate_ChangeTrackingAllowsExplicitReplaceWithFullRefresh(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SourceURI = "mssql+ct://example:1433/app"
+	cfg.SourceTable = "dbo.users"
+	cfg.DestURI = "duckdb:///tmp/out.duckdb"
+	cfg.IncrementalStrategy = StrategyReplace
+	cfg.IncrementalStrategyExplicit = true
+	cfg.FullRefresh = true
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}

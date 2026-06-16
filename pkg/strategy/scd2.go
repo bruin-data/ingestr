@@ -87,6 +87,7 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 		ExcludeColumns: job.Config.SQLExcludeColumns,
 		Parallelism:    parallelism,
 		Schema:         job.SourceSchema,
+		FullRefresh:    job.Config.FullRefresh,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)

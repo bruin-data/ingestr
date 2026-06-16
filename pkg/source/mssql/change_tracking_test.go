@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -87,15 +88,162 @@ func TestBuildCTSnapshotQuery(t *testing.T) {
 		{Name: "name", DataType: schema.TypeString},
 	}
 
-	got := buildCTSnapshotQuery("dbo.items", columns, sourceReadOptionsForTest(10), 123, true)
+	got := buildCTSnapshotQuery("dbo.items", columns, 123, true)
 	normalized := strings.Join(strings.Fields(got), " ")
 
-	assert.Contains(t, normalized, "SELECT TOP 10")
+	assert.Contains(t, normalized, "SELECT")
+	assert.NotContains(t, normalized, "TOP")
 	assert.Contains(t, normalized, "[id], [name]")
 	assert.Contains(t, normalized, "CONVERT(varchar(20), 123)")
 	assert.Contains(t, normalized, "FROM [dbo].[items] WITH (HOLDLOCK)")
 }
 
-func sourceReadOptionsForTest(limit int) source.ReadOptions {
-	return source.ReadOptions{Limit: limit}
+func TestBuildCTHeartbeatQuery(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "name", DataType: schema.TypeString},
+	}
+
+	got := buildCTHeartbeatQuery("dbo.items", columns, []string{"id"}, 456)
+	normalized := strings.Join(strings.Fields(got), " ")
+
+	assert.Contains(t, normalized, "SELECT TOP 1")
+	assert.Contains(t, normalized, "[id], [name]")
+	assert.Contains(t, normalized, "CONVERT(varchar(20), 456)")
+	assert.Contains(t, normalized, "FROM [dbo].[items]")
+	assert.Contains(t, normalized, "ORDER BY [id]")
+}
+
+func TestChangeTrackingReadRejectsLimit(t *testing.T) {
+	table := &changeTrackingTable{}
+
+	records, err := table.Read(t.Context(), source.ReadOptions{Limit: 10})
+
+	require.Error(t, err)
+	assert.Nil(t, records)
+	assert.Contains(t, err.Error(), "--sql-limit")
+}
+
+func TestChangeTrackingReadRejectsMetadataExcludes(t *testing.T) {
+	table := &changeTrackingTable{}
+
+	records, err := table.Read(t.Context(), source.ReadOptions{ExcludeColumns: []string{destination.CDCLSNColumn}})
+
+	require.Error(t, err)
+	assert.Nil(t, records)
+	assert.Contains(t, err.Error(), "--sql-exclude-columns")
+	assert.Contains(t, err.Error(), destination.CDCLSNColumn)
+}
+
+func TestChangeTrackingReadRejectsPrimaryKeyExcludes(t *testing.T) {
+	table := &changeTrackingTable{primaryKeys: []string{"id"}}
+
+	records, err := table.Read(t.Context(), source.ReadOptions{ExcludeColumns: []string{"ID"}})
+
+	require.Error(t, err)
+	assert.Nil(t, records)
+	assert.Contains(t, err.Error(), "--sql-exclude-columns")
+	assert.Contains(t, err.Error(), "ID")
+}
+
+func TestChangeTrackingGetTableRejectsNonMergeStrategy(t *testing.T) {
+	src := &MSSQLChangeTrackingSource{}
+
+	table, err := src.GetTable(t.Context(), source.TableRequest{
+		Name:     "dbo.items",
+		Strategy: config.StrategyAppend,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, table)
+	assert.Contains(t, err.Error(), `require "merge" incremental strategy`)
+	assert.Contains(t, err.Error(), `"append"`)
+}
+
+func TestResolveChangeTrackingStrategyDistinguishesDefaultReplace(t *testing.T) {
+	strategy, err := resolveChangeTrackingStrategy(config.StrategyReplace, false, false)
+	require.NoError(t, err)
+	assert.Equal(t, config.StrategyMerge, strategy)
+
+	strategy, err = resolveChangeTrackingStrategy(config.StrategyReplace, true, true)
+	require.NoError(t, err)
+	assert.Equal(t, config.StrategyMerge, strategy)
+
+	strategy, err = resolveChangeTrackingStrategy(config.StrategyMerge, true, false)
+	require.NoError(t, err)
+	assert.Equal(t, config.StrategyMerge, strategy)
+
+	strategy, err = resolveChangeTrackingStrategy(config.StrategyAppend, true, true)
+	require.NoError(t, err)
+	assert.Equal(t, config.StrategyMerge, strategy)
+}
+
+func TestChangeTrackingGetTableRejectsExplicitReplaceWithoutFullRefresh(t *testing.T) {
+	src := &MSSQLChangeTrackingSource{}
+
+	table, err := src.GetTable(t.Context(), source.TableRequest{
+		Name:        "dbo.items",
+		Strategy:    config.StrategyReplace,
+		StrategySet: true,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, table)
+	assert.Contains(t, err.Error(), `require "merge" incremental strategy`)
+	assert.Contains(t, err.Error(), "full-refresh")
+	assert.Contains(t, err.Error(), `"replace"`)
+}
+
+func TestShouldEmitCTHeartbeatOnlyWhenNoChangeRows(t *testing.T) {
+	assert.True(t, shouldEmitCTHeartbeat(true, 0))
+	assert.False(t, shouldEmitCTHeartbeat(true, 1))
+	assert.False(t, shouldEmitCTHeartbeat(false, 0))
+}
+
+func TestObjectIDNamePreservesSupportedTableRefs(t *testing.T) {
+	tests := []struct {
+		name  string
+		table string
+		want  string
+	}{
+		{
+			name:  "unqualified table defaults dbo",
+			table: "items",
+			want:  "[dbo].[items]",
+		},
+		{
+			name:  "schema qualified table",
+			table: "sales.items",
+			want:  "[sales].[items]",
+		},
+		{
+			name:  "database qualified table",
+			table: "RemoteDB.dbo.items",
+			want:  "[RemoteDB].[dbo].[items]",
+		},
+		{
+			name:  "bracketed identifiers with dots",
+			table: "[RemoteDB].[erp.schema].[order.items]",
+			want:  "[RemoteDB].[erp.schema].[order.items]",
+		},
+		{
+			name:  "escaped bracket in identifier",
+			table: "[Remote]]DB].[dbo].[item]]table]",
+			want:  "[Remote]]DB].[dbo].[item]]table]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, objectIDName(tt.table))
+		})
+	}
+}
+
+func TestCTVersionExpiredErrorMentionsFullRefresh(t *testing.T) {
+	err := (&ctVersionExpiredError{table: "dbo.items", version: 10, minVersion: 20}).Error()
+
+	assert.Contains(t, err, "version 10")
+	assert.Contains(t, err, "minimum valid version is 20")
+	assert.Contains(t, err, "--full-refresh")
 }

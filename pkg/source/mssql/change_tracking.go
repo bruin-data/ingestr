@@ -43,7 +43,7 @@ type ctVersionExpiredError struct {
 }
 
 func (e *ctVersionExpiredError) Error() string {
-	return fmt.Sprintf("SQL Server Change Tracking version %d is no longer valid for %s; minimum valid version is %d", e.version, e.table, e.minVersion)
+	return fmt.Sprintf("SQL Server Change Tracking version %d is no longer valid for %s; minimum valid version is %d; run with --full-refresh to rebuild the destination from a new snapshot", e.version, e.table, e.minVersion)
 }
 
 func NewMSSQLChangeTrackingSource() *MSSQLChangeTrackingSource {
@@ -105,6 +105,11 @@ func (s *MSSQLChangeTrackingSource) GetTable(ctx context.Context, req source.Tab
 		return nil, fmt.Errorf("custom queries are not supported for SQL Server Change Tracking sources")
 	}
 
+	strategy, err := resolveChangeTrackingStrategy(req.Strategy, req.StrategySet, req.FullRefresh)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := s.ensureTableChangeTracking(ctx, req.Name); err != nil {
 		return nil, err
 	}
@@ -124,11 +129,6 @@ func (s *MSSQLChangeTrackingSource) GetTable(ctx context.Context, req source.Tab
 
 	tableSchema.PrimaryKeys = pks
 	tableSchema = addCTColumns(tableSchema)
-
-	strategy := config.StrategyMerge
-	if req.Strategy != "" && req.Strategy != config.StrategyReplace {
-		strategy = req.Strategy
-	}
 
 	return &changeTrackingTable{
 		source:      s,
@@ -164,6 +164,13 @@ func (t *changeTrackingTable) GetSchema(ctx context.Context) (*schema.TableSchem
 }
 
 func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	if opts.Limit > 0 {
+		return nil, fmt.Errorf("SQL Server Change Tracking sources do not support --sql-limit because partial snapshots cannot safely advance the resume cursor")
+	}
+	if err := validateCTExcludeColumns(opts.ExcludeColumns, t.primaryKeys); err != nil {
+		return nil, err
+	}
+
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -174,27 +181,13 @@ func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions)
 			tableSchema = opts.Schema
 		}
 
-		if version, ok := parseStoredCTVersion(opts.CDCResumeLSN); ok && version > 0 {
-			canResume, err := t.source.canResumeCT(ctx, t.tableName, version)
+		if version, ok := parseStoredCTVersion(opts.CDCResumeLSN); ok {
+			_, err := t.source.readCTChanges(ctx, t.tableName, tableSchema, t.primaryKeys, version, opts, results, true)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
 			}
-			if canResume {
-				err := t.source.readCTChanges(ctx, t.tableName, tableSchema, t.primaryKeys, version, opts, results)
-				if err == nil {
-					return
-				}
-				var expired *ctVersionExpiredError
-				if !errors.As(err, &expired) {
-					results <- source.RecordBatchResult{Err: err}
-					return
-				}
-				config.Debug("[MSSQL CT] Resume version %d expired while reading %s; taking a fresh snapshot", version, t.tableName)
-			}
-			if !canResume {
-				config.Debug("[MSSQL CT] Resume version %d is no longer valid for %s; taking a fresh snapshot", version, t.tableName)
-			}
+			return
 		}
 
 		snapshotVersion, err := t.source.snapshotCTTable(ctx, t.tableName, tableSchema, opts, results)
@@ -203,8 +196,14 @@ func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions)
 			return
 		}
 
-		if err := t.source.readCTChanges(ctx, t.tableName, tableSchema, t.primaryKeys, snapshotVersion, opts, results); err != nil {
+		if opts.FullRefresh {
+			return
+		}
+
+		_, err = t.source.readCTChanges(ctx, t.tableName, tableSchema, t.primaryKeys, snapshotVersion, opts, results, false)
+		if err != nil {
 			results <- source.RecordBatchResult{Err: err}
+			return
 		}
 	}()
 
@@ -266,6 +265,29 @@ func (s *MSSQLChangeTrackingSource) ensureTableChangeTracking(ctx context.Contex
 	return nil
 }
 
+func resolveChangeTrackingStrategy(strategy config.IncrementalStrategy, strategySet, fullRefresh bool) (config.IncrementalStrategy, error) {
+	if fullRefresh {
+		switch strategy {
+		case "", config.StrategyReplace, config.StrategyTruncateInsert, config.StrategyAppend, config.StrategyDeleteInsert, config.StrategyMerge, config.StrategySCD2, config.StrategyNone:
+			return config.StrategyMerge, nil
+		default:
+			return "", fmt.Errorf("SQL Server Change Tracking sources require a valid incremental strategy when full-refresh is enabled; got %q", strategy)
+		}
+	}
+
+	switch strategy {
+	case "", config.StrategyMerge:
+		return config.StrategyMerge, nil
+	case config.StrategyReplace:
+		if strategySet && !fullRefresh {
+			return "", fmt.Errorf("SQL Server Change Tracking sources require %q incremental strategy unless full-refresh is enabled; got %q", config.StrategyMerge, strategy)
+		}
+		return config.StrategyMerge, nil
+	default:
+		return "", fmt.Errorf("SQL Server Change Tracking sources require %q incremental strategy; got %q", config.StrategyMerge, strategy)
+	}
+}
+
 func addCTColumns(original *schema.TableSchema) *schema.TableSchema {
 	result := *original
 	result.Columns = make([]schema.Column, 0, len(original.Columns)+len(ctMetadataColumns))
@@ -287,14 +309,6 @@ func sourceColumnsWithoutCT(tableSchema *schema.TableSchema) []schema.Column {
 
 type ctQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
-func (s *MSSQLChangeTrackingSource) canResumeCT(ctx context.Context, table string, version int64) (bool, error) {
-	minVersion, err := s.minValidCTVersion(ctx, s.db, table)
-	if err != nil {
-		return false, err
-	}
-	return version >= minVersion, nil
 }
 
 func (s *MSSQLChangeTrackingSource) minValidCTVersion(ctx context.Context, q ctQueryer, table string) (int64, error) {
@@ -342,14 +356,14 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 	}
 
 	columns := tableSchema.Columns
-	query := buildCTSnapshotQuery(table, sourceColumnsWithoutCT(tableSchema), opts, version, isolation != sql.LevelSnapshot)
+	query := buildCTSnapshotQuery(table, sourceColumnsWithoutCT(tableSchema), version, isolation != sql.LevelSnapshot)
 	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query snapshot for %s: %w", table, err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	if err := s.rowsToCTBatches(rows, columns, opts, results); err != nil {
+	if _, err := s.rowsToCTBatches(rows, columns, opts, results); err != nil {
 		return 0, err
 	}
 
@@ -360,100 +374,159 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 	return version, nil
 }
 
-func (s *MSSQLChangeTrackingSource) readCTChanges(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelSnapshot)
+func (s *MSSQLChangeTrackingSource) readCTChanges(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, emitHeartbeat bool) (int64, error) {
+	readThroughVersion, err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelSnapshot, emitHeartbeat)
 	if err == nil {
-		return nil
+		return readThroughVersion, nil
 	}
 	var expired *ctVersionExpiredError
 	if errors.As(err, &expired) {
-		return err
+		return 0, err
 	}
-	config.Debug("[MSSQL CT] SNAPSHOT isolation change read failed for %s: %v; retrying with read committed", table, err)
-	return s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelReadCommitted)
+	return 0, fmt.Errorf("failed to read SQL Server Change Tracking changes using SNAPSHOT isolation: %w", err)
 }
 
-func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel) error {
+func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel, emitHeartbeat bool) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: isolation})
 	if err != nil {
-		return fmt.Errorf("failed to begin Change Tracking transaction: %w", err)
+		return 0, fmt.Errorf("failed to begin Change Tracking transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	minVersion, err := s.minValidCTVersion(ctx, tx, table)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if fromVersion < minVersion {
-		return &ctVersionExpiredError{table: table, version: fromVersion, minVersion: minVersion}
+		return 0, &ctVersionExpiredError{table: table, version: fromVersion, minVersion: minVersion}
 	}
 
 	targetVersion, err := s.currentCTVersion(ctx, tx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if targetVersion <= fromVersion {
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit Change Tracking transaction: %w", err)
+			return 0, fmt.Errorf("failed to commit Change Tracking transaction: %w", err)
 		}
-		return nil
+		return fromVersion, nil
 	}
 
 	columns := tableSchema.Columns
 	query := buildCTChangesQuery(table, sourceColumnsWithoutCT(tableSchema), primaryKeys)
 	rows, err := tx.QueryContext(ctx, query, fromVersion, targetVersion)
 	if err != nil {
-		return fmt.Errorf("failed to query Change Tracking changes for %s: %w", table, err)
+		return 0, fmt.Errorf("failed to query Change Tracking changes for %s: %w", table, err)
 	}
-	defer func() { _ = rows.Close() }()
 
-	if err := s.rowsToCTBatches(rows, columns, opts, results); err != nil {
-		return err
+	changeRows, err := s.rowsToCTBatches(rows, columns, opts, results)
+	if err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close Change Tracking rows for %s: %w", table, err)
+	}
+
+	if shouldEmitCTHeartbeat(emitHeartbeat, changeRows) {
+		if err := s.emitCTHeartbeat(ctx, tx, table, tableSchema, primaryKeys, targetVersion, opts, results); err != nil {
+			return 0, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit Change Tracking transaction: %w", err)
+		return 0, fmt.Errorf("failed to commit Change Tracking transaction: %w", err)
 	}
 
+	return targetVersion, nil
+}
+
+func (s *MSSQLChangeTrackingSource) emitCTHeartbeat(ctx context.Context, tx *sql.Tx, table string, tableSchema *schema.TableSchema, primaryKeys []string, targetVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	query := buildCTHeartbeatQuery(table, sourceColumnsWithoutCT(tableSchema), primaryKeys, targetVersion)
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to query Change Tracking heartbeat for %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	if _, err := s.rowsToCTBatches(rows, tableSchema.Columns, opts, results); err != nil {
+		return err
+	}
 	return nil
 }
 
-func (s *MSSQLChangeTrackingSource) rowsToCTBatches(rows *sql.Rows, columns []schema.Column, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func shouldEmitCTHeartbeat(emitHeartbeat bool, changeRows int64) bool {
+	return emitHeartbeat && changeRows == 0
+}
+
+func validateCTExcludeColumns(excludeColumns []string, primaryKeys []string) error {
+	pkSet := make(map[string]bool, len(primaryKeys))
+	for _, pk := range primaryKeys {
+		pkSet[strings.ToLower(pk)] = true
+	}
+	for _, col := range excludeColumns {
+		if destination.IsCDCMetaColumn(col) {
+			return fmt.Errorf("SQL Server Change Tracking sources require metadata column %q; remove it from --sql-exclude-columns", col)
+		}
+		if pkSet[strings.ToLower(col)] {
+			return fmt.Errorf("SQL Server Change Tracking sources require primary key column %q; remove it from --sql-exclude-columns", col)
+		}
+	}
+	return nil
+}
+
+func (s *MSSQLChangeTrackingSource) rowsToCTBatches(rows *sql.Rows, columns []schema.Column, opts source.ReadOptions, results chan<- source.RecordBatchResult) (int64, error) {
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000
 	}
 	arrowSchema := buildArrowSchema(columns)
+	var totalRows int64
 
 	for {
 		record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, s.guidConversion)
 		if err != nil {
-			return err
+			return totalRows, err
 		}
 		if count == 0 {
-			return nil
+			return totalRows, nil
 		}
+		totalRows += count
 		results <- source.RecordBatchResult{Batch: record}
 	}
 }
 
-func buildCTSnapshotQuery(table string, columns []schema.Column, opts source.ReadOptions, version int64, lock bool) string {
+func buildCTSnapshotQuery(table string, columns []schema.Column, version int64, lock bool) string {
 	selects := make([]string, 0, len(columns)+len(ctMetadataColumns))
 	for _, col := range columns {
 		selects = append(selects, quoteColumn(col.Name))
 	}
 	selects = append(selects, ctMetadataSelects(ctVersionExpr(strconv.FormatInt(version, 10)), "0")...)
 
-	selectClause := "SELECT"
-	if opts.Limit > 0 {
-		selectClause = fmt.Sprintf("SELECT TOP %d", opts.Limit)
-	}
-
 	hint := ""
 	if lock {
 		hint = " WITH (HOLDLOCK)"
 	}
-	return fmt.Sprintf("%s %s FROM %s%s", selectClause, strings.Join(selects, ", "), quoteTable(table), hint)
+	return fmt.Sprintf("SELECT %s FROM %s%s", strings.Join(selects, ", "), quoteTable(table), hint)
+}
+
+func buildCTHeartbeatQuery(table string, columns []schema.Column, primaryKeys []string, version int64) string {
+	selects := make([]string, 0, len(columns)+len(ctMetadataColumns))
+	for _, col := range columns {
+		selects = append(selects, quoteColumn(col.Name))
+	}
+	selects = append(selects, ctMetadataSelects(ctVersionExpr(strconv.FormatInt(version, 10)), "0")...)
+
+	orderBy := make([]string, 0, len(primaryKeys))
+	for _, pk := range primaryKeys {
+		orderBy = append(orderBy, quoteColumn(pk))
+	}
+
+	query := fmt.Sprintf("SELECT TOP 1 %s FROM %s", strings.Join(selects, ", "), quoteTable(table))
+	if len(orderBy) > 0 {
+		query += " ORDER BY " + strings.Join(orderBy, ", ")
+	}
+	return query
 }
 
 func buildCTChangesQuery(table string, columns []schema.Column, primaryKeys []string) string {
@@ -517,8 +590,8 @@ func parseStoredCTVersion(raw string) (int64, bool) {
 
 func objectIDName(table string) string {
 	tableRef := parseMSSQLTableRef(table)
-	if len(tableRef.parts) >= 2 {
-		return tableRef.schemaName + "." + tableRef.tableName
+	if len(tableRef.parts) == 1 {
+		return quoteIdentifierPath([]string{"dbo", tableRef.tableName})
 	}
-	return "dbo." + tableRef.tableName
+	return quoteIdentifierPath(tableRef.parts)
 }
