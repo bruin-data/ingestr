@@ -153,6 +153,48 @@ func TestValidateMySQLCDCTableSupportedRejectsNativeBinlogTypes(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestMySQLCDCReadAllValidatesOnlySelectedTables(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.TABLES").
+		WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).
+			AddRow("bad").
+			AddRow("good"))
+	expectMySQLCDCTableSchema(mock, "app", "bad")
+	expectMySQLCDCTableSchema(mock, "app", "good")
+	mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+DATA_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
+		WithArgs("app", "good").
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}))
+
+	src := &MySQLCDCSource{db: db, database: "app"}
+	selected, err := src.getSelectedTables(context.Background(), source.MultiTableReadOptions{Tables: []string{"good"}})
+	require.NoError(t, err)
+	require.Len(t, selected, 1)
+	assert.Equal(t, "good", selected[0].Name)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func expectMySQLCDCTableSchema(mock sqlmock.Sqlmock, database, table string) {
+	mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+COLUMN_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
+		WithArgs(database, table).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"COLUMN_NAME",
+			"COLUMN_TYPE",
+			"IS_NULLABLE",
+			"NUMERIC_PRECISION",
+			"NUMERIC_SCALE",
+			"CHARACTER_MAXIMUM_LENGTH",
+		}).
+			AddRow("id", "bigint", "NO", nil, nil, nil).
+			AddRow("name", "varchar(255)", "YES", nil, nil, int64(255)))
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.KEY_COLUMN_USAGE").
+		WithArgs(database, table).
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).AddRow("id"))
+}
+
 func TestStoredMySQLPositionHelpers(t *testing.T) {
 	pos := gomysql.Position{Name: "mysql-bin.000012", Pos: 345}
 	stored := formatStoredMySQLPosition(pos, 7)

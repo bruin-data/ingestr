@@ -207,6 +207,10 @@ func (s *MySQLCDCSource) IsMultiTable() bool {
 }
 
 func (s *MySQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInfo, error) {
+	return s.getTables(ctx, true)
+}
+
+func (s *MySQLCDCSource) getTables(ctx context.Context, validateSupported bool) ([]source.SourceTableInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT TABLE_NAME
 		FROM INFORMATION_SCHEMA.TABLES
@@ -230,8 +234,10 @@ func (s *MySQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInf
 		if err != nil {
 			return nil, fmt.Errorf("failed to get schema for %s: %w", tableName, err)
 		}
-		if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, tableName); err != nil {
-			return nil, err
+		if validateSupported {
+			if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, tableName); err != nil {
+				return nil, err
+			}
 		}
 		tableSchema := addMySQLCDCColumns(fullSchema)
 		if len(tableSchema.PrimaryKeys) == 0 {
@@ -254,8 +260,8 @@ func (s *MySQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInf
 	return tables, nil
 }
 
-func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
-	allTables, err := s.GetTables(ctx)
+func (s *MySQLCDCSource) getSelectedTables(ctx context.Context, opts source.MultiTableReadOptions) ([]source.SourceTableInfo, error) {
+	allTables, err := s.getTables(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +276,18 @@ func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 		if len(filter) > 0 && !filter[strings.ToLower(table.Name)] {
 			continue
 		}
+		if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, table.Name); err != nil {
+			return nil, err
+		}
 		selected = append(selected, table)
+	}
+	return selected, nil
+}
+
+func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	selected, err := s.getSelectedTables(ctx, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	results := make(chan source.RecordBatchResult, 16)
