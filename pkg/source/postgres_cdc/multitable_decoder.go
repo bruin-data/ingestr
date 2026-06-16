@@ -28,7 +28,6 @@ type MultiTableDecoder struct {
 	targetRelIDs   map[uint32]string // relation ID -> full table name
 	pendingChanges []TableChange
 	currentTxLSN   pglogrepl.LSN
-	rowFillState   map[string]map[string][]interface{}
 }
 
 func NewMultiTableDecoder(tables []source.SourceTableInfo) *MultiTableDecoder {
@@ -41,7 +40,6 @@ func NewMultiTableDecoder(tables []source.SourceTableInfo) *MultiTableDecoder {
 		tableSchemas: tableSchemas,
 		relations:    make(map[uint32]*RelationInfo),
 		targetRelIDs: make(map[uint32]string),
-		rowFillState: make(map[string]map[string][]interface{}),
 	}
 }
 
@@ -197,10 +195,7 @@ func (d *MultiTableDecoder) handleCommit() ([]DecodedBatch, error) {
 			continue
 		}
 
-		if d.rowFillState[tableName] == nil {
-			d.rowFillState[tableName] = make(map[string][]interface{})
-		}
-		applyIntraBatchFill(changes, tableSchema, d.rowFillState[tableName])
+		applyIntraBatchFill(changes, tableSchema)
 
 		batch, err := d.changesToBatch(changes, tableSchema)
 		if err != nil {

@@ -660,6 +660,142 @@ func TestPostgresCDC_IntraBatchInsertUpdatePreservesUnchangedJSONB(t *testing.T)
 	assert.Equal(t, "completed", resultData)
 }
 
+// TestPostgresCDC_IntraBatchChangedThenUnchangedOverwritesExistingRow guards the
+// case adjacent to the empty-destination one: an existing destination row, then
+// within a single staging batch a changed TOAST value followed by a partial
+// UPDATE that leaves it unchanged. The latest change wins at the destination, so
+// the filled value must overwrite the stale target value rather than be dropped
+// via the _cdc_unchanged_cols target fallback.
+func TestPostgresCDC_IntraBatchChangedThenUnchangedOverwritesExistingRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+
+	sourcePool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer sourcePool.Close()
+
+	oldCases := make([]int, 50)
+	for i := range oldCases {
+		oldCases[i] = i
+	}
+	oldPayload, err := json.Marshal(map[string]interface{}{
+		"testCases": oldCases,
+		"padding":   strings.Repeat("o", 8*1024),
+	})
+	require.NoError(t, err)
+
+	newCases := make([]int, 200)
+	for i := range newCases {
+		newCases[i] = i * 2
+	}
+	newPayload, err := json.Marshal(map[string]interface{}{
+		"testCases": newCases,
+		"padding":   strings.Repeat("n", 8*1024),
+	})
+	require.NoError(t, err)
+
+	_, err = sourcePool.Exec(ctx, `
+		CREATE TABLE public.test_intra_overwrite (
+			id SERIAL PRIMARY KEY,
+			config_data JSONB NOT NULL,
+			result_data TEXT NOT NULL
+		)
+	`)
+	require.NoError(t, err)
+	_, err = sourcePool.Exec(ctx, `CREATE PUBLICATION test_intra_overwrite_pub FOR TABLE public.test_intra_overwrite`)
+	require.NoError(t, err)
+	_, err = sourcePool.Exec(ctx, `ALTER USER testuser REPLICATION`)
+	require.NoError(t, err)
+
+	// Seed the row before the first sync so the snapshot lands it on the
+	// destination with the OLD payload.
+	_, err = sourcePool.Exec(
+		ctx,
+		`INSERT INTO public.test_intra_overwrite (config_data, result_data) VALUES ($1::jsonb, 'pending')`,
+		string(oldPayload),
+	)
+	require.NoError(t, err)
+
+	destContainer, err := postgres.Run(
+		ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("destdb"),
+		postgres.WithUsername("destuser"),
+		postgres.WithPassword("destpass"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(30*time.Second),
+		),
+	)
+	require.NoError(t, err)
+	defer func() { _ = destContainer.Terminate(ctx) }()
+
+	destConnString, err := destContainer.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+
+	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_intra_overwrite_pub&mode=batch"
+	cfg := &config.IngestConfig{
+		SourceURI:           cdcSourceURI,
+		DestURI:             destConnString,
+		SourceTable:         "public.test_intra_overwrite",
+		DestTable:           "public.test_intra_overwrite_dest",
+		PrimaryKeys:         []string{"id"},
+		IncrementalStrategy: "merge",
+	}
+
+	// First sync: snapshot loads the row with the OLD payload onto the destination.
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	// Same staging batch: change config_data (full value in WAL), then a partial
+	// UPDATE that leaves config_data unchanged. These are separate transactions
+	// accumulated into one downstream batch.
+	_, err = sourcePool.Exec(
+		ctx,
+		`UPDATE public.test_intra_overwrite SET config_data = $1::jsonb WHERE id = 1`,
+		string(newPayload),
+	)
+	require.NoError(t, err)
+	_, err = sourcePool.Exec(ctx, `UPDATE public.test_intra_overwrite SET result_data = 'completed' WHERE id = 1`)
+	require.NoError(t, err)
+
+	// Second sync auto-resumes from the destination's max LSN.
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	var sourceConfig, destConfig string
+	var sourceLen, destLen int
+	err = sourcePool.QueryRow(ctx, `
+		SELECT config_data::text, jsonb_array_length(config_data->'testCases')
+		FROM public.test_intra_overwrite WHERE id = 1
+	`).Scan(&sourceConfig, &sourceLen)
+	require.NoError(t, err)
+
+	destPool, err := pgxpool.New(ctx, destConnString)
+	require.NoError(t, err)
+	defer destPool.Close()
+
+	err = destPool.QueryRow(ctx, `
+		SELECT config_data::text, jsonb_array_length(config_data->'testCases')
+		FROM public.test_intra_overwrite_dest WHERE id = 1
+	`).Scan(&destConfig, &destLen)
+	require.NoError(t, err)
+
+	assert.Equal(t, 200, sourceLen, "source should hold the NEW payload")
+	assert.Equal(t, sourceLen, destLen, "destination must reflect the changed payload, not the stale target value")
+	assert.Equal(t, sourceConfig, destConfig, "changed-then-unchanged config in one batch must overwrite the existing row")
+
+	var resultData string
+	err = destPool.QueryRow(ctx, `SELECT result_data FROM public.test_intra_overwrite_dest WHERE id = 1`).Scan(&resultData)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", resultData)
+}
+
 // TestPostgresCDC_BatchModeCompletesWithActiveWrites verifies that batch mode completes
 // based on LSN rather than waiting indefinitely for inactivity. This test was added
 // to prevent regression of a bug where batch mode would wait forever if the source

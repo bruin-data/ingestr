@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
@@ -276,6 +277,15 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	}
 
 	accum := newBatchAccumulator(batchSize)
+	pkByTable := make(map[string][]string, len(r.tables))
+	for _, t := range r.tables {
+		if t.Schema != nil {
+			pkByTable[t.Name] = t.Schema.PrimaryKeys
+		}
+	}
+	accum.transform = func(tableName string, batch arrow.RecordBatch) arrow.RecordBatch {
+		return forwardFillUnchanged(batch, pkByTable[tableName])
+	}
 
 	for {
 		select {

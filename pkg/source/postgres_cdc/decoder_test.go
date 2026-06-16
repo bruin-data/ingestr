@@ -292,44 +292,62 @@ func TestApplyIntraBatchFill(t *testing.T) {
 				OldValues: []interface{}{int32(1)},
 			},
 		}
-		state := make(map[string][]interface{})
-		applyIntraBatchFill(changes, tableSchema, state)
+		applyIntraBatchFill(changes, tableSchema)
 		assert.Equal(t, `{"big":true}`, resolveColumnValue(changes[1], 1))
 		assert.Equal(t, "done", resolveColumnValue(changes[1], 2))
 	})
 
-	t.Run("fills across separate transaction commits", func(t *testing.T) {
-		state := make(map[string][]interface{})
-		insert := []Change{{
-			Operation: "INSERT",
-			Values:    []interface{}{int32(1), `{"big":true}`, "pending"},
-		}}
-		applyIntraBatchFill(insert, tableSchema, state)
-
-		update := []Change{{
-			Operation: "UPDATE",
-			Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
-			OldValues: []interface{}{int32(1)},
-		}}
-		applyIntraBatchFill(update, tableSchema, state)
-		assert.Equal(t, `{"big":true}`, resolveColumnValue(update[0], 1))
+	t.Run("filled column is dropped from unchanged cols", func(t *testing.T) {
+		// A changed value followed by a partial update that leaves the column
+		// unchanged, in the same commit. The latest row wins at the destination;
+		// because we now have an authoritative value in staging, the column must
+		// NOT be reported as unchanged or the merge would keep a stale target.
+		changes := []Change{
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), `{"v":"new"}`, "a"},
+				OldValues: []interface{}{int32(1)},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "b"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"v":"new"}`, resolveColumnValue(changes[1], 1))
+		assert.Equal(t, `[]`, unchangedColumnsJSON(changes[1], tableSchema.Columns, 3))
 	})
 
-	t.Run("pk update carries unchanged toast from old key", func(t *testing.T) {
-		state := make(map[string][]interface{})
-		insert := []Change{{
-			Operation: "INSERT",
-			Values:    []interface{}{int32(1), `{"keep":true}`, "pending"},
-		}}
-		applyIntraBatchFill(insert, tableSchema, state)
+	t.Run("unfilled unchanged column stays in unchanged cols", func(t *testing.T) {
+		// No prior value available in the commit, so the column remains unchanged
+		// and the destination must fall back to the existing target value.
+		changes := []Change{
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "b"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Nil(t, resolveColumnValue(changes[0], 1))
+		assert.Equal(t, `["config_data"]`, unchangedColumnsJSON(changes[0], tableSchema.Columns, 3))
+	})
 
-		update := []Change{{
-			Operation: "UPDATE",
-			Values:    []interface{}{int32(2), tupleUnchangedMarker, "done"},
-			OldValues: []interface{}{int32(1)},
-		}}
-		applyIntraBatchFill(update, tableSchema, state)
-		assert.Equal(t, `{"keep":true}`, resolveColumnValue(update[0], 1))
+	t.Run("pk update carries unchanged toast from old key within commit", func(t *testing.T) {
+		changes := []Change{
+			{
+				Operation: "INSERT",
+				Values:    []interface{}{int32(1), `{"keep":true}`, "pending"},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(2), tupleUnchangedMarker, "done"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"keep":true}`, resolveColumnValue(changes[1], 1))
 	})
 
 	t.Run("chains multiple unchanged updates", func(t *testing.T) {
@@ -349,8 +367,7 @@ func TestApplyIntraBatchFill(t *testing.T) {
 				OldValues: []interface{}{int32(1)},
 			},
 		}
-		state := make(map[string][]interface{})
-		applyIntraBatchFill(changes, tableSchema, state)
+		applyIntraBatchFill(changes, tableSchema)
 		assert.Equal(t, `{"v":1}`, resolveColumnValue(changes[2], 1))
 		assert.Equal(t, "c", resolveColumnValue(changes[2], 2))
 	})
@@ -367,9 +384,27 @@ func TestApplyIntraBatchFill(t *testing.T) {
 				OldValues: []interface{}{int32(1), `{"from":"old"}`, "pending"},
 			},
 		}
-		state := make(map[string][]interface{})
-		applyIntraBatchFill(changes, tableSchema, state)
+		applyIntraBatchFill(changes, tableSchema)
 		assert.Equal(t, `{"from":"old"}`, resolveColumnValue(changes[1], 1))
+	})
+
+	t.Run("does not fill across separate commits", func(t *testing.T) {
+		// Cross-commit coalescing is handled at the staging-batch level
+		// (forwardFillUnchanged), not by the decoder. A partial UPDATE arriving
+		// in its own commit has no prior state and stays unchanged.
+		insert := []Change{{
+			Operation: "INSERT",
+			Values:    []interface{}{int32(1), `{"big":true}`, "pending"},
+		}}
+		applyIntraBatchFill(insert, tableSchema)
+
+		update := []Change{{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+			OldValues: []interface{}{int32(1)},
+		}}
+		applyIntraBatchFill(update, tableSchema)
+		assert.Nil(t, resolveColumnValue(update[0], 1))
 	})
 }
 
