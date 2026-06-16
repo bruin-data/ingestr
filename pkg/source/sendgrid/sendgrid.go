@@ -141,19 +141,15 @@ var validAggregations = map[string]bool{
 }
 
 type credentials struct {
-	apiKey             string
-	onBehalfOf         string
-	emailActivityQuery string
-	statsAggregatedBy  string
+	apiKey     string
+	onBehalfOf string
 }
 
 type SendGridSource struct {
-	apiKey             string
-	onBehalfOf         string
-	emailActivityQuery string
-	statsAggregatedBy  string
-	client             *ingestrhttp.Client
-	activityClient     *ingestrhttp.Client
+	apiKey         string
+	onBehalfOf     string
+	client         *ingestrhttp.Client
+	activityClient *ingestrhttp.Client
 }
 
 func NewSendGridSource() *SendGridSource {
@@ -176,8 +172,6 @@ func (s *SendGridSource) Connect(ctx context.Context, uri string) error {
 
 	s.apiKey = creds.apiKey
 	s.onBehalfOf = creds.onBehalfOf
-	s.emailActivityQuery = creds.emailActivityQuery
-	s.statsAggregatedBy = creds.statsAggregatedBy
 
 	commonOpts := []ingestrhttp.Option{
 		ingestrhttp.WithBaseURL(baseURL),
@@ -232,31 +226,53 @@ func parseURI(uri string) (credentials, error) {
 		return credentials{}, fmt.Errorf("api_key is required in sendgrid URI")
 	}
 
-	statsAggregatedBy := values.Get("stats_aggregated_by")
-	if statsAggregatedBy == "" {
-		statsAggregatedBy = defaultStatsAggregated
-	}
-	if !validAggregations[statsAggregatedBy] {
-		return credentials{}, fmt.Errorf("invalid stats_aggregated_by %q in sendgrid URI: supported values are day, week, month", statsAggregatedBy)
-	}
-
 	return credentials{
-		apiKey:             apiKey,
-		onBehalfOf:         values.Get("on_behalf_of"),
-		emailActivityQuery: strings.TrimSpace(values.Get("email_activity_query")),
-		statsAggregatedBy:  statsAggregatedBy,
+		apiKey:     apiKey,
+		onBehalfOf: values.Get("on_behalf_of"),
 	}, nil
 }
 
+// parseTableName splits an optional granularity suffix from the table name, e.g.
+// "global_stats:week". Only global_stats accepts a suffix; it controls the SendGrid
+// `aggregated_by` parameter and defaults to "day". The returned aggregatedBy is empty
+// for tables that do not use it.
+func parseTableName(name string) (table string, aggregatedBy string, err error) {
+	table = name
+	suffix := ""
+	if strings.Contains(name, ":") {
+		parts := strings.SplitN(name, ":", 2)
+		table, suffix = parts[0], parts[1]
+	}
+
+	if !isValidTable(table) {
+		return "", "", fmt.Errorf("unsupported table: %s (supported: %s)", name, supportedTableList())
+	}
+
+	if table != "global_stats" {
+		if suffix != "" {
+			return "", "", fmt.Errorf("table %q does not support a granularity suffix", table)
+		}
+		return table, "", nil
+	}
+
+	if suffix == "" {
+		return table, defaultStatsAggregated, nil
+	}
+	if !validAggregations[suffix] {
+		return "", "", fmt.Errorf("invalid granularity %q for global_stats: supported values are day, week, month", suffix)
+	}
+	return table, suffix, nil
+}
+
 func (s *SendGridSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
-	tableName := req.Name
-	if !isValidTable(tableName) {
-		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", req.Name, supportedTableList())
+	tableName, aggregatedBy, err := parseTableName(req.Name)
+	if err != nil {
+		return nil, err
 	}
 	tc := supportedTables[tableName]
 
 	return &source.DynamicSourceTable{
-		TableName:           tableName,
+		TableName:           req.Name,
 		TablePrimaryKeys:    tc.primaryKeys,
 		TableIncrementalKey: tc.incrementalKey,
 		TableStrategy:       tc.strategy,
@@ -265,7 +281,7 @@ func (s *SendGridSource) GetTable(ctx context.Context, req source.TableRequest) 
 			return nil, fmt.Errorf("sendgrid source does not have a predefined schema; schema inference is required")
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, tableName, opts)
+			return s.read(ctx, tableName, aggregatedBy, opts)
 		},
 	}, nil
 }
@@ -284,7 +300,7 @@ func supportedTableList() string {
 	return strings.Join(tables, ", ")
 }
 
-func (s *SendGridSource) read(ctx context.Context, table string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *SendGridSource) read(ctx context.Context, table, aggregatedBy string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -297,7 +313,7 @@ func (s *SendGridSource) read(ctx context.Context, table string, opts source.Rea
 		}
 
 		config.Debug("[SENDGRID] reading %s", table)
-		if err := s.fetch(ctx, table, tc, opts, results); err != nil {
+		if err := s.fetch(ctx, table, tc, aggregatedBy, opts, results); err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -312,8 +328,8 @@ func (s *SendGridSource) clientForTier(tier rateLimitTier) *ingestrhttp.Client {
 	return s.client
 }
 
-func (s *SendGridSource) fetch(ctx context.Context, table string, tc tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	params, err := s.serverParams(tc, opts)
+func (s *SendGridSource) fetch(ctx context.Context, table string, tc tableConfig, aggregatedBy string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	params, err := serverParams(tc, aggregatedBy, opts)
 	if err != nil {
 		return err
 	}
@@ -331,12 +347,12 @@ func (s *SendGridSource) fetch(ctx context.Context, table string, tc tableConfig
 }
 
 // serverParams builds the server-side query parameters for a table based on its filter mode.
-func (s *SendGridSource) serverParams(tc tableConfig, opts source.ReadOptions) (map[string]string, error) {
+func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) (map[string]string, error) {
 	params := map[string]string{}
 
 	switch tc.filter {
 	case filterActivityQuery:
-		params["query"] = s.buildMessagesQuery(opts)
+		params["query"] = buildMessagesQuery(opts)
 	case filterStatsDateRange:
 		if opts.IntervalStart == nil {
 			return nil, fmt.Errorf("sendgrid global_stats requires --interval-start because /stats requires start_date")
@@ -346,7 +362,7 @@ func (s *SendGridSource) serverParams(tc tableConfig, opts source.ReadOptions) (
 		if opts.IntervalEnd != nil {
 			params["end_date"] = opts.IntervalEnd.UTC().Format("2006-01-02")
 		}
-		params["aggregated_by"] = s.statsAggregatedBy
+		params["aggregated_by"] = aggregatedBy
 	case filterBounceUnixRange:
 		if opts.IntervalStart != nil {
 			params["start_time"] = strconv.FormatInt(opts.IntervalStart.UTC().Unix(), 10)
@@ -488,25 +504,17 @@ func sendFiltered(table string, tc tableConfig, items []map[string]interface{}, 
 	return sendBatch(table, items, opts, results)
 }
 
-func (s *SendGridSource) buildMessagesQuery(opts source.ReadOptions) string {
-	clauses := make([]string, 0, 2)
-
+func buildMessagesQuery(opts source.ReadOptions) string {
 	switch {
 	case opts.IntervalStart != nil && opts.IntervalEnd != nil:
-		clauses = append(clauses, fmt.Sprintf(`last_event_time BETWEEN TIMESTAMP "%s" AND TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalStart), formatMessageTime(*opts.IntervalEnd)))
+		return fmt.Sprintf(`last_event_time BETWEEN TIMESTAMP "%s" AND TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalStart), formatMessageTime(*opts.IntervalEnd))
 	case opts.IntervalStart != nil:
-		clauses = append(clauses, fmt.Sprintf(`last_event_time>=TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalStart)))
+		return fmt.Sprintf(`last_event_time>=TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalStart))
 	case opts.IntervalEnd != nil:
-		clauses = append(clauses, fmt.Sprintf(`last_event_time<=TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalEnd)))
+		return fmt.Sprintf(`last_event_time<=TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalEnd))
 	default:
-		clauses = append(clauses, fmt.Sprintf(`last_event_time>=TIMESTAMP "%s"`, defaultActivityStart))
+		return fmt.Sprintf(`last_event_time>=TIMESTAMP "%s"`, defaultActivityStart)
 	}
-
-	if s.emailActivityQuery != "" {
-		clauses = append(clauses, fmt.Sprintf("(%s)", s.emailActivityQuery))
-	}
-
-	return strings.Join(clauses, " AND ")
 }
 
 func extractItems(body map[string]interface{}, dataKey string) []map[string]interface{} {

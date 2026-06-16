@@ -16,8 +16,6 @@ URI parameters:
 
 - `api_key` (required): Your Twilio SendGrid API key. Basic authentication is not supported by SendGrid's v3 API.
 - `on_behalf_of` (optional): Value for SendGrid's `on-behalf-of` header, used when a parent account queries a subuser or customer account.
-- `email_activity_query` (optional): An additional SendGrid Email Activity query expression that is combined with the interval filter for the `messages` table.
-- `stats_aggregated_by` (optional): Aggregation for the `global_stats` table. One of `day` (default), `week`, or `month`.
 
 ## Setting up a SendGrid Integration
 
@@ -47,12 +45,14 @@ SendGrid source allows ingesting the following sources into separate tables:
 | Table | PK | Inc Key | Inc Strategy | Details |
 | ----- | -- | ------- | ------------ | ------- |
 | `messages` | `msg_id` | `last_event_time` | merge | Email Activity. Server-side query on `last_event_time`. The endpoint has no pagination, so a single page of up to 1000 messages is returned. |
-| `global_stats` | `date` | `date` | merge | Global email statistics. Server-side `start_date`/`end_date` filter. `--interval-start` is required. |
+| `global_stats` | `date` | `date` | merge | Global email statistics. Server-side `start_date`/`end_date` filter. `--interval-start` is required. Aggregation defaults to daily; use a `global_stats:week` or `global_stats:month` suffix for weekly/monthly grain. |
 | `bounces` | `email`, `created` | `created` | merge | Bounced addresses. Server-side inclusive `start_time`/`end_time` Unix timestamp filter. |
 | `lists` | `id` | - | replace | Marketing contact lists. No time filter; the table is fully replaced on each run. |
 | `single_sends` | `id` | `updated_at` | merge | Marketing single sends. Filtered client-side on `updated_at`. |
 
 Use one of these as the `--source-table` parameter in the `ingestr ingest` command.
+
+The `global_stats` table accepts an optional granularity suffix — `global_stats`, `global_stats:week`, or `global_stats:month` (defaults to daily).
 
 ## Examples
 
@@ -60,18 +60,18 @@ Ingest weekly aggregated statistics from a given start date (`global_stats` requ
 
 ```sh
 ingestr ingest \
-  --source-uri 'sendgrid://?api_key=SG.xxxxxx&stats_aggregated_by=week' \
-  --source-table 'global_stats' \
+  --source-uri 'sendgrid://?api_key=SG.xxxxxx' \
+  --source-table 'global_stats:week' \
   --dest-uri duckdb:///sendgrid.duckdb \
   --dest-table 'sendgrid.global_stats' \
   --interval-start 2024-01-01
 ```
 
-Ingest only bounced messages of a subuser, using a custom Email Activity query and the `on-behalf-of` header (note the query value is URL-encoded — `status="bounce"`):
+Ingest messages on behalf of a subuser using the `on-behalf-of` header:
 
 ```sh
 ingestr ingest \
-  --source-uri 'sendgrid://?api_key=SG.xxxxxx&on_behalf_of=my-subuser&email_activity_query=status%3D%22bounce%22' \
+  --source-uri 'sendgrid://?api_key=SG.xxxxxx&on_behalf_of=my-subuser' \
   --source-table 'messages' \
   --dest-uri duckdb:///sendgrid.duckdb \
   --dest-table 'sendgrid.messages'

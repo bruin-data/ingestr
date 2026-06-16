@@ -21,17 +21,12 @@ func TestParseURI(t *testing.T) {
 		{
 			name: "api_key only",
 			uri:  "sendgrid://?api_key=SG.abc123",
-			want: credentials{apiKey: "SG.abc123", statsAggregatedBy: "day"},
+			want: credentials{apiKey: "SG.abc123"},
 		},
 		{
-			name: "all parameters",
-			uri:  "sendgrid://?api_key=SG.abc123&on_behalf_of=subuser&email_activity_query=status%3D%22delivered%22&stats_aggregated_by=week",
-			want: credentials{
-				apiKey:             "SG.abc123",
-				onBehalfOf:         "subuser",
-				emailActivityQuery: `status="delivered"`,
-				statsAggregatedBy:  "week",
-			},
+			name: "with on_behalf_of",
+			uri:  "sendgrid://?api_key=SG.abc123&on_behalf_of=subuser",
+			want: credentials{apiKey: "SG.abc123", onBehalfOf: "subuser"},
 		},
 		{
 			name:      "missing api_key",
@@ -56,17 +51,6 @@ func TestParseURI(t *testing.T) {
 			uri:       "postgres://?api_key=SG.abc123",
 			wantErr:   true,
 			errSubstr: "must start with sendgrid://",
-		},
-		{
-			name:      "invalid stats_aggregated_by",
-			uri:       "sendgrid://?api_key=SG.abc123&stats_aggregated_by=hour",
-			wantErr:   true,
-			errSubstr: "invalid stats_aggregated_by",
-		},
-		{
-			name: "stats_aggregated_by month",
-			uri:  "sendgrid://?api_key=SG.abc123&stats_aggregated_by=month",
-			want: credentials{apiKey: "SG.abc123", statsAggregatedBy: "month"},
 		},
 	}
 
@@ -102,7 +86,6 @@ func TestBuildMessagesQuery(t *testing.T) {
 		name          string
 		intervalStart *time.Time
 		intervalEnd   *time.Time
-		extraQuery    string
 		want          string
 	}{
 		{
@@ -125,19 +108,47 @@ func TestBuildMessagesQuery(t *testing.T) {
 			intervalEnd:   &end,
 			want:          `last_event_time BETWEEN TIMESTAMP "2024-01-01T10:00:00Z" AND TIMESTAMP "2024-02-01T12:00:00Z"`,
 		},
-		{
-			name:          "extra query appended",
-			intervalStart: &start,
-			extraQuery:    `status="delivered"`,
-			want:          `last_event_time>=TIMESTAMP "2024-01-01T10:00:00Z" AND (status="delivered")`,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &SendGridSource{emailActivityQuery: tt.extraQuery}
-			got := s.buildMessagesQuery(readOptions(tt.intervalStart, tt.intervalEnd))
+			got := buildMessagesQuery(readOptions(tt.intervalStart, tt.intervalEnd))
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestParseTableName(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantTable string
+		wantAggr  string
+		wantErr   bool
+		errSubstr string
+	}{
+		{name: "plain table", input: "lists", wantTable: "lists", wantAggr: ""},
+		{name: "global_stats defaults to day", input: "global_stats", wantTable: "global_stats", wantAggr: "day"},
+		{name: "global_stats week", input: "global_stats:week", wantTable: "global_stats", wantAggr: "week"},
+		{name: "global_stats month", input: "global_stats:month", wantTable: "global_stats", wantAggr: "month"},
+		{name: "global_stats day explicit", input: "global_stats:day", wantTable: "global_stats", wantAggr: "day"},
+		{name: "invalid granularity", input: "global_stats:hour", wantErr: true, errSubstr: "invalid granularity"},
+		{name: "suffix on non-stats table", input: "lists:week", wantErr: true, errSubstr: "does not support a granularity suffix"},
+		{name: "unknown table", input: "contacts", wantErr: true, errSubstr: "unsupported table"},
+		{name: "empty", input: "", wantErr: true, errSubstr: "unsupported table"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			table, aggr, err := parseTableName(tt.input)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errSubstr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantTable, table)
+			assert.Equal(t, tt.wantAggr, aggr)
 		})
 	}
 }
