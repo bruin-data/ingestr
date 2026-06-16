@@ -26,6 +26,15 @@ import (
 // flushed the destination holds its data and the _cdc_unchanged_cols target
 // fallback applies. When nothing needs filling the input batch is returned
 // unchanged (no allocation, no extra reference).
+//
+// Rows are keyed by their primary key as it appears in the staging batch, which
+// is always the new tuple's value. Limitation: a primary-key-changing UPDATE
+// that omits an unchanged TOAST column is keyed by its new PK, so it cannot be
+// linked back to the originating row under the old PK. When that INSERT and the
+// PK-changing UPDATE land in different commits of the same accumulated batch the
+// omitted value is not recovered here (it stays in _cdc_unchanged_cols and falls
+// back to the target). The within-commit decoder pass (applyIntraBatchFill) does
+// handle PK changes via the old tuple, so only the cross-commit case is affected.
 func forwardFillUnchanged(batch arrow.RecordBatch, pkNames []string) arrow.RecordBatch {
 	if batch == nil || batch.NumRows() < 2 || len(pkNames) == 0 {
 		return batch

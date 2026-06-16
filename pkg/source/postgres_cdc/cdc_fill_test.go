@@ -84,6 +84,17 @@ func buildFillBatch(rows []fillRow) arrow.RecordBatch {
 
 func strPtr(s string) *string { return &s }
 
+// releaseFillOutput releases the forward-fill output only when it is a freshly
+// allocated batch. On the no-allocation path forwardFillUnchanged returns the
+// input unchanged without taking an extra reference, so releasing it there
+// would double-free the caller's single reference. This mirrors the ownership
+// contract the accumulator relies on (see batchAccumulator.flushTable).
+func releaseFillOutput(in, out arrow.RecordBatch) {
+	if out != in {
+		out.Release()
+	}
+}
+
 func configValueAt(t *testing.T, batch arrow.RecordBatch, row int) (string, bool) {
 	t.Helper()
 	col, ok := batch.Column(1).(*array.String)
@@ -112,7 +123,7 @@ func TestForwardFillUnchanged(t *testing.T) {
 		defer in.Release()
 
 		out := forwardFillUnchanged(in, pk)
-		defer out.Release()
+		defer releaseFillOutput(in, out)
 		require.NotSame(t, in, out, "fill should produce a new batch")
 
 		v, ok := configValueAt(t, out, 1)
@@ -129,7 +140,7 @@ func TestForwardFillUnchanged(t *testing.T) {
 		defer in.Release()
 
 		out := forwardFillUnchanged(in, pk)
-		defer out.Release()
+		defer releaseFillOutput(in, out)
 
 		v, ok := configValueAt(t, out, 1)
 		assert.True(t, ok)
@@ -149,7 +160,7 @@ func TestForwardFillUnchanged(t *testing.T) {
 		defer in.Release()
 
 		out := forwardFillUnchanged(in, pk)
-		defer out.Release()
+		defer releaseFillOutput(in, out)
 		require.NotSame(t, in, out, "the unchanged row should be rewritten")
 
 		_, ok := configValueAt(t, out, 1)
@@ -165,7 +176,7 @@ func TestForwardFillUnchanged(t *testing.T) {
 		defer in.Release()
 
 		out := forwardFillUnchanged(in, pk)
-		defer out.Release()
+		defer releaseFillOutput(in, out)
 		assert.Same(t, in, out, "nothing to fill should return the same batch")
 
 		_, ok := configValueAt(t, out, 1)
@@ -181,7 +192,7 @@ func TestForwardFillUnchanged(t *testing.T) {
 		defer in.Release()
 
 		out := forwardFillUnchanged(in, pk)
-		defer out.Release()
+		defer releaseFillOutput(in, out)
 		assert.Same(t, in, out, "different pk must not be filled")
 
 		_, ok := configValueAt(t, out, 1)
@@ -197,7 +208,7 @@ func TestForwardFillUnchanged(t *testing.T) {
 		defer in.Release()
 
 		out := forwardFillUnchanged(in, pk)
-		defer out.Release()
+		defer releaseFillOutput(in, out)
 
 		_, ok := configValueAt(t, out, 2)
 		assert.False(t, ok, "value before a delete must not carry past it")
@@ -213,7 +224,7 @@ func TestForwardFillUnchanged(t *testing.T) {
 		defer in.Release()
 
 		out := forwardFillUnchanged(in, pk)
-		defer out.Release()
+		defer releaseFillOutput(in, out)
 
 		v0, ok0 := configValueAt(t, out, 0)
 		assert.True(t, ok0)
