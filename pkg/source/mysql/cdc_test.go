@@ -157,7 +157,7 @@ func TestStoredMySQLPositionHelpers(t *testing.T) {
 	pos := gomysql.Position{Name: "mysql-bin.000012", Pos: 345}
 	stored := formatStoredMySQLPosition(pos, 7)
 
-	assert.Equal(t, "00000000000000000012:mysql-bin.000012:00000000000000000345:000007", stored)
+	assert.Equal(t, "00000000000000000012:mysql-bin.000012:00000000000000000345:00000000000000000007", stored)
 
 	parsed, ok := parseStoredMySQLPosition(stored)
 	require.True(t, ok)
@@ -171,6 +171,11 @@ func TestStoredMySQLPositionHelpers(t *testing.T) {
 	parsed, ok = parseStoredMySQLPosition(wideStored)
 	require.True(t, ok)
 	assert.Equal(t, pos, parsed)
+	assert.True(
+		t,
+		formatStoredMySQLPosition(pos, 999999) < wideStored,
+		"stored positions should sort lexically by row sequence",
+	)
 
 	_, ok = parseStoredMySQLPosition("00000000/00000123")
 	assert.False(t, ok)
@@ -291,9 +296,9 @@ func TestBeginMySQLConsistentSnapshotLocksAroundPosition(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	mock.ExpectExec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").
-		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH TABLES WITH READ LOCK").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("START TRANSACTION WITH CONSISTENT SNAPSHOT").
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -319,9 +324,9 @@ func TestBeginMySQLConsistentSnapshotUnlocksOnPositionError(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	mock.ExpectExec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").
-		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH TABLES WITH READ LOCK").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("START TRANSACTION WITH CONSISTENT SNAPSHOT").
 		WillReturnResult(sqlmock.NewResult(0, 0))

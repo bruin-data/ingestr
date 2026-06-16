@@ -24,6 +24,8 @@ MySQL CDC is supported with the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mar
 
 If the saved `_cdc_lsn` is invalid or no longer available in MySQL binary logs, the run fails instead of taking a partial snapshot. Run with `--full-refresh` to rebuild the destination from a fresh snapshot.
 
+Incremental CDC runs use the `merge` strategy even if `--incremental-strategy=replace` is supplied, so updates and deletes can be applied by primary key. Use `--full-refresh` to rebuild the destination from a fresh snapshot.
+
 Example:
 
 ```shell
@@ -48,3 +50,5 @@ CDC URI parameters:
 - `server_id`: optional positive uint32 replication server id; generated automatically when omitted. Pin a unique value for scheduled or overlapping CDC runs.
 - `dest_schema`: optional destination schema for multi-table CDC runs.
 - `flavor`: `mysql` or `mariadb`; inferred from the URI scheme unless overridden.
+
+Multi-table CDC snapshots each selected table independently and then stream each table from its own snapshot position. Each table is consistent on its own, but a multi-table run is not a single global point-in-time snapshot across all tables.

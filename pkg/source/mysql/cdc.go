@@ -278,6 +278,7 @@ func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 		startByTable := make(map[string]gomysql.Position, len(selected))
 		metaByTable := make(map[string]mysqlCDCTableMetadata, len(selected))
 
+		// Multi-table CDC captures an independent snapshot position per table.
 		for _, table := range selected {
 			fullSchema := destination.DestinationTableSchema(table.Schema)
 			fullSchema = removeMySQLCDCColumns(fullSchema)
@@ -684,9 +685,6 @@ func (s *MySQLCDCSource) snapshotTable(ctx context.Context, meta mysqlCDCTableMe
 }
 
 func beginMySQLConsistentSnapshot(ctx context.Context, conn mysqlCDCSnapshotConn) (gomysql.Position, error) {
-	if _, err := conn.ExecContext(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"); err != nil {
-		return gomysql.Position{}, fmt.Errorf("failed to set MySQL snapshot isolation: %w", err)
-	}
 	if _, err := conn.ExecContext(ctx, "FLUSH TABLES WITH READ LOCK"); err != nil {
 		return gomysql.Position{}, fmt.Errorf("failed to lock MySQL tables for snapshot: %w", err)
 	}
@@ -698,6 +696,9 @@ func beginMySQLConsistentSnapshot(ctx context.Context, conn mysqlCDCSnapshotConn
 		}
 	}()
 
+	if _, err := conn.ExecContext(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"); err != nil {
+		return gomysql.Position{}, fmt.Errorf("failed to set MySQL snapshot isolation: %w", err)
+	}
 	if _, err := conn.ExecContext(ctx, "START TRANSACTION WITH CONSISTENT SNAPSHOT"); err != nil {
 		return gomysql.Position{}, fmt.Errorf("failed to start MySQL snapshot transaction: %w", err)
 	}
@@ -1343,7 +1344,7 @@ var (
 )
 
 func formatStoredMySQLPosition(pos gomysql.Position, rowSeq int) string {
-	return fmt.Sprintf("%020d:%s:%020d:%06d", mysqlBinlogSequence(pos.Name), pos.Name, pos.Pos, rowSeq)
+	return fmt.Sprintf("%020d:%s:%020d:%020d", mysqlBinlogSequence(pos.Name), pos.Name, pos.Pos, rowSeq)
 }
 
 func parseStoredMySQLPosition(stored string) (gomysql.Position, bool) {
