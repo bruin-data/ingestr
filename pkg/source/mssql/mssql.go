@@ -486,6 +486,11 @@ func (s *MSSQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 		columns := make([]schema.Column, len(colTypes))
 		for i, ct := range colTypes {
 			dt, precision, scale, arrayType := MapMSSQLToDataType(ct.DatabaseTypeName())
+			if dt == schema.TypeDecimal {
+				if p, s, ok := ct.DecimalSize(); ok {
+					precision, scale = int(p), int(s)
+				}
+			}
 			nullable, _ := ct.Nullable()
 			columns[i] = schema.Column{
 				Name:      ct.Name(),

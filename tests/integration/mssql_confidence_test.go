@@ -263,6 +263,62 @@ func TestMSSQLSource_TableToSQLite_DatabaseQualifiedTable(t *testing.T) {
 	assert.Equal(t, "bravo", name)
 }
 
+func TestMSSQLSource_CustomQueryToSQLite_PreservesDecimalScale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	if mssqlDest.uri == "" {
+		t.Skip("MSSQL container not available")
+	}
+
+	ctx := context.Background()
+	db := openMSSQLTestDB(t, mssqlDest.uri)
+	t.Cleanup(func() { _ = db.Close() })
+
+	tableName := fmt.Sprintf("dbo.decimal_query_%s", uniqueSuffix())
+	dropMSSQLTable(t, ctx, db, tableName)
+	t.Cleanup(func() { dropMSSQLTable(t, ctx, db, tableName) })
+
+	_, err := db.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE %s (
+		id INT PRIMARY KEY,
+		amount DECIMAL(21,8) NOT NULL
+	)`, quoteTableMSSQL(tableName)))
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(
+		ctx,
+		fmt.Sprintf("INSERT INTO %s (id, amount) VALUES (@p1, @p2), (@p3, @p4)", quoteTableMSSQL(tableName)),
+		1, "45.95000000",
+		2, "3456.76000000",
+	)
+	require.NoError(t, err)
+
+	tmpFile, err := os.CreateTemp("", "mssql_decimal_query_*.db")
+	require.NoError(t, err)
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+	cfg := &config.IngestConfig{
+		SourceURI:           mssqlDest.uri,
+		SourceTable:         fmt.Sprintf("query:SELECT id, amount FROM %s", quoteTableMSSQL(tableName)),
+		DestURI:             fmt.Sprintf("sqlite:///%s", tmpFile.Name()),
+		DestTable:           "decimal_rows",
+		IncrementalStrategy: config.StrategyReplace,
+	}
+	require.NoError(t, cfg.Validate())
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	destDB, err := sql.Open("sqlite3", tmpFile.Name())
+	require.NoError(t, err)
+	defer func() { _ = destDB.Close() }()
+
+	var amount1, amount2 string
+	require.NoError(t, destDB.QueryRow("SELECT CAST(amount AS TEXT) FROM decimal_rows WHERE id = 1").Scan(&amount1))
+	require.NoError(t, destDB.QueryRow("SELECT CAST(amount AS TEXT) FROM decimal_rows WHERE id = 2").Scan(&amount2))
+	assert.Equal(t, "45.95", amount1, "decimal scale should be preserved, not rounded to integer")
+	assert.Equal(t, "3456.76", amount2, "decimal scale should be preserved, not rounded to integer")
+}
+
 func TestAzureSQLSourceScheme_SQLServerContainerToSQLite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
