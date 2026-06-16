@@ -13,6 +13,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.3
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake v1.4.4
 	github.com/ClickHouse/clickhouse-go/v2 v2.42.0
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/InfluxCommunity/influxdb3-go/v2 v2.13.0
 	github.com/SAP/go-hdb v1.16.2
 	github.com/alecthomas/chroma/v2 v2.23.1
@@ -38,6 +39,7 @@ require (
 	github.com/elastic/go-elasticsearch/v9 v9.3.1
 	github.com/fatih/color v1.18.0
 	github.com/go-chi/chi/v5 v5.2.3
+	github.com/go-mysql-org/go-mysql v1.13.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
@@ -244,6 +246,9 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pierrec/lz4 v2.6.1+incompatible // indirect
 	github.com/pierrec/lz4/v4 v4.1.23 // indirect
+	github.com/pingcap/errors v0.11.5-0.20250318082626-8f80e5cb09ec // indirect
+	github.com/pingcap/log v1.1.1-0.20241212030209-7e3ff8601a2a // indirect
+	github.com/pingcap/tidb/pkg/parser v0.0.0-20250421232622-526b2c79173d // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
@@ -272,6 +277,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.43.0 // indirect
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
@@ -285,6 +291,7 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260203192932-546029d2fa20 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.66.10 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
