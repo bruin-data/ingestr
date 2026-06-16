@@ -120,6 +120,10 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 	}
 
 	accum := newBatchAccumulator(batchSize)
+	pkNames := r.tableSchema.PrimaryKeys
+	accum.transform = func(_ string, batch arrow.RecordBatch) arrow.RecordBatch {
+		return forwardFillUnchanged(batch, pkNames)
+	}
 
 	return streamLoop(ctx, repl, r.cdcConfig.Mode, targetLSN, batchSize, accum, results)
 }

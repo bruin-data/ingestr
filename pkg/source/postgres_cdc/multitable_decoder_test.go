@@ -5,10 +5,33 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// User-provided merge keys (SourceTableInfo.PrimaryKeys) must be reconciled into
+// the schema so the decoder, compaction, and unchanged-TOAST fill all key off
+// them — otherwise tables without a detected database primary key silently run
+// the fill pass with no keys and lose unchanged TOAST values.
+func TestNewMultiTableCDCReaderReconcilesPrimaryKeys(t *testing.T) {
+	t.Run("user keys override empty schema keys", func(t *testing.T) {
+		withKeys := &schema.TableSchema{Name: "events", PrimaryKeys: nil}
+		NewMultiTableCDCReader(nil, []source.SourceTableInfo{
+			{Name: "events", Schema: withKeys, PrimaryKeys: []string{"event_id"}},
+		}, CDCConfig{}, nil, "")
+		assert.Equal(t, []string{"event_id"}, withKeys.PrimaryKeys)
+	})
+
+	t.Run("detected schema keys are preserved when no override", func(t *testing.T) {
+		detected := &schema.TableSchema{Name: "accounts", PrimaryKeys: []string{"id"}}
+		NewMultiTableCDCReader(nil, []source.SourceTableInfo{
+			{Name: "accounts", Schema: detected, PrimaryKeys: nil},
+		}, CDCConfig{}, nil, "")
+		assert.Equal(t, []string{"id"}, detected.PrimaryKeys)
+	})
+}
 
 func TestMultiTableDecoderChangesToBatchSequencesSyncedAt(t *testing.T) {
 	tableSchema := &schema.TableSchema{

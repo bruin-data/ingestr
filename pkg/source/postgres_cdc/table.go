@@ -47,6 +47,11 @@ func NewCDCTable(src *PostgresCDCSource, req source.TableRequest) (*CDCTable, er
 	if len(pks) == 0 {
 		pks = tableSchema.PrimaryKeys
 	}
+	// Reconcile the effective merge keys into the schema so the decoder,
+	// compaction, and unchanged-TOAST fill all key off the same keys the
+	// destination merge uses (user-provided keys are otherwise ignored when the
+	// table has no database primary key).
+	tableSchema.PrimaryKeys = pks
 
 	// CDC requires merge strategy with primary keys
 	strategy := req.Strategy
