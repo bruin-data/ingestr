@@ -2,6 +2,7 @@ package transformer
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -114,25 +115,24 @@ func trimDictionaryColumn(col arrow.Array, dt *arrow.DictionaryType) (arrow.Arra
 
 	valueBuilder := array.NewBuilder(memory.DefaultAllocator, dt.ValueType)
 	defer valueBuilder.Release()
+	valueBuilder.Reserve(dict.Dictionary().Len())
 	indexBuilder := array.NewBuilder(memory.DefaultAllocator, dt.IndexType)
 	defer indexBuilder.Release()
 	indexBuilder.Reserve(col.Len())
 
 	valueIndex := make(map[string]int)
 	dictionaryValues := dict.Dictionary()
-	for i := 0; i < col.Len(); i++ {
-		if col.IsNull(i) {
-			indexBuilder.AppendNull()
+	oldToNewIndex := make([]int, dictionaryValues.Len())
+	for i := range oldToNewIndex {
+		oldToNewIndex[i] = -1
+	}
+
+	for i := 0; i < dictionaryValues.Len(); i++ {
+		if dictionaryValues.IsNull(i) {
 			continue
 		}
 
-		dictionaryIndex := dict.GetValueIndex(i)
-		if dictionaryValues.IsNull(dictionaryIndex) {
-			indexBuilder.AppendNull()
-			continue
-		}
-
-		value := strings.TrimSpace(dictionaryValues.ValueStr(dictionaryIndex))
+		value := strings.TrimSpace(dictionaryValues.ValueStr(i))
 		idx, ok := valueIndex[value]
 		if !ok {
 			idx = len(valueIndex)
@@ -141,8 +141,22 @@ func trimDictionaryColumn(col arrow.Array, dt *arrow.DictionaryType) (arrow.Arra
 			}
 			valueIndex[value] = idx
 		}
-		if err := indexBuilder.AppendValueFromString(strconv.Itoa(idx)); err != nil {
-			return nil, fmt.Errorf("dictionary index %d: %w", idx, err)
+		oldToNewIndex[i] = idx
+	}
+
+	for i := 0; i < col.Len(); i++ {
+		if col.IsNull(i) {
+			indexBuilder.AppendNull()
+			continue
+		}
+
+		dictionaryIndex := dict.GetValueIndex(i)
+		if oldToNewIndex[dictionaryIndex] < 0 {
+			indexBuilder.AppendNull()
+			continue
+		}
+		if err := appendDictionaryIndex(indexBuilder, oldToNewIndex[dictionaryIndex]); err != nil {
+			return nil, err
 		}
 	}
 
@@ -152,4 +166,31 @@ func trimDictionaryColumn(col arrow.Array, dt *arrow.DictionaryType) (arrow.Arra
 	defer values.Release()
 
 	return array.NewDictionaryArray(dt, indices, values), nil
+}
+
+func appendDictionaryIndex(builder array.Builder, idx int) error {
+	switch b := builder.(type) {
+	case *array.Int8Builder:
+		if idx > math.MaxInt8 {
+			return fmt.Errorf("dictionary index %d overflows int8", idx)
+		}
+		b.Append(int8(idx))
+	case *array.Int16Builder:
+		if idx > math.MaxInt16 {
+			return fmt.Errorf("dictionary index %d overflows int16", idx)
+		}
+		b.Append(int16(idx))
+	case *array.Int32Builder:
+		if idx > math.MaxInt32 {
+			return fmt.Errorf("dictionary index %d overflows int32", idx)
+		}
+		b.Append(int32(idx))
+	case *array.Int64Builder:
+		b.Append(int64(idx))
+	default:
+		if err := builder.AppendValueFromString(strconv.Itoa(idx)); err != nil {
+			return fmt.Errorf("dictionary index %d: %w", idx, err)
+		}
+	}
+	return nil
 }
