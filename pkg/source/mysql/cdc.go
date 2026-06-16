@@ -1127,16 +1127,16 @@ func (b *mysqlCDCChangeBuffer) flush(results chan<- source.RecordBatchResult) er
 }
 
 func finishMySQLCDCBatch(rows *sql.Rows, arrowSchema *arrow.Schema, builders []array.Builder, rowCount int64) (arrow.RecordBatch, int64, error) {
-	if rowCount == 0 {
-		releaseMySQLCDCBuilders(builders)
-		return nil, 0, nil
-	}
-
 	if rows != nil {
 		if err := rows.Err(); err != nil {
 			releaseMySQLCDCBuilders(builders)
 			return nil, 0, fmt.Errorf("error iterating MySQL rows: %w", err)
 		}
+	}
+
+	if rowCount == 0 {
+		releaseMySQLCDCBuilders(builders)
+		return nil, 0, nil
 	}
 
 	arrays := make([]arrow.Array, len(builders))

@@ -224,6 +224,37 @@ func TestMySQLCDCChangesToBatch(t *testing.T) {
 	assert.True(t, record.Column(3).(*array.Boolean).Value(1))
 }
 
+func TestRowsToMySQLCDCSnapshotBatchesReturnsIteratorErrorForEmptyBatch(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	iterErr := errors.New("connection reset")
+	mockRows := sqlmock.NewRows([]string{"id", "name"}).
+		AddRow(int64(1), "item1").
+		RowError(0, iterErr)
+	mock.ExpectQuery("SELECT").WillReturnRows(mockRows)
+
+	rows, err := db.Query("SELECT")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, 1)
+
+	err = rowsToMySQLCDCSnapshotBatches(rows, tableSchema, source.ReadOptions{}, gomysql.Position{Name: "mysql-bin.000001", Pos: 100}, results, "items")
+	require.ErrorIs(t, err, iterErr)
+	assertNoCDCResult(t, results)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAppendMySQLCDCBufferedChangesFlushesAtBatchSize(t *testing.T) {
 	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
 		Name: "items",
