@@ -78,17 +78,20 @@ func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
 		lookupKey, storeKey := fillStateKeys(*change, pkIndices, i)
 		prior := state[lookupKey]
 
-		if prior != nil {
-			for colIdx := 0; colIdx < nSource && colIdx < len(prior); colIdx++ {
-				if !columnIsUnchanged(*change, colIdx) {
-					continue
-				}
-				if resolveColumnValueBase(*change, colIdx) != nil {
-					continue
-				}
-				if prior[colIdx].known {
-					setColumnValue(change, colIdx, prior[colIdx].val)
-				}
+		for colIdx := 0; colIdx < nSource; colIdx++ {
+			if !columnIsUnchanged(*change, colIdx) {
+				continue
+			}
+			if base := resolveColumnValueBase(*change, colIdx); base != nil {
+				// Authoritative old-tuple value (REPLICA IDENTITY FULL). Clear
+				// the marker so the column is emitted with its value and not
+				// reported as unchanged; otherwise a matched merge falls back to
+				// the target and discards a value set earlier in the same batch.
+				setColumnValue(change, colIdx, base)
+				continue
+			}
+			if prior != nil && colIdx < len(prior) && prior[colIdx].known {
+				setColumnValue(change, colIdx, prior[colIdx].val)
 			}
 		}
 

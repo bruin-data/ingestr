@@ -408,6 +408,31 @@ func TestApplyIntraBatchFill(t *testing.T) {
 		}
 		applyIntraBatchFill(changes, tableSchema)
 		assert.Equal(t, `{"from":"old"}`, resolveColumnValue(changes[1], 1))
+		// The old-tuple value is authoritative, so the column must not be
+		// reported as unchanged (otherwise a matched merge would ignore it).
+		assert.Equal(t, `[]`, unchangedColumnsJSON(changes[1], tableSchema.Columns, 3))
+	})
+
+	t.Run("old-tuple resolution drops unchanged flag after same-batch change", func(t *testing.T) {
+		// An authoritative change to config, then a later unchanged update whose
+		// REPLICA IDENTITY FULL old tuple still carries the value. Compaction
+		// keeps only the latest row, so the column must be emitted (not flagged
+		// unchanged) or the destination falls back to the stale target value.
+		changes := []Change{
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), `{"v":"A"}`, "a"},
+				OldValues: []interface{}{int32(1), `{"v":"OLD"}`, "a"},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "b"},
+				OldValues: []interface{}{int32(1), `{"v":"A"}`, "a"},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"v":"A"}`, resolveColumnValue(changes[1], 1))
+		assert.Equal(t, `[]`, unchangedColumnsJSON(changes[1], tableSchema.Columns, 3))
 	})
 
 	t.Run("does not fill across separate commits", func(t *testing.T) {
