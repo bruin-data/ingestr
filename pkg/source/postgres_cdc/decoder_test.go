@@ -319,6 +319,28 @@ func TestApplyIntraBatchFill(t *testing.T) {
 		assert.Equal(t, `[]`, unchangedColumnsJSON(changes[1], tableSchema.Columns, 3))
 	})
 
+	t.Run("explicit null then unchanged keeps the null", func(t *testing.T) {
+		// SET config_data = NULL, then a partial update that leaves it unchanged.
+		// The known value is NULL, so it must be propagated (column dropped from
+		// _cdc_unchanged_cols) rather than letting the destination resurrect the
+		// stale target value.
+		changes := []Change{
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), nil, "a"},
+				OldValues: []interface{}{int32(1)},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "b"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Nil(t, resolveColumnValue(changes[1], 1))
+		assert.Equal(t, `[]`, unchangedColumnsJSON(changes[1], tableSchema.Columns, 3))
+	})
+
 	t.Run("unfilled unchanged column stays in unchanged cols", func(t *testing.T) {
 		// No prior value available in the commit, so the column remains unchanged
 		// and the destination must fall back to the existing target value.

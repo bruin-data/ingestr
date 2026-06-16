@@ -3,6 +3,7 @@ package postgres_cdc
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -18,13 +19,7 @@ func isTupleUnchanged(v interface{}) bool {
 }
 
 func resolveColumnValue(change Change, colIdx int) interface{} {
-	if v := resolveColumnValueBase(change, colIdx); v != nil || !columnIsUnchanged(change, colIdx) {
-		return v
-	}
-	if v, ok := columnFilledFromBatch(change, colIdx); ok {
-		return v
-	}
-	return nil
+	return resolveColumnValueBase(change, colIdx)
 }
 
 func resolveColumnValueBase(change Change, colIdx int) interface{} {
@@ -44,23 +39,27 @@ func resolveColumnValueBase(change Change, colIdx int) interface{} {
 	return nil
 }
 
-// columnFilledFromBatch reports whether the column's value was supplied from the
-// within-commit fill (i.e. staging now holds an authoritative value for it).
-func columnFilledFromBatch(change Change, colIdx int) (interface{}, bool) {
-	if change.batchFill == nil || colIdx >= len(change.batchFill) {
-		return nil, false
-	}
-	v := change.batchFill[colIdx]
-	return v, v != nil
+// knownValue is a column value tracked during within-commit fill. known
+// distinguishes an authoritative NULL (an explicit SET col = NULL, which must be
+// propagated) from a column we have no information about (which must stay
+// unchanged so the destination uses its target value).
+type knownValue struct {
+	val   interface{}
+	known bool
 }
 
 // applyIntraBatchFill coalesces unchanged TOAST columns within a single commit:
 // an INSERT (or full-value row) followed by a partial UPDATE of the same primary
 // key, where the UPDATE omits the unchanged TOAST value. compactPendingChanges
-// later keeps only the latest row per key, so without this the earlier full
-// value would be lost. State is local to the commit; cross-commit coalescing is
+// later keeps only the latest row per key, so without this the earlier value
+// would be lost. State is local to the commit; cross-commit coalescing is
 // handled later at the staging-batch level (see forwardFillUnchanged), which is
 // where separate transactions are actually merged.
+//
+// A filled column's value is written directly into change.Values, replacing the
+// unchanged marker. That makes columnIsUnchanged report false for it, so it is
+// emitted with its (possibly NULL) value and excluded from _cdc_unchanged_cols —
+// which is exactly what we want, including when the known value is NULL.
 func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
 	if len(changes) == 0 || tableSchema == nil {
 		return
@@ -72,28 +71,25 @@ func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
 	}
 
 	nSource := sourceColumnCount(tableSchema)
-	state := make(map[string][]interface{})
+	state := make(map[string][]knownValue)
 
 	for i := range changes {
 		change := &changes[i]
 		lookupKey, storeKey := fillStateKeys(*change, pkIndices, i)
+		prior := state[lookupKey]
 
-		batchFill := make([]interface{}, nSource)
-		hasFill := false
-		for colIdx := 0; colIdx < nSource; colIdx++ {
-			if !columnIsUnchanged(*change, colIdx) {
-				continue
+		if prior != nil {
+			for colIdx := 0; colIdx < nSource && colIdx < len(prior); colIdx++ {
+				if !columnIsUnchanged(*change, colIdx) {
+					continue
+				}
+				if resolveColumnValueBase(*change, colIdx) != nil {
+					continue
+				}
+				if prior[colIdx].known {
+					setColumnValue(change, colIdx, prior[colIdx].val)
+				}
 			}
-			if resolveColumnValueBase(*change, colIdx) != nil {
-				continue
-			}
-			if prior, ok := state[lookupKey]; ok && colIdx < len(prior) && prior[colIdx] != nil {
-				batchFill[colIdx] = prior[colIdx]
-				hasFill = true
-			}
-		}
-		if hasFill {
-			change.batchFill = batchFill
 		}
 
 		if change.Operation == "DELETE" {
@@ -104,15 +100,39 @@ func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
 			continue
 		}
 
-		resolved := make([]interface{}, nSource)
+		// Carry forward prior known values, then overwrite with the columns this
+		// change resolves authoritatively (a real value, an explicit NULL, or a
+		// fill applied above).
+		next := make([]knownValue, nSource)
+		copy(next, prior)
 		for colIdx := 0; colIdx < nSource; colIdx++ {
-			resolved[colIdx] = resolveColumnValue(*change, colIdx)
+			if columnIsAuthoritative(*change, colIdx) {
+				next[colIdx] = knownValue{val: resolveColumnValue(*change, colIdx), known: true}
+			}
 		}
 		if lookupKey != storeKey {
 			delete(state, lookupKey)
 		}
-		state[storeKey] = resolved
+		state[storeKey] = next
 	}
+}
+
+// setColumnValue overwrites a column's value in place, replacing an unchanged
+// marker once we have resolved the value it stood for.
+func setColumnValue(change *Change, colIdx int, val interface{}) {
+	if colIdx < len(change.Values) {
+		change.Values[colIdx] = val
+	}
+}
+
+// columnIsAuthoritative reports whether the change carries a definite value for
+// the column — a real value, an explicit NULL, or an old-tuple value — as
+// opposed to an omitted unchanged-TOAST marker we cannot resolve.
+func columnIsAuthoritative(change Change, colIdx int) bool {
+	if !columnIsUnchanged(change, colIdx) {
+		return true
+	}
+	return resolveColumnValueBase(change, colIdx) != nil
 }
 
 func fillStateKeys(change Change, pkIndices []int, changeIndex int) (lookupKey, storeKey string) {
@@ -181,7 +201,21 @@ func pkKeyFromRow(values, oldValues []interface{}, pkIndices []int, changeIndex 
 		}
 		parts[i] = fmt.Sprintf("%T:%v", val, val)
 	}
-	return strings.Join(parts, "|")
+	return encodeKeyParts(parts)
+}
+
+// encodeKeyParts joins parts into a collision-free key by prefixing each with
+// its byte length. A plain delimiter (e.g. "|") is not injective: a value that
+// contains the delimiter could make two distinct composite keys collide and
+// cause TOAST values to be coalesced across different rows.
+func encodeKeyParts(parts []string) string {
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(strconv.Itoa(len(p)))
+		b.WriteByte(':')
+		b.WriteString(p)
+	}
+	return b.String()
 }
 
 func columnIsUnchanged(change Change, colIdx int) bool {
@@ -200,14 +234,11 @@ func unchangedColumnsJSON(change Change, columns []schema.Column, nSourceCols in
 	}
 	names := make([]string, 0)
 	for i := 0; i < nSourceCols && i < len(columns); i++ {
+		// applyIntraBatchFill overwrites the unchanged marker of any column it
+		// resolves (including to NULL), so columnIsUnchanged already excludes
+		// filled columns here; a column still marked unchanged is one we have no
+		// staging value for and the destination must fall back to its target.
 		if !columnIsUnchanged(change, i) {
-			continue
-		}
-		// A column resolved from the cross-commit fill cache now has an
-		// authoritative value in staging, so it must NOT be reported as
-		// unchanged; otherwise the destination merge would keep the (possibly
-		// stale) target value instead of the filled one on an existing row.
-		if _, filled := columnFilledFromBatch(change, i); filled {
 			continue
 		}
 		names = append(names, columns[i].Name)

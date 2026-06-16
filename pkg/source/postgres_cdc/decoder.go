@@ -56,7 +56,6 @@ type Change struct {
 	LSN       pglogrepl.LSN
 	Values    []interface{}
 	OldValues []interface{} // For UPDATE/DELETE with replica identity
-	batchFill []interface{} // intra-batch fill for unchanged TOAST cols without old tuple
 }
 
 type Decoder struct {

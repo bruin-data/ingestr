@@ -114,6 +114,11 @@ func forwardFillUnchanged(batch arrow.RecordBatch, pkNames []string) arrow.Recor
 			col := batch.Column(c)
 
 			if unchangedSet[name] && col.IsNull(r) {
+				// Omitted unchanged TOAST: fill from the most recent known row
+				// for this key, even when that value is NULL (an explicit
+				// SET col = NULL upstream). The zero-copy take copies the NULL,
+				// and dropping the column from _cdc_unchanged_cols stops the
+				// destination from resurrecting the stale target value.
 				if priors, ok := lastRow[key]; ok {
 					if sr, ok := priors[c]; ok {
 						srcIndex[c][r] = sr
@@ -125,12 +130,13 @@ func forwardFillUnchanged(batch arrow.RecordBatch, pkNames []string) arrow.Recor
 				continue
 			}
 
-			if !col.IsNull(r) {
-				if lastRow[key] == nil {
-					lastRow[key] = make(map[int]int)
-				}
-				lastRow[key][c] = r
+			// Authoritative value for this row (a real value or an explicit
+			// NULL). Record it regardless of nullness so a later unchanged row
+			// can be filled with it.
+			if lastRow[key] == nil {
+				lastRow[key] = make(map[int]int)
 			}
+			lastRow[key][c] = r
 		}
 
 		if filledAny {
@@ -188,7 +194,7 @@ func pkKeyAt(batch arrow.RecordBatch, pkIdx []int, row int) (string, bool) {
 		}
 		parts[i] = col.ValueStr(row)
 	}
-	return strings.Join(parts, "|"), true
+	return encodeKeyParts(parts), true
 }
 
 func stringAt(arr *array.String, row int) string {

@@ -137,6 +137,26 @@ func TestForwardFillUnchanged(t *testing.T) {
 		assert.Equal(t, `[]`, unchangedValueAt(t, out, 1))
 	})
 
+	t.Run("explicit null carries across rows and drops unchanged flag", func(t *testing.T) {
+		// An authoritative NULL (SET config_data = NULL) in one transaction
+		// followed by an unchanged TOAST update in another. The NULL must be
+		// filled forward and the column dropped from _cdc_unchanged_cols, so the
+		// destination does not fall back to the stale (non-null) target value.
+		in := buildFillBatch([]fillRow{
+			{id: 1, config: nil, status: "a", lsn: "0/1"},
+			{id: 1, config: nil, status: "b", lsn: "0/2", unchanged: []string{"config_data"}},
+		})
+		defer in.Release()
+
+		out := forwardFillUnchanged(in, pk)
+		defer out.Release()
+		require.NotSame(t, in, out, "the unchanged row should be rewritten")
+
+		_, ok := configValueAt(t, out, 1)
+		assert.False(t, ok, "filled value should be NULL")
+		assert.Equal(t, `[]`, unchangedValueAt(t, out, 1), "column must be dropped from _cdc_unchanged_cols")
+	})
+
 	t.Run("no prior value keeps column unchanged", func(t *testing.T) {
 		in := buildFillBatch([]fillRow{
 			{id: 1, config: nil, status: "a", lsn: "0/1", unchanged: []string{"config_data"}},
