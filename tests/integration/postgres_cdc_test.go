@@ -868,6 +868,99 @@ func TestPostgresCDC_MultiTable_SchemaEvolution(t *testing.T) {
 	assert.Equal(t, 2, count)
 }
 
+func TestPostgresCDC_MultiTableTrimWhitespace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	if pgDest.uri == "" {
+		t.Skip("shared postgres dest container not available")
+	}
+
+	ctx := context.Background()
+
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+
+	_, err = srcPool.Exec(ctx, `CREATE TABLE public.trim_items (
+		id TEXT PRIMARY KEY,
+		name TEXT,
+		note TEXT
+	)`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `
+		INSERT INTO public.trim_items (id, name, note) VALUES
+			($1::text, $2::text, $3::text),
+			($4::text, $5::text, $6::text)
+	`, "  key-1  ", "  Alpha  ", " keep  inner  space ", " \tkey-2\n ", "\tBeta\n", nil)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `CREATE PUBLICATION trim_pub FOR TABLE public.trim_items`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `ALTER USER testuser REPLICATION`)
+	require.NoError(t, err)
+
+	destSchema := uniqueSchemaName(t, "cdc_trim")
+	ensurePostgresSchema(t, ctx, pgDest.uri, destSchema)
+	t.Cleanup(func() { dropPostgresSchema(t, ctx, pgDest.uri, destSchema) })
+
+	cfg := &config.IngestConfig{
+		SourceURI: "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+			"&publication=trim_pub&mode=batch&dest_schema=" + destSchema,
+		DestURI:        pgDest.uri,
+		TrimWhitespace: true,
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	pg, err := sql.Open("pgx", pgDest.uri)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pg.Close() })
+
+	readRows := func() []struct {
+		id   string
+		name string
+		note sql.NullString
+	} {
+		t.Helper()
+
+		rows, err := pg.QueryContext(ctx, fmt.Sprintf(
+			`SELECT id, name, note FROM %s ORDER BY id`,
+			pqTable(destSchema, "trim_items"),
+		))
+		require.NoError(t, err)
+		defer func() { _ = rows.Close() }()
+
+		var result []struct {
+			id   string
+			name string
+			note sql.NullString
+		}
+		for rows.Next() {
+			var row struct {
+				id   string
+				name string
+				note sql.NullString
+			}
+			require.NoError(t, rows.Scan(&row.id, &row.name, &row.note))
+			result = append(result, row)
+		}
+		require.NoError(t, rows.Err())
+		return result
+	}
+
+	rows := readRows()
+	require.Len(t, rows, 2)
+	assert.Equal(t, "key-1", rows[0].id)
+	assert.Equal(t, "Alpha", rows[0].name)
+	assert.Equal(t, "keep  inner  space", rows[0].note.String)
+	assert.True(t, rows[0].note.Valid)
+	assert.Equal(t, "key-2", rows[1].id)
+	assert.Equal(t, "Beta", rows[1].name)
+	assert.False(t, rows[1].note.Valid)
+}
+
 // TestPostgresCDC_UnawareDestination_SQLite pins the contract that the
 // staging-only _cdc_unchanged_cols column never reaches the merge SQL of
 // destinations that don't consume it. A TOAST-sized payload forces the

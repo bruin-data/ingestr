@@ -30,6 +30,7 @@ ingestr ingest \
 - `--columns <name>:<type>:<source>`: Specifies the columns to be ingested. Use `name:type` to override a column's type, `name:type:source` to rename `source` to `name` with a type, or `name::source` to rename only. Multiple entries are comma-separated. Defaults to `None`.
 - `--no-inference`: Skips schema inference for schema-less sources and uses `--columns` as the source schema. Requires `--columns`.
 - `--mask <column_name>:<algorithm>[:param]`: Applies data masking to specified columns. Can be used multiple times for different columns. See the [Data Masking](../getting-started/data-masking.md) documentation for available algorithms and usage examples. Defaults to `None`.
+- `--trim-whitespace`: Trims leading and trailing whitespace from all string column values before writing to the destination. This applies to regular batch ingestions and CDC ingestions, preserves nulls and column types, and leaves non-string columns unchanged. Defaults to `false`. Can also be set with `TRIM_WHITESPACE=true` or `INGESTR_TRIM_WHITESPACE=true`.
 - `--schema-naming` Specifies what naming convention to use for table and column names on the destination. Can be `default` or `direct`.default is snake_case. `direct is case sensitive and doesn't contract underscores.
 
 The `interval-start` and `interval-end` options support various datetime formats, here are some examples:
@@ -129,6 +130,19 @@ This example demonstrates masking sensitive customer data:
 - Phone numbers show only first and last 3 digits
 - SSNs are completely redacted
 - Salaries are rounded to nearest $5000
+
+### Trimming whitespace from string values
+
+```bash
+ingestr ingest \
+   --source-uri 'postgresql://user:pass@localhost/app?sslmode=disable' \
+   --source-table 'public.customers' \
+   --dest-uri 'duckdb:///warehouse.duckdb' \
+   --dest-table 'raw.customers' \
+   --trim-whitespace
+```
+
+This trims leading and trailing whitespace from string values as data streams through ingestr. For example, `"  Alice  "` becomes `"Alice"` and `"\tA-123\n"` becomes `"A-123"`. Interior whitespace, such as `"ACME  Inc"`, is preserved.
 
 > [!INFO]
 > For more examples, please refer to the specific platforms' documentation on the sidebar.

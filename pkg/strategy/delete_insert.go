@@ -85,12 +85,6 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
-	// Apply batch transformation for discard_row/discard_value modes
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
-	}
-
 	intervalTracker := NewIntervalTracker(job.Config.IncrementalKey)
 	records = intervalTracker.Wrap(records)
 

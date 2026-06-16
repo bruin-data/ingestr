@@ -105,11 +105,6 @@ func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *Ingesti
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
-	}
-
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
 	}
@@ -179,11 +174,6 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 	records, err := job.GetRecords(ctx, readOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
-	}
-
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
 	}
 
 	if job.Tracker != nil {

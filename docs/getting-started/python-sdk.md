@@ -37,6 +37,17 @@ ingestr.ingest(
 
 Rows can be dictionaries, dataclasses, Pydantic models, named tuples, or regular Python objects with attributes.
 
+You can pass ingestion options through the Python API. For example, `trim_whitespace=True` trims leading and trailing whitespace from string values before they are written:
+
+```python
+ingestr.ingest(
+    [{"id": 1, "name": "  Ada  "}],
+    dest_uri="duckdb:///tmp/warehouse.duckdb",
+    dest_table="main.people",
+    trim_whitespace=True,
+)
+```
+
 ## Ingest yielded data
 
 Generator functions can yield individual rows or pages of rows:
@@ -146,5 +157,6 @@ ingestr.run_cli(
     source_table="events",
     dest_uri="duckdb:///tmp/warehouse.duckdb",
     dest_table="main.events",
+    trim_whitespace=True,
 )
 ```

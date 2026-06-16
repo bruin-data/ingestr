@@ -97,12 +97,6 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
-	// Apply batch transformation for discard_row/discard_value modes
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
-	}
-
 	// Wrap channel with progress tracker if provided
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
@@ -237,7 +231,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 		parallelism = 4
 	}
 
-	records, err := job.Source.ReadAll(ctx, source.MultiTableReadOptions{
+	records, err := job.ReadAll(ctx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
 			Parallelism:   parallelism,
 			PageSize:      job.Config.PageSize,
@@ -252,8 +246,6 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 		}
 		return fmt.Errorf("failed to read from multi-table source: %w", err)
 	}
-
-	records = job.ApplyBatchTransformation(records)
 
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
