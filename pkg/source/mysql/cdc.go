@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,8 +32,9 @@ import (
 type MySQLCDCMode string
 
 const (
-	MySQLCDCModeBatch  MySQLCDCMode = "batch"
-	MySQLCDCModeStream MySQLCDCMode = "stream"
+	MySQLCDCModeBatch MySQLCDCMode = "batch"
+	// mysqlCDCModeStream is defined for completeness but is not yet supported.
+	mysqlCDCModeStream MySQLCDCMode = "stream"
 
 	defaultMySQLCDCHeartbeat       = 1 * time.Second
 	defaultMySQLCDCStreamBatchSize = 10000
@@ -357,7 +359,7 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 		switch mode {
 		case string(MySQLCDCModeBatch):
 			cfg.Mode = MySQLCDCModeBatch
-		case string(MySQLCDCModeStream):
+		case string(mysqlCDCModeStream):
 			return cfg, "", mysqlCDCConnInfo{}, fmt.Errorf("MySQL CDC stream mode is not supported; use mode=batch")
 		default:
 			return cfg, "", mysqlCDCConnInfo{}, fmt.Errorf("invalid mode: %s (must be 'batch')", mode)
@@ -946,11 +948,20 @@ func primaryKeyChanged(before, after []interface{}, pkIndexes []int) bool {
 		if idx < 0 || idx >= len(before) || idx >= len(after) {
 			continue
 		}
-		if fmt.Sprintf("%T:%v", before[idx], before[idx]) != fmt.Sprintf("%T:%v", after[idx], after[idx]) {
+		if !primaryKeyValuesEqual(before[idx], after[idx]) {
 			return true
 		}
 	}
 	return false
+}
+
+func primaryKeyValuesEqual(before, after interface{}) bool {
+	beforeTime, ok := before.(time.Time)
+	if ok {
+		afterTime, ok := after.(time.Time)
+		return ok && beforeTime.Equal(afterTime)
+	}
+	return reflect.DeepEqual(before, after)
 }
 
 func primaryKeyIndexes(columns []schema.Column, primaryKeys []string) []int {

@@ -283,6 +283,11 @@ func assertNoCDCResult(t *testing.T, results <-chan source.RecordBatchResult) {
 func TestPrimaryKeyChanged(t *testing.T) {
 	assert.False(t, primaryKeyChanged([]interface{}{int64(1), "a"}, []interface{}{int64(1), "b"}, []int{0}))
 	assert.True(t, primaryKeyChanged([]interface{}{int64(1), "a"}, []interface{}{int64(2), "a"}, []int{0}))
+
+	utcPK := time.Date(2026, 6, 16, 12, 30, 45, 123000, time.UTC)
+	offsetPK := utcPK.In(time.FixedZone("offset", 3*60*60))
+	assert.False(t, primaryKeyChanged([]interface{}{utcPK}, []interface{}{offsetPK}, []int{0}))
+	assert.True(t, primaryKeyChanged([]interface{}{utcPK}, []interface{}{utcPK.Add(time.Microsecond)}, []int{0}))
 }
 
 func TestMySQLCDCResultTableName(t *testing.T) {
