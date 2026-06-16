@@ -7,4 +7,8 @@ func init() {
 		[]string{"mssql", "sqlserver", "mssql+pyodbc", "azuresql", "azure-sql"},
 		func() interface{} { return NewMSSQLSource() },
 	)
+	registry.RegisterSource(
+		[]string{"mssql+ct", "sqlserver+ct", "azuresql+ct", "azure-sql+ct"},
+		func() interface{} { return NewMSSQLChangeTrackingSource() },
+	)
 }

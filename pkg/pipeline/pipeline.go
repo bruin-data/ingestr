@@ -104,17 +104,17 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
-	// For CDC sources, check if we can resume from existing data
-	if isCDCSource(p.config.SourceURI) && !p.config.FullRefresh {
+	// For managed change sources, check if we can resume from existing data
+	if isManagedChangeSource(p.config.SourceURI) && !p.config.FullRefresh {
 		if resumeProvider, ok := dest.(destination.CDCResumeProvider); ok {
 			maxLSN, err := resumeProvider.GetMaxCDCLSN(ctx, p.config.DestTable)
 			if err != nil {
-				config.Debug("[PIPELINE] Failed to get max CDC LSN from destination: %v", err)
+				config.Debug("[PIPELINE] Failed to get max change cursor from destination: %v", err)
 			} else if maxLSN != "" {
-				config.Debug("[PIPELINE] Found existing CDC data, will resume from LSN: %s", maxLSN)
+				config.Debug("[PIPELINE] Found existing change data, will resume from cursor: %s", maxLSN)
 				p.config.CDCResumeLSN = maxLSN
 			} else {
-				config.Debug("[PIPELINE] No existing CDC data found, will perform full snapshot")
+				config.Debug("[PIPELINE] No existing change data found, will perform full snapshot")
 			}
 		}
 	}
@@ -155,7 +155,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	display.PrintSummary(&preFetchConfig)
 
 	if shouldWarnCDCStrategy(p.config, preFetchStrategy) {
-		fmt.Printf("Warning: CDC source is using %q strategy instead of %q; CDC delete and update operations may not be properly reflected in the destination\n", preFetchStrategy, config.StrategyMerge)
+		fmt.Printf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", preFetchStrategy, config.StrategyMerge)
 	}
 
 	tracker, err := p.createTracker(ctx)
@@ -825,7 +825,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	}
 
 	if shouldWarnCDCStrategy(p.config, resolvedStrategy) {
-		fmt.Printf("Warning: CDC source is using %q strategy instead of %q; CDC delete and update operations may not be properly reflected in the destination\n", resolvedStrategy, config.StrategyMerge)
+		fmt.Printf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", resolvedStrategy, config.StrategyMerge)
 	}
 
 	strat, err := strategy.Get(resolvedStrategy)
@@ -1392,7 +1392,7 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 // shouldWarnCDCStrategy returns true if the user should be warned about using
 // a non-merge strategy with a CDC source.
 func shouldWarnCDCStrategy(cfg *config.IngestConfig, resolvedStrategy config.IncrementalStrategy) bool {
-	return isCDCSource(cfg.SourceURI) && !cfg.FullRefresh && resolvedStrategy != config.StrategyMerge
+	return isManagedChangeSource(cfg.SourceURI) && !cfg.FullRefresh && resolvedStrategy != config.StrategyMerge
 }
 
 func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.SourceTable) config.IncrementalStrategy {
@@ -1407,7 +1407,7 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 			s = ss.DefaultStreamingStrategy()
 		}
 	}
-	if isCDCSource(cfg.SourceURI) && !cfg.FullRefresh && (s == "" || s == config.StrategyReplace) {
+	if isManagedChangeSource(cfg.SourceURI) && !cfg.FullRefresh && (s == "" || s == config.StrategyReplace) {
 		s = config.StrategyMerge
 	}
 	if cfg.FullRefresh {
@@ -1468,6 +1468,15 @@ func isCDCSource(uri string) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(uri[:schemeEnd]), "+cdc")
+}
+
+func isManagedChangeSource(uri string) bool {
+	schemeEnd := strings.Index(uri, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	scheme := strings.ToLower(uri[:schemeEnd])
+	return strings.Contains(scheme, "+cdc") || strings.Contains(scheme, "+ct")
 }
 
 // cdcSlotSuffix returns a 6-hex-char hash of the destination URI for use as a
