@@ -26,7 +26,7 @@ Homepage = "https://github.com/bruin-data/ingestr"
 Issues = "https://github.com/bruin-data/ingestr/issues"
 
 [project.optional-dependencies]
-sdk = ["pyarrow>=10"]
+sdk = ["pyarrow>=10", "pyarrow-hotfix"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["ingestr"]

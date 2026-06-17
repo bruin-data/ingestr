@@ -671,6 +671,11 @@ def _require_pyarrow() -> Any:
             "Python data ingestion requires pyarrow. Install it with `pip install 'ingestr[sdk]'` "
             "or `pip install pyarrow`."
         ) from exc
+    try:
+        # Neutralizes CVE-2023-47248 on pyarrow <14.0.1; a no-op on patched versions.
+        import pyarrow_hotfix  # noqa: F401
+    except ImportError:
+        pass
     return pa
 
 
