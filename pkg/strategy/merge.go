@@ -15,6 +15,68 @@ import (
 
 type MergeStrategy struct{}
 
+// mergeTableParams describes one dest/staging table pair for a merge.
+type mergeTableParams struct {
+	DestTable    string
+	StagingTable string
+	Schema       *schema.TableSchema
+	PrimaryKeys  []string
+	PartitionBy  string
+	ClusterBy    []string
+	IsCDC        bool
+}
+
+// prepareMergeTables ensures the destination table exists (without dropping it)
+// and creates a fresh staging table for it.
+func prepareMergeTables(ctx context.Context, dest destination.Destination, p mergeTableParams) error {
+	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       p.DestTable,
+		Schema:      destination.DestinationTableSchema(p.Schema),
+		DropFirst:   false,
+		PrimaryKeys: p.PrimaryKeys,
+		PartitionBy: p.PartitionBy,
+		ClusterBy:   p.ClusterBy,
+	}); err != nil {
+		return fmt.Errorf("failed to prepare destination table %s: %w", p.DestTable, err)
+	}
+
+	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:        p.StagingTable,
+		Schema:       p.Schema,
+		DropFirst:    true,
+		PrimaryKeys:  nil,
+		CDCMode:      p.IsCDC, // Allow NULLs for CDC deletes in staging
+		PartitionBy:  p.PartitionBy,
+		ClusterBy:    p.ClusterBy,
+		ExpiresAfter: destination.ManagedStagingTTL,
+	}); err != nil {
+		return fmt.Errorf("failed to prepare staging table %s: %w", p.StagingTable, err)
+	}
+
+	return nil
+}
+
+// mergeStagingInto merges the staging table into the target table by primary
+// key. A non-empty incrementalKey makes the per-PK dedup keep the row with the
+// highest value of that key (latest wins) instead of an arbitrary one.
+func mergeStagingInto(ctx context.Context, dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey string) error {
+	return dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable:   stagingTable,
+		TargetTable:    targetTable,
+		PrimaryKeys:    primaryKeys,
+		Columns:        destination.MergeColumnsFor(dest, tableSchema.ColumnNames()),
+		IncrementalKey: incrementalKey,
+	})
+}
+
+// warnIfCDCMergeUnsupported prints a warning when CDC data is headed at a
+// destination that can't process deletes during merge.
+func warnIfCDCMergeUnsupported(dest destination.Destination) {
+	if cdcAware, ok := dest.(destination.CDCMergeAware); !ok || !cdcAware.SupportsCDCMerge() {
+		fmt.Printf("Warning: CDC data detected but the destination does not support CDC-aware merge; deleted rows will be inserted as regular data with _cdc_deleted=true instead of being processed as deletes\n")
+	}
+}
+
 func (s *MergeStrategy) Name() config.IncrementalStrategy {
 	return config.StrategyMerge
 }
@@ -40,37 +102,19 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	fmt.Printf("[MERGE] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 	isCDC := hasCDCColumns(job.Schema)
 	if isCDC {
-		if cdcAware, ok := job.Destination.(destination.CDCMergeAware); !ok || !cdcAware.SupportsCDCMerge() {
-			fmt.Printf("Warning: CDC data detected but the destination does not support CDC-aware merge; deleted rows will be inserted as regular data with _cdc_deleted=true instead of being processed as deletes\n")
-		}
+		warnIfCDCMergeUnsupported(job.Destination)
 	}
 
-	destSchema := destination.DestinationTableSchema(job.Schema)
-
-	// Ensure destination table exists (don't drop it)
-	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
-		Table:       job.Config.DestTable,
-		Schema:      destSchema,
-		DropFirst:   false,
-		PrimaryKeys: job.Config.PrimaryKeys,
-		PartitionBy: job.Config.PartitionBy,
-		ClusterBy:   job.Config.ClusterBy,
-	}); err != nil {
-		return fmt.Errorf("failed to prepare destination table: %w", err)
-	}
-
-	// Create staging table with same schema
-	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
-		Table:        stagingTable,
+	if err := prepareMergeTables(ctx, job.Destination, mergeTableParams{
+		DestTable:    job.Config.DestTable,
+		StagingTable: stagingTable,
 		Schema:       job.Schema,
-		DropFirst:    true,
-		PrimaryKeys:  nil,
-		CDCMode:      isCDC, // Allow NULLs for CDC deletes in staging
+		PrimaryKeys:  job.Config.PrimaryKeys,
 		PartitionBy:  job.Config.PartitionBy,
 		ClusterBy:    job.Config.ClusterBy,
-		ExpiresAfter: destination.ManagedStagingTTL,
+		IsCDC:        isCDC,
 	}); err != nil {
-		return fmt.Errorf("failed to prepare staging table: %w", err)
+		return err
 	}
 
 	// Read from source
@@ -123,12 +167,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// Note: We only use source columns here. Destination-only columns (removed columns)
 	// will naturally receive NULL for new rows and remain unchanged for existing rows.
 	config.Debug("[MERGE] Executing merge operation")
-	if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
-		StagingTable: stagingTable,
-		TargetTable:  job.Config.DestTable,
-		PrimaryKeys:  job.Config.PrimaryKeys,
-		Columns:      destination.MergeColumnsFor(job.Destination, job.Schema.ColumnNames()),
-	}); err != nil {
+	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, ""); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
 
@@ -158,9 +197,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 		}
 	}
 	if anyTableHasCDC {
-		if cdcAware, ok := job.Destination.(destination.CDCMergeAware); !ok || !cdcAware.SupportsCDCMerge() {
-			fmt.Printf("Warning: CDC data detected but the destination does not support CDC-aware merge; deleted rows will be inserted as regular data with _cdc_deleted=true instead of being processed as deletes\n")
-		}
+		warnIfCDCMergeUnsupported(job.Destination)
 	}
 
 	stagingTables := make(map[string]string)
@@ -177,34 +214,20 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 
 			destTable := job.GetDestTableName(ti.Name)
 			stagingTable := GenerateStagingTableName(destTable, "merge", job.Config.StagingDataset)
-			isCDC := hasCDCColumns(ti.Schema)
-
-			tableDestSchema := destination.DestinationTableSchema(ti.Schema)
 
 			if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
 				errChan <- fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
 				return
 			}
 
-			if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
-				Table:       destTable,
-				Schema:      tableDestSchema,
-				DropFirst:   false,
-				PrimaryKeys: ti.PrimaryKeys,
-			}); err != nil {
-				errChan <- fmt.Errorf("failed to prepare destination table %s: %w", ti.Name, err)
-				return
-			}
-
-			if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
-				Table:        stagingTable,
+			if err := prepareMergeTables(ctx, job.Destination, mergeTableParams{
+				DestTable:    destTable,
+				StagingTable: stagingTable,
 				Schema:       ti.Schema,
-				DropFirst:    true,
-				PrimaryKeys:  nil,
-				CDCMode:      isCDC, // Make non-PK columns nullable for CDC staging tables
-				ExpiresAfter: destination.ManagedStagingTTL,
+				PrimaryKeys:  ti.PrimaryKeys,
+				IsCDC:        hasCDCColumns(ti.Schema), // Make non-PK columns nullable for CDC staging tables
 			}); err != nil {
-				errChan <- fmt.Errorf("failed to prepare staging table for %s: %w", ti.Name, err)
+				errChan <- err
 				return
 			}
 
@@ -276,12 +299,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			destTable := job.GetDestTableName(ti.Name)
 			stagingTable := stagingTables[ti.Name]
 
-			if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
-				StagingTable: stagingTable,
-				TargetTable:  destTable,
-				PrimaryKeys:  ti.PrimaryKeys,
-				Columns:      destination.MergeColumnsFor(job.Destination, ti.Schema.ColumnNames()),
-			}); err != nil {
+			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, ""); err != nil {
 				mergeErrChan <- fmt.Errorf("failed to merge table %s: %w", ti.Name, err)
 				return
 			}

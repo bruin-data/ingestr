@@ -76,6 +76,10 @@ type IngestConfig struct {
 	CDCResumeLSN  string // For CDC sources: resume from this LSN (auto-detected from destination)
 	CDCSlotSuffix string // For CDC sources: suffix appended to auto-generated slot names (derived from dest URI)
 
+	Stream        bool          // Continuous ingestion: flush buffered records on an interval or record-count trigger
+	FlushInterval time.Duration // Streaming mode: flush at least this often
+	FlushRecords  int           // Streaming mode: flush when this many records are buffered
+
 	// QueryAnnotations is a JSON object of external annotation keys (e.g. asset,
 	// pipeline) supplied by the caller. When set, ingestr prepends a
 	// "-- @bruin.config: {...}" comment to destination queries (QUERY_TAG on
@@ -92,6 +96,8 @@ func DefaultConfig() *IngestConfig {
 		PageSize:            25000,
 		LoaderFileSize:      25000,
 		ExtractParallelism:  5,
+		FlushInterval:       30 * time.Second,
+		FlushRecords:        50000,
 	}
 }
 
@@ -117,6 +123,28 @@ func (c *IngestConfig) Validate() error {
 	}
 	if c.NoInference && strings.TrimSpace(c.Columns) == "" {
 		return &ValidationError{Field: "columns", Message: "is required when no-inference is enabled"}
+	}
+	if c.Stream {
+		if c.FullRefresh {
+			return &ValidationError{Field: "full-refresh", Message: "cannot be combined with --stream"}
+		}
+		if c.IntervalEnd != nil {
+			return &ValidationError{Field: "interval-end", Message: "cannot be combined with --stream (a bounded end contradicts continuous ingestion)"}
+		}
+		if c.SQLLimit > 0 {
+			return &ValidationError{Field: "sql-limit", Message: "cannot be combined with --stream"}
+		}
+		if c.FlushInterval <= 0 {
+			return &ValidationError{Field: "flush-interval", Message: "must be positive"}
+		}
+		if c.FlushRecords <= 0 {
+			return &ValidationError{Field: "flush-records", Message: "must be positive"}
+		}
+		switch c.IncrementalStrategy {
+		case "", StrategyMerge, StrategyAppend:
+		default:
+			return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q is not supported with --stream (only merge and append)", c.IncrementalStrategy)}
+		}
 	}
 	return nil
 }

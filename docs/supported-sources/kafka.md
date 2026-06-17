@@ -59,3 +59,16 @@ ingestr ingest \
 ```
 
 The result of this command will be a table in the `kafka.duckdb` database with JSON columns.
+
+## Streaming ingestion
+
+Add `--stream` to consume the topic continuously instead of reading the current backlog and exiting. In streaming mode each message is projected into a fixed envelope schema — a `msg_id` primary key plus a JSON `data` column holding the key, value, and metadata — and changes are merged on `msg_id` (latest record per key wins within a flush window, ordered by an `_ingestr_order` column). The consumer group's offsets are committed only after a flush succeeds, so a restart resumes where it left off. See [`ingest --stream`](../commands/ingest.md#streaming-ingestion).
+
+```sh
+ingestr ingest \
+    --source-uri 'kafka://?bootstrap_servers=localhost:9092&group_id=test_group' \
+    --source-table 'my-topic' \
+    --dest-uri duckdb:///kafka.duckdb \
+    --dest-table 'dest.my_topic' \
+    --stream
+```

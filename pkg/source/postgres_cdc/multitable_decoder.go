@@ -176,6 +176,16 @@ func (d *MultiTableDecoder) handleBegin(data []byte, lsn pglogrepl.LSN) error {
 	return nil
 }
 
+// InFlightTxLSN returns the LSN of a transaction whose changes have been
+// decoded but not yet emitted (BEGIN seen, COMMIT not yet processed). The bool
+// is false when no transaction is mid-flight.
+func (d *MultiTableDecoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
+	if len(d.pendingChanges) == 0 {
+		return 0, false
+	}
+	return d.currentTxLSN, true
+}
+
 func (d *MultiTableDecoder) handleCommit() ([]DecodedBatch, error) {
 	if len(d.pendingChanges) == 0 {
 		return nil, nil

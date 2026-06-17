@@ -73,6 +73,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 	defer func() { _ = src.Close(ctx) }()
 
+	if p.config.Stream {
+		ss, ok := src.(source.StreamingSource)
+		if !ok || !ss.SupportsStreaming() {
+			return fmt.Errorf("--stream is not supported by this source; streaming requires a CDC source (postgres+cdc, mssql+cdc) or a message broker source (kafka, amqp)")
+		}
+	}
+
 	dest, err := uri.DefaultRegistry.GetDestination(p.config.DestURI)
 	if err != nil {
 		return fmt.Errorf("failed to get destination: %w", err)
@@ -119,6 +126,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		IncrementalKey: p.config.IncrementalKey,
 		PrimaryKeys:    p.config.PrimaryKeys,
 		Strategy:       p.config.IncrementalStrategy,
+		Streaming:      p.config.Stream,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get table: %w", err)
@@ -425,6 +433,20 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		// For known-schema sources with column type overrides, add a type caster
 		// that converts Arrow batches from source types to the overridden types.
 		job.TypeCaster = p.buildTypeCaster(tableSchema, destSchema)
+	}
+
+	if p.config.Stream {
+		committer, _ := src.(source.StreamCommitter)
+		exec := strategy.NewStreamingExecutor(strategy.StreamingOptions{
+			FlushInterval: p.config.FlushInterval,
+			FlushRecords:  int64(p.config.FlushRecords),
+			Strategy:      resolvedStrategy,
+			Committer:     committer,
+		})
+		if err := exec.Execute(ctx, job); err != nil {
+			return fmt.Errorf("streaming ingestion failed: %w", err)
+		}
+		return nil
 	}
 
 	if err := strat.Execute(ctx, job); err != nil {
@@ -790,6 +812,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	config.Debug("[PIPELINE] Multi-table mode: %d tables", len(tables))
 
 	resolvedStrategy := p.config.IncrementalStrategy
+	if p.config.Stream && resolvedStrategy == "" {
+		if ss, ok := src.(source.StreamingSource); ok {
+			resolvedStrategy = ss.DefaultStreamingStrategy()
+		}
+	}
 	if isCDCSource(p.config.SourceURI) && !p.config.FullRefresh && (resolvedStrategy == "" || resolvedStrategy == config.StrategyReplace) {
 		resolvedStrategy = config.StrategyMerge
 	}
@@ -907,6 +934,20 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		CDCResumeLSNs:     cdcResumeLSNs,
 		EvolutionPlans:    evolutionPlans,
 		WhitespaceTrimmer: whitespaceTrimmer,
+	}
+
+	if p.config.Stream {
+		committer, _ := src.(source.StreamCommitter)
+		exec := strategy.NewStreamingExecutor(strategy.StreamingOptions{
+			FlushInterval: p.config.FlushInterval,
+			FlushRecords:  int64(p.config.FlushRecords),
+			Strategy:      resolvedStrategy,
+			Committer:     committer,
+		})
+		if err := exec.ExecuteMultiTable(ctx, job); err != nil {
+			return fmt.Errorf("streaming ingestion failed: %w", err)
+		}
+		return nil
 	}
 
 	if err := mtStrat.ExecuteMultiTable(ctx, job); err != nil {
@@ -1360,6 +1401,11 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 		s = table.Strategy()
 	} else {
 		s = cfg.IncrementalStrategy
+	}
+	if cfg.Stream && s == "" {
+		if ss, ok := src.(source.StreamingSource); ok {
+			s = ss.DefaultStreamingStrategy()
+		}
 	}
 	if isCDCSource(cfg.SourceURI) && !cfg.FullRefresh && (s == "" || s == config.StrategyReplace) {
 		s = config.StrategyMerge

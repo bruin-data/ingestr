@@ -188,6 +188,14 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	lsnStr := FormatLSN(lsn)
 	syncedAt := time.Now().UTC()
 
+	// In streaming mode, snapshot batches carry the snapshot's consistent-point
+	// LSN as a commit token. It is always safe to confirm: streaming begins from
+	// this LSN, so nothing earlier remains to be read.
+	var commitToken any
+	if opts.Streaming {
+		commitToken = lsn
+	}
+
 	// Build Arrow schema including CDC columns
 	arrowSchema := buildArrowSchema(s.tableSchema.Columns)
 
@@ -208,7 +216,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 		totalRows += count
 		config.Debug("[CDC] Snapshot batch %d: %d rows (total: %d)", batchNum, count, totalRows)
 
-		results <- source.RecordBatchResult{Batch: record}
+		results <- source.RecordBatchResult{Batch: record, CommitToken: commitToken}
 	}
 
 	config.Debug("[CDC] Snapshot completed: %d rows in %d batches", totalRows, batchNum)

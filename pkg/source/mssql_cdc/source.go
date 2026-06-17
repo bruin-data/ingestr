@@ -126,6 +126,27 @@ func (s *MSSQLCDCSource) HandlesIncrementality() bool {
 	return true
 }
 
+// SupportsStreaming reports that SQL Server CDC can run in continuous mode.
+func (s *MSSQLCDCSource) SupportsStreaming() bool {
+	return true
+}
+
+// DefaultStreamingStrategy returns merge: CDC changes (including deletes) are
+// applied by primary key.
+func (s *MSSQLCDCSource) DefaultStreamingStrategy() config.IncrementalStrategy {
+	return config.StrategyMerge
+}
+
+// applyStreamingMode forces continuous polling when --stream is set, regardless
+// of the URI ?mode= parameter. SQL Server CDC reads change tables via polling
+// and has no consumer-side acknowledgement, so there is no StreamCommitter:
+// at-least-once is provided by resuming from the destination's max _cdc_lsn.
+func (s *MSSQLCDCSource) applyStreamingMode(streaming bool) {
+	if streaming {
+		s.cdcConfig.Mode = ModeStream
+	}
+}
+
 func (s *MSSQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
 	if req.Name == "" {
 		return nil, fmt.Errorf("table name is required")
@@ -202,6 +223,7 @@ func (s *MSSQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInf
 }
 
 func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	s.applyStreamingMode(opts.Streaming)
 	allTables, err := s.GetTables(ctx)
 	if err != nil {
 		return nil, err
@@ -572,6 +594,7 @@ func (t *CDCTable) GetSchema(ctx context.Context) (*schema.TableSchema, error) {
 }
 
 func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	t.source.applyStreamingMode(opts.Streaming)
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -1110,5 +1133,6 @@ func isZeroLSN(lsn string) bool {
 var (
 	_ source.Source           = (*MSSQLCDCSource)(nil)
 	_ source.MultiTableSource = (*MSSQLCDCSource)(nil)
+	_ source.StreamingSource  = (*MSSQLCDCSource)(nil)
 	_ source.SourceTable      = (*CDCTable)(nil)
 )

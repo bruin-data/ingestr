@@ -106,9 +106,10 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 			startLSN = minResumeLSN
 		}
 
-		// For batch mode, get the current WAL LSN as our target
+		// For batch mode, get the current WAL LSN as our target.
+		// --stream forces continuous mode regardless of the URI ?mode= param.
 		var targetLSN pglogrepl.LSN
-		if r.cdcConfig.Mode == ModeBatch {
+		if r.cdcConfig.Mode == ModeBatch && !opts.Streaming {
 			var err error
 			targetLSN, err = r.getCurrentWALLSN(ctx)
 			if err != nil {
@@ -274,7 +275,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	cdcConfigWithSlot.SlotName = slotName
 
 	// Create multi-table replicator
-	repl, err := NewMultiTableReplicator(r.source, r.tables, cdcConfigWithSlot, startLSN, r)
+	repl, err := NewMultiTableReplicator(r.source, r.tables, cdcConfigWithSlot, startLSN, r, opts.Streaming)
 	if err != nil {
 		return fmt.Errorf("failed to create replicator: %w", err)
 	}
@@ -298,42 +299,50 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		return forwardFillUnchanged(batch, pkByTable[tableName])
 	}
 
+	// In streaming mode, batches carry a CommitToken (safe LSN) so the pipeline
+	// confirms the slot only after the data is durable. targetLSN is 0 in
+	// streaming mode, so the catch-up exit below never triggers.
+	var token tokenFunc
+	if opts.Streaming {
+		token = func() any { return safeCommitLSN(repl, accum) }
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			config.Debug("[CDC] Context cancelled, stopping stream")
-			accum.flushAll(results)
+			accum.flushAll(results, token)
 			return ctx.Err()
 		default:
 		}
 
 		// Get next batch (may be from any table)
-		batch, tableName, hadActivity, err := repl.NextBatch(ctx, batchSize)
+		batch, tableName, lsn, hadActivity, err := repl.NextBatch(ctx, batchSize)
 		if err != nil {
-			accum.flushAll(results)
+			accum.flushAll(results, token)
 			return fmt.Errorf("failed to get next batch: %w", err)
 		}
 
 		if batch != nil && batch.NumRows() > 0 {
-			accum.add(tableName, batch)
+			accum.add(tableName, batch, lsn)
 		}
 
 		// Flush tables that have accumulated enough rows
-		accum.flushReady(results)
+		accum.flushReady(results, token)
 
 		// For batch mode, check if we've caught up to the target LSN
-		if r.cdcConfig.Mode == ModeBatch && targetLSN > 0 {
+		if targetLSN > 0 {
 			currentLSN := repl.CurrentLSN()
 			if currentLSN >= targetLSN {
 				config.Debug("[CDC] Batch mode: reached target LSN %s (current: %s)", targetLSN, currentLSN)
-				accum.flushAll(results)
+				accum.flushAll(results, token)
 				return nil
 			}
 		}
 
 		// When idle (no WAL activity), flush any pending batches
 		if !hadActivity {
-			accum.flushAll(results)
+			accum.flushAll(results, token)
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
@@ -386,6 +395,11 @@ func (r *MultiTableCDCReader) ShouldFilterChange(tableName string, changeLSN pgl
 		return false
 	}
 
-	// Filter if change LSN is <= last processed LSN for this table
-	return changeLSN <= lastProcessed
+	// Strict less-than is required at the snapshot boundary: the snapshot is
+	// exported at the slot's consistent point, and the first transaction that
+	// commits afterwards carries a BEGIN LSN equal to that point. It is NOT in
+	// the snapshot, so it must be streamed. On resume, processedLSN is the
+	// BEGIN LSN of the last already-applied transaction; re-emitting it is
+	// harmless because the merge is idempotent by primary key (at-least-once).
+	return changeLSN < lastProcessed
 }
