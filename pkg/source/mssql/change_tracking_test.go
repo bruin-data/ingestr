@@ -2,12 +2,14 @@ package mssql
 
 import (
 	"errors"
+	"math"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -239,6 +241,27 @@ func TestShouldEmitCTHeartbeatOnlyWhenNoChangeRows(t *testing.T) {
 	assert.True(t, shouldEmitCTHeartbeat(true, 0))
 	assert.False(t, shouldEmitCTHeartbeat(true, 1))
 	assert.False(t, shouldEmitCTHeartbeat(false, 0))
+}
+
+func TestSyntheticCTHeartbeatRecord(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "name", DataType: schema.TypeString},
+		{Name: destination.CDCLSNColumn, DataType: schema.TypeString},
+		{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+		{Name: destination.CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+	}
+
+	record, err := syntheticCTHeartbeatRecord(columns, []string{"id"}, 42)
+	require.NoError(t, err)
+	defer record.Release()
+
+	require.EqualValues(t, 1, record.NumRows())
+	require.EqualValues(t, math.MinInt64, record.Column(0).(*array.Int64).Value(0))
+	assert.True(t, record.Column(1).IsNull(0))
+	assert.Equal(t, "00000000000000000042", record.Column(2).(*array.String).Value(0))
+	assert.True(t, record.Column(3).(*array.Boolean).Value(0))
+	assert.False(t, record.Column(4).IsNull(0))
 }
 
 func TestObjectIDNamePreservesSupportedTableRefs(t *testing.T) {

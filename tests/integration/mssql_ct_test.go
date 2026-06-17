@@ -150,10 +150,10 @@ func TestMSSQLChangeTracking_SnapshotAndIncremental_DuckDB(t *testing.T) {
 	var currentCTVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT CHANGE_TRACKING_CURRENT_VERSION()`).Scan(&currentCTVersion))
 
-	assert.EqualValues(t, 4, queryDuckCount(`SELECT COUNT(*) FROM items_dest`), "insert+delete inside one CT window should not create a destination row")
+	assert.EqualValues(t, 5, queryDuckCount(`SELECT COUNT(*) FROM items_dest`), "insert+delete inside one CT window should create a deleted cursor tombstone")
 	assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM items_dest WHERE id = 3 AND name = 'item3' AND value = 300 AND "_cdc_deleted"`), "CT delete only carries PKs, so existing row data is preserved")
-	assert.EqualValues(t, 0, queryDuckCount(`SELECT COUNT(*) FROM items_dest WHERE id = 5`))
-	assert.Less(t, queryDuckString(`SELECT MAX("_cdc_lsn") FROM items_dest`), fmt.Sprintf("%020d", currentCTVersion), "row-level Change Tracking cursor does not advance for changes that materialize no destination row")
+	assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM items_dest WHERE id = 5 AND "_cdc_deleted"`), "insert+delete tombstone should be materialized for cursor advancement")
+	assert.Equal(t, fmt.Sprintf("%020d", currentCTVersion), queryDuckString(`SELECT MAX("_cdc_lsn") FROM items_dest`), "Change Tracking cursor should advance even when a window has no active row image")
 }
 
 func TestMSSQLChangeTracking_EmptyTableSnapshot_DuckDB(t *testing.T) {
@@ -187,8 +187,17 @@ func TestMSSQLChangeTracking_EmptyTableSnapshot_DuckDB(t *testing.T) {
 		require.NoError(t, duck.QueryRow(query).Scan(&v))
 		return v
 	}
+	queryDuckString := func(query string) string {
+		duck, err := sql.Open("adbc_generic", "driver=duckdb;path="+duckdbPath)
+		require.NoError(t, err)
+		defer func() { _ = duck.Close() }()
 
-	assert.EqualValues(t, 0, queryDuckCount(`SELECT COUNT(*) FROM items_empty_dest`))
+		var v string
+		require.NoError(t, duck.QueryRow(query).Scan(&v))
+		return v
+	}
+
+	assert.EqualValues(t, 0, queryDuckCount(`SELECT COUNT(*) FROM items_empty_dest WHERE NOT "_cdc_deleted"`))
 
 	_, err = db.ExecContext(ctx, `INSERT INTO dbo.items (id, name, value) VALUES (1, N'item1', 100)`)
 	require.NoError(t, err)
@@ -197,5 +206,6 @@ func TestMSSQLChangeTracking_EmptyTableSnapshot_DuckDB(t *testing.T) {
 
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
-	assert.EqualValues(t, 0, queryDuckCount(`SELECT COUNT(*) FROM items_empty_dest`), "insert+delete on an empty table should not create a destination row")
+	assert.EqualValues(t, 0, queryDuckCount(`SELECT COUNT(*) FROM items_empty_dest WHERE NOT "_cdc_deleted"`), "insert+delete on an empty table should not create an active destination row")
+	assert.NotEmpty(t, queryDuckString(`SELECT MAX("_cdc_lsn") FROM items_empty_dest`), "empty-table cursor tombstone should advance resume state")
 }

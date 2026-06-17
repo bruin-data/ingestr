@@ -5,12 +5,17 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -371,6 +376,12 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 	if err != nil {
 		return 0, emittedRows, err
 	}
+	if emittedRows == 0 && !opts.FullRefresh {
+		if err := emitSyntheticCTHeartbeat(tableSchema.Columns, tableSchema.PrimaryKeys, version, results); err != nil {
+			return 0, 0, err
+		}
+		emittedRows = 1
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, emittedRows, fmt.Errorf("failed to commit snapshot transaction: %w", err)
@@ -454,14 +465,109 @@ func (s *MSSQLChangeTrackingSource) emitCTHeartbeat(ctx context.Context, tx *sql
 	}
 	defer func() { _ = rows.Close() }()
 
-	if _, err := s.rowsToCTBatches(rows, tableSchema.Columns, opts, results); err != nil {
+	emittedRows, err := s.rowsToCTBatches(rows, tableSchema.Columns, opts, results)
+	if err != nil {
 		return err
+	}
+	if emittedRows == 0 {
+		return emitSyntheticCTHeartbeat(tableSchema.Columns, primaryKeys, targetVersion, results)
 	}
 	return nil
 }
 
 func shouldEmitCTHeartbeat(emitHeartbeat bool, changeRows int64) bool {
 	return emitHeartbeat && changeRows == 0
+}
+
+func emitSyntheticCTHeartbeat(columns []schema.Column, primaryKeys []string, targetVersion int64, results chan<- source.RecordBatchResult) error {
+	record, err := syntheticCTHeartbeatRecord(columns, primaryKeys, targetVersion)
+	if err != nil {
+		return err
+	}
+	results <- source.RecordBatchResult{Batch: record}
+	return nil
+}
+
+func syntheticCTHeartbeatRecord(columns []schema.Column, primaryKeys []string, targetVersion int64) (arrow.RecordBatch, error) {
+	arrowSchema := buildArrowSchema(columns)
+	mem := memory.NewGoAllocator()
+	builders := make([]array.Builder, len(columns))
+	for i, field := range arrowSchema.Fields() {
+		builders[i] = array.NewBuilder(mem, field.Type)
+	}
+	defer func() {
+		for _, b := range builders {
+			b.Release()
+		}
+	}()
+
+	pkSet := make(map[string]bool, len(primaryKeys))
+	for _, pk := range primaryKeys {
+		pkSet[strings.ToLower(pk)] = true
+	}
+
+	for i, col := range columns {
+		value := syntheticCTHeartbeatValue(col, pkSet, targetVersion)
+		if value == nil {
+			builders[i].AppendNull()
+			continue
+		}
+		arrowconv.AppendValue(builders[i], value)
+	}
+
+	arrays := make([]arrow.Array, len(builders))
+	for i, b := range builders {
+		arrays[i] = b.NewArray()
+	}
+	defer func() {
+		for _, arr := range arrays {
+			arr.Release()
+		}
+	}()
+
+	return array.NewRecordBatch(arrowSchema, arrays, 1), nil
+}
+
+func syntheticCTHeartbeatValue(col schema.Column, pkSet map[string]bool, targetVersion int64) any {
+	switch {
+	case strings.EqualFold(col.Name, destination.CDCLSNColumn):
+		return formatCTVersion(targetVersion)
+	case strings.EqualFold(col.Name, destination.CDCDeletedColumn):
+		return true
+	case strings.EqualFold(col.Name, destination.CDCSyncedAtColumn):
+		return time.Now().UTC()
+	case pkSet[strings.ToLower(col.Name)]:
+		return syntheticCTPrimaryKeyValue(col)
+	default:
+		return nil
+	}
+}
+
+func syntheticCTPrimaryKeyValue(col schema.Column) any {
+	switch col.DataType {
+	case schema.TypeBoolean:
+		return false
+	case schema.TypeInt8:
+		return int8(math.MinInt8)
+	case schema.TypeInt16:
+		return int16(math.MinInt16)
+	case schema.TypeInt32:
+		return int32(math.MinInt32)
+	case schema.TypeInt64:
+		return int64(math.MinInt64)
+	case schema.TypeFloat32, schema.TypeFloat64:
+		return float64(math.SmallestNonzeroFloat64)
+	case schema.TypeDecimal:
+		return "0"
+	case schema.TypeBinary:
+		return []byte("__ingestr_ct_heartbeat__")
+	case schema.TypeDate, schema.TypeTime, schema.TypeTimestamp, schema.TypeTimestampTZ:
+		return time.Unix(0, 0).UTC()
+	case schema.TypeUUID:
+		return "00000000-0000-0000-0000-000000000000"
+	default:
+		return "__ingestr_ct_heartbeat__"
+	}
 }
 
 func validateCTExcludeColumns(excludeColumns []string, primaryKeys []string) error {
@@ -577,6 +683,10 @@ func ctMetadataSelects(versionExpr, deletedExpr string) []string {
 
 func ctVersionExpr(expr string) string {
 	return fmt.Sprintf("RIGHT(REPLICATE('0', %d) + CONVERT(varchar(%d), %s), %d)", ctVersionWidth, ctVersionWidth, expr, ctVersionWidth)
+}
+
+func formatCTVersion(version int64) string {
+	return fmt.Sprintf("%0*d", ctVersionWidth, version)
 }
 
 func parseStoredCTVersion(raw string) (int64, bool) {

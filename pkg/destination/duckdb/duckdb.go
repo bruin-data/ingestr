@@ -440,11 +440,14 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		)
 	}
 
-	// For CDC, upsert from the latest non-deleted change per PK so a delete
-	// followed by nothing doesn't clobber row data; deletes are applied below.
-	upsertSource := dedupSource("")
+	// For CDC, updates use the latest non-deleted change per PK so a delete
+	// followed by nothing doesn't clobber row data. Inserts use the latest
+	// change overall so delete-only keys can materialize tombstones for resume.
+	updateSource := dedupSource("")
+	insertSource := updateSource
 	if isCDC {
-		upsertSource = dedupSource(` WHERE "_cdc_deleted" = false`)
+		updateSource = dedupSource(` WHERE "_cdc_deleted" = false`)
+		insertSource = dedupSource("")
 	}
 
 	if len(nonPKColumns) > 0 {
@@ -452,7 +455,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
 			buildUpdateSet(nonPKColumns, "target", "source", applyUnchangedCols),
-			upsertSource,
+			updateSource,
 			onCondition,
 		)
 		config.Debug("[DUCKDB MERGE] Executing UPDATE: %s", updateSQL)
@@ -467,7 +470,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		quotedTargetTable,
 		strings.Join(destQuoted, ", "),
 		strings.Join(destQuoted, ", "),
-		upsertSource,
+		insertSource,
 		quotedTargetTable,
 		onCondition,
 	)
