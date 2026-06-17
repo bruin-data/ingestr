@@ -51,6 +51,9 @@ SendGrid source allows ingesting the following sources into separate tables:
 | `invalid_emails` | `email`, `created` | `created` | merge | Invalid addresses. Same suppression filter. |
 | `spam_reports` | `email`, `created` | `created` | merge | Spam-report suppressions. Same suppression filter. |
 | `unsubscribes` | `email`, `created` | `created` | merge | Global unsubscribe list. Same suppression filter. |
+| `suppression_groups` | `id` | - | replace | Unsubscribe (suppression) groups. |
+| `suppression_group_members` | `group_id`, `email` | - | replace | Suppressed addresses per group; fans out over each group. |
+| `templates` | `id` | `updated_at` | merge | Transactional templates (legacy + dynamic). Filtered client-side on `updated_at`. |
 | `lists` | `id` | - | replace | Marketing contact lists. No time filter; the table is fully replaced on each run. |
 | `single_sends` | `id` | `updated_at` | merge | Marketing single sends. Filtered client-side on `updated_at`. |
 

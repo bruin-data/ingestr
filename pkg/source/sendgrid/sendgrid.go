@@ -27,6 +27,7 @@ const (
 	maxSuppressionPageSize = 500  // shared by the /suppression/* endpoints (bounces, blocks, ...)
 	maxListsPageSize       = 1000 // GET /marketing/lists allows up to 1000
 	maxSingleSendsPageSize = 100  // GET /marketing/singlesends caps page_size at 100
+	maxTemplatesPageSize   = 200  // GET /templates caps page_size at 200
 	maxPages               = 10000
 
 	defaultActivityStart   = "1970-01-01T00:00:00Z"
@@ -47,9 +48,10 @@ const (
 type paginationStyle int
 
 const (
-	paginateBisect paginationStyle = iota // recursive date-range bisection for Email Activity (messages)
-	paginateOffset                        // limit + offset, top-level array response (global_stats, bounces)
-	paginateToken                         // page_size + page_token via _metadata.next (lists, single_sends)
+	paginateBisect       paginationStyle = iota // recursive date-range bisection for Email Activity (messages)
+	paginateOffset                              // limit + offset, top-level array response (global_stats, bounces)
+	paginateToken                               // page_size + page_token via _metadata.next (lists, single_sends)
+	paginateGroupMembers                        // fan out over /asm/groups, emit {group_id, email} per member
 )
 
 type filterMode int
@@ -79,6 +81,7 @@ type tableConfig struct {
 	pagination     paginationStyle
 	filter         filterMode
 	tier           rateLimitTier
+	extraParams    map[string]string // static query params always sent with the request
 }
 
 var supportedTables = map[string]tableConfig{
@@ -158,6 +161,36 @@ var supportedTables = map[string]tableConfig{
 		pagination:     paginateOffset,
 		filter:         filterSuppressionUnixRange,
 		tier:           tierGeneral,
+	},
+	"suppression_groups": {
+		endpoint:    "/asm/groups",
+		dataKey:     "",
+		primaryKeys: []string{"id"},
+		strategy:    config.StrategyReplace,
+		pageSize:    maxSuppressionPageSize,
+		pagination:  paginateOffset,
+		filter:      filterNone,
+		tier:        tierGeneral,
+	},
+	"suppression_group_members": {
+		endpoint:    "/asm/groups",
+		primaryKeys: []string{"group_id", "email"},
+		strategy:    config.StrategyReplace,
+		pagination:  paginateGroupMembers,
+		filter:      filterNone,
+		tier:        tierGeneral,
+	},
+	"templates": {
+		endpoint:       "/templates",
+		dataKey:        "result",
+		primaryKeys:    []string{"id"},
+		incrementalKey: "updated_at",
+		strategy:       config.StrategyMerge,
+		pageSize:       maxTemplatesPageSize,
+		pagination:     paginateToken,
+		filter:         filterClientSide,
+		tier:           tierGeneral,
+		extraParams:    map[string]string{"generations": "legacy,dynamic"},
 	},
 	"lists": {
 		endpoint:    "/marketing/lists",
@@ -381,6 +414,10 @@ func (s *SendGridSource) fetch(ctx context.Context, table string, tc tableConfig
 		return s.fetchMessages(ctx, table, tc, opts, results)
 	}
 
+	if tc.pagination == paginateGroupMembers {
+		return s.fetchGroupMembers(ctx, table, tc, opts, results)
+	}
+
 	params, err := serverParams(tc, aggregatedBy, opts)
 	if err != nil {
 		return err
@@ -396,9 +433,13 @@ func (s *SendGridSource) fetch(ctx context.Context, table string, tc tableConfig
 	}
 }
 
-// serverParams builds the server-side query parameters for a table based on its filter mode.
+// serverParams builds the server-side query parameters for a table based on its filter mode,
+// starting from any static extraParams configured for the table.
 func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) (map[string]string, error) {
 	params := map[string]string{}
+	for k, v := range tc.extraParams {
+		params[k] = v
+	}
 
 	switch tc.filter {
 	case filterStatsDateRange:
@@ -592,6 +633,66 @@ func (s *SendGridSource) fetchToken(ctx context.Context, table string, tc tableC
 
 	config.Debug("[SENDGRID] maxPages guard reached for %s", table)
 	return nil
+}
+
+// fetchGroupMembers fans out over the unsubscribe groups from /asm/groups and emits one row
+// {group_id, email} per suppressed address. The per-group endpoint returns a bare array of email
+// strings, so the rows are constructed here.
+func (s *SendGridSource) fetchGroupMembers(ctx context.Context, table string, tc tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	groupsBody, err := s.doRequest(table, tableConfig{endpoint: "/asm/groups", dataKey: ""}, s.clientForTier(tc.tier).R(ctx))
+	if err != nil {
+		return err
+	}
+
+	for _, group := range extractItems(groupsBody, "") {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		groupID, ok := idToString(group["id"])
+		if !ok {
+			continue
+		}
+
+		resp, err := s.clientForTier(tc.tier).R(ctx).Get(fmt.Sprintf("/asm/groups/%s/suppressions", groupID))
+		if err != nil {
+			return fmt.Errorf("failed to fetch sendgrid %s for group %s: %w", table, groupID, err)
+		}
+		if !resp.IsSuccess() {
+			return fmt.Errorf("sendgrid %s request for group %s failed with status %d: %s", table, groupID, resp.StatusCode(), resp.String())
+		}
+
+		var emails []string
+		if err := jsonUseNumber(resp.Body(), &emails); err != nil {
+			return fmt.Errorf("failed to parse sendgrid %s response for group %s: %w", table, groupID, err)
+		}
+
+		items := make([]map[string]interface{}, 0, len(emails))
+		for _, email := range emails {
+			items = append(items, map[string]interface{}{"group_id": group["id"], "email": email})
+		}
+		if err := sendBatch(table, items, opts, results); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// idToString renders a JSON id (number or string) as a string for use in a URL path.
+func idToString(v interface{}) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, t != ""
+	case json.Number:
+		return t.String(), true
+	case float64:
+		return strconv.FormatInt(int64(t), 10), true
+	default:
+		return "", false
+	}
 }
 
 // doRequest performs the GET, checks the status, and decodes the JSON body into a map.

@@ -21,6 +21,8 @@ import (
 //   - bounces: two hard bounces from sends to non-existent gmail.com mailboxes
 //   - blocks: two blocks from sends to a domain with no resolvable MX
 //   - unsubscribes: two global unsubscribes seeded via the ASM API
+//   - suppression_groups / suppression_group_members: one group + two members seeded via the ASM API
+//   - templates: one dynamic template seeded via the templates API
 //   - messages: Email Activity for the account's test sends. This data is time-limited (SendGrid
 //     retains Email Activity for a bounded window) and reflects every send, so it uses
 //     MinExpectedRowCount and a schema-only assertion rather than an exact count.
@@ -165,6 +167,67 @@ func TestSendGridPipeline(t *testing.T) {
 		// invalid_emails and spam_reports are also supported and use the same code path, but they
 		// are system/recipient-generated (no API to seed them), so they're empty in the test
 		// account and not asserted here.
+		{
+			SourceTable: "suppression_groups",
+			DestTable:   "main.sendgrid_suppression_groups",
+			KeyColumn:   "id",
+			ExpectedSchema: []schema.Column{
+				{Name: "id", DataType: schema.TypeInt64},
+				{Name: "name", DataType: schema.TypeString},
+				{Name: "description", DataType: schema.TypeString},
+				{Name: "is_default", DataType: schema.TypeBoolean},
+				{Name: "unsubscribes", DataType: schema.TypeInt64},
+			},
+			ExpectedRowCount: 1,
+			Rows: []testutil.ExpectedRow{
+				{
+					ID: "30733",
+					Fields: map[string]any{
+						"name":       "Ingestr Test Group",
+						"is_default": false,
+					},
+				},
+			},
+		},
+		{
+			SourceTable: "suppression_group_members",
+			DestTable:   "main.sendgrid_suppression_group_members",
+			KeyColumn:   "email",
+			ExpectedSchema: []schema.Column{
+				{Name: "email", DataType: schema.TypeString},
+				{Name: "group_id", DataType: schema.TypeInt64},
+			},
+			ExpectedRowCount: 2,
+			Rows: []testutil.ExpectedRow{
+				{
+					ID: "member-1@example.com",
+					Fields: map[string]any{
+						"group_id": int64(30733),
+					},
+				},
+			},
+		},
+		{
+			SourceTable: "templates",
+			DestTable:   "main.sendgrid_templates",
+			KeyColumn:   "id",
+			ExpectedSchema: []schema.Column{
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "name", DataType: schema.TypeString},
+				{Name: "generation", DataType: schema.TypeString},
+				{Name: "updated_at", DataType: schema.TypeTimestampTZ},
+			},
+			ExpectedRowCount: 1,
+			Rows: []testutil.ExpectedRow{
+				{
+					ID: "d-5e13b314a84048bebd04ab82407d9385",
+					Fields: map[string]any{
+						"name":       "Ingestr Test Template",
+						"generation": "dynamic",
+					},
+				},
+			},
+		},
 		{
 			SourceTable: "messages",
 			DestTable:   "main.sendgrid_messages",
