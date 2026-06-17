@@ -1,10 +1,13 @@
 package mssql
 
 import (
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -31,6 +34,7 @@ func TestParseStoredCTVersion(t *testing.T) {
 		message string
 	}{
 		{raw: "", wantOK: false, message: "empty"},
+		{raw: "00000000000000000000", want: 0, wantOK: true, message: "zero version"},
 		{raw: "00000000000000000123", want: 123, wantOK: true, message: "padded"},
 		{raw: "00000000000000000123:ignored", want: 123, wantOK: true, message: "padded with suffix"},
 		{raw: "not-a-version", wantOK: false, message: "invalid"},
@@ -62,6 +66,43 @@ func TestAddCTColumns(t *testing.T) {
 	assert.Equal(t, destination.CDCDeletedColumn, got.Columns[3].Name)
 	assert.Equal(t, destination.CDCSyncedAtColumn, got.Columns[4].Name)
 	assert.Len(t, original.Columns, 2, "addCTColumns must not mutate the input schema")
+}
+
+func TestSnapshotCTTableDoesNotRetryAfterEmittingRows(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+	tableSchema := &schema.TableSchema{
+		Columns: append([]schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		}, ctMetadataColumns...),
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(int64(7)))
+	mock.ExpectQuery("FROM \\[dbo\\]\\.\\[items\\]").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id",
+			destination.CDCLSNColumn,
+			destination.CDCDeletedColumn,
+			destination.CDCSyncedAtColumn,
+		}).AddRow(int64(1), "00000000000000000007", false, time.Now()))
+	mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+
+	results := make(chan source.RecordBatchResult, 2)
+	_, err = src.snapshotCTTable(t.Context(), "dbo.items", tableSchema, source.ReadOptions{PageSize: 100}, results)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not retrying")
+	assert.Len(t, results, 1)
+	res := <-results
+	require.NoError(t, res.Err)
+	require.NotNil(t, res.Batch)
+	res.Batch.Release()
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestBuildCTChangesQuery(t *testing.T) {

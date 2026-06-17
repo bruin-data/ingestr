@@ -335,43 +335,48 @@ func (s *MSSQLChangeTrackingSource) currentCTVersion(ctx context.Context, q ctQu
 }
 
 func (s *MSSQLChangeTrackingSource) snapshotCTTable(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult) (int64, error) {
-	version, err := s.snapshotCTTableWithIsolation(ctx, table, tableSchema, opts, results, sql.LevelSnapshot)
+	version, emittedRows, err := s.snapshotCTTableWithIsolation(ctx, table, tableSchema, opts, results, sql.LevelSnapshot)
 	if err == nil {
 		return version, nil
 	}
+	if emittedRows > 0 {
+		return 0, fmt.Errorf("SNAPSHOT isolation snapshot for %s failed after emitting %d rows; not retrying with table lock to avoid duplicate records: %w", table, emittedRows, err)
+	}
 	config.Debug("[MSSQL CT] SNAPSHOT isolation snapshot failed for %s: %v; retrying with table lock", table, err)
-	return s.snapshotCTTableWithIsolation(ctx, table, tableSchema, opts, results, sql.LevelSerializable)
+	version, _, err = s.snapshotCTTableWithIsolation(ctx, table, tableSchema, opts, results, sql.LevelSerializable)
+	return version, err
 }
 
-func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel) (int64, error) {
+func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel) (int64, int64, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: isolation})
 	if err != nil {
-		return 0, fmt.Errorf("failed to begin snapshot transaction: %w", err)
+		return 0, 0, fmt.Errorf("failed to begin snapshot transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	version, err := s.currentCTVersion(ctx, tx)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	columns := tableSchema.Columns
 	query := buildCTSnapshotQuery(table, sourceColumnsWithoutCT(tableSchema), version, isolation != sql.LevelSnapshot)
 	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
-		return 0, fmt.Errorf("failed to query snapshot for %s: %w", table, err)
+		return 0, 0, fmt.Errorf("failed to query snapshot for %s: %w", table, err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	if _, err := s.rowsToCTBatches(rows, columns, opts, results); err != nil {
-		return 0, err
+	emittedRows, err := s.rowsToCTBatches(rows, columns, opts, results)
+	if err != nil {
+		return 0, emittedRows, err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit snapshot transaction: %w", err)
+		return 0, emittedRows, fmt.Errorf("failed to commit snapshot transaction: %w", err)
 	}
 
-	return version, nil
+	return version, emittedRows, nil
 }
 
 func (s *MSSQLChangeTrackingSource) readCTChanges(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, emitHeartbeat bool) (int64, error) {
