@@ -1,7 +1,10 @@
 package sendgrid
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -180,6 +183,97 @@ func TestFilterByTimestamp(t *testing.T) {
 	t.Run("start only", func(t *testing.T) {
 		got := filterByTimestamp(items, "updated_at", &start, nil)
 		assert.ElementsMatch(t, []string{"2", "3", "6"}, idsOf(got))
+	})
+}
+
+// fakeActivity simulates SendGrid's Email Activity endpoint: it returns every message whose
+// timestamp falls in [from, to], but caps the response at pageSize (mimicking truncation with
+// no pagination). The fetch callback returned closes over the call counter for assertions.
+func fakeActivity(t *testing.T, msgs []map[string]interface{}, pageSize int, calls *int) func(from, to time.Time) ([]map[string]interface{}, error) {
+	t.Helper()
+	return func(from, to time.Time) ([]map[string]interface{}, error) {
+		*calls++
+		var win []map[string]interface{}
+		for _, m := range msgs {
+			ts, _ := parseItemTime(m["last_event_time"])
+			if !ts.Before(from) && !ts.After(to) {
+				win = append(win, m)
+			}
+		}
+		sort.Slice(win, func(i, j int) bool {
+			a, _ := parseItemTime(win[i]["last_event_time"])
+			b, _ := parseItemTime(win[j]["last_event_time"])
+			return a.Before(b)
+		})
+		if len(win) > pageSize {
+			win = win[:pageSize] // truncate like the real API
+		}
+		return win, nil
+	}
+}
+
+func msgsAt(times []time.Time) []map[string]interface{} {
+	out := make([]map[string]interface{}, len(times))
+	for i, ts := range times {
+		out[i] = map[string]interface{}{
+			"msg_id":          fmt.Sprintf("m%d", i),
+			"last_event_time": ts.UTC().Format(time.RFC3339),
+		}
+	}
+	return out
+}
+
+func TestBisectWindows(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+	start := base.Add(-365 * 24 * time.Hour)
+	end := base.Add(365 * 24 * time.Hour)
+
+	run := func(msgs []map[string]interface{}, pageSize int) (distinct map[string]bool, calls, truncations int) {
+		distinct = map[string]bool{}
+		fetch := fakeActivity(t, msgs, pageSize, &calls)
+		emit := func(items []map[string]interface{}) error {
+			for _, m := range items {
+				distinct[m["msg_id"].(string)] = true
+			}
+			return nil
+		}
+		onTruncate := func(_, _ time.Time) { truncations++ }
+		require.NoError(t, bisectWindows(ctx, start, end, pageSize, fetch, emit, onTruncate))
+		return
+	}
+
+	t.Run("sparse range needs one request", func(t *testing.T) {
+		var times []time.Time
+		for i := 0; i < 10; i++ {
+			times = append(times, base.Add(time.Duration(i)*time.Hour))
+		}
+		distinct, calls, truncations := run(msgsAt(times), 100)
+		assert.Len(t, distinct, 10)
+		assert.Equal(t, 1, calls)
+		assert.Equal(t, 0, truncations)
+	})
+
+	t.Run("dense uneven range captures all via splitting", func(t *testing.T) {
+		var times []time.Time
+		// 450 messages clustered into the first two hours, one per ~16s.
+		for i := 0; i < 450; i++ {
+			times = append(times, base.Add(time.Duration(i)*16*time.Second))
+		}
+		distinct, calls, truncations := run(msgsAt(times), 100)
+		assert.Len(t, distinct, 450, "every message should be captured")
+		assert.Greater(t, calls, 1, "a dense range must split into multiple requests")
+		assert.Equal(t, 0, truncations)
+	})
+
+	t.Run("more than a page in one second triggers truncation guard", func(t *testing.T) {
+		var times []time.Time
+		for i := 0; i < 150; i++ {
+			times = append(times, base) // all at the exact same instant
+		}
+		distinct, _, truncations := run(msgsAt(times), 100)
+		assert.GreaterOrEqual(t, truncations, 1, "unsplittable window must warn")
+		assert.Len(t, distinct, 100, "only one capped page is retrievable for a single instant")
 	})
 }
 

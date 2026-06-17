@@ -385,6 +385,44 @@ func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) 
 // Boundary overlaps are harmless because messages merge on msg_id.
 func (s *SendGridSource) fetchMessages(ctx context.Context, table string, tc tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	start, end := resolveMessagesRange(opts)
+
+	fetch := func(from, to time.Time) ([]map[string]interface{}, error) {
+		query := buildMessagesQuery(source.ReadOptions{IntervalStart: &from, IntervalEnd: &to})
+		req := s.clientForTier(tc.tier).R(ctx).
+			SetQueryParam("limit", strconv.Itoa(tc.pageSize)).
+			SetQueryParam("query", query)
+		body, err := s.doRequest(table, tc, req)
+		if err != nil {
+			return nil, err
+		}
+		return extractItems(body, tc.dataKey), nil
+	}
+
+	emit := func(items []map[string]interface{}) error {
+		return sendBatch(table, items, opts, results)
+	}
+
+	onTruncate := func(from, to time.Time) {
+		fmt.Fprintf(os.Stderr, "[WARNING] sendgrid messages: more than %d events fall within %s..%s and cannot be split further; some events are not retrieved.\n", tc.pageSize, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+	}
+
+	return bisectWindows(ctx, start, end, tc.pageSize, fetch, emit, onTruncate)
+}
+
+// bisectWindows fetches the [start, end] time range, emitting each window that fits under
+// pageSize. Any window that comes back full (>= pageSize) is assumed truncated and split in
+// half, recursing until each piece is under the cap or narrower than messagesMinWindow (the
+// timestamp granularity), at which point onTruncate is called for the unsplittable window.
+// The fetched items of a split (non-leaf) window are discarded and re-fetched per half, so only
+// leaf windows are emitted; this keeps coverage gap-free at the cost of re-querying parents.
+func bisectWindows(
+	ctx context.Context,
+	start, end time.Time,
+	pageSize int,
+	fetch func(from, to time.Time) ([]map[string]interface{}, error),
+	emit func(items []map[string]interface{}) error,
+	onTruncate func(from, to time.Time),
+) error {
 	windows := 0
 
 	var walk func(from, to time.Time) error
@@ -401,26 +439,17 @@ func (s *SendGridSource) fetchMessages(ctx context.Context, table string, tc tab
 			return nil
 		}
 
-		query := buildMessagesQuery(source.ReadOptions{IntervalStart: &from, IntervalEnd: &to})
-		req := s.clientForTier(tc.tier).R(ctx).
-			SetQueryParam("limit", strconv.Itoa(tc.pageSize)).
-			SetQueryParam("query", query)
-
-		body, err := s.doRequest(table, tc, req)
+		items, err := fetch(from, to)
 		if err != nil {
 			return err
 		}
-
-		items := extractItems(body, tc.dataKey)
-		if len(items) < tc.pageSize {
-			return sendBatch(table, items, opts, results)
+		if len(items) < pageSize {
+			return emit(items)
 		}
 
-		// The window hit the cap. Split it in half unless it is already too narrow to divide,
-		// in which case more than maxPageSize events share this instant and some are dropped.
 		if to.Sub(from) <= messagesMinWindow {
-			fmt.Fprintf(os.Stderr, "[WARNING] sendgrid messages: more than %d events fall within %s..%s and cannot be split further; some events are not retrieved.\n", tc.pageSize, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
-			return sendBatch(table, items, opts, results)
+			onTruncate(from, to)
+			return emit(items)
 		}
 
 		mid := from.Add(to.Sub(from) / 2)
