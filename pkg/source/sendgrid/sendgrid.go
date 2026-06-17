@@ -24,7 +24,7 @@ const (
 
 	maxMessagesPageSize    = 1000
 	maxStatsPageSize       = 500
-	maxBouncesPageSize     = 500
+	maxSuppressionPageSize = 500  // shared by the /suppression/* endpoints (bounces, blocks, ...)
 	maxListsPageSize       = 1000 // GET /marketing/lists allows up to 1000
 	maxSingleSendsPageSize = 100  // GET /marketing/singlesends caps page_size at 100
 	maxPages               = 10000
@@ -55,11 +55,11 @@ const (
 type filterMode int
 
 const (
-	filterNone            filterMode = iota
-	filterActivityQuery              // messages: Email Activity query on last_event_time
-	filterStatsDateRange             // global_stats: start_date/end_date query params (requires --interval-start)
-	filterBounceUnixRange            // bounces: start_time/end_time Unix query params
-	filterClientSide                 // single_sends: client-side filter on incrementalKey
+	filterNone                 filterMode = iota
+	filterActivityQuery                   // messages: Email Activity query on last_event_time
+	filterStatsDateRange                  // global_stats: start_date/end_date query params (requires --interval-start)
+	filterSuppressionUnixRange            // suppression tables: start_time/end_time Unix query params
+	filterClientSide                      // single_sends: client-side filter on incrementalKey
 )
 
 type rateLimitTier int
@@ -110,9 +110,53 @@ var supportedTables = map[string]tableConfig{
 		primaryKeys:    []string{"email", "created"},
 		incrementalKey: "created",
 		strategy:       config.StrategyMerge,
-		pageSize:       maxBouncesPageSize,
+		pageSize:       maxSuppressionPageSize,
 		pagination:     paginateOffset,
-		filter:         filterBounceUnixRange,
+		filter:         filterSuppressionUnixRange,
+		tier:           tierGeneral,
+	},
+	"blocks": {
+		endpoint:       "/suppression/blocks",
+		dataKey:        "",
+		primaryKeys:    []string{"email", "created"},
+		incrementalKey: "created",
+		strategy:       config.StrategyMerge,
+		pageSize:       maxSuppressionPageSize,
+		pagination:     paginateOffset,
+		filter:         filterSuppressionUnixRange,
+		tier:           tierGeneral,
+	},
+	"invalid_emails": {
+		endpoint:       "/suppression/invalid_emails",
+		dataKey:        "",
+		primaryKeys:    []string{"email", "created"},
+		incrementalKey: "created",
+		strategy:       config.StrategyMerge,
+		pageSize:       maxSuppressionPageSize,
+		pagination:     paginateOffset,
+		filter:         filterSuppressionUnixRange,
+		tier:           tierGeneral,
+	},
+	"spam_reports": {
+		endpoint:       "/suppression/spam_reports",
+		dataKey:        "",
+		primaryKeys:    []string{"email", "created"},
+		incrementalKey: "created",
+		strategy:       config.StrategyMerge,
+		pageSize:       maxSuppressionPageSize,
+		pagination:     paginateOffset,
+		filter:         filterSuppressionUnixRange,
+		tier:           tierGeneral,
+	},
+	"unsubscribes": {
+		endpoint:       "/suppression/unsubscribes",
+		dataKey:        "",
+		primaryKeys:    []string{"email", "created"},
+		incrementalKey: "created",
+		strategy:       config.StrategyMerge,
+		pageSize:       maxSuppressionPageSize,
+		pagination:     paginateOffset,
+		filter:         filterSuppressionUnixRange,
 		tier:           tierGeneral,
 	},
 	"lists": {
@@ -369,7 +413,7 @@ func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) 
 			params["end_date"] = opts.IntervalEnd.UTC().Add(-time.Nanosecond).Format("2006-01-02")
 		}
 		params["aggregated_by"] = aggregatedBy
-	case filterBounceUnixRange:
+	case filterSuppressionUnixRange:
 		if opts.IntervalStart != nil {
 			params["start_time"] = strconv.FormatInt(opts.IntervalStart.UTC().Unix(), 10)
 		}

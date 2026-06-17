@@ -19,6 +19,8 @@ import (
 //   - single_sends: one draft single send ("Ingestr Test Single Send")
 //   - global_stats: always returns one row per day in the requested range (zero metrics if no sends)
 //   - bounces: two hard bounces from sends to non-existent gmail.com mailboxes
+//   - blocks: two blocks from sends to a domain with no resolvable MX
+//   - unsubscribes: two global unsubscribes seeded via the ASM API
 //   - messages: Email Activity for the account's test sends. This data is time-limited (SendGrid
 //     retains Email Activity for a bounded window) and reflects every send, so it uses
 //     MinExpectedRowCount and a schema-only assertion rather than an exact count.
@@ -122,6 +124,47 @@ func TestSendGridPipeline(t *testing.T) {
 				},
 			},
 		},
+		{
+			SourceTable: "blocks",
+			DestTable:   "main.sendgrid_blocks",
+			KeyColumn:   "email",
+			ExpectedSchema: []schema.Column{
+				{Name: "email", DataType: schema.TypeString},
+				{Name: "reason", DataType: schema.TypeString},
+				{Name: "created", DataType: schema.TypeInt64},
+			},
+			ExpectedRowCount: 2,
+			Rows: []testutil.ExpectedRow{
+				{
+					ID: "nobody@nonexistent-bruin-test-xyz123.com",
+					Fields: map[string]any{
+						"reason":  "unable to get mx info: failed to get IPs from PTR record: lookup <nil>: unrecognized address",
+						"created": int64(1781011819),
+					},
+				},
+			},
+		},
+		{
+			SourceTable: "unsubscribes",
+			DestTable:   "main.sendgrid_unsubscribes",
+			KeyColumn:   "email",
+			ExpectedSchema: []schema.Column{
+				{Name: "email", DataType: schema.TypeString},
+				{Name: "created", DataType: schema.TypeInt64},
+			},
+			ExpectedRowCount: 2,
+			Rows: []testutil.ExpectedRow{
+				{
+					ID: "unsub-test-1@example.com",
+					Fields: map[string]any{
+						"created": int64(1781695248),
+					},
+				},
+			},
+		},
+		// invalid_emails and spam_reports are also supported and use the same code path, but they
+		// are system/recipient-generated (no API to seed them), so they're empty in the test
+		// account and not asserted here.
 		{
 			SourceTable: "messages",
 			DestTable:   "main.sendgrid_messages",

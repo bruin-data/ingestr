@@ -46,7 +46,11 @@ SendGrid source allows ingesting the following sources into separate tables:
 | ----- | -- | ------- | ------------ | ------- |
 | `messages` | `msg_id` | `last_event_time` | merge | Email Activity. Server-side query on `last_event_time`. The endpoint caps each response at 1000 records with no pagination, so ingestr recursively splits the time range until every window fits under the cap. |
 | `global_stats` | `date` | `date` | merge | Global email statistics. Server-side `start_date`/`end_date` filter. `--interval-start` is required. Aggregation defaults to daily; use a `global_stats:week` or `global_stats:month` suffix for weekly/monthly grain. |
-| `bounces` | `email`, `created` | `created` | merge | Bounced addresses. Server-side inclusive `start_time`/`end_time` Unix timestamp filter. |
+| `bounces` | `email`, `created` | `created` | merge | Bounced addresses. Server-side `start_time`/`end_time` Unix filter. |
+| `blocks` | `email`, `created` | `created` | merge | Blocked addresses (e.g. unroutable domains). Same suppression filter. |
+| `invalid_emails` | `email`, `created` | `created` | merge | Invalid addresses. Same suppression filter. |
+| `spam_reports` | `email`, `created` | `created` | merge | Spam-report suppressions. Same suppression filter. |
+| `unsubscribes` | `email`, `created` | `created` | merge | Global unsubscribe list. Same suppression filter. |
 | `lists` | `id` | - | replace | Marketing contact lists. No time filter; the table is fully replaced on each run. |
 | `single_sends` | `id` | `updated_at` | merge | Marketing single sends. Filtered client-side on `updated_at`. |
 
