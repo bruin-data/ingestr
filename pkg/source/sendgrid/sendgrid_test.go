@@ -101,15 +101,15 @@ func TestBuildMessagesQuery(t *testing.T) {
 			want:          `last_event_time>=TIMESTAMP "2024-01-01T10:00:00Z"`,
 		},
 		{
-			name:        "end only",
+			name:        "end only is exclusive",
 			intervalEnd: &end,
-			want:        `last_event_time<=TIMESTAMP "2024-02-01T12:00:00Z"`,
+			want:        `last_event_time<TIMESTAMP "2024-02-01T12:00:00Z"`,
 		},
 		{
-			name:          "both bounds use BETWEEN",
+			name:          "both bounds are half-open [start, end)",
 			intervalStart: &start,
 			intervalEnd:   &end,
-			want:          `last_event_time BETWEEN TIMESTAMP "2024-01-01T10:00:00Z" AND TIMESTAMP "2024-02-01T12:00:00Z"`,
+			want:          `last_event_time>=TIMESTAMP "2024-01-01T10:00:00Z" AND last_event_time<TIMESTAMP "2024-02-01T12:00:00Z"`,
 		},
 	}
 
@@ -184,11 +184,19 @@ func TestFilterByTimestamp(t *testing.T) {
 		got := filterByTimestamp(items, "updated_at", &start, nil)
 		assert.ElementsMatch(t, []string{"2", "3", "6"}, idsOf(got))
 	})
+
+	t.Run("end is exclusive at the boundary", func(t *testing.T) {
+		jan := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+		jun := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC) // ids 2 and 6 sit exactly here
+		got := filterByTimestamp(items, "updated_at", &jan, &jun)
+		assert.ElementsMatch(t, []string{"1"}, idsOf(got), "items exactly at end must be excluded")
+	})
 }
 
 // fakeActivity simulates SendGrid's Email Activity endpoint: it returns every message whose
-// timestamp falls in [from, to], but caps the response at pageSize (mimicking truncation with
-// no pagination). The fetch callback returned closes over the call counter for assertions.
+// timestamp falls in the half-open window [from, to) (matching buildMessagesQuery's >= start,
+// < end), but caps the response at pageSize (mimicking truncation with no pagination). The
+// fetch callback returned closes over the call counter for assertions.
 func fakeActivity(t *testing.T, msgs []map[string]interface{}, pageSize int, calls *int) func(from, to time.Time) ([]map[string]interface{}, error) {
 	t.Helper()
 	return func(from, to time.Time) ([]map[string]interface{}, error) {
@@ -196,7 +204,7 @@ func fakeActivity(t *testing.T, msgs []map[string]interface{}, pageSize int, cal
 		var win []map[string]interface{}
 		for _, m := range msgs {
 			ts, _ := parseItemTime(m["last_event_time"])
-			if !ts.Before(from) && !ts.After(to) {
+			if !ts.Before(from) && ts.Before(to) {
 				win = append(win, m)
 			}
 		}

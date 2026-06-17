@@ -364,7 +364,9 @@ func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) 
 		params["start_date"] = opts.IntervalStart.UTC().Format("2006-01-02")
 		params["end_date"] = time.Now().UTC().Format("2006-01-02")
 		if opts.IntervalEnd != nil {
-			params["end_date"] = opts.IntervalEnd.UTC().Format("2006-01-02")
+			// end is exclusive: /stats end_date is an inclusive day, so use the last day
+			// strictly before the end boundary.
+			params["end_date"] = opts.IntervalEnd.UTC().Add(-time.Nanosecond).Format("2006-01-02")
 		}
 		params["aggregated_by"] = aggregatedBy
 	case filterBounceUnixRange:
@@ -372,7 +374,8 @@ func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) 
 			params["start_time"] = strconv.FormatInt(opts.IntervalStart.UTC().Unix(), 10)
 		}
 		if opts.IntervalEnd != nil {
-			params["end_time"] = strconv.FormatInt(opts.IntervalEnd.UTC().Unix(), 10)
+			// end is exclusive: SendGrid's end_time is an inclusive Unix second, so subtract one.
+			params["end_time"] = strconv.FormatInt(opts.IntervalEnd.UTC().Unix()-1, 10)
 		}
 	}
 
@@ -382,7 +385,7 @@ func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) 
 // fetchMessages reads the Email Activity endpoint, which caps each query at maxMessagesPageSize
 // and supports no pagination. To retrieve more than one page, it recursively bisects the time
 // range: a window that comes back full is split in half until each piece fits under the cap.
-// Boundary overlaps are harmless because messages merge on msg_id.
+// The query window is half-open [from, to), so splits are disjoint and no message is fetched twice.
 func (s *SendGridSource) fetchMessages(ctx context.Context, table string, tc tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	start, end := resolveMessagesRange(opts)
 
@@ -581,14 +584,17 @@ func sendFiltered(table string, tc tableConfig, items []map[string]interface{}, 
 	return sendBatch(table, items, opts, results)
 }
 
+// buildMessagesQuery builds the Email Activity filter with a half-open [start, end) window:
+// the start is inclusive and the end is exclusive. This also makes bisection splits disjoint,
+// so a message on a split boundary is fetched exactly once.
 func buildMessagesQuery(opts source.ReadOptions) string {
 	switch {
 	case opts.IntervalStart != nil && opts.IntervalEnd != nil:
-		return fmt.Sprintf(`last_event_time BETWEEN TIMESTAMP "%s" AND TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalStart), formatMessageTime(*opts.IntervalEnd))
+		return fmt.Sprintf(`last_event_time>=TIMESTAMP "%s" AND last_event_time<TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalStart), formatMessageTime(*opts.IntervalEnd))
 	case opts.IntervalStart != nil:
 		return fmt.Sprintf(`last_event_time>=TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalStart))
 	case opts.IntervalEnd != nil:
-		return fmt.Sprintf(`last_event_time<=TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalEnd))
+		return fmt.Sprintf(`last_event_time<TIMESTAMP "%s"`, formatMessageTime(*opts.IntervalEnd))
 	default:
 		return fmt.Sprintf(`last_event_time>=TIMESTAMP "%s"`, defaultActivityStart)
 	}
@@ -643,7 +649,8 @@ func filterByTimestamp(items []map[string]interface{}, field string, start, end 
 		if start != nil && itemTime.Before(start.UTC()) {
 			continue
 		}
-		if end != nil && itemTime.After(end.UTC()) {
+		// end is exclusive: drop items at or after the end boundary.
+		if end != nil && !itemTime.Before(end.UTC()) {
 			continue
 		}
 		filtered = append(filtered, item)

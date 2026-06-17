@@ -39,6 +39,7 @@ func TestSendGridPipeline(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, fmt.Sprintf("sendgrid_%d.duckdb", time.Now().UnixNano()))
 	destURI := fmt.Sprintf("duckdb:///%s", dbPath)
 
+	// Intervals are half-open [start, end): the end day is excluded, so Jun 1..Jun 9 yields Jun 1..Jun 8.
 	statsStart := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	statsEnd := time.Date(2026, 6, 9, 0, 0, 0, 0, time.UTC)
 
@@ -98,7 +99,7 @@ func TestSendGridPipeline(t *testing.T) {
 			ExpectedSchema: []schema.Column{
 				{Name: "date", DataType: schema.TypeDate},
 			},
-			ExpectedRowCount: 9,
+			ExpectedRowCount: 8,
 		},
 		{
 			SourceTable: "bounces",
