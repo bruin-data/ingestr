@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/multitable"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
@@ -21,6 +23,120 @@ func replaceShouldDedup(dest destination.Destination, primaryKeys []string) bool
 	return len(primaryKeys) > 0 &&
 		dest.SupportsMergeStrategy() &&
 		dest.GetScheme() != "clickhouse"
+}
+
+func sourcePrimaryKeysSafeForReplaceFastPath(job *IngestionJob) bool {
+	return sourcePrimaryKeysGuaranteedUnique(job) &&
+		!primaryKeyValuesMayChange(job)
+}
+
+func sourcePrimaryKeysGuaranteedUnique(job *IngestionJob) bool {
+	provider, ok := job.Table.(source.PrimaryKeyUniquenessProvider)
+	if !ok || !provider.PrimaryKeysUnique() || job.SourceSchema == nil {
+		return false
+	}
+	if !slices.Equal(job.Table.PrimaryKeys(), job.SourceSchema.PrimaryKeys) {
+		return false
+	}
+
+	return slices.Equal(mappedSourcePrimaryKeys(job), job.Config.PrimaryKeys) &&
+		!nonPrimaryKeyMapsToDestinationPrimaryKey(job)
+}
+
+func mappedSourcePrimaryKeys(job *IngestionJob) []string {
+	primaryKeys := append([]string(nil), job.SourceSchema.PrimaryKeys...)
+	if job.ColumnRenamer == nil || !job.ColumnRenamer.HasRenames() {
+		return primaryKeys
+	}
+
+	mapping := job.ColumnRenamer.Mapping()
+	for i, pk := range primaryKeys {
+		if mapped, ok := mapping[pk]; ok {
+			primaryKeys[i] = mapped
+		}
+	}
+	return primaryKeys
+}
+
+func nonPrimaryKeyMapsToDestinationPrimaryKey(job *IngestionJob) bool {
+	sourcePrimaryKeys := make(map[string]bool, len(job.SourceSchema.PrimaryKeys))
+	for _, pk := range job.SourceSchema.PrimaryKeys {
+		sourcePrimaryKeys[pk] = true
+	}
+	destinationPrimaryKeys := make(map[string]bool, len(job.Config.PrimaryKeys))
+	for _, pk := range job.Config.PrimaryKeys {
+		destinationPrimaryKeys[pk] = true
+	}
+
+	var mapping map[string]string
+	if job.ColumnRenamer != nil && job.ColumnRenamer.HasRenames() {
+		mapping = job.ColumnRenamer.Mapping()
+	}
+
+	for _, col := range job.SourceSchema.Columns {
+		if sourcePrimaryKeys[col.Name] {
+			continue
+		}
+		name := col.Name
+		if mapped, ok := mapping[name]; ok {
+			name = mapped
+		}
+		if destinationPrimaryKeys[name] {
+			return true
+		}
+	}
+	return false
+}
+
+func primaryKeyValuesMayChange(job *IngestionJob) bool {
+	if len(job.Config.PrimaryKeys) == 0 {
+		return false
+	}
+	if job.TypeCaster != nil {
+		return true
+	}
+	if job.ColumnMasker != nil && intersects(job.Config.PrimaryKeys, job.ColumnMasker.MaskedColumns()) {
+		return true
+	}
+
+	mode, err := schemaevolution.ParseContractMode(job.Config.SchemaContract)
+	if err == nil && mode == schemaevolution.ContractDiscardValue && schemaChangesTouchPrimaryKeys(job.SchemaComparison, job.Config.PrimaryKeys) {
+		return true
+	}
+	return false
+}
+
+func schemaChangesTouchPrimaryKeys(comparison *schemaevolution.SchemaComparison, primaryKeys []string) bool {
+	if comparison == nil || !comparison.HasChanges {
+		return false
+	}
+
+	pkSet := make(map[string]bool, len(primaryKeys))
+	for _, pk := range primaryKeys {
+		pkSet[pk] = true
+	}
+	for _, change := range comparison.Changes {
+		if pkSet[change.ColumnName] {
+			return true
+		}
+	}
+	return false
+}
+
+func intersects(left, right []string) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	set := make(map[string]bool, len(left))
+	for _, v := range left {
+		set[v] = true
+	}
+	for _, v := range right {
+		if set[v] {
+			return true
+		}
+	}
+	return false
 }
 
 // deduplicateStaging collapses duplicate primary keys from rawTable into a
@@ -98,7 +214,9 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	}
 
 	// Deduplicated replace: Load a PK-free staging table so duplicate keys can land.
-	dedup := useStaging && replaceShouldDedup(job.Destination, job.Config.PrimaryKeys)
+	dedup := useStaging &&
+		!sourcePrimaryKeysSafeForReplaceFastPath(job) &&
+		replaceShouldDedup(job.Destination, job.Config.PrimaryKeys)
 	stagingPrimaryKeys := job.Config.PrimaryKeys
 	if dedup {
 		stagingPrimaryKeys = nil

@@ -13,14 +13,15 @@ import (
 // DynamicSourceTable is a SourceTable implementation for sources
 // where metadata is queried from the database at runtime or inferred from data.
 type DynamicSourceTable struct {
-	TableName           string
-	TablePrimaryKeys    []string
-	TableIncrementalKey string
-	TableStrategy       config.IncrementalStrategy
-	TablePartitionBy    string
-	KnownSchema         bool
-	SchemaFn            func(ctx context.Context) (*schema.TableSchema, error)
-	ReadFn              func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error)
+	TableName              string
+	TablePrimaryKeys       []string
+	TablePrimaryKeysUnique bool
+	TableIncrementalKey    string
+	TableStrategy          config.IncrementalStrategy
+	TablePartitionBy       string
+	KnownSchema            bool
+	SchemaFn               func(ctx context.Context) (*schema.TableSchema, error)
+	ReadFn                 func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error)
 }
 
 func (t *DynamicSourceTable) Name() string {
@@ -29,6 +30,10 @@ func (t *DynamicSourceTable) Name() string {
 
 func (t *DynamicSourceTable) PrimaryKeys() []string {
 	return t.TablePrimaryKeys
+}
+
+func (t *DynamicSourceTable) PrimaryKeysUnique() bool {
+	return t.TablePrimaryKeysUnique
 }
 
 func (t *DynamicSourceTable) IncrementalKey() string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 	"time"
 
@@ -92,6 +93,7 @@ func (s *PostgresSource) GetTable(ctx context.Context, req source.TableRequest) 
 	if len(pks) == 0 {
 		pks = tableSchema.PrimaryKeys
 	}
+	pksUnique := len(req.PrimaryKeys) == 0 && len(tableSchema.PrimaryKeys) > 0
 
 	// Use user's strategy or default to replace
 	strategy := req.Strategy
@@ -100,11 +102,12 @@ func (s *PostgresSource) GetTable(ctx context.Context, req source.TableRequest) 
 	}
 
 	return &source.DynamicSourceTable{
-		TableName:           req.Name,
-		TablePrimaryKeys:    pks,
-		TableIncrementalKey: req.IncrementalKey,
-		TableStrategy:       strategy,
-		KnownSchema:         true,
+		TableName:              req.Name,
+		TablePrimaryKeys:       pks,
+		TablePrimaryKeysUnique: pksUnique,
+		TableIncrementalKey:    req.IncrementalKey,
+		TableStrategy:          strategy,
+		KnownSchema:            true,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			return tableSchema, nil
 		},
@@ -118,17 +121,32 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 	schemaName, tableName := parseTableName(table)
 
 	query := `
+		WITH primary_keys AS (
+			SELECT kcu.column_name, kcu.ordinal_position
+			FROM information_schema.table_constraints tc
+			JOIN information_schema.key_column_usage kcu
+				ON tc.constraint_catalog = kcu.constraint_catalog
+				AND tc.constraint_schema = kcu.constraint_schema
+				AND tc.constraint_name = kcu.constraint_name
+				AND tc.table_schema = kcu.table_schema
+				AND tc.table_name = kcu.table_name
+			WHERE tc.constraint_type = 'PRIMARY KEY'
+				AND tc.table_schema = $1
+				AND tc.table_name = $2
+		)
 		SELECT
-			column_name,
-			data_type,
-			is_nullable,
-			numeric_precision,
-			numeric_scale,
-			character_maximum_length,
-			udt_name
-		FROM information_schema.columns
-		WHERE table_schema = $1 AND table_name = $2
-		ORDER BY ordinal_position
+			c.column_name,
+			c.data_type,
+			c.is_nullable,
+			c.numeric_precision,
+			c.numeric_scale,
+			c.character_maximum_length,
+			c.udt_name,
+			pk.ordinal_position
+		FROM information_schema.columns c
+		LEFT JOIN primary_keys pk ON pk.column_name = c.column_name
+		WHERE c.table_schema = $1 AND c.table_name = $2
+		ORDER BY c.ordinal_position
 	`
 
 	rows, err := s.pool.Query(ctx, query, schemaName, tableName)
@@ -138,11 +156,16 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 	defer rows.Close()
 
 	var columns []schema.Column
+	var pkColumns []struct {
+		name    string
+		ordinal int
+	}
 	for rows.Next() {
 		var columnName, dataType, isNullable, udtName string
 		var numericPrecision, numericScale, charMaxLen *int
+		var pkOrdinal *int
 
-		if err := rows.Scan(&columnName, &dataType, &isNullable, &numericPrecision, &numericScale, &charMaxLen, &udtName); err != nil {
+		if err := rows.Scan(&columnName, &dataType, &isNullable, &numericPrecision, &numericScale, &charMaxLen, &udtName, &pkOrdinal); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -161,6 +184,13 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 			DataType:  dt,
 			Nullable:  isNullable == "YES",
 			ArrayType: arrayType,
+		}
+		if pkOrdinal != nil {
+			col.IsPrimaryKey = true
+			pkColumns = append(pkColumns, struct {
+				name    string
+				ordinal int
+			}{name: columnName, ordinal: *pkOrdinal})
 		}
 
 		if numericPrecision != nil {
@@ -190,33 +220,12 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 		return nil, fmt.Errorf("table %s not found or has no columns", table)
 	}
 
-	pkQuery := `
-		SELECT a.attname
-		FROM pg_index i
-		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-		WHERE i.indrelid = format('%I.%I', $1, $2)::regclass
-		AND i.indisprimary
-	`
-
-	var primaryKeys []string
-	pkRows, err := s.pool.Query(ctx, pkQuery, schemaName, tableName)
-	if err == nil {
-		defer pkRows.Close()
-		for pkRows.Next() {
-			var pkName string
-			if err := pkRows.Scan(&pkName); err == nil {
-				primaryKeys = append(primaryKeys, pkName)
-			}
-		}
-	}
-
-	for i := range columns {
-		for _, pk := range primaryKeys {
-			if columns[i].Name == pk {
-				columns[i].IsPrimaryKey = true
-				break
-			}
-		}
+	sort.Slice(pkColumns, func(i, j int) bool {
+		return pkColumns[i].ordinal < pkColumns[j].ordinal
+	})
+	primaryKeys := make([]string, len(pkColumns))
+	for i, pk := range pkColumns {
+		primaryKeys[i] = pk.name
 	}
 
 	return &schema.TableSchema{
