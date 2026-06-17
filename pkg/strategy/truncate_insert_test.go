@@ -11,6 +11,7 @@ import (
 
 func TestTruncateInsertStrategy_Execute_ReadFailsBeforeTruncateWithPrimaryKeys(t *testing.T) {
 	job, src, dest := minimalJob()
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
 	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
 	src.primaryKeysUnique = true
 	src.readErr = errors.New("read failed")

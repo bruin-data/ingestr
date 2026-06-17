@@ -213,7 +213,11 @@ func (d *fakeDestination) DropTable(ctx context.Context, table string) error {
 	return err
 }
 
-func (d *fakeDestination) TruncateTable(ctx context.Context, table string) error {
+type truncateCapableDestination struct {
+	*fakeDestination
+}
+
+func (d *truncateCapableDestination) TruncateTable(ctx context.Context, table string) error {
 	d.mu.Lock()
 	d.calls = append(d.calls, "TruncateTable")
 	d.truncateCalls = append(d.truncateCalls, table)
