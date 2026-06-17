@@ -380,7 +380,7 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 }
 
 func (s *MSSQLChangeTrackingSource) readCTChanges(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, emitHeartbeat bool) (int64, error) {
-	readThroughVersion, err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelSnapshot, emitHeartbeat)
+	readThroughVersion, err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelReadCommitted, emitHeartbeat)
 	if err == nil {
 		return readThroughVersion, nil
 	}
@@ -388,7 +388,7 @@ func (s *MSSQLChangeTrackingSource) readCTChanges(ctx context.Context, table str
 	if errors.As(err, &expired) {
 		return 0, err
 	}
-	return 0, fmt.Errorf("failed to read SQL Server Change Tracking changes using SNAPSHOT isolation: %w", err)
+	return 0, fmt.Errorf("failed to read SQL Server Change Tracking changes using READ COMMITTED isolation: %w", err)
 }
 
 func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel, emitHeartbeat bool) (int64, error) {
