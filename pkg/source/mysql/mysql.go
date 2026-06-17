@@ -160,7 +160,11 @@ func (s *MySQLSource) GetTable(ctx context.Context, req source.TableRequest) (so
 }
 
 func (s *MySQLSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := s.parseTableName(table)
+	return getMySQLSchema(ctx, s.db, s.database, table)
+}
+
+func getMySQLSchema(ctx context.Context, db *sql.DB, database string, table string) (*schema.TableSchema, error) {
+	schemaName, tableName := parseMySQLTableName(database, table)
 
 	query := `
 		SELECT
@@ -175,7 +179,7 @@ func (s *MySQLSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 		ORDER BY ORDINAL_POSITION
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, schemaName, tableName)
+	rows, err := db.QueryContext(ctx, query, schemaName, tableName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query schema: %w", err)
 	}
@@ -237,7 +241,7 @@ func (s *MySQLSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 	`
 
 	var primaryKeys []string
-	pkRows, err := s.db.QueryContext(ctx, pkQuery, schemaName, tableName)
+	pkRows, err := db.QueryContext(ctx, pkQuery, schemaName, tableName)
 	if err == nil {
 		defer func() { _ = pkRows.Close() }()
 		for pkRows.Next() {
@@ -385,13 +389,13 @@ func (s *MySQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 	return results, nil
 }
 
-func (s *MySQLSource) parseTableName(table string) (string, string) {
+func parseMySQLTableName(database string, table string) (string, string) {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
 		return parts[0], parts[1]
 	}
 	// MySQL uses the database name as the schema
-	return s.database, table
+	return database, table
 }
 
 func filterColumns(columns []schema.Column, exclude []string) []schema.Column {
