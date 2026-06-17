@@ -183,6 +183,28 @@ func TestFilterByTimestamp(t *testing.T) {
 	})
 }
 
+func TestResolveMessagesRange(t *testing.T) {
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("both bounds preserved", func(t *testing.T) {
+		gotStart, gotEnd := resolveMessagesRange(source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+		assert.True(t, gotStart.Equal(start))
+		assert.True(t, gotEnd.Equal(end))
+	})
+
+	t.Run("missing start defaults to epoch", func(t *testing.T) {
+		gotStart, _ := resolveMessagesRange(source.ReadOptions{IntervalEnd: &end})
+		assert.True(t, gotStart.Equal(time.Unix(0, 0).UTC()))
+	})
+
+	t.Run("missing end defaults to now", func(t *testing.T) {
+		before := time.Now().UTC()
+		_, gotEnd := resolveMessagesRange(source.ReadOptions{IntervalStart: &start})
+		assert.False(t, gotEnd.Before(before))
+	})
+}
+
 func TestParseItemTime(t *testing.T) {
 	t.Run("rfc3339 string", func(t *testing.T) {
 		got, ok := parseItemTime("2024-06-01T00:00:00Z")

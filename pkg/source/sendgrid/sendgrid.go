@@ -32,6 +32,10 @@ const (
 	defaultActivityStart   = "1970-01-01T00:00:00Z"
 	defaultStatsAggregated = "day"
 
+	// messagesMinWindow is the smallest Email Activity window the bisection will split to before
+	// giving up; last_event_time has second granularity, so a 1s window cannot be divided further.
+	messagesMinWindow = time.Second
+
 	// SendGrid Email Activity API is documented at 6 req/min: (6 * 0.8) / 60 = 0.08 req/sec.
 	emailActivityRateLimit = 0.08
 	// SendGrid Web API v3 documents endpoint-specific rate-limit headers but no global numeric limit.
@@ -43,7 +47,7 @@ const (
 type paginationStyle int
 
 const (
-	paginateSingle paginationStyle = iota // one request, no pagination (messages)
+	paginateBisect paginationStyle = iota // recursive date-range bisection for Email Activity (messages)
 	paginateOffset                        // limit + offset, top-level array response (global_stats, bounces)
 	paginateToken                         // page_size + page_token via _metadata.next (lists, single_sends)
 )
@@ -85,7 +89,7 @@ var supportedTables = map[string]tableConfig{
 		incrementalKey: "last_event_time",
 		strategy:       config.StrategyMerge,
 		pageSize:       maxMessagesPageSize,
-		pagination:     paginateSingle,
+		pagination:     paginateBisect,
 		filter:         filterActivityQuery,
 		tier:           tierEmailActivity,
 	},
@@ -329,14 +333,16 @@ func (s *SendGridSource) clientForTier(tier rateLimitTier) *ingestrhttp.Client {
 }
 
 func (s *SendGridSource) fetch(ctx context.Context, table string, tc tableConfig, aggregatedBy string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if tc.pagination == paginateBisect {
+		return s.fetchMessages(ctx, table, tc, opts, results)
+	}
+
 	params, err := serverParams(tc, aggregatedBy, opts)
 	if err != nil {
 		return err
 	}
 
 	switch tc.pagination {
-	case paginateSingle:
-		return s.fetchSingle(ctx, table, tc, params, opts, results)
 	case paginateOffset:
 		return s.fetchOffset(ctx, table, tc, params, opts, results)
 	case paginateToken:
@@ -351,8 +357,6 @@ func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) 
 	params := map[string]string{}
 
 	switch tc.filter {
-	case filterActivityQuery:
-		params["query"] = buildMessagesQuery(opts)
 	case filterStatsDateRange:
 		if opts.IntervalStart == nil {
 			return nil, fmt.Errorf("sendgrid global_stats requires --interval-start because /stats requires start_date")
@@ -375,28 +379,72 @@ func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) 
 	return params, nil
 }
 
-// fetchSingle issues one request (no pagination) and sends the resulting items.
-func (s *SendGridSource) fetchSingle(ctx context.Context, table string, tc tableConfig, params map[string]string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
+// fetchMessages reads the Email Activity endpoint, which caps each query at maxMessagesPageSize
+// and supports no pagination. To retrieve more than one page, it recursively bisects the time
+// range: a window that comes back full is split in half until each piece fits under the cap.
+// Boundary overlaps are harmless because messages merge on msg_id.
+func (s *SendGridSource) fetchMessages(ctx context.Context, table string, tc tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	start, end := resolveMessagesRange(opts)
+	windows := 0
+
+	var walk func(from, to time.Time) error
+	walk = func(from, to time.Time) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		windows++
+		if windows > maxPages {
+			config.Debug("[SENDGRID] maxPages guard reached for messages")
+			return nil
+		}
+
+		query := buildMessagesQuery(source.ReadOptions{IntervalStart: &from, IntervalEnd: &to})
+		req := s.clientForTier(tc.tier).R(ctx).
+			SetQueryParam("limit", strconv.Itoa(tc.pageSize)).
+			SetQueryParam("query", query)
+
+		body, err := s.doRequest(table, tc, req)
+		if err != nil {
+			return err
+		}
+
+		items := extractItems(body, tc.dataKey)
+		if len(items) < tc.pageSize {
+			return sendBatch(table, items, opts, results)
+		}
+
+		// The window hit the cap. Split it in half unless it is already too narrow to divide,
+		// in which case more than maxPageSize events share this instant and some are dropped.
+		if to.Sub(from) <= messagesMinWindow {
+			fmt.Fprintf(os.Stderr, "[WARNING] sendgrid messages: more than %d events fall within %s..%s and cannot be split further; some events are not retrieved.\n", tc.pageSize, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+			return sendBatch(table, items, opts, results)
+		}
+
+		mid := from.Add(to.Sub(from) / 2)
+		if err := walk(from, mid); err != nil {
+			return err
+		}
+		return walk(mid, to)
 	}
 
-	req := s.clientForTier(tc.tier).R(ctx).
-		SetQueryParam("limit", strconv.Itoa(tc.pageSize)).
-		SetQueryParams(params)
+	return walk(start, end)
+}
 
-	body, err := s.doRequest(table, tc, req)
-	if err != nil {
-		return err
+// resolveMessagesRange resolves a concrete [start, end] window to bisect, defaulting the start
+// to the Unix epoch and the end to now when the interval bounds are not provided.
+func resolveMessagesRange(opts source.ReadOptions) (time.Time, time.Time) {
+	start := time.Unix(0, 0).UTC()
+	if opts.IntervalStart != nil {
+		start = opts.IntervalStart.UTC()
 	}
-
-	items := extractItems(body, tc.dataKey)
-	if len(items) >= tc.pageSize {
-		fmt.Fprintf(os.Stderr, "[WARNING] sendgrid %s returned a full page of %d records; this endpoint does not support pagination, so any records beyond the page limit are not retrieved. Narrow --interval-start/--interval-end to capture all data.\n", table, tc.pageSize)
+	end := time.Now().UTC()
+	if opts.IntervalEnd != nil {
+		end = opts.IntervalEnd.UTC()
 	}
-	return sendFiltered(table, tc, items, opts, results)
+	return start, end
 }
 
 // fetchOffset paginates with limit+offset over a top-level array response.

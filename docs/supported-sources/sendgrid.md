@@ -44,7 +44,7 @@ SendGrid source allows ingesting the following sources into separate tables:
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 | ----- | -- | ------- | ------------ | ------- |
-| `messages` | `msg_id` | `last_event_time` | merge | Email Activity. Server-side query on `last_event_time`. The endpoint has no pagination, so a single page of up to 1000 messages is returned. |
+| `messages` | `msg_id` | `last_event_time` | merge | Email Activity. Server-side query on `last_event_time`. The endpoint caps each response at 1000 records with no pagination, so ingestr recursively splits the time range until every window fits under the cap. |
 | `global_stats` | `date` | `date` | merge | Global email statistics. Server-side `start_date`/`end_date` filter. `--interval-start` is required. Aggregation defaults to daily; use a `global_stats:week` or `global_stats:month` suffix for weekly/monthly grain. |
 | `bounces` | `email`, `created` | `created` | merge | Bounced addresses. Server-side inclusive `start_time`/`end_time` Unix timestamp filter. |
 | `lists` | `id` | - | replace | Marketing contact lists. No time filter; the table is fully replaced on each run. |
@@ -80,6 +80,7 @@ ingestr ingest \
 ## Notes
 
 - The `messages` table requires the SendGrid Email Activity feature and an API key with Email Activity access.
+- The Email Activity endpoint returns at most 1000 records per query and offers no pagination. ingestr works around this by recursively bisecting the `last_event_time` range — any window that comes back full is split in half until each piece is under the cap. Because the 6 req/min limit applies, very dense ranges can take a while; and if more than 1000 events share the same one-second instant, the surplus cannot be separated and a warning is emitted.
 - SendGrid documents a hard limit of 6 requests per minute for the Email Activity API; ingestr applies a dedicated rate limiter for `messages` and a conservative limiter for the other v3 endpoints, relying on retries for 429 responses.
 - The `contacts` endpoint is intentionally not included because SendGrid's current `GET /v3/marketing/contacts` endpoint returns only up to 50 recent contacts and documents contact pagination as deprecated.
 - Nested objects and arrays are preserved as JSON strings in the destination columns.
