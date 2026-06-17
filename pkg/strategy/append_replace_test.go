@@ -6,8 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
 func singleBatchRecords(t *testing.T, rows ...int64) <-chan source.RecordBatchResult {
@@ -33,6 +35,30 @@ func TestIngestionJob_GetRecords_UsesBuffered(t *testing.T) {
 	defer src.mu.Unlock()
 	if src.readCalled {
 		t.Fatalf("expected Source.Read not to be called when BufferedRecords is set")
+	}
+}
+
+func TestIngestionJob_GetRecords_AppliesTransformation(t *testing.T) {
+	job, _, _ := minimalJob()
+	job.BufferedRecords = mustClosedRecords(source.RecordBatchResult{
+		Batch: intStringRecordBatch(t, "id", []int64{1}, "name", []string{"  alice  "}),
+	})
+	job.WhitespaceTrimmer = transformer.NewWhitespaceTrimmer()
+
+	records, err := job.GetRecords(context.Background(), source.ReadOptions{})
+	if err != nil {
+		t.Fatalf("GetRecords returned error: %v", err)
+	}
+
+	result := <-records
+	if result.Err != nil {
+		t.Fatalf("transformed record returned error: %v", result.Err)
+	}
+	defer result.Batch.Release()
+
+	names := result.Batch.Column(1).(*array.String)
+	if got := names.Value(0); got != "alice" {
+		t.Fatalf("trimmed name = %q, want alice", got)
 	}
 }
 

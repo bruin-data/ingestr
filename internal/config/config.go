@@ -66,6 +66,7 @@ type IngestConfig struct {
 	Columns           string // Raw column overrides string (parsed by pipeline)
 	NoInference       bool   // Skip schema inference for unknown-schema sources and use Columns as the schema
 	Mask              []string
+	TrimWhitespace    bool
 
 	PipelinesDir   string
 	StagingBucket  string

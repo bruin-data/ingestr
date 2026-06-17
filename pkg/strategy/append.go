@@ -68,12 +68,6 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
-	// Apply batch transformation for discard_row/discard_value modes
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
-	}
-
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
 	}
@@ -150,7 +144,7 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 		parallelism = 4
 	}
 
-	records, err := job.Source.ReadAll(ctx, source.MultiTableReadOptions{
+	records, err := job.ReadAll(ctx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
 			Parallelism: parallelism,
 			PageSize:    job.Config.PageSize,

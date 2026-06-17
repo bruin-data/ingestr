@@ -395,6 +395,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
+	var whitespaceTrimmer *transformer.WhitespaceTrimmer
+	if resolvedConfig.TrimWhitespace {
+		whitespaceTrimmer = transformer.NewWhitespaceTrimmer()
+	}
+
 	job := &strategy.IngestionJob{
 		Config:              &resolvedConfig,
 		Table:               table,
@@ -408,6 +413,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		ColumnRenamer:       p.columnRenamer,
 		IngestrColumnFiller: p.ingestrColumnFiller,
 		ColumnMasker:        columnMasker,
+		WhitespaceTrimmer:   whitespaceTrimmer,
 		EvolutionPlan:       evolutionPlan,
 	}
 
@@ -886,15 +892,21 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		}
 	}
 
+	var whitespaceTrimmer *transformer.WhitespaceTrimmer
+	if resolvedConfig.TrimWhitespace {
+		whitespaceTrimmer = transformer.NewWhitespaceTrimmer()
+	}
+
 	job := &strategy.MultiTableIngestionJob{
-		Config:         &resolvedConfig,
-		Source:         src,
-		Destination:    p.dest,
-		Tables:         tables,
-		TableDestNames: tableDestNames,
-		Tracker:        tracker,
-		CDCResumeLSNs:  cdcResumeLSNs,
-		EvolutionPlans: evolutionPlans,
+		Config:            &resolvedConfig,
+		Source:            src,
+		Destination:       p.dest,
+		Tables:            tables,
+		TableDestNames:    tableDestNames,
+		Tracker:           tracker,
+		CDCResumeLSNs:     cdcResumeLSNs,
+		EvolutionPlans:    evolutionPlans,
+		WhitespaceTrimmer: whitespaceTrimmer,
 	}
 
 	if err := mtStrat.ExecuteMultiTable(ctx, job); err != nil {
