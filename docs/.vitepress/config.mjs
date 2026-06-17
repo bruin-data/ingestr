@@ -146,6 +146,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
 
           {
             text: "Platforms",
+            link: "/supported-sources/platforms.md",
             collapsed: false,
             items: [
               { text: "Adjust", link: "/supported-sources/adjust.md" },
@@ -233,15 +234,6 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Zoom", link: "/supported-sources/zoom.md" },
             ],
           },
-        ],
-      },
-      {
-        text: "Soccer API Research",
-        items: [
-          { text: "API-Football", link: "/soccer-sources/api-football.md" },
-          { text: "BallDontLie FIFA", link: "/soccer-sources/balldontlie-fifa.md" },
-          { text: "football-data.org", link: "/soccer-sources/football-data-org.md" },
-          { text: "Handoff", link: "/soccer-sources/handoff.md" },
         ],
       },
     ],
