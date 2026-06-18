@@ -78,6 +78,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		ExcludeColumns: job.Config.SQLExcludeColumns,
 		Parallelism:    parallelism,
 		Schema:         job.SourceSchema,
+		FullRefresh:    job.Config.FullRefresh,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)

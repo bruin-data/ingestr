@@ -168,6 +168,7 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Strategy != "" {
 		cfg.IncrementalStrategy = config.IncrementalStrategy(req.Strategy)
+		cfg.IncrementalStrategyExplicit = true
 	}
 	cfg.PrimaryKeys = req.PrimaryKeys
 	cfg.IncrementalKey = req.IncrementalKey

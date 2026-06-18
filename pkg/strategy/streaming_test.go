@@ -121,10 +121,9 @@ func TestStreaming_CountTriggerFlushes(t *testing.T) {
 	require.Eventually(t, func() bool { return writeCallCount(dest) == 1 }, 5*time.Second, time.Millisecond)
 	require.Eventually(t, func() bool { return len(committer.committed()) == 1 }, 5*time.Second, time.Millisecond)
 
-	// Order: write to staging, merge into dest, reset staging (PrepareTable
-	// fallback since fakeDestination is not TruncateCapable), then commit.
+	// Order: write to staging, merge into dest, reset staging, then commit.
 	dest.mu.Lock()
-	assert.Equal(t, []string{"WriteParallel", "MergeTable", "PrepareTable"}, dest.calls)
+	assert.Equal(t, []string{"WriteParallel", "MergeTable", "TruncateTable"}, dest.calls)
 	assert.Equal(t, "ds.tbl_staging", dest.writeCalls[0].Table)
 	assert.True(t, dest.writeCalls[0].StagingTable)
 	assert.Equal(t, "ds.tbl_staging", dest.mergeCalls[0].StagingTable)

@@ -44,6 +44,8 @@ type TableRequest struct {
 	PrimaryKeys    []string                   // User-specified PKs (used only if source doesn't define them)
 	Strategy       config.IncrementalStrategy // User-specified strategy (used only if source doesn't define it)
 	Streaming      bool                       // Table will be read in streaming mode (--stream)
+	StrategySet    bool                       // Whether strategy was explicitly supplied by the caller
+	FullRefresh    bool                       // Whether the run ignores incremental state and fully refreshes the destination
 }
 
 // Source represents a data source that can provide tables.

@@ -228,6 +228,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.DestTable = c.String("dest-table")
 	cfg.IncrementalKey = c.String("incremental-key")
 	cfg.IncrementalStrategy = config.IncrementalStrategy(c.String("incremental-strategy"))
+	cfg.IncrementalStrategyExplicit = c.IsSet("incremental-strategy")
 	cfg.PrimaryKeys = c.StringSlice("primary-key")
 	cfg.PartitionBy = c.String("partition-by")
 	cfg.Yes = c.Bool("yes")

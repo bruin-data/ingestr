@@ -458,11 +458,14 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		)
 	}
 
-	// For CDC, upsert from the latest non-deleted change per PK so a delete
-	// followed by nothing doesn't clobber row data; deletes are applied below.
-	upsertSource := dedupSource("")
+	// For CDC, updates use the latest non-deleted change per PK so a delete
+	// followed by nothing doesn't clobber row data. Inserts use the latest
+	// change overall so delete-only keys can materialize tombstones for resume.
+	updateSource := dedupSource("")
+	insertSource := updateSource
 	if isCDC {
-		upsertSource = dedupSource(` WHERE "_cdc_deleted" = 0`)
+		updateSource = dedupSource(` WHERE "_cdc_deleted" = 0`)
+		insertSource = dedupSource("")
 	}
 
 	// UPDATE existing records using SQLite syntax
@@ -471,7 +474,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 			`UPDATE %s SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
 			buildUpdateSetSQLite(nonPKColumns, "source"),
-			upsertSource,
+			updateSource,
 			buildJoinConditionSQLite(opts.PrimaryKeys, quotedTargetTable, "source"),
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
@@ -488,7 +491,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		quotedTargetTable,
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedColumns, ", "),
-		upsertSource,
+		insertSource,
 		quotedTargetTable,
 		buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source"),
 	)
@@ -716,11 +719,15 @@ func (d *SQLiteDestination) SupportsCDCMerge() bool { return true }
 
 // GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
 func (d *SQLiteDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	if err := d.ensureSchemaAttached(ctx, schemaOf(table)); err != nil {
+		return "", err
+	}
+
 	var maxLSN sql.NullString
 	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, destination.QuoteTableName(table))
 	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)
 	if err != nil {
-		if strings.Contains(err.Error(), "no such table") {
+		if strings.Contains(err.Error(), "no such table") || strings.Contains(err.Error(), "no such column") {
 			return "", nil
 		}
 		return "", err

@@ -29,6 +29,34 @@ URI parameters:
 
 The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's SQL Server dialect [here](https://docs.sqlalchemy.org/en/20/core/engines.html#microsoft-sql-server).
 
+## Change Tracking
+
+ingestr can read SQL Server Change Tracking tables with the `mssql+ct://`, `sqlserver+ct://`, `azuresql+ct://`, and `azure-sql+ct://` URI schemes.
+
+```sh
+ingestr ingest \
+    --source-uri "mssql+ct://user:password@host:1433/dbname?encrypt=disable" \
+    --source-table "dbo.users" \
+    --dest-uri "duckdb:///warehouse.duckdb" \
+    --dest-table "dbo.users"
+```
+
+The destination table stores the Change Tracking cursor in `_cdc_lsn`, so later runs resume automatically from the latest loaded version. Change Tracking loads use the `merge` strategy by default and require a primary key on the source table.
+
+SQL Server setup example:
+
+```sql
+ALTER DATABASE your_database
+SET CHANGE_TRACKING = ON
+(CHANGE_RETENTION = 2 DAYS, AUTO_CLEANUP = ON);
+
+ALTER TABLE dbo.users
+ENABLE CHANGE_TRACKING
+WITH (TRACK_COLUMNS_UPDATED = OFF);
+```
+
+Change Tracking returns net row changes since the last loaded version. For inserts and updates, ingestr joins the changed primary keys back to the source table and loads the current row. For deletes, SQL Server only returns the primary key, so ingestr marks the destination row as deleted with `_cdc_deleted = true` while preserving existing destination values for other columns. If a row is updated and then deleted between two ingestr runs, Change Tracking cannot reconstruct the intermediate updated values.
+
 ## Tips & Tricks
 
 If you're using Azure SQL Server, you can use `az cli` to generate access tokens to connect to SQL server. 

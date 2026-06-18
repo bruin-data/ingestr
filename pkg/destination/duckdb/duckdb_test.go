@@ -726,6 +726,58 @@ func TestMergeTable(t *testing.T) {
 	assert.Equal(t, 300, value)
 }
 
+func TestMergeTable_CDCMaterializesDeleteOnlyTombstone(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(-9223372036854775808, NULL, '00000000000000000042', true, CURRENT_TIMESTAMP)
+	`)
+	require.NoError(t, err)
+
+	err = dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		TargetTable:  "target_table",
+		PrimaryKeys:  []string{"id"},
+		Columns: []string{
+			"id",
+			"name",
+			destination.CDCLSNColumn,
+			destination.CDCDeletedColumn,
+			destination.CDCSyncedAtColumn,
+		},
+	})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM target_table WHERE "_cdc_deleted" = true AND "_cdc_lsn" = '00000000000000000042'`).Scan(&count))
+	assert.Equal(t, 1, count)
+}
+
 func TestDeleteInsertTable_DedupesStagingByPK(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)

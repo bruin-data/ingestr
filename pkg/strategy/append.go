@@ -61,6 +61,7 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		ExcludeColumns: job.Config.SQLExcludeColumns,
 		Parallelism:    parallelism,
 		Schema:         job.SourceSchema,
+		FullRefresh:    job.Config.FullRefresh,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)
@@ -149,6 +150,7 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 			Parallelism: parallelism,
 			PageSize:    job.Config.PageSize,
 			Limit:       job.Config.SQLLimit,
+			FullRefresh: job.Config.FullRefresh,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})

@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -17,10 +18,84 @@ import (
 type mockDestination struct {
 	destination.Destination
 	tableSchema *schema.TableSchema
+	scheme      string
 }
 
 func (m *mockDestination) GetTableSchema(_ context.Context, _ string) (*schema.TableSchema, error) {
 	return m.tableSchema, nil
+}
+
+func (m *mockDestination) GetScheme() string {
+	if m.scheme != "" {
+		return m.scheme
+	}
+	return "mock"
+}
+
+type mockCDCResumeDestination struct {
+	mockDestination
+}
+
+func (m *mockCDCResumeDestination) GetMaxCDCLSN(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
+func TestRunRejectsChangeTrackingSQLLimitBeforeSourceLookup(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "mssql+ct://example:1433/app"
+	cfg.SourceTable = "dbo.items"
+	cfg.DestURI = "unsupported-destination://out"
+	cfg.SQLLimit = 10
+
+	err := New(cfg).Run(context.Background())
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "sql-limit") {
+		t.Fatalf("expected sql-limit validation error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "failed to get source") || strings.Contains(err.Error(), "failed to get destination") {
+		t.Fatalf("expected validation before source/destination lookup, got %v", err)
+	}
+}
+
+func TestValidateChangeTrackingDestinationAcceptsResumeProvider(t *testing.T) {
+	err := validateChangeTrackingDestination(&mockCDCResumeDestination{
+		mockDestination: mockDestination{scheme: "mock"},
+	})
+	if err != nil {
+		t.Fatalf("expected resume provider to pass validation, got %v", err)
+	}
+}
+
+func TestValidateChangeTrackingDestinationRequiresResumeProvider(t *testing.T) {
+	err := validateChangeTrackingDestination(&mockDestination{scheme: "mock"})
+
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "resume cursors") {
+		t.Fatalf("expected resume cursor error, got %v", err)
+	}
+}
+
+func TestValidateChangeTrackingDestinationRunsForFullRefreshRequirement(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "mssql+ct://example:1433/app"
+	cfg.SourceTable = "dbo.items"
+	cfg.DestURI = "mock://dest"
+	cfg.FullRefresh = true
+
+	requireChangeTrackingValidation := isChangeTrackingSource(cfg.SourceURI)
+	if !requireChangeTrackingValidation {
+		t.Fatal("expected mssql+ct URI to require destination validation")
+	}
+	err := validateChangeTrackingDestination(&mockCDCResumeDestination{
+		mockDestination: mockDestination{scheme: "mock"},
+	})
+	if err != nil {
+		t.Fatalf("expected full-refresh validation to accept resume provider, got %v", err)
+	}
 }
 
 func TestSetupNamingConvention(t *testing.T) {
