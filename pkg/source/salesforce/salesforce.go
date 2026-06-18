@@ -274,21 +274,26 @@ type tableMeta struct {
 }
 
 var salesforceTableMeta = map[string]tableMeta{
-	"user":                     {"User", config.StrategyReplace, nil, ""},
-	"user_role":                {"UserRole", config.StrategyReplace, nil, ""},
-	"opportunity":              {"Opportunity", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"opportunity_line_item":    {"OpportunityLineItem", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"opportunity_contact_role": {"OpportunityContactRole", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 	"account":                  {"Account", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"contact":                  {"Contact", config.StrategyReplace, []string{"Id"}, ""},
-	"lead":                     {"Lead", config.StrategyReplace, []string{"Id"}, ""},
 	"campaign":                 {"Campaign", config.StrategyReplace, []string{"Id"}, ""},
+	"campaign_history":         {"CampaignHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
 	"campaign_member":          {"CampaignMember", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"product":                  {"Product2", config.StrategyReplace, []string{"Id"}, ""},
+	"contact":                  {"Contact", config.StrategyReplace, []string{"Id"}, ""},
+	"contact_history":          {"ContactHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"event":                    {"Event", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"lead":                     {"Lead", config.StrategyReplace, []string{"Id"}, ""},
+	"lead_history":             {"LeadHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"opportunity":              {"Opportunity", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"opportunity_contact_role": {"OpportunityContactRole", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"opportunity_history":      {"OpportunityHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"opportunity_line_item":    {"OpportunityLineItem", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 	"pricebook":                {"Pricebook2", config.StrategyReplace, []string{"Id"}, ""},
 	"pricebook_entry":          {"PricebookEntry", config.StrategyReplace, []string{"Id"}, ""},
+	"product":                  {"Product2", config.StrategyReplace, []string{"Id"}, ""},
 	"task":                     {"Task", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"event":                    {"Event", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"user":                     {"User", config.StrategyReplace, nil, ""},
+	"user_history":             {"UserHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"user_role":                {"UserRole", config.StrategyReplace, nil, ""},
 }
 
 func (s *salesforceSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
