@@ -14,10 +14,11 @@ URI parameters:
 
 - `sport`: ESPN sport slug. Defaults to `football`.
 - `league`: ESPN league slug. Defaults to `nfl`.
-- `dates`: Optional scoreboard date or date range, such as `20260910` or `20260910-20260912`.
 - `season`: Optional season year passed to scoreboard and standings requests.
 - `limit`: Optional request limit for scoreboard and news. Defaults to `100`.
 - `base_url`: Overrides the ESPN API base URL. Defaults to `https://site.api.espn.com`.
+
+The scoreboard window comes from `--interval-start` / `--interval-end`, which the source converts to ESPN's `dates=YYYYMMDD[-YYYYMMDD]` query parameter (UTC).
 
 ## Example
 
@@ -25,8 +26,10 @@ Load NFL scoreboard events into DuckDB:
 
 ```sh
 ingestr ingest \
-  --source-uri 'espn://?sport=football&league=nfl&dates=20260910-20260912' \
+  --source-uri 'espn://?sport=football&league=nfl' \
   --source-table 'scoreboard' \
+  --interval-start 2026-09-10 \
+  --interval-end 2026-09-12 \
   --dest-uri 'duckdb:///espn.duckdb' \
   --dest-table 'sports.scoreboard'
 ```
