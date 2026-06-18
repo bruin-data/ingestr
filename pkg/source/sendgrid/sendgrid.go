@@ -33,22 +33,13 @@ const (
 	defaultActivityStart   = "1970-01-01T00:00:00Z"
 	defaultStatsAggregated = "day"
 
-	// messagesMinWindow is the smallest Email Activity window the time bisection splits to;
-	// last_event_time has second granularity, so a 1s window cannot be divided further by time.
-	// A still-full 1s window is then partitioned by msg_id prefix instead.
-	messagesMinWindow = time.Second
-	// messagesIDAlphabet is the case-folded character set msg_ids draw from (base64url + dot);
-	// LIKE is case-insensitive, so one case covers both. Used to partition a saturated second.
-	messagesIDAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz-_."
-	// maxMessagesPrefixLen caps msg_id prefix recursion depth as a safety stop.
-	maxMessagesPrefixLen = 16
+	messagesMinWindow    = time.Second                               // time-bisection floor (last_event_time is second-granular)
+	messagesIDAlphabet   = "0123456789abcdefghijklmnopqrstuvwxyz-_." // case-folded msg_id chars, for prefix partitioning
+	maxMessagesPrefixLen = 16                                        // msg_id prefix recursion depth guard
 
-	// SendGrid Email Activity API is documented at 6 req/min: (6 * 0.8) / 60 = 0.08 req/sec.
-	emailActivityRateLimit = 0.08
-	// SendGrid Web API v3 documents endpoint-specific rate-limit headers but no global numeric limit.
-	// Keep a conservative local cap for non-Email-Activity endpoints and rely on retries for 429s.
-	generalRateLimit = 5.0
-	rateLimitBurst   = 5
+	emailActivityRateLimit = 0.08 // SendGrid documents 6 req/min for Email Activity: (6*0.8)/60
+	generalRateLimit       = 5.0  // conservative local cap; other v3 endpoints expose only per-endpoint headers
+	rateLimitBurst         = 5
 )
 
 type paginationStyle int
@@ -319,10 +310,8 @@ func parseURI(uri string) (credentials, error) {
 	}, nil
 }
 
-// parseTableName splits an optional granularity suffix from the table name, e.g.
-// "global_stats:week". Only global_stats accepts a suffix; it controls the SendGrid
-// `aggregated_by` parameter and defaults to "day". The returned aggregatedBy is empty
-// for tables that do not use it.
+// parseTableName splits an optional granularity suffix (e.g. "global_stats:week") from the table
+// name. Only global_stats accepts one (sets aggregated_by, default "day"); aggregatedBy is "" otherwise.
 func parseTableName(name string) (table string, aggregatedBy string, err error) {
 	table = name
 	suffix := ""
@@ -439,8 +428,7 @@ func (s *SendGridSource) fetch(ctx context.Context, table string, tc tableConfig
 	}
 }
 
-// serverParams builds the server-side query parameters for a table based on its filter mode,
-// starting from any static extraParams configured for the table.
+// serverParams builds the request query params from the table's filter mode and static extraParams.
 func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) (map[string]string, error) {
 	params := map[string]string{}
 	for k, v := range tc.extraParams {
@@ -455,8 +443,7 @@ func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) 
 		params["start_date"] = opts.IntervalStart.UTC().Format("2006-01-02")
 		params["end_date"] = time.Now().UTC().Format("2006-01-02")
 		if opts.IntervalEnd != nil {
-			// end is exclusive: /stats end_date is an inclusive day, so use the last day
-			// strictly before the end boundary.
+			// exclusive end: /stats end_date is an inclusive day, so use the day before.
 			params["end_date"] = opts.IntervalEnd.UTC().Add(-time.Nanosecond).Format("2006-01-02")
 		}
 		params["aggregated_by"] = aggregatedBy
@@ -473,15 +460,11 @@ func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) 
 	return params, nil
 }
 
-// fetchMessages reads the Email Activity endpoint, which caps each query at maxMessagesPageSize
-// and supports no pagination. To retrieve more than one page, it recursively bisects the time
-// range: a window that comes back full is split in half until each piece fits under the cap.
-// The query window is half-open [from, to), so splits are disjoint and no message is fetched twice.
+// fetchMessages reads the Email Activity feed, which caps responses at 1000 with no pagination.
 func (s *SendGridSource) fetchMessages(ctx context.Context, table string, tc tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	start, end := resolveMessagesRange(opts)
 
-	// fetch queries a half-open [from, to) window, optionally constrained to msg_ids beginning
-	// with msgIDPrefix (used to sub-partition a single saturated second).
+	// fetch queries a half-open [from, to) window, optionally constrained to a msg_id prefix.
 	fetch := func(from, to time.Time, msgIDPrefix string) ([]map[string]interface{}, error) {
 		query := buildMessagesQuery(source.ReadOptions{IntervalStart: &from, IntervalEnd: &to})
 		if msgIDPrefix != "" {
@@ -508,14 +491,8 @@ func (s *SendGridSource) fetchMessages(ctx context.Context, table string, tc tab
 	return bisectWindows(ctx, start, end, tc.pageSize, fetch, emit, onExhausted)
 }
 
-// bisectWindows retrieves every message in [start, end) under SendGrid's 1000-row, no-pagination
-// cap. It first bisects the time range: a window that comes back full is split in half until each
-// piece is under the cap. Once a window is down to the timestamp granularity (messagesMinWindow)
-// and is still full, more than pageSize events share that instant, so it switches to partitioning
-// by msg_id prefix — recursively extending the prefix over the id alphabet until each bucket fits
-// under the cap. Because msg_id is unique and uniformly distributed, this always converges; the
-// onExhausted guard only fires in the degenerate case of >pageSize ids identical up to the prefix
-// depth cap.
+// bisectWindows retrieves all messages under the 1000-row, no-pagination cap by bisecting the time
+// range, then partitioning a still-full single second by msg_id prefix until each bucket fits.
 func bisectWindows(
 	ctx context.Context,
 	start, end time.Time,
@@ -697,9 +674,8 @@ func (s *SendGridSource) fetchToken(ctx context.Context, table string, tc tableC
 	return nil
 }
 
-// fetchGroupMembers fans out over the unsubscribe groups from /asm/groups and emits one row
-// {group_id, email} per suppressed address. The per-group endpoint returns a bare array of email
-// strings, so the rows are constructed here.
+// fetchGroupMembers fans out over /asm/groups and emits {group_id, email} per suppressed address
+// (the per-group endpoint returns a bare array of email strings).
 func (s *SendGridSource) fetchGroupMembers(ctx context.Context, table string, tc tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	groupsBody, err := s.doRequest(table, tableConfig{endpoint: "/asm/groups", dataKey: ""}, s.clientForTier(tc.tier).R(ctx))
 	if err != nil {
@@ -791,9 +767,8 @@ func sendFiltered(table string, tc tableConfig, items []map[string]interface{}, 
 	return sendBatch(table, items, opts, results)
 }
 
-// buildMessagesQuery builds the Email Activity filter with a half-open [start, end) window:
-// the start is inclusive and the end is exclusive. This also makes bisection splits disjoint,
-// so a message on a split boundary is fetched exactly once.
+// buildMessagesQuery builds the Email Activity filter for a half-open [start, end) window
+// (start inclusive, end exclusive), keeping bisection splits disjoint.
 func buildMessagesQuery(opts source.ReadOptions) string {
 	switch {
 	case opts.IntervalStart != nil && opts.IntervalEnd != nil:
@@ -851,9 +826,7 @@ func filterByTimestamp(items []map[string]interface{}, field string, start, end 
 	for _, item := range items {
 		itemTime, ok := parseItemTime(item[field])
 		if !ok {
-			// Keep items whose incremental key is missing/null/unparseable rather than dropping
-			// them: we can't place them in the interval, and silently discarding would lose records
-			// permanently. These tables use merge, so re-emitting on each run is harmless.
+			// Keep rows with a missing/unparseable key rather than silently dropping them (merge dedups).
 			filtered = append(filtered, item)
 			continue
 		}
