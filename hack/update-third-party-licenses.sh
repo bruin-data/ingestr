@@ -24,6 +24,7 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 go_licenses_bin="$tmpdir/bin/go-licenses$(go env GOEXE)"
+active_goroot="$(go env GOROOT)"
 
 (cd "$repo_root" && GOBIN="$tmpdir/bin" go install "$go_licenses_module")
 
@@ -134,7 +135,7 @@ run_target() {
 	local target_log="$tmpdir/$label.log"
 	local target_failure="$tmpdir/$label.failed"
 
-	if ! (cd "$repo_root" && GOOS="$goos" GOARCH="$goarch" "$go_licenses_bin" check "$packages" \
+	if ! (cd "$repo_root" && GOOS="$goos" GOARCH="$goarch" GOROOT="$active_goroot" "$go_licenses_bin" check "$packages" \
 		--include_tests \
 		"${ignore_flags[@]}" \
 		--disallowed_types="$disallowed_license_types" \
@@ -147,7 +148,7 @@ run_target() {
 		return 1
 	fi
 
-	if ! (cd "$repo_root" && GOOS="$goos" GOARCH="$goarch" "$go_licenses_bin" save "$packages" \
+	if ! (cd "$repo_root" && GOOS="$goos" GOARCH="$goarch" GOROOT="$active_goroot" "$go_licenses_bin" save "$packages" \
 		--include_tests \
 		"${ignore_flags[@]}" \
 		--save_path "$target_save_dir" \
