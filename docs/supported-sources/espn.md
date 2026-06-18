@@ -2,7 +2,7 @@
 
 ESPN exposes a set of unauthenticated JSON endpoints at `site.api.espn.com` that cover scores, teams, standings, and news. These endpoints are unofficial and can change without notice.
 
-`ingestr` supports ESPN as a public source. The default configuration targets NFL data with `sport=football` and `league=nfl`.
+`ingestr` supports ESPN as a public source. No authentication is required. The default configuration targets NFL data with `sport=football` and `league=nfl`.
 
 ## URI format
 
