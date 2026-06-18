@@ -387,7 +387,7 @@ func (s *ESPNSource) get(ctx context.Context, endpoint string, params map[string
 			return nil, fmt.Errorf("malformed espn response from %s: %w", endpoint, err)
 		}
 	}
-	return normalizeMap(payload), nil
+	return payload, nil
 }
 
 func checkResponse(endpoint string, resp *httpclient.Response) error {
@@ -476,34 +476,6 @@ func interfaceSlice(value interface{}) []interface{} {
 		return nil
 	}
 	return raw
-}
-
-func normalizeMap(item map[string]interface{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(item))
-	for key, value := range item {
-		out[key] = normalizeValue(value)
-	}
-	return out
-}
-
-func normalizeValue(value interface{}) interface{} {
-	switch v := value.(type) {
-	case string:
-		if strings.EqualFold(strings.TrimSpace(v), "null") {
-			return nil
-		}
-		return v
-	case map[string]interface{}:
-		return normalizeMap(v)
-	case []interface{}:
-		out := make([]interface{}, len(v))
-		for i, item := range v {
-			out[i] = normalizeValue(item)
-		}
-		return out
-	default:
-		return value
-	}
 }
 
 func reachedLimit(items []map[string]interface{}, opts source.ReadOptions) bool {
