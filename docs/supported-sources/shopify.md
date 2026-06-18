@@ -25,13 +25,7 @@ To use the Shopify API, you need to create a custom app in the Shopify Partner D
 1. Go to the [Shopify Dev Dashboard](https://dev.shopify.com/dashboard)
 2. Select an existing app or create a new one
 
-### Step 2: Get App Credentials
-
-1. In the app sidebar, open **Settings**
-2. In **Credentials**, copy the **Client ID**
-3. Reveal and copy the **Client secret**
-
-### Step 3: Configure API Scopes
+### Step 2: Configure API Scopes
 
 In the app configuration, make sure the app has read scopes for the data you want to ingest:
 - `read_products`
@@ -44,14 +38,14 @@ After changing scopes:
 1. Create a new app version
 2. Release the new app version
 
-### Step 4: Install the App in Your Store
+### Step 3: Install the App in Your Store
 
 1. Open the Shopify store admin: `https://admin.shopify.com/store/your-store-name`
 2. Go to **Settings** → **Apps and sales channels**
 3. Find and open your app
 4. Install or reinstall the app so the new scopes become active
 
-### Step 5: Get the Admin API Access Token
+### Step 4: Get the Admin API Access Token
 
 1. After installation, go back to **Apps and sales channels**
 2. Click on your app

@@ -20,28 +20,16 @@ The URI is used to connect to the Freshdesk API for extracting data.
 
 ## Setting up a Freshdesk integration
 
-To connect to Freshdesk, you need to create an agent with API access and obtain the API key.
+To connect to Freshdesk, you need your API key and account domain.
 
-### Step 1: Create a New Agent
+### Step 1: Get the API Key
 
-1. Log in to your Freshdesk admin account
-2. Go to **Admin** → **Team** → **Agents**
-3. Click **New Agent**
-4. Fill in the required details (name, email, etc.)
+1. Log in to your Freshdesk account
+2. Click your profile picture in the top right corner
+3. Go to **Profile settings**
+4. Click **View API Key** and copy it
 
-### Step 2: Enable API Key Access
-
-1. In the agent creation/edit form, go to **Security and permissions**
-2. Toggle on **API Key access**
-3. Save the agent configuration
-
-### Step 3: Get the API Key
-
-1. Go to **Profile settings** (click your profile picture in the top right)
-2. Click **View API Key** from the top right
-3. Copy the API key
-
-### Step 4: Find Your Domain
+### Step 2: Find Your Domain
 
 Your domain is the subdomain in your Freshdesk URL. For example:
 - If your URL is `https://mycompany.freshdesk.com/`, your domain is `mycompany`

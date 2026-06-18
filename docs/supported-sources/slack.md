@@ -33,7 +33,7 @@ To set up a Slack integration, you need to create a Slack App and obtain an API 
 ### Step 2: Configure OAuth Scopes
 
 1. In the left sidebar, click **OAuth & Permissions**
-2. Scroll down to **Scopes** → **User Token Scopes** (or Bot Token Scopes)
+2. Scroll down to **Scopes** → **Bot Token Scopes**
 3. Add the following scopes based on the data you want to access:
    - `channels:read` - View basic information about public channels
    - `channels:history` - View messages in public channels
@@ -46,7 +46,7 @@ To set up a Slack integration, you need to create a Slack App and obtain an API 
 1. Scroll to the top of **OAuth & Permissions** page
 2. Click **Install to Workspace**
 3. Review and allow the permissions
-4. Copy the **User OAuth Token** (starts with `xoxp-`) or **Bot User OAuth Token** (starts with `xoxb-`)
+4. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
 
 This token is your `api_key` for the ingestr URI.
 

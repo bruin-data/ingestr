@@ -23,7 +23,7 @@ The URI is used to connect to the Intercom API for extracting data.
 
 To connect to Intercom, you need to create an app and obtain an access token.
 
-### Option 1: Create a Private App (Recommended)
+### Step 1: Create a Private App
 
 1. Log in to your [Intercom Developer Hub](https://developers.intercom.com/)
 2. Click **Your apps** in the top right
