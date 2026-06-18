@@ -91,7 +91,8 @@ func writeCallCount(d *fakeDestination) int {
 }
 
 func TestStreaming_CountTriggerFlushes(t *testing.T) {
-	dest := &fakeDestination{}
+	baseDest := &fakeDestination{}
+	dest := &truncateCapableDestination{fakeDestination: baseDest}
 	committer := &fakeCommitter{}
 	loop := newTestLoop(dest, StreamingOptions{
 		FlushInterval: time.Hour,
@@ -113,22 +114,22 @@ func TestStreaming_CountTriggerFlushes(t *testing.T) {
 		}
 	}
 	// 3 batches x 4 rows = 12 rows, threshold 100 not reached yet: no flush.
-	assert.Equal(t, 0, writeCallCount(dest))
+	assert.Equal(t, 0, writeCallCount(baseDest))
 
 	big := make([]int64, 100)
 	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", big, nil), CommitToken: 3}
 
-	require.Eventually(t, func() bool { return writeCallCount(dest) == 1 }, 5*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return writeCallCount(baseDest) == 1 }, 5*time.Second, time.Millisecond)
 	require.Eventually(t, func() bool { return len(committer.committed()) == 1 }, 5*time.Second, time.Millisecond)
 
 	// Order: write to staging, merge into dest, reset staging, then commit.
-	dest.mu.Lock()
-	assert.Equal(t, []string{"WriteParallel", "MergeTable", "TruncateTable"}, dest.calls)
-	assert.Equal(t, "ds.tbl_staging", dest.writeCalls[0].Table)
-	assert.True(t, dest.writeCalls[0].StagingTable)
-	assert.Equal(t, "ds.tbl_staging", dest.mergeCalls[0].StagingTable)
-	assert.Equal(t, "ds.tbl", dest.mergeCalls[0].TargetTable)
-	dest.mu.Unlock()
+	baseDest.mu.Lock()
+	assert.Equal(t, []string{"WriteParallel", "MergeTable", "TruncateTable"}, baseDest.calls)
+	assert.Equal(t, "ds.tbl_staging", baseDest.writeCalls[0].Table)
+	assert.True(t, baseDest.writeCalls[0].StagingTable)
+	assert.Equal(t, "ds.tbl_staging", baseDest.mergeCalls[0].StagingTable)
+	assert.Equal(t, "ds.tbl", baseDest.mergeCalls[0].TargetTable)
+	baseDest.mu.Unlock()
 	// Cumulative token semantics: only the newest token is committed.
 	assert.Equal(t, []any{3}, committer.committed())
 
