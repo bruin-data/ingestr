@@ -124,6 +124,31 @@ func TestESPNScoreboardEmitsRawEvents(t *testing.T) {
 	require.True(t, hasField(result.Batch, "competitions"), "competitions field should exist")
 }
 
+func TestESPNScoreboardEmptyWhenEventsKeyMissing(t *testing.T) {
+	for _, payload := range []string{`{}`, `{"events":null}`, `{"events":[]}`} {
+		t.Run(payload, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = fmt.Fprint(w, payload)
+			}))
+			defer server.Close()
+
+			src := NewESPNSource()
+			require.NoError(t, src.Connect(context.Background(), "espn://?base_url="+url.QueryEscape(server.URL)))
+
+			for _, tbl := range []string{"scoreboard", "competitors"} {
+				table, err := src.GetTable(context.Background(), source.TableRequest{Name: tbl})
+				require.NoError(t, err)
+				results, err := table.Read(context.Background(), source.ReadOptions{})
+				require.NoError(t, err)
+				result := <-results
+				require.NoError(t, result.Err, "%s should not error on payload %s", tbl, payload)
+				require.EqualValues(t, 0, result.Batch.NumRows(), "%s should emit zero rows for payload %s", tbl, payload)
+				result.Batch.Release()
+			}
+		})
+	}
+}
+
 func TestESPNCompetitorsFanOutAndCarryPKs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/apis/site/v2/sports/football/nfl/scoreboard", r.URL.Path)

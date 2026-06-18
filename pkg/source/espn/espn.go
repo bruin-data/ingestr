@@ -408,11 +408,12 @@ func sitePath(sport, league, resource string) string {
 	return fmt.Sprintf("/apis/site/v2/sports/%s/%s/%s", sport, league, resource)
 }
 
+// extractEvents pulls the events array out of a scoreboard payload. A missing
+// or null `events` key is treated as zero results, not an error — ESPN omits the
+// key for off-season days, leagues without scheduled games, or alternate
+// payload shapes, and callers should produce an empty batch in those cases.
 func extractEvents(payload map[string]interface{}) ([]map[string]interface{}, error) {
 	raw := interfaceSlice(payload["events"])
-	if raw == nil {
-		return nil, fmt.Errorf("missing events array")
-	}
 	events := make([]map[string]interface{}, 0, len(raw))
 	for i, rawEvent := range raw {
 		event, ok := rawEvent.(map[string]interface{})
