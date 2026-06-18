@@ -30,23 +30,30 @@ To set up a Slack integration, you need to create a Slack App and obtain an API 
 4. Enter an App Name (e.g., "Data Integration") and select your workspace
 5. Click **Create App**
 
-### Step 2: Configure OAuth Scopes
+### Step 2: Choose a Token Type
+
+Slack supports two token types, and ingestr works with either:
+
+- **User token (`xoxp-`)** — recommended for one-off ingestion by an admin. Inherits the installing user's channel access, so no per-channel setup is needed.
+- **Bot token (`xoxb-`)** — recommended for unattended, long-running pipelines. The bot must be invited to each channel you want to read messages from (`/invite @your-app` in each channel).
+
+### Step 3: Configure OAuth Scopes
 
 1. In the left sidebar, click **OAuth & Permissions**
-2. Scroll down to **Scopes** → **Bot Token Scopes**
-3. Add the following scopes based on the data you want to access:
-   - `channels:read` - View basic information about public channels
-   - `channels:history` - View messages in public channels
-   - `users:read` - View users in the workspace
-   - `team:read` - View team information
-   - For access logs, you need Enterprise Grid and `admin.teams:read` scope
+2. Scroll down to **Scopes** and add the scopes below under **User Token Scopes** *or* **Bot Token Scopes**, matching the token type you chose in Step 2:
+   - `channels:read` — list public channels
+   - `channels:history` — read messages in public channels
+   - `users:read` — list workspace users
+   - `team:read` — read team metadata
+   - `admin.teams:read` — required for `access_logs` (Enterprise Grid only)
 
-### Step 3: Install the App and Get Token
+### Step 4: Install the App and Get the Token
 
-1. Scroll to the top of **OAuth & Permissions** page
-2. Click **Install to Workspace**
-3. Review and allow the permissions
-4. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
+1. Scroll to the top of the **OAuth & Permissions** page
+2. Click **Install to Workspace** and approve the requested permissions
+3. Copy the token that matches your choice in Step 2:
+   - **User OAuth Token** (`xoxp-…`), or
+   - **Bot User OAuth Token** (`xoxb-…`)
 
 This token is your `api_key` for the ingestr URI.
 
