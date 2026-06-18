@@ -93,7 +93,7 @@ func writeCallCount(d *fakeDestination) int {
 func TestStreaming_CountTriggerFlushes(t *testing.T) {
 	dest := &fakeDestination{}
 	committer := &fakeCommitter{}
-	loop := newTestLoop(dest, StreamingOptions{
+	loop := newTestLoop(&truncateCapableDestination{fakeDestination: dest}, StreamingOptions{
 		FlushInterval: time.Hour,
 		FlushRecords:  100,
 		Strategy:      config.StrategyMerge,
