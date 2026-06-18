@@ -244,7 +244,7 @@ func (d *SQLiteDestination) writeRecordBatch(ctx context.Context, record arrow.R
 	colNames := make([]string, numCols)
 	placeholders := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
-		colNames[i] = fmt.Sprintf(`"%s"`, record.Schema().Field(i).Name)
+		colNames[i] = destination.QuoteIdentifier(record.Schema().Field(i).Name)
 		placeholders[i] = "?"
 	}
 
@@ -434,15 +434,36 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 
-	// Build dedup subquery to handle duplicate PKs in staging
+	// Build dedup subquery to handle duplicate PKs in staging. For CDC data the
+	// latest change per PK wins (LSN strings are fixed-width and sort
+	// lexicographically); otherwise, when an incremental key is set the latest
+	// row per PK wins, else arbitrary.
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
-	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedPKs, ", "),
-		destination.QuoteTableName(opts.StagingTable),
-	)
+	isCDC := destination.HasCDCDeletedColumn(columns)
+	dedupOrderBy := "(SELECT NULL)"
+	if isCDC {
+		dedupOrderBy = destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier)
+	} else if opts.IncrementalKey != "" {
+		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
+	}
+	dedupSource := func(where string) string {
+		return fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			destination.QuoteTableName(opts.StagingTable),
+			where,
+		)
+	}
+
+	// For CDC, upsert from the latest non-deleted change per PK so a delete
+	// followed by nothing doesn't clobber row data; deletes are applied below.
+	upsertSource := dedupSource("")
+	if isCDC {
+		upsertSource = dedupSource(` WHERE "_cdc_deleted" = 0`)
+	}
 
 	// UPDATE existing records using SQLite syntax
 	if len(nonPKColumns) > 0 {
@@ -450,7 +471,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 			`UPDATE %s SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
 			buildUpdateSetSQLite(nonPKColumns, "source"),
-			dedupSource,
+			upsertSource,
 			buildJoinConditionSQLite(opts.PrimaryKeys, quotedTargetTable, "source"),
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
@@ -467,7 +488,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		quotedTargetTable,
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedColumns, ", "),
-		dedupSource,
+		upsertSource,
 		quotedTargetTable,
 		buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source"),
 	)
@@ -476,6 +497,23 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
 		return fmt.Errorf("failed to insert new records: %w", err)
+	}
+
+	if isCDC {
+		// Mark rows deleted only when the latest change for the PK is a delete,
+		// carrying the delete's LSN so resume picks up after it.
+		markDeletedSQL := fmt.Sprintf(
+			`UPDATE %s SET "_cdc_deleted" = 1, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = 1`,
+			quotedTargetTable,
+			dedupSource(""),
+			buildJoinConditionSQLite(opts.PrimaryKeys, quotedTargetTable, "source"),
+		)
+		config.Debug("[MERGE] Executing CDC delete marking: %s", markDeletedSQL)
+
+		if _, err := tx.ExecContext(ctx, markDeletedSQL); err != nil {
+			config.LogFailedQuery(markDeletedSQL, err)
+			return fmt.Errorf("failed to mark deleted records: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -502,8 +540,8 @@ func (d *SQLiteDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
 	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE "%s" >= ? AND "%s" <= ?`,
-		quotedTargetTable, opts.IncrementalKey, opts.IncrementalKey,
+		`DELETE FROM %s WHERE %s >= ? AND %s <= ?`,
+		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
 	)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -674,6 +712,25 @@ func (d *SQLiteDestination) SupportsSCD2Strategy() bool { return true }
 // SupportsAtomicSwap returns true as SQLite supports atomic table renames.
 func (d *SQLiteDestination) SupportsAtomicSwap() bool { return true }
 
+func (d *SQLiteDestination) SupportsCDCMerge() bool { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
+func (d *SQLiteDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	var maxLSN sql.NullString
+	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, destination.QuoteTableName(table))
+	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return "", nil
+		}
+		return "", err
+	}
+	if !maxLSN.Valid {
+		return "", nil
+	}
+	return maxLSN.String, nil
+}
+
 // GetScheme returns the primary URI scheme for SQLite.
 func (d *SQLiteDestination) GetScheme() string { return "sqlite" }
 
@@ -747,7 +804,7 @@ func mapSQLiteTypeToSchema(colType string) schema.DataType {
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf(`"%s"`, col)
+		quoted[i] = fmt.Sprintf(`"%s"`, strings.ReplaceAll(col, `"`, `""`))
 	}
 	return quoted
 }
@@ -772,7 +829,7 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinConditionSQLite(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf(`%s."%s" = %s."%s"`, targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf(`%s.%s = %s.%s`, targetAlias, destination.QuoteIdentifier(key), sourceAlias, destination.QuoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -781,7 +838,7 @@ func buildJoinConditionSQLite(keys []string, targetAlias, sourceAlias string) st
 func buildUpdateSetSQLite(columns []string, sourceAlias string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
+		sets[i] = fmt.Sprintf(`%s = %s.%s`, destination.QuoteIdentifier(col), sourceAlias, destination.QuoteIdentifier(col))
 	}
 	return strings.Join(sets, ", ")
 }
@@ -793,7 +850,7 @@ func buildChangeConditionsSQLite(columns []string, targetAlias, sourceAlias stri
 	}
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
-		conditions[i] = fmt.Sprintf(`%s."%s" IS NOT %s."%s"`, targetAlias, col, sourceAlias, col)
+		conditions[i] = fmt.Sprintf(`%s.%s IS NOT %s.%s`, targetAlias, destination.QuoteIdentifier(col), sourceAlias, destination.QuoteIdentifier(col))
 	}
 	return strings.Join(conditions, " OR ")
 }
@@ -831,7 +888,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToSQLite(col)
-		colDefs = append(colDefs, fmt.Sprintf(`"%s" %s`, col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf(`%s %s`, destination.QuoteIdentifier(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", table, strings.Join(colDefs, ",\n  "))
@@ -839,7 +896,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf(`"%s"`, k)
+			quotedKeys[i] = destination.QuoteIdentifier(k)
 		}
 		sql += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}
@@ -860,6 +917,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 			return 1
 		}
 		return 0
+	case *array.Int8:
+		return a.Value(idx)
 	case *array.Int16:
 		return a.Value(idx)
 	case *array.Int32:

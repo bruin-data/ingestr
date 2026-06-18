@@ -2,7 +2,12 @@ package mssql
 
 import (
 	"net/url"
+	"strings"
 	"testing"
+
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
+	mssqldb "github.com/microsoft/go-mssqldb"
 )
 
 func TestURIToConnString(t *testing.T) {
@@ -89,7 +94,7 @@ func TestURIToConnString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			connStr, driverName, err := uriToConnString(tt.uri)
+			connStr, driverName, err := URIToConnString(tt.uri)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (connStr=%q)", connStr)
@@ -139,5 +144,281 @@ func TestURIToConnString(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildSelectQueryPreservesColumnCasing(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "RowPointer"},
+		{Name: "NoteExistsFlag"},
+		{Name: "CreatedBy"},
+	}
+
+	query := buildSelectQuery("dbo.notes", columns, source.ReadOptions{})
+
+	for _, name := range []string{"[RowPointer]", "[NoteExistsFlag]", "[CreatedBy]"} {
+		if !strings.Contains(query, name) {
+			t.Errorf("query %q missing original column %q", query, name)
+		}
+	}
+	for _, name := range []string{"row_pointer", "note_exists_flag", "created_by"} {
+		if strings.Contains(query, name) {
+			t.Errorf("query %q must not contain renamed column %q", query, name)
+		}
+	}
+}
+
+func TestParseTableNameSupportsMultipartIdentifiers(t *testing.T) {
+	tests := []struct {
+		name       string
+		table      string
+		wantSchema string
+		wantTable  string
+	}{
+		{
+			name:       "unqualified table defaults schema",
+			table:      "users",
+			wantSchema: "dbo",
+			wantTable:  "users",
+		},
+		{
+			name:       "schema qualified table",
+			table:      "sales.orders",
+			wantSchema: "sales",
+			wantTable:  "orders",
+		},
+		{
+			name:       "database qualified table",
+			table:      "RemoteDB.dbo.orders",
+			wantSchema: "dbo",
+			wantTable:  "orders",
+		},
+		{
+			name:       "linked server qualified table",
+			table:      "LINKED_SRV.RemoteDB.dbo.my_table",
+			wantSchema: "dbo",
+			wantTable:  "my_table",
+		},
+		{
+			name:       "bracketed identifiers with dots",
+			table:      "[LINKED_SRV].[RemoteDB].[erp.schema].[my.table]",
+			wantSchema: "erp.schema",
+			wantTable:  "my.table",
+		},
+		{
+			name:       "escaped bracket in identifier",
+			table:      "[LINKED]]SRV].[RemoteDB].[dbo].[my]]table]",
+			wantSchema: "dbo",
+			wantTable:  "my]table",
+		},
+		{
+			name:       "empty schema segment defaults schema",
+			table:      "RemoteDB..orders",
+			wantSchema: "dbo",
+			wantTable:  "orders",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotSchema, gotTable := parseTableName(tt.table)
+			if gotSchema != tt.wantSchema {
+				t.Errorf("schema = %q, want %q", gotSchema, tt.wantSchema)
+			}
+			if gotTable != tt.wantTable {
+				t.Errorf("table = %q, want %q", gotTable, tt.wantTable)
+			}
+		})
+	}
+}
+
+func TestQuoteTableSupportsMultipartIdentifiers(t *testing.T) {
+	tests := []struct {
+		name  string
+		table string
+		want  string
+	}{
+		{
+			name:  "unqualified table",
+			table: "users",
+			want:  "[users]",
+		},
+		{
+			name:  "schema qualified table",
+			table: "dbo.notes",
+			want:  "[dbo].[notes]",
+		},
+		{
+			name:  "linked server qualified table",
+			table: "LINKED_SRV.RemoteDB.dbo.my_table",
+			want:  "[LINKED_SRV].[RemoteDB].[dbo].[my_table]",
+		},
+		{
+			name:  "bracketed identifiers with dots",
+			table: "[LINKED_SRV].[RemoteDB].[erp.schema].[my.table]",
+			want:  "[LINKED_SRV].[RemoteDB].[erp.schema].[my.table]",
+		},
+		{
+			name:  "escaped bracket in identifier",
+			table: "[LINKED]]SRV].[RemoteDB].[dbo].[my]]table]",
+			want:  "[LINKED]]SRV].[RemoteDB].[dbo].[my]]table]",
+		},
+		{
+			name:  "empty schema segment",
+			table: "RemoteDB..orders",
+			want:  "[RemoteDB]..[orders]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := quoteTable(tt.table); got != tt.want {
+				t.Errorf("quoteTable(%q) = %q, want %q", tt.table, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInformationSchemaQualifierSkipsEmptyCatalogParts(t *testing.T) {
+	tableRef := parseMSSQLTableRef("LINKED_SRV..dbo.my_table")
+
+	got := tableRef.informationSchemaQualifier()
+	want := "[LINKED_SRV].INFORMATION_SCHEMA"
+	if got != want {
+		t.Fatalf("information schema qualifier = %q, want %q", got, want)
+	}
+}
+
+func TestBuildSelectQuerySupportsLinkedServerTable(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id"},
+		{Name: "CreatedAt"},
+	}
+
+	query := buildSelectQuery("LINKED_SRV.RemoteDB.dbo.my_table", columns, source.ReadOptions{Limit: 10})
+	want := "SELECT TOP 10 [id], [CreatedAt] FROM [LINKED_SRV].[RemoteDB].[dbo].[my_table]"
+	if query != want {
+		t.Fatalf("query = %q, want %q", query, want)
+	}
+}
+
+func TestSchemaMetadataQueriesUseCatalogPrefix(t *testing.T) {
+	tableRef := parseMSSQLTableRef("LINKED_SRV.RemoteDB.dbo.my_table")
+	columnsQuery, pkQuery := schemaMetadataQueries(tableRef)
+
+	if !strings.Contains(columnsQuery, "FROM [LINKED_SRV].[RemoteDB].INFORMATION_SCHEMA.COLUMNS") {
+		t.Fatalf("columns query does not use linked-server information schema: %s", columnsQuery)
+	}
+	if !strings.Contains(pkQuery, "FROM [LINKED_SRV].[RemoteDB].INFORMATION_SCHEMA.TABLE_CONSTRAINTS") {
+		t.Fatalf("pk query does not use linked-server table constraints: %s", pkQuery)
+	}
+	if !strings.Contains(pkQuery, "JOIN [LINKED_SRV].[RemoteDB].INFORMATION_SCHEMA.KEY_COLUMN_USAGE") {
+		t.Fatalf("pk query does not use linked-server key column usage: %s", pkQuery)
+	}
+}
+
+func TestGuidConversionEnabled(t *testing.T) {
+	connStr, _, err := URIToConnString("mssql://sa:pass@localhost/db?guid+conversion=true")
+	if err != nil {
+		t.Fatalf("URIToConnString error: %v", err)
+	}
+	if !guidConversionEnabled(connStr) {
+		t.Fatal("expected guid conversion to be enabled")
+	}
+
+	connStr, _, err = URIToConnString("mssql://sa:pass@localhost/db?guid+conversion=false")
+	if err != nil {
+		t.Fatalf("URIToConnString error: %v", err)
+	}
+	if guidConversionEnabled(connStr) {
+		t.Fatal("expected guid conversion to be disabled")
+	}
+
+	connStr, _, err = URIToConnString("mssql://sa:pass@localhost/db?GUID+CONVERSION=1")
+	if err != nil {
+		t.Fatalf("URIToConnString error: %v", err)
+	}
+	if !guidConversionEnabled(connStr) {
+		t.Fatal("expected case-insensitive guid conversion to be enabled")
+	}
+}
+
+func TestNormalizeUUIDValueFormatsRawSQLServerBytes(t *testing.T) {
+	raw := []byte{
+		0x6F, 0x96, 0x19, 0xFF,
+		0x8B, 0x86,
+		0xD0, 0x11,
+		0xB4, 0x2D,
+		0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF,
+	}
+
+	got, err := normalizeUUIDValue(raw, false)
+	if err != nil {
+		t.Fatalf("normalizeUUIDValue error: %v", err)
+	}
+	if got != "FF19966F-868B-11D0-B42D-00C04FC964FF" {
+		t.Fatalf("got %q, want canonical UUID", got)
+	}
+}
+
+func TestNormalizeUUIDValueFormatsGuidConvertedBytes(t *testing.T) {
+	raw := []byte{
+		0xFF, 0x19, 0x96, 0x6F,
+		0x86, 0x8B,
+		0x11, 0xD0,
+		0xB4, 0x2D,
+		0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF,
+	}
+
+	got, err := normalizeUUIDValue(raw, true)
+	if err != nil {
+		t.Fatalf("normalizeUUIDValue error: %v", err)
+	}
+	if got != "FF19966F-868B-11D0-B42D-00C04FC964FF" {
+		t.Fatalf("got %q, want canonical UUID", got)
+	}
+}
+
+func TestNormalizeUUIDValueHandlesDriverUUIDTypes(t *testing.T) {
+	uuid := mssqldb.UniqueIdentifier{
+		0xFF, 0x19, 0x96, 0x6F,
+		0x86, 0x8B,
+		0x11, 0xD0,
+		0xB4, 0x2D,
+		0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF,
+	}
+
+	got, err := normalizeUUIDValue(mssqldb.NullUniqueIdentifier{UUID: uuid, Valid: true}, false)
+	if err != nil {
+		t.Fatalf("normalizeUUIDValue error: %v", err)
+	}
+	if got != "FF19966F-868B-11D0-B42D-00C04FC964FF" {
+		t.Fatalf("got %q, want canonical UUID", got)
+	}
+
+	got, err = normalizeUUIDValue(mssqldb.NullUniqueIdentifier{}, false)
+	if err != nil {
+		t.Fatalf("normalizeUUIDValue error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("got %v, want nil", got)
+	}
+}
+
+func TestNormalizeUUIDValuePassesStringsThrough(t *testing.T) {
+	const want = "ff19966f-868b-11d0-b42d-00c04fc964ff"
+
+	got, err := normalizeUUIDValue(want, false)
+	if err != nil {
+		t.Fatalf("normalizeUUIDValue error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeUUIDValueRejectsInvalidByteLength(t *testing.T) {
+	if _, err := normalizeUUIDValue([]byte{0x01, 0x02}, false); err == nil {
+		t.Fatal("expected invalid uniqueidentifier length error")
 	}
 }

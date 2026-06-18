@@ -24,6 +24,8 @@ func startMSSQLContainerRaw(ctx context.Context, name string) (testcontainers.Co
 		"mcr.microsoft.com/mssql/server:2022-latest",
 		mssql.WithAcceptEULA(),
 		mssql.WithPassword(mssqlPassword),
+		// SQL Server Agent is required by the CDC capture/cleanup jobs.
+		testcontainers.WithEnv(map[string]string{"MSSQL_AGENT_ENABLED": "true"}),
 		testcontainers.WithWaitStrategy(
 			wait.ForAll(
 				wait.ForListeningPort("1433/tcp"),

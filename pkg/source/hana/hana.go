@@ -426,7 +426,7 @@ func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOptions) string {
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
-		colNames[i] = fmt.Sprintf("\"%s\"", col.Name)
+		colNames[i] = fmt.Sprintf("\"%s\"", strings.ReplaceAll(col.Name, "\"", "\"\""))
 	}
 
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteTable(table))

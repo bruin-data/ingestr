@@ -176,6 +176,16 @@ func (d *MultiTableDecoder) handleBegin(data []byte, lsn pglogrepl.LSN) error {
 	return nil
 }
 
+// InFlightTxLSN returns the LSN of a transaction whose changes have been
+// decoded but not yet emitted (BEGIN seen, COMMIT not yet processed). The bool
+// is false when no transaction is mid-flight.
+func (d *MultiTableDecoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
+	if len(d.pendingChanges) == 0 {
+		return 0, false
+	}
+	return d.currentTxLSN, true
+}
+
 func (d *MultiTableDecoder) handleCommit() ([]DecodedBatch, error) {
 	if len(d.pendingChanges) == 0 {
 		return nil, nil
@@ -194,6 +204,8 @@ func (d *MultiTableDecoder) handleCommit() ([]DecodedBatch, error) {
 		if tableSchema == nil {
 			continue
 		}
+
+		applyIntraBatchFill(changes, tableSchema)
 
 		batch, err := d.changesToBatch(changes, tableSchema)
 		if err != nil {
@@ -387,7 +399,7 @@ func (d *MultiTableDecoder) parseTupleData(data []byte, rel *RelationInfo, table
 		case tupleDataNull:
 			values[i] = nil
 		case tupleDataUnchanged:
-			values[i] = nil
+			values[i] = tupleUnchangedMarker
 		case tupleDataText:
 			if len(data) < 4 {
 				return nil, fmt.Errorf("text length truncated")
@@ -402,7 +414,7 @@ func (d *MultiTableDecoder) parseTupleData(data []byte, rel *RelationInfo, table
 			data = data[length:]
 
 			// Convert text to appropriate type based on schema column
-			if int(i) < len(tableSchema.Columns)-3 { // Exclude CDC columns
+			if int(i) < sourceColumnCount(tableSchema) {
 				col := tableSchema.Columns[i]
 				values[i] = convertTextValue(textVal, col)
 			} else {
@@ -442,22 +454,18 @@ func (d *MultiTableDecoder) changesToBatch(changes []Change, tableSchema *schema
 	}
 
 	syncedAt := time.Now().UTC()
-	sourceColCount := len(tableSchema.Columns) - 3 // Exclude CDC columns
+	nSource := sourceColumnCount(tableSchema)
 
-	for _, change := range changes {
-		// Append source column values
-		for i := 0; i < sourceColCount; i++ {
-			var val interface{}
-			if i < len(change.Values) {
-				val = change.Values[i]
-			}
-			arrowconv.AppendValue(builders[i], val)
+	for i, change := range changes {
+		for colIdx := 0; colIdx < nSource; colIdx++ {
+			arrowconv.AppendValue(builders[colIdx], resolveColumnValue(change, colIdx))
 		}
 
-		// Append CDC columns
-		builders[sourceColCount].(*array.StringBuilder).Append(FormatLSN(change.LSN))
-		builders[sourceColCount+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
-		builders[sourceColCount+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
+		builders[nSource].(*array.StringBuilder).Append(FormatLSN(change.LSN))
+		builders[nSource+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
+		perRowSyncedAt := syncedAt.Add(time.Duration(i) * time.Microsecond)
+		builders[nSource+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))
+		builders[nSource+3].(*array.StringBuilder).Append(unchangedColumnsJSON(change, tableSchema.Columns, nSource))
 	}
 
 	arrays := make([]arrow.Array, len(builders))

@@ -34,7 +34,7 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       job.Config.DestTable,
-		Schema:      job.Schema,
+		Schema:      destination.DestinationTableSchema(job.Schema),
 		DropFirst:   false,
 		PrimaryKeys: job.Schema.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
@@ -66,12 +66,6 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	records, err := job.GetRecords(ctx, readOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
-	}
-
-	// Apply batch transformation for discard_row/discard_value modes
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
 	}
 
 	if job.Tracker != nil {
@@ -113,9 +107,14 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 
 			destTable := job.GetDestTableName(ti.Name)
 
+			if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
+				errChan <- fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
+				return
+			}
+
 			if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 				Table:       destTable,
-				Schema:      ti.Schema,
+				Schema:      destination.DestinationTableSchema(ti.Schema),
 				DropFirst:   false,
 				PrimaryKeys: ti.PrimaryKeys,
 			}); err != nil {
@@ -145,7 +144,7 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 		parallelism = 4
 	}
 
-	records, err := job.Source.ReadAll(ctx, source.MultiTableReadOptions{
+	records, err := job.ReadAll(ctx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
 			Parallelism: parallelism,
 			PageSize:    job.Config.PageSize,

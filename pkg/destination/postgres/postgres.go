@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -123,7 +126,7 @@ func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, table string
 
 	quotedKeys := make([]string, len(primaryKeys))
 	for i, k := range primaryKeys {
-		quotedKeys[i] = fmt.Sprintf(`"%s"`, k)
+		quotedKeys[i] = destination.QuoteIdentifier(k)
 	}
 	alterSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", quoted, strings.Join(quotedKeys, ", "))
 	if _, err := d.pool.Exec(ctx, alterSQL); err != nil {
@@ -154,6 +157,13 @@ func (d *PostgresDestination) ensureSchemaExists(ctx context.Context, schemaName
 
 	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", destination.QuoteIdentifier(schemaName))
 	if _, err := d.pool.Exec(ctx, createSchemaSQL); err != nil {
+		// IF NOT EXISTS is not race-safe: concurrent creators (e.g. multi-table
+		// CDC preparing staging tables in parallel) can both pass the existence
+		// check and one loses with a duplicate error. Treat that as success.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && (pgErr.Code == "23505" || pgErr.Code == "42P06") {
+			return nil
+		}
 		config.LogFailedQuery(createSchemaSQL, err)
 		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
 	}
@@ -448,13 +458,19 @@ func (t *pgTransaction) Rollback(ctx context.Context) error {
 func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
 
-	columns := opts.Columns
-	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	stagingColumns := opts.Columns
+	destColumns := destination.DestinationColumns(stagingColumns)
+	stagingQuoted := quoteColumns(stagingColumns)
+	destQuoted := quoteColumns(destColumns)
+	nonPKColumns := filterColumns(destColumns, opts.PrimaryKeys)
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 
 	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := slices.Contains(columns, "_cdc_deleted")
+	hasCDCDeleted := slices.Contains(stagingColumns, destination.CDCDeletedColumn)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	hasUnchangedCols := slices.Contains(stagingColumns, destination.CDCUnchangedColsColumn)
 
 	// Begin transaction for atomic merge
 	tx, err := d.pool.Begin(ctx)
@@ -471,8 +487,8 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// We upsert the latest non-deleted row per PK, then mark deletes only if the
 		// latest change for that PK is a delete (preserving row data).
 		pkList := strings.Join(quotedPKs, ", ")
-		selectCols := strings.Join(quotedColumns, ", ")
-		orderByParts := append(append([]string{}, quotedPKs...), `"_cdc_lsn"::pg_lsn DESC`, `"_cdc_synced_at" DESC`)
+		selectCols := strings.Join(stagingQuoted, ", ")
+		orderByParts := append(append([]string{}, quotedPKs...), destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier))
 		orderBy := strings.Join(orderByParts, ", ")
 
 		latestActive := fmt.Sprintf(
@@ -488,15 +504,33 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			pkList, selectCols, quotedStagingTable, orderBy,
 		)
 
-		// Step 1: Upsert latest non-deleted rows (data changes)
+		// Step 1: Upsert latest non-deleted rows (data changes).
+		// Use UPDATE ... FROM + INSERT instead of ON CONFLICT so
+		// la."_cdc_unchanged_cols" is read once per row, not once per column.
+		onTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "la")
+		unchangedRef := ""
+		if hasUnchangedCols {
+			unchangedRef = fmt.Sprintf(`la."%s"`, destination.CDCUnchangedColsColumn)
+		}
 		upsertSQL := fmt.Sprintf(
-			`WITH %s INSERT INTO %s (%s) SELECT %s FROM latest_active ON CONFLICT (%s) DO UPDATE SET %s`,
+			`WITH %s, updated AS (
+				UPDATE %s AS target SET %s
+				FROM latest_active la
+				WHERE %s
+				RETURNING 1
+			)
+			INSERT INTO %s (%s)
+			SELECT %s FROM latest_active la
+			WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 			latestActive,
 			quotedTargetTable,
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedPKs, ", "),
-			buildConflictUpdateSet(nonPKColumns),
+			buildCDCConflictUpdateSet(nonPKColumns, "target", "la", unchangedRef),
+			onTargetCondition,
+			quotedTargetTable,
+			strings.Join(destQuoted, ", "),
+			strings.Join(destQuoted, ", "),
+			quotedTargetTable,
+			onTargetCondition,
 		)
 		config.Debug("[MERGE] Executing upsert for non-deleted rows: %s", upsertSQL)
 
@@ -507,14 +541,14 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 		// Step 2: Mark deletes only when the latest change is a delete
 		onLatestCondition := buildJoinCondition(opts.PrimaryKeys, "deleted", "latest")
-		onTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "deleted")
+		onDeleteTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "deleted")
 		updateDeletedSQL := fmt.Sprintf(
 			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true`,
 			latestAll,
 			latestDeleted,
 			quotedTargetTable,
 			onLatestCondition,
-			onTargetCondition,
+			onDeleteTargetCondition,
 		)
 		config.Debug("[MERGE] Executing UPDATE for deleted rows: %s", updateDeletedSQL)
 
@@ -526,17 +560,21 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// Non-CDC mode: efficient upsert using INSERT ... ON CONFLICT.
 		// DISTINCT ON dedupes staging by PK so the same target row isn't
 		// affected twice in one statement, which Postgres rejects with
-		// SQLSTATE 21000. No deterministic recency column exists outside
-		// CDC mode, so the winner per PK is arbitrary.
+		// SQLSTATE 21000. When an incremental key is set the latest row per PK
+		// wins; otherwise the winner is arbitrary.
 		pkList := strings.Join(quotedPKs, ", ")
+		orderBy := pkList
+		if opts.IncrementalKey != "" {
+			orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
+		}
 		upsertSQL := fmt.Sprintf(
 			`INSERT INTO %s (%s) SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s ON CONFLICT (%s) DO UPDATE SET %s`,
 			quotedTargetTable,
-			strings.Join(quotedColumns, ", "),
+			strings.Join(destQuoted, ", "),
 			pkList,
-			strings.Join(quotedColumns, ", "),
+			strings.Join(destQuoted, ", "),
 			quotedStagingTable,
-			pkList,
+			orderBy,
 			pkList,
 			buildConflictUpdateSet(nonPKColumns),
 		)
@@ -571,9 +609,16 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
+	lockSQL := buildDeleteInsertLockSQL(quotedTargetTable)
+	config.Debug("[DELETE+INSERT] Locking target table: %s", lockSQL)
+	if _, err := tx.Exec(ctx, lockSQL); err != nil {
+		config.LogFailedQuery(lockSQL, err)
+		return fmt.Errorf("failed to lock target table: %w", err)
+	}
+
 	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE "%s" >= $1 AND "%s" <= $2`,
-		quotedTargetTable, opts.IncrementalKey, opts.IncrementalKey,
+		`DELETE FROM %s WHERE %s >= $1 AND %s <= $2`,
+		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
 	)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
@@ -604,6 +649,10 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 
 	config.Debug("[DELETE+INSERT] Delete+Insert completed in %v", time.Since(startOp))
 	return nil
+}
+
+func buildDeleteInsertLockSQL(quotedTargetTable string) string {
+	return fmt.Sprintf("LOCK TABLE %s IN EXCLUSIVE MODE", quotedTargetTable)
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
@@ -765,6 +814,8 @@ func (d *PostgresDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 	return *maxLSN, nil
 }
 
+func (d *PostgresDestination) SupportsCDCUnchangedCols() bool { return true }
+
 func (d *PostgresDestination) SupportsCDCMerge() bool {
 	return true
 }
@@ -879,7 +930,7 @@ func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf(`"%s"`, col)
+		quoted[i] = fmt.Sprintf(`"%s"`, strings.ReplaceAll(col, `"`, `""`))
 	}
 	return quoted
 }
@@ -904,7 +955,7 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf(`%s."%s" = %s."%s"`, targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf(`%s.%s = %s.%s`, targetAlias, destination.QuoteIdentifier(key), sourceAlias, destination.QuoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -914,9 +965,39 @@ func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 func buildConflictUpdateSet(columns []string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf(`"%s" = EXCLUDED."%s"`, col, col)
+		sets[i] = fmt.Sprintf(`%s = EXCLUDED.%s`, destination.QuoteIdentifier(col), destination.QuoteIdentifier(col))
 	}
 	return strings.Join(sets, ", ")
+}
+
+func buildCDCConflictUpdateSet(columns []string, targetAlias, sourceAlias, unchangedRef string) string {
+	sets := make([]string, len(columns))
+	for i, col := range columns {
+		if destination.IsCDCMetaColumn(col) || unchangedRef == "" {
+			sets[i] = fmt.Sprintf(`"%s" = %s."%s"`, col, sourceAlias, col)
+			continue
+		}
+		sets[i] = cdcMergeAssign(
+			col,
+			fmt.Sprintf(`%s."%s"`, targetAlias, col),
+			fmt.Sprintf(`%s."%s"`, sourceAlias, col),
+			unchangedRef,
+		)
+	}
+	return strings.Join(sets, ", ")
+}
+
+func cdcUnchangedColsJSONLiteral(colName string) string {
+	b, _ := json.Marshal([]string{colName})
+	return strings.ReplaceAll(string(b), "'", "''")
+}
+
+func cdcMergeAssign(col, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	lit := cdcUnchangedColsJSONLiteral(col)
+	return fmt.Sprintf(
+		`"%s" = CASE WHEN %s::jsonb @> '%s'::jsonb THEN %s ELSE %s END`,
+		col, unchangedColsExpr, lit, targetExpr, sourceExpr,
+	)
 }
 
 // buildChangeConditions builds change detection conditions using IS DISTINCT FROM.
@@ -926,7 +1007,7 @@ func buildChangeConditions(columns []string, targetAlias, sourceAlias string) st
 	}
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
-		conditions[i] = fmt.Sprintf(`%s."%s" IS DISTINCT FROM %s."%s"`, targetAlias, col, sourceAlias, col)
+		conditions[i] = fmt.Sprintf(`%s.%s IS DISTINCT FROM %s.%s`, targetAlias, destination.QuoteIdentifier(col), sourceAlias, destination.QuoteIdentifier(col))
 	}
 	return strings.Join(conditions, " OR ")
 }
@@ -935,7 +1016,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToPostgres(col)
-		colDefs = append(colDefs, fmt.Sprintf(`"%s" %s`, col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf(`%s %s`, destination.QuoteIdentifier(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", table, strings.Join(colDefs, ",\n  "))
@@ -943,7 +1024,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf(`"%s"`, k)
+			quotedKeys[i] = destination.QuoteIdentifier(k)
 		}
 		sql += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}

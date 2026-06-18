@@ -1,3 +1,9 @@
+# /// script
+# requires-python = ">=3.12,<3.13"
+# dependencies = [
+#     "airbyte==0.47.0",
+# ]
+# ///
 """Benchmark script for Airbyte (PyAirbyte)."""
 
 import argparse

@@ -19,13 +19,13 @@ func TestMondayPipeline(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	key := os.Getenv("MONDAY_API_KEY")
-	if key == "" {
-		t.Skip("Set MONDAY_API_KEY to run Monday integration tests")
+	token := os.Getenv("MONDAY_API_TOKEN")
+	if token == "" {
+		t.Skip("Set MONDAY_API_TOKEN to run Monday integration tests")
 	}
 
 	ctx := context.Background()
-	sourceURI := fmt.Sprintf("monday://?api_key=%s", key)
+	sourceURI := fmt.Sprintf("monday://?api_token=%s", token)
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, fmt.Sprintf("monday_%d.duckdb", time.Now().UnixNano()))
@@ -356,7 +356,9 @@ func TestMondayPipeline(t *testing.T) {
 				{Name: "updated_at", DataType: schema.TypeTimestampTZ},
 				{Name: "edited_at", DataType: schema.TypeTimestampTZ},
 				{Name: "creator_id", DataType: schema.TypeString},
+				{Name: "creator_name", DataType: schema.TypeString},
 				{Name: "item_id", DataType: schema.TypeString},
+				{Name: "item_name", DataType: schema.TypeString},
 				{Name: "assets", DataType: schema.TypeString},
 				{Name: "replies", DataType: schema.TypeString},
 				{Name: "likes", DataType: schema.TypeString},
@@ -496,6 +498,134 @@ func TestMondayPipeline(t *testing.T) {
 						"is_default_workspace": true,
 						"state":                "active",
 						"account_product_id":   "6121987",
+					},
+				},
+			},
+		},
+		// items: the new resource lands board rows with column_values as JSON.
+		// 2 + 1 + 3 + 3 items across the four boards.
+		{
+			SourceTable: "items",
+			DestTable:   "main.monday_items",
+			KeyColumn:   "id",
+			ExpectedSchema: []schema.Column{
+				{Name: "board_id", DataType: schema.TypeString},
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "name", DataType: schema.TypeString},
+				{Name: "state", DataType: schema.TypeString},
+				{Name: "created_at", DataType: schema.TypeTimestampTZ},
+				{Name: "updated_at", DataType: schema.TypeTimestampTZ},
+				{Name: "creator_id", DataType: schema.TypeString},
+				{Name: "group_id", DataType: schema.TypeString},
+				{Name: "group_title", DataType: schema.TypeString},
+				{Name: "column_values", DataType: schema.TypeJSON},
+			},
+			ExpectedRowCount: 9,
+		},
+		// items scoped to a single board -> only that board's items (items_count = 3).
+		{
+			SourceTable:      "items:5091839751",
+			DestTable:        "main.monday_items_initial",
+			KeyColumn:        "id",
+			ExpectedRowCount: 3,
+			ExpectedSchema: []schema.Column{
+				{Name: "board_id", DataType: schema.TypeString},
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "name", DataType: schema.TypeString},
+				{Name: "column_values", DataType: schema.TypeJSON},
+			},
+		},
+		// :linked returns the master board's own items plus any linked sub-boards
+		// (board name == master item title). No sub-board names match on this
+		// account, so it returns at least the master's own 3 items.
+		{
+			SourceTable:         "items:5091839751:linked",
+			DestTable:           "main.monday_items_linked",
+			KeyColumn:           "id",
+			MinExpectedRowCount: 3,
+			ExpectedSchema: []schema.Column{
+				{Name: "board_id", DataType: schema.TypeString},
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "column_values", DataType: schema.TypeJSON},
+			},
+		},
+		// board_columns scoped to a single board.
+		{
+			SourceTable:         "board_columns:5091839751",
+			DestTable:           "main.monday_board_columns_scoped",
+			KeyColumn:           "board_id || '~' || id",
+			MinExpectedRowCount: 3,
+			ExpectedSchema: []schema.Column{
+				{Name: "board_id", DataType: schema.TypeString},
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "title", DataType: schema.TypeString},
+				{Name: "type", DataType: schema.TypeString},
+			},
+			Rows: []testutil.ExpectedRow{
+				{ID: "5091839751~project_owner", Fields: map[string]any{"board_id": "5091839751", "title": "Owner", "type": "people"}},
+				{ID: "5091839751~project_status", Fields: map[string]any{"board_id": "5091839751", "title": "Status", "type": "status"}},
+				{ID: "5091839751~project_timeline", Fields: map[string]any{"board_id": "5091839751", "title": "Timeline", "type": "timeline"}},
+			},
+		},
+		// board_views scoped to a single board.
+		{
+			SourceTable:         "board_views:5091839751",
+			DestTable:           "main.monday_board_views_scoped",
+			KeyColumn:           "board_id || '~' || id",
+			MinExpectedRowCount: 1,
+			ExpectedSchema: []schema.Column{
+				{Name: "board_id", DataType: schema.TypeString},
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "name", DataType: schema.TypeString},
+				{Name: "type", DataType: schema.TypeString},
+			},
+		},
+		// boards scoped to a single board -> exactly that board.
+		{
+			SourceTable:      "boards:5091839751",
+			DestTable:        "main.monday_boards_scoped",
+			KeyColumn:        "id",
+			ExpectedRowCount: 1,
+			ExpectedSchema: []schema.Column{
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "name", DataType: schema.TypeString},
+				{Name: "items_count", DataType: schema.TypeInt64},
+			},
+			Rows: []testutil.ExpectedRow{
+				{
+					ID: "5091839751",
+					Fields: map[string]any{
+						"name":        "initial project",
+						"items_count": int64(3),
+					},
+				},
+			},
+		},
+		// updates scoped to a single board -> only updates on that board's items,
+		// enriched with item_name + creator_name. One update on the Marketing
+		// Campaigns board.
+		{
+			SourceTable:      "updates:5091841883",
+			DestTable:        "main.monday_updates_scoped",
+			KeyColumn:        "id",
+			ExpectedRowCount: 1,
+			ExpectedSchema: []schema.Column{
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "body", DataType: schema.TypeString},
+				{Name: "creator_id", DataType: schema.TypeString},
+				{Name: "creator_name", DataType: schema.TypeString},
+				{Name: "item_id", DataType: schema.TypeString},
+				{Name: "item_name", DataType: schema.TypeString},
+			},
+			Rows: []testutil.ExpectedRow{
+				{
+					ID: "523528666",
+					Fields: map[string]any{
+						"body":         "Email campaign draft ready for review.",
+						"creator_id":   "99910119",
+						"creator_name": "Gong Test",
+						"item_id":      "2723608951",
+						"item_name":    "Task 1",
 					},
 				},
 			},

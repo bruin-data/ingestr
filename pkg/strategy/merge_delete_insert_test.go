@@ -120,6 +120,25 @@ func TestDeleteInsertStrategy_Validate(t *testing.T) {
 	}
 }
 
+func TestDeleteInsertStrategy_Execute_RejectsUnsupportedDestinationBeforeStaging(t *testing.T) {
+	job, _, dest := minimalJob()
+	job.Config.IncrementalStrategy = config.StrategyDeleteInsert
+	job.Config.IncrementalKey = "id"
+	dest.noDeleteInsert = true
+
+	strat := &DeleteInsertStrategy{}
+	err := strat.Execute(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected unsupported destination error")
+	}
+	if !strings.Contains(err.Error(), "does not support delete+insert strategy") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(dest.prepareCalls) != 0 || len(dest.writeCalls) != 0 || len(dest.diCalls) != 0 {
+		t.Fatalf("expected no staging work, got prepare=%d write=%d di=%d", len(dest.prepareCalls), len(dest.writeCalls), len(dest.diCalls))
+	}
+}
+
 func TestDeleteInsertStrategy_Execute_SkipsWhenNoIntervalDetected(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyDeleteInsert

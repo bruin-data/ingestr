@@ -165,13 +165,13 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	config.Debug("[CDC] Reading snapshot data from %s", s.tableName)
 
 	// Build select query (excluding CDC columns as they don't exist in source)
-	sourceColumns := s.tableSchema.Columns[:len(s.tableSchema.Columns)-3] // Remove CDC columns
+	sourceColumns := s.tableSchema.Columns[:sourceColumnCount(s.tableSchema)]
 	colNames := make([]string, len(sourceColumns))
 	for i, col := range sourceColumns {
-		colNames[i] = fmt.Sprintf(`"%s"`, col.Name)
+		colNames[i] = quoteIdentifier(col.Name)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), s.tableName)
+	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteTableName(s.tableName))
 	config.Debug("[CDC] Snapshot query: %s", query)
 
 	rows, err := tx.Query(ctx, query)
@@ -187,6 +187,14 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 
 	lsnStr := FormatLSN(lsn)
 	syncedAt := time.Now().UTC()
+
+	// In streaming mode, snapshot batches carry the snapshot's consistent-point
+	// LSN as a commit token. It is always safe to confirm: streaming begins from
+	// this LSN, so nothing earlier remains to be read.
+	var commitToken any
+	if opts.Streaming {
+		commitToken = lsn
+	}
 
 	// Build Arrow schema including CDC columns
 	arrowSchema := buildArrowSchema(s.tableSchema.Columns)
@@ -208,7 +216,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 		totalRows += count
 		config.Debug("[CDC] Snapshot batch %d: %d rows (total: %d)", batchNum, count, totalRows)
 
-		results <- source.RecordBatchResult{Batch: record}
+		results <- source.RecordBatchResult{Batch: record, CommitToken: commitToken}
 	}
 
 	config.Debug("[CDC] Snapshot completed: %d rows in %d batches", totalRows, batchNum)
@@ -239,13 +247,10 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 			arrowconv.AppendValue(builders[i], convertValue(val, columns[i]))
 		}
 
-		// Append CDC columns
-		// _cdc_lsn
 		builders[len(columns)].(*array.StringBuilder).Append(lsn)
-		// _cdc_deleted (false for snapshot rows)
 		builders[len(columns)+1].(*array.BooleanBuilder).Append(false)
-		// _cdc_synced_at
 		builders[len(columns)+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
+		builders[len(columns)+3].(*array.StringBuilder).Append("[]")
 
 		rowCount++
 

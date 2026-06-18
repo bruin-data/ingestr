@@ -2,6 +2,7 @@ package cratedb
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -39,5 +40,5 @@ func (d *Dialect) TypeName(col schema.Column) string {
 }
 
 func (d *Dialect) QuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
 }

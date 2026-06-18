@@ -34,12 +34,16 @@ func (s *DeleteInsertStrategy) RequiresIncrementalKey() bool {
 }
 
 func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) error {
+	if !job.Destination.SupportsDeleteInsertStrategy() {
+		return fmt.Errorf("destination %s does not support delete+insert strategy", job.Destination.GetScheme())
+	}
+
 	stagingTable := GenerateStagingTableName(job.Config.DestTable, "di", job.Config.StagingDataset)
 	fmt.Printf("[DELETE+INSERT] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       job.Config.DestTable,
-		Schema:      job.Schema,
+		Schema:      destination.DestinationTableSchema(job.Schema),
 		DropFirst:   false,
 		PrimaryKeys: job.Config.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
@@ -79,12 +83,6 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	records, err := job.GetRecords(ctx, readOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
-	}
-
-	// Apply batch transformation for discard_row/discard_value modes
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
 	}
 
 	intervalTracker := NewIntervalTracker(job.Config.IncrementalKey)

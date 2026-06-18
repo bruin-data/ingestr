@@ -103,6 +103,7 @@ func TestTypeForStep(t *testing.T) {
 		StepExtract:      typeIngestrExtract,
 		StepLoad:         typeIngestrLoad,
 		StepDDL:          typeIngestrLoad,
+		StepEvolve:       typeIngestrLoad,
 		StepSwap:         typeIngestrLoad,
 		StepCleanup:      typeIngestrLoad,
 		StepTruncate:     typeIngestrLoad,

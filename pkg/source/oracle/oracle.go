@@ -527,9 +527,9 @@ func quoteIdentifier(name string) string {
 func quoteTable(table string) string {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
-		return fmt.Sprintf("\"%s\".\"%s\"", strings.ToUpper(parts[0]), strings.ToUpper(parts[1]))
+		return quoteIdentifier(strings.ToUpper(parts[0])) + "." + quoteIdentifier(strings.ToUpper(parts[1]))
 	}
-	return fmt.Sprintf("\"%s\"", strings.ToUpper(table))
+	return quoteIdentifier(strings.ToUpper(table))
 }
 
 func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) (arrow.RecordBatch, int64, error) {

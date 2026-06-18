@@ -36,6 +36,52 @@ Alternatively, you can install it with pip:
 pip install ingestr
 ```
 
+The pip package can also be used from Python. Install the SDK extra for Python data ingestion:
+
+```sh
+pip install 'ingestr[sdk]'
+```
+
+Python rows, generators, and DataFrames are sent to the bundled `ingestr` binary as Arrow IPC streams by default:
+
+```python
+import ingestr
+
+ingestr.ingest(
+    [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Grace"}],
+    dest_uri="duckdb:///tmp/warehouse.duckdb",
+    dest_table="main.people",
+)
+```
+
+DataFrames and yielded data use the same Arrow stream transport:
+
+```python
+ingestr.ingest(df, dest_uri="duckdb:///tmp/warehouse.duckdb", dest_table="main.events")
+
+def events():
+    yield [{"id": 1, "event": "signup"}]
+    yield [{"id": 2, "event": "purchase"}]
+
+ingestr.ingest(events, dest_uri="postgresql://...", dest_table="public.events")
+```
+
+For push-style code, omit the data argument and use `ingest` as a context manager. The context value accepts the same shapes as `ingestr.ingest(data, ...)`:
+
+```python
+with ingestr.ingest(dest_uri="postgresql://...", dest_table="public.events") as ingest:
+    for response in client.list_events():
+        ingest(response["items"])
+```
+
+For very large already-materialized data, use the existing mmap Arrow IPC file transport:
+
+```python
+ingestr.ingest(df, dest_uri="duckdb:///tmp/warehouse.duckdb", dest_table="main.events", transport="mmap")
+```
+
+For full CLI pass-through, use `ingestr.run(["ingest", "--source-uri", "...", "--dest-uri", "...", "--source-table", "..."])`, or `ingestr.run_cli(...)` for keyword arguments that map to CLI flags.
+
 
 ## Quickstart
 
@@ -160,6 +206,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
+        <td>MaxCompute</td>
+        <td>✅</td>
+        <td>✅</td>
+    </tr>
+    <tr>
         <td>Microsoft Fabric</td>
         <td>✅</td>
         <td>✅</td>
@@ -263,6 +314,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>API-Football</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>AppsFlyer</td>
         <td>✅</td>
         <td>-</td>
@@ -301,6 +357,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>Azure Data Lake Storage Gen2</td>
         <td>✅</td>
         <td>✅</td>
+    </tr>
+    <tr>
+        <td>BallDontLie FIFA</td>
+        <td>✅</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Bruin</td>
@@ -344,6 +405,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>Fluxx</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>football-data.org</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -469,6 +535,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>Notion</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Paddle</td>
         <td>✅</td>
         <td>-</td>
     </tr>

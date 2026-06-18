@@ -41,10 +41,11 @@ type Transaction interface {
 
 // MergeOptions contains parameters for merge operations.
 type MergeOptions struct {
-	StagingTable string
-	TargetTable  string
-	PrimaryKeys  []string
-	Columns      []string
+	StagingTable   string
+	TargetTable    string
+	PrimaryKeys    []string
+	Columns        []string
+	IncrementalKey string
 }
 
 // DeleteInsertOptions contains parameters for delete+insert operations.
@@ -145,6 +146,15 @@ type CDCMergeAware interface {
 // write atomically visible after the write phase completes.
 type AtomicCommitWriter interface {
 	SupportsAtomicCommitWrites() bool
+}
+
+// MultiTableNamer is an optional interface for destinations whose table names
+// cannot embed a multi-table source's qualified name verbatim (e.g. BigQuery
+// table IDs cannot contain dots). It maps a source table name like
+// "dbo.orders" plus the configured destination schema to a destination table
+// name. Destinations without this interface get "<destSchema>.<sourceTable>".
+type MultiTableNamer interface {
+	DestTableName(destSchema, sourceTable string) string
 }
 
 // ExactRowCountWaiter is an optional interface for destinations that can

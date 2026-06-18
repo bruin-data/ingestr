@@ -34,13 +34,15 @@ type MultiTableReplicator struct {
 	lsnFilter     LSNUpdater
 	clientXLogPos pglogrepl.LSN
 	standbyTimer  time.Time
+	lastMessageAt time.Time
 	started       bool
+	streaming     bool
 
 	// Buffered batches from a single transaction (may contain multiple tables)
 	pendingBatches []DecodedBatch
 }
 
-func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTableInfo, cdcConfig CDCConfig, startLSN pglogrepl.LSN, lsnFilter LSNUpdater) (*MultiTableReplicator, error) {
+func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTableInfo, cdcConfig CDCConfig, startLSN pglogrepl.LSN, lsnFilter LSNUpdater, streaming bool) (*MultiTableReplicator, error) {
 	decoder := NewMultiTableDecoder(tables)
 
 	return &MultiTableReplicator{
@@ -52,8 +54,39 @@ func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTable
 		lsnFilter:     lsnFilter,
 		clientXLogPos: startLSN,
 		standbyTimer:  time.Now(),
+		lastMessageAt: time.Now(),
 		started:       false,
+		streaming:     streaming,
 	}, nil
+}
+
+// PendingLowWater reports the lowest LSN of any change received but not yet
+// emitted: batches buffered from a multi-table transaction plus an in-flight
+// transaction whose COMMIT has not arrived.
+func (r *MultiTableReplicator) PendingLowWater() (pglogrepl.LSN, bool) {
+	low := pglogrepl.LSN(0)
+	found := false
+	for _, b := range r.pendingBatches {
+		if !found || b.LSN < low {
+			low = b.LSN
+			found = true
+		}
+	}
+	if lsn, ok := r.decoder.InFlightTxLSN(); ok {
+		if !found || lsn < low {
+			low = lsn
+		}
+		found = true
+	}
+	return low, found
+}
+
+func (r *MultiTableReplicator) standbyStatus() pglogrepl.StandbyStatusUpdate {
+	var committed pglogrepl.LSN
+	if r.streaming && r.source.pos != nil {
+		committed = r.source.pos.Committed()
+	}
+	return standbyUpdate(r.streaming, r.clientXLogPos, committed, r.startLSN)
 }
 
 func (r *MultiTableReplicator) Start(ctx context.Context) error {
@@ -97,10 +130,11 @@ func (r *MultiTableReplicator) CurrentLSN() pglogrepl.LSN {
 	return r.clientXLogPos
 }
 
-// NextBatch returns the next batch, its source table name, and a flag indicating WAL activity.
-// Returns (nil, "", false, nil) when no data is available.
-// Returns (nil, "", true, nil) when WAL data was received but no complete batch yet (e.g., buffering transaction).
-func (r *MultiTableReplicator) NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, string, bool, error) {
+// NextBatch returns the next batch, its source table name, the LSN of the
+// transaction that produced it, and a flag indicating WAL activity.
+// Returns (nil, "", 0, false, nil) when no data is available.
+// Returns (nil, "", 0, true, nil) when WAL data was received but no complete batch yet (e.g., buffering transaction).
+func (r *MultiTableReplicator) NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, string, pglogrepl.LSN, bool, error) {
 	// Return buffered batches first
 	if len(r.pendingBatches) > 0 {
 		batch := r.pendingBatches[0]
@@ -111,62 +145,69 @@ func (r *MultiTableReplicator) NextBatch(ctx context.Context, batchSize int) (ar
 			r.lsnFilter.updateProcessedLSN(batch.TableName, batch.LSN)
 		}
 
-		return batch.Batch, batch.TableName, true, nil
+		return batch.Batch, batch.TableName, batch.LSN, true, nil
 	}
 
 	// Start replication if not yet started
 	if !r.started {
 		if err := r.Start(ctx); err != nil {
-			return nil, "", false, err
+			return nil, "", 0, false, err
 		}
 	}
 
-	// Send standby status periodically
+	// Send standby status periodically. A send failure means the replication
+	// connection is broken, so surface it rather than spinning on dead reads.
 	if time.Since(r.standbyTimer) > 10*time.Second {
 		err := pglogrepl.SendStandbyStatusUpdate(
 			ctx,
 			r.source.replConn,
-			pglogrepl.StandbyStatusUpdate{
-				WALWritePosition: r.clientXLogPos,
-			},
+			r.standbyStatus(),
 		)
 		if err != nil {
-			config.Debug("[CDC] Failed to send standby status: %v", err)
+			return nil, "", 0, false, fmt.Errorf("failed to send standby status (replication connection lost): %w", err)
 		}
 		r.standbyTimer = time.Now()
 	}
 
-	// Set a short deadline for receiving messages
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	// Bound a single receive so the loop can react to cancellation and flush
+	// idle batches. See receiveTimeout for why this is not sub-second.
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, receiveTimeout)
 	defer cancel()
 
 	msg, err := r.source.replConn.ReceiveMessage(ctxWithTimeout)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, "", false, ctx.Err()
+			return nil, "", 0, false, ctx.Err()
 		}
-		// Timeout is expected when no data is available
+		// Timeout is expected when no data is available. But total silence for
+		// longer than deadConnectionTimeout (no data and no keepalives) means a
+		// dead or half-open connection that the per-call read timeout would mask forever.
 		if ctxWithTimeout.Err() != nil {
-			return nil, "", false, nil
+			if time.Since(r.lastMessageAt) > deadConnectionTimeout {
+				return nil, "", 0, false, fmt.Errorf("no message from server for %s; replication connection appears dead", deadConnectionTimeout)
+			}
+			return nil, "", 0, false, nil
 		}
-		return nil, "", false, fmt.Errorf("failed to receive message: %w", err)
+		return nil, "", 0, false, fmt.Errorf("failed to receive message: %w", err)
 	}
 
+	r.lastMessageAt = time.Now()
+
 	if msg == nil {
-		return nil, "", false, nil
+		return nil, "", 0, false, nil
 	}
 
 	switch msg := msg.(type) {
 	case *pgproto3.CopyData:
 		if len(msg.Data) == 0 {
-			return nil, "", true, nil // Received a message, even if empty
+			return nil, "", 0, true, nil // Received a message, even if empty
 		}
 
 		switch msg.Data[0] {
 		case pglogrepl.PrimaryKeepaliveMessageByteID:
 			pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
 			if err != nil {
-				return nil, "", true, fmt.Errorf("failed to parse keepalive: %w", err)
+				return nil, "", 0, true, fmt.Errorf("failed to parse keepalive: %w", err)
 			}
 
 			if pkm.ReplyRequested {
@@ -180,14 +221,14 @@ func (r *MultiTableReplicator) NextBatch(ctx context.Context, batchSize int) (ar
 		case pglogrepl.XLogDataByteID:
 			xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
 			if err != nil {
-				return nil, "", true, fmt.Errorf("failed to parse xlog data: %w", err)
+				return nil, "", 0, true, fmt.Errorf("failed to parse xlog data: %w", err)
 			}
 
 			config.Debug("[CDC] Received XLogData at LSN %s, data len=%d, first byte=%x", xld.WALStart, len(xld.WALData), xld.WALData[0])
 
 			batches, err := r.decoder.Decode(xld.WALData, xld.WALStart)
 			if err != nil {
-				return nil, "", true, fmt.Errorf("failed to decode WAL data: %w", err)
+				return nil, "", 0, true, fmt.Errorf("failed to decode WAL data: %w", err)
 			}
 
 			if len(batches) > 0 {
@@ -213,7 +254,7 @@ func (r *MultiTableReplicator) NextBatch(ctx context.Context, batchSize int) (ar
 			}
 
 			if len(filteredBatches) == 0 {
-				return nil, "", true, nil // WAL data received but no new batches (filtered or buffered)
+				return nil, "", 0, true, nil // WAL data received but no new batches (filtered or buffered)
 			}
 
 			// Return first batch, buffer the rest
@@ -227,9 +268,9 @@ func (r *MultiTableReplicator) NextBatch(ctx context.Context, batchSize int) (ar
 				r.lsnFilter.updateProcessedLSN(first.TableName, first.LSN)
 			}
 
-			return first.Batch, first.TableName, true, nil
+			return first.Batch, first.TableName, first.LSN, true, nil
 		}
 	}
 
-	return nil, "", true, nil // Received some message type we don't handle
+	return nil, "", 0, true, nil // Received some message type we don't handle
 }

@@ -78,4 +78,10 @@ ingestr ingest \
     see https://github.com/dlt-hub/dlt/issues/2248
 -->
 > [!WARNING]
-> Clickhouse currently doesn't support `delete+insert`, `merge` or `scd2` incremental strategies.
+> ingestr does not use ClickHouse transactions. ClickHouse `delete+insert` is supported as a best-effort two-step operation: ingestr runs `ALTER TABLE ... DELETE`, waits for the mutation to finish, and then inserts rows from the staging table. This is not a single atomic transaction.
+
+## Supported destination strategies
+
+When using ClickHouse as a destination, ingestr supports `replace`, `append`, `merge`, `delete+insert`, `truncate+insert`, and `scd2`.
+
+`delete+insert` does not use ClickHouse's experimental transaction feature. Concurrent ingestr runs writing to the same ClickHouse table can still interleave between the delete and insert steps.

@@ -16,6 +16,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -264,7 +265,7 @@ func TestWriteLoadJobChunksSplitsJSONLByLoaderFileSize(t *testing.T) {
 	close(records)
 
 	var writers []*trackingWriteCloser
-	chunks, rowsWritten, err := dest.writeLoadJobChunks(context.Background(), records, loadJobFormatJSONL, 2, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
+	chunks, rowsWritten, err := dest.writeLoadJobChunks(context.Background(), records, loadJobFormatJSONL, 2, nil, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
 		writer := &trackingWriteCloser{}
 		writers = append(writers, writer)
 		return stagedLoadChunk{index: part}, writer, nil
@@ -302,7 +303,7 @@ func TestWriteLoadJobChunksSplitsParquetByLoaderFileSize(t *testing.T) {
 	close(records)
 
 	var writers []*trackingWriteCloser
-	chunks, rowsWritten, err := dest.writeLoadJobChunks(context.Background(), records, loadJobFormatParquet, 2, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
+	chunks, rowsWritten, err := dest.writeLoadJobChunks(context.Background(), records, loadJobFormatParquet, 2, nil, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
 		writer := &trackingWriteCloser{}
 		writers = append(writers, writer)
 		return stagedLoadChunk{index: part}, writer, nil
@@ -338,7 +339,7 @@ func TestWriteLoadJobChunksKeepsExactBoundaryChunks(t *testing.T) {
 	close(records)
 
 	var writers []*trackingWriteCloser
-	chunks, rowsWritten, err := dest.writeLoadJobChunks(context.Background(), records, loadJobFormatParquet, 2, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
+	chunks, rowsWritten, err := dest.writeLoadJobChunks(context.Background(), records, loadJobFormatParquet, 2, nil, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
 		writer := &trackingWriteCloser{}
 		writers = append(writers, writer)
 		return stagedLoadChunk{index: part}, writer, nil
@@ -363,6 +364,56 @@ func TestWriteLoadJobChunksKeepsExactBoundaryChunks(t *testing.T) {
 		if writers[i].Len() == 0 {
 			t.Fatalf("writer %d received no parquet bytes", i)
 		}
+	}
+}
+
+func TestWriteLoadJobChunksCastsParquetToTargetSchema(t *testing.T) {
+	dest := &BigQueryDestination{}
+	records := make(chan source.RecordBatchResult, 1)
+	// Source batch carries "id" as INT64
+	records <- source.RecordBatchResult{Batch: makeTestRecordBatch(t, 1, 2, 3)}
+	close(records)
+
+	// ...but the staging table the evolution plan created declares it FLOAT64.
+	target := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+	}, nil)
+
+	var writers []*trackingWriteCloser
+	chunks, rowsWritten, err := dest.writeLoadJobChunks(context.Background(), records, loadJobFormatParquet, 0, target, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
+		writer := &trackingWriteCloser{}
+		writers = append(writers, writer)
+		return stagedLoadChunk{index: part}, writer, nil
+	})
+	if err != nil {
+		t.Fatalf("writeLoadJobChunks returned error: %v", err)
+	}
+	if rowsWritten != 3 {
+		t.Fatalf("rowsWritten = %d, want 3", rowsWritten)
+	}
+	if len(writers) != 1 || len(chunks) != 1 {
+		t.Fatalf("len(chunks)=%d len(writers)=%d, want 1/1", len(chunks), len(writers))
+	}
+
+	pf, err := file.NewParquetReader(bytes.NewReader(writers[0].Bytes()))
+	if err != nil {
+		t.Fatalf("failed to open parquet bytes: %v", err)
+	}
+	defer func() { _ = pf.Close() }()
+	arrowReader, err := pqarrow.NewFileReader(pf, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	if err != nil {
+		t.Fatalf("failed to create arrow reader: %v", err)
+	}
+	sc, err := arrowReader.Schema()
+	if err != nil {
+		t.Fatalf("failed to read parquet arrow schema: %v", err)
+	}
+	fields, ok := sc.FieldsByName("id")
+	if !ok || len(fields) == 0 {
+		t.Fatalf("id field missing from parquet schema %v", sc)
+	}
+	if fields[0].Type.ID() != arrow.FLOAT64 {
+		t.Fatalf("id parquet type = %s, want float64 (int64 batch must be cast to the target/staging schema)", fields[0].Type)
 	}
 }
 
@@ -498,8 +549,18 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "bigquery aborted transaction reason",
+			err:  gcbq.Error{Reason: "aborted", Message: "Transaction is aborted due to concurrent update"},
+			want: true,
+		},
+		{
 			name: "bigquery backend error message hint",
 			err:  gcbq.Error{Reason: "", Message: "The job encountered an error during execution. Retrying the job may solve the problem."},
+			want: true,
+		},
+		{
+			name: "bigquery concurrent update message",
+			err:  gcbq.Error{Reason: "invalidQuery", Message: "Could not serialize access to table due to concurrent update"},
 			want: true,
 		},
 		{
@@ -541,6 +602,35 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 				t.Fatalf("isRetryableLoadJobError() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRetryDelayForQueryJobAddsJitterForConcurrentUpdates(t *testing.T) {
+	oldJitter := queryJobJitter
+	defer func() { queryJobJitter = oldJitter }()
+
+	var gotMax time.Duration
+	queryJobJitter = func(max time.Duration) time.Duration {
+		gotMax = max
+		return 123 * time.Millisecond
+	}
+
+	err := gcbq.Error{Reason: "aborted", Message: "Could not serialize access due to concurrent update"}
+	delay := retryDelayForQueryJob(2, err)
+	if gotMax != 3*time.Second {
+		t.Fatalf("jitter max = %v, want 3s", gotMax)
+	}
+	if delay != 2*time.Second+123*time.Millisecond {
+		t.Fatalf("delay = %v, want 2.123s", delay)
+	}
+
+	gotMax = 0
+	delay = retryDelayForQueryJob(2, gcbq.Error{Reason: "backendError", Message: "backend"})
+	if gotMax != 0 {
+		t.Fatalf("jitter called for non-concurrent error with max %v", gotMax)
+	}
+	if delay != 2*time.Second {
+		t.Fatalf("non-concurrent delay = %v, want 2s", delay)
 	}
 }
 

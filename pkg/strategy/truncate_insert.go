@@ -67,7 +67,7 @@ func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *Ingesti
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       targetTable,
-		Schema:      job.Schema,
+		Schema:      destination.DestinationTableSchema(job.Schema),
 		DropFirst:   false,
 		PrimaryKeys: job.Config.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
@@ -105,11 +105,6 @@ func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *Ingesti
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
-	}
-
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
 	}
@@ -139,7 +134,7 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       targetTable,
-		Schema:      job.Schema,
+		Schema:      destination.DestinationTableSchema(job.Schema),
 		DropFirst:   false,
 		PrimaryKeys: job.Config.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
@@ -181,11 +176,6 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
-	}
-
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
 	}
@@ -212,10 +202,11 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 
 	config.Debug("[TRUNCATE+INSERT] Executing deduplicated insert via merge from staging")
 	if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
-		StagingTable: stagingTable,
-		TargetTable:  targetTable,
-		PrimaryKeys:  job.Config.PrimaryKeys,
-		Columns:      job.Schema.ColumnNames(),
+		StagingTable:   stagingTable,
+		TargetTable:    targetTable,
+		PrimaryKeys:    job.Config.PrimaryKeys,
+		Columns:        job.Schema.ColumnNames(),
+		IncrementalKey: job.Config.IncrementalKey,
 	}); err != nil {
 		return fmt.Errorf("failed to insert from staging: %w", err)
 	}

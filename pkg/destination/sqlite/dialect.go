@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -38,7 +39,7 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		return "INTEGER"
-	case schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
+	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
 		return "INTEGER"
 	case schema.TypeFloat32, schema.TypeFloat64:
 		return "REAL"
@@ -60,5 +61,5 @@ func (d *Dialect) TypeName(col schema.Column) string {
 }
 
 func (d *Dialect) QuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
 }

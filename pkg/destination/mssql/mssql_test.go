@@ -35,6 +35,55 @@ func TestBuildCreateTableSQL_CapsLongStringPrimaryKeyLength(t *testing.T) {
 	assertContains(t, sql, "[name] NVARCHAR(1000)")
 }
 
+func TestBuildDeleteInsertDeleteSQLUsesTableLock(t *testing.T) {
+	sql := buildDeleteInsertDeleteSQL("dbo.events", "updated_at")
+
+	assertContains(t, sql, "DELETE FROM [dbo].[events] WITH (TABLOCKX, HOLDLOCK)")
+	assertContains(t, sql, "[updated_at] >= @p1")
+	assertContains(t, sql, "[updated_at] <= @p2")
+}
+
+func TestRowsPerSecondAllowsZeroDuration(t *testing.T) {
+	if got := rowsPerSecond(10, 0); got != 0 {
+		t.Fatalf("rowsPerSecond with zero duration = %v, want 0", got)
+	}
+	if got := rowsPerSecond(10, time.Second); got != 10 {
+		t.Fatalf("rowsPerSecond = %v, want 10", got)
+	}
+}
+
+func TestBuildTableIsEmptyForUpdateSQLLocksTarget(t *testing.T) {
+	sql := buildTableIsEmptyForUpdateSQL("dbo.events")
+
+	assertContains(t, sql, "FROM [dbo].[events] WITH (TABLOCKX, HOLDLOCK)")
+}
+
+func TestBuildInsertDedupSQLUsesTableLockAndDedupsPrimaryKey(t *testing.T) {
+	sql := buildInsertDedupSQL(
+		"dbo.events",
+		"_bruin_staging.events_raw",
+		[]string{"id"},
+		[]string{"id", "name", "updated_at"},
+		"updated_at",
+	)
+
+	assertContains(t, sql, "INSERT INTO [dbo].[events] WITH (TABLOCK) ([id], [name], [updated_at])")
+	assertContains(t, sql, "ROW_NUMBER() OVER (PARTITION BY [id] ORDER BY [updated_at] DESC)")
+	assertContains(t, sql, "FROM [_bruin_staging].[events_raw]")
+}
+
+func TestBuildInsertDedupSQLAllowsNoIncrementalKey(t *testing.T) {
+	sql := buildInsertDedupSQL(
+		"dbo.events",
+		"_bruin_staging.events_raw",
+		[]string{"id"},
+		[]string{"id", "name"},
+		"",
+	)
+
+	assertContains(t, sql, "ROW_NUMBER() OVER (PARTITION BY [id] ORDER BY (SELECT NULL))")
+}
+
 func TestDialectTypeNameUsesDestinationTypeMapping(t *testing.T) {
 	dialect := &Dialect{}
 	columns := []schema.Column{

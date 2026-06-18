@@ -269,6 +269,40 @@ func TestDuckDBWithPrimaryKeyAutoDetection(t *testing.T) {
 	validateSQLitePKResults(t, destPath, 50)
 }
 
+func TestPostgresWithPrimaryKeyAutoDetection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	sourceURI := sharedPostgresURI(t, "source")
+	sourceSchema := uniqueSchemaName(t, "src")
+	ensurePostgresSchema(t, ctx, sourceURI, sourceSchema)
+	t.Cleanup(func() { dropPostgresSchema(t, ctx, sourceURI, sourceSchema) })
+
+	tmpFile, err := os.CreateTemp("", "test_postgres_pk_*.db")
+	require.NoError(t, err)
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+	setupPostgresSourceDataWithPK(t, ctx, sourceURI, sourceSchema, "users")
+
+	cfg := &config.IngestConfig{
+		SourceURI:           sourceURI,
+		SourceTable:         sourceSchema + ".users",
+		DestURI:             fmt.Sprintf("sqlite:///%s", tmpFile.Name()),
+		DestTable:           "pk_table",
+		IncrementalStrategy: "merge",
+	}
+
+	p := pipeline.New(cfg)
+	err = p.Run(ctx)
+	require.NoError(t, err, "Pipeline should auto-detect Postgres PKs and run merge")
+
+	validateSQLitePKResults(t, tmpFile.Name(), 50)
+}
+
 // TestPostgresToPostgresCamelCaseColumns reproduces a bug where the naming
 // convention renames source columns (e.g. FirstName → first_name) in-place,
 // and the renamed names are then used in the source SELECT query, causing:

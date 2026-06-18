@@ -9,6 +9,7 @@ type DataType int
 const (
 	TypeUnknown DataType = iota
 	TypeBoolean
+	TypeInt8
 	TypeInt16
 	TypeInt32
 	TypeInt64
@@ -26,6 +27,49 @@ const (
 	TypeUUID
 	TypeArray
 )
+
+func (d DataType) String() string {
+	switch d {
+	case TypeBoolean:
+		return "boolean"
+	case TypeInt8:
+		return "int8"
+	case TypeInt16:
+		return "int16"
+	case TypeInt32:
+		return "int32"
+	case TypeInt64:
+		return "int64"
+	case TypeFloat32:
+		return "float32"
+	case TypeFloat64:
+		return "float64"
+	case TypeDecimal:
+		return "decimal"
+	case TypeString:
+		return "string"
+	case TypeBinary:
+		return "binary"
+	case TypeDate:
+		return "date"
+	case TypeTime:
+		return "time"
+	case TypeTimestamp:
+		return "timestamp_ntz"
+	case TypeTimestampTZ:
+		return "timestamp"
+	case TypeInterval:
+		return "interval"
+	case TypeJSON:
+		return "json"
+	case TypeUUID:
+		return "uuid"
+	case TypeArray:
+		return "array"
+	default:
+		return "unknown"
+	}
+}
 
 type Column struct {
 	Name         string
@@ -73,6 +117,8 @@ func DataTypeToArrowType(col Column) arrow.DataType {
 		return UnknownArrowType
 	case TypeBoolean:
 		return arrow.FixedWidthTypes.Boolean
+	case TypeInt8:
+		return arrow.PrimitiveTypes.Int8
 	case TypeInt16:
 		return arrow.PrimitiveTypes.Int16
 	case TypeInt32:
@@ -105,7 +151,7 @@ func DataTypeToArrowType(col Column) arrow.DataType {
 	case TypeTimestampTZ:
 		return &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
 	case TypeArray:
-		elemType := DataTypeToArrowType(Column{DataType: col.ArrayType})
+		elemType := DataTypeToArrowType(Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale})
 		return arrow.ListOf(elemType)
 	default:
 		return arrow.BinaryTypes.String

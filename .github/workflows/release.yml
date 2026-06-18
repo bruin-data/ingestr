@@ -12,6 +12,8 @@ env:
   INSTALL_URL: https://getbruin.com/install/ingestr
   INGESTR_DISABLE_TELEMETRY: "true"
   DISABLE_TELEMETRY: "true"
+  REGISTRY: ghcr.io
+  IMAGE_NAME: bruin-data/ingestr
 
 jobs:
   integration-tests:
@@ -30,6 +32,8 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
       - name: Run test suite
         run: make ${{ matrix.suite }}
 
@@ -289,9 +293,110 @@ jobs:
           echo "Installer script tests failed after ${max_attempts} attempts on Linux." >&2
           exit 1
 
+  docker-build:
+    runs-on: depot-ubuntu-latest
+    name: Docker Build
+    needs: [integration-tests]
+    permissions:
+      # allow issuing OIDC tokens for this workflow run
+      id-token: write
+      # allow at least reading the repo contents, add other permissions if necessary
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: bruin-data
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Set up Depot
+        uses: depot/setup-action@v1
+
+      - name: Build and push Docker image
+        uses: depot/build-push-action@v1
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            BRANCH_NAME=${{ github.ref_name }}
+
+  docker-test:
+    runs-on: depot-ubuntu-latest
+    name: Test Docker Image
+    needs: [docker-build]
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: bruin-data
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the built Docker image
+        run: |
+          echo "Pulling image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+
+      - name: Test version output
+        run: |
+          docker run --rm \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
+            ingestr --version
+
+      - name: Test CSV to DuckDB ingestion
+        run: |
+          echo "Creating test fixtures..."
+          mkdir -p /tmp/docker-test
+          chmod 777 /tmp/docker-test
+          printf 'id,name\n1,alice\n2,bob\n' > /tmp/docker-test/sample.csv
+
+          echo "Running CSV -> DuckDB ingestion..."
+          docker run --rm \
+            -v /tmp/docker-test:/tmp/docker-test \
+            -w /tmp/docker-test \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
+            ingestr ingest \
+              --source-uri 'csv:///tmp/docker-test/sample.csv' \
+              --source-table sample \
+              --dest-uri 'duckdb:///tmp/docker-test/out.duckdb' \
+              --dest-table main.sample \
+              --yes
+
+          echo "Verifying DuckDB output was created..."
+          ls -la /tmp/docker-test/out.duckdb
+
+      - name: Cleanup test files
+        if: always()
+        run: |
+          # The image runs as user `ingestr` and may create files the runner can't
+          # delete; cleanup via a root container avoids permission issues.
+          docker run --rm --user root \
+            -v /tmp/docker-test:/tmp/docker-test \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
+            sh -c 'find /tmp/docker-test -mindepth 1 -delete' || true
+          rm -rf /tmp/docker-test
+
   release:
     runs-on: ubuntu-latest
-    needs: [install-unix, install-windows]
+    needs: [install-unix, install-windows, docker-test]
     steps:
       - uses: actions/checkout@v4
       - name: Extract tag from ref

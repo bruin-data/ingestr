@@ -45,7 +45,7 @@ copy_notice_file() {
 		printf '===============================================================================\n'
 		printf '%s\n' "$rel"
 		printf '===============================================================================\n\n'
-		cat "$abs"
+		sed 's/[[:blank:]]*$//' "$abs"
 		printf '\n'
 	} >>"$out"
 }
@@ -105,7 +105,7 @@ EOF
 		printf '===============================================================================\n'
 		printf '%s/%s (%s, manually audited)\n' "$module" "$license_file" "$license_name"
 		printf '===============================================================================\n\n'
-		cat "$dir/$license_file"
+		sed 's/[[:blank:]]*$//' "$dir/$license_file"
 	} >>"$out"
 }
 
@@ -118,6 +118,7 @@ ignore_flags=(
 	# pinned below so version or license text changes force a manual review.
 	--ignore "github.com/segmentio/asm"
 	--ignore "modernc.org/mathutil"
+	--ignore "github.com/DATA-DOG/go-sqlmock"
 	# This Darwin/cgo package is selected differently by host settings. Keep the
 	# required notice deterministic across local machines and CI.
 	--ignore "github.com/99designs/go-keychain"
@@ -253,6 +254,14 @@ append_manual_module_license \
 	"LICENSE" \
 	"BSD-3-Clause" \
 	"bfa9bf72a72ca009fd62a8f84fca3dca67e51d93af96352723646599898b6cf5" \
+	"$generated_file"
+
+append_manual_module_license \
+	"github.com/DATA-DOG/go-sqlmock" \
+	"v1.5.2" \
+	"LICENSE" \
+	"BSD-3-Clause" \
+	"e3a6ae97f6eef8ce17e44d5f22adba594c4ea2b592c4be7ee9b387c441ef34d6" \
 	"$generated_file"
 
 append_manual_module_license \

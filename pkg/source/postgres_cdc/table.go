@@ -15,13 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// CDC metadata column names
-const (
-	CDCLSNColumn      = "_cdc_lsn"
-	CDCDeletedColumn  = "_cdc_deleted"
-	CDCSyncedAtColumn = "_cdc_synced_at"
-)
-
 // FormatLSN formats an LSN as zero-padded hex (e.g. "00000000/0001FA40").
 // This ensures correct lexicographic ordering when stored as strings,
 // which is critical for SQL MAX(_cdc_lsn) queries in destinations.
@@ -54,6 +47,11 @@ func NewCDCTable(src *PostgresCDCSource, req source.TableRequest) (*CDCTable, er
 	if len(pks) == 0 {
 		pks = tableSchema.PrimaryKeys
 	}
+	// Reconcile the effective merge keys into the schema so the decoder,
+	// compaction, and unchanged-TOAST fill all key off the same keys the
+	// destination merge uses (user-provided keys are otherwise ignored when the
+	// table has no database primary key).
+	tableSchema.PrimaryKeys = pks
 
 	// CDC requires merge strategy with primary keys
 	strategy := req.Strategy
@@ -212,23 +210,35 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 	}
 
 	pkQuery := `
-		SELECT a.attname
-		FROM pg_index i
-		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-		WHERE i.indrelid = ($1 || '.' || $2)::regclass
-		AND i.indisprimary
+		SELECT kcu.column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_catalog = kcu.constraint_catalog
+			AND tc.constraint_schema = kcu.constraint_schema
+			AND tc.constraint_name = kcu.constraint_name
+			AND tc.table_schema = kcu.table_schema
+			AND tc.table_name = kcu.table_name
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+			AND tc.table_schema = $1
+			AND tc.table_name = $2
+		ORDER BY kcu.ordinal_position
 	`
 
 	var primaryKeys []string
 	pkRows, err := pool.Query(ctx, pkQuery, schemaName, tableName)
-	if err == nil {
-		defer func() { pkRows.Close() }()
-		for pkRows.Next() {
-			var pkName string
-			if err := pkRows.Scan(&pkName); err == nil {
-				primaryKeys = append(primaryKeys, pkName)
-			}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query primary keys: %w", err)
+	}
+	defer func() { pkRows.Close() }()
+	for pkRows.Next() {
+		var pkName string
+		if err := pkRows.Scan(&pkName); err != nil {
+			return nil, fmt.Errorf("failed to scan primary key row: %w", err)
 		}
+		primaryKeys = append(primaryKeys, pkName)
+	}
+	if err := pkRows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating primary key rows: %w", err)
 	}
 
 	for i := range columns {
@@ -265,6 +275,11 @@ func addCDCColumns(tableSchema *schema.TableSchema) *schema.TableSchema {
 			DataType: schema.TypeTimestampTZ,
 			Nullable: false,
 		},
+		{
+			Name:     CDCUnchangedColsColumn,
+			DataType: schema.TypeString,
+			Nullable: false,
+		},
 	}
 
 	newSchema := *tableSchema
@@ -279,6 +294,15 @@ func parseTableName(table string) (string, string) {
 		return parts[0], parts[1]
 	}
 	return "public", table
+}
+
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+func quoteTableName(table string) string {
+	schemaName, tableName := parseTableName(table)
+	return quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName)
 }
 
 func buildArrowSchema(columns []schema.Column) *arrow.Schema {

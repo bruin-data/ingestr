@@ -87,9 +87,15 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 }
 
 func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
+	// --stream forces continuous mode regardless of the URI ?mode= param.
+	mode := r.cdcConfig.Mode
+	if opts.Streaming {
+		mode = ModeStream
+	}
+
 	// For batch mode, get the current WAL LSN as our target before starting
 	var targetLSN pglogrepl.LSN
-	if r.cdcConfig.Mode == ModeBatch {
+	if mode == ModeBatch {
 		var lsnStr string
 		err := r.source.queryPool.QueryRow(ctx, "SELECT pg_current_wal_lsn()::text").Scan(&lsnStr)
 		if err != nil {
@@ -108,7 +114,7 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 	cdcConfigWithSlot := r.cdcConfig
 	cdcConfigWithSlot.SlotName = slotName
 
-	repl, err := NewReplicator(r.source, r.tableName, r.tableSchema, cdcConfigWithSlot, startLSN)
+	repl, err := NewReplicator(r.source, r.tableName, r.tableSchema, cdcConfigWithSlot, startLSN, opts.Streaming)
 	if err != nil {
 		return fmt.Errorf("failed to create replicator: %w", err)
 	}
@@ -120,49 +126,62 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 	}
 
 	accum := newBatchAccumulator(batchSize)
+	pkNames := r.tableSchema.PrimaryKeys
+	accum.transform = func(_ string, batch arrow.RecordBatch) arrow.RecordBatch {
+		return forwardFillUnchanged(batch, pkNames)
+	}
 
-	return streamLoop(ctx, repl, r.cdcConfig.Mode, targetLSN, batchSize, accum, results)
+	return streamLoop(ctx, repl, mode, targetLSN, batchSize, accum, results, opts.Streaming)
 }
 
 // batchReplicator is the subset of *Replicator that streamLoop depends on,
 // allowing the accumulation loop to be tested without a live connection.
 type batchReplicator interface {
-	NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, bool, error)
+	NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, pglogrepl.LSN, bool, error)
 	CurrentLSN() pglogrepl.LSN
+	PendingLowWater() (pglogrepl.LSN, bool)
 }
 
 // streamLoop pulls batches from repl and feeds them through the accumulator,
 // flushing only when the replicator reports a genuine idle period. Treating
 // every batch-less call as idle would flush after every transaction and defeat
 // accumulation entirely (see hadActivity in Replicator.NextBatch).
-func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetLSN pglogrepl.LSN, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult) error {
+//
+// When streaming, each flushed batch carries a CommitToken (a safe LSN) so the
+// pipeline can confirm the replication slot only after the data is durable.
+func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetLSN pglogrepl.LSN, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult, streaming bool) error {
+	var token tokenFunc
+	if streaming {
+		token = func() any { return safeCommitLSN(repl, accum) }
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			config.Debug("[CDC] Context cancelled, stopping stream")
-			accum.flushAll(results)
+			accum.flushAll(results, token)
 			return ctx.Err()
 		default:
 		}
 
-		batch, hadActivity, err := repl.NextBatch(ctx, batchSize)
+		batch, lsn, hadActivity, err := repl.NextBatch(ctx, batchSize)
 		if err != nil {
-			accum.flushAll(results)
+			accum.flushAll(results, token)
 			return fmt.Errorf("failed to get next batch: %w", err)
 		}
 
 		if batch != nil && batch.NumRows() > 0 {
-			accum.add("", batch)
+			accum.add("", batch, lsn)
 		}
 
-		accum.flushReady(results)
+		accum.flushReady(results, token)
 
 		// For batch mode, check if we've caught up to the target LSN
 		if mode == ModeBatch && targetLSN > 0 {
 			currentLSN := repl.CurrentLSN()
 			if currentLSN >= targetLSN {
 				config.Debug("[CDC] Batch mode: reached target LSN %s (current: %s)", targetLSN, currentLSN)
-				accum.flushAll(results)
+				accum.flushAll(results, token)
 				return nil
 			}
 		}
@@ -171,7 +190,7 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetL
 		// non-commit messages and keepalives count as activity, so we keep
 		// accumulating across transactions instead of flushing each one.
 		if !hadActivity {
-			accum.flushAll(results)
+			accum.flushAll(results, token)
 			time.Sleep(100 * time.Millisecond)
 		}
 	}

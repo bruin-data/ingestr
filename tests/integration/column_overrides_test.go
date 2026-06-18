@@ -103,6 +103,48 @@ func TestColumnOverrides_CSVToDuckDB_AppliesTypes(t *testing.T) {
 	assert.Equal(t, 3, readDuckDBRowCount(t, duckDBPath, "main.users"))
 }
 
+func TestColumnOverrides_CSVToDuckDB_TinyInt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	csvPath := filepath.Join(tmpDir, "users.csv")
+	require.NoError(t, os.WriteFile(csvPath, []byte(csvWithRows), 0o644))
+
+	duckDBPath := filepath.Join(tmpDir, "out.duckdb")
+	cfg := &config.IngestConfig{
+		SourceURI:           fmt.Sprintf("csv://%s", csvPath),
+		SourceTable:         "users",
+		DestURI:             fmt.Sprintf("duckdb:///%s", duckDBPath),
+		DestTable:           "main.users",
+		IncrementalStrategy: config.StrategyReplace,
+		Columns:             "age:tinyint",
+	}
+	require.NoError(t, cfg.Validate())
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	types := readDuckDBColumnTypes(t, duckDBPath, "main.users")
+	assert.Equal(t, "TINYINT", types["age"], "age should be overridden to 8-bit TINYINT")
+	assert.Equal(t, 3, readDuckDBRowCount(t, duckDBPath, "main.users"))
+
+	db := openDuckDBForTest(t, duckDBPath)
+	defer func() { _ = db.Close() }()
+	rows, err := db.Query("SELECT age FROM main.users ORDER BY age")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	var got []int64
+	for rows.Next() {
+		var age int64
+		require.NoError(t, rows.Scan(&age))
+		got = append(got, age)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []int64{25, 30, 35}, got, "8-bit integer values should round-trip intact")
+}
+
 func TestColumnMasking_CSVToDuckDB(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

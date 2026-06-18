@@ -29,6 +29,7 @@ var supportedTables = []string{
 	"account_roles",
 	"users",
 	"boards",
+	"items",
 	"workspaces",
 	"webhooks",
 	"updates",
@@ -142,6 +143,21 @@ var boardViewsFields = []schema.Column{
 	{Name: "access_level", DataType: schema.TypeString, Nullable: true},
 }
 
+var itemsFields = []schema.Column{
+	{Name: "board_id", DataType: schema.TypeString, Nullable: false},
+	{Name: "id", DataType: schema.TypeString, Nullable: false},
+	{Name: "name", DataType: schema.TypeString, Nullable: true},
+	{Name: "state", DataType: schema.TypeString, Nullable: true},
+	{Name: "created_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "updated_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "creator_id", DataType: schema.TypeString, Nullable: true},
+	{Name: "group_id", DataType: schema.TypeString, Nullable: true},
+	{Name: "group_title", DataType: schema.TypeString, Nullable: true},
+	// Raw cell data: a JSON array of {id, title, text, type, value} per column.
+	// Pivot downstream (join board_columns) into named columns.
+	{Name: "column_values", DataType: schema.TypeJSON, Nullable: true},
+}
+
 var workspacesFields = []schema.Column{
 	{Name: "id", DataType: schema.TypeString, Nullable: false},
 	{Name: "name", DataType: schema.TypeString, Nullable: true},
@@ -172,7 +188,9 @@ var updatesFields = []schema.Column{
 	{Name: "updated_at", DataType: schema.TypeTimestampTZ, Nullable: true},
 	{Name: "edited_at", DataType: schema.TypeTimestampTZ, Nullable: true},
 	{Name: "creator_id", DataType: schema.TypeString, Nullable: true},
+	{Name: "creator_name", DataType: schema.TypeString, Nullable: true},
 	{Name: "item_id", DataType: schema.TypeString, Nullable: true},
+	{Name: "item_name", DataType: schema.TypeString, Nullable: true},
 	{Name: "creator", DataType: schema.TypeJSON, Nullable: true},
 	{Name: "item", DataType: schema.TypeJSON, Nullable: true},
 	{Name: "assets", DataType: schema.TypeString, Nullable: true},
@@ -196,8 +214,8 @@ var tagsFields = []schema.Column{
 }
 
 type MondaySource struct {
-	apiKey string
-	client *httpclient.Client
+	apiToken string
+	client   *httpclient.Client
 }
 
 func NewMondaySource() *MondaySource {
@@ -213,18 +231,18 @@ func (s *MondaySource) HandlesIncrementality() bool {
 }
 
 func (s *MondaySource) Connect(ctx context.Context, uri string) error {
-	apiKey, err := ParseMondayUri(uri)
+	apiToken, err := ParseMondayUri(uri)
 	if err != nil {
 		return err
 	}
 
-	s.apiKey = apiKey
+	s.apiToken = apiToken
 	s.client = httpclient.New(
 		httpclient.WithBaseURL(graphqlBaseUrl),
 		httpclient.WithTimeout(60*time.Second),
 		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
 		httpclient.WithDebug(config.DebugMode),
-		httpclient.WithHeader("Authorization", s.apiKey),
+		httpclient.WithHeader("Authorization", s.apiToken),
 		httpclient.WithHeader("Content-Type", "application/json"),
 	)
 
@@ -239,7 +257,7 @@ func ParseMondayUri(uri string) (string, error) {
 
 	rest := strings.TrimPrefix(uri, "monday://")
 	if rest == "" || rest == "?" {
-		return "", fmt.Errorf("api_key is required in URI query parameters")
+		return "", fmt.Errorf("api_token is required in URI query parameters")
 	}
 
 	rest = strings.TrimPrefix(rest, "?")
@@ -249,12 +267,12 @@ func ParseMondayUri(uri string) (string, error) {
 		return "", fmt.Errorf("failed to parse monday URI query: %w", err)
 	}
 
-	apiKey := values.Get("api_key")
-	if apiKey == "" {
-		return "", fmt.Errorf("api_key query parameter is required")
+	apiToken := values.Get("api_token")
+	if apiToken == "" {
+		return "", fmt.Errorf("api_token query parameter is required")
 	}
 
-	return apiKey, nil
+	return apiToken, nil
 }
 
 func (s *MondaySource) Close(ctx context.Context) error {
@@ -265,7 +283,7 @@ func (s *MondaySource) Close(ctx context.Context) error {
 }
 
 func (s *MondaySource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
-	tableName := req.Name
+	tableName, _ := parseTableSpec(req.Name)
 	if !isValidTable(tableName) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", req.Name, strings.Join(supportedTables, ", "))
 	}
@@ -294,7 +312,7 @@ func (s *MondaySource) GetTable(ctx context.Context, req source.TableRequest) (s
 			return tableSchema, nil
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, tableName, opts)
+			return s.read(ctx, req.Name, opts)
 		},
 	}, nil
 }
@@ -315,6 +333,9 @@ func (s *MondaySource) getSchema(ctx context.Context, table string) (*schema.Tab
 		primaryKeys = nil
 	case "boards":
 		fields = boardsFields
+		primaryKeys = []string{"id"}
+	case "items":
+		fields = itemsFields
 		primaryKeys = []string{"id"}
 	case "workspaces":
 		fields = workspacesFields
@@ -356,8 +377,30 @@ func (s *MondaySource) read(ctx context.Context, table string, opts source.ReadO
 	if !isValidTable(tableName) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", table, strings.Join(supportedTables, ", "))
 	}
+
+	// The board-aware tables accept a `:<board_id>[,<id>...]` param to scope to
+	// specific boards (empty -> all boards in the account):
+	//   items:<ids> / items:<master>:linked / updates:<ids> /
+	//   board_columns:<ids> / board_views:<ids> / boards:<ids>
+	var boardIDParams []string
+	itemsLinked := false
 	if len(params) > 0 {
-		return nil, fmt.Errorf("%s table must be in the format `%s`", tableName, tableName)
+		switch tableName {
+		case "items", "updates", "board_columns", "board_views", "boards":
+		default:
+			return nil, fmt.Errorf("%s table must be in the format `%s`", tableName, tableName)
+		}
+		if tableName == "items" && params[len(params)-1] == "linked" {
+			itemsLinked = true
+			params = params[:len(params)-1]
+		}
+		for _, p := range params {
+			for _, id := range strings.Split(p, ",") {
+				if trimmed := strings.TrimSpace(id); trimmed != "" {
+					boardIDParams = append(boardIDParams, trimmed)
+				}
+			}
+		}
 	}
 
 	results := make(chan source.RecordBatchResult, 8)
@@ -374,13 +417,15 @@ func (s *MondaySource) read(ctx context.Context, table string, opts source.ReadO
 		case "users":
 			err = s.readUsers(ctx, opts, results)
 		case "boards":
-			err = s.readBoards(ctx, opts, results)
+			err = s.readBoards(ctx, opts, results, boardIDParams)
+		case "items":
+			err = s.readItems(ctx, opts, results, boardIDParams, itemsLinked)
 		case "workspaces":
 			err = s.readWorkspaces(ctx, opts, results)
 		case "webhooks":
 			err = s.readWebhooks(ctx, opts, results)
 		case "updates":
-			err = s.readUpdates(ctx, opts, results)
+			err = s.readUpdates(ctx, opts, results, boardIDParams)
 		case "teams":
 			err = s.readTeams(ctx, opts, results)
 		case "tags":
@@ -388,9 +433,9 @@ func (s *MondaySource) read(ctx context.Context, table string, opts source.ReadO
 		case "custom_activities":
 			err = s.readCustomActivities(ctx, opts, results)
 		case "board_columns":
-			err = s.readBoardColumns(ctx, opts, results)
+			err = s.readBoardColumns(ctx, opts, results, boardIDParams)
 		case "board_views":
-			err = s.readBoardViews(ctx, opts, results)
+			err = s.readBoardViews(ctx, opts, results, boardIDParams)
 		default:
 			err = fmt.Errorf("unsupported table: %s", table)
 		}
@@ -880,8 +925,15 @@ func (s *MondaySource) readUsers(ctx context.Context, opts source.ReadOptions, r
 }
 
 // readUpdates reads updates with optional date filtering and sends them as record batches.
-func (s *MondaySource) readUpdates(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *MondaySource) readUpdates(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, boardIDs []string) error {
 	config.Debug("[Monday] Reading updates")
+
+	// Board-scoped mode: `updates:<board_id>` pulls only the given boards' item
+	// updates (Monday's top-level updates query can't filter by board, so this uses
+	// the nested boards->items->updates path) and supplies the item name.
+	if len(boardIDs) > 0 {
+		return s.readBoardScopedUpdates(ctx, opts, results, boardIDs)
+	}
 
 	pageSize := opts.PageSize
 	if pageSize <= 0 || pageSize > maxPageSize {
@@ -901,9 +953,11 @@ func (s *MondaySource) readUpdates(ctx context.Context, opts source.ReadOptions,
 			item_id
 			creator {
 				id
+				name
 			}
 			item {
 				id
+				name
 			}
 			assets {
 				id
@@ -1198,7 +1252,513 @@ func (s *MondaySource) readSimpleList(
 	return nil
 }
 
-func (s *MondaySource) readBoardColumns(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+// itemFieldsFragment is the item selection shared by the first-page and
+// next-page item queries. group{} and creator{} are flattened by
+// normalizeDictionaries into group_id/group_title/creator_id; column_values
+// (a list of multi-key objects) is JSON-encoded into the column_values column.
+const itemFieldsFragment = `
+	id
+	name
+	state
+	created_at
+	updated_at
+	creator {
+		id
+	}
+	group {
+		id
+		title
+	}
+	column_values {
+		id
+		text
+		value
+		type
+		column {
+			title
+		}
+	}`
+
+func cursorString(v interface{}) string {
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+// readItems streams the rows (items) of one or more boards, with cursor-based
+// items_page pagination. boardIDs empty -> every board in the account.
+// linked -> treat boardIDs as master boards and fan out to their linked sub-boards
+// (board name == master item title).
+func (s *MondaySource) readItems(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, boardIDs []string, linked bool) error {
+	config.Debug("[Monday] Reading items")
+
+	if linked {
+		if len(boardIDs) == 0 {
+			return fmt.Errorf("items:<master_board_id>:linked requires at least one master board id")
+		}
+		resolved, err := s.resolveLinkedBoardIDs(ctx, boardIDs)
+		if err != nil {
+			return err
+		}
+		config.Debug("[Monday] Resolved %d linked sub-boards from %d master board(s)", len(resolved), len(boardIDs))
+		// Include the master board(s) themselves alongside their linked sub-boards,
+		// so a single `items:<master>:linked` returns both the master's own rows and
+		// every sub-board's rows. Dedup preserves master-first ordering.
+		seen := make(map[string]struct{}, len(boardIDs)+len(resolved))
+		combined := make([]string, 0, len(boardIDs)+len(resolved))
+		for _, id := range boardIDs {
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				combined = append(combined, id)
+			}
+		}
+		for _, id := range resolved {
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				combined = append(combined, id)
+			}
+		}
+		boardIDs = combined
+	} else if len(boardIDs) == 0 {
+		ids, err := s.getAllBoardIDs(ctx, opts)
+		if err != nil {
+			return err
+		}
+		boardIDs = ids
+	}
+	if len(boardIDs) == 0 {
+		return nil
+	}
+
+	pageSize := opts.PageSize
+	if pageSize <= 0 || pageSize > maxPageSize {
+		pageSize = maxPageSize
+	}
+	limit := min(pageSize, maxPageSize)
+
+	firstPageQuery := `
+		query ($board_id: ID!, $limit: Int!) {
+		boards(ids: [$board_id]) {
+			items_page(limit: $limit) {
+				cursor
+				items {` + itemFieldsFragment + `
+				}
+			}
+		}
+	}
+	`
+	nextPageQuery := `
+		query ($cursor: String!, $limit: Int!) {
+		next_items_page(cursor: $cursor, limit: $limit) {
+			cursor
+			items {` + itemFieldsFragment + `
+			}
+		}
+	}
+	`
+
+	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	totalProcessed := 0
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, itemsFields, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build items record: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = batch[:0]
+		return nil
+	}
+
+	emit := func(boardID string, rawItems []interface{}) error {
+		for _, raw := range rawItems {
+			itemMap, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			itemMap["board_id"] = boardID
+			batch = append(batch, normalizeDictionaries(itemMap))
+			totalProcessed++
+			if len(batch) >= defaultBatchSize {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	for _, boardID := range boardIDs {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		data, err := s.executeGraphQL(ctx, firstPageQuery, map[string]interface{}{
+			"board_id": boardID,
+			"limit":    limit,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to execute items query for board %s: %w", boardID, err)
+		}
+
+		var response map[string]interface{}
+		if err := json.Unmarshal(data, &response); err != nil {
+			return fmt.Errorf("failed to unmarshal items response: %w", err)
+		}
+
+		boards, ok := response["boards"].([]interface{})
+		if !ok || len(boards) == 0 {
+			continue
+		}
+		boardMap, ok := boards[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		itemsPage, ok := boardMap["items_page"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		rawItems, _ := itemsPage["items"].([]interface{})
+		if err := emit(boardID, rawItems); err != nil {
+			return err
+		}
+
+		cursor := cursorString(itemsPage["cursor"])
+		for cursor != "" {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			data, err := s.executeGraphQL(ctx, nextPageQuery, map[string]interface{}{
+				"cursor": cursor,
+				"limit":  limit,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to execute next_items_page for board %s: %w", boardID, err)
+			}
+
+			var nextResp map[string]interface{}
+			if err := json.Unmarshal(data, &nextResp); err != nil {
+				return fmt.Errorf("failed to unmarshal next_items_page response: %w", err)
+			}
+
+			nextPage, ok := nextResp["next_items_page"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			rawItems, _ := nextPage["items"].([]interface{})
+			if err := emit(boardID, rawItems); err != nil {
+				return err
+			}
+			cursor = cursorString(nextPage["cursor"])
+		}
+	}
+
+	if err := flush(); err != nil {
+		return err
+	}
+	config.Debug("[Monday] Finished reading items: %d total records", totalProcessed)
+	return nil
+}
+
+// readBoardScopedUpdates streams one row per update on each board's items (with the
+// item name), cursor-paginated. Used when `updates` is scoped to specific boards;
+// Monday's top-level updates query cannot filter by board, so it walks
+// boards -> items_page -> updates instead.
+func (s *MondaySource) readBoardScopedUpdates(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, boardIDs []string) error {
+	config.Debug("[Monday] Reading board-scoped updates for %d board(s)", len(boardIDs))
+
+	const itemUpdates = `
+				id
+				name
+				updates(limit: 100) {
+					id
+					body
+					text_body
+					created_at
+					updated_at
+					creator { id name }
+				}`
+	firstQuery := `
+		query ($board_id: ID!, $limit: Int!) {
+		boards(ids: [$board_id]) {
+			items_page(limit: $limit) {
+				cursor
+				items {` + itemUpdates + `
+				}
+			}
+		}
+	}
+	`
+	nextQuery := `
+		query ($cursor: String!, $limit: Int!) {
+		next_items_page(cursor: $cursor, limit: $limit) {
+			cursor
+			items {` + itemUpdates + `
+			}
+		}
+	}
+	`
+
+	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	totalProcessed := 0
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, updatesFields, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build updates record: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = batch[:0]
+		return nil
+	}
+
+	emit := func(rawItems []interface{}) error {
+		for _, raw := range rawItems {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			updates, _ := item["updates"].([]interface{})
+			for _, u := range updates {
+				upd, ok := u.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				// Shape each update like an account-wide updates record, then let
+				// normalizeDictionaries flatten creator{id,name}/item{id,name} into
+				// creator_id/creator_name/item_id/item_name (matching updatesFields).
+				rec := map[string]interface{}{
+					"id":         upd["id"],
+					"body":       upd["body"],
+					"text_body":  upd["text_body"],
+					"created_at": upd["created_at"],
+					"updated_at": upd["updated_at"],
+					"creator":    upd["creator"],
+					"item":       map[string]interface{}{"id": item["id"], "name": item["name"]},
+				}
+				batch = append(batch, normalizeDictionaries(rec))
+				totalProcessed++
+				if len(batch) >= defaultBatchSize {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return nil
+	}
+
+	for _, boardID := range boardIDs {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		data, err := s.executeGraphQL(ctx, firstQuery, map[string]interface{}{"board_id": boardID, "limit": maxPageSize})
+		if err != nil {
+			return fmt.Errorf("failed to execute board-scoped updates query for board %s: %w", boardID, err)
+		}
+		var response map[string]interface{}
+		if err := json.Unmarshal(data, &response); err != nil {
+			return fmt.Errorf("failed to unmarshal board-scoped updates response: %w", err)
+		}
+		boards, ok := response["boards"].([]interface{})
+		if !ok || len(boards) == 0 {
+			continue
+		}
+		boardMap, ok := boards[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		itemsPage, ok := boardMap["items_page"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		rawItems, _ := itemsPage["items"].([]interface{})
+		if err := emit(rawItems); err != nil {
+			return err
+		}
+		cursor := cursorString(itemsPage["cursor"])
+		for cursor != "" {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			data, err := s.executeGraphQL(ctx, nextQuery, map[string]interface{}{"cursor": cursor, "limit": maxPageSize})
+			if err != nil {
+				return fmt.Errorf("failed to execute next_items_page (board_updates) for board %s: %w", boardID, err)
+			}
+			var nextResp map[string]interface{}
+			if err := json.Unmarshal(data, &nextResp); err != nil {
+				return fmt.Errorf("failed to unmarshal next_items_page (board_updates) response: %w", err)
+			}
+			nextPage, ok := nextResp["next_items_page"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			rawItems, _ := nextPage["items"].([]interface{})
+			if err := emit(rawItems); err != nil {
+				return err
+			}
+			cursor = cursorString(nextPage["cursor"])
+		}
+	}
+
+	if err := flush(); err != nil {
+		return err
+	}
+	config.Debug("[Monday] Finished reading board-scoped updates: %d total records", totalProcessed)
+	return nil
+}
+
+// resolveLinkedBoardIDs maps each master board's item titles to boards of the same
+// name (board name == master item title) and returns the deduped set of linked
+// sub-board ids.
+func (s *MondaySource) resolveLinkedBoardIDs(ctx context.Context, masterIDs []string) ([]string, error) {
+	nameToID, err := s.getBoardNameToID(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	linked := make(map[string]struct{})
+	for _, master := range masterIDs {
+		names, err := s.getBoardItemNames(ctx, master)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range names {
+			if id, ok := nameToID[name]; ok {
+				linked[id] = struct{}{}
+			}
+		}
+	}
+
+	out := make([]string, 0, len(linked))
+	for id := range linked {
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// getBoardNameToID returns a board name -> id map for every board in the account.
+func (s *MondaySource) getBoardNameToID(ctx context.Context) (map[string]string, error) {
+	const query = `query ($limit: Int!, $page: Int!) { boards(limit: $limit, page: $page) { id name } }`
+	nameToID := make(map[string]string)
+	itemsChan, errChan := s.paginateGraphQL(ctx, query, "boards", maxPageSize, nil)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case err, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+		case board, ok := <-itemsChan:
+			if !ok {
+				return nameToID, nil
+			}
+			name, _ := board["name"].(string)
+			if id := board["id"]; name != "" && id != nil {
+				nameToID[name] = fmt.Sprint(id)
+			}
+		}
+	}
+}
+
+// getBoardItemNames returns the names of every item on a board (cursor-paginated).
+func (s *MondaySource) getBoardItemNames(ctx context.Context, boardID string) ([]string, error) {
+	const firstQuery = `
+		query ($board_id: ID!, $limit: Int!) {
+		boards(ids: [$board_id]) {
+			items_page(limit: $limit) {
+				cursor
+				items { name }
+			}
+		}
+	}
+	`
+	const nextQuery = `
+		query ($cursor: String!, $limit: Int!) {
+		next_items_page(cursor: $cursor, limit: $limit) {
+			cursor
+			items { name }
+		}
+	}
+	`
+
+	var names []string
+	collect := func(rawItems []interface{}) {
+		for _, raw := range rawItems {
+			if m, ok := raw.(map[string]interface{}); ok {
+				if name, ok := m["name"].(string); ok && name != "" {
+					names = append(names, name)
+				}
+			}
+		}
+	}
+
+	data, err := s.executeGraphQL(ctx, firstQuery, map[string]interface{}{"board_id": boardID, "limit": maxPageSize})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch items for master board %s: %w", boardID, err)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	boards, ok := resp["boards"].([]interface{})
+	if !ok || len(boards) == 0 {
+		return names, nil
+	}
+	boardMap, _ := boards[0].(map[string]interface{})
+	itemsPage, ok := boardMap["items_page"].(map[string]interface{})
+	if !ok {
+		return names, nil
+	}
+	rawItems, _ := itemsPage["items"].([]interface{})
+	collect(rawItems)
+
+	cursor := cursorString(itemsPage["cursor"])
+	for cursor != "" {
+		data, err := s.executeGraphQL(ctx, nextQuery, map[string]interface{}{"cursor": cursor, "limit": maxPageSize})
+		if err != nil {
+			return nil, err
+		}
+		var nresp map[string]interface{}
+		if err := json.Unmarshal(data, &nresp); err != nil {
+			return nil, err
+		}
+		nextPage, ok := nresp["next_items_page"].(map[string]interface{})
+		if !ok {
+			break
+		}
+		rawItems, _ := nextPage["items"].([]interface{})
+		collect(rawItems)
+		cursor = cursorString(nextPage["cursor"])
+	}
+	return names, nil
+}
+
+func (s *MondaySource) readBoardColumns(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, boardIDs []string) error {
 	const query = `
 		query ($board_ids: [ID!]) {
 		boards(ids: $board_ids) {
@@ -1217,9 +1777,12 @@ func (s *MondaySource) readBoardColumns(ctx context.Context, opts source.ReadOpt
 	`
 	config.Debug("[Monday] Reading board columns")
 
-	boardIDs, err := s.getAllBoardIDs(ctx, opts)
-	if err != nil {
-		return err
+	if len(boardIDs) == 0 {
+		ids, err := s.getAllBoardIDs(ctx, opts)
+		if err != nil {
+			return err
+		}
+		boardIDs = ids
 	}
 	if len(boardIDs) == 0 {
 		return nil
@@ -1302,7 +1865,7 @@ func (s *MondaySource) readBoardColumns(ctx context.Context, opts source.ReadOpt
 	return nil
 }
 
-func (s *MondaySource) readBoardViews(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *MondaySource) readBoardViews(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, boardIDs []string) error {
 	const query = `
 		query ($board_ids: [ID!]) {
 		boards(ids: $board_ids) {
@@ -1320,9 +1883,12 @@ func (s *MondaySource) readBoardViews(ctx context.Context, opts source.ReadOptio
 	`
 	config.Debug("[Monday] Reading board views")
 
-	boardIDs, err := s.getAllBoardIDs(ctx, opts)
-	if err != nil {
-		return err
+	if len(boardIDs) == 0 {
+		ids, err := s.getAllBoardIDs(ctx, opts)
+		if err != nil {
+			return err
+		}
+		boardIDs = ids
 	}
 	if len(boardIDs) == 0 {
 		return nil
@@ -1447,10 +2013,7 @@ collectLoop:
 }
 
 // readBoards reads the boards information with pagination and sends it as record batches
-func (s *MondaySource) readBoards(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	const query = `
-		query ($limit: Int!, $page: Int!) {
-		boards(limit: $limit, page: $page) {
+const boardFieldsFragment = `
 			id
 			name
 			description
@@ -1483,12 +2046,52 @@ func (s *MondaySource) readBoards(ctx context.Context, opts source.ReadOptions, 
 			}
 			tags {
 				id
-				
-			}
+			}`
+
+func (s *MondaySource) readBoards(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, boardIDs []string) error {
+	// Default: paginate all boards in the account.
+	if len(boardIDs) == 0 {
+		query := `
+		query ($limit: Int!, $page: Int!) {
+		boards(limit: $limit, page: $page) {` + boardFieldsFragment + `
 		}
 	}
 	`
-	return s.readPaginatedList(ctx, opts, results, query, "boards", boardsFields, normalizeDictionaries, "boards")
+		return s.readPaginatedList(ctx, opts, results, query, "boards", boardsFields, normalizeDictionaries, "boards")
+	}
+
+	// Scoped: only the requested boards.
+	config.Debug("[Monday] Reading %d scoped board(s)", len(boardIDs))
+	query := `
+		query ($board_ids: [ID!]) {
+		boards(ids: $board_ids) {` + boardFieldsFragment + `
+		}
+	}
+	`
+	data, err := s.executeGraphQL(ctx, query, map[string]interface{}{"board_ids": boardIDs})
+	if err != nil {
+		return fmt.Errorf("failed to execute scoped boards query: %w", err)
+	}
+	var response map[string]interface{}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return fmt.Errorf("failed to unmarshal scoped boards response: %w", err)
+	}
+	boards, ok := response["boards"].([]interface{})
+	if !ok || len(boards) == 0 {
+		return nil
+	}
+	batch := make([]map[string]interface{}, 0, len(boards))
+	for _, raw := range boards {
+		if boardMap, ok := raw.(map[string]interface{}); ok {
+			batch = append(batch, normalizeDictionaries(boardMap))
+		}
+	}
+	record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, boardsFields, opts.ExcludeColumns)
+	if err != nil {
+		return fmt.Errorf("failed to build scoped boards record: %w", err)
+	}
+	results <- source.RecordBatchResult{Batch: record}
+	return nil
 }
 
 // readWorkspaces reads the workspaces information with pagination and sends it as record batches

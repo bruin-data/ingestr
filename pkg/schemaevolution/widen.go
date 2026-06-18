@@ -8,22 +8,23 @@ import (
 // Higher index = wider type.
 var wideningOrder = map[schema.DataType]int{
 	schema.TypeBoolean:     0,
-	schema.TypeInt16:       1,
-	schema.TypeInt32:       2,
-	schema.TypeInt64:       3,
-	schema.TypeFloat32:     4,
-	schema.TypeFloat64:     5,
-	schema.TypeDecimal:     6,
-	schema.TypeDate:        7,
-	schema.TypeTime:        8,
-	schema.TypeTimestamp:   9,
-	schema.TypeTimestampTZ: 10,
-	schema.TypeBinary:      10,
-	schema.TypeUUID:        10,
-	schema.TypeInterval:    10,
-	schema.TypeArray:       10,
-	schema.TypeString:      11,
-	schema.TypeJSON:        12,
+	schema.TypeInt8:        1,
+	schema.TypeInt16:       2,
+	schema.TypeInt32:       3,
+	schema.TypeInt64:       4,
+	schema.TypeFloat32:     5,
+	schema.TypeFloat64:     6,
+	schema.TypeDecimal:     7,
+	schema.TypeDate:        8,
+	schema.TypeTime:        9,
+	schema.TypeTimestamp:   10,
+	schema.TypeTimestampTZ: 11,
+	schema.TypeBinary:      11,
+	schema.TypeUUID:        11,
+	schema.TypeInterval:    11,
+	schema.TypeArray:       11,
+	schema.TypeString:      12,
+	schema.TypeJSON:        13,
 }
 
 // wideningPaths defines valid type widening paths.
@@ -31,6 +32,7 @@ var wideningOrder = map[schema.DataType]int{
 var wideningPaths = map[schema.DataType][]schema.DataType{
 	schema.TypeBoolean: {schema.TypeString, schema.TypeJSON},
 
+	schema.TypeInt8:    {schema.TypeInt16, schema.TypeInt32, schema.TypeInt64, schema.TypeFloat64, schema.TypeDecimal, schema.TypeString, schema.TypeJSON},
 	schema.TypeInt16:   {schema.TypeInt32, schema.TypeInt64, schema.TypeFloat64, schema.TypeDecimal, schema.TypeString, schema.TypeJSON},
 	schema.TypeInt32:   {schema.TypeInt64, schema.TypeFloat64, schema.TypeDecimal, schema.TypeString, schema.TypeJSON},
 	schema.TypeInt64:   {schema.TypeFloat64, schema.TypeDecimal, schema.TypeString, schema.TypeJSON},
@@ -87,14 +89,14 @@ func GetWidenedType(src, dest schema.DataType) (schema.DataType, string) {
 	if srcOrder > destOrder {
 		if CanWiden(dest, src) {
 			if src == schema.TypeString || src == schema.TypeJSON {
-				return src, "type widened to " + dataTypeName(src)
+				return src, "type widened to " + src.String()
 			}
 			return src, ""
 		}
 	} else {
 		if CanWiden(src, dest) {
 			if dest == schema.TypeString || dest == schema.TypeJSON {
-				return dest, "type widened to " + dataTypeName(dest)
+				return dest, "type widened to " + dest.String()
 			}
 			return dest, ""
 		}
@@ -140,45 +142,4 @@ func MergeDecimalPrecision(src, dest schema.Column) (precision, scale int) {
 	}
 
 	return precision, scale
-}
-
-func dataTypeName(dt schema.DataType) string {
-	switch dt {
-	case schema.TypeBoolean:
-		return "BOOLEAN"
-	case schema.TypeInt16:
-		return "INT16"
-	case schema.TypeInt32:
-		return "INT32"
-	case schema.TypeInt64:
-		return "INT64"
-	case schema.TypeFloat32:
-		return "FLOAT32"
-	case schema.TypeFloat64:
-		return "FLOAT64"
-	case schema.TypeDecimal:
-		return "DECIMAL"
-	case schema.TypeString:
-		return "STRING"
-	case schema.TypeBinary:
-		return "BINARY"
-	case schema.TypeDate:
-		return "DATE"
-	case schema.TypeTime:
-		return "TIME"
-	case schema.TypeTimestamp:
-		return "TIMESTAMP"
-	case schema.TypeTimestampTZ:
-		return "TIMESTAMPTZ"
-	case schema.TypeInterval:
-		return "INTERVAL"
-	case schema.TypeJSON:
-		return "JSON"
-	case schema.TypeUUID:
-		return "UUID"
-	case schema.TypeArray:
-		return "ARRAY"
-	default:
-		return "UNKNOWN"
-	}
 }

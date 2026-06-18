@@ -10,7 +10,7 @@ var DebugMode bool
 
 func Debug(format string, args ...interface{}) {
 	if DebugMode {
-		fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, args...))
+		fmt.Printf("%s\tDEBUG\t%s\n", time.Now().Format("2006-01-02T15:04:05.000Z0700"), fmt.Sprintf(format, args...))
 	}
 }
 
@@ -66,6 +66,7 @@ type IngestConfig struct {
 	Columns           string // Raw column overrides string (parsed by pipeline)
 	NoInference       bool   // Skip schema inference for unknown-schema sources and use Columns as the schema
 	Mask              []string
+	TrimWhitespace    bool
 
 	PipelinesDir   string
 	StagingBucket  string
@@ -74,6 +75,10 @@ type IngestConfig struct {
 
 	CDCResumeLSN  string // For CDC sources: resume from this LSN (auto-detected from destination)
 	CDCSlotSuffix string // For CDC sources: suffix appended to auto-generated slot names (derived from dest URI)
+
+	Stream        bool          // Continuous ingestion: flush buffered records on an interval or record-count trigger
+	FlushInterval time.Duration // Streaming mode: flush at least this often
+	FlushRecords  int           // Streaming mode: flush when this many records are buffered
 
 	// QueryAnnotations is a JSON object of external annotation keys (e.g. asset,
 	// pipeline) supplied by the caller. When set, ingestr prepends a
@@ -91,6 +96,8 @@ func DefaultConfig() *IngestConfig {
 		PageSize:            25000,
 		LoaderFileSize:      25000,
 		ExtractParallelism:  5,
+		FlushInterval:       30 * time.Second,
+		FlushRecords:        50000,
 	}
 }
 
@@ -117,12 +124,38 @@ func (c *IngestConfig) Validate() error {
 	if c.NoInference && strings.TrimSpace(c.Columns) == "" {
 		return &ValidationError{Field: "columns", Message: "is required when no-inference is enabled"}
 	}
+	if c.Stream {
+		if c.FullRefresh {
+			return &ValidationError{Field: "full-refresh", Message: "cannot be combined with --stream"}
+		}
+		if c.IntervalEnd != nil {
+			return &ValidationError{Field: "interval-end", Message: "cannot be combined with --stream (a bounded end contradicts continuous ingestion)"}
+		}
+		if c.SQLLimit > 0 {
+			return &ValidationError{Field: "sql-limit", Message: "cannot be combined with --stream"}
+		}
+		if c.FlushInterval <= 0 {
+			return &ValidationError{Field: "flush-interval", Message: "must be positive"}
+		}
+		if c.FlushRecords <= 0 {
+			return &ValidationError{Field: "flush-records", Message: "must be positive"}
+		}
+		switch c.IncrementalStrategy {
+		case "", StrategyMerge, StrategyAppend:
+		default:
+			return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q is not supported with --stream (only merge and append)", c.IncrementalStrategy)}
+		}
+	}
 	return nil
 }
 
 // IsCDCSource returns true if the source URI is a CDC source.
 func (c *IngestConfig) IsCDCSource() bool {
-	return strings.HasPrefix(c.SourceURI, "postgres+cdc://") || strings.HasPrefix(c.SourceURI, "postgresql+cdc://")
+	schemeEnd := strings.Index(c.SourceURI, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(c.SourceURI[:schemeEnd]), "+cdc")
 }
 
 type ValidationError struct {

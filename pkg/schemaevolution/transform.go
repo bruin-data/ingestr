@@ -203,11 +203,12 @@ func TransformBatchStream(ctx context.Context, batches <-chan source.RecordBatch
 			// Transform batch
 			transformed, err := transformer.Transform(ctx, result.Batch)
 			if err != nil {
-				out <- source.RecordBatchResult{Err: err}
+				out <- source.RecordBatchResult{Err: err, TableName: result.TableName}
 				continue
 			}
 
-			out <- source.RecordBatchResult{Batch: transformed}
+			result.Batch = transformed
+			out <- result
 		}
 	}()
 

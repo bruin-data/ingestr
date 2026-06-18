@@ -134,6 +134,7 @@ func TestDecoderHandleRelation(t *testing.T) {
 			{Name: CDCLSNColumn, DataType: schema.TypeString},
 			{Name: CDCDeletedColumn, DataType: schema.TypeBoolean},
 			{Name: CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+			{Name: CDCUnchangedColsColumn, DataType: schema.TypeString},
 		},
 	}
 
@@ -204,6 +205,7 @@ func TestDecoderBeginAndCommit(t *testing.T) {
 			{Name: CDCLSNColumn, DataType: schema.TypeString},
 			{Name: CDCDeletedColumn, DataType: schema.TypeBoolean},
 			{Name: CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+			{Name: CDCUnchangedColsColumn, DataType: schema.TypeString},
 		},
 	}
 
@@ -220,6 +222,246 @@ func TestDecoderBeginAndCommit(t *testing.T) {
 	batch, err := decoder.handleCommit()
 	require.NoError(t, err)
 	assert.Nil(t, batch)
+}
+
+func TestResolveColumnValue(t *testing.T) {
+	t.Run("unchanged uses old tuple on update", func(t *testing.T) {
+		change := Change{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+			OldValues: []interface{}{int32(1), `{"testCases":[1,2,3]}`, "pending"},
+		}
+		assert.Equal(t, `{"testCases":[1,2,3]}`, resolveColumnValue(change, 1))
+		assert.Equal(t, "done", resolveColumnValue(change, 2))
+	})
+
+	t.Run("unchanged without old tuple becomes nil", func(t *testing.T) {
+		change := Change{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), tupleUnchangedMarker},
+			OldValues: []interface{}{int32(1)},
+		}
+		assert.Nil(t, resolveColumnValue(change, 1))
+	})
+
+	t.Run("explicit null stays nil", func(t *testing.T) {
+		change := Change{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), nil},
+			OldValues: []interface{}{int32(1), `{"keep":true}`},
+		}
+		assert.Nil(t, resolveColumnValue(change, 1))
+	})
+}
+
+func TestUnchangedColumnsJSON(t *testing.T) {
+	cols := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt32},
+		{Name: "config_data", DataType: schema.TypeString},
+		{Name: "status", DataType: schema.TypeString},
+	}
+	change := Change{
+		Operation: "UPDATE",
+		Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+		OldValues: []interface{}{int32(1), `{"big":true}`, "pending"},
+	}
+	assert.Equal(t, `["config_data"]`, unchangedColumnsJSON(change, cols, 3))
+	assert.Equal(t, "[]", unchangedColumnsJSON(Change{Operation: "INSERT", Values: []interface{}{int32(1)}}, cols, 3))
+}
+
+func TestApplyIntraBatchFill(t *testing.T) {
+	cols := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt32},
+		{Name: "config_data", DataType: schema.TypeString},
+		{Name: "status", DataType: schema.TypeString},
+	}
+	tableSchema := &schema.TableSchema{
+		Columns:     append(cols, cdcMetaColumns()...),
+		PrimaryKeys: []string{"id"},
+	}
+
+	t.Run("insert then partial update fills unchanged from batch", func(t *testing.T) {
+		changes := []Change{
+			{
+				Operation: "INSERT",
+				Values:    []interface{}{int32(1), `{"big":true}`, "pending"},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"big":true}`, resolveColumnValue(changes[1], 1))
+		assert.Equal(t, "done", resolveColumnValue(changes[1], 2))
+	})
+
+	t.Run("filled column is dropped from unchanged cols", func(t *testing.T) {
+		// A changed value followed by a partial update that leaves the column
+		// unchanged, in the same commit. The latest row wins at the destination;
+		// because we now have an authoritative value in staging, the column must
+		// NOT be reported as unchanged or the merge would keep a stale target.
+		changes := []Change{
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), `{"v":"new"}`, "a"},
+				OldValues: []interface{}{int32(1)},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "b"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"v":"new"}`, resolveColumnValue(changes[1], 1))
+		assert.Equal(t, `[]`, unchangedColumnsJSON(changes[1], tableSchema.Columns, 3))
+	})
+
+	t.Run("explicit null then unchanged keeps the null", func(t *testing.T) {
+		// SET config_data = NULL, then a partial update that leaves it unchanged.
+		// The known value is NULL, so it must be propagated (column dropped from
+		// _cdc_unchanged_cols) rather than letting the destination resurrect the
+		// stale target value.
+		changes := []Change{
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), nil, "a"},
+				OldValues: []interface{}{int32(1)},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "b"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Nil(t, resolveColumnValue(changes[1], 1))
+		assert.Equal(t, `[]`, unchangedColumnsJSON(changes[1], tableSchema.Columns, 3))
+	})
+
+	t.Run("unfilled unchanged column stays in unchanged cols", func(t *testing.T) {
+		// No prior value available in the commit, so the column remains unchanged
+		// and the destination must fall back to the existing target value.
+		changes := []Change{
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "b"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Nil(t, resolveColumnValue(changes[0], 1))
+		assert.Equal(t, `["config_data"]`, unchangedColumnsJSON(changes[0], tableSchema.Columns, 3))
+	})
+
+	t.Run("pk update carries unchanged toast from old key within commit", func(t *testing.T) {
+		changes := []Change{
+			{
+				Operation: "INSERT",
+				Values:    []interface{}{int32(1), `{"keep":true}`, "pending"},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(2), tupleUnchangedMarker, "done"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"keep":true}`, resolveColumnValue(changes[1], 1))
+	})
+
+	t.Run("chains multiple unchanged updates", func(t *testing.T) {
+		changes := []Change{
+			{
+				Operation: "INSERT",
+				Values:    []interface{}{int32(1), `{"v":1}`, "a"},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "b"},
+				OldValues: []interface{}{int32(1)},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "c"},
+				OldValues: []interface{}{int32(1)},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"v":1}`, resolveColumnValue(changes[2], 1))
+		assert.Equal(t, "c", resolveColumnValue(changes[2], 2))
+	})
+
+	t.Run("old tuple still preferred over batch state", func(t *testing.T) {
+		changes := []Change{
+			{
+				Operation: "INSERT",
+				Values:    []interface{}{int32(1), `{"from":"insert"}`, "pending"},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+				OldValues: []interface{}{int32(1), `{"from":"old"}`, "pending"},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"from":"old"}`, resolveColumnValue(changes[1], 1))
+		// The old-tuple value is authoritative, so the column must not be
+		// reported as unchanged (otherwise a matched merge would ignore it).
+		assert.Equal(t, `[]`, unchangedColumnsJSON(changes[1], tableSchema.Columns, 3))
+	})
+
+	t.Run("old-tuple resolution drops unchanged flag after same-batch change", func(t *testing.T) {
+		// An authoritative change to config, then a later unchanged update whose
+		// REPLICA IDENTITY FULL old tuple still carries the value. Compaction
+		// keeps only the latest row, so the column must be emitted (not flagged
+		// unchanged) or the destination falls back to the stale target value.
+		changes := []Change{
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), `{"v":"A"}`, "a"},
+				OldValues: []interface{}{int32(1), `{"v":"OLD"}`, "a"},
+			},
+			{
+				Operation: "UPDATE",
+				Values:    []interface{}{int32(1), tupleUnchangedMarker, "b"},
+				OldValues: []interface{}{int32(1), `{"v":"A"}`, "a"},
+			},
+		}
+		applyIntraBatchFill(changes, tableSchema)
+		assert.Equal(t, `{"v":"A"}`, resolveColumnValue(changes[1], 1))
+		assert.Equal(t, `[]`, unchangedColumnsJSON(changes[1], tableSchema.Columns, 3))
+	})
+
+	t.Run("does not fill across separate commits", func(t *testing.T) {
+		// Cross-commit coalescing is handled at the staging-batch level
+		// (forwardFillUnchanged), not by the decoder. A partial UPDATE arriving
+		// in its own commit has no prior state and stays unchanged.
+		insert := []Change{{
+			Operation: "INSERT",
+			Values:    []interface{}{int32(1), `{"big":true}`, "pending"},
+		}}
+		applyIntraBatchFill(insert, tableSchema)
+
+		update := []Change{{
+			Operation: "UPDATE",
+			Values:    []interface{}{int32(1), tupleUnchangedMarker, "done"},
+			OldValues: []interface{}{int32(1)},
+		}}
+		applyIntraBatchFill(update, tableSchema)
+		assert.Nil(t, resolveColumnValue(update[0], 1))
+	})
+}
+
+func cdcMetaColumns() []schema.Column {
+	return []schema.Column{
+		{Name: CDCLSNColumn, DataType: schema.TypeString},
+		{Name: CDCDeletedColumn, DataType: schema.TypeBoolean},
+		{Name: CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+		{Name: CDCUnchangedColsColumn, DataType: schema.TypeString},
+	}
 }
 
 func TestNewDecoder(t *testing.T) {

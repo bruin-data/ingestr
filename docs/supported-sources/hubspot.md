@@ -12,17 +12,36 @@ The URI format for HubSpot is as follows:
 hubspot://?api_key=<api-key-here>
 ```
 
+or, using a service key:
+
+```plaintext
+hubspot://?service_key=<service-key-here>
+```
+
 URI parameters:
 
-- `api_key`: The API key is used for authentication with the HubSpot API.
+- `api_key`: A private app access token used for authentication with the HubSpot API.
+- `service_key`: A HubSpot [service key](https://developers.hubspot.com/blog/hubspot-service-keys-the-right-api-credential-for-data-integrations) used for authentication with the HubSpot API.
+
+Provide exactly one of `api_key` or `service_key`. Both are sent to HubSpot as an HTTP Bearer token, so they are interchangeable as the credential.
+
+> **Note:** HubSpot service keys are currently in **public beta**. The feature may change before general availability, so keep that in mind before relying on it for production workloads.
 
 The URI is used to connect to the HubSpot API for extracting data.
 
 ## Setting up a HubSpot Integration
 
-To connect to HubSpot, you need to create a Legacy Private App to obtain an access token.
+HubSpot supports two credential types. Pick whichever fits your account; ingestr accepts either.
 
-### Step 1: Create a Legacy App
+### Option A: Service Key (public beta)
+
+Go to **Settings → Integrations → Service Keys** in your HubSpot account, create a key, grant it the required scopes, and copy the generated key. Use it via `service_key=` in the URI.
+
+### Option B: Private App access token
+
+To connect to HubSpot with a private app access token, create a Legacy Private App and copy its token.
+
+#### Step 1: Create a Legacy App
 
 1. Log in to your [HubSpot account](https://app.hubspot.com/)
 2. Click the **Settings** icon (gear) in the top navigation
@@ -31,14 +50,14 @@ To connect to HubSpot, you need to create a Legacy Private App to obtain an acce
 5. Select **Private** as the app type
 6. If prompted to create a service key, select **I still want a legacy private app** and continue
 
-### Step 2: Configure the App
+#### Step 2: Configure the App
 
 1. Enter a name for your app (e.g., "Data Integration")
 2. Optionally add a description
 3. Skip the webhook setup (not needed for data ingestion)
 4. Click the **Scopes** tab
 
-### Step 3: Select Scopes
+#### Step 3: Select Scopes
 
 Add the scopes for the data you want to access. Common scopes include:
 - **CRM**: `crm.objects.contacts.read`, `crm.objects.companies.read`, `crm.objects.deals.read`
@@ -48,7 +67,7 @@ Add the scopes for the data you want to access. Common scopes include:
 
 Select **Read** access for each object type you want to ingest.
 
-### Step 4: Create and Get the Token
+#### Step 4: Create and Get the Token
 
 1. Click **Create app** in the top right
 2. Review the information and click **Continue creating**
@@ -57,7 +76,7 @@ Select **Read** access for each object type you want to ingest.
 
 > **Note**: The token is only shown once. If you lose it, you'll need to rotate the token in the app settings.
 
-Once you have your access token, let's say your API key is `pat_test_12345`, here's a sample command that will copy the data from HubSpot into a DuckDB database:
+Once you have a credential (for example `pat_test_12345`), here's a sample command that will copy the data from HubSpot into a DuckDB database:
 
 ```sh
 ingestr ingest --source-uri 'hubspot://?api_key=pat_test_12345' --source-table 'companies' --dest-uri duckdb:///hubspot.duckdb --dest-table 'companies.data'
