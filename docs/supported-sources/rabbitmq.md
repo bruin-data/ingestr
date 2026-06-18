@@ -47,3 +47,16 @@ ingestr ingest \
 ```
 
 The result of this command will be a table in the `rabbitmq.duckdb` database with JSON columns containing the message data and metadata.
+
+## Streaming ingestion
+
+Add `--stream` to consume the queue continuously instead of reading what is currently available and exiting. In streaming mode each message is projected into a fixed envelope schema — a `msg_id` primary key plus a JSON `data` column holding the decoded body and metadata — and changes are merged on `msg_id` (latest record per key wins within a flush window, ordered by an `_ingestr_order` column) (so at-least-once redeliveries are idempotent). Deliveries are acknowledged only after a flush succeeds. See [`ingest --stream`](../commands/ingest.md#streaming-ingestion).
+
+```sh
+ingestr ingest \
+    --source-uri 'amqp://guest:guest@localhost:5672/' \
+    --source-table 'my_queue' \
+    --dest-uri 'duckdb://./rabbitmq.duckdb' \
+    --dest-table 'dest.my_queue' \
+    --stream
+```

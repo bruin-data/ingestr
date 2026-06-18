@@ -2,6 +2,7 @@ package fabric
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -114,5 +115,16 @@ func TestURIToConnString(t *testing.T) {
 				t.Errorf("tenant_id should not appear in DSN query, got %q", q.Get("tenant_id"))
 			}
 		})
+	}
+}
+
+func TestBuildDeleteInsertDeleteSQLUsesTableLock(t *testing.T) {
+	sql := buildDeleteInsertDeleteSQL("dbo.events", "updated_at")
+
+	if !strings.Contains(sql, "DELETE FROM [dbo].[events] WITH (TABLOCKX, HOLDLOCK)") {
+		t.Fatalf("delete SQL missing table lock: %s", sql)
+	}
+	if !strings.Contains(sql, "[updated_at] >= @p1") || !strings.Contains(sql, "[updated_at] <= @p2") {
+		t.Fatalf("delete SQL missing interval predicate: %s", sql)
 	}
 }

@@ -3,10 +3,12 @@ package bigquery
 import (
 	"bufio"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,10 +23,13 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/databuffer"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"google.golang.org/api/option"
 )
+
+var queryJobJitter = randomQueryJobJitter
 
 const (
 	stagedGCSObjectChunkSize   = 32 * 1024 * 1024
@@ -129,7 +134,14 @@ func (d *BigQueryDestination) writeWithLoadJob(
 		maxRowsPerFile = 0
 	}
 
-	staged, err := d.stageLoadJobFiles(ctx, table, records, opts.StagingBucket, format, maxRowsPerFile)
+	// The pipeline's schema evolution plan decides the schema for both the
+	// destination and the staging table; the load file must match that table.
+	var targetSchema *arrow.Schema
+	if opts.Schema != nil {
+		targetSchema = opts.Schema.ToArrowSchema()
+	}
+
+	staged, err := d.stageLoadJobFiles(ctx, table, records, opts.StagingBucket, format, maxRowsPerFile, targetSchema)
 	if err != nil {
 		return err
 	}
@@ -190,9 +202,10 @@ func (d *BigQueryDestination) stageLoadJobFiles(
 	stagingBucket string,
 	format loadJobFileFormat,
 	maxRowsPerFile int,
+	targetSchema *arrow.Schema,
 ) (*stagedLoadSet, error) {
 	if stagingBucket != "" {
-		return d.stageLoadJobFilesToGCS(ctx, table, records, stagingBucket, format, maxRowsPerFile)
+		return d.stageLoadJobFilesToGCS(ctx, table, records, stagingBucket, format, maxRowsPerFile, targetSchema)
 	}
 
 	tempDir, err := os.MkdirTemp("", "ingestr-bq-load-*")
@@ -205,7 +218,7 @@ func (d *BigQueryDestination) stageLoadJobFiles(
 		format:  format,
 	}
 
-	chunks, rowsWritten, err := d.writeLoadJobChunks(ctx, records, format, resolveLoadJobRowsPerFile(maxRowsPerFile), func(part int) (stagedLoadChunk, io.WriteCloser, error) {
+	chunks, rowsWritten, err := d.writeLoadJobChunks(ctx, records, format, resolveLoadJobRowsPerFile(maxRowsPerFile), targetSchema, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
 		path := buildLocalLoadFilePath(tempDir, table, format, part)
 		writer, err := os.Create(path)
 		if err != nil {
@@ -233,6 +246,7 @@ func (d *BigQueryDestination) stageLoadJobFilesToGCS(
 	stagingBucket string,
 	format loadJobFileFormat,
 	maxRowsPerFile int,
+	targetSchema *arrow.Schema,
 ) (*stagedLoadSet, error) {
 	bucket, prefix, err := parseGCSBucketURI(stagingBucket)
 	if err != nil {
@@ -247,7 +261,7 @@ func (d *BigQueryDestination) stageLoadJobFilesToGCS(
 		format: format,
 	}
 
-	chunks, rowsWritten, err := d.writeLoadJobChunks(ctx, records, format, resolveLoadJobRowsPerFile(maxRowsPerFile), func(part int) (stagedLoadChunk, io.WriteCloser, error) {
+	chunks, rowsWritten, err := d.writeLoadJobChunks(ctx, records, format, resolveLoadJobRowsPerFile(maxRowsPerFile), targetSchema, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
 		objectName := buildGCSLoadObjectName(objectPrefix, format, part)
 		writer := d.gcsClient.Bucket(bucket).Object(objectName).NewWriter(ctx)
 		writer.ChunkSize = stagedGCSObjectChunkSize
@@ -754,12 +768,13 @@ func isRetryableLoadJobError(err error) bool {
 		strings.Contains(msg, "exceeded rate limits") ||
 		strings.Contains(msg, "jobbackenderror") ||
 		strings.Contains(msg, "backenderror") ||
-		strings.Contains(msg, "not found: dataset")
+		strings.Contains(msg, "not found: dataset") ||
+		isBigQueryConcurrentUpdateError(err)
 }
 
 func isRetryableLoadJobReason(reason string, message string) bool {
 	switch strings.ToLower(reason) {
-	case "ratelimitexceeded", "quotaexceeded", "backenderror", "jobbackenderror":
+	case "ratelimitexceeded", "quotaexceeded", "backenderror", "jobbackenderror", "aborted":
 		return true
 	}
 
@@ -768,7 +783,40 @@ func isRetryableLoadJobReason(reason string, message string) bool {
 		return true
 	}
 	return strings.Contains(msg, "exceeded rate limits") ||
-		strings.Contains(msg, "retrying the job may solve the problem")
+		strings.Contains(msg, "retrying the job may solve the problem") ||
+		strings.Contains(msg, "could not serialize access") ||
+		strings.Contains(msg, "concurrent update") ||
+		strings.Contains(msg, "transaction is aborted")
+}
+
+func retryDelayForQueryJob(attempt int, err error) time.Duration {
+	delay := time.Duration(attempt) * time.Second
+	if !isBigQueryConcurrentUpdateError(err) {
+		return delay
+	}
+
+	return delay + queryJobJitter(time.Duration(attempt+1)*time.Second)
+}
+
+func randomQueryJobJitter(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	n, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(max)))
+	if err != nil {
+		return time.Duration(time.Now().UnixNano() % int64(max))
+	}
+	return time.Duration(n.Int64())
+}
+
+func isBigQueryConcurrentUpdateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "could not serialize access") ||
+		strings.Contains(msg, "concurrent update") ||
+		strings.Contains(msg, "transaction is aborted")
 }
 
 func sleepWithContextForLoadJob(ctx context.Context, d time.Duration) error {
@@ -809,7 +857,7 @@ func (d *BigQueryDestination) writeLoadJobStream(
 	format loadJobFileFormat,
 	openWriter func() (io.WriteCloser, error),
 ) (int64, error) {
-	_, rowsWritten, err := d.writeLoadJobChunks(ctx, records, format, 0, func(_ int) (stagedLoadChunk, io.WriteCloser, error) {
+	_, rowsWritten, err := d.writeLoadJobChunks(ctx, records, format, 0, nil, func(_ int) (stagedLoadChunk, io.WriteCloser, error) {
 		writer, err := openWriter()
 		return stagedLoadChunk{}, writer, err
 	})
@@ -837,6 +885,7 @@ func (d *BigQueryDestination) writeLoadJobChunks(
 	records <-chan source.RecordBatchResult,
 	format loadJobFileFormat,
 	maxRowsPerFile int64,
+	targetSchema *arrow.Schema,
 	openWriter func(part int) (stagedLoadChunk, io.WriteCloser, error),
 ) ([]stagedLoadChunk, int64, error) {
 	var (
@@ -877,7 +926,7 @@ func (d *BigQueryDestination) writeLoadJobChunks(
 		}
 		chunkMeta = meta
 		chunkMeta.index = part
-		chunkWriter = newLoadJobChunkWriter(format, writer)
+		chunkWriter = newLoadJobChunkWriter(format, writer, targetSchema)
 		currentRows = 0
 		return nil
 	}
@@ -958,7 +1007,7 @@ func (d *BigQueryDestination) writeLoadJobChunks(
 	return chunks, totalRows, nil
 }
 
-func newLoadJobChunkWriter(format loadJobFileFormat, writer io.WriteCloser) loadJobChunkWriter {
+func newLoadJobChunkWriter(format loadJobFileFormat, writer io.WriteCloser, targetSchema *arrow.Schema) loadJobChunkWriter {
 	switch format {
 	case loadJobFormatJSONL:
 		return &jsonlChunkWriter{
@@ -967,7 +1016,8 @@ func newLoadJobChunkWriter(format loadJobFileFormat, writer io.WriteCloser) load
 		}
 	default:
 		return &parquetChunkWriter{
-			stageWriter: writer,
+			stageWriter:  writer,
+			targetSchema: targetSchema,
 			writerProps: parquet.NewWriterProperties(
 				parquet.WithCompression(compress.Codecs.Snappy),
 				parquet.WithDictionaryDefault(true),
@@ -1007,16 +1057,28 @@ func (w *jsonlChunkWriter) Abort(cause error) {
 }
 
 type parquetChunkWriter struct {
-	stageWriter io.WriteCloser
-	parquetW    *pqarrow.FileWriter
-	arrowSchema *arrow.Schema
-	writerProps *parquet.WriterProperties
-	arrowProps  pqarrow.ArrowWriterProperties
+	stageWriter  io.WriteCloser
+	parquetW     *pqarrow.FileWriter
+	arrowSchema  *arrow.Schema
+	targetSchema *arrow.Schema
+	writerProps  *parquet.WriterProperties
+	arrowProps   pqarrow.ArrowWriterProperties
 }
 
 func (w *parquetChunkWriter) WriteRecord(record arrow.RecordBatch) error {
+	rec := record
+	if w.targetSchema != nil && !record.Schema().Equal(w.targetSchema) {
+		casted, err := databuffer.CastRecordToSchema(record, w.targetSchema, true)
+		if err != nil {
+			w.Abort(err)
+			return fmt.Errorf("failed to cast batch to staging schema: %w", err)
+		}
+		rec = casted
+		defer rec.Release()
+	}
+
 	if w.parquetW == nil {
-		arrowSchema := stripSchemaMetadata(record.Schema())
+		arrowSchema := stripSchemaMetadata(rec.Schema())
 		parquetW, err := newParquetFileWriter(arrowSchema, w.stageWriter, w.writerProps, w.arrowProps)
 		if err != nil {
 			w.Abort(err)
@@ -1026,10 +1088,10 @@ func (w *parquetChunkWriter) WriteRecord(record arrow.RecordBatch) error {
 		w.parquetW = parquetW
 	}
 
-	recordToWrite := record
+	recordToWrite := rec
 	shouldRelease := false
-	if w.arrowSchema != nil && !record.Schema().Equal(w.arrowSchema) && schemaEqualIgnoringMetadata(record.Schema(), w.arrowSchema) {
-		normalized, err := normalizeRecordToSchema(record, w.arrowSchema)
+	if w.arrowSchema != nil && !rec.Schema().Equal(w.arrowSchema) && schemaEqualIgnoringMetadata(rec.Schema(), w.arrowSchema) {
+		normalized, err := normalizeRecordToSchema(rec, w.arrowSchema)
 		if err != nil {
 			return err
 		}

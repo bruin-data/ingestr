@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	_ "github.com/microsoft/go-mssqldb"
+	mssqldb "github.com/microsoft/go-mssqldb"
 	_ "github.com/microsoft/go-mssqldb/azuread"
 )
 
@@ -25,8 +26,9 @@ const (
 )
 
 type MSSQLSource struct {
-	db  *sql.DB
-	uri string
+	db             *sql.DB
+	uri            string
+	guidConversion bool
 }
 
 func NewMSSQLSource() *MSSQLSource {
@@ -38,7 +40,7 @@ func (s *MSSQLSource) Schemes() []string {
 }
 
 func (s *MSSQLSource) Connect(ctx context.Context, uri string) error {
-	connStr, driverName, err := uriToConnString(uri)
+	connStr, driverName, err := URIToConnString(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse SQL Server URI: %w", err)
 	}
@@ -60,14 +62,15 @@ func (s *MSSQLSource) Connect(ctx context.Context, uri string) error {
 
 	s.db = db
 	s.uri = uri
+	s.guidConversion = guidConversionEnabled(connStr)
 	return nil
 }
 
-// uriToConnString converts SQL Server and Azure SQL URIs to the connection
+// URIToConnString converts SQL Server and Azure SQL URIs to the connection
 // string format expected by go-mssqldb.
 // URI format: mssql://user:pass@host:port/database?param=value
 // Conn string format: sqlserver://user:pass@host:port?database=db&param=value
-func uriToConnString(uri string) (string, string, error) {
+func URIToConnString(uri string) (string, string, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
 		return "", "", err
@@ -212,6 +215,21 @@ func isServicePrincipalFedAuth(fedAuth string) bool {
 		strings.EqualFold(fedAuth, "ActiveDirectoryApplication")
 }
 
+func guidConversionEnabled(connStr string) bool {
+	u, err := url.Parse(connStr)
+	if err != nil {
+		return false
+	}
+
+	raw, ok := normalizeQueryParamCI(u.Query(), "guid conversion")
+	if !ok || raw == "" {
+		return false
+	}
+
+	enabled, err := strconv.ParseBool(raw)
+	return err == nil && enabled
+}
+
 func (s *MSSQLSource) Close(ctx context.Context) error {
 	if s.db != nil {
 		return s.db.Close()
@@ -262,20 +280,9 @@ func (s *MSSQLSource) GetTable(ctx context.Context, req source.TableRequest) (so
 }
 
 func (s *MSSQLSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := parseTableName(table)
-
-	query := `
-		SELECT
-			COLUMN_NAME,
-			DATA_TYPE,
-			IS_NULLABLE,
-			NUMERIC_PRECISION,
-			NUMERIC_SCALE,
-			CHARACTER_MAXIMUM_LENGTH
-		FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
-		ORDER BY ORDINAL_POSITION
-	`
+	tableRef := parseMSSQLTableRef(table)
+	schemaName, tableName := tableRef.schemaName, tableRef.tableName
+	query, pkQuery := schemaMetadataQueries(tableRef)
 
 	rows, err := s.db.QueryContext(ctx, query, schemaName, tableName)
 	if err != nil {
@@ -328,19 +335,6 @@ func (s *MSSQLSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 		return nil, fmt.Errorf("table %s not found or has no columns", table)
 	}
 
-	// Get primary keys
-	pkQuery := `
-		SELECT c.COLUMN_NAME
-		FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-		JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE c
-			ON tc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
-			AND tc.TABLE_SCHEMA = c.TABLE_SCHEMA
-		WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-			AND tc.TABLE_SCHEMA = @p1
-			AND tc.TABLE_NAME = @p2
-		ORDER BY c.ORDINAL_POSITION
-	`
-
 	var primaryKeys []string
 	pkRows, err := s.db.QueryContext(ctx, pkQuery, schemaName, tableName)
 	if err == nil {
@@ -370,11 +364,49 @@ func (s *MSSQLSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 	}, nil
 }
 
+func schemaMetadataQueries(tableRef mssqlTableRef) (string, string) {
+	infoSchema := tableRef.informationSchemaQualifier()
+	columnsQuery := fmt.Sprintf(`
+		SELECT
+			COLUMN_NAME,
+			DATA_TYPE,
+			IS_NULLABLE,
+			NUMERIC_PRECISION,
+			NUMERIC_SCALE,
+			CHARACTER_MAXIMUM_LENGTH
+		FROM %s.COLUMNS
+		WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
+		ORDER BY ORDINAL_POSITION
+	`, infoSchema)
+
+	pkQuery := fmt.Sprintf(`
+		SELECT c.COLUMN_NAME
+		FROM %s.TABLE_CONSTRAINTS tc
+		JOIN %s.KEY_COLUMN_USAGE c
+			ON tc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
+			AND tc.TABLE_SCHEMA = c.TABLE_SCHEMA
+		WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+			AND tc.TABLE_SCHEMA = @p1
+			AND tc.TABLE_NAME = @p2
+		ORDER BY c.ORDINAL_POSITION
+	`, infoSchema, infoSchema)
+
+	return columnsQuery, pkQuery
+}
+
 func (s *MSSQLSource) read(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	startTotal := time.Now()
 	config.Debug("[SOURCE] Starting read from %s", table)
 
-	columns := filterColumns(tableSchema.Columns, opts.ExcludeColumns)
+	schemaToUse := tableSchema
+	if opts.Schema != nil {
+		schemaToUse = opts.Schema
+		config.Debug("[SOURCE] Using provided schema (%d columns)", len(schemaToUse.Columns))
+	} else {
+		config.Debug("[SOURCE] Using pre-fetched schema (%d columns)", len(schemaToUse.Columns))
+	}
+
+	columns := filterColumns(schemaToUse.Columns, opts.ExcludeColumns)
 	arrowSchema := buildArrowSchema(columns)
 
 	batchSize := opts.PageSize
@@ -403,7 +435,7 @@ func (s *MSSQLSource) read(ctx context.Context, table string, tableSchema *schem
 
 		for {
 			startBatch := time.Now()
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, s.guidConversion)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -454,6 +486,11 @@ func (s *MSSQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 		columns := make([]schema.Column, len(colTypes))
 		for i, ct := range colTypes {
 			dt, precision, scale, arrayType := MapMSSQLToDataType(ct.DatabaseTypeName())
+			if dt == schema.TypeDecimal {
+				if p, s, ok := ct.DecimalSize(); ok {
+					precision, scale = int(p), int(s)
+				}
+			}
 			nullable, _ := ct.Nullable()
 			columns[i] = schema.Column{
 				Name:      ct.Name(),
@@ -467,7 +504,7 @@ func (s *MSSQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 		arrowSchema := buildArrowSchema(columns)
 
 		for {
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, s.guidConversion)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -482,13 +519,97 @@ func (s *MSSQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 	return results, nil
 }
 
+type mssqlTableRef struct {
+	parts        []string
+	catalogParts []string
+	schemaName   string
+	tableName    string
+}
+
 func parseTableName(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+	tableRef := parseMSSQLTableRef(table)
+	return tableRef.schemaName, tableRef.tableName
+}
+
+func parseMSSQLTableRef(table string) mssqlTableRef {
+	parts := splitMSSQLIdentifierPath(table)
+	tableName := parts[len(parts)-1]
+	schemaName := "dbo"
+	if len(parts) > 1 && parts[len(parts)-2] != "" {
+		schemaName = parts[len(parts)-2]
 	}
-	// SQL Server default schema is dbo
-	return "dbo", table
+
+	var catalogParts []string
+	if len(parts) > 2 {
+		catalogParts = parts[:len(parts)-2]
+	}
+
+	return mssqlTableRef{
+		parts:        parts,
+		catalogParts: catalogParts,
+		schemaName:   schemaName,
+		tableName:    tableName,
+	}
+}
+
+func (r mssqlTableRef) informationSchemaQualifier() string {
+	if len(r.catalogParts) == 0 {
+		return "INFORMATION_SCHEMA"
+	}
+	quotedCatalog := quoteCatalogIdentifierPath(r.catalogParts)
+	if quotedCatalog == "" {
+		return "INFORMATION_SCHEMA"
+	}
+	return quotedCatalog + ".INFORMATION_SCHEMA"
+}
+
+func splitMSSQLIdentifierPath(path string) []string {
+	path = strings.TrimSpace(path)
+	var rawParts []string
+	var current strings.Builder
+	inBracket := false
+
+	for i := 0; i < len(path); i++ {
+		ch := path[i]
+		if inBracket {
+			current.WriteByte(ch)
+			if ch == ']' {
+				if i+1 < len(path) && path[i+1] == ']' {
+					i++
+					current.WriteByte(path[i])
+					continue
+				}
+				inBracket = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '[':
+			inBracket = true
+			current.WriteByte(ch)
+		case '.':
+			rawParts = append(rawParts, current.String())
+			current.Reset()
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	rawParts = append(rawParts, current.String())
+
+	parts := make([]string, len(rawParts))
+	for i, part := range rawParts {
+		parts[i] = normalizeMSSQLIdentifierPart(part)
+	}
+	return parts
+}
+
+func normalizeMSSQLIdentifierPart(part string) string {
+	part = strings.TrimSpace(part)
+	if len(part) >= 2 && part[0] == '[' && part[len(part)-1] == ']' {
+		return strings.ReplaceAll(part[1:len(part)-1], "]]", "]")
+	}
+	return part
 }
 
 func filterColumns(columns []schema.Column, exclude []string) []schema.Column {
@@ -525,7 +646,7 @@ func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOptions) string {
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
-		colNames[i] = fmt.Sprintf("[%s]", col.Name)
+		colNames[i] = quoteColumn(col.Name)
 	}
 
 	// Handle TOP for limit (SQL Server uses TOP instead of LIMIT)
@@ -539,10 +660,10 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 	var conditions []string
 	if opts.IncrementalKey != "" {
 		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf("[%s] >= '%s'", opts.IncrementalKey, opts.IntervalStart.Format("2006-01-02 15:04:05")))
+			conditions = append(conditions, fmt.Sprintf("%s >= '%s'", quoteColumn(opts.IncrementalKey), opts.IntervalStart.Format("2006-01-02 15:04:05")))
 		}
 		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf("[%s] <= '%s'", opts.IncrementalKey, opts.IntervalEnd.Format("2006-01-02 15:04:05")))
+			conditions = append(conditions, fmt.Sprintf("%s <= '%s'", quoteColumn(opts.IncrementalKey), opts.IntervalEnd.Format("2006-01-02 15:04:05")))
 		}
 	}
 
@@ -554,14 +675,41 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 }
 
 func quoteTable(table string) string {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return fmt.Sprintf("[%s].[%s]", parts[0], parts[1])
-	}
-	return fmt.Sprintf("[%s]", table)
+	tableRef := parseMSSQLTableRef(table)
+	return quoteIdentifierPath(tableRef.parts)
 }
 
-func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) (arrow.RecordBatch, int64, error) {
+// quoteIdentifierPath joins parts as bracket-quoted SQL Server identifiers.
+// Empty parts are kept as empty strings so two-dot notation (e.g. [db]..[table])
+// round-trips correctly when tableRef.parts is passed directly.
+func quoteIdentifierPath(parts []string) string {
+	quoted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			quoted = append(quoted, "")
+			continue
+		}
+		quoted = append(quoted, quoteColumn(part))
+	}
+	return strings.Join(quoted, ".")
+}
+
+func quoteCatalogIdentifierPath(parts []string) string {
+	quoted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		quoted = append(quoted, quoteColumn(part))
+	}
+	return strings.Join(quoted, ".")
+}
+
+func quoteColumn(name string) string {
+	return fmt.Sprintf("[%s]", strings.ReplaceAll(name, "]", "]]"))
+}
+
+func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, guidConversion bool) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(columns))
 
@@ -586,6 +734,16 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 
 		for i, dest := range scanDest {
 			val := *dest.(*interface{})
+			if columns[i].DataType == schema.TypeUUID {
+				var err error
+				val, err = normalizeUUIDValue(val, guidConversion)
+				if err != nil {
+					for _, b := range builders {
+						b.Release()
+					}
+					return nil, 0, fmt.Errorf("failed to convert uniqueidentifier column %q: %w", columns[i].Name, err)
+				}
+			}
 			arrowconv.AppendValue(builders[i], val)
 		}
 		rowCount++
@@ -621,4 +779,48 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 	}
 
 	return record, rowCount, nil
+}
+
+func normalizeUUIDValue(val interface{}, guidConversion bool) (interface{}, error) {
+	switch v := val.(type) {
+	case nil:
+		return nil, nil
+	case []byte:
+		return formatUUIDBytes(v, guidConversion)
+	case mssqldb.UniqueIdentifier:
+		return v.String(), nil
+	case *mssqldb.UniqueIdentifier:
+		if v == nil {
+			return nil, nil
+		}
+		return v.String(), nil
+	case mssqldb.NullUniqueIdentifier:
+		if !v.Valid {
+			return nil, nil
+		}
+		return v.UUID.String(), nil
+	case *mssqldb.NullUniqueIdentifier:
+		if v == nil || !v.Valid {
+			return nil, nil
+		}
+		return v.UUID.String(), nil
+	default:
+		return val, nil
+	}
+}
+
+func formatUUIDBytes(raw []byte, guidConversion bool) (string, error) {
+	if len(raw) != 16 {
+		return "", fmt.Errorf("invalid uniqueidentifier length %d", len(raw))
+	}
+
+	if guidConversion {
+		return fmt.Sprintf("%X-%X-%X-%X-%X", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:]), nil
+	}
+
+	var uuid mssqldb.UniqueIdentifier
+	if err := uuid.Scan(raw); err != nil {
+		return "", err
+	}
+	return uuid.String(), nil
 }

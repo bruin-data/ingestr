@@ -9,6 +9,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,10 +36,14 @@ type PostgresCDCSource struct {
 	replConn  *pgconn.PgConn // Replication connection
 	uri       string
 	cdcConfig CDCConfig
+	// pos holds the LSN the pipeline has confirmed durable in streaming mode.
+	// It is shared between the pipeline goroutine (CommitStream) and the
+	// replication goroutine (standby status updates).
+	pos *streamPosition
 }
 
 func NewPostgresCDCSource() *PostgresCDCSource {
-	return &PostgresCDCSource{}
+	return &PostgresCDCSource{pos: newStreamPosition()}
 }
 
 func (s *PostgresCDCSource) Schemes() []string {
@@ -113,6 +118,34 @@ func (s *PostgresCDCSource) Close(ctx context.Context) error {
 
 func (s *PostgresCDCSource) HandlesIncrementality() bool {
 	return false
+}
+
+// SupportsStreaming reports that Postgres CDC can run in continuous mode.
+func (s *PostgresCDCSource) SupportsStreaming() bool {
+	return true
+}
+
+// DefaultStreamingStrategy returns merge: CDC changes (including deletes) must
+// be applied by primary key.
+func (s *PostgresCDCSource) DefaultStreamingStrategy() config.IncrementalStrategy {
+	return config.StrategyMerge
+}
+
+// CommitStream records the durable LSN reported by the pipeline after a
+// successful flush. The replication goroutine reads it when sending standby
+// status updates so the slot's confirmed_flush_lsn only advances past durable
+// data. The token is the pglogrepl.LSN attached to the last flushed batch.
+func (s *PostgresCDCSource) CommitStream(_ context.Context, token any) error {
+	lsn, ok := token.(pglogrepl.LSN)
+	if !ok {
+		return fmt.Errorf("postgres cdc: unexpected commit token type %T", token)
+	}
+	if s.pos == nil {
+		return fmt.Errorf("postgres cdc: stream position not initialized")
+	}
+	s.pos.Commit(lsn)
+	config.Debug("[CDC] Confirmed durable LSN: %s", lsn)
+	return nil
 }
 
 func (s *PostgresCDCSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
@@ -326,4 +359,6 @@ const (
 var (
 	_ source.Source           = (*PostgresCDCSource)(nil)
 	_ source.MultiTableSource = (*PostgresCDCSource)(nil)
+	_ source.StreamingSource  = (*PostgresCDCSource)(nil)
+	_ source.StreamCommitter  = (*PostgresCDCSource)(nil)
 )

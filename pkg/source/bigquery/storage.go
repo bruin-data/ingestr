@@ -127,13 +127,13 @@ func buildRowFilter(opts source.ReadOptions, tableSchema *schema.TableSchema) st
 	// Add start filter
 	if opts.IntervalStart != nil {
 		startValue := formatFilterValue(opts.IntervalStart, columnType)
-		filters = append(filters, fmt.Sprintf("%s >= %s", opts.IncrementalKey, startValue))
+		filters = append(filters, fmt.Sprintf("%s >= %s", quoteFilterIdentifier(opts.IncrementalKey), startValue))
 	}
 
 	// Add end filter
 	if opts.IntervalEnd != nil {
 		endValue := formatFilterValue(opts.IntervalEnd, columnType)
-		filters = append(filters, fmt.Sprintf("%s <= %s", opts.IncrementalKey, endValue))
+		filters = append(filters, fmt.Sprintf("%s <= %s", quoteFilterIdentifier(opts.IncrementalKey), endValue))
 	}
 
 	if len(filters) == 0 {
@@ -141,6 +141,10 @@ func buildRowFilter(opts source.ReadOptions, tableSchema *schema.TableSchema) st
 	}
 
 	return strings.Join(filters, " AND ")
+}
+
+func quoteFilterIdentifier(name string) string {
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
 }
 
 // formatFilterValue formats a value for use in BigQuery Storage API row filters.

@@ -52,11 +52,11 @@ Indeed source allows ingesting the following resources into separate tables:
 | `campaign_properties` | campaignId | - | merge | Retrieves properties for each campaign |
 | `campaign_stats` | campaignId, Date | Date | merge | Retrieves daily statistics for each campaign |
 | `account` | employerId, jobSourceId | - | merge | Retrieves account information including job sources |
-| `traffic_stats` | - | date | merge | Retrieves daily traffic statistics |
+| `traffic_stats` | - | date | delete+insert | Retrieves daily traffic statistics |
 
 ## Incremental Loading
 
-The `campaign_stats` and `traffic_stats` tables support incremental loading using date-based merge strategy. Use `--interval-start` and `--interval-end` to specify the date range:
+The `campaign_stats` and `traffic_stats` tables support incremental loading using a date-based strategy (`merge` for `campaign_stats`, `delete+insert` for `traffic_stats`). Use `--interval-start` and `--interval-end` to specify the date range:
 
 ```sh
 ingestr ingest \

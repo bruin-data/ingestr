@@ -53,6 +53,8 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		return "BOOLEAN"
+	case schema.TypeInt8:
+		return "TINYINT"
 	case schema.TypeInt16:
 		return "SMALLINT"
 	case schema.TypeInt32:
@@ -95,5 +97,5 @@ func (d *Dialect) TypeName(col schema.Column) string {
 }
 
 func (d *Dialect) QuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return quoteIdentifier(name)
 }

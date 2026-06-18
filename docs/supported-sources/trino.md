@@ -80,7 +80,9 @@ ingestr ingest \
 ```
 
 ## Supported write dispositions
-When using Trino as a destination, all the existing write dispositions are supported.
+When using Trino as a destination, ingestr supports `replace`, `append`, `merge`, `truncate+insert`, and `scd2`.
+
+`delete+insert` is not supported for Trino destinations. Transaction support in Trino depends on the catalog connector, and ingestr does not expose a destination transaction for Trino. Because ingestr cannot make the delete and insert steps atomic across Trino catalogs, it fails this strategy before loading staging data.
 
 ## Data type handling
 Trino automatically handles most SQL data type conversions. When used as a destination:

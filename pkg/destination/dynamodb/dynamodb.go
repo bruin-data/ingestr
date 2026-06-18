@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,6 +74,18 @@ func (d *DynamoDBDestination) PrepareTable(ctx context.Context, opts destination
 		if len(pks) == 0 && opts.Schema != nil {
 			pks = opts.Schema.PrimaryKeys
 		}
+	}
+
+	if opts.CDCMode {
+		// CDC staging holds multiple change rows per source PK, which a
+		// PK-keyed table would collapse (and BatchWriteItem rejects duplicate
+		// keys within a batch). Key staging by (pk, _cdc_lsn) instead; LSNs
+		// are unique per change row. Snapshot rows share one LSN stamp, so
+		// composite source PKs cannot be represented safely.
+		if len(pks) != 1 {
+			return fmt.Errorf("CDC merge into DynamoDB requires exactly one primary key, got %d", len(pks))
+		}
+		pks = []string{pks[0], destination.CDCLSNColumn}
 	}
 
 	if opts.DropFirst {
@@ -189,7 +202,7 @@ func (d *DynamoDBDestination) createTable(ctx context.Context, table string, sch
 
 func schemaTypeToDynamoDBScalar(dt schema.DataType) types.ScalarAttributeType {
 	switch dt {
-	case schema.TypeInt16, schema.TypeInt32, schema.TypeInt64,
+	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64,
 		schema.TypeFloat32, schema.TypeFloat64, schema.TypeDecimal:
 		return types.ScalarAttributeTypeN
 	default:
@@ -434,6 +447,10 @@ func (d *DynamoDBDestination) SwapTable(_ context.Context, _ destination.SwapOpt
 }
 
 func (d *DynamoDBDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	if destination.HasCDCDeletedColumn(opts.Columns) {
+		return d.mergeCDC(ctx, opts)
+	}
+
 	// DynamoDB PutItem is inherently an upsert — we scan the staging table and put all items into the target.
 	paginator := dynamodb.NewScanPaginator(d.client, &dynamodb.ScanInput{
 		TableName: aws.String(opts.StagingTable),
@@ -465,6 +482,167 @@ func (d *DynamoDBDestination) MergeTable(ctx context.Context, opts destination.M
 	}
 
 	return nil
+}
+
+// mergeCDC composes one item per PK from CDC staging data: row data comes from
+// the latest non-deleted change (so a trailing delete keeps the last update's
+// values), CDC attributes and the deleted flag from the latest change overall.
+// Scan order is arbitrary, so the latest change per PK is tracked by comparing
+// the fixed-width LSN strings. Delete-only windows update CDC attributes on
+// existing items only; unknown rows are not materialized from a bare delete.
+func (d *DynamoDBDestination) mergeCDC(ctx context.Context, opts destination.MergeOptions) error {
+	type cdcEntry struct {
+		latest        map[string]types.AttributeValue
+		latestLSN     string
+		latestDeleted bool
+		active        map[string]types.AttributeValue
+		activeLSN     string
+	}
+	entries := map[string]*cdcEntry{}
+
+	itemLSN := func(item map[string]types.AttributeValue) string {
+		if s, ok := item[destination.CDCLSNColumn].(*types.AttributeValueMemberS); ok {
+			return s.Value
+		}
+		return ""
+	}
+	itemDeleted := func(item map[string]types.AttributeValue) bool {
+		if b, ok := item[destination.CDCDeletedColumn].(*types.AttributeValueMemberBOOL); ok {
+			return b.Value
+		}
+		return false
+	}
+
+	paginator := dynamodb.NewScanPaginator(d.client, &dynamodb.ScanInput{
+		TableName: aws.String(opts.StagingTable),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to scan staging table %q: %w", opts.StagingTable, err)
+		}
+		for _, item := range page.Items {
+			keyParts := make([]string, len(opts.PrimaryKeys))
+			for i, pk := range opts.PrimaryKeys {
+				keyParts[i] = fmt.Sprintf("%#v", item[pk])
+			}
+			key := strings.Join(keyParts, "\x00")
+
+			entry, ok := entries[key]
+			if !ok {
+				entry = &cdcEntry{}
+				entries[key] = entry
+			}
+			lsn := itemLSN(item)
+			deleted := itemDeleted(item)
+			if entry.latest == nil || destination.CDCSupersedes(lsn, deleted, entry.latestLSN, entry.latestDeleted) {
+				entry.latest = item
+				entry.latestLSN = lsn
+				entry.latestDeleted = deleted
+			}
+			if !deleted && (entry.active == nil || lsn > entry.activeLSN) {
+				entry.active = item
+				entry.activeLSN = lsn
+			}
+		}
+	}
+
+	chunk := make([]types.WriteRequest, 0, maxBatchWriteItems)
+	for _, entry := range entries {
+		if entry.active == nil {
+			if err := d.markCDCDeleted(ctx, opts, entry.latest); err != nil {
+				return err
+			}
+			continue
+		}
+
+		item := make(map[string]types.AttributeValue, len(entry.active))
+		for k, v := range entry.active {
+			if destination.IsCDCStagingOnlyColumn(k) {
+				continue
+			}
+			item[k] = v
+		}
+		item[destination.CDCLSNColumn] = entry.latest[destination.CDCLSNColumn]
+		item[destination.CDCDeletedColumn] = entry.latest[destination.CDCDeletedColumn]
+		item[destination.CDCSyncedAtColumn] = entry.latest[destination.CDCSyncedAtColumn]
+
+		chunk = append(chunk, types.WriteRequest{PutRequest: &types.PutRequest{Item: item}})
+		if len(chunk) == maxBatchWriteItems {
+			if _, err := d.batchWrite(ctx, opts.TargetTable, chunk); err != nil {
+				return err
+			}
+			chunk = chunk[:0]
+		}
+	}
+	if len(chunk) > 0 {
+		if _, err := d.batchWrite(ctx, opts.TargetTable, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *DynamoDBDestination) markCDCDeleted(ctx context.Context, opts destination.MergeOptions, deletedItem map[string]types.AttributeValue) error {
+	key := map[string]types.AttributeValue{}
+	for _, pk := range opts.PrimaryKeys {
+		key[pk] = deletedItem[pk]
+	}
+
+	_, err := d.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:           aws.String(opts.TargetTable),
+		Key:                 key,
+		ConditionExpression: aws.String("attribute_exists(#pk)"),
+		UpdateExpression:    aws.String("SET #del = :del, #lsn = :lsn, #syn = :syn"),
+		ExpressionAttributeNames: map[string]string{
+			"#pk":  opts.PrimaryKeys[0],
+			"#del": destination.CDCDeletedColumn,
+			"#lsn": destination.CDCLSNColumn,
+			"#syn": destination.CDCSyncedAtColumn,
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":del": deletedItem[destination.CDCDeletedColumn],
+			":lsn": deletedItem[destination.CDCLSNColumn],
+			":syn": deletedItem[destination.CDCSyncedAtColumn],
+		},
+	})
+	if err != nil {
+		var condErr *types.ConditionalCheckFailedException
+		if errors.As(err, &condErr) {
+			return nil
+		}
+		return fmt.Errorf("failed to mark CDC delete in %q: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
+func (d *DynamoDBDestination) SupportsCDCMerge() bool { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
+func (d *DynamoDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	paginator := dynamodb.NewScanPaginator(d.client, &dynamodb.ScanInput{
+		TableName:                aws.String(table),
+		ProjectionExpression:     aws.String("#lsn"),
+		ExpressionAttributeNames: map[string]string{"#lsn": destination.CDCLSNColumn},
+	})
+
+	maxLSN := ""
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			var notFound *types.ResourceNotFoundException
+			if errors.As(err, &notFound) {
+				return "", nil
+			}
+			return "", fmt.Errorf("failed to scan %q for max CDC LSN: %w", table, err)
+		}
+		for _, item := range page.Items {
+			if s, ok := item[destination.CDCLSNColumn].(*types.AttributeValueMemberS); ok && s.Value > maxLSN {
+				maxLSN = s.Value
+			}
+		}
+	}
+	return maxLSN, nil
 }
 
 func (d *DynamoDBDestination) DeleteInsertTable(_ context.Context, _ destination.DeleteInsertOptions) error {

@@ -13,7 +13,7 @@ NO_COLOR=\033[0m
 OK_COLOR=\033[32;01m
 ERROR_COLOR=\033[31;01m
 
-.PHONY: all clean test build deps generate licenses licenses-check lint format lint-ci format-ci test-ci setup
+.PHONY: all clean test test-python build deps generate licenses licenses-check lint format lint-ci format-ci test-ci setup test-db2-integration
 
 all: clean deps test build
 
@@ -62,10 +62,24 @@ run: build
 test: generate
 	@echo "$(OK_COLOR)==> Running unit tests$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -short -race -cover -timeout 5m ./...
+	@$(MAKE) test-python
+
+test-python:
+	@echo "$(OK_COLOR)==> Running Python SDK tests$(NO_COLOR)"
+	@if command -v uv >/dev/null 2>&1; then \
+		uv run --extra sdk python tests/python/test_ingestr_package.py; \
+	else \
+		echo "uv not found; install uv to run Python SDK tests"; \
+		exit 1; \
+	fi
 
 test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags integration -v -p 64 -parallel 64 -timeout 10m ./tests/integration/...
+
+test-db2-integration: generate
+	@echo "$(OK_COLOR)==> Running Db2 integration tests$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi && INGESTR_TEST_DB2=1 $(TELEMETRY_ENV) go test -tags integration -count=1 -v -timeout 10m ./pkg/source/db2 -run TestDb2SourceWithIBMContainer
 
 test-conformance:
 	@echo "$(OK_COLOR)==> Running destination standards tests$(NO_COLOR)"

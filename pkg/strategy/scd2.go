@@ -45,11 +45,12 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 
 	// Extend schema with SCD columns
 	extendedSchema := extendSchemaWithSCDColumns(job.Schema)
+	destExtendedSchema := extendSchemaWithSCDColumns(destination.DestinationTableSchema(job.Schema))
 
 	// Ensure destination table exists with extended schema (don't drop it)
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       job.Config.DestTable,
-		Schema:      extendedSchema,
+		Schema:      destExtendedSchema,
 		DropFirst:   false,
 		PrimaryKeys: nil, // SCD2 tables shouldn't have PKs since we have multiple versions
 		PartitionBy: job.Config.PartitionBy,
@@ -93,11 +94,6 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
-	}
-
 	// Add SCD columns to records using transformer
 	adder := transformer.NewColumnAdder(
 		transformer.ColumnSpec{
@@ -120,10 +116,11 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 		records = job.Tracker.Wrap(records)
 	}
 
-	// Write to staging table using parallel writes
+	// Write to staging table using parallel writes. The write schema must match
+	// the staging table, which was created with the SCD columns
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            stagingTable,
-		Schema:           job.Schema,
+		Schema:           extendedSchema,
 		Parallelism:      parallelism,
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,

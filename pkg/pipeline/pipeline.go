@@ -73,6 +73,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 	defer func() { _ = src.Close(ctx) }()
 
+	if p.config.Stream {
+		ss, ok := src.(source.StreamingSource)
+		if !ok || !ss.SupportsStreaming() {
+			return fmt.Errorf("--stream is not supported by this source; streaming requires a CDC source (postgres+cdc, mssql+cdc) or a message broker source (kafka, amqp)")
+		}
+	}
+
 	dest, err := uri.DefaultRegistry.GetDestination(p.config.DestURI)
 	if err != nil {
 		return fmt.Errorf("failed to get destination: %w", err)
@@ -119,6 +126,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		IncrementalKey: p.config.IncrementalKey,
 		PrimaryKeys:    p.config.PrimaryKeys,
 		Strategy:       p.config.IncrementalStrategy,
+		Streaming:      p.config.Stream,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get table: %w", err)
@@ -308,11 +316,18 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
+	// Capture the schema before evolution: on incremental runs against an
+	// existing table, evolution replaces destSchema with FinalSchema, which is
+	// built from the destination's columns and therefore drops staging-only
+	// CDC columns (e.g. _cdc_unchanged_cols). StagingIngestSchema below
+	// re-appends them from this snapshot so staging keeps carrying them.
+	fullSchema := destSchema
+
 	// Schema contract handling: evolve destination schema if needed (skip for replace strategy)
 	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
 	var evolutionPlan *schemaevolution.EvolutionPlan
 	if resolvedStrategy != config.StrategyReplace {
-		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, destSchema)
+		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, p.config.DestTable, destSchema)
 		if err != nil {
 			return fmt.Errorf("schema evolution failed: %w", err)
 		}
@@ -320,6 +335,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			destSchema = evolutionPlan.FinalSchema
 		}
 	}
+
+	// Staging mirrors the destination schema, with staging-only CDC columns retained.
+	ingestSchema := destination.StagingIngestSchema(fullSchema, destSchema)
 
 	if inferBuffer != nil {
 		bufferTarget := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
@@ -346,13 +364,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	// Primary key columns must be NOT NULL
-	pkSet := make(map[string]bool, len(destSchema.PrimaryKeys))
-	for _, pk := range destSchema.PrimaryKeys {
+	pkSet := make(map[string]bool, len(ingestSchema.PrimaryKeys))
+	for _, pk := range ingestSchema.PrimaryKeys {
 		pkSet[pk] = true
 	}
-	for i := range destSchema.Columns {
-		if pkSet[destSchema.Columns[i].Name] {
-			destSchema.Columns[i].Nullable = false
+	for i := range ingestSchema.Columns {
+		if pkSet[ingestSchema.Columns[i].Name] {
+			ingestSchema.Columns[i].Nullable = false
 		}
 	}
 
@@ -377,19 +395,24 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			return fmt.Errorf("invalid mask configuration: %w", err)
 		}
 		if m.HasMasks() {
-			if err := m.ValidateColumns(destSchema); err != nil {
+			if err := m.ValidateColumns(ingestSchema); err != nil {
 				return fmt.Errorf("invalid mask configuration: %w", err)
 			}
-			m.ApplyToSchema(destSchema)
+			m.ApplyToSchema(ingestSchema)
 			columnMasker = m
 		}
+	}
+
+	var whitespaceTrimmer *transformer.WhitespaceTrimmer
+	if resolvedConfig.TrimWhitespace {
+		whitespaceTrimmer = transformer.NewWhitespaceTrimmer()
 	}
 
 	job := &strategy.IngestionJob{
 		Config:              &resolvedConfig,
 		Table:               table,
 		Destination:         dest,
-		Schema:              destSchema,
+		Schema:              ingestSchema,
 		SourceSchema:        originalSourceSchema,
 		Tracker:             jobTracker,
 		BufferedRecords:     bufferedRecords,
@@ -398,6 +421,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		ColumnRenamer:       p.columnRenamer,
 		IngestrColumnFiller: p.ingestrColumnFiller,
 		ColumnMasker:        columnMasker,
+		WhitespaceTrimmer:   whitespaceTrimmer,
 		EvolutionPlan:       evolutionPlan,
 	}
 
@@ -409,6 +433,20 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		// For known-schema sources with column type overrides, add a type caster
 		// that converts Arrow batches from source types to the overridden types.
 		job.TypeCaster = p.buildTypeCaster(tableSchema, destSchema)
+	}
+
+	if p.config.Stream {
+		committer, _ := src.(source.StreamCommitter)
+		exec := strategy.NewStreamingExecutor(strategy.StreamingOptions{
+			FlushInterval: p.config.FlushInterval,
+			FlushRecords:  int64(p.config.FlushRecords),
+			Strategy:      resolvedStrategy,
+			Committer:     committer,
+		})
+		if err := exec.Execute(ctx, job); err != nil {
+			return fmt.Errorf("streaming ingestion failed: %w", err)
+		}
+		return nil
 	}
 
 	if err := strat.Execute(ctx, job); err != nil {
@@ -774,6 +812,14 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	config.Debug("[PIPELINE] Multi-table mode: %d tables", len(tables))
 
 	resolvedStrategy := p.config.IncrementalStrategy
+	if p.config.Stream && resolvedStrategy == "" {
+		if ss, ok := src.(source.StreamingSource); ok {
+			resolvedStrategy = ss.DefaultStreamingStrategy()
+		}
+	}
+	if isCDCSource(p.config.SourceURI) && !p.config.FullRefresh && (resolvedStrategy == "" || resolvedStrategy == config.StrategyReplace) {
+		resolvedStrategy = config.StrategyMerge
+	}
 	if p.config.FullRefresh {
 		resolvedStrategy = config.StrategyReplace
 	}
@@ -814,9 +860,12 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	}
 
 	tableDestNames := make(map[string]string)
+	namer, _ := p.dest.(destination.MultiTableNamer)
 	for _, table := range tables {
 		destName := table.Name
-		if table.DestSchema != "" {
+		if namer != nil {
+			destName = namer.DestTableName(table.DestSchema, table.Name)
+		} else if table.DestSchema != "" {
 			// TODO(turtledev): When a publication in a non-public
 			// schema is created, the tables names may (?) have a schema.
 			//
@@ -828,6 +877,24 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			destName = table.DestSchema + "." + table.Name
 		}
 		tableDestNames[table.Name] = destName
+	}
+
+	// Schema contract handling: build a per-table evolution plan so destination
+	// tables gain columns added at the source (skip for replace, which drops and
+	// recreates). Plans are built sequentially because evolveSchemaIfNeeded
+	// keeps comparison state on the pipeline; strategies apply them per table.
+	var evolutionPlans map[string]*schemaevolution.EvolutionPlan
+	if resolvedStrategy != config.StrategyReplace {
+		evolutionPlans = make(map[string]*schemaevolution.EvolutionPlan)
+		for _, table := range tables {
+			plan, err := p.evolveSchemaIfNeeded(ctx, tableDestNames[table.Name], table.Schema)
+			if err != nil {
+				return fmt.Errorf("schema evolution failed for table %s: %w", table.Name, err)
+			}
+			if plan != nil {
+				evolutionPlans[table.Name] = plan
+			}
+		}
 	}
 
 	// For CDC sources, query per-table max LSNs for resume
@@ -852,14 +919,35 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		}
 	}
 
+	var whitespaceTrimmer *transformer.WhitespaceTrimmer
+	if resolvedConfig.TrimWhitespace {
+		whitespaceTrimmer = transformer.NewWhitespaceTrimmer()
+	}
+
 	job := &strategy.MultiTableIngestionJob{
-		Config:         &resolvedConfig,
-		Source:         src,
-		Destination:    p.dest,
-		Tables:         tables,
-		TableDestNames: tableDestNames,
-		Tracker:        tracker,
-		CDCResumeLSNs:  cdcResumeLSNs,
+		Config:            &resolvedConfig,
+		Source:            src,
+		Destination:       p.dest,
+		Tables:            tables,
+		TableDestNames:    tableDestNames,
+		Tracker:           tracker,
+		CDCResumeLSNs:     cdcResumeLSNs,
+		EvolutionPlans:    evolutionPlans,
+		WhitespaceTrimmer: whitespaceTrimmer,
+	}
+
+	if p.config.Stream {
+		committer, _ := src.(source.StreamCommitter)
+		exec := strategy.NewStreamingExecutor(strategy.StreamingOptions{
+			FlushInterval: p.config.FlushInterval,
+			FlushRecords:  int64(p.config.FlushRecords),
+			Strategy:      resolvedStrategy,
+			Committer:     committer,
+		})
+		if err := exec.ExecuteMultiTable(ctx, job); err != nil {
+			return fmt.Errorf("streaming ingestion failed: %w", err)
+		}
+		return nil
 	}
 
 	if err := mtStrat.ExecuteMultiTable(ctx, job); err != nil {
@@ -871,9 +959,9 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 // evolveSchemaIfNeeded inspects the destination's current schema and builds an
 // EvolutionPlan describing how it should change to accommodate sourceSchema.
-func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
+func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, sourceSchema *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
 	// Get destination table schema (nil if table doesn't exist)
-	destSchema, err := p.dest.GetTableSchema(ctx, p.config.DestTable)
+	destSchema, err := p.dest.GetTableSchema(ctx, destTable)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get destination schema: %w", err)
 	}
@@ -902,9 +990,9 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 		config.Debug("[SCHEMA EVOLUTION] Applying %d column type overrides", len(overrides))
 	}
 
-	// Compare schemas with overrides
+	// Compare schemas with overrides. Staging-only CDC columns are not persisted on the destination.
 	opts := &schemaevolution.CompareOptions{Overrides: overrides}
-	comparison, err := schemaevolution.Compare(sourceSchema, destSchema, opts)
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
 	}
@@ -1012,7 +1100,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, sourceSchema *schem
 
 	// Generate migration using the FILTERED schema comparison (after contract filtering)
 	// This ensures we only apply allowed changes (e.g., new columns in discard_value mode)
-	migration, err := schemaevolution.GenerateMigration(p.filteredSchemaComparison, dialect, p.config.DestTable)
+	migration, err := schemaevolution.GenerateMigration(p.filteredSchemaComparison, dialect, destTable)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate migration: %w", err)
 	}
@@ -1276,7 +1364,7 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 		if override.DataType != schema.TypeUnknown {
 			newCol := override.ApplyToColumn(col)
 			if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale {
-				fmt.Printf("Column override: %q type changed from %v(p=%v,s=%v) to %v(p=%v,s=%v)\n",
+				fmt.Printf("Column override: %q type changed from %s(p=%v,s=%v) to %s(p=%v,s=%v)\n",
 					col.Name, col.DataType, col.Precision, col.Scale, newCol.DataType, newCol.Precision, newCol.Scale)
 			}
 			sourceSchema.Columns[i] = newCol
@@ -1313,6 +1401,14 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 		s = table.Strategy()
 	} else {
 		s = cfg.IncrementalStrategy
+	}
+	if cfg.Stream && s == "" {
+		if ss, ok := src.(source.StreamingSource); ok {
+			s = ss.DefaultStreamingStrategy()
+		}
+	}
+	if isCDCSource(cfg.SourceURI) && !cfg.FullRefresh && (s == "" || s == config.StrategyReplace) {
+		s = config.StrategyMerge
 	}
 	if cfg.FullRefresh {
 		s = config.StrategyReplace
@@ -1367,7 +1463,11 @@ func rewriteReplaceForPostgres(strat config.IncrementalStrategy, destURI string)
 
 // isCDCSource returns true if the source URI indicates a CDC source
 func isCDCSource(uri string) bool {
-	return strings.HasPrefix(uri, "postgres+cdc://") || strings.HasPrefix(uri, "postgresql+cdc://")
+	schemeEnd := strings.Index(uri, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(uri[:schemeEnd]), "+cdc")
 }
 
 // cdcSlotSuffix returns a 6-hex-char hash of the destination URI for use as a

@@ -30,7 +30,11 @@ ingestr ingest \
 - `--columns <name>:<type>:<source>`: Specifies the columns to be ingested. Use `name:type` to override a column's type, `name:type:source` to rename `source` to `name` with a type, or `name::source` to rename only. Multiple entries are comma-separated. Defaults to `None`.
 - `--no-inference`: Skips schema inference for schema-less sources and uses `--columns` as the source schema. Requires `--columns`.
 - `--mask <column_name>:<algorithm>[:param]`: Applies data masking to specified columns. Can be used multiple times for different columns. See the [Data Masking](../getting-started/data-masking.md) documentation for available algorithms and usage examples. Defaults to `None`.
+- `--trim-whitespace`: Trims leading and trailing whitespace from all string column values before writing to the destination. This applies to regular batch ingestions and CDC ingestions, preserves nulls and column types, and leaves non-string columns unchanged. Defaults to `false`. Can also be set with `TRIM_WHITESPACE=true` or `INGESTR_TRIM_WHITESPACE=true`.
 - `--schema-naming` Specifies what naming convention to use for table and column names on the destination. Can be `default` or `direct`.default is snake_case. `direct is case sensitive and doesn't contract underscores.
+- `--stream`: Runs continuous (streaming) ingestion instead of a one-shot load. Supported by CDC sources (`postgres+cdc`, `mssql+cdc`) and message brokers (`kafka`, `amqp`). The process runs until interrupted (SIGINT/SIGTERM), flushing buffered records to the destination on an interval or record-count trigger. See [Streaming ingestion](#streaming-ingestion) below.
+- `--flush-interval`: In streaming mode, flush buffered records to the destination at least this often. Defaults to `30s`. Only valid with `--stream`.
+- `--flush-records`: In streaming mode, flush when this many records have been buffered. Defaults to `50000`. Only valid with `--stream`.
 
 The `interval-start` and `interval-end` options support various datetime formats, here are some examples:
 - `%Y-%m-%d`: `2023-01-31`
@@ -42,6 +46,33 @@ The `interval-start` and `interval-end` options support various datetime formats
 > [!INFO]
 > For the details around the incremental key and the various strategies, please refer to the [Incremental Loading](../getting-started/incremental-loading.md) section.
 
+
+## Streaming ingestion
+
+The `--stream` flag turns `ingest` into a long-running process that continuously pulls changes from the source and flushes them to the destination, rather than running once and exiting. It is supported by:
+
+- **CDC sources** (`postgres+cdc`, `mssql+cdc`): captures every insert, update, and delete across all tables in the publication/capture set and applies them with the `merge` strategy.
+- **Message brokers** (`kafka`, `amqp`): consumes messages into a fixed envelope schema — a `msg_id` primary key, a JSON `data` column holding the decoded body and metadata, and an `_ingestr_order` column (source offset / delivery tag) — and applies them with `merge` keyed on `msg_id`, keeping the latest record per key within each flush window. Schema inference is skipped (a never-ending stream has no end to infer from).
+
+A flush happens whenever **either** `--flush-interval` (default 30s) **or** `--flush-records` (default 50000) is reached, whichever comes first. `--flush-records` is the memory bound: records are buffered until a flush.
+
+Each flush writes the buffered records, merges them into the destination, and only then confirms the source position as durable. This gives **at-least-once delivery**: a crash before a flush completes re-delivers the un-flushed changes on restart, and the `merge` (by primary key / `msg_id`) makes replays idempotent. The stream resumes automatically — CDC from the destination's last recorded LSN, brokers from their committed offset / unacknowledged messages.
+
+Stop a stream with `Ctrl+C` (SIGINT) or SIGTERM; ingestr performs a final flush of buffered data and exits cleanly.
+
+```bash
+# Stream all changes from a Postgres publication into BigQuery, flushing
+# every 15 seconds or 100k changes, whichever comes first.
+ingestr ingest \
+   --source-uri 'postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub' \
+   --dest-uri 'bigquery://my_project?credentials_path=/path/to/sa.json' \
+   --stream \
+   --flush-interval 15s \
+   --flush-records 100000
+```
+
+> [!INFO]
+> Schema changes are picked up at startup. If the source schema changes while a stream is running, restart the stream to apply the new schema. Run streaming ingestion under a supervisor (systemd, Kubernetes, etc.) so it restarts after transient source/destination outages.
 
 ## General flags
 
@@ -129,6 +160,19 @@ This example demonstrates masking sensitive customer data:
 - Phone numbers show only first and last 3 digits
 - SSNs are completely redacted
 - Salaries are rounded to nearest $5000
+
+### Trimming whitespace from string values
+
+```bash
+ingestr ingest \
+   --source-uri 'postgresql://user:pass@localhost/app?sslmode=disable' \
+   --source-table 'public.customers' \
+   --dest-uri 'duckdb:///warehouse.duckdb' \
+   --dest-table 'raw.customers' \
+   --trim-whitespace
+```
+
+This trims leading and trailing whitespace from string values as data streams through ingestr. For example, `"  Alice  "` becomes `"Alice"` and `"\tA-123\n"` becomes `"A-123"`. Interior whitespace, such as `"ACME  Inc"`, is preserved.
 
 > [!INFO]
 > For more examples, please refer to the specific platforms' documentation on the sidebar.

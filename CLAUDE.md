@@ -1,24 +1,24 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
-gong is a Go-based data ingestion CLI tool that transfers data between various databases and formats. It's a reimplementation of the Python-based ingestr tool, focusing on performance and portability. The project uses Apache Arrow for efficient in-memory data representation and ADBC (Arrow Database Connectivity) for database interactions.
+**ingestr** is a Go-based data ingestion CLI that transfers data between databases and formats. It uses Apache Arrow for in-memory data representation and ADBC (Arrow Database Connectivity) for database interactions.
+
+- Go module: `github.com/bruin-data/ingestr`
+- Binary: `ingestr` (built to `bin/ingestr`)
+- Entry point: `main.go` → `cmd/`
 
 ## Build and Test Commands
 
 ```bash
 # Build the application
-make build                    # Builds to bin/gong
+make build                    # Builds to bin/ingestr
 
-# Run tests
-make test                     # Run all unit tests with race detection
-go test -short ./...          # Run unit tests only (skip integration tests)
+# Run unit tests
+make test                     # All unit tests with race detection
+go test -short ./...          # Unit tests only
 
-# Run integration tests
-go test -v ./tests/integration/...  # Run all integration tests
-go test -v -run TestPostgresToPostgres ./tests/integration/...  # Run specific test
+# Run integration tests (gated by the `integration` build tag)
+make test-integration
+go test -tags integration -v -run TestPostgresToPostgres ./tests/integration/...
 
 # Clean build artifacts
 make clean
@@ -28,7 +28,13 @@ make run ARGS="ingest --source-uri=postgres://... --dest-uri=sqlite://... --sour
 
 # Direct execution
 go run . ingest --source-uri=<uri> --dest-uri=<uri> --source-table=<table>
+
+# Format and lint
+make format                   # gci + gofumpt + go vet + golangci-lint
+make lint                     # Linters only
 ```
+
+Always run `make format`, `make lint` and `make test` when you are done with making your changes, ensure they pass.
 
 ## Architecture Overview
 
@@ -44,24 +50,24 @@ go run . ingest --source-uri=<uri> --dest-uri=<uri> --source-table=<table>
 2. **URI Registry** (`internal/uri/registry.go`): Central registry pattern for source/destination discovery
    - Maps URI schemes (postgres, duckdb, bigquery, etc.) to constructor functions
    - Provides `GetSource(uri)` and `GetDestination(uri)` methods
-   - DefaultRegistry is initialized at package init time with all supported connectors
+   - `DefaultRegistry` is initialized at package init time with all supported connectors
 
 3. **Sources** (`pkg/source/`): Data extraction layer
-   - All sources implement `Source` interface with `Connect`, `GetSchema`, `Read`, `Close`
+   - All sources implement the `Source` interface with `Connect`, `GetSchema`, `Read`, `Close`
    - Return data as `<-chan RecordBatchResult` streaming Arrow record batches
    - Two main patterns:
      - **ADBC-based**: Generic ADBC source with pluggable Dialect interface (DuckDB, Snowflake, BigQuery)
      - **Native driver**: Direct database driver usage (Postgres via pgx, MySQL, MSSQL)
 
 4. **Destinations** (`pkg/destination/`): Data loading layer
-   - All destinations implement `Destination` interface
+   - All destinations implement the `Destination` interface
    - Key methods: `PrepareTable`, `Write`, `WriteParallel`, `SwapTable`
    - Support transaction handling via `Transaction` interface
    - Consume Arrow record batches from sources
 
 5. **Strategies** (`pkg/strategy/`): Write pattern implementations
    - Registry-based pattern with `Register()` and `Get()` functions
-   - Each strategy implements `WriteStrategy` interface
+   - Each strategy implements the `WriteStrategy` interface
    - Current strategies: `replace` (drop/recreate), `merge` (upsert by primary key)
    - Strategy validation occurs after primary key auto-detection
 
@@ -76,15 +82,8 @@ The ADBC source uses a Dialect interface to abstract database-specific behavior:
 
 - **Dialect**: Base interface for driver management, SQL templates, type mapping
 - **DatasetAwareDialect**: For databases like BigQuery that embed schema in query paths
-- **DatasetConnector**: For databases requiring dataset_id in connection string (BigQuery)
+- **DatasetConnector**: For databases requiring `dataset_id` in connection string (BigQuery)
 - **SchemaProvider**: Optional interface for native API schema fetching (faster than SQL)
-
-Located in `pkg/source/adbc/`:
-- `source.go`: Generic ADBC source implementation
-- `dialect.go`: Dialect interface definitions
-- `driver.go`: ADBC driver management and dbc tool integration
-- `query.go`: SQL query builder with column filtering and incremental logic
-- `batch.go`: Arrow record batch conversion from sql.Rows
 
 Database-specific dialects in `pkg/source/{database}/dialect.go`:
 - `duckdb/dialect.go`
@@ -101,14 +100,14 @@ Database-specific dialects in `pkg/source/{database}/dialect.go`:
 4. Pipeline created with config and executed
 
 **Data Flow**:
-1. Source.Read() returns `<-chan RecordBatchResult` with Arrow record batches
+1. `Source.Read()` returns `<-chan RecordBatchResult` with Arrow record batches
 2. Strategy executes its pattern (e.g., staging table, merge, swap)
-3. Destination.Write() or WriteParallel() consumes the channel
+3. `Destination.Write()` or `WriteParallel()` consumes the channel
 4. Arrow format enables zero-copy transfer where possible
 
 **Primary Key Handling**:
-- Sources attempt to detect PKs during GetSchema()
-- Pipeline auto-populates config.PrimaryKeys if empty and source provides them
+- Sources attempt to detect PKs during `GetSchema()`
+- Pipeline auto-populates `config.PrimaryKeys` if empty and source provides them
 - Strategy validation checks for required PKs after auto-detection
 - This allows merge strategy to work without explicit PK specification
 
@@ -118,7 +117,7 @@ Database-specific dialects in `pkg/source/{database}/dialect.go`:
 Do NOT write comments everywhere. If the code is self-explanatory, do not write comments.
 
 ### Type Mapping
-Each source must map its native types to `schema.DataType` enum. The ADBC dialect system delegates this via `MapDataType(dbType string)`. Native sources implement mapping directly (e.g., `pkg/source/postgres/mapper.go`).
+Each source must map its native types to the `schema.DataType` enum. The ADBC dialect system delegates this via `MapDataType(dbType string)`. Native sources implement mapping directly (e.g., `pkg/source/postgres/mapper.go`).
 
 ### Timestamp Convention
 All timestamps in the Arrow layer use **microseconds** as the standard unit. This is enforced throughout the codebase:
@@ -148,11 +147,11 @@ This convention exists because:
 ADBC drivers are installed via the native `github.com/columnar-tech/dbc` client. The `pkg/source/adbc` package handles this automatically. Drivers are cached and only installed once.
 
 ### Integration Tests
-Located in `tests/integration/integration_test.go`. Tests use testcontainers for PostgreSQL and create temporary files for SQLite/DuckDB. Integration tests are skipped in short mode (`go test -short`).
+Located in `tests/integration/`. Tests use testcontainers for PostgreSQL and create temporary files for SQLite/DuckDB. Integration tests are gated by the `integration` build tag — run them with `go test -tags integration ./tests/integration/...` or `make test-integration`. Plain `go test ./...` will not pick them up.
 
 ### Error Handling
 - Config validation returns `*ValidationError` with field name and message
-- Pipeline wraps errors with context (e.g., "failed to connect to source: ...")
+- Pipeline wraps errors with context (e.g., `"failed to connect to source: ..."`)
 - ADBC source provides debug logging via `config.Debug()` when `--debug` flag is set
 - Always use `fmt.Errorf` with `%w` for error wrapping to preserve error chains
 
@@ -171,14 +170,14 @@ The tool accepts various URI schemes:
 
 ### Adding New Sources
 1. Implement the `Source` interface or create an ADBC Dialect
-2. Register in `internal/uri/registry.go` init() with URI schemes
+2. Register in `internal/uri/registry.go` `init()` with URI schemes
 3. If using ADBC: implement Dialect with SQL templates and type mapper
 4. If native driver: handle connection, schema fetching, and batch reading directly
 
-**Schema-less sources** (like MongoDB): Implement `HasKnownSchema() bool` returning `false`. The pipeline will automatically use schema inference (`pkg/schemainfer/`) to derive the schema from the first batch of data. The source should still emit proper Arrow types - use `pkg/schema.JSONArrowType` for nested documents and arrays.
+**Schema-less sources** (like MongoDB): Implement `HasKnownSchema() bool` returning `false`. The pipeline will automatically use schema inference (`pkg/schemainfer/`) to derive the schema from the first batch of data. The source should still emit proper Arrow types — use `pkg/schema.JSONArrowType` for nested documents and arrays.
 
 ### Adding New Strategies
 1. Implement `WriteStrategy` interface in `pkg/strategy/`
-2. Register in `pkg/strategy/strategy.go` init() function
+2. Register in `pkg/strategy/strategy.go` `init()` function
 3. Implement validation for required config (e.g., primary keys for merge)
-4. Execute pattern using IngestionJob (has source, destination, schema, config)
+4. Execute pattern using `IngestionJob` (has source, destination, schema, config)

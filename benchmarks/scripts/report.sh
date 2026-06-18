@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [ -n "${1:-}" ]; then
-    exec uv run --project "$BENCH_DIR" --locked python "$SCRIPT_DIR/runner.py" --report "$1"
+    exec uv run --no-project --python 3.13 --script "$SCRIPT_DIR/runner.py" --report "$1"
 else
-    exec uv run --project "$BENCH_DIR" --locked python "$SCRIPT_DIR/runner.py" --report
+    exec uv run --no-project --python 3.13 --script "$SCRIPT_DIR/runner.py" --report
 fi

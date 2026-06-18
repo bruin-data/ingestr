@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/progress"
@@ -22,7 +23,7 @@ type IngestionJob struct {
 	Tracker      progress.Tracker    // Progress tracker for monitoring ingestion
 
 	// BufferedRecords contains pre-read data for schema-unknown sources.
-	// If non-nil, GetRecords() returns this instead of reading from Table.
+	// If non-nil, GetRecords() transforms this stream instead of reading from Table.
 	BufferedRecords <-chan source.RecordBatchResult
 
 	// SchemaComparison contains the result of comparing source and destination schemas.
@@ -47,17 +48,26 @@ type IngestionJob struct {
 	// ColumnMasker replaces values in user-specified columns (e.g. passwords).
 	ColumnMasker *transformer.ColumnMasker
 
+	// WhitespaceTrimmer trims string values when --trim-whitespace is enabled.
+	WhitespaceTrimmer *transformer.WhitespaceTrimmer
+
 	// EvolutionPlan holds the deferred schema evolution to apply on the destination.
 	EvolutionPlan *schemaevolution.EvolutionPlan
 }
 
-// GetRecords returns either buffered records (for schema-unknown sources)
-// or reads from the table directly (for schema-known sources).
+// GetRecords returns the transformed record stream for this job.
 func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	var records <-chan source.RecordBatchResult
 	if j.BufferedRecords != nil {
-		return j.BufferedRecords, nil
+		records = j.BufferedRecords
+	} else {
+		var err error
+		records, err = j.Table.Read(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return j.Table.Read(ctx, opts)
+	return j.ApplyBatchTransformation(ctx, records)
 }
 
 // ApplyEvolution applies the pending schema evolution plan to the destination.
@@ -65,6 +75,7 @@ func (j *IngestionJob) ApplyEvolution(ctx context.Context) error {
 	if j.EvolutionPlan == nil || !j.EvolutionPlan.HasMigration() {
 		return nil
 	}
+	ctx = annotation.WithStep(ctx, annotation.StepEvolve)
 	return j.EvolutionPlan.Apply(ctx, j.Destination)
 }
 
@@ -85,7 +96,21 @@ type MultiTableIngestionJob struct {
 	Tables         []source.SourceTableInfo
 	TableDestNames map[string]string // source table → dest table mapping
 	Tracker        progress.Tracker
-	CDCResumeLSNs  map[string]string // Per-table CDC resume LSNs: source table → max LSN already processed
+	CDCResumeLSNs  map[string]string                         // Per-table CDC resume LSNs: source table → max LSN already processed
+	EvolutionPlans map[string]*schemaevolution.EvolutionPlan // Per-table schema evolution plans: source table → plan
+
+	// WhitespaceTrimmer trims string values when --trim-whitespace is enabled.
+	WhitespaceTrimmer *transformer.WhitespaceTrimmer
+}
+
+// ApplyEvolutionFor applies the pending schema evolution plan for a source table.
+func (j *MultiTableIngestionJob) ApplyEvolutionFor(ctx context.Context, sourceTable string) error {
+	plan := j.EvolutionPlans[sourceTable]
+	if plan == nil || !plan.HasMigration() {
+		return nil
+	}
+	ctx = annotation.WithStep(ctx, annotation.StepEvolve)
+	return plan.Apply(ctx, j.Destination)
 }
 
 // GetDestTableName returns the destination table name for a source table.
@@ -94,6 +119,21 @@ func (j *MultiTableIngestionJob) GetDestTableName(sourceTable string) string {
 		return mapping
 	}
 	return sourceTable
+}
+
+func (j *MultiTableIngestionJob) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	records, err := j.Source.ReadAll(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return j.ApplyBatchTransformation(records), nil
+}
+
+func (j *MultiTableIngestionJob) ApplyBatchTransformation(records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {
+	if j.WhitespaceTrimmer != nil {
+		records = transformer.Wrap(records, j.WhitespaceTrimmer)
+	}
+	return records
 }
 
 // MultiTableStrategy extends WriteStrategy for multi-table sources.
@@ -128,6 +168,10 @@ func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-c
 	// Apply column renaming (if configured)
 	if j.ColumnRenamer != nil && j.ColumnRenamer.HasRenames() {
 		records = transformer.Wrap(records, j.ColumnRenamer)
+	}
+
+	if j.WhitespaceTrimmer != nil {
+		records = transformer.Wrap(records, j.WhitespaceTrimmer)
 	}
 
 	// Apply column masking

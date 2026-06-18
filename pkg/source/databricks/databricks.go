@@ -143,7 +143,7 @@ func (s *DatabricksSource) GetTable(ctx context.Context, req source.TableRequest
 
 func (s *DatabricksSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := s.parseTableName(table)
-	fullTable := fmt.Sprintf("`%s`.`%s`.`%s`", s.catalog, schemaName, tableName)
+	fullTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(s.catalog), quoteIdentifier(schemaName), quoteIdentifier(tableName))
 
 	query := fmt.Sprintf("DESCRIBE TABLE %s", fullTable)
 
@@ -207,7 +207,7 @@ func (s *DatabricksSource) getSchema(ctx context.Context, table string) (*schema
 
 func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	schemaName, tableName := s.parseTableName(table)
-	fullTable := fmt.Sprintf("`%s`.`%s`.`%s`", s.catalog, schemaName, tableName)
+	fullTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(s.catalog), quoteIdentifier(schemaName), quoteIdentifier(tableName))
 
 	columns := tableSchema.Columns
 	if len(opts.ExcludeColumns) > 0 {
@@ -216,7 +216,7 @@ func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *
 
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
-		colNames[i] = fmt.Sprintf("`%s`", col.Name)
+		colNames[i] = quoteIdentifier(col.Name)
 	}
 
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), fullTable)
@@ -346,9 +346,12 @@ func (s *DatabricksSource) buildRecordBatch(alloc memory.Allocator, arrowSchema 
 				continue
 			}
 			val := row[i]
-			if val == "" || val == "null" || val == "NULL" {
+			switch val {
+			case "":
+				builder.AppendEmptyValue()
+			case "null", "NULL":
 				builder.AppendNull()
-			} else {
+			default:
 				arrowconv.AppendValue(builder, val)
 			}
 		}
@@ -472,14 +475,18 @@ func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 	return arrow.NewSchema(fields, nil)
 }
 
+func quoteIdentifier(name string) string {
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
+}
+
 func buildIncrementalWhere(key string, start, end interface{}) string {
 	var conditions []string
 
 	if start != nil {
-		conditions = append(conditions, fmt.Sprintf("`%s` >= %s", key, formatValue(start)))
+		conditions = append(conditions, fmt.Sprintf("%s >= %s", quoteIdentifier(key), formatValue(start)))
 	}
 	if end != nil {
-		conditions = append(conditions, fmt.Sprintf("`%s` <= %s", key, formatValue(end)))
+		conditions = append(conditions, fmt.Sprintf("%s <= %s", quoteIdentifier(key), formatValue(end)))
 	}
 
 	return strings.Join(conditions, " AND ")

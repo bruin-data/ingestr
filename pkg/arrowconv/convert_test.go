@@ -2,6 +2,7 @@ package arrowconv
 
 import (
 	"encoding/json"
+	"net"
 	"testing"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -281,6 +284,110 @@ func TestAppendValue_TimestampBuilder(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAppendValue_ListTimestampBuilder(t *testing.T) {
+	tsType := &arrow.TimestampType{Unit: arrow.Microsecond}
+	builder := array.NewListBuilder(memory.DefaultAllocator, tsType)
+	defer builder.Release()
+
+	first := time.Date(2026, 6, 10, 12, 0, 0, 123_000_000, time.UTC)
+	second := time.Date(2026, 6, 10, 13, 30, 0, 456_000_000, time.UTC)
+
+	AppendValue(builder, []time.Time{first, second})
+
+	arr := builder.NewArray().(*array.List)
+	defer arr.Release()
+
+	require.Equal(t, 1, arr.Len())
+	assert.False(t, arr.IsNull(0))
+
+	values := arr.ListValues().(*array.Timestamp)
+	require.Equal(t, 2, values.Len())
+	assert.Equal(t, arrow.Timestamp(first.UnixMicro()), values.Value(0))
+	assert.Equal(t, arrow.Timestamp(second.UnixMicro()), values.Value(1))
+}
+
+func TestAppendValue_ListNullableScalarElements(t *testing.T) {
+	textBuilder := array.NewListBuilder(memory.DefaultAllocator, arrow.BinaryTypes.String)
+	defer textBuilder.Release()
+	alpha := "alpha"
+	omega := "omega"
+	AppendValue(textBuilder, []*string{&alpha, nil, &omega})
+
+	textArr := textBuilder.NewArray().(*array.List)
+	defer textArr.Release()
+	textValues := textArr.ListValues().(*array.String)
+	require.Equal(t, 3, textValues.Len())
+	assert.Equal(t, "alpha", textValues.Value(0))
+	assert.True(t, textValues.IsNull(1))
+	assert.Equal(t, "omega", textValues.Value(2))
+
+	intBuilder := array.NewListBuilder(memory.DefaultAllocator, arrow.PrimitiveTypes.Int32)
+	defer intBuilder.Release()
+	one := uint16(1)
+	two := uint16(2)
+	AppendValue(intBuilder, []*uint16{&one, nil, &two})
+
+	intArr := intBuilder.NewArray().(*array.List)
+	defer intArr.Release()
+	intValues := intArr.ListValues().(*array.Int32)
+	require.Equal(t, 3, intValues.Len())
+	assert.Equal(t, int32(1), intValues.Value(0))
+	assert.True(t, intValues.IsNull(1))
+	assert.Equal(t, int32(2), intValues.Value(2))
+
+	boolBuilder := array.NewListBuilder(memory.DefaultAllocator, arrow.FixedWidthTypes.Boolean)
+	defer boolBuilder.Release()
+	yes := true
+	no := false
+	AppendValue(boolBuilder, []*bool{&yes, nil, &no})
+
+	boolArr := boolBuilder.NewArray().(*array.List)
+	defer boolArr.Release()
+	boolValues := boolArr.ListValues().(*array.Boolean)
+	require.Equal(t, 3, boolValues.Len())
+	assert.True(t, boolValues.Value(0))
+	assert.True(t, boolValues.IsNull(1))
+	assert.False(t, boolValues.Value(2))
+}
+
+func TestAppendValue_ListStringerElements(t *testing.T) {
+	builder := array.NewListBuilder(memory.DefaultAllocator, arrow.BinaryTypes.String)
+	defer builder.Release()
+
+	firstUUID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	secondUUID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	AppendValue(builder, []*uuid.UUID{&firstUUID, nil, &secondUUID})
+	AppendValue(builder, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("8.8.8.8")})
+
+	arr := builder.NewArray().(*array.List)
+	defer arr.Release()
+	values := arr.ListValues().(*array.String)
+	require.Equal(t, 5, values.Len())
+	assert.Equal(t, firstUUID.String(), values.Value(0))
+	assert.True(t, values.IsNull(1))
+	assert.Equal(t, secondUUID.String(), values.Value(2))
+	assert.Equal(t, "127.0.0.1", values.Value(3))
+	assert.Equal(t, "8.8.8.8", values.Value(4))
+}
+
+func TestAppendValue_ListDecimalBuilder(t *testing.T) {
+	dt := &arrow.Decimal128Type{Precision: 18, Scale: 5}
+	builder := array.NewListBuilder(memory.DefaultAllocator, dt)
+	defer builder.Release()
+
+	first := decimal.RequireFromString("12.34567")
+	second := decimal.RequireFromString("89.00001")
+	AppendValue(builder, []*decimal.Decimal{&first, nil, &second})
+
+	arr := builder.NewArray().(*array.List)
+	defer arr.Release()
+	values := arr.ListValues().(*array.Decimal128)
+	require.Equal(t, 3, values.Len())
+	assert.Equal(t, "1234567", decimal128.Num(values.Value(0)).BigInt().String())
+	assert.True(t, values.IsNull(1))
+	assert.Equal(t, "8900001", decimal128.Num(values.Value(2)).BigInt().String())
 }
 
 func TestAppendValue_Decimal128_JSONNumber(t *testing.T) {

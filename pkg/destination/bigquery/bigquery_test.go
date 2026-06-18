@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +20,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
+	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 )
 
 func duckdbCompatible(sql string) string {
@@ -89,6 +94,396 @@ func TestNewBigQueryDestination(t *testing.T) {
 	dest := NewBigQueryDestination()
 	if dest == nil {
 		t.Fatal("NewBigQueryDestination returned nil")
+	}
+}
+
+func TestRunQueryJobWithRetryRecoversDuplicateJobInsert(t *testing.T) {
+	ctx := context.Background()
+	const sql = "SELECT 1"
+
+	var insertCalls int
+	var jobGetCalls int
+	var queryResultsCalls int
+	var gotJobID string
+	var gotSQL string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/projects/test-project/jobs"):
+			insertCalls++
+			var req struct {
+				JobReference struct {
+					ProjectID string `json:"projectId"`
+					JobID     string `json:"jobId"`
+					Location  string `json:"location"`
+				} `json:"jobReference"`
+				Configuration struct {
+					Query struct {
+						Query string `json:"query"`
+					} `json:"query"`
+				} `json:"configuration"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			gotJobID = req.JobReference.JobID
+			gotSQL = req.Configuration.Query.Query
+
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    http.StatusConflict,
+					"message": fmt.Sprintf("Already Exists: Job test-project:US.%s", gotJobID),
+					"status":  "ALREADY_EXISTS",
+					"errors": []map[string]string{
+						{
+							"domain":  "global",
+							"message": fmt.Sprintf("Already Exists: Job test-project:US.%s", gotJobID),
+							"reason":  "duplicate",
+						},
+					},
+				},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/jobs/"):
+			jobGetCalls++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference": map[string]string{
+					"projectId": "test-project",
+					"jobId":     gotJobID,
+					"location":  "US",
+				},
+				"configuration": map[string]interface{}{
+					"query": map[string]interface{}{
+						"query":        gotSQL,
+						"useLegacySql": false,
+					},
+				},
+				"status": map[string]string{
+					"state": "DONE",
+				},
+				"statistics": map[string]interface{}{
+					"query": map[string]string{
+						"statementType": "SELECT",
+					},
+				},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/queries/"):
+			queryResultsCalls++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference": map[string]string{
+					"projectId": "test-project",
+					"jobId":     gotJobID,
+					"location":  "US",
+				},
+				"jobComplete": true,
+				"totalRows":   "0",
+				"schema": map[string]interface{}{
+					"fields": []interface{}{},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:    client,
+		projectID: "test-project",
+		location:  "US",
+	}
+
+	job, err := dest.runQueryJobWithRetryAttempts(ctx, sql, "MERGE", 1)
+	if err != nil {
+		t.Fatalf("runQueryJobWithRetryAttempts() error = %v", err)
+	}
+	if job == nil {
+		t.Fatal("runQueryJobWithRetryAttempts() returned nil job")
+	}
+	if job.ID() != gotJobID {
+		t.Fatalf("job.ID() = %q, want %q", job.ID(), gotJobID)
+	}
+	if !strings.HasPrefix(gotJobID, "ingestr_") {
+		t.Fatalf("job ID = %q, want ingestr_ prefix", gotJobID)
+	}
+	if !strings.Contains(gotSQL, sql) {
+		t.Fatalf("submitted SQL = %q, want it to contain %q", gotSQL, sql)
+	}
+	if insertCalls != 1 {
+		t.Fatalf("insertCalls = %d, want 1", insertCalls)
+	}
+	if jobGetCalls == 0 {
+		t.Fatal("expected duplicate recovery to fetch the existing job")
+	}
+	if queryResultsCalls != 1 {
+		t.Fatalf("queryResultsCalls = %d, want 1", queryResultsCalls)
+	}
+}
+
+func TestRunQueryJobWithRetryUsesRemainingAttemptsAfterDuplicateRecoveryFailure(t *testing.T) {
+	ctx := context.Background()
+	const sql = "SELECT 1"
+
+	var insertCalls int
+	var jobGetCalls int
+	var queryResultsCalls int
+	var gotJobID string
+	var gotSQL string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/projects/test-project/jobs"):
+			insertCalls++
+			var req struct {
+				JobReference struct {
+					JobID string `json:"jobId"`
+				} `json:"jobReference"`
+				Configuration struct {
+					Query struct {
+						Query string `json:"query"`
+					} `json:"query"`
+				} `json:"configuration"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			gotJobID = req.JobReference.JobID
+			gotSQL = req.Configuration.Query.Query
+
+			if insertCalls == 1 {
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    http.StatusConflict,
+						"message": fmt.Sprintf("Already Exists: Job test-project:US.%s", gotJobID),
+						"errors": []map[string]string{
+							{
+								"domain":  "global",
+								"message": fmt.Sprintf("Already Exists: Job test-project:US.%s", gotJobID),
+								"reason":  "duplicate",
+							},
+						},
+					},
+				})
+				return
+			}
+
+			writeBigQueryTestJob(w, gotJobID, gotSQL)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/jobs/"):
+			jobGetCalls++
+			if jobGetCalls == 1 {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    http.StatusNotFound,
+						"message": "Not found: Job",
+					},
+				})
+				return
+			}
+			writeBigQueryTestJob(w, gotJobID, gotSQL)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/queries/"):
+			queryResultsCalls++
+			writeBigQueryTestQueryResults(w, gotJobID)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:    client,
+		projectID: "test-project",
+		location:  "US",
+	}
+
+	job, err := dest.runQueryJobWithRetryAttempts(ctx, sql, "MERGE", 2)
+	if err != nil {
+		t.Fatalf("runQueryJobWithRetryAttempts() error = %v", err)
+	}
+	if job == nil {
+		t.Fatal("runQueryJobWithRetryAttempts() returned nil job")
+	}
+	if insertCalls != 2 {
+		t.Fatalf("insertCalls = %d, want 2", insertCalls)
+	}
+	if jobGetCalls != 2 {
+		t.Fatalf("jobGetCalls = %d, want 2", jobGetCalls)
+	}
+	if queryResultsCalls != 1 {
+		t.Fatalf("queryResultsCalls = %d, want 1", queryResultsCalls)
+	}
+}
+
+func TestRecoverDuplicateQueryJobReportsSQLMismatch(t *testing.T) {
+	ctx := context.Background()
+	const expectedSQL = "SELECT 1"
+	const existingSQL = "SELECT 2"
+	const jobID = "ingestr_test"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/jobs/") {
+			writeBigQueryTestJob(w, jobID, existingSQL)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:    client,
+		projectID: "test-project",
+		location:  "US",
+	}
+
+	_, err = dest.recoverDuplicateQueryJob(ctx, jobID, expectedSQL)
+	if err == nil {
+		t.Fatal("recoverDuplicateQueryJob() error = nil, want mismatch")
+	}
+	if !strings.Contains(err.Error(), `existing="SELECT 2"`) || !strings.Contains(err.Error(), `expected="SELECT 1"`) {
+		t.Fatalf("recoverDuplicateQueryJob() error = %q, want existing and expected SQL snippets", err)
+	}
+}
+
+func TestRecoverDuplicateQueryJobAllowsDifferentAnnotation(t *testing.T) {
+	ctx := context.Background()
+	const expectedSQL = "-- @bruin.config: {\"request_id\":\"expected\"}\nSELECT 1"
+	const existingSQL = "-- @bruin.config: {\"request_id\":\"existing\"}\nSELECT 1"
+	const jobID = "ingestr_test"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/projects/test-project/jobs/") {
+			writeBigQueryTestJob(w, jobID, existingSQL)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:    client,
+		projectID: "test-project",
+		location:  "US",
+	}
+
+	job, err := dest.recoverDuplicateQueryJob(ctx, jobID, expectedSQL)
+	if err != nil {
+		t.Fatalf("recoverDuplicateQueryJob() error = %v", err)
+	}
+	if job == nil {
+		t.Fatal("recoverDuplicateQueryJob() returned nil job")
+	}
+}
+
+func writeBigQueryTestJob(w http.ResponseWriter, jobID, sql string) {
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"jobReference": map[string]string{
+			"projectId": "test-project",
+			"jobId":     jobID,
+			"location":  "US",
+		},
+		"configuration": map[string]interface{}{
+			"query": map[string]interface{}{
+				"query":        sql,
+				"useLegacySql": false,
+			},
+		},
+		"status": map[string]string{
+			"state": "DONE",
+		},
+		"statistics": map[string]interface{}{
+			"query": map[string]string{
+				"statementType": "SELECT",
+			},
+		},
+	})
+}
+
+func writeBigQueryTestQueryResults(w http.ResponseWriter, jobID string) {
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"jobReference": map[string]string{
+			"projectId": "test-project",
+			"jobId":     jobID,
+			"location":  "US",
+		},
+		"jobComplete": true,
+		"totalRows":   "0",
+		"schema": map[string]interface{}{
+			"fields": []interface{}{},
+		},
+	})
+}
+
+func TestIsBigQueryDuplicateJobError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "googleapi duplicate job",
+			err: &googleapi.Error{
+				Code:    http.StatusConflict,
+				Message: "Already Exists: Job test:US.job",
+				Errors: []googleapi.ErrorItem{
+					{Reason: "duplicate", Message: "Already Exists: Job test:US.job"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "string duplicate job",
+			err:  errors.New("googleapi: Error 409: Already Exists: Job bruin-internal-dwh:US.w61mnz2N9xQMtY2nzHLeEotitcQ, duplicate"),
+			want: true,
+		},
+		{
+			name: "table already exists is not duplicate job",
+			err: &googleapi.Error{
+				Code:    http.StatusConflict,
+				Message: "Already Exists: Table test.dataset.table",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBigQueryDuplicateJobError(tt.err); got != tt.want {
+				t.Fatalf("isBigQueryDuplicateJobError() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -304,14 +699,36 @@ func TestSupportsStrategies(t *testing.T) {
 	}
 }
 
-func TestBeginTransaction_NotSupported(t *testing.T) {
+func TestBeginTransaction_ReturnsScriptTransaction(t *testing.T) {
 	dest := NewBigQueryDestination()
-	_, err := dest.BeginTransaction(context.Background())
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	tx, err := dest.BeginTransaction(context.Background())
+	if err != nil {
+		t.Fatalf("BeginTransaction returned error: %v", err)
 	}
-	if !contains(err.Error(), "transactions not supported") {
-		t.Fatalf("unexpected error: %v", err)
+
+	bqTx, ok := tx.(*bigQueryTransaction)
+	if !ok {
+		t.Fatalf("transaction type = %T, want *bigQueryTransaction", tx)
+	}
+
+	if err := bqTx.Exec(context.Background(), "DELETE FROM `p`.`d`.`t` WHERE TRUE"); err != nil {
+		t.Fatalf("Exec returned error: %v", err)
+	}
+	if err := bqTx.Exec(context.Background(), "INSERT INTO `p`.`d`.`t` SELECT * FROM `p`.`d`.`s`"); err != nil {
+		t.Fatalf("Exec returned error: %v", err)
+	}
+
+	got := buildBigQueryTransactionScript(bqTx.statements...)
+	want := "BEGIN TRANSACTION;\n" +
+		"DELETE FROM `p`.`d`.`t` WHERE TRUE;\n" +
+		"INSERT INTO `p`.`d`.`t` SELECT * FROM `p`.`d`.`s`;\n" +
+		"COMMIT TRANSACTION;"
+	if got != want {
+		t.Fatalf("transaction script =\n%s\nwant:\n%s", got, want)
+	}
+
+	if err := bqTx.Exec(context.Background(), "SELECT 1", 1); err == nil || !contains(err.Error(), "does not support positional query args") {
+		t.Fatalf("Exec with args error = %v", err)
 	}
 }
 
@@ -765,6 +1182,32 @@ func TestFormatBigQueryValue(t *testing.T) {
 	}
 }
 
+func TestBuildDeleteInsertTransactionScript(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.projectID = "my-project"
+
+	opts := destination.DeleteInsertOptions{
+		StagingTable:       "staging_ds.staging_tbl",
+		TargetTable:        "target_ds.target_tbl",
+		IncrementalKey:     "ts",
+		IncrementalKeyType: schema.TypeInt64,
+		IntervalStart:      int64(1),
+		IntervalEnd:        int64(10),
+		Columns:            []string{"id", "ts", "name"},
+		PrimaryKeys:        []string{"id"},
+	}
+
+	deleteSQL, insertSQL := dest.buildDeleteInsertStatements("staging_ds", "staging_tbl", "target_ds", "target_tbl", opts)
+	got := buildBigQueryTransactionScript(deleteSQL, insertSQL)
+	want := "BEGIN TRANSACTION;\n" +
+		"DELETE FROM `my-project`.`target_ds`.`target_tbl` WHERE `ts` >= 1 AND `ts` <= 10;\n" +
+		"INSERT INTO `my-project`.`target_ds`.`target_tbl` (`id`, `ts`, `name`) SELECT `id`, `ts`, `name` FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `ts` DESC) = 1;\n" +
+		"COMMIT TRANSACTION;"
+	if got != want {
+		t.Fatalf("transaction script =\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func TestParseAlterColumnTypeSQL(t *testing.T) {
 	table, column, newType, ok := parseAlterColumnTypeSQL("ALTER TABLE my_dataset.my_table ALTER COLUMN `age` SET DATA TYPE STRING")
 	if !ok {
@@ -912,7 +1355,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	dest.projectID = "my-project"
 
 	t.Run("single_pk", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, nil)
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, nil, "")
 
 		if !contains(sql, "MERGE `my-project`.`target_ds`.`target_tbl` AS t\n") {
 			t.Fatalf("sql missing merge header:\n%s", sql)
@@ -941,7 +1384,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("all_columns_are_pk_no_update", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id"}, nil)
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id"}, nil, "")
 		if contains(sql, "WHEN MATCHED THEN") {
 			t.Fatalf("sql should not include matched update when there are no non-PK columns:\n%s", sql)
 		}
@@ -951,7 +1394,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("on_clause_is_null_safe_single_pk", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name"}, nil)
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name"}, nil, "")
 
 		if !contains(sql, "ON (t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))\n") {
 			t.Fatalf("sql missing null-safe on clause:\n%s", sql)
@@ -962,7 +1405,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("on_clause_is_null_safe_composite_pk", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"tenant_id", "user_id"}, []string{"tenant_id", "user_id", "value"}, nil)
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"tenant_id", "user_id"}, []string{"tenant_id", "user_id", "value"}, nil, "")
 
 		expected := "ON (t.`tenant_id` = s.`tenant_id` OR (t.`tenant_id` IS NULL AND s.`tenant_id` IS NULL)) AND (t.`user_id` = s.`user_id` OR (t.`user_id` IS NULL AND s.`user_id` IS NULL))\n"
 		if !contains(sql, expected) {
@@ -975,7 +1418,7 @@ func TestBuildMergeSQL(t *testing.T) {
 
 	t.Run("with_cast_map", func(t *testing.T) {
 		castMap := map[string]string{"day": "STRING"}
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id", "day"}, []string{"id", "day", "amount"}, castMap)
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id", "day"}, []string{"id", "day", "amount"}, castMap, "")
 
 		if !contains(sql, "(t.`day` = CAST(s.`day` AS STRING) OR (t.`day` IS NULL AND CAST(s.`day` AS STRING) IS NULL))") {
 			t.Fatalf("sql missing cast in ON clause:\n%s", sql)
@@ -988,6 +1431,65 @@ func TestBuildMergeSQL(t *testing.T) {
 		}
 		if !contains(sql, "(t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))") {
 			t.Fatalf("sql missing null-safe on clause for non-cast pk:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_mode", func(t *testing.T) {
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}, nil, "")
+
+		if !contains(sql, "SELECT la.`id`, act.`name`, la.`_cdc_lsn`, la.`_cdc_deleted`, la.`_cdc_synced_at`, act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active`") {
+			t.Fatalf("sql missing composed source columns (data from latest active, CDC from latest overall):\n%s", sql)
+		}
+		if !contains(sql, "ORDER BY `_cdc_lsn` DESC, `_cdc_deleted` DESC) = 1) AS la") {
+			t.Fatalf("sql missing latest-overall dedup:\n%s", sql)
+		}
+		if !contains(sql, "WHERE `_cdc_deleted` = false QUALIFY ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `_cdc_lsn` DESC) = 1) AS act") {
+			t.Fatalf("sql missing latest-active dedup:\n%s", sql)
+		}
+		if !contains(sql, "WHEN MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n  UPDATE SET t.`name` = s.`name`") {
+			t.Fatalf("sql missing full update for active or update-then-deleted rows:\n%s", sql)
+		}
+		if !contains(sql, "WHEN MATCHED AND s.`_cdc_deleted` = true THEN\n  UPDATE SET t.`_cdc_deleted` = true, t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_synced_at` = s.`_cdc_synced_at`") {
+			t.Fatalf("sql missing CDC-only update for delete-only windows:\n%s", sql)
+		}
+		if !contains(sql, "WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n  INSERT (`id`, `name`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)") {
+			t.Fatalf("sql missing insert clause materializing insert-then-deleted rows:\n%s", sql)
+		}
+		if contains(sql, "WHEN NOT MATCHED AND s.`_cdc_deleted` = false THEN") {
+			t.Fatalf("sql still has the old insert clause that drops insert-then-deleted rows:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_mode_unchanged_cols_cased_columns", func(t *testing.T) {
+		// The source emits _cdc_unchanged_cols with source-side (lower-case)
+		// column names; a destination table created with cased columns must
+		// still match them, so the containment check compares lower-cased.
+		columns := []string{"id", "Name", "CONFIG_DATA", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at", "_cdc_unchanged_cols"}
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, columns, nil, "")
+
+		if !contains(sql, "t.`CONFIG_DATA` = IF('config_data' IN UNNEST(IFNULL(JSON_EXTRACT_STRING_ARRAY(LOWER(s.`_cdc_unchanged_cols`)), [])), t.`CONFIG_DATA`, s.`CONFIG_DATA`)") {
+			t.Fatalf("sql missing case-normalized unchanged-cols preservation:\n%s", sql)
+		}
+		if !contains(sql, "t.`Name` = IF('name' IN UNNEST(") {
+			t.Fatalf("sql missing lower-cased literal for cased column:\n%s", sql)
+		}
+		// staging-only column must not be persisted on the destination
+		if !contains(sql, "INSERT (`id`, `Name`, `CONFIG_DATA`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)\n") {
+			t.Fatalf("sql INSERT list should exclude _cdc_unchanged_cols:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_mode_without_unchanged_cols_column", func(t *testing.T) {
+		// Sources that materialize full change rows (e.g. SQL Server CDC) emit
+		// no _cdc_unchanged_cols; the merge must not reference it.
+		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, columns, nil, "")
+
+		if contains(sql, "_cdc_unchanged_cols") {
+			t.Fatalf("sql must not reference _cdc_unchanged_cols when absent:\n%s", sql)
 		}
 	})
 }

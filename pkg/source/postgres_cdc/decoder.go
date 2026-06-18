@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -194,11 +193,29 @@ func (d *Decoder) handleBegin(data []byte, lsn pglogrepl.LSN) error {
 	return nil
 }
 
+// CurrentTxLSN returns the LSN of the transaction currently being decoded. It
+// remains valid after a COMMIT until the next BEGIN, so callers can read the
+// LSN of the batch just returned by Decode.
+func (d *Decoder) CurrentTxLSN() pglogrepl.LSN {
+	return d.currentTxLSN
+}
+
+// InFlightTxLSN returns the LSN of a transaction whose changes have been
+// decoded but not yet emitted (BEGIN seen, COMMIT not yet processed). The bool
+// is false when no transaction is mid-flight.
+func (d *Decoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
+	if len(d.pendingChanges) == 0 {
+		return 0, false
+	}
+	return d.currentTxLSN, true
+}
+
 func (d *Decoder) handleCommit() (arrow.RecordBatch, error) {
 	if len(d.pendingChanges) == 0 {
 		return nil, nil
 	}
 
+	d.applyIntraBatchFill()
 	d.compactPendingChanges()
 
 	batch, err := d.changesToBatch()
@@ -333,6 +350,10 @@ func (d *Decoder) handleDelete(data []byte) error {
 	return nil
 }
 
+func (d *Decoder) applyIntraBatchFill() {
+	applyIntraBatchFill(d.pendingChanges, d.tableSchema)
+}
+
 func (d *Decoder) compactPendingChanges() {
 	if len(d.pendingChanges) < 2 {
 		return
@@ -393,21 +414,7 @@ func (d *Decoder) compactPendingChanges() {
 }
 
 func (d *Decoder) pkKey(change Change, pkIndices []int, changeIndex int) string {
-	parts := make([]string, len(pkIndices))
-	for i, idx := range pkIndices {
-		var val interface{}
-		if idx < len(change.Values) {
-			val = change.Values[idx]
-		}
-		if val == nil && idx < len(change.OldValues) {
-			val = change.OldValues[idx]
-		}
-		if val == nil {
-			return fmt.Sprintf("row-%d", changeIndex)
-		}
-		parts[i] = fmt.Sprintf("%T:%v", val, val)
-	}
-	return strings.Join(parts, "|")
+	return pkKeyFromRow(change.Values, change.OldValues, pkIndices, changeIndex)
 }
 
 func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{}, error) {
@@ -432,7 +439,7 @@ func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{},
 		case tupleDataNull:
 			values[i] = nil
 		case tupleDataUnchanged:
-			values[i] = nil // Will use old value if needed
+			values[i] = tupleUnchangedMarker
 		case tupleDataText:
 			if len(data) < 4 {
 				return nil, fmt.Errorf("text length truncated")
@@ -447,7 +454,7 @@ func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{},
 			data = data[length:]
 
 			// Convert text to appropriate type based on schema column
-			if int(i) < len(d.tableSchema.Columns)-3 { // Exclude CDC columns
+			if int(i) < sourceColumnCount(d.tableSchema) {
 				col := d.tableSchema.Columns[i]
 				values[i] = convertTextValue(textVal, col)
 			} else {
@@ -487,26 +494,18 @@ func (d *Decoder) changesToBatch() (arrow.RecordBatch, error) {
 	}
 
 	syncedAt := time.Now().UTC()
-	sourceColCount := len(d.tableSchema.Columns) - 3 // Exclude CDC columns
+	nSource := sourceColumnCount(d.tableSchema)
 
 	for i, change := range d.pendingChanges {
-		// Append source column values
-		for colIdx := 0; colIdx < sourceColCount; colIdx++ {
-			var val interface{}
-			if colIdx < len(change.Values) {
-				val = change.Values[colIdx]
-			}
-			arrowconv.AppendValue(builders[colIdx], val)
+		for colIdx := 0; colIdx < nSource; colIdx++ {
+			arrowconv.AppendValue(builders[colIdx], resolveColumnValue(change, colIdx))
 		}
 
-		// Append CDC columns
-		// _cdc_lsn
-		builders[sourceColCount].(*array.StringBuilder).Append(FormatLSN(change.LSN))
-		// _cdc_deleted
-		builders[sourceColCount+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
-		// _cdc_synced_at
+		builders[nSource].(*array.StringBuilder).Append(FormatLSN(change.LSN))
+		builders[nSource+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
 		perRowSyncedAt := syncedAt.Add(time.Duration(i) * time.Microsecond)
-		builders[sourceColCount+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))
+		builders[nSource+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))
+		builders[nSource+3].(*array.StringBuilder).Append(unchangedColumnsJSON(change, d.tableSchema.Columns, nSource))
 	}
 
 	arrays := make([]arrow.Array, len(builders))

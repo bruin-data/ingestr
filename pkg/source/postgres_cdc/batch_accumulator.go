@@ -6,6 +6,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/jackc/pglogrepl"
 )
 
 // batchAccumulator collects small per-table Arrow batches and merges them
@@ -14,39 +15,74 @@ import (
 type batchAccumulator struct {
 	batches   map[string][]arrow.RecordBatch
 	rowCounts map[string]int64
+	// minLSN tracks the lowest (oldest) transaction LSN still buffered per
+	// table. Batches are added in non-decreasing LSN order, so the first batch
+	// buffered for a table after a flush carries that table's minimum. Used to
+	// compute a safe commit position for streaming mode.
+	minLSN    map[string]pglogrepl.LSN
 	threshold int64
+
+	// transform, when set, post-processes each merged batch just before it is
+	// sent downstream. It receives the table name and the outgoing batch and
+	// returns the batch to emit. Returning a batch different from the input
+	// transfers ownership (the original is released). The accumulator itself
+	// stays schema-agnostic; CDC-specific logic lives in the supplied function.
+	transform func(tableName string, batch arrow.RecordBatch) arrow.RecordBatch
 }
 
 func newBatchAccumulator(threshold int) *batchAccumulator {
 	return &batchAccumulator{
 		batches:   make(map[string][]arrow.RecordBatch),
 		rowCounts: make(map[string]int64),
+		minLSN:    make(map[string]pglogrepl.LSN),
 		threshold: int64(threshold),
 	}
 }
 
-func (a *batchAccumulator) add(tableName string, batch arrow.RecordBatch) {
+func (a *batchAccumulator) add(tableName string, batch arrow.RecordBatch, lsn pglogrepl.LSN) {
+	if _, ok := a.minLSN[tableName]; !ok {
+		a.minLSN[tableName] = lsn
+	}
 	a.batches[tableName] = append(a.batches[tableName], batch)
 	a.rowCounts[tableName] += batch.NumRows()
 }
 
+// minPendingLSN returns the lowest transaction LSN still buffered across all
+// tables, or (0, false) when the accumulator is empty.
+func (a *batchAccumulator) minPendingLSN() (pglogrepl.LSN, bool) {
+	var min pglogrepl.LSN
+	found := false
+	for _, lsn := range a.minLSN {
+		if !found || lsn < min {
+			min = lsn
+			found = true
+		}
+	}
+	return min, found
+}
+
+// tokenFunc computes the CommitToken to attach to a flushed batch. It is
+// evaluated after the flushed table's batches have been removed from the
+// accumulator, so it reflects only data that remains un-emitted.
+type tokenFunc func() any
+
 // flushReady sends merged batches for tables that have accumulated enough rows.
-func (a *batchAccumulator) flushReady(results chan<- source.RecordBatchResult) {
+func (a *batchAccumulator) flushReady(results chan<- source.RecordBatchResult, token tokenFunc) {
 	for tableName, count := range a.rowCounts {
 		if count >= a.threshold {
-			a.flushTable(tableName, results)
+			a.flushTable(tableName, results, token)
 		}
 	}
 }
 
 // flushAll sends merged batches for all tables, regardless of row count.
-func (a *batchAccumulator) flushAll(results chan<- source.RecordBatchResult) {
+func (a *batchAccumulator) flushAll(results chan<- source.RecordBatchResult, token tokenFunc) {
 	for tableName := range a.batches {
-		a.flushTable(tableName, results)
+		a.flushTable(tableName, results, token)
 	}
 }
 
-func (a *batchAccumulator) flushTable(tableName string, results chan<- source.RecordBatchResult) {
+func (a *batchAccumulator) flushTable(tableName string, results chan<- source.RecordBatchResult, token tokenFunc) {
 	batches := a.batches[tableName]
 	if len(batches) == 0 {
 		return
@@ -54,26 +90,37 @@ func (a *batchAccumulator) flushTable(tableName string, results chan<- source.Re
 
 	delete(a.batches, tableName)
 	delete(a.rowCounts, tableName)
+	delete(a.minLSN, tableName)
 
-	if len(batches) == 1 {
-		results <- source.RecordBatchResult{
-			Batch:     batches[0],
-			TableName: tableName,
-		}
-		return
+	var commitToken any
+	if token != nil {
+		commitToken = token()
 	}
 
-	merged := concatRecordBatches(batches)
-	config.Debug("[CDC] Flushed %d micro-batches into %d rows for table %s", len(batches), merged.NumRows(), tableName)
+	var out arrow.RecordBatch
+	if len(batches) == 1 {
+		out = batches[0]
+	} else {
+		out = concatRecordBatches(batches)
+		config.Debug("[CDC] Flushed %d micro-batches into %d rows for table %s", len(batches), out.NumRows(), tableName)
 
-	// Release the originals now that the merged batch owns the data
-	for _, b := range batches {
-		b.Release()
+		// Release the originals now that the merged batch owns the data
+		for _, b := range batches {
+			b.Release()
+		}
+	}
+
+	if a.transform != nil {
+		if transformed := a.transform(tableName, out); transformed != out {
+			out.Release()
+			out = transformed
+		}
 	}
 
 	results <- source.RecordBatchResult{
-		Batch:     merged,
-		TableName: tableName,
+		Batch:       out,
+		TableName:   tableName,
+		CommitToken: commitToken,
 	}
 }
 

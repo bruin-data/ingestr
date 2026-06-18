@@ -18,7 +18,7 @@ func MapDataTypeToBigQuery(col schema.Column) bigquery.FieldType {
 	case schema.TypeBoolean:
 		return bigquery.BooleanFieldType
 
-	case schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
+	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
 		return bigquery.IntegerFieldType
 
 	case schema.TypeFloat32, schema.TypeFloat64:

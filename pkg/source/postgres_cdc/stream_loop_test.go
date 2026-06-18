@@ -27,24 +27,38 @@ type fakeReplicator struct {
 	steps []replStep
 	idx   int
 	lsn   pglogrepl.LSN
+
+	// pendingLowWater, when set, scripts PendingLowWater's return value.
+	pendingLowWater func() (pglogrepl.LSN, bool)
 }
 
-func (f *fakeReplicator) NextBatch(_ context.Context, _ int) (arrow.RecordBatch, bool, error) {
+func (f *fakeReplicator) NextBatch(_ context.Context, _ int) (arrow.RecordBatch, pglogrepl.LSN, bool, error) {
 	if f.idx >= len(f.steps) {
 		// Stream exhausted: report idle with no further LSN progress.
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
 	s := f.steps[f.idx]
 	f.idx++
 	if s.lsn > f.lsn {
 		f.lsn = s.lsn
 	}
-	return s.batch, s.hadActivity, nil
+	return s.batch, s.lsn, s.hadActivity, nil
 }
 
 func (f *fakeReplicator) CurrentLSN() pglogrepl.LSN { return f.lsn }
 
+func (f *fakeReplicator) PendingLowWater() (pglogrepl.LSN, bool) {
+	if f.pendingLowWater != nil {
+		return f.pendingLowWater()
+	}
+	return 0, false
+}
+
 func makeRowBatch(id int64) arrow.RecordBatch {
+	return makeNRowBatch(1)
+}
+
+func makeNRowBatch(n int) arrow.RecordBatch {
 	mem := memory.NewGoAllocator()
 	arrowSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
@@ -52,11 +66,13 @@ func makeRowBatch(id int64) arrow.RecordBatch {
 
 	b := array.NewInt64Builder(mem)
 	defer b.Release()
-	b.Append(id)
+	for i := range n {
+		b.Append(int64(i))
+	}
 	col := b.NewArray()
 	defer col.Release()
 
-	return array.NewRecordBatch(arrowSchema, []arrow.Array{col}, 1)
+	return array.NewRecordBatch(arrowSchema, []arrow.Array{col}, int64(n))
 }
 
 // buildSingleRowTxnStream models n single-row transactions and returns the
@@ -89,7 +105,7 @@ func drainStreamLoop(t *testing.T, steps []replStep, targetLSN pglogrepl.LSN) (b
 	results := make(chan source.RecordBatchResult, len(steps)+1)
 	accum := newBatchAccumulator(10000)
 
-	err := streamLoop(context.Background(), repl, ModeBatch, targetLSN, 10000, accum, results)
+	err := streamLoop(context.Background(), repl, ModeBatch, targetLSN, 10000, accum, results, false)
 	require.NoError(t, err)
 	close(results)
 

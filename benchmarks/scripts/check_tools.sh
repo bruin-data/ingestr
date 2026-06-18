@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REQUIRED_TOOLS=("hyperfine" "docker" "psql" "duckdb")
-OPTIONAL_TOOLS=("uv" "sling")
+OPTIONAL_TOOLS=("uv" "sling" "java")
 
 errors=0
 for tool in "${REQUIRED_TOOLS[@]}"; do

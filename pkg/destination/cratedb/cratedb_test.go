@@ -1,9 +1,11 @@
 package cratedb
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/assert"
 )
@@ -27,9 +29,30 @@ func TestStrategySupport(t *testing.T) {
 	assert.True(t, d.SupportsReplaceStrategy())
 	assert.True(t, d.SupportsAppendStrategy())
 	assert.True(t, d.SupportsMergeStrategy())
-	assert.True(t, d.SupportsDeleteInsertStrategy())
+	assert.False(t, d.SupportsDeleteInsertStrategy())
 	assert.True(t, d.SupportsSCD2Strategy())
 	assert.False(t, d.SupportsAtomicSwap())
+}
+
+func TestDeleteInsertUnsupported(t *testing.T) {
+	t.Parallel()
+	d := NewCrateDBDestination()
+	err := d.DeleteInsertTable(t.Context(), destination.DeleteInsertOptions{})
+	if err == nil || !strings.Contains(err.Error(), "delete+insert strategy is not supported") {
+		t.Fatalf("DeleteInsertTable error = %v, want unsupported error", err)
+	}
+}
+
+func TestBeginTransactionUnsupported(t *testing.T) {
+	t.Parallel()
+	d := NewCrateDBDestination()
+	tx, err := d.BeginTransaction(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "transactions are not supported") {
+		t.Fatalf("BeginTransaction error = %v, want unsupported error", err)
+	}
+	if tx != nil {
+		t.Fatalf("BeginTransaction tx = %T, want nil", tx)
+	}
 }
 
 func TestParseSchemaTable(t *testing.T) {

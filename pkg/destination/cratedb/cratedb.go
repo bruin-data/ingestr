@@ -3,6 +3,7 @@ package cratedb
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -200,7 +201,7 @@ func (d *CrateDBDestination) writeRecordBatch(ctx context.Context, record arrow.
 	colNames := make([]string, numCols)
 	unnestParams := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
-		colNames[i] = fmt.Sprintf(`"%s"`, record.Schema().Field(i).Name)
+		colNames[i] = destination.QuoteIdentifier(record.Schema().Field(i).Name)
 		unnestParams[i] = fmt.Sprintf("$%d::%s", i+1, arrowFieldToCrateDBArrayCast(record.Schema().Field(i)))
 	}
 
@@ -256,6 +257,15 @@ func (d *CrateDBDestination) MergeTable(ctx context.Context, opts destination.Me
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
+	if destination.HasCDCDeletedColumn(columns) && len(opts.PrimaryKeys) > 0 {
+		if err := d.mergeCDC(ctx, quotedTargetTable, quotedStagingTable, columns, opts.PrimaryKeys); err != nil {
+			return err
+		}
+		d.refreshTable(ctx, opts.TargetTable)
+		config.Debug("[CRATEDB MERGE] CDC merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	var upsertSQL string
 	if len(nonPKColumns) == 0 {
 		upsertSQL = fmt.Sprintf(
@@ -290,46 +300,109 @@ func (d *CrateDBDestination) MergeTable(ctx context.Context, opts destination.Me
 	return nil
 }
 
-func (d *CrateDBDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
-	startOp := time.Now()
-
-	d.refreshTable(ctx, opts.StagingTable)
-
-	quotedColumns := quoteColumns(opts.Columns)
-	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
-	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
-
-	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE "%s" >= $1 AND "%s" <= $2`,
-		quotedTargetTable, opts.IncrementalKey, opts.IncrementalKey,
-	)
-	config.Debug("[CRATEDB DELETE+INSERT] Executing DELETE: %s", deleteSQL)
-
-	if _, err := d.pool.Exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
-		config.LogFailedQuery(deleteSQL, err)
-		return fmt.Errorf("failed to delete records: %w", err)
+// mergeCDC applies CDC staging data deterministically. CrateDB has no
+// UPDATE ... FROM, so it runs three upserts: (1) latest non-deleted change per
+// PK, (2) full row for PKs whose latest change is a delete but that carry row
+// data from an earlier change in the window (update/insert then delete), and
+// (3) CDC-columns-only marking for delete-only windows, restricted via an
+// inner join to rows already present in the target so unknown rows are not
+// materialized from a bare delete image.
+func (d *CrateDBDestination) mergeCDC(ctx context.Context, quotedTargetTable, quotedStagingTable string, columns, primaryKeys []string) error {
+	pkMap := make(map[string]bool, len(primaryKeys))
+	quotedPKs := quoteColumns(primaryKeys)
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
 	}
+	pkList := strings.Join(quotedPKs, ", ")
+	quotedColumns := quoteColumns(columns)
+	colList := strings.Join(quotedColumns, ", ")
+	nonPKColumns := filterColumns(columns, primaryKeys)
 
-	d.refreshTable(ctx, opts.TargetTable)
-
-	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s`,
-		quotedTargetTable,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		quotedStagingTable,
-	)
-	config.Debug("[CRATEDB DELETE+INSERT] Executing INSERT: %s", insertSQL)
-
-	if _, err := d.pool.Exec(ctx, insertSQL); err != nil {
-		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert records: %w", err)
+	joinOn := func(left, right string) string {
+		conds := make([]string, len(quotedPKs))
+		for i, pk := range quotedPKs {
+			conds[i] = fmt.Sprintf("%s.%s = %s.%s", left, pk, right, pk)
+		}
+		return strings.Join(conds, " AND ")
 	}
+	dedup := func(where, orderBy string) string {
+		return fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+			colList, colList, pkList, orderBy, quotedStagingTable, where,
+		)
+	}
+	latestAll := dedup("", destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier))
+	latestActive := dedup(` WHERE "_cdc_deleted" = false`, `"_cdc_lsn" DESC`)
 
-	d.refreshTable(ctx, opts.TargetTable)
+	upsertActiveSQL := fmt.Sprintf(
+		`INSERT INTO %s (%s) SELECT %s FROM %s AS act ON CONFLICT (%s) DO UPDATE SET %s`,
+		quotedTargetTable, colList,
+		prefixColumns(quotedColumns, "act"),
+		latestActive, pkList, buildConflictUpdateSet(nonPKColumns),
+	)
 
-	config.Debug("[CRATEDB DELETE+INSERT] Completed in %v", time.Since(startOp))
+	composed := make([]string, len(columns))
+	for i, col := range columns {
+		alias := "act"
+		if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+			alias = "la"
+		}
+		composed[i] = alias + "." + quotedColumns[i]
+	}
+	upsertDeletedWithDataSQL := fmt.Sprintf(
+		`INSERT INTO %s (%s) SELECT %s FROM %s AS la JOIN %s AS act ON %s WHERE la."_cdc_deleted" = true ON CONFLICT (%s) DO UPDATE SET %s`,
+		quotedTargetTable, colList,
+		strings.Join(composed, ", "),
+		latestAll, latestActive, joinOn("la", "act"), pkList, buildConflictUpdateSet(nonPKColumns),
+	)
+
+	markDeletedSQL := fmt.Sprintf(
+		`INSERT INTO %s (%s) SELECT %s FROM %s AS la JOIN %s AS t ON %s LEFT JOIN %s AS act ON %s WHERE la."_cdc_deleted" = true AND act."_cdc_lsn" IS NULL ON CONFLICT (%s) DO UPDATE SET "_cdc_deleted" = excluded."_cdc_deleted", "_cdc_lsn" = excluded."_cdc_lsn", "_cdc_synced_at" = excluded."_cdc_synced_at"`,
+		quotedTargetTable, colList,
+		prefixColumns(quotedColumns, "la"),
+		latestAll, quotedTargetTable, joinOn("la", "t"), latestActive, joinOn("la", "act"), pkList,
+	)
+
+	for _, sql := range []string{upsertActiveSQL, upsertDeletedWithDataSQL, markDeletedSQL} {
+		config.Debug("[CRATEDB MERGE] Executing CDC statement: %s", sql)
+		if _, err := d.pool.Exec(ctx, sql); err != nil {
+			config.LogFailedQuery(sql, err)
+			return fmt.Errorf("failed to apply CDC merge: %w", err)
+		}
+	}
 	return nil
+}
+
+func prefixColumns(quotedColumns []string, alias string) string {
+	prefixed := make([]string, len(quotedColumns))
+	for i, col := range quotedColumns {
+		prefixed[i] = alias + "." + col
+	}
+	return strings.Join(prefixed, ", ")
+}
+
+func (d *CrateDBDestination) SupportsCDCMerge() bool { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
+func (d *CrateDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	d.refreshTable(ctx, table)
+
+	var maxLSN *string
+	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, destination.QuoteTableName(table))
+	if err := d.pool.QueryRow(ctx, query).Scan(&maxLSN); err != nil {
+		if strings.Contains(err.Error(), "unknown") || strings.Contains(err.Error(), "RelationUnknown") {
+			return "", nil
+		}
+		return "", err
+	}
+	if maxLSN == nil {
+		return "", nil
+	}
+	return *maxLSN, nil
+}
+
+func (d *CrateDBDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
+	return errors.New("delete+insert strategy is not supported for cratedb destination")
 }
 
 func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
@@ -351,13 +424,13 @@ func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD
 	// We identify PKs where at least one non-PK column differs
 	pkJoin := make([]string, len(opts.PrimaryKeys))
 	for i, key := range opts.PrimaryKeys {
-		pkJoin[i] = fmt.Sprintf(`s."%s" = t."%s"`, key, key)
+		pkJoin[i] = fmt.Sprintf(`s.%s = t.%s`, destination.QuoteIdentifier(key), destination.QuoteIdentifier(key))
 	}
 	changeDetect := make([]string, len(nonPKColumns))
 	for i, col := range nonPKColumns {
 		changeDetect[i] = fmt.Sprintf(
-			`(s."%s" <> t."%s" OR (s."%s" IS NULL AND t."%s" IS NOT NULL) OR (s."%s" IS NOT NULL AND t."%s" IS NULL))`,
-			col, col, col, col, col, col,
+			`(s.%[1]s <> t.%[1]s OR (s.%[1]s IS NULL AND t.%[1]s IS NOT NULL) OR (s.%[1]s IS NOT NULL AND t.%[1]s IS NULL))`,
+			destination.QuoteIdentifier(col),
 		)
 	}
 
@@ -423,7 +496,7 @@ func (d *CrateDBDestination) SCD2Table(ctx context.Context, opts destination.SCD
 	// Only insert where no current row exists (changed rows were closed in step 1, new rows never existed)
 	existsJoin := make([]string, len(opts.PrimaryKeys))
 	for i, key := range opts.PrimaryKeys {
-		existsJoin[i] = fmt.Sprintf(`existing."%s" = source."%s"`, key, key)
+		existsJoin[i] = fmt.Sprintf(`existing.%s = source.%s`, destination.QuoteIdentifier(key), destination.QuoteIdentifier(key))
 	}
 
 	insertSQL := fmt.Sprintf(
@@ -488,23 +561,8 @@ func (d *CrateDBDestination) Exec(ctx context.Context, sql string, args ...any) 
 }
 
 func (d *CrateDBDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
-	return &noopTransaction{pool: d.pool}, nil
+	return nil, errors.New("transactions are not supported for cratedb destination")
 }
-
-type noopTransaction struct {
-	pool *pgxpool.Pool
-}
-
-func (t *noopTransaction) Exec(ctx context.Context, sql string, args ...any) error {
-	_, err := t.pool.Exec(ctx, sql, args...)
-	if err != nil {
-		config.LogFailedQuery(sql, err)
-	}
-	return err
-}
-
-func (t *noopTransaction) Commit(_ context.Context) error   { return nil }
-func (t *noopTransaction) Rollback(_ context.Context) error { return nil }
 
 func (d *CrateDBDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseSchemaTable(table)
@@ -555,7 +613,7 @@ func (d *CrateDBDestination) GetScheme() string                  { return "crate
 func (d *CrateDBDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *CrateDBDestination) SupportsAppendStrategy() bool       { return true }
 func (d *CrateDBDestination) SupportsMergeStrategy() bool        { return true }
-func (d *CrateDBDestination) SupportsDeleteInsertStrategy() bool { return true }
+func (d *CrateDBDestination) SupportsDeleteInsertStrategy() bool { return false }
 func (d *CrateDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *CrateDBDestination) SupportsAtomicSwap() bool           { return false }
 
@@ -580,7 +638,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := mapDataTypeToCrateDB(col)
-		colDefs = append(colDefs, fmt.Sprintf(`"%s" %s`, col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf(`%s %s`, destination.QuoteIdentifier(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", table, strings.Join(colDefs, ",\n  "))
@@ -588,7 +646,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf(`"%s"`, k)
+			quotedKeys[i] = destination.QuoteIdentifier(k)
 		}
 		sql += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}
@@ -600,7 +658,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf(`"%s"`, col)
+		quoted[i] = fmt.Sprintf(`"%s"`, strings.ReplaceAll(col, `"`, `""`))
 	}
 	return quoted
 }
@@ -626,16 +684,16 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildConcatExpr(keys []string, prefix string) string {
 	if len(keys) == 1 {
 		if prefix != "" {
-			return fmt.Sprintf(`%s."%s"`, prefix, keys[0])
+			return fmt.Sprintf(`%s.%s`, prefix, destination.QuoteIdentifier(keys[0]))
 		}
-		return fmt.Sprintf(`"%s"`, keys[0])
+		return destination.QuoteIdentifier(keys[0])
 	}
 	parts := make([]string, len(keys))
 	for i, key := range keys {
 		if prefix != "" {
-			parts[i] = fmt.Sprintf(`CAST(%s."%s" AS TEXT)`, prefix, key)
+			parts[i] = fmt.Sprintf(`CAST(%s.%s AS TEXT)`, prefix, destination.QuoteIdentifier(key))
 		} else {
-			parts[i] = fmt.Sprintf(`CAST("%s" AS TEXT)`, key)
+			parts[i] = fmt.Sprintf(`CAST(%s AS TEXT)`, destination.QuoteIdentifier(key))
 		}
 	}
 	return strings.Join(parts, " || '~' || ")
@@ -667,7 +725,7 @@ func arrowFieldToCrateDBArrayCast(field arrow.Field) string {
 func buildConflictUpdateSet(columns []string) string {
 	sets := make([]string, len(columns))
 	for i, col := range columns {
-		sets[i] = fmt.Sprintf(`"%s" = EXCLUDED."%s"`, col, col)
+		sets[i] = fmt.Sprintf(`%s = EXCLUDED.%s`, destination.QuoteIdentifier(col), destination.QuoteIdentifier(col))
 	}
 	return strings.Join(sets, ", ")
 }

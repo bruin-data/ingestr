@@ -10,4 +10,4 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-exec uv run --project "$BENCH_DIR" --locked python "$SCRIPT_DIR/runner.py" "$@"
+exec uv run --no-project --python 3.13 --script "$SCRIPT_DIR/runner.py" "$@"

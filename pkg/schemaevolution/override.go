@@ -38,6 +38,8 @@ var StandardTypeNames = map[string]schema.DataType{
 	"bool":    schema.TypeBoolean,
 
 	// Integer types
+	"int8":     schema.TypeInt8,
+	"tinyint":  schema.TypeInt8,
 	"int16":    schema.TypeInt16,
 	"smallint": schema.TypeInt16,
 	"int32":    schema.TypeInt32,

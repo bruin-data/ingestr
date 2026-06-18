@@ -277,7 +277,7 @@ func (d *FabricDestination) writeRecordBatch(ctx context.Context, record arrow.R
 
 	colNames := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
-		colNames[i] = fmt.Sprintf("[%s]", record.Schema().Field(i).Name)
+		colNames[i] = quoteColumn(record.Schema().Field(i).Name)
 	}
 	colList := strings.Join(colNames, ", ")
 
@@ -361,14 +361,14 @@ func (d *FabricDestination) MergeTable(ctx context.Context, opts destination.Mer
 func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
-		onConditions[i] = fmt.Sprintf("target.[%s] = source.[%s]", pk, pk)
+		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
 	}
 
 	var updateSet string
 	if len(nonPKColumns) > 0 {
 		updates := make([]string, len(nonPKColumns))
 		for i, col := range nonPKColumns {
-			updates[i] = fmt.Sprintf("target.[%s] = source.[%s]", col, col)
+			updates[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(col), quoteColumn(col))
 		}
 		updateSet = fmt.Sprintf("WHEN MATCHED THEN UPDATE SET %s", strings.Join(updates, ", "))
 	}
@@ -415,10 +415,7 @@ func (d *FabricDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE [%s] >= @p1 AND [%s] <= @p2",
-		quoteTable(opts.TargetTable), opts.IncrementalKey, opts.IncrementalKey,
-	)
+	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, opts.IncrementalKey)
 	config.Debug("[Fabric DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -443,6 +440,13 @@ func (d *FabricDestination) DeleteInsertTable(ctx context.Context, opts destinat
 
 	config.Debug("[Fabric DELETE+INSERT] Delete+Insert completed in %v", time.Since(startOp))
 	return nil
+}
+
+func buildDeleteInsertDeleteSQL(targetTable, incrementalKey string) string {
+	return fmt.Sprintf(
+		"DELETE FROM %s WITH (TABLOCKX, HOLDLOCK) WHERE %s >= @p1 AND %s <= @p2",
+		quoteTable(targetTable), quoteColumn(incrementalKey), quoteColumn(incrementalKey),
+	)
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
@@ -684,15 +688,19 @@ func mapFabricTypeToSchema(dataType string) schema.DataType {
 func quoteTable(table string) string {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
-		return fmt.Sprintf("[%s].[%s]", parts[0], parts[1])
+		return fmt.Sprintf("[%s].[%s]", strings.ReplaceAll(parts[0], "]", "]]"), strings.ReplaceAll(parts[1], "]", "]]"))
 	}
-	return fmt.Sprintf("[%s]", table)
+	return fmt.Sprintf("[%s]", strings.ReplaceAll(table, "]", "]]"))
+}
+
+func quoteColumn(col string) string {
+	return fmt.Sprintf("[%s]", strings.ReplaceAll(col, "]", "]]"))
 }
 
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf("[%s]", col)
+		quoted[i] = quoteColumn(col)
 	}
 	return quoted
 }
@@ -715,7 +723,7 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf("%s.[%s] = %s.[%s]", targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf("%s.%s = %s.%s", targetAlias, quoteColumn(key), sourceAlias, quoteColumn(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -728,11 +736,12 @@ func buildChangeConditions(columns []string, targetAlias, sourceAlias string) st
 	}
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
+		qc := quoteColumn(col)
 		conditions[i] = fmt.Sprintf(
-			`((%s.[%s] IS NULL AND %s.[%s] IS NOT NULL) OR (%s.[%s] IS NOT NULL AND %s.[%s] IS NULL) OR %s.[%s] <> %s.[%s])`,
-			targetAlias, col, sourceAlias, col,
-			targetAlias, col, sourceAlias, col,
-			targetAlias, col, sourceAlias, col,
+			`((%s.%s IS NULL AND %s.%s IS NOT NULL) OR (%s.%s IS NOT NULL AND %s.%s IS NULL) OR %s.%s <> %s.%s)`,
+			targetAlias, qc, sourceAlias, qc,
+			targetAlias, qc, sourceAlias, qc,
+			targetAlias, qc, sourceAlias, qc,
 		)
 	}
 	return strings.Join(conditions, " OR ")
@@ -745,7 +754,7 @@ func escapeTableName(table string) string {
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
 	var colDefs []string
 	for _, col := range columns {
-		colDefs = append(colDefs, fmt.Sprintf("[%s] %s", col.Name, MapDataTypeToFabric(col)))
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), MapDataTypeToFabric(col)))
 	}
 
 	createPart := fmt.Sprintf("CREATE TABLE %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))
@@ -753,7 +762,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf("[%s]", k)
+			quotedKeys[i] = quoteColumn(k)
 		}
 		// Fabric only allows NONCLUSTERED, NOT ENFORCED primary keys.
 		createPart += fmt.Sprintf(",\n  PRIMARY KEY NONCLUSTERED (%s) NOT ENFORCED", strings.Join(quotedKeys, ", "))
@@ -775,6 +784,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 			return 1
 		}
 		return 0
+	case *array.Int8:
+		return a.Value(idx)
 	case *array.Int16:
 		return a.Value(idx)
 	case *array.Int32:

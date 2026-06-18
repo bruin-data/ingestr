@@ -1,9 +1,11 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,10 +44,24 @@ type kafkaConfig struct {
 	SASLPassword     string
 	BatchSize        int
 	BatchTimeout     time.Duration
+
+	// AWS MSK IAM (SASL OAUTHBEARER) settings.
+	AWSRegion          string
+	AWSRoleArn         string
+	AWSRoleSessionName string
+	AWSProfile         string
+	AWSAccessKeyID     string
+	AWSSecretAccessKey string
+	AWSSessionToken    string
 }
 
 type KafkaSource struct {
 	cfg kafkaConfig
+
+	// streamReader holds the live consumer-group reader in streaming mode so
+	// CommitStream can commit offsets after the pipeline has flushed.
+	mu           sync.Mutex
+	streamReader *kafkago.Reader
 }
 
 func NewKafkaSource() *KafkaSource {
@@ -55,6 +71,69 @@ func NewKafkaSource() *KafkaSource {
 func (s *KafkaSource) HandlesIncrementality() bool {
 	return false
 }
+
+// SupportsStreaming reports that Kafka can be consumed continuously.
+func (s *KafkaSource) SupportsStreaming() bool {
+	return true
+}
+
+// DefaultStreamingStrategy returns merge keyed on the envelope msg_id so
+// at-least-once redeliveries (e.g. after a group rebalance) are idempotent
+// rather than producing duplicate rows or violating the msg_id primary key.
+func (s *KafkaSource) DefaultStreamingStrategy() config.IncrementalStrategy {
+	return config.StrategyMerge
+}
+
+// CommitStream commits the per-partition offsets captured in the token after
+// the pipeline has durably written the corresponding messages.
+func (s *KafkaSource) CommitStream(ctx context.Context, token any) error {
+	msgs, ok := token.(map[int]kafkago.Message)
+	if !ok {
+		return fmt.Errorf("kafka: unexpected commit token type %T", token)
+	}
+	s.mu.Lock()
+	reader := s.streamReader
+	s.mu.Unlock()
+	if reader == nil {
+		// The reader was already closed (e.g. a final flush racing shutdown).
+		// The data is durably written, so skipping the offset commit is safe
+		// under at-least-once: the group re-reads from its last committed
+		// position on the next start.
+		config.Debug("[KAFKA] CommitStream: no active reader, skipping offset commit")
+		return nil
+	}
+	flat := make([]kafkago.Message, 0, len(msgs))
+	for _, m := range msgs {
+		flat = append(flat, m)
+	}
+	if len(flat) == 0 {
+		return nil
+	}
+	if err := reader.CommitMessages(ctx, flat...); err != nil {
+		return fmt.Errorf("kafka: failed to commit offsets: %w", err)
+	}
+	return nil
+}
+
+// streamingEnvelopeSchema is the fixed schema for streaming Kafka ingestion:
+// a primary-key message id plus a JSON column with the key, value, and metadata.
+func streamingEnvelopeSchema(topic string) *schema.TableSchema {
+	return &schema.TableSchema{
+		Name: topic,
+		Columns: []schema.Column{
+			{Name: "msg_id", DataType: schema.TypeString, Nullable: false, IsPrimaryKey: true},
+			{Name: "data", DataType: schema.TypeJSON, Nullable: true},
+			// Monotonic per-key source position (Kafka offset). Used as the merge
+			// incremental key so the latest record per msg_id wins within a flush
+			// cycle. Same key => same partition => offsets are ordered.
+			{Name: streamOrderColumn, DataType: schema.TypeInt64, Nullable: false},
+		},
+		PrimaryKeys:    []string{"msg_id"},
+		IncrementalKey: streamOrderColumn,
+	}
+}
+
+const streamOrderColumn = "_ingestr_order"
 
 func (s *KafkaSource) Schemes() []string {
 	return []string{"kafka"}
@@ -71,6 +150,15 @@ func (s *KafkaSource) Connect(ctx context.Context, uri string) error {
 }
 
 func (s *KafkaSource) Close(ctx context.Context) error {
+	// The streaming reader outlives its fetch goroutine so the pipeline's final
+	// flush can commit offsets; it is closed here, after Run has returned.
+	s.mu.Lock()
+	r := s.streamReader
+	s.streamReader = nil
+	s.mu.Unlock()
+	if r != nil {
+		return r.Close()
+	}
 	return nil
 }
 
@@ -83,6 +171,28 @@ func (s *KafkaSource) GetTable(ctx context.Context, req source.TableRequest) (so
 	strategy := req.Strategy
 	if strategy == "" {
 		strategy = config.StrategyReplace
+	}
+
+	// Streaming mode has no inferable schema (the stream never ends), so every
+	// message is projected into a fixed msg_id + data envelope.
+	if req.Streaming {
+		primaryKeys := req.PrimaryKeys
+		if len(primaryKeys) == 0 {
+			primaryKeys = []string{"msg_id"}
+		}
+		return &source.DynamicSourceTable{
+			TableName:           topicName,
+			TablePrimaryKeys:    primaryKeys,
+			TableIncrementalKey: req.IncrementalKey,
+			TableStrategy:       strategy,
+			KnownSchema:         true,
+			SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
+				return streamingEnvelopeSchema(topicName), nil
+			},
+			ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+				return s.readStreaming(ctx, topicName, opts)
+			},
+		}, nil
 	}
 
 	return &source.DynamicSourceTable{
@@ -98,6 +208,100 @@ func (s *KafkaSource) GetTable(ctx context.Context, req source.TableRequest) (so
 			return s.read(ctx, topicName, opts)
 		},
 	}, nil
+}
+
+// readStreaming consumes the topic continuously via a consumer-group reader,
+// committing offsets only after the pipeline durably writes each flush (so
+// delivery is at-least-once). It uses FetchMessage (not ReadMessage) so offsets
+// are never auto-committed before the data is durable.
+func (s *KafkaSource) readStreaming(ctx context.Context, topic string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	dialer, err := s.buildDialer()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build kafka dialer: %w", err)
+	}
+
+	if opts.IntervalStart != nil {
+		fmt.Printf("Warning: --interval-start is ignored for streaming Kafka; the consumer group's committed offsets determine the start position\n")
+	}
+
+	reader := kafkago.NewReader(kafkago.ReaderConfig{
+		Brokers:     strings.Split(s.cfg.BootstrapServers, ","),
+		GroupID:     s.cfg.GroupID,
+		Topic:       topic,
+		Dialer:      dialer,
+		MinBytes:    1,
+		MaxBytes:    10e6,
+		StartOffset: kafkago.FirstOffset, // only used when the group has no committed offset
+	})
+
+	s.mu.Lock()
+	s.streamReader = reader
+	s.mu.Unlock()
+
+	results := make(chan source.RecordBatchResult, 8)
+
+	go func() {
+		// Only close the results channel here; the reader is kept open (and
+		// s.streamReader set) so the pipeline's final flush after cancellation
+		// can still commit offsets via CommitStream. Close() closes the reader.
+		defer close(results)
+
+		envelopeCols := streamingEnvelopeSchema(topic).Columns
+		batch := make([]map[string]interface{}, 0, s.cfg.BatchSize)
+		latest := make(map[int]kafkago.Message) // per-partition highest message seen, for committing
+
+		flush := func() bool {
+			if len(batch) == 0 {
+				return true
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, envelopeCols, opts.ExcludeColumns)
+			if err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert kafka messages to Arrow: %w", err)}
+				return false
+			}
+			// Cumulative token: a copy of the per-partition offsets emitted so far.
+			token := make(map[int]kafkago.Message, len(latest))
+			for p, m := range latest {
+				token[p] = kafkago.Message{Topic: m.Topic, Partition: m.Partition, Offset: m.Offset}
+			}
+			results <- source.RecordBatchResult{Batch: record, CommitToken: token}
+			batch = batch[:0]
+			return true
+		}
+
+		for {
+			fetchCtx, cancel := context.WithTimeout(ctx, s.cfg.BatchTimeout)
+			msg, err := reader.FetchMessage(fetchCtx)
+			cancel()
+
+			if err != nil {
+				if ctx.Err() != nil {
+					flush()
+					return
+				}
+				if errors.Is(err, context.DeadlineExceeded) {
+					// Idle: flush any partial batch and keep consuming.
+					if !flush() {
+						return
+					}
+					continue
+				}
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to fetch from topic %s: %w", topic, err)}
+				return
+			}
+
+			batch = append(batch, messageToEnvelope(msg))
+			latest[msg.Partition] = msg
+
+			if len(batch) >= s.cfg.BatchSize {
+				if !flush() {
+					return
+				}
+			}
+		}
+	}()
+
+	return results, nil
 }
 
 func (s *KafkaSource) read(ctx context.Context, topic string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -296,6 +500,12 @@ func (s *KafkaSource) readPartition(
 	return nil
 }
 
+var (
+	_ source.Source          = (*KafkaSource)(nil)
+	_ source.StreamingSource = (*KafkaSource)(nil)
+	_ source.StreamCommitter = (*KafkaSource)(nil)
+)
+
 func messageToItem(msg kafkago.Message) map[string]interface{} {
 	var keyStr interface{}
 	if msg.Key != nil {
@@ -325,6 +535,50 @@ func messageToItem(msg kafkago.Message) map[string]interface{} {
 		"_kafka":        kafkaMeta,
 		"_kafka_msg_id": msgID,
 	}
+}
+
+// messageToEnvelope projects a Kafka message into the streaming envelope:
+// a primary-key msg_id and a JSON data column holding the key, value, and
+// metadata. The value is decoded as JSON so it nests as a structured object
+// (parity with the RabbitMQ envelope); non-JSON values fall back to a string.
+func messageToEnvelope(msg kafkago.Message) map[string]interface{} {
+	item := messageToItem(msg)
+	msgID := streamMsgID(msg)
+
+	meta, _ := item["_kafka"].(map[string]interface{})
+	if meta != nil {
+		var body any
+		dec := json.NewDecoder(bytes.NewReader(msg.Value))
+		dec.UseNumber()
+		if err := dec.Decode(&body); err != nil {
+			body = string(msg.Value)
+		}
+		meta["data"] = body
+	}
+
+	encoded, err := json.Marshal(meta)
+	if err != nil {
+		encoded = fmt.Appendf(nil, "%q", string(msg.Value))
+	}
+	return map[string]interface{}{
+		"msg_id":          msgID,
+		"data":            string(encoded),
+		streamOrderColumn: msg.Offset,
+	}
+}
+
+// streamMsgID derives the streaming envelope's primary key. For keyed messages
+// it is stable per key (so the merge keeps the latest record per key —
+// changelog/compaction semantics). For keyless messages it includes the offset
+// so every message gets a distinct id; otherwise all keyless messages on a
+// partition would collide on one id and the merge would keep only the last per
+// flush window (silent data loss). topic/partition/offset is stable across
+// redeliveries, so at-least-once dedup still works.
+func streamMsgID(msg kafkago.Message) string {
+	if len(msg.Key) > 0 {
+		return generateMsgID(msg.Topic, msg.Partition, msg.Offset, string(msg.Key))
+	}
+	return fmt.Sprintf("%s:%d:%d", msg.Topic, msg.Partition, msg.Offset)
 }
 
 func generateMsgID(topic string, partition int, offset int64, key interface{}) string {
@@ -361,39 +615,70 @@ func (s *KafkaSource) buildDialer() (*kafkago.Dialer, error) {
 		}
 	}
 
-	if s.cfg.SASLMechanism != "" && s.cfg.SASLUsername != "" {
-		mechanism, err := buildSASLMechanism(s.cfg.SASLMechanism, s.cfg.SASLUsername, s.cfg.SASLPassword)
+	if s.cfg.SASLMechanism != "" {
+		mechanism, err := buildSASLMechanism(s.cfg)
 		if err != nil {
 			return nil, err
 		}
 		dialer.SASLMechanism = mechanism
+
+		// MSK IAM serves OAUTHBEARER only over TLS and the token is a sensitive
+		// presigned URL, so enable TLS unless the user explicitly opted out.
+		if strings.EqualFold(s.cfg.SASLMechanism, "OAUTHBEARER") &&
+			dialer.TLS == nil && !strings.EqualFold(s.cfg.SecurityProtocol, "SASL_PLAINTEXT") {
+			dialer.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
+			config.Debug("[KAFKA] OAUTHBEARER: TLS auto-enabled (MSK IAM requires TLS)")
+		}
 	}
 
 	return dialer, nil
 }
 
-func buildSASLMechanism(mechanism, username, password string) (sasl.Mechanism, error) {
-	switch strings.ToUpper(mechanism) {
+func buildSASLMechanism(cfg kafkaConfig) (sasl.Mechanism, error) {
+	mechanism := strings.ToUpper(cfg.SASLMechanism)
+	switch mechanism {
 	case "PLAIN":
+		if err := validateSASLCredentials(mechanism, cfg); err != nil {
+			return nil, err
+		}
 		return &plain.Mechanism{
-			Username: username,
-			Password: password,
+			Username: cfg.SASLUsername,
+			Password: cfg.SASLPassword,
 		}, nil
 	case "SCRAM-SHA-256":
-		m, err := scram.Mechanism(scram.SHA256, username, password)
+		if err := validateSASLCredentials(mechanism, cfg); err != nil {
+			return nil, err
+		}
+		m, err := scram.Mechanism(scram.SHA256, cfg.SASLUsername, cfg.SASLPassword)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SCRAM-SHA-256 mechanism: %w", err)
 		}
 		return m, nil
 	case "SCRAM-SHA-512":
-		m, err := scram.Mechanism(scram.SHA512, username, password)
+		if err := validateSASLCredentials(mechanism, cfg); err != nil {
+			return nil, err
+		}
+		m, err := scram.Mechanism(scram.SHA512, cfg.SASLUsername, cfg.SASLPassword)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SCRAM-SHA-512 mechanism: %w", err)
 		}
 		return m, nil
+	case "OAUTHBEARER":
+		provider, err := newOAuthBearerTokenProvider(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return oauthBearerMechanism{provider: provider}, nil
 	default:
-		return nil, fmt.Errorf("unsupported SASL mechanism: %s (supported: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512)", mechanism)
+		return nil, fmt.Errorf("unsupported SASL mechanism: %s (supported: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512, OAUTHBEARER)", cfg.SASLMechanism)
 	}
+}
+
+func validateSASLCredentials(mechanism string, cfg kafkaConfig) error {
+	if cfg.SASLUsername == "" || cfg.SASLPassword == "" {
+		return fmt.Errorf("kafka SASL %s requires sasl_username and sasl_password", mechanism)
+	}
+	return nil
 }
 
 func (s *KafkaSource) getPartitions(ctx context.Context, dialer *kafkago.Dialer, brokers []string, topic string) ([]int, error) {
@@ -491,14 +776,21 @@ func parseKafkaURI(uri string) (kafkaConfig, error) {
 	}
 
 	return kafkaConfig{
-		BootstrapServers: bootstrapServers,
-		GroupID:          groupID,
-		SecurityProtocol: values.Get("security_protocol"),
-		SASLMechanism:    values.Get("sasl_mechanisms"),
-		SASLUsername:     values.Get("sasl_username"),
-		SASLPassword:     values.Get("sasl_password"),
-		BatchSize:        batchSize,
-		BatchTimeout:     batchTimeout,
+		BootstrapServers:   bootstrapServers,
+		GroupID:            groupID,
+		SecurityProtocol:   values.Get("security_protocol"),
+		SASLMechanism:      values.Get("sasl_mechanisms"),
+		SASLUsername:       values.Get("sasl_username"),
+		SASLPassword:       values.Get("sasl_password"),
+		BatchSize:          batchSize,
+		BatchTimeout:       batchTimeout,
+		AWSRegion:          values.Get("aws_region"),
+		AWSRoleArn:         values.Get("aws_role_arn"),
+		AWSRoleSessionName: values.Get("aws_role_session_name"),
+		AWSProfile:         values.Get("aws_profile"),
+		AWSAccessKeyID:     values.Get("aws_access_key_id"),
+		AWSSecretAccessKey: values.Get("aws_secret_access_key"),
+		AWSSessionToken:    values.Get("aws_session_token"),
 	}, nil
 }
 

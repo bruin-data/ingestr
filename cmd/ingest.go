@@ -148,7 +148,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "columns",
-				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:string:fname,email::eml'. Types: bigint, int, smallint, float, double, decimal(p,s), string, text, boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
+				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:string:fname,email::eml'. Types: bigint, int, smallint, tinyint, float, double, decimal(p,s), string, text, boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
 				Sources: cli.EnvVars("INGESTR_COLUMNS"),
 			},
 			&cli.BoolFlag{
@@ -160,6 +160,11 @@ func IngestCommand() *cli.Command {
 				Name:    "mask",
 				Usage:   "Column masking configuration in format 'column:algorithm[:param]'. Algorithms: hash, sha256, md5, hmac, email, phone, credit_card, ssn, redact, stars, fixed, random, partial, first_letter, uuid, sequential, round, range, noise, date_shift, year_only, month_year.",
 				Sources: cli.EnvVars("MASK", "INGESTR_MASK"),
+			},
+			&cli.BoolFlag{
+				Name:    "trim-whitespace",
+				Usage:   "Trim leading and trailing whitespace from all string column values",
+				Sources: cli.EnvVars("TRIM_WHITESPACE", "INGESTR_TRIM_WHITESPACE"),
 			},
 			&cli.StringFlag{
 				Name:    "pipelines-dir",
@@ -180,6 +185,23 @@ func IngestCommand() *cli.Command {
 				Name:    "debug",
 				Usage:   "Enable debug logging",
 				Sources: cli.EnvVars("DEBUG", "INGESTR_DEBUG"),
+			},
+			&cli.BoolFlag{
+				Name:    "stream",
+				Usage:   "Continuously ingest from the source, flushing to the destination on an interval or record-count trigger (CDC and message-broker sources only)",
+				Sources: cli.EnvVars("INGESTR_STREAM"),
+			},
+			&cli.DurationFlag{
+				Name:    "flush-interval",
+				Usage:   "How often to flush buffered records to the destination in streaming mode",
+				Value:   30 * time.Second,
+				Sources: cli.EnvVars("INGESTR_FLUSH_INTERVAL"),
+			},
+			&cli.IntFlag{
+				Name:    "flush-records",
+				Usage:   "Flush to the destination when this many records are buffered in streaming mode",
+				Value:   50000,
+				Sources: cli.EnvVars("INGESTR_FLUSH_RECORDS"),
 			},
 			&cli.StringFlag{
 				Name:    "query-annotations",
@@ -222,10 +244,24 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.Columns = c.String("columns")
 	cfg.NoInference = c.Bool("no-inference")
 	cfg.Mask = c.StringSlice("mask")
+	cfg.TrimWhitespace = c.Bool("trim-whitespace")
 	cfg.PipelinesDir = c.String("pipelines-dir")
 	cfg.StagingBucket = c.String("staging-bucket")
 	cfg.StagingDataset = c.String("staging-dataset")
 	cfg.QueryAnnotations = c.String("query-annotations")
+	cfg.Stream = c.Bool("stream")
+	cfg.FlushInterval = c.Duration("flush-interval")
+	cfg.FlushRecords = int(c.Int("flush-records"))
+
+	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
+		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")
+	}
+	// In streaming mode the source decides the default strategy (merge for CDC,
+	// append for brokers); only treat the strategy as a user override when the
+	// flag was explicitly set, since it defaults to "replace".
+	if cfg.Stream && !c.IsSet("incremental-strategy") {
+		cfg.IncrementalStrategy = ""
+	}
 
 	if clusterBy := c.String("cluster-by"); clusterBy != "" {
 		// Split by comma to support multiple clustering columns
@@ -259,8 +295,10 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		return err
 	}
 
-	if _, err := strategy.Get(cfg.IncrementalStrategy); err != nil {
-		return err
+	if cfg.IncrementalStrategy != "" {
+		if _, err := strategy.Get(cfg.IncrementalStrategy); err != nil {
+			return err
+		}
 	}
 
 	trackCommandRunning(ctx, "ingest", ingestTelemetryProperties(cfg))
@@ -271,6 +309,12 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	}
 
 	if ctx.Err() != nil {
+		// In streaming mode, cancellation (SIGINT/SIGTERM) is the normal way to
+		// stop; the pipeline has already flushed pending data.
+		if cfg.Stream {
+			color.Green("Streaming ingestion stopped.")
+			return nil
+		}
 		return ctx.Err()
 	}
 

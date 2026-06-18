@@ -3,10 +3,13 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -197,6 +200,13 @@ func (d *MSSQLDestination) Write(ctx context.Context, records <-chan source.Reco
 }
 
 func (d *MSSQLDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if opts.StagingTable && opts.Parallelism > 1 {
+		return d.writeParallelBatches(ctx, records, opts)
+	}
+	return d.writeSerialBatches(ctx, records, opts)
+}
+
+func (d *MSSQLDestination) writeSerialBatches(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	startTime := time.Now()
 	var totalRows int64
 	var batchNum int
@@ -217,16 +227,115 @@ func (d *MSSQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 		}
 
 		totalRows += rows
-		rate := float64(rows) / time.Since(startBatch).Seconds()
+		batchDuration := time.Since(startBatch)
+		rate := rowsPerSecond(rows, batchDuration)
 		config.Debug("[MSSQL] Batch %d: %d rows in %v (%.0f rows/sec, total: %d)",
-			batchNum, rows, time.Since(startBatch), rate, totalRows)
+			batchNum, rows, batchDuration, rate, totalRows)
 
 		result.Batch.Release()
 	}
 
-	totalRate := float64(totalRows) / time.Since(startTime).Seconds()
-	config.Debug("[MSSQL] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTime), totalRate)
+	totalDuration := time.Since(startTime)
+	totalRate := rowsPerSecond(totalRows, totalDuration)
+	config.Debug("[MSSQL] Total: %d rows written in %v (%.0f rows/sec)", totalRows, totalDuration, totalRate)
 	return nil
+}
+
+func (d *MSSQLDestination) writeParallelBatches(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	parallelism := opts.Parallelism
+	if parallelism <= 0 {
+		parallelism = 4
+	}
+
+	startTime := time.Now()
+	config.Debug("[MSSQL] Starting parallel write to %s with %d workers", opts.Table, parallelism)
+
+	type writeResult struct {
+		batchNum int
+		rows     int64
+		duration time.Duration
+		err      error
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan writeResult, parallelism*2)
+	var wg sync.WaitGroup
+	var batchNum atomic.Int64
+
+	for i := 0; i < parallelism; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for result := range records {
+				myBatch := int(batchNum.Add(1))
+				if result.Err != nil {
+					results <- writeResult{batchNum: myBatch, err: result.Err}
+					cancel()
+					return
+				}
+
+				record := result.Batch
+				if record == nil {
+					continue
+				}
+
+				startBatch := time.Now()
+				rows, err := d.writeRecordBatch(ctx, record, opts.Table, opts.Schema)
+				record.Release()
+				if err != nil {
+					results <- writeResult{batchNum: myBatch, rows: rows, duration: time.Since(startBatch), err: err}
+					cancel()
+					return
+				}
+
+				results <- writeResult{
+					batchNum: myBatch,
+					rows:     rows,
+					duration: time.Since(startBatch),
+				}
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var totalRows int64
+	var firstErr error
+	for res := range results {
+		if res.err != nil {
+			if firstErr == nil {
+				firstErr = res.err
+				config.Debug("[MSSQL] Batch %d failed after %v: %v", res.batchNum, res.duration, res.err)
+			}
+			continue
+		}
+
+		totalRows += res.rows
+		config.Debug("[MSSQL] Batch %d: %d rows in %v (%.0f rows/sec, total: %d)",
+			res.batchNum, res.rows, res.duration, rowsPerSecond(res.rows, res.duration), totalRows)
+	}
+
+	if firstErr != nil {
+		return fmt.Errorf("parallel write failed: %w", firstErr)
+	}
+
+	totalDuration := time.Since(startTime)
+	totalRate := rowsPerSecond(totalRows, totalDuration)
+	config.Debug("[MSSQL] Total: %d rows written in %v (%.0f rows/sec)", totalRows, totalDuration, totalRate)
+	return nil
+}
+
+func rowsPerSecond(rows int64, duration time.Duration) float64 {
+	if duration <= 0 {
+		return 0
+	}
+	return float64(rows) / duration.Seconds()
 }
 
 func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string, tableSchema *schema.TableSchema) (int64, error) {
@@ -344,7 +453,7 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 			_ = tx.Rollback()
 			return fmt.Errorf("failed to ensure target schema exists: %w", err)
 		}
-		transferSQL := fmt.Sprintf("ALTER SCHEMA [%s] TRANSFER %s", targetSchema, quoteTable(stagingTable))
+		transferSQL := fmt.Sprintf("ALTER SCHEMA %s TRANSFER %s", quoteColumn(targetSchema), quoteTable(stagingTable))
 		if _, err := tx.ExecContext(ctx, transferSQL); err != nil {
 			config.LogFailedQuery(transferSQL, err)
 			_ = tx.Rollback()
@@ -408,11 +517,19 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
 
-	columns := opts.Columns
-	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	if len(opts.PrimaryKeys) > 0 && !destination.HasCDCDeletedColumn(opts.Columns) {
+		insertSQL := buildInsertDedupSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
+		inserted, err := d.insertIntoEmptyTarget(ctx, opts.TargetTable, opts.PrimaryKeys, insertSQL)
+		if err != nil {
+			return err
+		}
+		if inserted {
+			config.Debug("[MERGE] Deduplicated insert completed in %v", time.Since(startMerge))
+			return nil
+		}
+	}
 
-	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns)
+	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
@@ -424,19 +541,145 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	return nil
 }
 
-func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string) string {
-	onConditions := make([]string, len(primaryKeys))
-	for i, pk := range primaryKeys {
-		onConditions[i] = fmt.Sprintf("target.[%s] = source.[%s]", pk, pk)
+func tableIsEmptyForUpdate(ctx context.Context, tx *sql.Tx, table string) (bool, error) {
+	query := buildTableIsEmptyForUpdateSQL(table)
+	var v int
+	if err := tx.QueryRowContext(ctx, query).Scan(&v); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return true, nil
+		}
+		config.LogFailedQuery(query, err)
+		return false, err
+	}
+	return false, nil
+}
+
+func buildTableIsEmptyForUpdateSQL(table string) string {
+	return fmt.Sprintf("SELECT TOP (1) 1 FROM %s WITH (TABLOCKX, HOLDLOCK)", quoteTable(table))
+}
+
+func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTable string, primaryKeys []string, insertSQL string) (bool, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to begin deduplicated insert transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	empty, err := tableIsEmptyForUpdate(ctx, tx, targetTable)
+	if err != nil {
+		return false, fmt.Errorf("failed to check target table before merge: %w", err)
+	}
+	if !empty {
+		return false, nil
 	}
 
-	var updateSet string
-	if len(nonPKColumns) > 0 {
-		updates := make([]string, len(nonPKColumns))
-		for i, col := range nonPKColumns {
-			updates[i] = fmt.Sprintf("target.[%s] = source.[%s]", col, col)
+	var pkName string
+	var droppedPK bool
+	if isNormalisedStagingTable(targetTable) {
+		pkName, droppedPK, err = dropPrimaryKeyIfExists(ctx, tx, targetTable)
+		if err != nil {
+			return false, err
 		}
-		updateSet = fmt.Sprintf("WHEN MATCHED THEN UPDATE SET %s", strings.Join(updates, ", "))
+	}
+
+	config.Debug("[MERGE] Empty target, executing deduplicated INSERT: %s", insertSQL)
+	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return false, fmt.Errorf("failed to insert deduplicated records: %w", err)
+	}
+
+	if droppedPK {
+		if err := addPrimaryKey(ctx, tx, targetTable, pkName, primaryKeys); err != nil {
+			return false, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("failed to commit deduplicated insert transaction: %w", err)
+	}
+	committed = true
+	return true, nil
+}
+
+func isNormalisedStagingTable(table string) bool {
+	return strings.Contains(table, "_staging_normalised_")
+}
+
+func dropPrimaryKeyIfExists(ctx context.Context, tx *sql.Tx, table string) (string, bool, error) {
+	query := `SELECT kc.name
+FROM sys.key_constraints AS kc
+WHERE kc.parent_object_id = OBJECT_ID(@p1) AND kc.[type] = 'PK'`
+
+	var constraintName string
+	if err := tx.QueryRowContext(ctx, query, table).Scan(&constraintName); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		config.LogFailedQuery(query, err)
+		return "", false, fmt.Errorf("failed to find primary key constraint: %w", err)
+	}
+
+	dropSQL := fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", quoteTable(table), quoteColumn(constraintName))
+	config.Debug("[MERGE] Dropping target primary key before bulk insert: %s", dropSQL)
+	if _, err := tx.ExecContext(ctx, dropSQL); err != nil {
+		config.LogFailedQuery(dropSQL, err)
+		return "", false, fmt.Errorf("failed to drop primary key before deduplicated insert: %w", err)
+	}
+	return constraintName, true, nil
+}
+
+func addPrimaryKey(ctx context.Context, tx *sql.Tx, table, constraintName string, primaryKeys []string) error {
+	quotedKeys := strings.Join(quoteColumns(primaryKeys), ", ")
+	constraintClause := ""
+	if constraintName != "" {
+		constraintClause = " CONSTRAINT " + quoteColumn(constraintName)
+	}
+
+	addSQL := fmt.Sprintf("ALTER TABLE %s ADD%s PRIMARY KEY (%s)", quoteTable(table), constraintClause, quotedKeys)
+	config.Debug("[MERGE] Recreating target primary key after bulk insert: %s", addSQL)
+	if _, err := tx.ExecContext(ctx, addSQL); err != nil {
+		config.LogFailedQuery(addSQL, err)
+		return fmt.Errorf("failed to recreate primary key after deduplicated insert: %w", err)
+	}
+	return nil
+}
+
+func buildInsertDedupSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey string) string {
+	quotedColumns := quoteColumns(columns)
+	colList := strings.Join(quotedColumns, ", ")
+
+	orderByCol := ""
+	if incrementalKey != "" {
+		orderByCol = quoteColumn(incrementalKey)
+	}
+
+	selectClause := destination.DedupStagingSelect(
+		colList,
+		strings.Join(quoteColumns(primaryKeys), ", "),
+		quoteTable(stagingTable),
+		orderByCol,
+	)
+
+	return buildInsertSQL(targetTable, colList, selectClause)
+}
+
+func buildInsertSQL(targetTable, colList, selectClause string) string {
+	return fmt.Sprintf("INSERT INTO %s WITH (TABLOCK) (%s) %s", quoteTable(targetTable), colList, selectClause)
+}
+
+func buildMergeSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey string) string {
+	quotedColumns := quoteColumns(columns)
+	nonPKColumns := filterColumns(columns, primaryKeys)
+	isCDC := destination.HasCDCDeletedColumn(columns)
+
+	onConditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
 	}
 
 	insertCols := strings.Join(quotedColumns, ", ")
@@ -445,13 +688,34 @@ func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns,
 		sourceCols[i] = "source." + col
 	}
 
-	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKs := quoteColumns(primaryKeys)
+	pkPartition := strings.Join(quotedPKs, ", ")
+
+	if isCDC {
+		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, onConditions, insertCols, sourceCols, pkPartition)
+	}
+
+	var updateSet string
+	if len(nonPKColumns) > 0 {
+		updates := make([]string, len(nonPKColumns))
+		for i, col := range nonPKColumns {
+			updates[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(col), quoteColumn(col))
+		}
+		updateSet = fmt.Sprintf("WHEN MATCHED THEN UPDATE SET %s", strings.Join(updates, ", "))
+	}
+
+	// Build dedup subquery to handle duplicate PKs in staging. When an
+	// incremental key is set the latest row per PK wins; otherwise arbitrary.
+	dedupOrderBy := "(SELECT NULL)"
+	if incrementalKey != "" {
+		dedupOrderBy = quoteColumns([]string{incrementalKey})[0] + " DESC"
+	}
 	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
 		insertCols,
 		insertCols,
-		strings.Join(quotedPKs, ", "),
+		pkPartition,
+		dedupOrderBy,
 		quoteTable(stagingTable),
 	)
 
@@ -472,6 +736,75 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 	return sql
 }
 
+// buildCDCMergeSQL builds a CDC-aware MERGE: data columns come from the latest
+// non-deleted change per PK (so a trailing delete keeps the last update's
+// values), CDC columns and the deleted flag from the latest change overall.
+// Rows inserted and deleted within one window materialize as soft-deleted.
+// T-SQL allows only one UPDATE among WHEN MATCHED clauses, so the "delete-only
+// window keeps existing row data" rule is expressed with CASE instead of a
+// second clause.
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns, onConditions []string, insertCols string, sourceCols []string, pkPartition string) string {
+	pkMap := make(map[string]bool, len(primaryKeys))
+	for _, pk := range primaryKeys {
+		pkMap[strings.ToLower(pk)] = true
+	}
+
+	laActJoin := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		laActJoin[i] = fmt.Sprintf("la.%s = act.%s", quoteColumn(pk), quoteColumn(pk))
+	}
+
+	selectCols := make([]string, 0, len(columns)+1)
+	for _, col := range columns {
+		alias := "act"
+		if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+			alias = "la"
+		}
+		selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteColumn(col)))
+	}
+	selectCols = append(selectCols, "CASE WHEN act.[_cdc_lsn] IS NOT NULL THEN 1 ELSE 0 END AS [__ingestr_has_active]")
+
+	dedup := func(where, orderBy string) string {
+		return fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+			insertCols, insertCols, pkPartition, orderBy, quoteTable(stagingTable), where,
+		)
+	}
+	composedSource := fmt.Sprintf(
+		"(SELECT %s FROM %s AS la LEFT JOIN %s AS act ON %s)",
+		strings.Join(selectCols, ", "),
+		dedup("", destination.CDCLatestOverallOrderBy(quoteColumn)),
+		dedup(" WHERE [_cdc_deleted] = 0", "[_cdc_lsn] DESC"),
+		strings.Join(laActJoin, " AND "),
+	)
+
+	hasRowData := "(source.[_cdc_deleted] = 0 OR source.[__ingestr_has_active] = 1)"
+	updates := make([]string, len(nonPKColumns))
+	for i, col := range nonPKColumns {
+		quoted := quoteColumn(col)
+		if destination.IsCDCColumn(col) {
+			updates[i] = fmt.Sprintf("target.%s = source.%s", quoted, quoted)
+		} else {
+			updates[i] = fmt.Sprintf("target.%s = CASE WHEN %s THEN source.%s ELSE target.%s END", quoted, hasRowData, quoted, quoted)
+		}
+	}
+
+	return fmt.Sprintf(
+		`MERGE %s AS target
+USING %s AS source
+ON %s
+WHEN MATCHED THEN UPDATE SET %s
+WHEN NOT MATCHED AND %s THEN INSERT (%s) VALUES (%s);`,
+		quoteTable(targetTable),
+		composedSource,
+		strings.Join(onConditions, " AND "),
+		strings.Join(updates, ", "),
+		hasRowData,
+		insertCols,
+		strings.Join(sourceCols, ", "),
+	)
+}
+
 func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
 	startOp := time.Now()
 
@@ -483,10 +816,7 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE [%s] >= @p1 AND [%s] <= @p2",
-		quoteTable(opts.TargetTable), opts.IncrementalKey, opts.IncrementalKey,
-	)
+	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, opts.IncrementalKey)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -511,6 +841,13 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 
 	config.Debug("[DELETE+INSERT] Delete+Insert completed in %v", time.Since(startOp))
 	return nil
+}
+
+func buildDeleteInsertDeleteSQL(targetTable, incrementalKey string) string {
+	return fmt.Sprintf(
+		"DELETE FROM %s WITH (TABLOCKX, HOLDLOCK) WHERE %s >= @p1 AND %s <= @p2",
+		quoteTable(targetTable), quoteColumn(incrementalKey), quoteColumn(incrementalKey),
+	)
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
@@ -649,6 +986,24 @@ func (d *MSSQLDestination) SupportsMergeStrategy() bool        { return true }
 func (d *MSSQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MSSQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MSSQLDestination) SupportsAtomicSwap() bool           { return true }
+func (d *MSSQLDestination) SupportsCDCMerge() bool             { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
+func (d *MSSQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	var maxLSN sql.NullString
+	query := fmt.Sprintf("SELECT MAX([_cdc_lsn]) FROM %s", quoteTable(table))
+	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)
+	if err != nil {
+		if strings.Contains(err.Error(), "Invalid object name") {
+			return "", nil
+		}
+		return "", err
+	}
+	if !maxLSN.Valid {
+		return "", nil
+	}
+	return maxLSN.String, nil
+}
 
 func (d *MSSQLDestination) GetScheme() string { return "mssql" }
 
@@ -753,15 +1108,19 @@ func mapMSSQLTypeToSchema(dataType string) schema.DataType {
 func quoteTable(table string) string {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
-		return fmt.Sprintf("[%s].[%s]", parts[0], parts[1])
+		return fmt.Sprintf("[%s].[%s]", strings.ReplaceAll(parts[0], "]", "]]"), strings.ReplaceAll(parts[1], "]", "]]"))
 	}
-	return fmt.Sprintf("[%s]", table)
+	return fmt.Sprintf("[%s]", strings.ReplaceAll(table, "]", "]]"))
+}
+
+func quoteColumn(col string) string {
+	return fmt.Sprintf("[%s]", strings.ReplaceAll(col, "]", "]]"))
 }
 
 func quoteColumns(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		quoted[i] = fmt.Sprintf("[%s]", col)
+		quoted[i] = quoteColumn(col)
 	}
 	return quoted
 }
@@ -789,7 +1148,7 @@ func extractTableName(table string) string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf("%s.[%s] = %s.[%s]", targetAlias, key, sourceAlias, key)
+		conditions[i] = fmt.Sprintf("%s.%s = %s.%s", targetAlias, quoteColumn(key), sourceAlias, quoteColumn(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -802,11 +1161,12 @@ func buildChangeConditionsMSSQL(columns []string, targetAlias, sourceAlias strin
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
 		// MSSQL doesn't have IS DISTINCT FROM, use ISNULL or COALESCE comparison
+		qc := quoteColumn(col)
 		conditions[i] = fmt.Sprintf(
-			`((%s.[%s] IS NULL AND %s.[%s] IS NOT NULL) OR (%s.[%s] IS NOT NULL AND %s.[%s] IS NULL) OR %s.[%s] <> %s.[%s])`,
-			targetAlias, col, sourceAlias, col,
-			targetAlias, col, sourceAlias, col,
-			targetAlias, col, sourceAlias, col,
+			`((%s.%s IS NULL AND %s.%s IS NOT NULL) OR (%s.%s IS NOT NULL AND %s.%s IS NULL) OR %s.%s <> %s.%s)`,
+			targetAlias, qc, sourceAlias, qc,
+			targetAlias, qc, sourceAlias, qc,
+			targetAlias, qc, sourceAlias, qc,
 		)
 	}
 	return strings.Join(conditions, " OR ")
@@ -829,7 +1189,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := mapColumnTypeForCreate(col, primaryKeySet[strings.ToLower(col.Name)])
-		colDefs = append(colDefs, fmt.Sprintf("[%s] %s", col.Name, colType))
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
 	}
 
 	createPart := fmt.Sprintf("CREATE TABLE %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))
@@ -837,7 +1197,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
 		for i, k := range primaryKeys {
-			quotedKeys[i] = fmt.Sprintf("[%s]", k)
+			quotedKeys[i] = quoteColumn(k)
 		}
 		createPart += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}

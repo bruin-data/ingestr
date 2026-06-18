@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -169,7 +168,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 	// Use the implicit table stage (@%table_name) which exists automatically
 	// for every table and doesn't require CREATE STAGE privilege
-	stageName := fmt.Sprintf(`%s.%%"%s"`, quoteIdentifier(schemaName), tableName)
+	stageName := fmt.Sprintf(`%s.%%%s`, quoteIdentifier(schemaName), quoteIdentifier(tableName))
 	loadID := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	type uploadResult struct {
@@ -219,14 +218,8 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 				startBatch := time.Now()
 
-				// Write to parquet in memory
 				buf := new(bytes.Buffer)
-				writerProps := parquet.NewWriterProperties(
-					parquet.WithCompression(compress.Codecs.Snappy),
-					parquet.WithBatchSize(64*1024),
-				)
-				arrowProps := pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(memory.DefaultAllocator))
-
+				writerProps, arrowProps := snowflakeParquetWriterProperties()
 				writer, err := pqarrow.NewFileWriter(record.Schema(), buf, writerProps, arrowProps)
 				if err != nil {
 					record.Release()
@@ -308,8 +301,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 	config.Debug("[DEST] Loading %d files with single COPY INTO...", len(uploadedFiles))
 	startCopy := time.Now()
 
-	copySQL := fmt.Sprintf("COPY INTO %s FROM @%s/%s FILE_FORMAT = (TYPE = PARQUET) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE",
-		fullTable, stageName, loadID)
+	copySQL := buildCopyIntoSQL(fullTable, stageName, loadID)
 
 	if _, err := d.db.ExecContext(ctx, copySQL); err != nil {
 		config.LogFailedQuery(copySQL, err)
@@ -319,6 +311,23 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 	config.Debug("[DEST] COPY INTO completed in %v", time.Since(startCopy))
 	config.Debug("[DEST] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), float64(totalRows)/time.Since(startTotal).Seconds())
 	return nil
+}
+
+func snowflakeParquetWriterProperties() (*parquet.WriterProperties, pqarrow.ArrowWriterProperties) {
+	writerProps := parquet.NewWriterProperties(
+		parquet.WithCompression(compress.Codecs.Snappy),
+		parquet.WithBatchSize(64*1024),
+	)
+	arrowProps := pqarrow.NewArrowWriterProperties(
+		pqarrow.WithAllocator(memory.DefaultAllocator),
+		pqarrow.WithStoreSchema(),
+	)
+	return writerProps, arrowProps
+}
+
+func buildCopyIntoSQL(fullTable, stageName, loadID string) string {
+	return fmt.Sprintf("COPY INTO %s FROM @%s/%s FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE",
+		fullTable, stageName, loadID)
 }
 
 func (d *SnowflakeDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
@@ -385,7 +394,7 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 		return errors.New("merge requires at least one primary key")
 	}
 
-	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns)
+	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
 
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
@@ -398,7 +407,8 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 	return nil
 }
 
-func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
+func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string) string {
+	destColumns := destination.DestinationColumns(allColumns)
 	stagingSchema, stagingName := parseSchemaTable(stagingTable)
 	targetSchema, targetName := parseSchemaTable(targetTable)
 
@@ -416,18 +426,38 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		pkMap[strings.ToLower(pk)] = true
 	}
 
+	// Column names may have been case-mapped by the naming layer (Snowflake
+	// commonly uppercases), so CDC columns must be detected case-insensitively
+	// and referenced by their actual names.
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
+	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
+	// and their staging tables have no such column to reference.
+	hasUnchangedCols := containsFold(allColumns, destination.CDCUnchangedColsColumn)
+	unchangedRef := "source." + quoteIdentifier(destination.CDCUnchangedColsColumn)
 	var updateSets []string
-	for _, col := range allColumns {
+	for _, col := range destColumns {
 		if !pkMap[strings.ToLower(col)] {
-			updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", quoteIdentifier(col), quoteIdentifier(col)))
+			q := quoteIdentifier(col)
+			if hasCDCDeleted && hasUnchangedCols && !destination.IsCDCMetaColumn(col) {
+				updateSets = append(updateSets, cdcMergeAssign(
+					col, q, "target."+q, "source."+q, unchangedRef,
+				))
+			} else {
+				updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", q, q))
+			}
 		}
 	}
 
-	quotedCols := make([]string, len(allColumns))
-	sourceCols := make([]string, len(allColumns))
+	stagingQuoted := make([]string, len(allColumns))
 	for i, col := range allColumns {
-		quotedCols[i] = quoteIdentifier(col)
-		sourceCols[i] = "source." + quoteIdentifier(col)
+		stagingQuoted[i] = quoteIdentifier(col)
+	}
+	destQuoted := make([]string, len(destColumns))
+	destSourceCols := make([]string, len(destColumns))
+	for i, col := range destColumns {
+		destQuoted[i] = quoteIdentifier(col)
+		destSourceCols[i] = "source." + quoteIdentifier(col)
 	}
 
 	quotedPKList := make([]string, len(primaryKeys))
@@ -435,56 +465,117 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		quotedPKList[i] = quoteIdentifier(pk)
 	}
 
-	hasCDCDeleted := slices.Contains(allColumns, "_cdc_deleted")
-
 	dedupOrderBy := "(SELECT NULL)"
+	if incrementalKey != "" {
+		dedupOrderBy = quoteIdentifier(incrementalKey) + " DESC"
+	}
+
+	var mergeSQL strings.Builder
+	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFull)
+
 	if hasCDCDeleted {
-		dedupOrderBy = fmt.Sprintf("%s DESC, %s DESC",
-			quoteIdentifier("_cdc_lsn"),
-			quoteIdentifier("_cdc_deleted"))
+		// CDC mode: compose the merge source from two per-PK dedups of staging:
+		// data columns come from the latest non-deleted change (so a trailing
+		// delete doesn't discard the last update's values), while the CDC
+		// columns and deleted flag come from the latest change overall. This
+		// also materializes rows inserted and deleted within one sync window
+		// as soft-deleted rows, storing the delete's LSN for resume.
+		cdcLSN := quoteIdentifier(actualColumnName(allColumns, destination.CDCLSNColumn))
+		cdcDeleted := quoteIdentifier(actualColumnName(allColumns, destination.CDCDeletedColumn))
+		cdcSyncedAt := quoteIdentifier(actualColumnName(allColumns, destination.CDCSyncedAtColumn))
+
+		laActJoin := make([]string, len(primaryKeys))
+		for i, pk := range primaryKeys {
+			quoted := quoteIdentifier(pk)
+			laActJoin[i] = fmt.Sprintf("(la.%s = act.%s OR (la.%s IS NULL AND act.%s IS NULL))", quoted, quoted, quoted, quoted)
+		}
+
+		selectCols := make([]string, 0, len(allColumns)+1)
+		for _, col := range allColumns {
+			alias := "act"
+			if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+				alias = "la"
+			}
+			selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteIdentifier(col)))
+		}
+		selectCols = append(selectCols, fmt.Sprintf("act.%s IS NOT NULL AS \"__ingestr_has_active\"", cdcLSN))
+
+		dedup := func(where, orderBy string) string {
+			return fmt.Sprintf(
+				`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+				strings.Join(stagingQuoted, ", "),
+				strings.Join(stagingQuoted, ", "),
+				strings.Join(quotedPKList, ", "),
+				orderBy,
+				stagingFull,
+				where,
+			)
+		}
+		quoteActual := func(col string) string {
+			return quoteIdentifier(actualColumnName(allColumns, col))
+		}
+		composedSource := fmt.Sprintf(
+			"(SELECT %s FROM %s AS la LEFT JOIN %s AS act ON %s)",
+			strings.Join(selectCols, ", "),
+			dedup("", destination.CDCLatestOverallOrderBy(quoteActual)),
+			dedup(fmt.Sprintf(" WHERE %s = false", cdcDeleted), cdcLSN+" DESC"),
+			strings.Join(laActJoin, " AND "),
+		)
+
+		fmt.Fprintf(&mergeSQL, "USING %s AS source\n", composedSource)
+		fmt.Fprintf(&mergeSQL, "ON %s\n", onClause)
+
+		hasRowData := fmt.Sprintf("(source.%s = false OR source.\"__ingestr_has_active\")", cdcDeleted)
+		if len(updateSets) > 0 {
+			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s THEN\n", hasRowData)
+			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+		}
+
+		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = true THEN\n", cdcDeleted)
+		fmt.Fprintf(&mergeSQL, "  UPDATE SET target.%s = true, target.%s = source.%s, target.%s = source.%s\n",
+			cdcDeleted, cdcLSN, cdcLSN, cdcSyncedAt, cdcSyncedAt)
+
+		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND %s THEN\n", hasRowData)
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
+
+		return mergeSQL.String()
 	}
 
 	dedupSource := fmt.Sprintf(
 		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-		strings.Join(quotedCols, ", "),
-		strings.Join(quotedCols, ", "),
+		strings.Join(stagingQuoted, ", "),
+		strings.Join(stagingQuoted, ", "),
 		strings.Join(quotedPKList, ", "),
 		dedupOrderBy,
 		stagingFull,
 	)
 
-	var mergeSQL strings.Builder
-	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFull)
 	fmt.Fprintf(&mergeSQL, "USING %s AS source\n", dedupSource)
 	fmt.Fprintf(&mergeSQL, "ON %s\n", onClause)
 
-	if hasCDCDeleted {
-		if len(updateSets) > 0 {
-			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = false THEN\n", quoteIdentifier("_cdc_deleted"))
-			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
-		}
-
-		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = true THEN\n", quoteIdentifier("_cdc_deleted"))
-		fmt.Fprintf(&mergeSQL, "  UPDATE SET target.%s = true, target.%s = source.%s, target.%s = source.%s\n",
-			quoteIdentifier("_cdc_deleted"),
-			quoteIdentifier("_cdc_lsn"), quoteIdentifier("_cdc_lsn"),
-			quoteIdentifier("_cdc_synced_at"), quoteIdentifier("_cdc_synced_at"))
-
-		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND source.%s = false THEN\n", quoteIdentifier("_cdc_deleted"))
-		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
-	} else {
+	{
 		if len(updateSets) > 0 {
 			mergeSQL.WriteString("WHEN MATCHED THEN\n")
 			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
 		}
 
 		mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
-		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
-		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 	}
 
 	return mergeSQL.String()
+}
+
+// actualColumnName resolves the case-mapped name of a logical column.
+func actualColumnName(columns []string, name string) string {
+	for _, col := range columns {
+		if strings.EqualFold(col, name) {
+			return col
+		}
+	}
+	return name
 }
 
 func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
@@ -755,6 +846,8 @@ func (d *SnowflakeDestination) GetMaxCDCLSN(ctx context.Context, table string) (
 
 func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
 
+func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }
+
 func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseSchemaTable(table)
 
@@ -861,7 +954,7 @@ func quoteIdentifier(name string) string {
 	if strings.HasPrefix(name, `"`) && strings.HasSuffix(name, `"`) {
 		return name
 	}
-	return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(strings.ToUpper(name), `"`, `""`))
 }
 
 func quoteColumns(cols []string) []string {
@@ -890,7 +983,7 @@ func filterColumns(columns []string, exclude []string) []string {
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf(`%s."%s" = %s."%s"`, targetAlias, strings.ToUpper(key), sourceAlias, strings.ToUpper(key))
+		conditions[i] = fmt.Sprintf(`%s.%s = %s.%s`, targetAlias, quoteIdentifier(key), sourceAlias, quoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
@@ -902,7 +995,7 @@ func buildChangeConditionsSnowflake(columns []string, targetAlias, sourceAlias s
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
 		// Snowflake supports IS DISTINCT FROM
-		conditions[i] = fmt.Sprintf(`%s."%s" IS DISTINCT FROM %s."%s"`, targetAlias, strings.ToUpper(col), sourceAlias, strings.ToUpper(col))
+		conditions[i] = fmt.Sprintf(`%s.%s IS DISTINCT FROM %s.%s`, targetAlias, quoteIdentifier(col), sourceAlias, quoteIdentifier(col))
 	}
 	return strings.Join(conditions, " OR ")
 }
@@ -946,4 +1039,24 @@ func formatSnowflakeValue(v interface{}) string {
 	default:
 		return fmt.Sprintf("'%v'", val)
 	}
+}
+
+func cdcMergeAssign(colName, colQuoted, targetExpr, sourceExpr, unchangedColsExpr string) string {
+	// The source emits _cdc_unchanged_cols using the source column names (e.g. lower case).
+	// The merge column name may be folded to upper case when the schema is read
+	// back from the destination on an incremental run, so compare case-insensitively.
+	colLit := strings.ReplaceAll(strings.ToLower(colName), "'", "''")
+	return fmt.Sprintf(
+		"%s = IFF(ARRAY_CONTAINS(TO_VARIANT('%s'), TRY_PARSE_JSON(LOWER(%s))), %s, %s)",
+		colQuoted, colLit, unchangedColsExpr, targetExpr, sourceExpr,
+	)
+}
+
+func containsFold(items []string, target string) bool {
+	for _, item := range items {
+		if strings.EqualFold(item, target) {
+			return true
+		}
+	}
+	return false
 }

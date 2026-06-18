@@ -230,7 +230,17 @@ func (d *MongoDBDestination) MergeTable(ctx context.Context, opts destination.Me
 		return fmt.Errorf("failed to get target collection: %w", err)
 	}
 
-	cursor, err := stagingCol.Find(ctx, bson.D{})
+	isCDC := destination.HasCDCDeletedColumn(opts.Columns)
+	findOpts := options.Find()
+	if isCDC {
+		// Process changes in LSN order so the per-PK composition below sees the
+		// latest change last (LSN strings are fixed-width and sort
+		// lexicographically). Deletes sort after other changes with the same
+		// LSN so a tied delete wins, mirroring destination.CDCLatestOverallOrderBy.
+		findOpts.SetSort(bson.D{{Key: destination.CDCLSNColumn, Value: 1}, {Key: destination.CDCDeletedColumn, Value: 1}})
+	}
+
+	cursor, err := stagingCol.Find(ctx, bson.D{}, findOpts)
 	if err != nil {
 		return fmt.Errorf("failed to read staging collection: %w", err)
 	}
@@ -239,6 +249,17 @@ func (d *MongoDBDestination) MergeTable(ctx context.Context, opts destination.Me
 	const batchSize = 1000
 	var operations []mongo.WriteModel
 	var totalUpserted int64
+
+	// For CDC, compose one document per PK: row data comes from the latest
+	// non-deleted change (so a trailing delete keeps the last update's values),
+	// CDC columns and the deleted flag from the latest change overall.
+	type cdcComposed struct {
+		filter bson.M
+		latest bson.M
+		active bson.M
+	}
+	var composedOrder []string
+	composedByPK := map[string]*cdcComposed{}
 
 	for cursor.Next(ctx) {
 		var doc bson.M
@@ -252,6 +273,22 @@ func (d *MongoDBDestination) MergeTable(ctx context.Context, opts destination.Me
 		}
 
 		delete(doc, "_id")
+		delete(doc, destination.CDCUnchangedColsColumn)
+
+		if isCDC {
+			key := fmt.Sprintf("%v", filter)
+			entry, ok := composedByPK[key]
+			if !ok {
+				entry = &cdcComposed{filter: filter}
+				composedByPK[key] = entry
+				composedOrder = append(composedOrder, key)
+			}
+			entry.latest = doc
+			if deleted, _ := doc[destination.CDCDeletedColumn].(bool); !deleted {
+				entry.active = doc
+			}
+			continue
+		}
 
 		operations = append(operations, mongo.NewReplaceOneModel().
 			SetFilter(filter).
@@ -271,6 +308,39 @@ func (d *MongoDBDestination) MergeTable(ctx context.Context, opts destination.Me
 		return fmt.Errorf("staging cursor error: %w", err)
 	}
 
+	for _, key := range composedOrder {
+		entry := composedByPK[key]
+		doc := entry.active
+		if doc == nil {
+			// Delete-only window: update CDC columns on an existing document
+			// without clobbering row data; unknown rows are not materialized
+			// from a bare delete image.
+			operations = append(operations, mongo.NewUpdateOneModel().
+				SetFilter(entry.filter).
+				SetUpdate(bson.M{"$set": bson.M{
+					destination.CDCDeletedColumn:  entry.latest[destination.CDCDeletedColumn],
+					destination.CDCLSNColumn:      entry.latest[destination.CDCLSNColumn],
+					destination.CDCSyncedAtColumn: entry.latest[destination.CDCSyncedAtColumn],
+				}}))
+		} else {
+			doc[destination.CDCDeletedColumn] = entry.latest[destination.CDCDeletedColumn]
+			doc[destination.CDCLSNColumn] = entry.latest[destination.CDCLSNColumn]
+			doc[destination.CDCSyncedAtColumn] = entry.latest[destination.CDCSyncedAtColumn]
+			operations = append(operations, mongo.NewReplaceOneModel().
+				SetFilter(entry.filter).
+				SetReplacement(doc).
+				SetUpsert(true))
+		}
+
+		if len(operations) >= batchSize {
+			if _, err := targetCol.BulkWrite(ctx, operations, options.BulkWrite().SetOrdered(false)); err != nil {
+				return fmt.Errorf("failed to bulk write merge batch: %w", err)
+			}
+			totalUpserted += int64(len(operations))
+			operations = operations[:0]
+		}
+	}
+
 	if len(operations) > 0 {
 		if _, err := targetCol.BulkWrite(ctx, operations, options.BulkWrite().SetOrdered(false)); err != nil {
 			return fmt.Errorf("failed to bulk write final merge batch: %w", err)
@@ -280,6 +350,29 @@ func (d *MongoDBDestination) MergeTable(ctx context.Context, opts destination.Me
 
 	config.Debug("[MONGODB DEST] Merge complete: %d documents upserted into %s", totalUpserted, opts.TargetTable)
 	return nil
+}
+
+func (d *MongoDBDestination) SupportsCDCMerge() bool { return true }
+
+// GetMaxCDCLSN returns the maximum _cdc_lsn value from the collection for CDC resume.
+func (d *MongoDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	collection, err := d.getCollection(table)
+	if err != nil {
+		return "", err
+	}
+
+	opts := options.FindOne().SetSort(bson.D{{Key: destination.CDCLSNColumn, Value: -1}}).SetProjection(bson.M{destination.CDCLSNColumn: 1})
+	var doc bson.M
+	if err := collection.FindOne(ctx, bson.M{}, opts).Decode(&doc); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return "", nil
+		}
+		return "", err
+	}
+	if lsn, ok := doc[destination.CDCLSNColumn].(string); ok {
+		return lsn, nil
+	}
+	return "", nil
 }
 
 func (d *MongoDBDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {

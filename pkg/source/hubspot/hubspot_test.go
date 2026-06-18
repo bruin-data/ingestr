@@ -93,6 +93,69 @@ func TestParseHistoryTableName(t *testing.T) {
 	}
 }
 
+func TestParseHubspotURI(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "api_key",
+			input: "hubspot://?api_key=pat_test_12345",
+			want:  "pat_test_12345",
+		},
+		{
+			name:  "service_key",
+			input: "hubspot://?service_key=sk_test_67890",
+			want:  "sk_test_67890",
+		},
+		{
+			name:  "both equal",
+			input: "hubspot://?api_key=tok&service_key=tok",
+			want:  "tok",
+		},
+		{
+			name:    "both differ",
+			input:   "hubspot://?api_key=a&service_key=b",
+			wantErr: true,
+		},
+		{
+			name:    "missing credential",
+			input:   "hubspot://?",
+			wantErr: true,
+		},
+		{
+			name:    "empty",
+			input:   "hubspot://",
+			wantErr: true,
+		},
+		{
+			name:    "wrong scheme",
+			input:   "postgres://?api_key=x",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseHubspotURI(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (value %q)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseTableAssocOverride(t *testing.T) {
 	cases := []struct {
 		name         string

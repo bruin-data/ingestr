@@ -307,6 +307,8 @@ func formatValue(arr arrow.Array, idx int) string {
 			return "true"
 		}
 		return "false"
+	case *array.Int8:
+		return fmt.Sprintf("%d", a.Value(idx))
 	case *array.Int16:
 		return fmt.Sprintf("%d", a.Value(idx))
 	case *array.Int32:

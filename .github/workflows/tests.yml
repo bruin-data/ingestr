@@ -51,6 +51,8 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
       - run: make test
 
   end2end:

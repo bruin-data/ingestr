@@ -160,7 +160,11 @@ func (s *MySQLSource) GetTable(ctx context.Context, req source.TableRequest) (so
 }
 
 func (s *MySQLSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := s.parseTableName(table)
+	return getMySQLSchema(ctx, s.db, s.database, table)
+}
+
+func getMySQLSchema(ctx context.Context, db *sql.DB, database string, table string) (*schema.TableSchema, error) {
+	schemaName, tableName := parseMySQLTableName(database, table)
 
 	query := `
 		SELECT
@@ -175,7 +179,7 @@ func (s *MySQLSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 		ORDER BY ORDINAL_POSITION
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, schemaName, tableName)
+	rows, err := db.QueryContext(ctx, query, schemaName, tableName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query schema: %w", err)
 	}
@@ -237,7 +241,7 @@ func (s *MySQLSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 	`
 
 	var primaryKeys []string
-	pkRows, err := s.db.QueryContext(ctx, pkQuery, schemaName, tableName)
+	pkRows, err := db.QueryContext(ctx, pkQuery, schemaName, tableName)
 	if err == nil {
 		defer func() { _ = pkRows.Close() }()
 		for pkRows.Next() {
@@ -269,7 +273,15 @@ func (s *MySQLSource) read(ctx context.Context, table string, tableSchema *schem
 	startTotal := time.Now()
 	config.Debug("[SOURCE] Starting read from %s", table)
 
-	columns := filterColumns(tableSchema.Columns, opts.ExcludeColumns)
+	schemaToUse := tableSchema
+	if opts.Schema != nil {
+		schemaToUse = opts.Schema
+		config.Debug("[SOURCE] Using provided schema (%d columns)", len(schemaToUse.Columns))
+	} else {
+		config.Debug("[SOURCE] Using pre-fetched schema (%d columns)", len(schemaToUse.Columns))
+	}
+
+	columns := filterColumns(schemaToUse.Columns, opts.ExcludeColumns)
 	arrowSchema := buildArrowSchema(columns)
 
 	batchSize := opts.PageSize
@@ -377,13 +389,13 @@ func (s *MySQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 	return results, nil
 }
 
-func (s *MySQLSource) parseTableName(table string) (string, string) {
+func parseMySQLTableName(database string, table string) (string, string) {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
 		return parts[0], parts[1]
 	}
 	// MySQL uses the database name as the schema
-	return s.database, table
+	return database, table
 }
 
 func filterColumns(columns []schema.Column, exclude []string) []schema.Column {
@@ -420,7 +432,7 @@ func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOptions) string {
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
-		colNames[i] = fmt.Sprintf("`%s`", col.Name)
+		colNames[i] = quoteColumn(col.Name)
 	}
 
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteTable(table))
@@ -428,10 +440,10 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 	var conditions []string
 	if opts.IncrementalKey != "" {
 		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf("`%s` >= '%s'", opts.IncrementalKey, opts.IntervalStart.Format("2006-01-02 15:04:05")))
+			conditions = append(conditions, fmt.Sprintf("%s >= '%s'", quoteColumn(opts.IncrementalKey), opts.IntervalStart.Format("2006-01-02 15:04:05")))
 		}
 		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf("`%s` <= '%s'", opts.IncrementalKey, opts.IntervalEnd.Format("2006-01-02 15:04:05")))
+			conditions = append(conditions, fmt.Sprintf("%s <= '%s'", quoteColumn(opts.IncrementalKey), opts.IntervalEnd.Format("2006-01-02 15:04:05")))
 		}
 	}
 
@@ -449,9 +461,13 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 func quoteTable(table string) string {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
-		return fmt.Sprintf("`%s`.`%s`", parts[0], parts[1])
+		return fmt.Sprintf("`%s`.`%s`", strings.ReplaceAll(parts[0], "`", "``"), strings.ReplaceAll(parts[1], "`", "``"))
 	}
-	return fmt.Sprintf("`%s`", table)
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(table, "`", "``"))
+}
+
+func quoteColumn(name string) string {
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
 }
 
 func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) (arrow.RecordBatch, int64, error) {
