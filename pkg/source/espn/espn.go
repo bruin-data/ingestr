@@ -35,7 +35,6 @@ type ESPNSource struct {
 	client  *httpclient.Client
 	sport   string
 	league  string
-	dates   string
 	season  string
 	limit   int
 	baseURL string
@@ -57,7 +56,6 @@ func (s *ESPNSource) Connect(ctx context.Context, uri string) error {
 
 	s.sport = cfg.sport
 	s.league = cfg.league
-	s.dates = cfg.dates
 	s.season = cfg.season
 	s.limit = cfg.limit
 	s.baseURL = cfg.baseURL
@@ -73,7 +71,6 @@ func (s *ESPNSource) Connect(ctx context.Context, uri string) error {
 type uriConfig struct {
 	sport   string
 	league  string
-	dates   string
 	season  string
 	limit   int
 	baseURL string
@@ -92,7 +89,6 @@ func parseURI(raw string) (uriConfig, error) {
 	cfg := uriConfig{
 		sport:   strings.TrimSpace(values.Get("sport")),
 		league:  strings.TrimSpace(values.Get("league")),
-		dates:   strings.TrimSpace(values.Get("dates")),
 		season:  strings.TrimSpace(values.Get("season")),
 		limit:   defaultLimit,
 		baseURL: strings.TrimRight(values.Get("base_url"), "/"),
@@ -340,9 +336,6 @@ func (s *ESPNSource) fetchScoreboardPayload(ctx context.Context, opts source.Rea
 }
 
 func (s *ESPNSource) scoreboardDates(opts source.ReadOptions) string {
-	if s.dates != "" {
-		return s.dates
-	}
 	if opts.IntervalStart == nil && opts.IntervalEnd == nil {
 		return ""
 	}
