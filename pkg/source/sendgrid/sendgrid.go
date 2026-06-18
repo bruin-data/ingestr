@@ -851,6 +851,10 @@ func filterByTimestamp(items []map[string]interface{}, field string, start, end 
 	for _, item := range items {
 		itemTime, ok := parseItemTime(item[field])
 		if !ok {
+			// Keep items whose incremental key is missing/null/unparseable rather than dropping
+			// them: we can't place them in the interval, and silently discarding would lose records
+			// permanently. These tables use merge, so re-emitting on each run is harmless.
+			filtered = append(filtered, item)
 			continue
 		}
 		if start != nil && itemTime.Before(start.UTC()) {

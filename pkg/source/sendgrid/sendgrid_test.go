@@ -162,8 +162,8 @@ func TestFilterByTimestamp(t *testing.T) {
 		{"id": "1", "updated_at": "2024-01-01T00:00:00Z"},
 		{"id": "2", "updated_at": "2024-06-01T00:00:00Z"},
 		{"id": "3", "updated_at": "2024-12-01T00:00:00Z"},
-		{"id": "4", "updated_at": ""},                        // unparseable -> excluded when filtering
-		{"id": "5"},                                          // missing field -> excluded when filtering
+		{"id": "4", "updated_at": ""},                        // unparseable -> KEPT (avoid silent loss)
+		{"id": "5"},                                          // missing field -> KEPT (avoid silent loss)
 		{"id": "6", "updated_at": json.Number("1717200000")}, // 2024-06-01 unix
 	}
 
@@ -175,22 +175,21 @@ func TestFilterByTimestamp(t *testing.T) {
 		assert.Len(t, got, len(items))
 	})
 
-	t.Run("start and end filter", func(t *testing.T) {
+	t.Run("start and end filter keeps in-range plus null-timestamp rows", func(t *testing.T) {
 		got := filterByTimestamp(items, "updated_at", &start, &end)
-		ids := idsOf(got)
-		assert.ElementsMatch(t, []string{"2", "6"}, ids)
+		assert.ElementsMatch(t, []string{"2", "6", "4", "5"}, idsOf(got))
 	})
 
-	t.Run("start only", func(t *testing.T) {
+	t.Run("start only keeps in-range plus null-timestamp rows", func(t *testing.T) {
 		got := filterByTimestamp(items, "updated_at", &start, nil)
-		assert.ElementsMatch(t, []string{"2", "3", "6"}, idsOf(got))
+		assert.ElementsMatch(t, []string{"2", "3", "6", "4", "5"}, idsOf(got))
 	})
 
-	t.Run("end is exclusive at the boundary", func(t *testing.T) {
+	t.Run("end is exclusive at the boundary; null-timestamp rows still kept", func(t *testing.T) {
 		jan := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-		jun := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC) // ids 2 and 6 sit exactly here
+		jun := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC) // ids 2 and 6 sit exactly here -> excluded
 		got := filterByTimestamp(items, "updated_at", &jan, &jun)
-		assert.ElementsMatch(t, []string{"1"}, idsOf(got), "items exactly at end must be excluded")
+		assert.ElementsMatch(t, []string{"1", "4", "5"}, idsOf(got), "items exactly at end excluded; null-ts kept")
 	})
 }
 
