@@ -2,13 +2,16 @@ package espn
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
@@ -34,6 +37,41 @@ func TestESPNParseURI(t *testing.T) {
 	require.ErrorContains(t, err, "limit")
 }
 
+func TestESPNHandlesIncrementality(t *testing.T) {
+	src := NewESPNSource()
+	require.True(t, src.HandlesIncrementality())
+}
+
+func TestESPNTableDefaults(t *testing.T) {
+	src := NewESPNSource()
+	require.NoError(t, src.Connect(context.Background(), "espn://"))
+
+	want := map[string]struct {
+		pks      []string
+		strategy config.IncrementalStrategy
+	}{
+		"teams":       {[]string{"id"}, config.StrategyReplace},
+		"scoreboard":  {[]string{"id"}, config.StrategyMerge},
+		"competitors": {[]string{"event_id", "competition_id", "team_id"}, config.StrategyMerge},
+		"standings":   {[]string{"league_id", "group_id", "season", "team_id"}, config.StrategyReplace},
+		"news":        {[]string{"id"}, config.StrategyMerge},
+	}
+	for name, expected := range want {
+		table, err := src.GetTable(context.Background(), source.TableRequest{Name: name})
+		require.NoError(t, err, "GetTable(%s)", name)
+		require.Equal(t, expected.pks, table.PrimaryKeys(), "%s primary keys", name)
+		require.Equal(t, expected.strategy, table.Strategy(), "%s strategy", name)
+		require.False(t, table.HasKnownSchema(), "%s should not have a known schema (uses schema inference)", name)
+	}
+}
+
+func TestESPNEventsTableRemoved(t *testing.T) {
+	src := NewESPNSource()
+	require.NoError(t, src.Connect(context.Background(), "espn://"))
+	_, err := src.GetTable(context.Background(), source.TableRequest{Name: "events"})
+	require.ErrorContains(t, err, "unsupported table")
+}
+
 func TestESPNReadTeams(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/apis/site/v2/sports/football/nfl/teams", r.URL.Path)
@@ -54,13 +92,12 @@ func TestESPNReadTeams(t *testing.T) {
 	defer result.Batch.Release()
 
 	require.EqualValues(t, 2, result.Batch.NumRows())
-	ids := result.Batch.Column(0).(*array.Int64)
-	require.EqualValues(t, 22, ids.Value(0))
-	names := result.Batch.Column(5).(*array.String)
-	require.Equal(t, "Arizona Cardinals", names.Value(0))
+	require.Equal(t, "22", stringAt(t, result.Batch, "id", 0))
+	require.Equal(t, "Arizona Cardinals", stringAt(t, result.Batch, "displayName", 0))
+	require.Equal(t, "1", stringAt(t, result.Batch, "id", 1))
 }
 
-func TestESPNScoreboardUsesDatesAndFlattensEvents(t *testing.T) {
+func TestESPNScoreboardEmitsRawEvents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/apis/site/v2/sports/football/nfl/scoreboard", r.URL.Path)
 		require.Equal(t, "20260910-20260912", r.URL.Query().Get("dates"))
@@ -71,7 +108,7 @@ func TestESPNScoreboardUsesDatesAndFlattensEvents(t *testing.T) {
 
 	src := NewESPNSource()
 	require.NoError(t, src.Connect(context.Background(), "espn://?dates=20260910-20260912&base_url="+url.QueryEscape(server.URL)))
-	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "events"})
+	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "scoreboard"})
 	require.NoError(t, err)
 
 	results, err := table.Read(context.Background(), source.ReadOptions{Limit: 1})
@@ -81,15 +118,13 @@ func TestESPNScoreboardUsesDatesAndFlattensEvents(t *testing.T) {
 	defer result.Batch.Release()
 
 	require.EqualValues(t, 1, result.Batch.NumRows())
-	eventIDs := result.Batch.Column(0).(*array.Int64)
-	require.EqualValues(t, 401872656, eventIDs.Value(0))
-	homeTeamIDs := result.Batch.Column(14).(*array.Int64)
-	require.EqualValues(t, 26, homeTeamIDs.Value(0))
-	awayScores := result.Batch.Column(21).(*array.Int64)
-	require.EqualValues(t, 0, awayScores.Value(0))
+	require.Equal(t, "401872656", stringAt(t, result.Batch, "id", 0))
+	require.Equal(t, "New England Patriots at Seattle Seahawks", stringAt(t, result.Batch, "name", 0))
+	// nested competitions should still be present (as JSON) — schema inference will retype later.
+	require.True(t, hasField(result.Batch, "competitions"), "competitions field should exist")
 }
 
-func TestESPNCompetitorsFanOutFromScoreboard(t *testing.T) {
+func TestESPNCompetitorsFanOutAndCarryPKs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/apis/site/v2/sports/football/nfl/scoreboard", r.URL.Path)
 		_, _ = fmt.Fprint(w, scoreboardPayload())
@@ -108,15 +143,15 @@ func TestESPNCompetitorsFanOutFromScoreboard(t *testing.T) {
 	defer result.Batch.Release()
 
 	require.EqualValues(t, 2, result.Batch.NumRows())
-	teamIDs := result.Batch.Column(2).(*array.Int64)
-	require.EqualValues(t, 26, teamIDs.Value(0))
-	require.EqualValues(t, 17, teamIDs.Value(1))
-	homeAway := result.Batch.Column(6).(*array.String)
-	require.Equal(t, "home", homeAway.Value(0))
-	require.Equal(t, "away", homeAway.Value(1))
+	require.Equal(t, "401872656", stringAt(t, result.Batch, "event_id", 0))
+	require.Equal(t, "401872656", stringAt(t, result.Batch, "competition_id", 0))
+	require.Equal(t, "26", stringAt(t, result.Batch, "team_id", 0))
+	require.Equal(t, "17", stringAt(t, result.Batch, "team_id", 1))
+	require.Equal(t, "home", stringAt(t, result.Batch, "homeAway", 0))
+	require.Equal(t, "away", stringAt(t, result.Batch, "homeAway", 1))
 }
 
-func TestESPNStandingsWalksChildren(t *testing.T) {
+func TestESPNStandingsWalksChildrenAndCarriesPKs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/apis/v2/sports/football/nfl/standings", r.URL.Path)
 		require.Equal(t, "2025", r.URL.Query().Get("season"))
@@ -136,12 +171,13 @@ func TestESPNStandingsWalksChildren(t *testing.T) {
 	defer result.Batch.Release()
 
 	require.EqualValues(t, 1, result.Batch.NumRows())
-	teamIDs := result.Batch.Column(8).(*array.Int64)
-	require.EqualValues(t, 17, teamIDs.Value(0))
-	wins := result.Batch.Column(14).(*array.Float64)
-	require.EqualValues(t, 14, wins.Value(0))
-	streak := result.Batch.Column(22).(*array.String)
-	require.Equal(t, "W3", streak.Value(0))
+	require.Equal(t, "9", stringAt(t, result.Batch, "league_id", 0))
+	require.Equal(t, "8", stringAt(t, result.Batch, "group_id", 0))
+	require.Equal(t, "17", stringAt(t, result.Batch, "team_id", 0))
+	// season is a number in the payload, schema inference will store it as integer JSON.
+	require.True(t, hasField(result.Batch, "season"))
+	// stats array preserved
+	require.True(t, hasField(result.Batch, "stats"))
 }
 
 func TestESPNNews(t *testing.T) {
@@ -164,10 +200,9 @@ func TestESPNNews(t *testing.T) {
 	defer result.Batch.Release()
 
 	require.EqualValues(t, 1, result.Batch.NumRows())
-	headlines := result.Batch.Column(4).(*array.String)
-	require.Equal(t, "Are the Cowboys legit contenders this season?", headlines.Value(0))
-	links := result.Batch.Column(10).(*array.String)
-	require.Equal(t, "https://www.espn.com/video/clip/_/id/49094173/test", links.Value(0))
+	require.Equal(t, "Are the Cowboys legit contenders this season?", stringAt(t, result.Batch, "headline", 0))
+	// raw nested links preserved
+	require.True(t, hasField(result.Batch, "links"))
 }
 
 func TestESPNRegistryLookup(t *testing.T) {
@@ -182,6 +217,52 @@ func TestESPNUnsupportedTable(t *testing.T) {
 	src := NewESPNSource()
 	_, err := src.GetTable(context.Background(), source.TableRequest{Name: "roster"})
 	require.ErrorContains(t, err, "unsupported table")
+}
+
+// hasField reports whether the record's schema contains the given field name.
+func hasField(batch arrow.RecordBatch, name string) bool {
+	for _, f := range batch.Schema().Fields() {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// stringAt returns the value at (column, row) as a Go string, regardless of how
+// it is stored. Values produced by ItemsToArrowRecordWithSchema(nil) use the
+// "unknown" Arrow extension type whose storage is a string of JSON-encoded data.
+// We unwrap the extension, then strip the outer quotes for JSON string values so
+// callers can compare against natural string literals.
+func stringAt(t *testing.T, batch arrow.RecordBatch, name string, row int) string {
+	t.Helper()
+	for i, f := range batch.Schema().Fields() {
+		if f.Name != name {
+			continue
+		}
+		col := batch.Column(i)
+		if ext, ok := col.(array.ExtensionArray); ok {
+			storage, sok := ext.Storage().(*array.String)
+			require.True(t, sok, "unknown ext storage should be *array.String")
+			raw := storage.Value(row)
+			if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+				var s string
+				require.NoError(t, json.Unmarshal([]byte(raw), &s))
+				return s
+			}
+			return raw
+		}
+		switch a := col.(type) {
+		case *array.String:
+			return a.Value(row)
+		case *array.LargeString:
+			return a.Value(row)
+		default:
+			return a.ValueStr(row)
+		}
+	}
+	t.Fatalf("column %q not found in schema", name)
+	return ""
 }
 
 func teamsPayload() string {

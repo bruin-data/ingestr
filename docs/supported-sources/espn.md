@@ -1,6 +1,6 @@
 # ESPN
 
-[ESPN's public site API](https://espnapi.com/) exposes unauthenticated JSON endpoints for scores, teams, standings, and news. These endpoints are unofficial and can change without notice.
+ESPN exposes a set of unauthenticated JSON endpoints at `site.api.espn.com` that cover scores, teams, standings, and news. These endpoints are unofficial and can change without notice.
 
 `ingestr` supports ESPN as a public source. The default configuration targets NFL data with `sport=football` and `league=nfl`.
 
@@ -26,9 +26,9 @@ Load NFL scoreboard events into DuckDB:
 ```sh
 ingestr ingest \
   --source-uri 'espn://?sport=football&league=nfl&dates=20260910-20260912' \
-  --source-table 'events' \
+  --source-table 'scoreboard' \
   --dest-uri 'duckdb:///espn.duckdb' \
-  --dest-table 'sports.events'
+  --dest-table 'sports.scoreboard'
 ```
 
 Load NBA teams:
@@ -43,19 +43,19 @@ ingestr ingest \
 
 ## Tables
 
-| Table | PK | Inc Key | Inc Strategy | Details |
+| Table | PK | Inc Key | Default Strategy | Details |
 | --- | --- | --- | --- | --- |
-| `teams` | `id` | - | replace | Loads teams from `/apis/site/v2/sports/{sport}/{league}/teams`. |
-| `scoreboard` | `id` | - | replace | Loads flattened scoreboard event rows and preserves each raw event as JSON. |
-| `events` | `id` | - | replace | Alias-shaped event table for scoreboard events. |
-| `competitors` | `event_id`, `competition_id`, `team_id` | - | replace | Fans out each scoreboard event into one row per competitor/team. |
-| `standings` | `league_id`, `group_id`, `season`, `team_id` | - | replace | Loads standings from `/apis/v2/sports/{sport}/{league}/standings`. |
-| `news` | `id` | - | replace | Loads latest league news articles from `/apis/site/v2/sports/{sport}/{league}/news`. |
+| `teams` | `id` | - | `replace` | Loads teams from `/apis/site/v2/sports/{sport}/{league}/teams`. Roster snapshot. |
+| `scoreboard` | `id` | - | `merge` | Loads scoreboard events from `/apis/site/v2/sports/{sport}/{league}/scoreboard`. Use `merge` to accumulate events across interval runs. |
+| `competitors` | `event_id`, `competition_id`, `team_id` | - | `merge` | Fans out each scoreboard event into one row per competitor/team. |
+| `standings` | `league_id`, `group_id`, `season`, `team_id` | - | `replace` | Loads standings from `/apis/v2/sports/{sport}/{league}/standings`. Latest snapshot for the given season. |
+| `news` | `id` | - | `merge` | Loads latest league news articles from `/apis/site/v2/sports/{sport}/{league}/news`. Accumulates over runs. |
 
-Use these as the `--source-table` parameter in the `ingestr ingest` command.
+Use these as the `--source-table` parameter in the `ingestr ingest` command. Pass `--incremental-strategy` to override the default for any table.
 
 ## Notes
 
 - ESPN does not require an API key for these public endpoints.
-- `--interval-start` and `--interval-end` are converted to ESPN scoreboard `dates` when the URI does not include `dates`.
-- Nested ESPN objects are preserved as JSON columns while common IDs, names, scores, status, standings, and article fields are exposed as typed columns.
+- The source preserves the raw ESPN payload — nested objects come through as JSON columns and scalar fields are typed by schema inference. Column shapes vary across sports and leagues; for example, NFL events expose `week.number` while soccer events do not.
+- For `scoreboard` and `competitors`, `--interval-start` and `--interval-end` are converted to ESPN's `dates` query parameter when the URI does not already include `dates`. The source declares that it handles its own incrementality so the pipeline does not attempt to filter again.
+- For `competitors` and `standings`, the source adds top-level `event_id` / `competition_id` / `team_id` / `league_id` / `group_id` / `season` fields so the composite primary keys are addressable directly.
