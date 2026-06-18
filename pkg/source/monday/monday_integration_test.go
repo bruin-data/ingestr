@@ -19,13 +19,13 @@ func TestMondayPipeline(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	key := os.Getenv("MONDAY_API_KEY")
-	if key == "" {
-		t.Skip("Set MONDAY_API_KEY to run Monday integration tests")
+	token := os.Getenv("MONDAY_API_TOKEN")
+	if token == "" {
+		t.Skip("Set MONDAY_API_TOKEN to run Monday integration tests")
 	}
 
 	ctx := context.Background()
-	sourceURI := fmt.Sprintf("monday://?api_key=%s", key)
+	sourceURI := fmt.Sprintf("monday://?api_token=%s", token)
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, fmt.Sprintf("monday_%d.duckdb", time.Now().UnixNano()))
@@ -602,9 +602,10 @@ func TestMondayPipeline(t *testing.T) {
 			},
 		},
 		// updates scoped to a single board -> only updates on that board's items,
-		// enriched with item_name + creator_name. One update on the initial project board.
+		// enriched with item_name + creator_name. One update on the Marketing
+		// Campaigns board.
 		{
-			SourceTable:      "updates:5091839751",
+			SourceTable:      "updates:5091841883",
 			DestTable:        "main.monday_updates_scoped",
 			KeyColumn:        "id",
 			ExpectedRowCount: 1,
@@ -618,12 +619,13 @@ func TestMondayPipeline(t *testing.T) {
 			},
 			Rows: []testutil.ExpectedRow{
 				{
-					ID: "523528203",
+					ID: "523528666",
 					Fields: map[string]any{
-						"body":         "Started working on initial task setup.",
+						"body":         "Email campaign draft ready for review.",
 						"creator_id":   "99910119",
 						"creator_name": "Gong Test",
-						"item_id":      "2723610670",
+						"item_id":      "2723608951",
+						"item_name":    "Task 1",
 					},
 				},
 			},

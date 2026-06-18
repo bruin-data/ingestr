@@ -43,9 +43,10 @@ Monday.com source allows ingesting the following resources into separate tables:
 | `account_roles` | - | - | replace | Account roles with their types and permissions. Full reload on each run. |
 | `users` | - | - | replace | Users in your Monday.com account with their profiles and permissions. Full reload on each run. |
 | `boards` | id | updated_at | merge | Boards with their metadata, state, and configuration. Incrementally loads only updated boards. |
+| `items` | id | - | replace | Items (rows) across all boards, including each cell's raw values as a JSON array in `column_values`. Full reload on each run. |
 | `workspaces` | - | - | replace | Workspaces containing boards and their settings. Full reload on each run. |
 | `webhooks` | - | - | replace | Webhooks configured for boards with their events and configurations. Full reload on each run. |
-| `updates` | id | updated_at | merge | Updates (comments) on items with their content and metadata. Incrementally loads only updated entries. |
+| `updates` | id | updated_at | merge | Updates (comments) on items with their content and metadata, including the creator and item names. Incrementally loads only updated entries. |
 | `teams` | - | - | replace | Teams in your account with their members. Full reload on each run. |
 | `tags` | - | - | replace | Tags used across your account for organizing items. Full reload on each run. |
 | `custom_activities` | - | - | replace | Custom activity types defined in your account. Full reload on each run. |
@@ -53,6 +54,32 @@ Monday.com source allows ingesting the following resources into separate tables:
 | `board_views` | - | - | replace | Views configured for boards with their filters and settings. Full reload on each run. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+### Scoping to specific boards
+
+`items`, `boards`, `board_columns`, `board_views`, and `updates` accept an optional `:<board_id>[,<board_id>...]` suffix to restrict the result to the listed boards. Without a suffix they behave as before (every board in the account).
+
+```sh
+# Items on a single board
+ingestr ingest --source-table "items:5091839751" ...
+
+# board_columns from two boards
+ingestr ingest --source-table "board_columns:5091839751,5091841857" ...
+
+# Updates on items belonging to a single board
+ingestr ingest --source-table "updates:5091841883" ...
+```
+
+### `items:<board_id>:linked`
+
+`items` additionally supports a `:linked` suffix that treats the given board as a "master" board and also pulls items from any **sub-boards whose name matches one of the master's item titles**. Useful for a "master board → linked sub-boards" fan-out pattern where the master's items name the sub-boards. Requires at least one master board id.
+
+```sh
+ingestr ingest --source-table "items:5091839751:linked" ...
+```
+
+> [!NOTE]
+> `:linked` discovers sub-boards by the convention that **an item on the master board has the same title as the sub-board's name**. So if your master board has an item called `Q1 Roadmap` and you also have a board called `Q1 Roadmap`, that board is treated as a linked sub-board and its items are included in the result.
 
 > [!NOTE]
 > Monday.com has rate limits for API requests. The source handles pagination automatically and respects the API's maximum page size of 100 items.

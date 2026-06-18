@@ -214,8 +214,8 @@ var tagsFields = []schema.Column{
 }
 
 type MondaySource struct {
-	apiKey string
-	client *httpclient.Client
+	apiToken string
+	client   *httpclient.Client
 }
 
 func NewMondaySource() *MondaySource {
@@ -231,18 +231,18 @@ func (s *MondaySource) HandlesIncrementality() bool {
 }
 
 func (s *MondaySource) Connect(ctx context.Context, uri string) error {
-	apiKey, err := ParseMondayUri(uri)
+	apiToken, err := ParseMondayUri(uri)
 	if err != nil {
 		return err
 	}
 
-	s.apiKey = apiKey
+	s.apiToken = apiToken
 	s.client = httpclient.New(
 		httpclient.WithBaseURL(graphqlBaseUrl),
 		httpclient.WithTimeout(60*time.Second),
 		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
 		httpclient.WithDebug(config.DebugMode),
-		httpclient.WithHeader("Authorization", s.apiKey),
+		httpclient.WithHeader("Authorization", s.apiToken),
 		httpclient.WithHeader("Content-Type", "application/json"),
 	)
 
@@ -257,7 +257,7 @@ func ParseMondayUri(uri string) (string, error) {
 
 	rest := strings.TrimPrefix(uri, "monday://")
 	if rest == "" || rest == "?" {
-		return "", fmt.Errorf("api_key is required in URI query parameters")
+		return "", fmt.Errorf("api_token is required in URI query parameters")
 	}
 
 	rest = strings.TrimPrefix(rest, "?")
@@ -267,17 +267,12 @@ func ParseMondayUri(uri string) (string, error) {
 		return "", fmt.Errorf("failed to parse monday URI query: %w", err)
 	}
 
-	// Accept api_token as an alias for api_key for backward compatibility
-	// (older configs and documentation use api_token).
-	apiKey := values.Get("api_key")
-	if apiKey == "" {
-		apiKey = values.Get("api_token")
-	}
-	if apiKey == "" {
-		return "", fmt.Errorf("api_key (or api_token) query parameter is required")
+	apiToken := values.Get("api_token")
+	if apiToken == "" {
+		return "", fmt.Errorf("api_token query parameter is required")
 	}
 
-	return apiKey, nil
+	return apiToken, nil
 }
 
 func (s *MondaySource) Close(ctx context.Context) error {
