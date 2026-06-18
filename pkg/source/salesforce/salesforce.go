@@ -28,6 +28,7 @@ type salesforceAuthMethod string
 const (
 	salesforceAuthPassword          salesforceAuthMethod = "password"
 	salesforceAuthClientCredentials salesforceAuthMethod = "client_credentials"
+	salesforceAuthAccessToken       salesforceAuthMethod = "access_token"
 )
 
 type salesforceSource struct {
@@ -39,6 +40,7 @@ type salesforceSource struct {
 	sfUser         string
 	sfPassword     string
 	sfToken        string
+	sfAccessToken  string
 	sfClientID     string
 	sfClientSecret string
 	sfUrl          string
@@ -49,6 +51,7 @@ type salesforceConfig struct {
 	username     string
 	password     string
 	token        string
+	accessToken  string
 	domain       string
 	clientID     string
 	clientSecret string
@@ -71,6 +74,7 @@ func (s *salesforceSource) Connect(ctx context.Context, uri string) error {
 	s.sfUser = cfg.username
 	s.sfPassword = cfg.password
 	s.sfToken = cfg.token
+	s.sfAccessToken = cfg.accessToken
 	s.sfClientID = cfg.clientID
 	s.sfClientSecret = cfg.clientSecret
 	s.authMethod = cfg.authMethod
@@ -91,6 +95,8 @@ func (s *salesforceSource) Connect(ctx context.Context, uri string) error {
 		if err := s.loginClientCredentials(ctx); err != nil {
 			return fmt.Errorf("failed to login to Salesforce with client credentials: %w", err)
 		}
+	case salesforceAuthAccessToken:
+		s.loginAccessToken()
 	default:
 		return fmt.Errorf("unsupported Salesforce auth method: %s", s.authMethod)
 	}
@@ -124,6 +130,7 @@ func parseSalesforceURI(uri string) (salesforceConfig, error) {
 		username:     params.Get("username"),
 		password:     params.Get("password"),
 		token:        params.Get("token"),
+		accessToken:  params.Get("access_token"),
 		domain:       params.Get("domain"),
 		clientID:     params.Get("client_id"),
 		clientSecret: params.Get("client_secret"),
@@ -135,7 +142,9 @@ func parseSalesforceURI(uri string) (salesforceConfig, error) {
 	}
 	switch authMethod {
 	case "":
-		if cfg.clientID != "" || cfg.clientSecret != "" {
+		if cfg.accessToken != "" {
+			cfg.authMethod = salesforceAuthAccessToken
+		} else if cfg.clientID != "" || cfg.clientSecret != "" {
 			cfg.authMethod = salesforceAuthClientCredentials
 		} else {
 			cfg.authMethod = salesforceAuthPassword
@@ -144,6 +153,8 @@ func parseSalesforceURI(uri string) (salesforceConfig, error) {
 		cfg.authMethod = salesforceAuthPassword
 	case string(salesforceAuthClientCredentials):
 		cfg.authMethod = salesforceAuthClientCredentials
+	case string(salesforceAuthAccessToken):
+		cfg.authMethod = salesforceAuthAccessToken
 	default:
 		return salesforceConfig{}, fmt.Errorf("unsupported Salesforce auth_method: %s", authMethod)
 	}
@@ -169,6 +180,10 @@ func parseSalesforceURI(uri string) (salesforceConfig, error) {
 		}
 		if cfg.clientSecret == "" {
 			return salesforceConfig{}, fmt.Errorf("client_secret is required for Salesforce client credentials")
+		}
+	case salesforceAuthAccessToken:
+		if cfg.accessToken == "" {
+			return salesforceConfig{}, fmt.Errorf("access_token is required for Salesforce access token authentication")
 		}
 	}
 
@@ -233,6 +248,10 @@ func (s *salesforceSource) loginClientCredentials(ctx context.Context) error {
 
 	s.client.SetSidLoc(tokenResp.AccessToken, strings.TrimRight(tokenResp.InstanceURL, "/"))
 	return nil
+}
+
+func (s *salesforceSource) loginAccessToken() {
+	s.client.SetSidLoc(s.sfAccessToken, strings.TrimRight(s.sfUrl, "/"))
 }
 
 func (s *salesforceSource) Close(ctx context.Context) error {
