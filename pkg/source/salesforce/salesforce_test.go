@@ -48,8 +48,29 @@ func TestParseSalesforceURIInfersClientCredentialsAuth(t *testing.T) {
 	}
 }
 
+func TestParseSalesforceURIInfersAccessTokenAuth(t *testing.T) {
+	cfg, err := parseSalesforceURI("salesforce://?access_token=access-token&domain=https://company.my.salesforce.com")
+	if err != nil {
+		t.Fatalf("parseSalesforceURI returned error: %v", err)
+	}
+
+	if cfg.authMethod != salesforceAuthAccessToken {
+		t.Fatalf("authMethod = %q, want %q", cfg.authMethod, salesforceAuthAccessToken)
+	}
+	if cfg.accessToken != "access-token" || cfg.domain != "https://company.my.salesforce.com" {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
 func TestParseSalesforceURIRequiresClientSecretForClientCredentials(t *testing.T) {
 	_, err := parseSalesforceURI("salesforce://?client_id=id&domain=test&grant_type=client_credentials")
+	if err == nil {
+		t.Fatal("parseSalesforceURI returned nil error, want validation error")
+	}
+}
+
+func TestParseSalesforceURIRequiresAccessTokenForAccessTokenAuth(t *testing.T) {
+	_, err := parseSalesforceURI("salesforce://?auth_method=access_token&domain=test")
 	if err == nil {
 		t.Fatal("parseSalesforceURI returned nil error, want validation error")
 	}
@@ -74,6 +95,22 @@ func TestSalesforceBaseURL(t *testing.T) {
 				t.Fatalf("salesforceBaseURL(%q) = %q, want %q", tt.domain, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestConnectWithAccessTokenAuth(t *testing.T) {
+	src := NewSalesforceSource()
+
+	if err := src.Connect(context.Background(), "salesforce://?access_token=access-token&domain=https://company.my.salesforce.com"); err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	defer func() { _ = src.Close(context.Background()) }()
+
+	if got := src.sessionID; got != "access-token" {
+		t.Fatalf("sessionID = %q, want %q", got, "access-token")
+	}
+	if got := src.instanceURL; got != "https://company.my.salesforce.com" {
+		t.Fatalf("instanceURL = %q, want %q", got, "https://company.my.salesforce.com")
 	}
 }
 

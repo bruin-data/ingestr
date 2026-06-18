@@ -5,7 +5,18 @@ Ingestr supports Salesforce as a source.
 
 ## URI format
 
-The URI format for Salesforce using username, password, and security token authentication is as follows:
+The URI format for Salesforce using an OAuth access token is as follows:
+
+```plaintext
+salesforce://?access_token=<access_token>&domain=<domain>
+```
+
+URI parameters:
+- `access_token` is an OAuth access token for your Salesforce org.
+- `domain` is your Salesforce My Domain, instance host, or full instance URL. For sandboxes, use the sandbox My Domain URL, for example `https://MyDomainName--SandboxName.sandbox.my.salesforce.com`.
+
+You can also use username, password, and security token authentication:
+
 ```
 salesforce://?username=<username>&password=<password>&token=<token>&domain=<domain>
 ```
@@ -13,7 +24,7 @@ salesforce://?username=<username>&password=<password>&token=<token>&domain=<doma
 URI parameters:
 - `username` is your Salesforce account username.
 - `password` is your Salesforce account password.
-- `token` is your Salesforce security token.
+- `token` is your Salesforce security token. This is not the same as an OAuth access token.
 - `domain` is your Salesforce instance domain (for example, `login`, `test`, or `your-domain.my`). You can also pass the full Salesforce host or URL.
 
 To use the OAuth 2.0 client credentials flow, use the following URI:
@@ -31,22 +42,72 @@ You can obtain your security token by logging into your Salesforce account and n
 
 ## Setting up a Salesforce Integration
 
-You can obtain an OAuth access token by setting up a connected app in Salesforce and using OAuth 2.0 authentication. For more information, see [Salesforce API Authentication](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/quickstart_oauth.htm).
+### Option A: Salesforce CLI access token
+
+This is the most direct setup path when you want to authenticate interactively in a browser and then pass the resulting OAuth access token to ingestr.
+
+1. Create a Salesforce developer org from [developer.salesforce.com/signup](https://developer.salesforce.com/signup) if you do not already have an org. Salesforce sends the org username by email; for developer orgs it can look like `your.original.email.3f6ksj33ew99@agentforce.com`.
+2. Install the Salesforce CLI from the [Salesforce CLI setup guide](https://developer.salesforce.com/docs/atlas.en-us.262.0.sfdx_setup.meta/sfdx_setup/sfdx_setup_install_cli.htm).
+3. Log in to your org:
+
+   ```sh
+   sf org login web
+   ```
+
+   For a sandbox or a specific My Domain URL, pass the instance URL:
+
+   ```sh
+   sf org login web --instance-url https://MyDomainName--SandboxName.sandbox.my.salesforce.com
+   ```
+
+4. Display the org details and note the `Instance Url` and username:
+
+   ```sh
+   sf org display --target-org <salesforce-username>
+   ```
+
+   Recent Salesforce CLI versions hide secrets from this command. If you see a warning that secrets are hidden, use the auth command in the next step instead of setting `SF_TEMP_SHOW_SECRETS=true`.
+
+5. Show the access token:
+
+   ```sh
+   sf org auth show-access-token --target-org <salesforce-username>
+   ```
+
+6. Use the access token and instance URL in the ingestr source URI:
+
+   ```sh
+   ingestr ingest \
+     --source-uri "salesforce://?access_token=<access_token>&domain=<instance-url>" \
+     --source-table "account" \
+     --dest-uri "duckdb:///sf.db" \
+     --dest-table "public.account"
+   ```
+
+   URL-encode query parameter values if they contain special characters such as `&`, `+`, or `%`.
+
+For Salesforce's official OAuth quickstart, see [Salesforce API Authentication](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/quickstart_oauth.htm). For developer org setup, see [Set Up Your Developer Environment](https://developer.salesforce.com/docs/atlas.en-us.262.0.api_rest.meta/api_rest/quickstart_dev_org.htm).
+
+### Option B: Username, password, and security token
+
+Use this option when you have a Salesforce security token from user settings. The `token` URI parameter is the Salesforce security token, not the OAuth access token printed by `sf org auth show-access-token`.
+
+### Option C: Client credentials
+
+Use this option when you have a connected app configured for the OAuth 2.0 client credentials flow. ingestr exchanges `client_id` and `client_secret` for an access token automatically.
 
 ## Example
 
 Let's say:
-* Your Salesforce username is `user`.
-* Your password is `password123`.
-* Your security token is `fake_token`.
-* Your domain is `your-domain.my`.
+* Your Salesforce access token is `fake_access_token`.
+* Your Salesforce instance URL is `https://your-domain.my.salesforce.com`.
 * You want to ingest `account` data from your salesforce account
 * You want to save this data in a duckdb database `sf.db` under the table `public.account`
 
 You can run the following command to achieve this:
 ```sh
 ingestr ingest \
-  --source-uri "salesforce://?username=user&password=password123&token=fake_token&domain=your-domain.my" \
+  --source-uri "salesforce://?access_token=fake_access_token&domain=https://your-domain.my.salesforce.com" \
   --source-table "account" \
   --dest-uri "duckdb:///sf.db" \
   --dest-table "public.account"
@@ -81,7 +142,7 @@ Use these as `--source-table` parameters in the `ingestr ingest` command.
  Copy user_role data from Salesforce into a DuckDB database:
 ```sh
 ingestr ingest \
-  --source-uri "salesforce://?username=<username>&password=<password>&token=<token>&domain=<domain>" \
+  --source-uri "salesforce://?access_token=<access_token>&domain=<instance-url>" \
   --source-table "user_role" \
   --dest-uri "duckdb:///sf.db" \
   --dest-table "public.user_role"
