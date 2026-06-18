@@ -52,10 +52,3 @@ ingestr ingest \
 | `news` | `id` | - | `merge` | Loads latest league news articles from `/apis/site/v2/sports/{sport}/{league}/news`. Accumulates over runs. |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command. Pass `--incremental-strategy` to override the default for any table.
-
-## Notes
-
-- ESPN does not require an API key for these public endpoints.
-- The source preserves the raw ESPN payload — nested objects come through as JSON columns and scalar fields are typed by schema inference. Column shapes vary across sports and leagues; for example, NFL events expose `week.number` while soccer events do not.
-- For `scoreboard` and `competitors`, `--interval-start` and `--interval-end` are converted to ESPN's `dates` query parameter when the URI does not already include `dates`. The source declares that it handles its own incrementality so the pipeline does not attempt to filter again.
-- For `competitors` and `standings`, the source adds top-level `event_id` / `competition_id` / `team_id` / `league_id` / `group_id` / `season` fields so the composite primary keys are addressable directly.
