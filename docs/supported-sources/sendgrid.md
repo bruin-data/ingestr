@@ -83,12 +83,3 @@ ingestr ingest \
   --dest-uri duckdb:///sendgrid.duckdb \
   --dest-table 'sendgrid.messages'
 ```
-
-## Notes
-
-- Intervals are **half-open `[start, end)`** — `--interval-start` is inclusive and `--interval-end` is exclusive across all tables. For example, `global_stats` with `--interval-start 2024-01-01 --interval-end 2024-01-09` returns Jan 1–8.
-- The `messages` table requires the SendGrid Email Activity feature and an API key with Email Activity access.
-- The Email Activity endpoint returns at most 1000 records per query and offers no pagination. ingestr works around this by recursively bisecting the `last_event_time` range — any window that comes back full is split in half until each piece is under the cap. Because the 6 req/min limit applies, very dense ranges can take a while; and if more than 1000 events share the same one-second instant, the surplus cannot be separated and a warning is emitted.
-- SendGrid documents a hard limit of 6 requests per minute for the Email Activity API; ingestr applies a dedicated rate limiter for `messages` and a conservative limiter for the other v3 endpoints, relying on retries for 429 responses.
-- The `contacts` endpoint is intentionally not included because SendGrid's current `GET /v3/marketing/contacts` endpoint returns only up to 50 recent contacts and documents contact pagination as deprecated.
-- Nested objects and arrays are preserved as JSON strings in the destination columns.
