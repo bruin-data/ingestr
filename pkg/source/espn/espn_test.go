@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -122,6 +123,94 @@ func TestESPNScoreboardEmitsRawEvents(t *testing.T) {
 	require.Equal(t, "New England Patriots at Seattle Seahawks", stringAt(t, result.Batch, "name", 0))
 	// nested competitions should still be present (as JSON) — schema inference will retype later.
 	require.True(t, hasField(result.Batch, "competitions"), "competitions field should exist")
+}
+
+func TestESPNScoreboardConvertsIntervalToDatesParam(t *testing.T) {
+	// Documents the contract relied on by Bruin Cloud: ingestr --interval-start
+	// and --interval-end land on source.ReadOptions and the ESPN source maps
+	// them to the upstream `dates=YYYYMMDD-YYYYMMDD` query parameter (UTC).
+	cases := []struct {
+		name      string
+		start     *time.Time
+		end       *time.Time
+		wantDates string
+	}{
+		{
+			name:      "start+end becomes range",
+			start:     timePtr(t, "2026-09-10T00:00:00Z"),
+			end:       timePtr(t, "2026-09-12T23:59:59Z"),
+			wantDates: "20260910-20260912",
+		},
+		{
+			name:      "start only becomes single date",
+			start:     timePtr(t, "2026-09-10T00:00:00Z"),
+			end:       nil,
+			wantDates: "20260910",
+		},
+		{
+			name:      "end only becomes single date",
+			start:     nil,
+			end:       timePtr(t, "2026-09-12T23:59:59Z"),
+			wantDates: "20260912",
+		},
+		{
+			name:      "non-UTC start is normalised to UTC date",
+			start:     timePtrInLocation(t, "2026-09-10T23:30:00", "America/Los_Angeles"),
+			end:       timePtrInLocation(t, "2026-09-11T05:00:00", "America/Los_Angeles"),
+			wantDates: "20260911-20260911",
+		},
+		{
+			name:      "no interval yields no dates param",
+			start:     nil,
+			end:       nil,
+			wantDates: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedDates string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/apis/site/v2/sports/football/nfl/scoreboard", r.URL.Path)
+				capturedDates = r.URL.Query().Get("dates")
+				_, _ = fmt.Fprint(w, `{"events":[]}`)
+			}))
+			defer server.Close()
+
+			src := NewESPNSource()
+			require.NoError(t, src.Connect(context.Background(), "espn://?base_url="+url.QueryEscape(server.URL)))
+			table, err := src.GetTable(context.Background(), source.TableRequest{Name: "scoreboard"})
+			require.NoError(t, err)
+
+			results, err := table.Read(context.Background(), source.ReadOptions{
+				IntervalStart: tc.start,
+				IntervalEnd:   tc.end,
+			})
+			require.NoError(t, err)
+			result := <-results
+			require.NoError(t, result.Err)
+			result.Batch.Release()
+
+			require.Equal(t, tc.wantDates, capturedDates,
+				"expected dates=%q on outgoing ESPN request, got %q", tc.wantDates, capturedDates)
+		})
+	}
+}
+
+func timePtr(t *testing.T, value string) *time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, value)
+	require.NoError(t, err)
+	return &parsed
+}
+
+func timePtrInLocation(t *testing.T, value, location string) *time.Time {
+	t.Helper()
+	loc, err := time.LoadLocation(location)
+	require.NoError(t, err)
+	parsed, err := time.ParseInLocation("2006-01-02T15:04:05", value, loc)
+	require.NoError(t, err)
+	return &parsed
 }
 
 func TestESPNScoreboardEmptyWhenEventsKeyMissing(t *testing.T) {
