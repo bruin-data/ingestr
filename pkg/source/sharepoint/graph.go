@@ -29,13 +29,15 @@ var graphScopes = []string{"https://graph.microsoft.com/.default"}
 // Authentication uses the OAuth2 client-credentials flow via azidentity, which
 // caches and refreshes the access token internally.
 type graphClient struct {
-	http     *httpclient.Client
-	cred     *azidentity.ClientSecretCredential
-	hostname string
-	sitePath string
-	library  string // requested document library name; empty => default drive
-	siteID   string
-	driveID  string // resolved when a non-default library is requested
+	http        *httpclient.Client
+	cred        *azidentity.ClientSecretCredential
+	hostname    string
+	sitePath    string
+	library     string // requested document library name; empty => default drive
+	siteID      string
+	driveID     string // resolved when a non-default library is requested
+	maxFileSize int64  // max bytes per downloaded file; 0 => unlimited
+	maxFiles    int    // max files a glob may match; 0 => unlimited
 }
 
 // driveItem is a single entry returned by the Graph children endpoint. The
@@ -67,11 +69,13 @@ func newGraphClient(cfg connConfig) (*graphClient, error) {
 	)
 
 	return &graphClient{
-		http:     client,
-		cred:     cred,
-		hostname: cfg.hostname,
-		sitePath: cfg.sitePath, // already trimmed in parseURI
-		library:  cfg.library,
+		http:        client,
+		cred:        cred,
+		hostname:    cfg.hostname,
+		sitePath:    cfg.sitePath, // already trimmed in parseURI
+		library:     cfg.library,
+		maxFileSize: cfg.maxFileSize,
+		maxFiles:    cfg.maxFiles,
 	}, nil
 }
 
@@ -241,12 +245,22 @@ func (g *graphClient) downloadToFile(ctx context.Context, filePath, destPath str
 	if err != nil {
 		return fmt.Errorf("failed to create local file for %q: %w", filePath, err)
 	}
-	n, copyErr := io.Copy(out, resp.Body)
+
+	// Cap the download so a huge (or malicious) file can't exhaust local disk:
+	// read at most maxFileSize+1 bytes and treat overflow as an error.
+	var body io.Reader = resp.Body
+	if g.maxFileSize > 0 {
+		body = io.LimitReader(resp.Body, g.maxFileSize+1)
+	}
+	n, copyErr := io.Copy(out, body)
 	if cerr := out.Close(); copyErr == nil {
 		copyErr = cerr
 	}
 	if copyErr != nil {
 		return fmt.Errorf("failed to write %q to disk: %w", filePath, copyErr)
+	}
+	if g.maxFileSize > 0 && n > g.maxFileSize {
+		return fmt.Errorf("file %q exceeds max_file_size of %d bytes", filePath, g.maxFileSize)
 	}
 	config.Debug("[SHAREPOINT] downloaded %d bytes from %s", n, filePath)
 	return nil
@@ -265,10 +279,14 @@ func (g *graphClient) listMatching(ctx context.Context, pattern string) ([]strin
 	recursive := strings.Contains(pattern, "**")
 
 	var matches []string
-	err := g.walk(ctx, prefix, recursive, func(p string) {
+	err := g.walk(ctx, prefix, recursive, func(p string) error {
 		if ok, _ := doublestar.Match(pattern, p); ok {
 			matches = append(matches, p)
+			if g.maxFiles > 0 && len(matches) > g.maxFiles {
+				return fmt.Errorf("glob %q matched more than max_files=%d files; narrow the pattern or raise max_files", pattern, g.maxFiles)
+			}
 		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -278,8 +296,9 @@ func (g *graphClient) listMatching(ctx context.Context, pattern string) ([]strin
 }
 
 // walk lists the files under folder, invoking emit for each file. When
-// recursive is true it descends into subfolders.
-func (g *graphClient) walk(ctx context.Context, folder string, recursive bool, emit func(string)) error {
+// recursive is true it descends into subfolders. emit may return an error to
+// stop the walk early (e.g. when a match cap is hit).
+func (g *graphClient) walk(ctx context.Context, folder string, recursive bool, emit func(string) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -300,7 +319,9 @@ func (g *graphClient) walk(ctx context.Context, folder string, recursive bool, e
 				}
 			}
 		case item.isFile():
-			emit(full)
+			if err := emit(full); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

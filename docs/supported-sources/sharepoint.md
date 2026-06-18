@@ -20,8 +20,13 @@ URI parameters:
 - `hostname`: SharePoint tenant hostname, e.g. `example.sharepoint.com`
 - `site`: server-relative site path, e.g. `sites/Example`
 - `library` (optional): document library (drive) name; defaults to the site's default **Documents** library. Set it to read from a secondary library on the same site.
+- `max_file_size` (optional): maximum bytes for any single downloaded file; the read fails if a file exceeds it. Defaults to `0` (unlimited).
+- `max_files` (optional): maximum number of files a glob may match before erroring, to guard against an over-broad recursive pattern. Defaults to `10000`; set `0` for unlimited.
 
 Authentication uses the OAuth2 **client-credentials** flow. The app registration needs application permission to read the site's files (e.g. `Sites.Read.All` or `Files.Read.All`), granted with admin consent.
+
+> [!TIP]
+> The `client_secret` travels in the URI, which can end up in shell history or process listings. Prefer supplying it from a secret store or environment variable rather than hard-coding it.
 
 To read files from a different site (a different document library), define a second connection pointing at that `site`.
 
@@ -39,7 +44,7 @@ The source table identifies a file (or a glob of files) within the site's defaul
 
 | Hint | Applies to | Meaning |
 |---|---|---|
-| `xlsx` / `csv` | all | format override (otherwise detected from the extension) |
+| `xlsx` / `csv` | all | format override (otherwise detected from the file extension) |
 | `sheet=<name>` | Excel | read a single sheet |
 | `sheets=<a>\|<b>\|<c>` | Excel | read and stack several sheets (separated by `\|`) |
 | `skip=<n>` | all | drop `n` rows before the header row |
@@ -51,6 +56,9 @@ The source table identifies a file (or a glob of files) within the site's defaul
 
 > [!NOTE]
 > Sheet names referenced in `sheet=`/`sheets=` cannot contain `|`, `,`, `=`, or `#`.
+
+> [!NOTE]
+> If a glob pattern has no file extension (e.g. `Reports/**`), each matched file's format is detected from its own extension, so one glob can span mixed `.xlsx` and `.csv` files. Add an `xlsx`/`csv` hint to force a single format for all matches.
 
 Examples:
 

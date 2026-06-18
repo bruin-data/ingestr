@@ -35,6 +35,10 @@ const (
 	formatCSV     fileFormat = "csv"
 )
 
+// defaultMaxFiles bounds how many files a glob may match before erroring, to
+// guard against an over-broad recursive pattern enumerating a whole library.
+const defaultMaxFiles = 10000
+
 // connConfig holds the connection parameters parsed from the source URI.
 type connConfig struct {
 	tenantID     string
@@ -43,6 +47,8 @@ type connConfig struct {
 	hostname     string
 	sitePath     string
 	library      string // optional document library name; empty => default ("Documents")
+	maxFileSize  int64  // optional max bytes per downloaded file; 0 => unlimited
+	maxFiles     int    // optional max files a glob may match; 0 => unlimited
 }
 
 // tableSpec is the parsed form of a source-table string.
@@ -181,13 +187,21 @@ func (s *SharePointSource) readFile(ctx context.Context, path string, spec table
 		return err
 	}
 
-	switch spec.format {
+	// spec.format is set for a literal path or a glob with an extension; for an
+	// extensionless glob it is detected per matched file here.
+	format := spec.format
+	if format == formatUnknown {
+		format = detectFormat(path)
+	}
+	switch format {
 	case formatXLSX:
 		return readExcel(ctx, path, localPath, spec, opts, results, total)
 	case formatCSV:
 		return readCSV(ctx, path, localPath, spec, opts, results, total)
+	case formatXLS:
+		return fmt.Errorf("legacy .xls (BIFF) files are not supported for %q; re-save the file as .xlsx", path)
 	default:
-		return fmt.Errorf("unsupported format %q for %q", spec.format, path)
+		return fmt.Errorf("could not determine file format for %q; add a format hint such as #xlsx or #csv", path)
 	}
 }
 
@@ -209,6 +223,22 @@ func parseURI(uri string) (connConfig, error) {
 		hostname:     q.Get("hostname"),
 		sitePath:     strings.Trim(q.Get("site"), "/"),
 		library:      strings.TrimSpace(q.Get("library")),
+		maxFiles:     defaultMaxFiles,
+	}
+
+	if v := strings.TrimSpace(q.Get("max_file_size")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			return connConfig{}, fmt.Errorf("invalid max_file_size %q: must be a non-negative integer (bytes)", v)
+		}
+		cfg.maxFileSize = n
+	}
+	if v := strings.TrimSpace(q.Get("max_files")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return connConfig{}, fmt.Errorf("invalid max_files %q: must be a non-negative integer (0 = unlimited)", v)
+		}
+		cfg.maxFiles = n
 	}
 
 	missing := make([]string, 0, 5)
@@ -266,7 +296,11 @@ func parseTableSpec(name string) (tableSpec, error) {
 	if spec.format == formatUnknown {
 		spec.format = detectFormat(path)
 	}
-	if spec.format == formatUnknown {
+	// A glob whose pattern has no usable extension (e.g. "Reports/**") leaves the
+	// format unknown here; detection is deferred to each matched file at read time
+	// (which also lets one glob span mixed file types). A single literal path must
+	// resolve to a format now.
+	if spec.format == formatUnknown && !hasGlobMeta(path) {
 		return tableSpec{}, fmt.Errorf("could not determine file format for %q; add a format hint such as #xlsx or #csv", path)
 	}
 	if spec.format == formatXLS {

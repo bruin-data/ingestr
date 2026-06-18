@@ -67,27 +67,28 @@ func buildItem(filePath, sheet string, rowIdx int, headers, cells []string) map[
 }
 
 // dedupHeaders normalizes a raw header row: blank cells become column_N and
-// duplicates get a _2/_3 suffix. The seen map is pre-seeded with the
-// metadata column names so a literal header colliding with one is renamed
-// rather than overwriting the metadata value.
+// duplicates get a _2/_3 suffix. The seen set is pre-seeded with the metadata
+// column names so a literal header colliding with one is renamed rather than
+// overwriting the metadata value. A generated suffix that itself collides with
+// an existing name keeps incrementing until it is unique, so no two output
+// names ever match (which would otherwise drop a column in buildItem's map).
 func dedupHeaders(raw []string) []string {
-	seen := map[string]int{
-		colSourceFile: 1,
-		colSheetName:  1,
-		colRowIdx:     1,
+	seen := map[string]bool{
+		colSourceFile: true,
+		colSheetName:  true,
+		colRowIdx:     true,
 	}
 	headers := make([]string, len(raw))
 	for i, h := range raw {
-		name := strings.TrimSpace(h)
-		if name == "" {
-			name = fmt.Sprintf("column_%d", i)
+		base := strings.TrimSpace(h)
+		if base == "" {
+			base = fmt.Sprintf("column_%d", i)
 		}
-		if count, exists := seen[name]; exists {
-			seen[name] = count + 1
-			name = fmt.Sprintf("%s_%d", name, count+1)
-		} else {
-			seen[name] = 1
+		name := base
+		for n := 2; seen[name]; n++ {
+			name = fmt.Sprintf("%s_%d", base, n)
 		}
+		seen[name] = true
 		headers[i] = name
 	}
 	return headers

@@ -4,12 +4,25 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/xuri/excelize/v2"
+)
+
+const (
+	// maxUnzipSize caps the total decompressed workbook size as a
+	// decompression-bomb guard. Generous so legitimate large workbooks are
+	// unaffected.
+	maxUnzipSize = 16 << 30 // 16 GiB
+	// unzipXMLInMemLimit is the per-part threshold above which excelize spills a
+	// decompressed worksheet / shared-string XML part to a temp file and streams
+	// it, rather than holding it in memory. This is what keeps peak memory low on
+	// large sheets; it is not a cap and never rejects a file.
+	unzipXMLInMemLimit = 16 << 20 // 16 MiB
 )
 
 // readExcel reads the requested sheets from a workbook on local disk and streams
@@ -33,7 +46,11 @@ import (
 //   - A requested sheet that does not exist is an error (listing the available
 //     sheets); when no sheet is specified, the first sheet is read.
 func readExcel(ctx context.Context, filePath, localPath string, spec tableSpec, opts source.ReadOptions, results chan<- source.RecordBatchResult, total *int) error {
-	f, err := excelize.OpenFile(localPath)
+	f, err := excelize.OpenFile(localPath, excelize.Options{
+		UnzipSizeLimit:    maxUnzipSize,
+		UnzipXMLSizeLimit: unzipXMLInMemLimit,
+		TmpDir:            os.TempDir(),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to open Excel workbook %q: %w", filePath, err)
 	}

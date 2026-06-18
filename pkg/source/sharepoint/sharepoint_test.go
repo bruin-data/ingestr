@@ -103,6 +103,11 @@ func TestParseTableSpec(t *testing.T) {
 			want:  tableSpec{path: "a.xlsx", format: formatXLSX, sheets: []string{"S"}, dateCols: []string{"DATE", "MONTH"}},
 		},
 		{
+			name:  "extensionless glob defers format to matched files",
+			input: "Reports/**",
+			want:  tableSpec{path: "Reports/**", format: formatUnknown},
+		},
+		{
 			name:    "unknown format errors",
 			input:   "folder/data.txt",
 			wantErr: true,
@@ -173,6 +178,11 @@ func TestDedupHeaders(t *testing.T) {
 	t.Parallel()
 	got := dedupHeaders([]string{"A", "", "A", "_row_idx"})
 	assert.Equal(t, []string{"A", "column_1", "A_2", "_row_idx_2"}, got)
+
+	// A generated suffix that collides with a real header must be re-suffixed,
+	// not produce a duplicate (which would drop a column in buildItem's map).
+	got = dedupHeaders([]string{"col", "col_2", "col"})
+	assert.Equal(t, []string{"col", "col_2", "col_3"}, got)
 }
 
 func TestDetectFormat(t *testing.T) {
@@ -232,11 +242,24 @@ func TestParseURI(t *testing.T) {
 	assert.Equal(t, "s", cfg.clientSecret)
 	assert.Equal(t, "example.sharepoint.com", cfg.hostname)
 	assert.Equal(t, "sites/Example", cfg.sitePath)
-	assert.Equal(t, "", cfg.library) // optional, defaults to the Documents library
+	assert.Equal(t, "", cfg.library)          // optional, defaults to the Documents library
+	assert.EqualValues(t, 0, cfg.maxFileSize) // unlimited by default
+	assert.Equal(t, defaultMaxFiles, cfg.maxFiles)
 
 	cfg, err = parseURI("sharepoint://?tenant_id=t&client_id=c&client_secret=s&site=sites/Example&hostname=example.sharepoint.com&library=Finance%20Docs")
 	require.NoError(t, err)
 	assert.Equal(t, "Finance Docs", cfg.library)
+
+	// optional hardening limits
+	cfg, err = parseURI("sharepoint://?tenant_id=t&client_id=c&client_secret=s&site=sites/Example&hostname=h&max_file_size=1048576&max_files=50")
+	require.NoError(t, err)
+	assert.EqualValues(t, 1048576, cfg.maxFileSize)
+	assert.Equal(t, 50, cfg.maxFiles)
+
+	_, err = parseURI("sharepoint://?tenant_id=t&client_id=c&client_secret=s&site=sites/Example&hostname=h&max_file_size=-1")
+	require.Error(t, err)
+	_, err = parseURI("sharepoint://?tenant_id=t&client_id=c&client_secret=s&site=sites/Example&hostname=h&max_files=abc")
+	require.Error(t, err)
 
 	_, err = parseURI("sharepoint://?tenant_id=t")
 	require.Error(t, err)
