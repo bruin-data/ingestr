@@ -26,7 +26,30 @@ clickhouse://<username>:<password>@<host>:<port>?http_port=<http_port>&secure=<s
 - `engine` (optional): The table engine type to use when creating destination tables. Valid values: `merge_tree`, `shared_merge_tree`, `replicated_merge_tree`, `stripe_log`, `tiny_log`. Only applicable when ClickHouse is the destination.
 - `engine.<name>` (optional): Engine-level settings to include in the `CREATE TABLE` statement. Prefix each setting name with `engine.`. For example, `engine.index_granularity=8192` will add `SETTINGS index_granularity = 8192` to the table definition. Only applicable when ClickHouse is the destination.
 
-ClickHouse requires a `username`, `password`, `host` and `port` to connect to the ClickHouse server. For more information, read [here](https://dlthub.com/docs/dlt-ecosystem/destinations/clickhouse#2-setup-clickhouse-database). Once you've completed the guide, you should have all the above-mentioned credentials.
+ClickHouse requires a `username`, `password`, `host` and `port` to connect to the ClickHouse server.
+
+### Setting up ClickHouse Credentials
+
+#### For ClickHouse Cloud
+
+1. Log in to [ClickHouse Cloud Console](https://clickhouse.cloud/)
+2. Select your service
+3. Go to **Connect** → **View connection string**
+4. Note the hostname, port, username, and password
+
+#### For Self-Hosted ClickHouse
+
+1. The default username is `default`
+2. Set a password in the ClickHouse configuration or create a new user:
+   ```sql
+   CREATE USER integration_user IDENTIFIED BY 'your_password';
+   GRANT SELECT, INSERT, CREATE TABLE, DROP TABLE ON *.* TO integration_user;
+   ```
+3. Note your server's hostname and ports:
+   - Native TCP port: default `9000` (or `9440` for TLS)
+   - HTTP port: default `8123` (or `8443` for TLS)
+
+Once you have all the credentials:
 
 ```
 ingestr ingest \

@@ -21,9 +21,42 @@ The URI is used to connect to the Intercom API for extracting data.
 
 ## Setting up an Intercom Integration
 
-Intercom requires a few steps to set up an integration, please follow the guide dltHub [has built here](https://dlthub.com/docs/dlt-ecosystem/verified-sources/intercom).
+To connect to Intercom, you need to create an app and obtain an access token.
 
-Once you complete the guide, you should have an access token. Let's say your access token is `dG9rOjE...` and your workspace is in the US region, here's a sample command that will copy the data from Intercom into a DuckDB database:
+### Step 1: Create a Private App
+
+1. Log in to your [Intercom Developer Hub](https://developers.intercom.com/)
+2. Click **Your apps** in the top right
+3. Click **New app**
+4. Enter an app name and select your workspace
+5. Choose **Internal integration** as the app type
+6. Click **Create app**
+
+### Step 2: Configure Permissions
+
+1. In your app settings, go to **Authentication**
+2. Under **Access Token**, click **Edit** next to the workspace
+3. Enable the permissions you need:
+   - **Read users and companies** - For contacts and companies
+   - **Read conversations** - For conversations
+   - **Read content data** - For articles and help center content
+   - **Read and list admins** - For admin users
+4. Click **Save**
+
+### Step 3: Get the Access Token
+
+1. In **Authentication**, find the **Access Token** section
+2. Copy the access token (it starts with `dG9r` when base64 encoded)
+3. Store this token securely
+
+### Determine Your Region
+
+Intercom has different data regions. Check your Intercom URL:
+- `app.intercom.com` → `us` region
+- `app.eu.intercom.com` → `eu` region  
+- `app.au.intercom.com` → `au` region
+
+Once you have your access token, let's say your access token is `dG9rOjE...` and your workspace is in the US region, here's a sample command that will copy the data from Intercom into a DuckDB database:
 
 ```sh
 ingestr ingest \

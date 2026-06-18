@@ -29,7 +29,47 @@ You have two ways of providing credentials:
 If there's no access key and secret key provided, ingestr will try to find the credentials in the local AWS credentials file.
 
 ## Setting up an Athena Integration
-Athena requires a `bucket`, `access_key_id`, `secret_access_key` and `region_name` to access the S3 bucket. Please follow the guide on dltHub to obtain [credentials](https://dlthub.com/docs/dlt-ecosystem/destinations/athena#2-setup-bucket-storage-and-athena-credentials). Once you've completed the guide, you should have all the above-mentioned credentials.
+
+Athena requires a `bucket`, `access_key_id`, `secret_access_key` and `region_name` to access the S3 bucket and run queries.
+
+### Step 1: Create an S3 Bucket for Results
+
+1. Go to the [Amazon S3 Console](https://s3.console.aws.amazon.com/)
+2. Click **Create bucket**
+3. Enter a bucket name (e.g., "my-athena-results")
+4. Select the same region where you'll use Athena
+5. Click **Create bucket**
+
+### Step 2: Configure an Athena Workgroup
+
+Athena needs a **Query result location** configured on the workgroup it runs through. ingestr uses the account's `primary` workgroup by default.
+
+1. Go to the [Athena Console](https://console.aws.amazon.com/athena/) → **Workgroups**
+2. Edit the existing `primary` workgroup (or create a new one)
+3. Set **Query result location** to a prefix in the bucket from Step 1 (e.g. `s3://my-athena-results/query-results/`) and save
+4. If you created a new workgroup, pass its name via the `workgroup` URI parameter
+
+### Step 3: Create an IAM User with Permissions
+
+1. Go to the [AWS IAM Console](https://console.aws.amazon.com/iam/)
+2. Click **Users** → **Add users**
+3. Enter a username (e.g., "athena-integration")
+4. Select **Access key - Programmatic access**
+5. Attach the following managed policies:
+   - `AmazonAthenaFullAccess` - For Athena query access
+   - `AmazonS3FullAccess` - For S3 bucket access (or create a more restrictive policy)
+   - `AWSGlueConsoleFullAccess` - For Glue Catalog access
+
+### Step 4: Get Access Keys
+
+1. After creating the user, copy the **Access key ID** and **Secret access key**
+2. Store these credentials securely (the secret key is shown only once)
+
+### Step 5: Note Your Region
+
+Ensure you know the AWS region where your Athena is configured (e.g., `us-east-1`, `eu-central-1`).
+
+Once you have all the credentials:
 ```
 ingestr ingest \
   --source-uri "stripe://?api_key=key123" \
