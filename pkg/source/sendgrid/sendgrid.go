@@ -33,9 +33,15 @@ const (
 	defaultActivityStart   = "1970-01-01T00:00:00Z"
 	defaultStatsAggregated = "day"
 
-	// messagesMinWindow is the smallest Email Activity window the bisection will split to before
-	// giving up; last_event_time has second granularity, so a 1s window cannot be divided further.
+	// messagesMinWindow is the smallest Email Activity window the time bisection splits to;
+	// last_event_time has second granularity, so a 1s window cannot be divided further by time.
+	// A still-full 1s window is then partitioned by msg_id prefix instead.
 	messagesMinWindow = time.Second
+	// messagesIDAlphabet is the case-folded character set msg_ids draw from (base64url + dot);
+	// LIKE is case-insensitive, so one case covers both. Used to partition a saturated second.
+	messagesIDAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz-_."
+	// maxMessagesPrefixLen caps msg_id prefix recursion depth as a safety stop.
+	maxMessagesPrefixLen = 16
 
 	// SendGrid Email Activity API is documented at 6 req/min: (6 * 0.8) / 60 = 0.08 req/sec.
 	emailActivityRateLimit = 0.08
@@ -474,8 +480,13 @@ func serverParams(tc tableConfig, aggregatedBy string, opts source.ReadOptions) 
 func (s *SendGridSource) fetchMessages(ctx context.Context, table string, tc tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	start, end := resolveMessagesRange(opts)
 
-	fetch := func(from, to time.Time) ([]map[string]interface{}, error) {
+	// fetch queries a half-open [from, to) window, optionally constrained to msg_ids beginning
+	// with msgIDPrefix (used to sub-partition a single saturated second).
+	fetch := func(from, to time.Time, msgIDPrefix string) ([]map[string]interface{}, error) {
 		query := buildMessagesQuery(source.ReadOptions{IntervalStart: &from, IntervalEnd: &to})
+		if msgIDPrefix != "" {
+			query += fmt.Sprintf(` AND msg_id LIKE "%s%%"`, escapeLike(msgIDPrefix))
+		}
 		req := s.clientForTier(tc.tier).R(ctx).
 			SetQueryParam("limit", strconv.Itoa(tc.pageSize)).
 			SetQueryParam("query", query)
@@ -490,28 +501,76 @@ func (s *SendGridSource) fetchMessages(ctx context.Context, table string, tc tab
 		return sendBatch(table, items, opts, results)
 	}
 
-	onTruncate := func(from, to time.Time) {
-		fmt.Fprintf(os.Stderr, "[WARNING] sendgrid messages: more than %d events fall within %s..%s and cannot be split further; some events are not retrieved.\n", tc.pageSize, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+	onExhausted := func(from, to time.Time, prefix string) {
+		fmt.Fprintf(os.Stderr, "[WARNING] sendgrid messages: more than %d events fall within %s..%s under msg_id prefix %q and cannot be partitioned further; some events are not retrieved.\n", tc.pageSize, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), prefix)
 	}
 
-	return bisectWindows(ctx, start, end, tc.pageSize, fetch, emit, onTruncate)
+	return bisectWindows(ctx, start, end, tc.pageSize, fetch, emit, onExhausted)
 }
 
-// bisectWindows fetches the [start, end] time range, emitting each window that fits under
-// pageSize. Any window that comes back full (>= pageSize) is assumed truncated and split in
-// half, recursing until each piece is under the cap or narrower than messagesMinWindow (the
-// timestamp granularity), at which point onTruncate is called for the unsplittable window.
-// The fetched items of a split (non-leaf) window are discarded and re-fetched per half, so only
-// leaf windows are emitted; this keeps coverage gap-free at the cost of re-querying parents.
+// bisectWindows retrieves every message in [start, end) under SendGrid's 1000-row, no-pagination
+// cap. It first bisects the time range: a window that comes back full is split in half until each
+// piece is under the cap. Once a window is down to the timestamp granularity (messagesMinWindow)
+// and is still full, more than pageSize events share that instant, so it switches to partitioning
+// by msg_id prefix — recursively extending the prefix over the id alphabet until each bucket fits
+// under the cap. Because msg_id is unique and uniformly distributed, this always converges; the
+// onExhausted guard only fires in the degenerate case of >pageSize ids identical up to the prefix
+// depth cap.
 func bisectWindows(
 	ctx context.Context,
 	start, end time.Time,
 	pageSize int,
-	fetch func(from, to time.Time) ([]map[string]interface{}, error),
+	fetch func(from, to time.Time, msgIDPrefix string) ([]map[string]interface{}, error),
 	emit func(items []map[string]interface{}) error,
-	onTruncate func(from, to time.Time),
+	onExhausted func(from, to time.Time, prefix string),
 ) error {
-	windows := 0
+	calls := 0
+	guard := func() bool {
+		calls++
+		if calls > maxPages {
+			config.Debug("[SENDGRID] maxPages guard reached for messages")
+			return false
+		}
+		return true
+	}
+
+	// partitionByPrefix splits a single saturated time window by msg_id prefix.
+	var partitionByPrefix func(from, to time.Time, prefix string) error
+	partitionByPrefix = func(from, to time.Time, prefix string) error {
+		for _, c := range messagesIDAlphabet {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			if !guard() {
+				return nil
+			}
+
+			sub := prefix + string(c)
+			items, err := fetch(from, to, sub)
+			if err != nil {
+				return err
+			}
+			if len(items) < pageSize {
+				if err := emit(items); err != nil {
+					return err
+				}
+				continue
+			}
+			if len(sub) >= maxMessagesPrefixLen {
+				onExhausted(from, to, sub)
+				if err := emit(items); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := partitionByPrefix(from, to, sub); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 
 	var walk func(from, to time.Time) error
 	walk = func(from, to time.Time) error {
@@ -520,14 +579,11 @@ func bisectWindows(
 			return ctx.Err()
 		default:
 		}
-
-		windows++
-		if windows > maxPages {
-			config.Debug("[SENDGRID] maxPages guard reached for messages")
+		if !guard() {
 			return nil
 		}
 
-		items, err := fetch(from, to)
+		items, err := fetch(from, to, "")
 		if err != nil {
 			return err
 		}
@@ -536,8 +592,8 @@ func bisectWindows(
 		}
 
 		if to.Sub(from) <= messagesMinWindow {
-			onTruncate(from, to)
-			return emit(items)
+			// Can't split time finer than the timestamp granularity; partition this instant by id.
+			return partitionByPrefix(from, to, "")
 		}
 
 		mid := from.Add(to.Sub(from) / 2)
@@ -548,6 +604,12 @@ func bisectWindows(
 	}
 
 	return walk(start, end)
+}
+
+// escapeLike escapes the SendGrid LIKE special characters so a literal msg_id prefix is matched
+// exactly. SendGrid uses backslash as the default escape character.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 // resolveMessagesRange resolves a concrete [start, end] window to bisect, defaulting the start

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -194,25 +195,26 @@ func TestFilterByTimestamp(t *testing.T) {
 }
 
 // fakeActivity simulates SendGrid's Email Activity endpoint: it returns every message whose
-// timestamp falls in the half-open window [from, to) (matching buildMessagesQuery's >= start,
-// < end), but caps the response at pageSize (mimicking truncation with no pagination). The
-// fetch callback returned closes over the call counter for assertions.
-func fakeActivity(t *testing.T, msgs []map[string]interface{}, pageSize int, calls *int) func(from, to time.Time) ([]map[string]interface{}, error) {
+// timestamp falls in the half-open window [from, to) and whose msg_id (case-insensitively) starts
+// with msgIDPrefix, capped at pageSize (mimicking the 1000-row, no-pagination truncation). The
+// returned callback closes over the call counter for assertions.
+func fakeActivity(t *testing.T, msgs []map[string]interface{}, pageSize int, calls *int) func(from, to time.Time, msgIDPrefix string) ([]map[string]interface{}, error) {
 	t.Helper()
-	return func(from, to time.Time) ([]map[string]interface{}, error) {
+	return func(from, to time.Time, msgIDPrefix string) ([]map[string]interface{}, error) {
 		*calls++
+		lowerPrefix := strings.ToLower(msgIDPrefix)
 		var win []map[string]interface{}
 		for _, m := range msgs {
 			ts, _ := parseItemTime(m["last_event_time"])
-			if !ts.Before(from) && ts.Before(to) {
-				win = append(win, m)
+			if ts.Before(from) || !ts.Before(to) {
+				continue
 			}
+			if msgIDPrefix != "" && !strings.HasPrefix(strings.ToLower(m["msg_id"].(string)), lowerPrefix) {
+				continue
+			}
+			win = append(win, m)
 		}
-		sort.Slice(win, func(i, j int) bool {
-			a, _ := parseItemTime(win[i]["last_event_time"])
-			b, _ := parseItemTime(win[j]["last_event_time"])
-			return a.Before(b)
-		})
+		sort.Slice(win, func(i, j int) bool { return win[i]["msg_id"].(string) < win[j]["msg_id"].(string) })
 		if len(win) > pageSize {
 			win = win[:pageSize] // truncate like the real API
 		}
@@ -220,11 +222,15 @@ func fakeActivity(t *testing.T, msgs []map[string]interface{}, pageSize int, cal
 	}
 }
 
+// msgsAt builds messages at the given times with unique msg_ids spread across the id alphabet so
+// prefix partitioning splits them cleanly.
 func msgsAt(times []time.Time) []map[string]interface{} {
+	const a = "0123456789abcdefghijklmnopqrstuvwxyz"
 	out := make([]map[string]interface{}, len(times))
 	for i, ts := range times {
+		id := string(a[i%len(a)]) + string(a[(i/len(a))%len(a)]) + fmt.Sprintf("%08d", i)
 		out[i] = map[string]interface{}{
-			"msg_id":          fmt.Sprintf("m%d", i),
+			"msg_id":          id,
 			"last_event_time": ts.UTC().Format(time.RFC3339),
 		}
 	}
@@ -237,7 +243,7 @@ func TestBisectWindows(t *testing.T) {
 	start := base.Add(-365 * 24 * time.Hour)
 	end := base.Add(365 * 24 * time.Hour)
 
-	run := func(msgs []map[string]interface{}, pageSize int) (distinct map[string]bool, calls, truncations int) {
+	run := func(msgs []map[string]interface{}, pageSize int) (distinct map[string]bool, calls, exhausted int) {
 		distinct = map[string]bool{}
 		fetch := fakeActivity(t, msgs, pageSize, &calls)
 		emit := func(items []map[string]interface{}) error {
@@ -246,8 +252,8 @@ func TestBisectWindows(t *testing.T) {
 			}
 			return nil
 		}
-		onTruncate := func(_, _ time.Time) { truncations++ }
-		require.NoError(t, bisectWindows(ctx, start, end, pageSize, fetch, emit, onTruncate))
+		onExhausted := func(_, _ time.Time, _ string) { exhausted++ }
+		require.NoError(t, bisectWindows(ctx, start, end, pageSize, fetch, emit, onExhausted))
 		return
 	}
 
@@ -256,33 +262,55 @@ func TestBisectWindows(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			times = append(times, base.Add(time.Duration(i)*time.Hour))
 		}
-		distinct, calls, truncations := run(msgsAt(times), 100)
+		distinct, calls, exhausted := run(msgsAt(times), 100)
 		assert.Len(t, distinct, 10)
 		assert.Equal(t, 1, calls)
-		assert.Equal(t, 0, truncations)
+		assert.Equal(t, 0, exhausted)
 	})
 
-	t.Run("dense uneven range captures all via splitting", func(t *testing.T) {
+	t.Run("dense uneven range captures all via time splitting", func(t *testing.T) {
 		var times []time.Time
 		// 450 messages clustered into the first two hours, one per ~16s.
 		for i := 0; i < 450; i++ {
 			times = append(times, base.Add(time.Duration(i)*16*time.Second))
 		}
-		distinct, calls, truncations := run(msgsAt(times), 100)
+		distinct, calls, exhausted := run(msgsAt(times), 100)
 		assert.Len(t, distinct, 450, "every message should be captured")
 		assert.Greater(t, calls, 1, "a dense range must split into multiple requests")
-		assert.Equal(t, 0, truncations)
+		assert.Equal(t, 0, exhausted)
 	})
 
-	t.Run("more than a page in one second triggers truncation guard", func(t *testing.T) {
+	t.Run("more than a page in one second is recovered via msg_id prefix partition", func(t *testing.T) {
 		var times []time.Time
-		for i := 0; i < 150; i++ {
+		for i := 0; i < 250; i++ {
 			times = append(times, base) // all at the exact same instant
 		}
-		distinct, _, truncations := run(msgsAt(times), 100)
-		assert.GreaterOrEqual(t, truncations, 1, "unsplittable window must warn")
-		assert.Len(t, distinct, 100, "only one capped page is retrievable for a single instant")
+		distinct, _, exhausted := run(msgsAt(times), 10)
+		assert.Len(t, distinct, 250, "all same-second events must be recovered by prefix partitioning")
+		assert.Equal(t, 0, exhausted, "diverse ids never hit the depth guard")
 	})
+
+	t.Run("identical-prefix overflow hits the depth guard", func(t *testing.T) {
+		// More than a page of ids sharing a prefix longer than the depth cap, all at one instant.
+		common := strings.Repeat("a", maxMessagesPrefixLen+4)
+		msgs := make([]map[string]interface{}, 5)
+		for i := range msgs {
+			msgs[i] = map[string]interface{}{
+				"msg_id":          common + fmt.Sprintf("%d", i),
+				"last_event_time": base.UTC().Format(time.RFC3339),
+			}
+		}
+		distinct, _, exhausted := run(msgs, 2)
+		assert.GreaterOrEqual(t, exhausted, 1, "an unsplittable identical-prefix cluster must warn")
+		assert.Less(t, len(distinct), 5, "only a capped page is retrievable when ids can't be partitioned")
+	})
+}
+
+func TestEscapeLike(t *testing.T) {
+	assert.Equal(t, `abc`, escapeLike("abc"))
+	assert.Equal(t, `a\_b`, escapeLike("a_b"))
+	assert.Equal(t, `a\%b`, escapeLike("a%b"))
+	assert.Equal(t, `a\\b`, escapeLike(`a\b`))
 }
 
 func TestResolveMessagesRange(t *testing.T) {
