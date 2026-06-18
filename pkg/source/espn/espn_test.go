@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -25,11 +26,10 @@ func TestESPNParseURI(t *testing.T) {
 	require.Equal(t, defaultLimit, cfg.limit)
 	require.Equal(t, defaultBaseURL, cfg.baseURL)
 
-	cfg, err = parseURI("espn://?sport=basketball&league=nba&dates=20260101-20260131&season=2026&limit=25")
+	cfg, err = parseURI("espn://?sport=basketball&league=nba&season=2026&limit=25")
 	require.NoError(t, err)
 	require.Equal(t, "basketball", cfg.sport)
 	require.Equal(t, "nba", cfg.league)
-	require.Equal(t, "20260101-20260131", cfg.dates)
 	require.Equal(t, "2026", cfg.season)
 	require.Equal(t, 25, cfg.limit)
 
@@ -107,11 +107,15 @@ func TestESPNScoreboardEmitsRawEvents(t *testing.T) {
 	defer server.Close()
 
 	src := NewESPNSource()
-	require.NoError(t, src.Connect(context.Background(), "espn://?dates=20260910-20260912&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "espn://?base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "scoreboard"})
 	require.NoError(t, err)
 
-	results, err := table.Read(context.Background(), source.ReadOptions{Limit: 1})
+	results, err := table.Read(context.Background(), source.ReadOptions{
+		Limit:         1,
+		IntervalStart: timePtr(t, "2026-09-10T00:00:00Z"),
+		IntervalEnd:   timePtr(t, "2026-09-12T23:59:59Z"),
+	})
 	require.NoError(t, err)
 	result := <-results
 	require.NoError(t, result.Err)
@@ -252,6 +256,13 @@ func hasField(batch arrow.RecordBatch, name string) bool {
 		}
 	}
 	return false
+}
+
+func timePtr(t *testing.T, value string) *time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, value)
+	require.NoError(t, err)
+	return &parsed
 }
 
 // stringAt returns the value at (column, row) as a Go string, regardless of how
