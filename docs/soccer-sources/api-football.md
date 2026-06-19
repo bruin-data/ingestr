@@ -17,7 +17,7 @@ Primary docs:
 | World Cup identifiers | `league=1`, `season=2026` |
 | Response envelope | `get`, `parameters`, `errors`, `results`, `paging`, `response` |
 | Pagination | Endpoint-specific. `players` uses `page`; some endpoints return one page for league/season filters. |
-| Rate limits | Plan quota based. Free is 100 requests/day; Pro 7,500/day; Ultra 75,000/day; Mega 150,000/day. |
+| Rate limits | Plan quota based. Free is 10 requests/minute and 100 requests/day; Pro 7,500/day; Ultra 75,000/day; Mega 150,000/day. |
 
 API-Football states that all plans include all competitions and endpoints, with free plans limited by available seasons. For World Cup 2026, verify actual free-plan access with a live key before promising free production coverage.
 
@@ -90,7 +90,7 @@ Recommended World Cup call:
 GET /teams?league=1&season=2026
 ```
 
-Ingestion shape: one `teams` row per `response[]`, flattening the `team` object and optionally preserving the nested `venue` fields as team-home-venue metadata. Do not treat team-home venue as World Cup match stadium without cross-checking fixtures.
+Ingestion shape: one `teams` row per `response[]`, with `id` lifted from `team.id` and the raw `team` and `venue` objects preserved as JSON columns (no field flattening). Do not treat team-home venue as World Cup match stadium without cross-checking fixtures.
 
 ### Stadiums / Venues
 
@@ -128,7 +128,7 @@ Recommended World Cup call:
 GET /standings?league=1&season=2026
 ```
 
-Ingestion shape: flatten nested `league.standings[][]` into one row per team per group, preserving `league.id`, `league.season`, `group`, `rank`, `team.id`, `points`, `goalsDiff`, `form`, `status`, `description`, and the nested `all/home/away` records if present.
+Ingestion shape: one row per team per group from `league.standings[][]`. The composite key (`league_id`, `season`, `group_name`, `team_id`) is lifted to top-level columns; the raw `standing` object (with nested `all/home/away`) and the `league` object (minus its embedded `standings` array) are preserved as JSON columns.
 
 ### Matches
 
@@ -227,9 +227,12 @@ Recommended ingestion flow:
 
 ## Implementation Notes
 
-- Proposed URI: `api-football://?api_key=<key>&league=1&season=2026`.
+- URI: `api-football://?api_key=<key>&league=1&season=2026`, with optional `timezone` and `base_url`.
 - Default `league=1` and `season=2026` for the World Cup use case.
-- Support `base_url` for tests.
-- Use `page` pagination for `/players`.
-- For live matches, respect the documented 15-second update cadence but avoid polling faster than the selected plan allows.
+- Schema is inferred from the data (`KnownSchema: false`); nested objects are preserved as JSON columns and only primary-key fields are lifted to typed top-level columns.
+- Strategies: `group_standings`, `matches`, `players`, `match_events` use `merge`; `teams` and `stadiums` use `replace`.
+- Batches stream per response: one batch per page for `/players`, one per fixture for `match_events`.
+- Server-side interval filtering uses the `/fixtures` `from`/`to` params (applied only when both `--interval-start` and `--interval-end` are set); other endpoints have no time filter.
+- Rate limiter is set to ~80% of the free tier's 10 requests/minute (`rateLimit = 0.13` req/s, burst 5).
+- Free plans cap the `/players` `page` parameter at 3, so full `players` extraction requires a paid plan.
 - Store API-Football IDs as provider IDs; do not try to normalize team/player IDs across services in the first connector.
