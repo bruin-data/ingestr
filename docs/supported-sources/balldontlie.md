@@ -1,15 +1,15 @@
-# BallDontLie FIFA
+# BallDontLie
 
 [BallDontLie](https://www.balldontlie.io/) provides FIFA World Cup API endpoints for teams, stadiums, matches, players, rosters, lineups, events, and match analytics.
 
-`ingestr` supports BallDontLie FIFA as a keyed source for richer World Cup data, including player and match-level tables.
+`ingestr` supports BallDontLie as a keyed source for richer World Cup data, including player and match-level tables.
 
-For endpoint parameters, plan tiers, and implementation notes across the selected soccer providers, see the [BallDontLie FIFA source research](../soccer-sources/balldontlie-fifa.md).
+For endpoint parameters, plan tiers, and implementation notes across the selected soccer providers, see the [BallDontLie source research](../soccer-sources/balldontlie.md).
 
 ## URI format
 
 ```plaintext
-balldontlie-fifa://?api_key=<api-key>&season=2026
+balldontlie://?api_key=<api-key>&season=2026
 ```
 
 URI parameters:
@@ -24,7 +24,7 @@ Load World Cup 2026 players into DuckDB:
 
 ```sh
 ingestr ingest \
-  --source-uri 'balldontlie-fifa://?api_key=<api-key>&season=2026' \
+  --source-uri 'balldontlie://?api_key=<api-key>&season=2026' \
   --source-table 'players' \
   --dest-uri 'duckdb:///worldcup2026.duckdb' \
   --dest-table 'soccer.players'
@@ -34,7 +34,7 @@ Load World Cup 2026 match events:
 
 ```sh
 ingestr ingest \
-  --source-uri 'balldontlie-fifa://?api_key=<api-key>&season=2026' \
+  --source-uri 'balldontlie://?api_key=<api-key>&season=2026' \
   --source-table 'match_events' \
   --dest-uri 'duckdb:///worldcup2026.duckdb' \
   --dest-table 'soccer.match_events'
@@ -46,11 +46,11 @@ ingestr ingest \
 | --- | --- | --- | --- | --- |
 | `teams` | `id` | - | replace | Loads World Cup teams. |
 | `stadiums` | `id` | - | replace | Loads stadium metadata. |
-| `group_standings` | `season_year`, `team_id` | - | replace | Loads group standings with team, group, and season fields flattened. |
-| `matches` | `id` | - | replace | Loads matches with nested season, stage, group, stadium, team, referee, and manager fields flattened where available. |
+| `group_standings` | `season_year`, `team_id` | - | replace | Loads group standings; nested team, group, and season objects are kept as JSON. |
+| `matches` | `id` | - | replace | Loads matches; nested season, stage, group, stadium, team, referee, and manager objects are kept as JSON. |
 | `players` | `id` | - | replace | Loads player profiles. |
-| `rosters` | `season_year`, `team_id`, `player_id` | - | replace | Loads season rosters and player summary fields. |
-| `match_lineups` | `match_id`, `team_id`, `player_id` | - | replace | Loads match lineups. |
+| `rosters` | `season_year`, `team_id`, `player_id` | - | replace | Loads season rosters; the nested player object is kept as JSON. |
+| `match_lineups` | `match_id`, `team_id`, `player_id` | - | replace | Loads match lineups; the nested player object is kept as JSON. |
 | `match_events` | `id` | - | replace | Loads match incidents such as goals, cards, substitutions, and shootout events. |
 | `player_match_stats` | `match_id`, `player_id` | - | replace | Loads player match statistics. |
 | `team_match_stats` | `match_id`, `team_id` | - | replace | Loads team match statistics. |
@@ -66,5 +66,4 @@ Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
 - The API key is sent in the `Authorization` header.
 - The source handles BallDontLie cursor pagination automatically.
-- The source stores richer nested objects as JSON columns while also exposing stable nested IDs and names as regular columns where useful.
 - BallDontLie's free tier only includes `teams` and `stadiums`; `group_standings` requires ALL-STAR, and match/player/event tables require GOAT according to the provider docs.

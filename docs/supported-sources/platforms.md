@@ -97,7 +97,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 ## Sports, games, and public data
 
 - [API-Football](/supported-sources/api-football.md)
-- [BallDontLie FIFA](/supported-sources/balldontlie-fifa.md)
+- [BallDontLie](/supported-sources/balldontlie.md)
 - [Chess.com](/supported-sources/chess.md)
 - [ESPN](/supported-sources/espn.md)
 - [football-data.org](/supported-sources/football-data-org.md)
