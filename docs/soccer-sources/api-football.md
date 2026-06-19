@@ -17,7 +17,6 @@ Primary docs:
 | World Cup identifiers | `league=1`, `season=2026` |
 | Response envelope | `get`, `parameters`, `errors`, `results`, `paging`, `response` |
 | Pagination | Endpoint-specific. `players` uses `page`; some endpoints return one page for league/season filters. |
-| Rate limits | Plan quota based. Free is 10 requests/minute and 100 requests/day; Pro 7,500/day; Ultra 75,000/day; Mega 150,000/day. |
 
 API-Football states that all plans include all competitions and endpoints, with free plans limited by available seasons. For World Cup 2026, verify actual free-plan access with a live key before promising free production coverage.
 
