@@ -179,12 +179,12 @@ func (s *APIFootballSource) tables() map[string]tableConfig {
 		},
 		"players": {
 			primaryKeys: []string{"id"},
-			strategy:    config.StrategyMerge,
+			strategy:    config.StrategyReplace,
 			read:        s.readPlayers,
 		},
 		"match_events": {
 			primaryKeys: []string{"event_key"},
-			strategy:    config.StrategyMerge,
+			strategy:    config.StrategyReplace,
 			read:        s.readMatchEvents,
 		},
 	}

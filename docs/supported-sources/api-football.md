@@ -50,8 +50,8 @@ ingestr ingest \
 | `stadiums` | `id` | - | replace | Derives venue IDs from fixtures and hydrates each venue through `/venues?id=<id>`. |
 | `group_standings` | `league_id`, `season`, `group_name`, `team_id` | - | merge | Loads group standings from `/standings`. |
 | `matches` | `id` | - | merge | Loads fixtures from `/fixtures`. |
-| `players` | `id` | - | merge | Loads paginated player rows from `/players`. |
-| `match_events` | `event_key` | - | merge | Fetches fixtures, then loads events from `/fixtures/events?fixture=<id>`. |
+| `players` | `id` | - | replace | Loads paginated player rows from `/players`. |
+| `match_events` | `event_key` | - | replace | Fetches fixtures, then loads events from `/fixtures/events?fixture=<id>`. |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
@@ -63,4 +63,4 @@ Use these as the `--source-table` parameter in the `ingestr ingest` command.
 - `stadiums` and `match_events` are fixture-derived because API-Football does not expose World Cup-scoped venue or all-event endpoints.
 - When `--interval-start` and `--interval-end` are both set, the fixture-derived tables (`matches`, `stadiums`, `match_events`) filter server-side via the `/fixtures` `from`/`to` parameters. The other endpoints have no time filter and always return the full league/season. With no interval, all tables fetch everything.
 - Nested provider objects are preserved as JSON columns; the schema is inferred from the data. Each table also exposes the primary-key fields (e.g. `id`, or `league_id`/`season`/`group_name`/`team_id`) as top-level typed columns so merge strategies can de-duplicate.
-- Mutable tables (`group_standings`, `matches`, `players`, `match_events`) use the `merge` strategy keyed on their primary keys, so re-running the same league/season upserts in place and ingesting additional leagues/seasons accumulates into one table. The static reference tables (`teams`, `stadiums`) use `replace`.
+- Strategy follows incremental capability: a table uses `merge` only if it can be loaded incrementally — either its endpoint accepts a time filter (`matches` via `/fixtures` `from`/`to`) or its rows carry an update timestamp (`group_standings` via `standing.update`). Tables with neither (`teams`, `stadiums`, `players`, `match_events`) use `replace` with a full fetch.

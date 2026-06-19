@@ -78,7 +78,7 @@ func TestAPIFootballPlayersPaginates(t *testing.T) {
 	require.NoError(t, src.Connect(context.Background(), "api-football://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "players"})
 	require.NoError(t, err)
-	require.Equal(t, "merge", string(table.Strategy()))
+	require.Equal(t, "replace", string(table.Strategy()))
 
 	// players streams one batch per page.
 	records := readAll(t, table)
