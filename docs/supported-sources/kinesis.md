@@ -15,7 +15,9 @@ kinesis://?aws_access_key_id=<aws-access-key-id>&aws_secret_access_key=<aws-secr
 URI parameters:
 - `aws_access_key_id`: the AWS access key ID used to authenticate the request
 - `aws_secret_access_key`: the AWS secret access key used to authenticate the request
+- `aws_session_token`: optional AWS session token
 - `region_name`: the AWS region name where the stream is located
+- `endpoint_url`: optional custom endpoint, useful for LocalStack
 
 
 
@@ -68,6 +70,19 @@ You can also use a full Kinesis [StreamARN] to address the stream in [ARN] forma
 
 ### Initial Load Configuration
 By default, ingestr reads from the beginning of the Kinesis stream. To start reading from a specific time, use the `interval_start` parameter.
+
+## Streaming ingestion
+
+Add `--stream` to consume the stream continuously. In streaming mode each record is projected into a fixed envelope schema: `msg_id`, JSON `data`, and `_ingestr_order`. Kinesis does not have broker-side acknowledgement for reads, so ingestr makes redelivery idempotent by merging on `msg_id`.
+
+```sh
+ingestr ingest \
+    --source-uri 'kinesis://?aws_access_key_id=id_123&aws_secret_access_key=secret_123&region_name=eu-central-1' \
+    --source-table 'customer_events' \
+    --dest-uri duckdb:///kinesis.duckdb \
+    --dest-table 'dest.customer_events' \
+    --stream
+```
 
 
 [ARN]: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference-arns.html

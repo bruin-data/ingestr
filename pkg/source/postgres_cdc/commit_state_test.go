@@ -96,6 +96,41 @@ func TestStandbyUpdate(t *testing.T) {
 	}
 }
 
+func TestParseStoredPostgresLSN(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want pglogrepl.LSN
+	}{
+		{
+			name: "standard",
+			raw:  "00000000/01947F48",
+			want: pglogrepl.LSN(0x01947F48),
+		},
+		{
+			name: "trimmed",
+			raw:  " \x00\"00000000/01947F48\"\n",
+			want: pglogrepl.LSN(0x01947F48),
+		},
+		{
+			name: "compact",
+			raw:  "0000000001947F48",
+			want: pglogrepl.LSN(0x01947F48),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseStoredPostgresLSN(tt.raw)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	_, err := parseStoredPostgresLSN("not-an-lsn")
+	require.Error(t, err)
+}
+
 func TestSafeCommitLSN(t *testing.T) {
 	tests := []struct {
 		name         string

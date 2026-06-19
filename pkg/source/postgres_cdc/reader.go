@@ -3,6 +3,7 @@ package postgres_cdc
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -44,7 +45,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			// Verify the slot still exists before trying to resume
 			if _, exists, _ := checkSlotExists(ctx, r.source.queryPool, slotName); exists {
 				config.Debug("[CDC] Resuming from LSN: %s (skipping snapshot)", opts.CDCResumeLSN)
-				resumeLSN, err := pglogrepl.ParseLSN(opts.CDCResumeLSN)
+				resumeLSN, err := parseStoredPostgresLSN(opts.CDCResumeLSN)
 				if err != nil {
 					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to parse resume LSN: %w", err)}
 					return
@@ -132,6 +133,29 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 	}
 
 	return streamLoop(ctx, repl, mode, targetLSN, batchSize, accum, results, opts.Streaming)
+}
+
+func parseStoredPostgresLSN(raw string) (pglogrepl.LSN, error) {
+	normalized := strings.Trim(raw, " \t\r\n\x00'\"")
+	if len(normalized) == 16 && strings.IndexByte(normalized, '/') == -1 && isHexLSN(normalized) {
+		normalized = normalized[:8] + "/" + normalized[8:]
+	}
+
+	lsn, err := pglogrepl.ParseLSN(normalized)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse LSN %q: %w", raw, err)
+	}
+	return lsn, nil
+}
+
+func isHexLSN(value string) bool {
+	for _, r := range value {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // batchReplicator is the subset of *Replicator that streamLoop depends on,
