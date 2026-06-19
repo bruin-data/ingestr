@@ -114,8 +114,40 @@ func TestBallDontLieReadRostersPreservesNestedAndNormalizesStringNull(t *testing
 	require.Subset(t, columnNames(record), []string{"season", "team_id", "player", "avg_rating"})
 	player := decodeUnknown(t, record, "player", 0).(map[string]any)
 	require.Equal(t, "9", fmt.Sprint(player["id"]))
+	// Primary-key fields are promoted from nested objects to top-level columns.
+	require.Subset(t, columnNames(record), []string{"season_year", "player_id"})
+	require.Equal(t, "2026", fmt.Sprint(decodeUnknown(t, record, "season_year", 0)))
+	require.Equal(t, "9", fmt.Sprint(decodeUnknown(t, record, "player_id", 0)))
+	require.Equal(t, "21", fmt.Sprint(decodeUnknown(t, record, "team_id", 0)))
 	// The string "null" is normalized to a real null.
 	require.True(t, columnIsNull(record, "avg_rating", 0))
+}
+
+func TestBallDontLieReadGroupStandingsInjectsKeyFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/fifa/worldcup/v1/group_standings", r.URL.Path)
+		_, _ = fmt.Fprint(w, `{"data":[{"season":{"id":3,"year":2026},"team":{"id":21,"name":"Netherlands","abbreviation":"NED"},"group":{"id":6,"name":"F"},"position":1,"played":3,"won":2,"drawn":1,"lost":0,"points":7}],"meta":{"next_cursor":null}}`)
+	}))
+	defer server.Close()
+
+	src := NewBallDontLieSource()
+	require.NoError(t, src.Connect(context.Background(), "balldontlie://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
+
+	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "group_standings"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"season_year", "team_id"}, table.PrimaryKeys())
+
+	record := readOnce(t, table)
+
+	require.EqualValues(t, 1, record.NumRows())
+	// season_year and team_id are promoted from nested season/team objects so
+	// the declared primary keys resolve against real columns.
+	require.Subset(t, columnNames(record), []string{"season", "team", "group", "season_year", "team_id"})
+	require.Equal(t, "2026", fmt.Sprint(decodeUnknown(t, record, "season_year", 0)))
+	require.Equal(t, "21", fmt.Sprint(decodeUnknown(t, record, "team_id", 0)))
+	// The nested objects are still present as JSON.
+	team := decodeUnknown(t, record, "team", 0).(map[string]any)
+	require.Equal(t, "Netherlands", team["name"])
 }
 
 func TestBallDontLieReadMatchEventsPreservesNestedPlayers(t *testing.T) {

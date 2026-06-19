@@ -29,6 +29,12 @@ type tableConfig struct {
 	endpoint    string
 	primaryKeys []string
 	strategy    config.IncrementalStrategy
+	keyFields   map[string]nestedKey
+}
+
+type nestedKey struct {
+	object string
+	field  string
 }
 
 type BallDontLieSource struct {
@@ -187,6 +193,7 @@ func (s *BallDontLieSource) stream(ctx context.Context, cfg tableConfig, opts so
 		if err != nil {
 			return fmt.Errorf("malformed balldontlie response from %s: %w", cfg.endpoint, err)
 		}
+		injectKeyFields(pageItems, cfg.keyFields)
 		if err := sendBatch(pageItems, opts, results); err != nil {
 			return err
 		}
@@ -226,6 +233,26 @@ func checkResponse(endpoint string, resp *httpclient.Response) error {
 		return fmt.Errorf("balldontlie API rate limit exceeded for %s (status 429)", endpoint)
 	default:
 		return fmt.Errorf("balldontlie API error for %s (status %d): %s", endpoint, resp.StatusCode(), resp.String())
+	}
+}
+
+// injectKeyFields promotes nested identifier fields (e.g. season.year) to
+// top-level columns so declared primary keys resolve against real columns,
+// without flattening the rest of the object.
+func injectKeyFields(items []map[string]interface{}, keyFields map[string]nestedKey) {
+	if len(keyFields) == 0 {
+		return
+	}
+	for _, item := range items {
+		for col, nk := range keyFields {
+			obj, ok := item[nk.object].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if v, ok := obj[nk.field]; ok {
+				item[col] = v
+			}
+		}
 	}
 }
 
@@ -315,6 +342,10 @@ var tables = map[string]tableConfig{
 		endpoint:    "/fifa/worldcup/v1/group_standings",
 		primaryKeys: []string{"season_year", "team_id"},
 		strategy:    config.StrategyReplace,
+		keyFields: map[string]nestedKey{
+			"season_year": {object: "season", field: "year"},
+			"team_id":     {object: "team", field: "id"},
+		},
 	},
 	"matches": {
 		endpoint:    "/fifa/worldcup/v1/matches",
@@ -330,11 +361,18 @@ var tables = map[string]tableConfig{
 		endpoint:    "/fifa/worldcup/v1/rosters",
 		primaryKeys: []string{"season_year", "team_id", "player_id"},
 		strategy:    config.StrategyReplace,
+		keyFields: map[string]nestedKey{
+			"season_year": {object: "season", field: "year"},
+			"player_id":   {object: "player", field: "id"},
+		},
 	},
 	"match_lineups": {
 		endpoint:    "/fifa/worldcup/v1/match_lineups",
 		primaryKeys: []string{"match_id", "team_id", "player_id"},
 		strategy:    config.StrategyReplace,
+		keyFields: map[string]nestedKey{
+			"player_id": {object: "player", field: "id"},
+		},
 	},
 	"match_events": {
 		endpoint:    "/fifa/worldcup/v1/match_events",
