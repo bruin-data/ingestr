@@ -265,11 +265,27 @@ func parseURI(uri string) (connConfig, error) {
 	return cfg, nil
 }
 
-// sharepointParamKeys are the query parameters recognized by the URL-style
-// source-table form (see parseTableSpec). Kept as the single source of truth for
-// strict validation so a typo errors instead of being silently dropped.
-var sharepointParamKeys = []string{
-	"sheet", "sheets", "skip", "encoding", "sep", "format", "raw", "formatted", "drop_empty", "date_cols",
+// sharepointParams is the URL-style query-parameter form of the source table; its
+// fields are the single source of truth for which parameters are accepted, and
+// tablespec.Decode populates it (a typo errors rather than being silently
+// dropped). sheet/sheets/date_cols accept a repeated key or a "|"-joined value.
+type sharepointParams struct {
+	Sheet     []string `mapstructure:"sheet"`
+	Sheets    []string `mapstructure:"sheets"`
+	Skip      int      `mapstructure:"skip"`
+	Encoding  string   `mapstructure:"encoding"`
+	Sep       string   `mapstructure:"sep"`
+	Format    string   `mapstructure:"format"`
+	Raw       bool     `mapstructure:"raw"`
+	Formatted bool     `mapstructure:"formatted"`
+	DropEmpty bool     `mapstructure:"drop_empty"`
+	DateCols  []string `mapstructure:"date_cols"`
+}
+
+// sharepointSpec is the decode target shaped like the parsed table string.
+type sharepointSpec struct {
+	Table  string           `mapstructure:"table"`
+	Params sharepointParams `mapstructure:"parameters"`
 }
 
 // parseTableSpec parses a source-table string in one of two forms:
@@ -292,10 +308,11 @@ func parseTableSpec(name string) (tableSpec, error) {
 		return tableSpec{}, err
 	}
 	if hasQuery {
-		if err := tablespec.ValidateKeys(params, sharepointParamKeys...); err != nil {
+		var decoded sharepointSpec
+		if err := tablespec.Decode(path, params, &decoded, tablespec.WithListSeparator("|")); err != nil {
 			return tableSpec{}, err
 		}
-		if err := applyParams(&spec, params); err != nil {
+		if err := applyParams(&spec, decoded.Params); err != nil {
 			return tableSpec{}, err
 		}
 	} else {
@@ -417,80 +434,32 @@ func applyHints(spec *tableSpec, s string) error {
 	return nil
 }
 
-// applyParams applies the URL-style query parameters to spec. Keys are read
-// explicitly (not by ranging the map) so behavior is deterministic regardless of
-// query order. A list-valued option accepts either a repeated key
-// (sheets=A&sheets=B) or a single "|"-joined value (sheets=A|B). Unknown keys are
-// rejected earlier by tablespec.ValidateKeys.
-func applyParams(spec *tableSpec, p url.Values) error {
-	for _, v := range p["sheet"] {
-		if v = strings.TrimSpace(v); v != "" {
-			spec.sheets = append(spec.sheets, v)
-		}
-	}
-	for _, v := range p["sheets"] {
-		spec.sheets = append(spec.sheets, splitSheets(v)...)
-	}
-	for _, v := range p["date_cols"] {
-		spec.dateCols = append(spec.dateCols, splitSheets(v)...)
-	}
+// applyParams maps the decoded query parameters onto spec. sheet and sheets both
+// contribute to the sheet set (sheet first); raw inverts formatted, matching the
+// legacy hint semantics. Type coercion, list splitting, bare-flag booleans, and
+// unknown-key rejection are handled by tablespec.Decode.
+func applyParams(spec *tableSpec, p sharepointParams) error {
+	var sheets []string
+	sheets = append(sheets, p.Sheet...)
+	sheets = append(sheets, p.Sheets...)
+	spec.sheets = sheets
+	spec.dateCols = p.DateCols
 
-	if p.Has("skip") {
-		n, err := strconv.Atoi(strings.TrimSpace(p.Get("skip")))
-		if err != nil || n < 0 {
-			return fmt.Errorf("invalid skip parameter %q: must be a non-negative integer", p.Get("skip"))
-		}
-		spec.skip = n
+	if p.Skip < 0 {
+		return fmt.Errorf("invalid skip parameter %d: must be a non-negative integer", p.Skip)
 	}
-	if p.Has("encoding") {
-		spec.encoding = strings.TrimSpace(p.Get("encoding"))
+	spec.skip = p.Skip
+	spec.encoding = strings.TrimSpace(p.Encoding)
+	spec.sep = p.Sep
+	if p.Format != "" {
+		spec.format = parseFormat(p.Format)
 	}
-	if p.Has("sep") {
-		spec.sep = p.Get("sep")
+	spec.formatted = p.Formatted
+	if p.Raw {
+		spec.formatted = false
 	}
-	if p.Has("format") {
-		spec.format = parseFormat(p.Get("format"))
-	}
-	if p.Has("formatted") {
-		b, err := parseParamBool("formatted", p.Get("formatted"))
-		if err != nil {
-			return err
-		}
-		spec.formatted = b
-	}
-	if p.Has("raw") {
-		b, err := parseParamBool("raw", p.Get("raw"))
-		if err != nil {
-			return err
-		}
-		if b {
-			spec.formatted = false
-		}
-	}
-	if p.Has("drop_empty") {
-		b, err := parseParamBool("drop_empty", p.Get("drop_empty"))
-		if err != nil {
-			return err
-		}
-		spec.dropEmpty = b
-	}
-
+	spec.dropEmpty = p.DropEmpty
 	return nil
-}
-
-// parseParamBool reads a boolean query parameter. A bare key (empty value, e.g.
-// "?raw") is treated as true to keep flag ergonomics; otherwise the value must
-// parse as a Go boolean.
-func parseParamBool(key, val string) (bool, error) {
-	val = strings.TrimSpace(val)
-	if val == "" {
-		return true, nil
-	}
-	b, err := strconv.ParseBool(val)
-	if err != nil {
-		return false, fmt.Errorf("invalid %s parameter %q: expected a boolean (true/false)", key, val)
-	}
-	return b, nil
 }
 
 // splitSheets splits a sheets= union on "|" (since "," separates hints).

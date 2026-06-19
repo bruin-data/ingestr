@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -449,9 +448,20 @@ type mondayReadSpec struct {
 	linked   bool
 }
 
-// mondayParamKeys are the query parameters recognized by the URL-style
-// source-table form (see parseMondaySpec).
-var mondayParamKeys = []string{"board_ids", "linked"}
+// mondayParams is the URL-style query-parameter form of the source table; its
+// fields are the single source of truth for which parameters are accepted, and
+// tablespec.Decode populates it. board_ids accepts a repeated key or a
+// comma-joined value.
+type mondayParams struct {
+	BoardIDs []string `mapstructure:"board_ids"`
+	Linked   bool     `mapstructure:"linked"`
+}
+
+// mondaySpec is the decode target shaped like the parsed table string.
+type mondaySpec struct {
+	Table  string       `mapstructure:"table"`
+	Params mondayParams `mapstructure:"parameters"`
+}
 
 // boardAwareTables accept a board-id scope.
 var boardAwareTables = map[string]bool{
@@ -477,19 +487,14 @@ func parseMondaySpec(name string) (mondayReadSpec, error) {
 	}
 
 	if hasQuery {
-		if err := tablespec.ValidateKeys(params, mondayParamKeys...); err != nil {
+		var decoded mondaySpec
+		if err := tablespec.Decode(path, params, &decoded, tablespec.WithListSeparator(",")); err != nil {
 			return mondayReadSpec{}, err
 		}
-		spec := mondayReadSpec{table: strings.TrimSpace(path)}
-		for _, v := range params["board_ids"] {
-			spec.boardIDs = append(spec.boardIDs, splitBoardIDs(v)...)
-		}
-		if params.Has("linked") {
-			linked, err := parseLinkedParam(params.Get("linked"))
-			if err != nil {
-				return mondayReadSpec{}, err
-			}
-			spec.linked = linked
+		spec := mondayReadSpec{
+			table:    strings.TrimSpace(decoded.Table),
+			boardIDs: decoded.Params.BoardIDs,
+			linked:   decoded.Params.Linked,
 		}
 		if len(spec.boardIDs) > 0 && !boardAwareTables[spec.table] {
 			return mondayReadSpec{}, fmt.Errorf("%s table does not accept a board_ids parameter", spec.table)
@@ -527,20 +532,6 @@ func splitBoardIDs(v string) []string {
 		}
 	}
 	return ids
-}
-
-// parseLinkedParam reads the linked query value; a bare key (empty value) is
-// treated as true to keep flag ergonomics.
-func parseLinkedParam(val string) (bool, error) {
-	val = strings.TrimSpace(val)
-	if val == "" {
-		return true, nil
-	}
-	b, err := strconv.ParseBool(val)
-	if err != nil {
-		return false, fmt.Errorf("invalid linked parameter %q: expected a boolean (true/false)", val)
-	}
-	return b, nil
 }
 
 // GraphQL types
