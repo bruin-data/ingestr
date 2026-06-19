@@ -135,6 +135,7 @@ func TestAPIFootballStadiumsDeriveFromFixturesAndHydrateVenues(t *testing.T) {
 	require.NoError(t, src.Connect(context.Background(), "api-football://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "stadiums"})
 	require.NoError(t, err)
+	require.Equal(t, "merge", string(table.Strategy()))
 
 	record := readOnce(t, table)
 
@@ -163,6 +164,7 @@ func TestAPIFootballMatchEventsFanOutFromFixtures(t *testing.T) {
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "match_events"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"event_key"}, table.PrimaryKeys())
+	require.Equal(t, "merge", string(table.Strategy()))
 
 	record := readOnce(t, table)
 

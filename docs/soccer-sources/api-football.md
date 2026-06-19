@@ -230,7 +230,7 @@ Recommended ingestion flow:
 - URI: `api-football://?api_key=<key>&league=1&season=2026`, with optional `timezone` and `base_url`.
 - Default `league=1` and `season=2026` for the World Cup use case.
 - Schema is inferred from the data (`KnownSchema: false`); nested objects are preserved as JSON columns and only primary-key fields are lifted to typed top-level columns.
-- Strategies: `merge` only where incremental loading is possible — `matches` (`/fixtures` `from`/`to` time filter) and `group_standings` (`standing.update` timestamp). `teams`, `stadiums`, `players`, and `match_events` have neither, so they use `replace` with a full fetch.
+- Strategies: `merge` where incremental loading is possible — `matches`, `stadiums`, and `match_events` source from `/fixtures` and honor its `from`/`to` interval; `group_standings` carries a `standing.update` timestamp. `teams` and `players` have neither, so they use `replace` with a full fetch.
 - Batches stream per response: one batch per page for `/players`, one per fixture for `match_events`.
 - Server-side interval filtering uses the `/fixtures` `from`/`to` params (applied only when both `--interval-start` and `--interval-end` are set); other endpoints have no time filter.
 - Rate limiter is set to ~80% of the free tier's 10 requests/minute (`rateLimit = 0.13` req/s, burst 5).

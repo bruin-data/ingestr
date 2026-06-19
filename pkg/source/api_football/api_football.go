@@ -164,7 +164,7 @@ func (s *APIFootballSource) tables() map[string]tableConfig {
 		},
 		"stadiums": {
 			primaryKeys: []string{"id"},
-			strategy:    config.StrategyReplace,
+			strategy:    config.StrategyMerge,
 			read:        s.readStadiums,
 		},
 		"group_standings": {
@@ -184,7 +184,7 @@ func (s *APIFootballSource) tables() map[string]tableConfig {
 		},
 		"match_events": {
 			primaryKeys: []string{"event_key"},
-			strategy:    config.StrategyReplace,
+			strategy:    config.StrategyMerge,
 			read:        s.readMatchEvents,
 		},
 	}
