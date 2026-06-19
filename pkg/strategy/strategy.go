@@ -54,6 +54,9 @@ type IngestionJob struct {
 	// LoadTimestamp adds or replaces _ingestr_loaded_at with one timestamp for the job.
 	LoadTimestamp *transformer.LoadTimestamp
 
+	// SchemaAligner reorders and fills transformed batches to match the write schema.
+	SchemaAligner *transformer.TypeCaster
+
 	// EvolutionPlan holds the deferred schema evolution to apply on the destination.
 	EvolutionPlan *schemaevolution.EvolutionPlan
 }
@@ -139,6 +142,10 @@ func (j *MultiTableIngestionJob) ApplyBatchTransformation(records <-chan source.
 	if j.WhitespaceTrimmer != nil {
 		records = transformer.Wrap(records, j.WhitespaceTrimmer)
 	}
+	return j.ApplyLoadTimestamp(records)
+}
+
+func (j *MultiTableIngestionJob) ApplyLoadTimestamp(records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {
 	if j.LoadTimestamp != nil {
 		records = transformer.Wrap(records, j.LoadTimestamp)
 	}
@@ -220,6 +227,10 @@ func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-c
 
 	if j.LoadTimestamp != nil {
 		records = transformer.Wrap(records, j.LoadTimestamp)
+	}
+
+	if j.SchemaAligner != nil {
+		records = transformer.Wrap(records, j.SchemaAligner)
 	}
 
 	return records, nil

@@ -1284,6 +1284,89 @@ func TestBuildBufferReaderTarget_SourceOnlyColumnIsDropped(t *testing.T) {
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
 
+func TestRemoveSCD2MetadataColumns_CaseInsensitive(t *testing.T) {
+	got := removeSCD2MetadataColumns(tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("_SCD_VALID_FROM", schema.TypeTimestampTZ),
+		tcol("_scd_valid_to", schema.TypeTimestampTZ),
+		tcol("_Scd_Is_Current", schema.TypeBoolean),
+		tcol("name", schema.TypeString),
+	))
+
+	assertColumns(t, "columns", got.ColumnNames(), []string{"id", "name"})
+}
+
+func TestAddLoadTimestampColumnCreatesNullableColumn(t *testing.T) {
+	got := addLoadTimestampColumn(tschema("users", tcol("id", schema.TypeInt64)))
+
+	if len(got.Columns) != 2 {
+		t.Fatalf("len(columns) = %d, want 2", len(got.Columns))
+	}
+	col := got.Columns[1]
+	if col.Name != "_ingestr_loaded_at" {
+		t.Fatalf("load timestamp column name = %q", col.Name)
+	}
+	if col.DataType != schema.TypeTimestampTZ {
+		t.Fatalf("load timestamp type = %v, want %v", col.DataType, schema.TypeTimestampTZ)
+	}
+	if !col.Nullable {
+		t.Fatal("load timestamp column should be nullable")
+	}
+}
+
+func TestAddLoadTimestampColumnKeepsExistingNameButMakesNullable(t *testing.T) {
+	existing := schema.Column{
+		Name:     "_INGESTR_LOADED_AT",
+		DataType: schema.TypeString,
+		Nullable: false,
+	}
+	got := addLoadTimestampColumn(tschema("users", tcol("id", schema.TypeInt64), existing))
+
+	col := got.Columns[1]
+	if col.Name != existing.Name {
+		t.Fatalf("load timestamp column name = %q, want %q", col.Name, existing.Name)
+	}
+	if col.DataType != schema.TypeTimestampTZ {
+		t.Fatalf("load timestamp type = %v, want %v", col.DataType, schema.TypeTimestampTZ)
+	}
+	if !col.Nullable {
+		t.Fatal("existing load timestamp column should be treated as nullable")
+	}
+}
+
+func TestPreserveSourceCDCColumnTypes(t *testing.T) {
+	ingest := tschema(
+		"items",
+		tcol("id", schema.TypeInt64),
+		tcol("_cdc_deleted", schema.TypeInt64),
+		tcol("_cdc_lsn", schema.TypeString),
+		tcol("_cdc_unchanged_cols", schema.TypeString),
+		tcol("value", schema.TypeString),
+	)
+	source := tschema(
+		"items",
+		tcol("id", schema.TypeInt64),
+		tcol("_cdc_deleted", schema.TypeBoolean),
+		tcol("_cdc_lsn", schema.TypeString),
+		tcol("_cdc_unchanged_cols", schema.TypeString),
+		tcol("value", schema.TypeInt64),
+	)
+
+	got := preserveSourceCDCColumnTypes(ingest, source)
+
+	types := map[string]schema.DataType{}
+	for _, col := range got.Columns {
+		types[col.Name] = col.DataType
+	}
+	if types["_cdc_deleted"] != schema.TypeBoolean {
+		t.Fatalf("_cdc_deleted type = %v, want %v", types["_cdc_deleted"], schema.TypeBoolean)
+	}
+	if types["value"] != schema.TypeString {
+		t.Fatalf("value type = %v, want destination-aligned string", types["value"])
+	}
+}
+
 func TestBuildBufferReaderTarget_OrderFollowsDest(t *testing.T) {
 	p := &Pipeline{}
 	src := tschema(

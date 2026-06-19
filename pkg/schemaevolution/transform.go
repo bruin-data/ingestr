@@ -120,6 +120,9 @@ func NewDiscardRowTransformer(sourceSchema, destSchema *schema.TableSchema, comp
 
 	if comparison != nil {
 		for _, change := range comparison.Changes {
+			if isInternalAllowedChange(change) {
+				continue
+			}
 			// Track all violations (both new columns and type mismatches)
 			transformer.violations[change.ColumnName] = true
 		}

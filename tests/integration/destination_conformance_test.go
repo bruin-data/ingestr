@@ -1381,7 +1381,8 @@ func validateReplaceSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 		t.Skipf("Could not read schema types: %v", err)
 		return
 	}
-	assert.Equal(t, backend.expectedTypes, actualTypes)
+	requireLoadTimestampColumn(t, actualTypes)
+	assert.Equal(t, backend.expectedTypes, withoutLoadTimestampTypes(actualTypes))
 }
 
 func validateMergeSQL(t *testing.T, backend *sqlBackend, uri, table string) {
