@@ -270,6 +270,8 @@ func TestIsIngestrColumn(t *testing.T) {
 		{"_dlt_parent_id", true},
 		{"_dlt_list_idx", true},
 		{"_dlt_root_id", true},
+		{"_ingestr_loaded_at", true},
+		{"_INGESTR_LOADED_AT", true},
 		{"_DLT_LOAD_ID", true}, // case insensitive
 		{"_Dlt_Id", true},
 		{"user_id", false},
@@ -322,13 +324,15 @@ func TestGetIngestrColumns(t *testing.T) {
 			Columns: []schema.Column{
 				{Name: "user_id"},
 				{Name: "_dlt_load_id"},
+				{Name: "_ingestr_loaded_at"},
 				{Name: "user_name"},
 				{Name: "_dlt_id"},
 			},
 		}
 		cols := GetIngestrColumns(s)
-		assert.Len(t, cols, 2)
+		assert.Len(t, cols, 3)
 		assert.Contains(t, cols, "_dlt_load_id")
+		assert.Contains(t, cols, "_ingestr_loaded_at")
 		assert.Contains(t, cols, "_dlt_id")
 	})
 }

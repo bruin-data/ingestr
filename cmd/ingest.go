@@ -166,6 +166,11 @@ func IngestCommand() *cli.Command {
 				Usage:   "Trim leading and trailing whitespace from all string column values",
 				Sources: cli.EnvVars("TRIM_WHITESPACE", "INGESTR_TRIM_WHITESPACE"),
 			},
+			&cli.BoolFlag{
+				Name:    "no-load-timestamp",
+				Usage:   "Disable adding the _ingestr_loaded_at load timestamp column",
+				Sources: cli.EnvVars("NO_LOAD_TIMESTAMP", "INGESTR_NO_LOAD_TIMESTAMP"),
+			},
 			&cli.StringFlag{
 				Name:    "pipelines-dir",
 				Usage:   "The path to store pipeline metadata",
@@ -246,6 +251,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.NoInference = c.Bool("no-inference")
 	cfg.Mask = c.StringSlice("mask")
 	cfg.TrimWhitespace = c.Bool("trim-whitespace")
+	cfg.NoLoadTimestamp = c.Bool("no-load-timestamp")
 	cfg.PipelinesDir = c.String("pipelines-dir")
 	cfg.StagingBucket = c.String("staging-bucket")
 	cfg.StagingDataset = c.String("staging-dataset")

@@ -138,7 +138,7 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		parallelism = 4
 	}
 
-	records, err := job.Source.ReadAll(ctx, source.MultiTableReadOptions{
+	records, err := job.ReadAll(ctx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
 			Parallelism:   parallelism,
 			PageSize:      job.Config.PageSize,

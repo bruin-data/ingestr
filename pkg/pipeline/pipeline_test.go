@@ -1327,6 +1327,48 @@ func TestBuildBufferReaderTarget_SkipsIngestrMetadataColumn(t *testing.T) {
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
 
+func TestBuildBufferReaderTarget_SkipsLoadTimestampColumn(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+	)
+	dest := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+		tcol("_ingestr_loaded_at", schema.TypeTimestampTZ),
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
+}
+
+func TestSetupIngestrColumnsDoesNotFillLoadTimestamp(t *testing.T) {
+	p := &Pipeline{
+		config: &config.IngestConfig{DestTable: "users"},
+		dest: &mockDestination{tableSchema: tschema(
+			"users",
+			tcol("id", schema.TypeInt64),
+			tcol("_ingestr_loaded_at", schema.TypeTimestampTZ),
+		)},
+	}
+	src := tschema("users", tcol("id", schema.TypeInt64))
+
+	got, err := p.setupIngestrColumns(context.Background(), src)
+	if err != nil {
+		t.Fatalf("setupIngestrColumns() error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("setupIngestrColumns() returned schema with columns %v, want nil", got.ColumnNames())
+	}
+	if p.ingestrColumnFiller != nil {
+		t.Fatal("load timestamp column must not use IngestrColumnFiller")
+	}
+}
+
 // Case 4b: dest has a NON-ingestr column NOT in source (soft-removed under
 // evolve mode). It MUST be included in the target so the buffer reader
 // null-fills it; staging then gets the column with NULLs, MERGE inserts NULL

@@ -51,6 +51,9 @@ type IngestionJob struct {
 	// WhitespaceTrimmer trims string values when --trim-whitespace is enabled.
 	WhitespaceTrimmer *transformer.WhitespaceTrimmer
 
+	// LoadTimestamp adds or replaces _ingestr_loaded_at with one timestamp for the job.
+	LoadTimestamp *transformer.LoadTimestamp
+
 	// EvolutionPlan holds the deferred schema evolution to apply on the destination.
 	EvolutionPlan *schemaevolution.EvolutionPlan
 }
@@ -101,6 +104,9 @@ type MultiTableIngestionJob struct {
 
 	// WhitespaceTrimmer trims string values when --trim-whitespace is enabled.
 	WhitespaceTrimmer *transformer.WhitespaceTrimmer
+
+	// LoadTimestamp adds or replaces _ingestr_loaded_at with one timestamp for the job.
+	LoadTimestamp *transformer.LoadTimestamp
 }
 
 // ApplyEvolutionFor applies the pending schema evolution plan for a source table.
@@ -132,6 +138,9 @@ func (j *MultiTableIngestionJob) ReadAll(ctx context.Context, opts source.MultiT
 func (j *MultiTableIngestionJob) ApplyBatchTransformation(records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {
 	if j.WhitespaceTrimmer != nil {
 		records = transformer.Wrap(records, j.WhitespaceTrimmer)
+	}
+	if j.LoadTimestamp != nil {
+		records = transformer.Wrap(records, j.LoadTimestamp)
 	}
 	return records
 }
@@ -207,6 +216,10 @@ func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-c
 
 	if j.IngestrColumnFiller != nil && j.IngestrColumnFiller.HasColumns() {
 		records = schemaevolution.TransformBatchStream(ctx, records, j.IngestrColumnFiller)
+	}
+
+	if j.LoadTimestamp != nil {
+		records = transformer.Wrap(records, j.LoadTimestamp)
 	}
 
 	return records, nil

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/annotation"
@@ -336,6 +337,12 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
+	var loadTimestamp time.Time
+	if !p.config.NoLoadTimestamp {
+		loadTimestamp = time.Now().UTC().Truncate(time.Microsecond)
+		destSchema = addLoadTimestampColumn(destSchema)
+	}
+
 	// Capture the schema before evolution: on incremental runs against an
 	// existing table, evolution replaces destSchema with FinalSchema, which is
 	// built from the destination's columns and therefore drops staging-only
@@ -354,6 +361,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		if evolutionPlan != nil && evolutionPlan.FinalSchema != nil {
 			destSchema = evolutionPlan.FinalSchema
 		}
+	}
+	if p.config.NoLoadTimestamp {
+		destSchema = removeLoadTimestampColumn(destSchema)
+		fullSchema = removeLoadTimestampColumn(fullSchema)
+	} else {
+		destSchema = addLoadTimestampColumn(destSchema)
+		fullSchema = addLoadTimestampColumn(fullSchema)
 	}
 
 	// Staging mirrors the destination schema, with staging-only CDC columns retained.
@@ -428,6 +442,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		whitespaceTrimmer = transformer.NewWhitespaceTrimmer()
 	}
 
+	var loadTimestampTransformer *transformer.LoadTimestamp
+	if !p.config.NoLoadTimestamp {
+		loadTimestampTransformer = transformer.NewLoadTimestamp(loadTimestampColumnForSchema(ingestSchema), loadTimestamp)
+	}
+
 	job := &strategy.IngestionJob{
 		Config:              &resolvedConfig,
 		Table:               table,
@@ -442,6 +461,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		IngestrColumnFiller: p.ingestrColumnFiller,
 		ColumnMasker:        columnMasker,
 		WhitespaceTrimmer:   whitespaceTrimmer,
+		LoadTimestamp:       loadTimestampTransformer,
 		EvolutionPlan:       evolutionPlan,
 	}
 
@@ -831,6 +851,14 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	config.Debug("[PIPELINE] Multi-table mode: %d tables", len(tables))
 
+	var loadTimestamp time.Time
+	if !p.config.NoLoadTimestamp {
+		loadTimestamp = time.Now().UTC().Truncate(time.Microsecond)
+		for i := range tables {
+			tables[i].Schema = addLoadTimestampColumn(tables[i].Schema)
+		}
+	}
+
 	resolvedStrategy := p.config.IncrementalStrategy
 	if p.config.Stream && resolvedStrategy == "" {
 		if ss, ok := src.(source.StreamingSource); ok {
@@ -944,6 +972,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		whitespaceTrimmer = transformer.NewWhitespaceTrimmer()
 	}
 
+	var loadTimestampTransformer *transformer.LoadTimestamp
+	if !p.config.NoLoadTimestamp {
+		loadTimestampTransformer = transformer.NewLoadTimestamp(loadTimestampColumnForSchema(nil), loadTimestamp)
+	}
+
 	job := &strategy.MultiTableIngestionJob{
 		Config:            &resolvedConfig,
 		Source:            src,
@@ -954,6 +987,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		CDCResumeLSNs:     cdcResumeLSNs,
 		EvolutionPlans:    evolutionPlans,
 		WhitespaceTrimmer: whitespaceTrimmer,
+		LoadTimestamp:     loadTimestampTransformer,
 	}
 
 	if p.config.Stream {
@@ -1155,15 +1189,26 @@ func (p *Pipeline) setupIngestrColumns(ctx context.Context, sourceSchema *schema
 	}
 
 	ingestrCols := naming.GetIngestrColumns(destSchema)
-	p.ingestrColumnFiller = schemaevolution.NewIngestrColumnFiller(ingestrCols)
-	config.Debug("[INGESTR] Will fill %d ingestr columns with '-': %v", len(ingestrCols), ingestrCols)
+	legacyCols := make([]string, 0, len(ingestrCols))
+	for _, colName := range ingestrCols {
+		if strings.EqualFold(colName, naming.IngestrLoadedAtColumn) {
+			continue
+		}
+		legacyCols = append(legacyCols, colName)
+	}
+	if len(legacyCols) == 0 {
+		return nil, nil
+	}
+
+	p.ingestrColumnFiller = schemaevolution.NewIngestrColumnFiller(legacyCols)
+	config.Debug("[INGESTR] Will fill %d ingestr columns with '-': %v", len(legacyCols), legacyCols)
 
 	// Copy the source schema so the original stays clean for source SELECT queries.
 	copied := *sourceSchema
 	copied.Columns = make([]schema.Column, len(sourceSchema.Columns))
 	copy(copied.Columns, sourceSchema.Columns)
 
-	for _, colName := range ingestrCols {
+	for _, colName := range legacyCols {
 		exists := false
 		for _, col := range copied.Columns {
 			if col.Name == colName {
@@ -1181,6 +1226,60 @@ func (p *Pipeline) setupIngestrColumns(ctx context.Context, sourceSchema *schema
 	}
 
 	return &copied, nil
+}
+
+func addLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+
+	result := *s
+	result.Columns = append([]schema.Column{}, s.Columns...)
+
+	for i, col := range result.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+			result.Columns[i] = loadTimestampColumnWithName(col.Name, col.Nullable)
+			return &result
+		}
+	}
+
+	result.Columns = append(result.Columns, loadTimestampColumnWithName(naming.IngestrLoadedAtColumn, false))
+	return &result
+}
+
+func removeLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+
+	result := *s
+	result.Columns = make([]schema.Column, 0, len(s.Columns))
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+			continue
+		}
+		result.Columns = append(result.Columns, col)
+	}
+	return &result
+}
+
+func loadTimestampColumnForSchema(s *schema.TableSchema) schema.Column {
+	if s != nil {
+		for _, col := range s.Columns {
+			if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+				return loadTimestampColumnWithName(col.Name, col.Nullable)
+			}
+		}
+	}
+	return loadTimestampColumnWithName(naming.IngestrLoadedAtColumn, false)
+}
+
+func loadTimestampColumnWithName(name string, nullable bool) schema.Column {
+	return schema.Column{
+		Name:     name,
+		DataType: schema.TypeTimestampTZ,
+		Nullable: nullable,
+	}
 }
 
 func (p *Pipeline) setupNamingConvention(ctx context.Context, sourceSchema *schema.TableSchema) error {
