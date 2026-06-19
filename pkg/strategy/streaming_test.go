@@ -94,7 +94,7 @@ func TestStreaming_CountTriggerFlushes(t *testing.T) {
 	baseDest := &fakeDestination{}
 	dest := &truncateCapableDestination{fakeDestination: baseDest}
 	committer := &fakeCommitter{}
-	loop := newTestLoop(&truncateCapableDestination{fakeDestination: dest}, StreamingOptions{
+	loop := newTestLoop(dest, StreamingOptions{
 		FlushInterval: time.Hour,
 		FlushRecords:  100,
 		Strategy:      config.StrategyMerge,
