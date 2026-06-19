@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -30,18 +32,25 @@ const (
 	getRecordsRPS      = 4.0
 	getRecordsBurst    = 2
 	maxListShardsPages = 100
+	streamOrderColumn  = "_ingestr_order"
 )
 
 type kinesisCredentials struct {
 	AccessKeyID     string
 	SecretAccessKey string
+	SessionToken    string
 	Region          string
+	EndpointURL     string
 }
 
 type KinesisSource struct {
 	creds   kinesisCredentials
 	client  *kinesis.Client
 	limiter *rate.Limiter
+
+	mu         sync.Mutex
+	streamSeq  int64
+	streamSeen map[string]struct{}
 }
 
 func NewKinesisSource() *KinesisSource {
@@ -56,6 +65,14 @@ func (s *KinesisSource) HandlesIncrementality() bool {
 	return true
 }
 
+func (s *KinesisSource) SupportsStreaming() bool {
+	return true
+}
+
+func (s *KinesisSource) DefaultStreamingStrategy() config.IncrementalStrategy {
+	return config.StrategyMerge
+}
+
 func (s *KinesisSource) Connect(ctx context.Context, uri string) error {
 	creds, err := parseKinesisURI(uri)
 	if err != nil {
@@ -66,7 +83,7 @@ func (s *KinesisSource) Connect(ctx context.Context, uri string) error {
 	loadOpts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(creds.Region),
 		awsconfig.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, ""),
+			credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken),
 		),
 	}
 
@@ -75,7 +92,11 @@ func (s *KinesisSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	s.client = kinesis.NewFromConfig(awsCfg)
+	s.client = kinesis.NewFromConfig(awsCfg, func(o *kinesis.Options) {
+		if creds.EndpointURL != "" {
+			o.BaseEndpoint = aws.String(creds.EndpointURL)
+		}
+	})
 	s.limiter = rate.NewLimiter(rate.Limit(getRecordsRPS), getRecordsBurst)
 
 	config.Debug("[KINESIS] Connected to region %s", creds.Region)
@@ -86,23 +107,25 @@ func (s *KinesisSource) Close(_ context.Context) error {
 	return nil
 }
 
-func parseKinesisURI(uri string) (kinesisCredentials, error) {
-	if !strings.HasPrefix(uri, "kinesis://") {
+func parseKinesisURI(raw string) (kinesisCredentials, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return kinesisCredentials{}, fmt.Errorf("invalid kinesis URI: %w", err)
+	}
+	if u.Scheme != "kinesis" {
 		return kinesisCredentials{}, fmt.Errorf("invalid kinesis URI: must start with kinesis://")
 	}
 
-	rest := strings.TrimPrefix(uri, "kinesis://")
-	rest = strings.TrimPrefix(rest, "?")
-
-	values, err := url.ParseQuery(rest)
-	if err != nil {
-		return kinesisCredentials{}, fmt.Errorf("failed to parse kinesis URI query: %w", err)
-	}
-
+	values := u.Query()
 	creds := kinesisCredentials{
-		AccessKeyID:     values.Get("aws_access_key_id"),
-		SecretAccessKey: values.Get("aws_secret_access_key"),
-		Region:          values.Get("region_name"),
+		AccessKeyID:     firstQuery(values, "aws_access_key_id", "access_key_id"),
+		SecretAccessKey: firstQuery(values, "aws_secret_access_key", "secret_access_key"),
+		SessionToken:    firstQuery(values, "aws_session_token", "session_token"),
+		Region:          firstQuery(values, "region_name", "region", "aws_region"),
+		EndpointURL:     firstQuery(values, "endpoint_url", "endpoint"),
+	}
+	if creds.EndpointURL == "" && u.Host != "" {
+		creds.EndpointURL = endpointFromHost(u.Host)
 	}
 
 	if creds.AccessKeyID == "" {
@@ -118,9 +141,62 @@ func parseKinesisURI(uri string) (kinesisCredentials, error) {
 	return creds, nil
 }
 
+func endpointFromHost(host string) string {
+	name, _, err := net.SplitHostPort(host)
+	if err != nil {
+		name = host
+	}
+	scheme := "https"
+	if name == "localhost" || name == "127.0.0.1" || name == "0.0.0.0" || strings.HasPrefix(name, "192.168.") || strings.HasPrefix(name, "10.") || isPrivate172(name) {
+		scheme = "http"
+	}
+	return scheme + "://" + host
+}
+
+func isPrivate172(host string) bool {
+	ip := net.ParseIP(host).To4()
+	if ip == nil {
+		return false
+	}
+	return ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31
+}
+
+func firstQuery(values url.Values, keys ...string) string {
+	for _, key := range keys {
+		if v := values.Get(key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func (s *KinesisSource) GetTable(_ context.Context, req source.TableRequest) (source.SourceTable, error) {
 	if req.Name == "" {
 		return nil, fmt.Errorf("kinesis: stream name is required (use --source-table)")
+	}
+
+	if req.Streaming {
+		strategy := req.Strategy
+		if strategy == "" {
+			strategy = s.DefaultStreamingStrategy()
+		}
+		primaryKeys := req.PrimaryKeys
+		if len(primaryKeys) == 0 {
+			primaryKeys = []string{"msg_id"}
+		}
+		return &source.DynamicSourceTable{
+			TableName:           req.Name,
+			TablePrimaryKeys:    primaryKeys,
+			TableIncrementalKey: streamOrderColumn,
+			TableStrategy:       strategy,
+			KnownSchema:         true,
+			SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
+				return streamingEnvelopeSchema(req.Name), nil
+			},
+			ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+				return s.read(ctx, req.Name, opts)
+			},
+		}, nil
 	}
 
 	return &source.DynamicSourceTable{
@@ -138,12 +214,28 @@ func (s *KinesisSource) GetTable(_ context.Context, req source.TableRequest) (so
 	}, nil
 }
 
+func streamingEnvelopeSchema(streamName string) *schema.TableSchema {
+	return &schema.TableSchema{
+		Name: streamName,
+		Columns: []schema.Column{
+			{Name: "msg_id", DataType: schema.TypeString, Nullable: false, IsPrimaryKey: true},
+			{Name: "data", DataType: schema.TypeJSON, Nullable: true},
+			{Name: streamOrderColumn, DataType: schema.TypeInt64, Nullable: false},
+		},
+		PrimaryKeys:    []string{"msg_id"},
+		IncrementalKey: streamOrderColumn,
+	}
+}
+
 func (s *KinesisSource) read(ctx context.Context, streamName string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
 		defer close(results)
 		if err := s.readStream(ctx, streamName, opts, results); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -168,6 +260,14 @@ func (s *KinesisSource) readStream(ctx context.Context, streamName string, opts 
 		}
 	}
 
+	if opts.Streaming {
+		s.mu.Lock()
+		s.streamSeq = 0
+		s.streamSeen = make(map[string]struct{}, len(shards))
+		s.mu.Unlock()
+		return s.readShardsConcurrently(ctx, streamName, resolvedStreamName, shards, opts, results)
+	}
+
 	for _, shardID := range shards {
 		select {
 		case <-ctx.Done():
@@ -181,6 +281,89 @@ func (s *KinesisSource) readStream(ctx context.Context, streamName string, opts 
 	}
 
 	return nil
+}
+
+func (s *KinesisSource) readShardsConcurrently(ctx context.Context, streamName, resolvedName string, shards []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	return s.readShardsConcurrentlyWith(ctx, shards, opts, func(ctx context.Context, shardID string) error {
+		return s.readShard(ctx, streamName, resolvedName, shardID, opts, results)
+	})
+}
+
+func (s *KinesisSource) readShardsConcurrentlyWith(ctx context.Context, shards []string, opts source.ReadOptions, read func(context.Context, string) error) error {
+	if len(shards) == 0 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	if opts.Streaming {
+		shards = s.claimStreamShards(shards)
+		if len(shards) == 0 {
+			return nil
+		}
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, len(shards))
+	var wg sync.WaitGroup
+	for _, shardID := range shards {
+		shardID := shardID
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := read(ctx, shardID); err != nil && ctx.Err() == nil {
+				errCh <- fmt.Errorf("failed to read shard %s: %w", shardID, err)
+				cancel()
+			}
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		select {
+		case err := <-errCh:
+			return err
+		default:
+			return ctx.Err()
+		}
+	case err := <-errCh:
+		cancel()
+		<-done
+		return err
+	case <-ctx.Done():
+		<-done
+		select {
+		case err := <-errCh:
+			return err
+		default:
+		}
+		return ctx.Err()
+	}
+}
+
+func (s *KinesisSource) claimStreamShards(shards []string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.streamSeen == nil {
+		s.streamSeen = make(map[string]struct{}, len(shards))
+	}
+	claimed := make([]string, 0, len(shards))
+	for _, shardID := range shards {
+		if _, ok := s.streamSeen[shardID]; ok {
+			config.Debug("[KINESIS] Skipping already scheduled shard %s", shardID)
+			continue
+		}
+		s.streamSeen[shardID] = struct{}{}
+		claimed = append(claimed, shardID)
+	}
+	return claimed
 }
 
 func (s *KinesisSource) readShard(ctx context.Context, streamName, resolvedName, shardID string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -224,11 +407,20 @@ func (s *KinesisSource) readShard(ctx context.Context, streamName, resolvedName,
 		if len(resp.Records) > 0 {
 			items := make([]map[string]interface{}, 0, len(resp.Records))
 			for _, record := range resp.Records {
-				item := buildRecordItem(record, shardID, resolvedName)
+				var item map[string]interface{}
+				if opts.Streaming {
+					item = s.buildRecordEnvelope(record, shardID, resolvedName)
+				} else {
+					item = buildRecordItem(record, shardID, resolvedName)
+				}
 				items = append(items, item)
 			}
 
-			batch, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+			var cols []schema.Column
+			if opts.Streaming {
+				cols = streamingEnvelopeSchema(resolvedName).Columns
+			}
+			batch, err := arrowconv.ItemsToArrowRecordWithSchema(items, cols, opts.ExcludeColumns)
 			if err != nil {
 				return fmt.Errorf("failed to convert kinesis records to arrow: %w", err)
 			}
@@ -236,19 +428,17 @@ func (s *KinesisSource) readShard(ctx context.Context, streamName, resolvedName,
 			config.Debug("[KINESIS] Sent batch of %d records from shard %s", len(items), shardID)
 		}
 
-		if resp.ChildShards != nil {
-			for _, childShard := range resp.ChildShards {
-				if childShard.ShardId != nil && *childShard.ShardId != "" {
-					childID := *childShard.ShardId
-					config.Debug("[KINESIS] Discovered child shard %s", childID)
-					if err := s.readShard(ctx, streamName, resolvedName, childID, opts, results); err != nil {
-						return fmt.Errorf("failed to read child shard %s: %w", childID, err)
-					}
-				}
+		if len(resp.ChildShards) > 0 {
+			childIDs := childShardIDs(resp.ChildShards)
+			for _, childID := range childIDs {
+				config.Debug("[KINESIS] Discovered child shard %s", childID)
+			}
+			if err := s.readChildShards(ctx, streamName, resolvedName, childIDs, opts, results); err != nil {
+				return err
 			}
 		}
 
-		if resp.MillisBehindLatest == nil || *resp.MillisBehindLatest < millisBehindCutoff {
+		if !opts.Streaming && (resp.MillisBehindLatest == nil || *resp.MillisBehindLatest < millisBehindCutoff) {
 			config.Debug("[KINESIS] Shard %s is caught up", shardID)
 			break
 		}
@@ -257,22 +447,63 @@ func (s *KinesisSource) readShard(ctx context.Context, streamName, resolvedName,
 			break
 		}
 		iterator = *resp.NextShardIterator
+		if opts.Streaming && len(resp.Records) == 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
 
 	return nil
 }
 
-func buildRecordItem(record types.Record, shardID, streamName string) map[string]interface{} {
-	msgID := digest128(shardID + *record.SequenceNumber)
+func (s *KinesisSource) readChildShards(ctx context.Context, streamName, resolvedName string, childIDs []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if len(childIDs) == 0 {
+		return nil
+	}
+	if opts.Streaming {
+		return s.readShardsConcurrently(ctx, streamName, resolvedName, childIDs, opts, results)
+	}
+	for _, childID := range childIDs {
+		if err := s.readShard(ctx, streamName, resolvedName, childID, opts, results); err != nil {
+			return fmt.Errorf("failed to read child shard %s: %w", childID, err)
+		}
+	}
+	return nil
+}
 
-	usec := int64(float64(record.ApproximateArrivalTimestamp.UnixMicro()))
+func childShardIDs(childShards []types.ChildShard) []string {
+	seen := make(map[string]struct{}, len(childShards))
+	ids := make([]string, 0, len(childShards))
+	for _, childShard := range childShards {
+		childID := aws.ToString(childShard.ShardId)
+		if childID == "" {
+			continue
+		}
+		if _, ok := seen[childID]; ok {
+			continue
+		}
+		seen[childID] = struct{}{}
+		ids = append(ids, childID)
+	}
+	return ids
+}
+
+func buildRecordItem(record types.Record, shardID, streamName string) map[string]interface{} {
+	seqNo := aws.ToString(record.SequenceNumber)
+	partitionKey := aws.ToString(record.PartitionKey)
+	msgID := digest128(shardID + seqNo)
+
+	tsValue := time.Now().UTC()
+	if record.ApproximateArrivalTimestamp != nil {
+		tsValue = record.ApproximateArrivalTimestamp.UTC()
+	}
+	usec := int64(float64(tsValue.UnixMicro()))
 	ts := time.UnixMicro(usec).UTC().Format("2006-01-02T15:04:05.000000+00:00")
 
 	metadata := map[string]interface{}{
 		"shard_id":    shardID,
-		"seq_no":      *record.SequenceNumber,
+		"seq_no":      seqNo,
 		"ts":          ts,
-		"partition":   *record.PartitionKey,
+		"partition":   partitionKey,
 		"stream_name": streamName,
 	}
 
@@ -296,6 +527,36 @@ func buildRecordItem(record types.Record, shardID, streamName string) map[string
 	}
 
 	return item
+}
+
+func (s *KinesisSource) buildRecordEnvelope(record types.Record, shardID, streamName string) map[string]interface{} {
+	item := buildRecordItem(record, shardID, streamName)
+	msgID, _ := item["kinesis_msg_id"].(string)
+	delete(item, "kinesis_msg_id")
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		encoded = jsonStringFallback(string(record.Data))
+	}
+	return map[string]interface{}{
+		"msg_id":          msgID,
+		"data":            string(encoded),
+		streamOrderColumn: s.nextStreamOrder(),
+	}
+}
+
+func jsonStringFallback(value string) []byte {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return []byte("null")
+	}
+	return encoded
+}
+
+func (s *KinesisSource) nextStreamOrder() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.streamSeq++
+	return s.streamSeq
 }
 
 // digest128 matches ingestr: base64-encoded SHAKE128 digest (15 bytes → 20 chars).
@@ -367,3 +628,8 @@ func (s *KinesisSource) getShardIterator(ctx context.Context, streamName, shardI
 	}
 	return *resp.ShardIterator, nil
 }
+
+var (
+	_ source.Source          = (*KinesisSource)(nil)
+	_ source.StreamingSource = (*KinesisSource)(nil)
+)
