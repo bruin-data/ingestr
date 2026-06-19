@@ -371,6 +371,9 @@ func (s *FootballDataOrgSource) readStandings(ctx context.Context, opts source.R
 		}
 		table := interfaceSlice(standing["table"])
 		for _, rawRow := range table {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			row, ok := rawRow.(map[string]interface{})
 			if !ok {
 				continue
@@ -636,15 +639,16 @@ func extractArray(payload map[string]interface{}, key string) ([]map[string]inte
 }
 
 func makeEvent(matchID, eventType string, index int, event map[string]interface{}) map[string]interface{} {
-	row := map[string]interface{}{
-		"event_key":   makeEventKey(matchID, eventType, index, event),
-		"match_id":    matchID,
-		"event_type":  eventType,
-		"event_index": index,
-	}
+	row := make(map[string]interface{}, len(event)+4)
 	for key, value := range event {
 		row[key] = value
 	}
+	// Set the synthetic keys last so a raw field of the same name can't
+	// overwrite them — the primary key (event_key) must be stable.
+	row["event_key"] = makeEventKey(matchID, eventType, index, event)
+	row["match_id"] = matchID
+	row["event_type"] = eventType
+	row["event_index"] = index
 	return row
 }
 
