@@ -47,11 +47,11 @@ ingestr ingest \
 | Table | PK | Inc Key | Inc Strategy | Details |
 | --- | --- | --- | --- | --- |
 | `teams` | `id` | - | replace | Loads teams from `/teams?league=<league>&season=<season>`. |
-| `stadiums` | `id` | - | replace | Derives venue IDs from fixtures and hydrates each venue through `/venues?id=<id>`. |
-| `group_standings` | `league_id`, `season`, `group_name`, `team_id` | - | replace | Loads and flattens group standings from `/standings`. |
-| `matches` | `id` | - | replace | Loads and flattens fixtures from `/fixtures`. |
+| `stadiums` | `id` | - | merge | Derives venue IDs from fixtures and hydrates each venue through `/venues?id=<id>`. |
+| `group_standings` | `league_id`, `season`, `group_name`, `team_id` | - | merge | Loads group standings from `/standings`. |
+| `matches` | `id` | - | merge | Loads fixtures from `/fixtures`. |
 | `players` | `id` | - | replace | Loads paginated player rows from `/players`. |
-| `match_events` | `event_key` | - | replace | Fetches fixtures, then loads events from `/fixtures/events?fixture=<id>`. |
+| `match_events` | `event_key` | - | merge | Fetches fixtures, then loads events from `/fixtures/events?fixture=<id>`. |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
@@ -60,5 +60,3 @@ Use these as the `--source-table` parameter in the `ingestr ingest` command.
 - The API key is sent in the `x-apisports-key` header.
 - API-Football free plans may not expose future seasons such as `2026`; the source surfaces the provider's plan/season error when access is denied.
 - `players` follows API-Football page pagination automatically.
-- `stadiums` and `match_events` are fixture-derived because API-Football does not expose World Cup-scoped venue or all-event endpoints.
-- Nested provider objects are preserved as JSON columns while common IDs, names, scores, and status fields are exposed as typed columns.
