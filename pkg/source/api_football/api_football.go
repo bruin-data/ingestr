@@ -438,13 +438,14 @@ func (s *APIFootballSource) readMatchEvents(ctx context.Context, opts source.Rea
 		}
 		out := make([]map[string]interface{}, 0, len(items))
 		for idx, item := range items {
-			row := map[string]interface{}{
-				"event_key":  makeEventKey(fixtureID, idx, item),
-				"fixture_id": fixtureObj["id"],
-			}
+			row := map[string]interface{}{}
 			for key, value := range item {
 				row[key] = value
 			}
+			// Set synthetic keys after copying so raw API fields can never
+			// overwrite the merge primary key.
+			row["event_key"] = makeEventKey(fixtureID, idx, item)
+			row["fixture_id"] = fixtureObj["id"]
 			out = append(out, row)
 		}
 		if err := sendBatch(out, opts, results); err != nil {
