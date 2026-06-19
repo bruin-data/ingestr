@@ -67,8 +67,6 @@ func TestFootballDataOrgMatchesUsesFiltersAndOptionalUnfoldHeaders(t *testing.T)
 		require.Equal(t, "2026", r.URL.Query().Get("season"))
 		require.Equal(t, "1", r.URL.Query().Get("matchday"))
 		require.Equal(t, "SCHEDULED", r.URL.Query().Get("status"))
-		require.Equal(t, "2026-06-11", r.URL.Query().Get("dateFrom"))
-		require.Equal(t, "2026-06-12", r.URL.Query().Get("dateTo"))
 		require.Equal(t, "GROUP_STAGE", r.URL.Query().Get("stage"))
 		require.Equal(t, "GROUP_A", r.URL.Query().Get("group"))
 		require.Equal(t, "true", r.Header.Get("X-Unfold-Goals"))
@@ -78,7 +76,7 @@ func TestFootballDataOrgMatchesUsesFiltersAndOptionalUnfoldHeaders(t *testing.T)
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	uri := "footballdata://?api_key=test-token&matchday=1&status=SCHEDULED&date_from=2026-06-11&date_to=2026-06-12&stage=GROUP_STAGE&group=GROUP_A&unfold_goals=true&unfold_bookings=true&base_url=" + url.QueryEscape(server.URL)
+	uri := "footballdata://?api_key=test-token&matchday=1&status=SCHEDULED&stage=GROUP_STAGE&group=GROUP_A&unfold_goals=true&unfold_bookings=true&base_url=" + url.QueryEscape(server.URL)
 	require.NoError(t, src.Connect(context.Background(), uri))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "matches"})
 	require.NoError(t, err)
@@ -105,28 +103,6 @@ func TestFootballDataOrgMatchesAppliesIngestionInterval(t *testing.T) {
 
 	src := NewFootballDataOrgSource()
 	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
-	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "matches"})
-	require.NoError(t, err)
-
-	start := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
-	record := readOnce(t, table, source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
-	defer record.Release()
-	require.EqualValues(t, 1, record.NumRows())
-}
-
-func TestFootballDataOrgMatchesURIFiltersOverrideInterval(t *testing.T) {
-	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
-		// Explicit URI date filters take precedence over the ingestion interval.
-		require.Equal(t, "2026-07-01", r.URL.Query().Get("dateFrom"))
-		require.Equal(t, "2026-07-10", r.URL.Query().Get("dateTo"))
-		_, _ = fmt.Fprint(w, matchesPayload())
-	})
-	defer server.Close()
-
-	src := NewFootballDataOrgSource()
-	uri := "footballdata://?api_key=test-token&date_from=2026-07-01&date_to=2026-07-10&base_url=" + url.QueryEscape(server.URL)
-	require.NoError(t, src.Connect(context.Background(), uri))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "matches"})
 	require.NoError(t, err)
 

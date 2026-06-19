@@ -88,8 +88,6 @@ type uriConfig struct {
 type matchFilters struct {
 	matchday string
 	status   string
-	dateFrom string
-	dateTo   string
 	stage    string
 	group    string
 }
@@ -119,8 +117,6 @@ func parseURI(raw string) (uriConfig, error) {
 		filters: matchFilters{
 			matchday: values.Get("matchday"),
 			status:   values.Get("status"),
-			dateFrom: firstNonEmpty(values.Get("date_from"), values.Get("dateFrom")),
-			dateTo:   firstNonEmpty(values.Get("date_to"), values.Get("dateTo")),
 			stage:    values.Get("stage"),
 			group:    values.Get("group"),
 		},
@@ -517,12 +513,6 @@ func (s *FootballDataOrgSource) fetchRawMatches(ctx context.Context, opts source
 	if s.filters.status != "" {
 		params["status"] = s.filters.status
 	}
-	if s.filters.dateFrom != "" {
-		params["dateFrom"] = s.filters.dateFrom
-	}
-	if s.filters.dateTo != "" {
-		params["dateTo"] = s.filters.dateTo
-	}
 	if s.filters.stage != "" {
 		params["stage"] = s.filters.stage
 	}
@@ -530,9 +520,8 @@ func (s *FootballDataOrgSource) fetchRawMatches(ctx context.Context, opts source
 		params["group"] = s.filters.group
 	}
 	// The matches endpoint supports server-side date filtering via dateFrom/dateTo
-	// (YYYY-MM-DD). When the URI does not pin the window explicitly, honour the
-	// ingestion interval so matches and the tables derived from them stay scoped.
-	if s.filters.dateFrom == "" && s.filters.dateTo == "" && opts.IntervalStart != nil && opts.IntervalEnd != nil {
+	// (YYYY-MM-DD). Date scoping is driven entirely by the ingestion interval.
+	if opts.IntervalStart != nil && opts.IntervalEnd != nil {
 		params["dateFrom"] = opts.IntervalStart.UTC().Format("2006-01-02")
 		params["dateTo"] = opts.IntervalEnd.UTC().Format("2006-01-02")
 	}
@@ -729,15 +718,6 @@ func normalizeValue(value interface{}) interface{} {
 	default:
 		return value
 	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func firstNonNil(values ...interface{}) interface{} {
