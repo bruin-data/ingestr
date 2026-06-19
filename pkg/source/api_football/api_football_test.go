@@ -17,16 +17,16 @@ import (
 
 func TestAPIFootballMissingAPIKey(t *testing.T) {
 	src := NewAPIFootballSource()
-	err := src.Connect(context.Background(), "api-football://")
+	err := src.Connect(context.Background(), "apifootball://")
 	require.ErrorContains(t, err, "api_key")
 }
 
 func TestAPIFootballRejectsInvalidLeagueAndSeason(t *testing.T) {
 	src := NewAPIFootballSource()
-	err := src.Connect(context.Background(), "api-football://?api_key=test&league=worldcup")
+	err := src.Connect(context.Background(), "apifootball://?api_key=test&league=worldcup")
 	require.ErrorContains(t, err, "league")
 
-	err = src.Connect(context.Background(), "api-football://?api_key=test&season=26")
+	err = src.Connect(context.Background(), "apifootball://?api_key=test&season=26")
 	require.ErrorContains(t, err, "season")
 }
 
@@ -41,7 +41,7 @@ func TestAPIFootballReadTeamsUsesAuthLeagueAndSeason(t *testing.T) {
 	defer server.Close()
 
 	src := NewAPIFootballSource()
-	require.NoError(t, src.Connect(context.Background(), "api-football://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "apifootball://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
 
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "teams"})
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestAPIFootballPlayersPaginates(t *testing.T) {
 	defer server.Close()
 
 	src := NewAPIFootballSource()
-	require.NoError(t, src.Connect(context.Background(), "api-football://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "apifootball://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "players"})
 	require.NoError(t, err)
 	require.Equal(t, "replace", string(table.Strategy()))
@@ -100,7 +100,7 @@ func TestAPIFootballMatchesPreserveNestedObjects(t *testing.T) {
 	defer server.Close()
 
 	src := NewAPIFootballSource()
-	require.NoError(t, src.Connect(context.Background(), "api-football://?api_key=test-key&timezone=America/New_York&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "apifootball://?api_key=test-key&timezone=America/New_York&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "matches"})
 	require.NoError(t, err)
 	require.Equal(t, "merge", string(table.Strategy()))
@@ -132,7 +132,7 @@ func TestAPIFootballStadiumsDeriveFromFixturesAndHydrateVenues(t *testing.T) {
 	defer server.Close()
 
 	src := NewAPIFootballSource()
-	require.NoError(t, src.Connect(context.Background(), "api-football://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "apifootball://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "stadiums"})
 	require.NoError(t, err)
 	require.Equal(t, "merge", string(table.Strategy()))
@@ -160,7 +160,7 @@ func TestAPIFootballMatchEventsFanOutFromFixtures(t *testing.T) {
 	defer server.Close()
 
 	src := NewAPIFootballSource()
-	require.NoError(t, src.Connect(context.Background(), "api-football://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "apifootball://?api_key=test-key&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "match_events"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"event_key"}, table.PrimaryKeys())
