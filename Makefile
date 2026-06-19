@@ -5,6 +5,9 @@ VERSION ?= dev
 GO_LICENSES_MODULE ?= github.com/google/go-licenses@v1.6.0
 LICENSE_DISALLOWED_TYPES ?= forbidden,restricted,unknown
 LICENSE_TARGETS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+LICENSE_CHECK_TARGETS ?= linux/amd64
+LICENSE_INCLUDE_TESTS ?= true
+LICENSE_CHECK_INCLUDE_TESTS ?= false
 export INGESTR_DISABLE_TELEMETRY := true
 export DISABLE_TELEMETRY := true
 TELEMETRY_ENV := INGESTR_DISABLE_TELEMETRY=true DISABLE_TELEMETRY=true
@@ -13,7 +16,7 @@ NO_COLOR=\033[0m
 OK_COLOR=\033[32;01m
 ERROR_COLOR=\033[31;01m
 
-.PHONY: all clean test test-python build deps generate licenses licenses-check lint format lint-ci format-ci test-ci setup test-db2-integration
+.PHONY: all clean test test-python build deps generate licenses licenses-check licenses-notices-check lint format lint-ci format-ci test-ci setup test-db2-integration
 
 all: clean deps test build
 
@@ -40,11 +43,15 @@ generate:
 
 licenses: generate
 	@echo "$(OK_COLOR)==> Updating third-party license notices$(NO_COLOR)"
-	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" LICENSE_TARGETS="$(LICENSE_TARGETS)" ./hack/update-third-party-licenses.sh
+	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" LICENSE_TARGETS="$(LICENSE_TARGETS)" LICENSE_INCLUDE_TESTS="$(LICENSE_INCLUDE_TESTS)" ./hack/update-third-party-licenses.sh
 
 licenses-check: generate
+	@echo "$(OK_COLOR)==> Checking third-party license policy$(NO_COLOR)"
+	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" LICENSE_TARGETS="$(LICENSE_CHECK_TARGETS)" LICENSE_INCLUDE_TESTS="$(LICENSE_CHECK_INCLUDE_TESTS)" ./hack/update-third-party-licenses.sh --policy-only
+
+licenses-notices-check: generate
 	@echo "$(OK_COLOR)==> Checking third-party license notices$(NO_COLOR)"
-	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" LICENSE_TARGETS="$(LICENSE_TARGETS)" ./hack/update-third-party-licenses.sh --check
+	@GO_LICENSES_MODULE="$(GO_LICENSES_MODULE)" LICENSE_DISALLOWED_TYPES="$(LICENSE_DISALLOWED_TYPES)" LICENSE_TARGETS="$(LICENSE_TARGETS)" LICENSE_INCLUDE_TESTS="$(LICENSE_INCLUDE_TESTS)" ./hack/update-third-party-licenses.sh --check
 
 
 build: generate deps
