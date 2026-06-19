@@ -23,9 +23,10 @@ const (
 	defaultBaseURL = "https://v3.football.api-sports.io"
 	defaultLeague  = "1"
 	defaultSeason  = "2026"
-	// api-sports.io free tier allows 10 req/min; rateLimit is ~80% of that per second.
+	// api-sports.io free tier allows 10 req/min; rateLimit is ~80% of that per
+	// second, with a burst small enough that the first minute stays under the cap.
 	rateLimit      = 0.13
-	rateLimitBurst = 5
+	rateLimitBurst = 2
 )
 
 type tableConfig struct {
