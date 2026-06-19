@@ -1,9 +1,11 @@
 package football_data_org
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -23,12 +25,15 @@ const (
 	defaultBaseURL     = "https://api.football-data.org/v4"
 	defaultCompetition = "WC"
 	defaultSeason      = "2026"
+	// football-data.org's free tier allows 10 requests/minute.
+	rateLimit      = (10 * 0.8) / 60.0
+	rateLimitBurst = 5
 )
 
 type tableConfig struct {
-	columns     []schema.Column
 	primaryKeys []string
-	fetch       func(context.Context, source.ReadOptions) ([]map[string]interface{}, error)
+	strategy    config.IncrementalStrategy
+	read        func(context.Context, source.ReadOptions, chan<- source.RecordBatchResult) error
 }
 
 type FootballDataOrgSource struct {
@@ -65,6 +70,7 @@ func (s *FootballDataOrgSource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithBaseURL(cfg.baseURL),
 		httpclient.WithTimeout(60*time.Second),
 		httpclient.WithHeader("X-Auth-Token", cfg.apiKey),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
 		httpclient.WithDebug(config.DebugMode),
 	)
 	return nil
@@ -159,7 +165,7 @@ func (s *FootballDataOrgSource) Close(ctx context.Context) error {
 }
 
 func (s *FootballDataOrgSource) HandlesIncrementality() bool {
-	return false
+	return true
 }
 
 func (s *FootballDataOrgSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
@@ -172,14 +178,10 @@ func (s *FootballDataOrgSource) GetTable(ctx context.Context, req source.TableRe
 	return &source.DynamicSourceTable{
 		TableName:        req.Name,
 		TablePrimaryKeys: cfg.primaryKeys,
-		TableStrategy:    config.StrategyReplace,
-		KnownSchema:      true,
+		TableStrategy:    cfg.strategy,
+		KnownSchema:      false,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
-			return &schema.TableSchema{
-				Name:        req.Name,
-				Columns:     cfg.columns,
-				PrimaryKeys: cfg.primaryKeys,
-			}, nil
+			return nil, fmt.Errorf("football-data source relies on schema inference")
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 			return s.read(ctx, cfg, opts)
@@ -191,33 +193,33 @@ func (s *FootballDataOrgSource) tables() map[string]tableConfig {
 	return map[string]tableConfig{
 		"teams": {
 			primaryKeys: []string{"id"},
-			columns:     teamColumns,
-			fetch:       s.fetchTeams,
+			strategy:    config.StrategyMerge,
+			read:        s.readTeams,
 		},
 		"stadiums": {
 			primaryKeys: []string{"venue_key"},
-			columns:     stadiumColumns,
-			fetch:       s.fetchStadiums,
+			strategy:    config.StrategyReplace,
+			read:        s.readStadiums,
 		},
 		"group_standings": {
 			primaryKeys: []string{"competition_id", "season_id", "stage", "standing_type", "group_name", "team_id"},
-			columns:     standingColumns,
-			fetch:       s.fetchStandings,
+			strategy:    config.StrategyReplace,
+			read:        s.readStandings,
 		},
 		"matches": {
 			primaryKeys: []string{"id"},
-			columns:     matchColumns,
-			fetch:       s.fetchMatches,
+			strategy:    config.StrategyMerge,
+			read:        s.readMatches,
 		},
 		"players": {
 			primaryKeys: []string{"team_id", "id"},
-			columns:     playerColumns,
-			fetch:       s.fetchPlayers,
+			strategy:    config.StrategyReplace,
+			read:        s.readPlayers,
 		},
 		"match_events": {
 			primaryKeys: []string{"event_key"},
-			columns:     eventColumns,
-			fetch:       s.fetchMatchEvents,
+			strategy:    config.StrategyMerge,
+			read:        s.readMatchEvents,
 		},
 	}
 }
@@ -227,60 +229,68 @@ func (s *FootballDataOrgSource) read(ctx context.Context, cfg tableConfig, opts 
 
 	go func() {
 		defer close(results)
-
-		items, err := cfg.fetch(ctx, opts)
-		if err != nil {
+		if err := cfg.read(ctx, opts, results); err != nil {
 			results <- source.RecordBatchResult{Err: err}
-			return
 		}
-		items = selectColumns(items, cfg.columns)
-
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, cfg.columns, opts.ExcludeColumns)
-		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert football-data data to Arrow: %w", err)}
-			return
-		}
-		results <- source.RecordBatchResult{Batch: record}
 	}()
 
 	return results, nil
 }
 
-func (s *FootballDataOrgSource) fetchTeams(ctx context.Context, opts source.ReadOptions) ([]map[string]interface{}, error) {
+// sendBatch converts a set of items to an Arrow record and streams it to the
+// results channel. Empty batches are skipped so no zero-row record is emitted.
+func sendBatch(items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if len(items) == 0 {
+		return nil
+	}
+	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+	if err != nil {
+		return fmt.Errorf("failed to convert football-data data to Arrow: %w", err)
+	}
+	results <- source.RecordBatchResult{Batch: record}
+	return nil
+}
+
+func (s *FootballDataOrgSource) readTeams(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	payload, err := s.get(ctx, competitionEndpoint(s.competition, "teams"), map[string]string{"season": s.season}, unfoldConfig{})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	items, err := extractArray(payload, "teams")
 	if err != nil {
-		return nil, fmt.Errorf("malformed football-data response from teams: %w", err)
+		return fmt.Errorf("malformed football-data response from teams: %w", err)
 	}
 
-	competition := nestedMap(payload, "competition")
-	season := nestedMap(payload, "season")
 	out := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
-		out = append(out, flattenTeam(competition, season, item))
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		out = append(out, item)
 		if opts.Limit > 0 && len(out) >= opts.Limit {
-			return out[:opts.Limit], nil
+			out = out[:opts.Limit]
+			break
 		}
 	}
-	return out, nil
+	return sendBatch(out, opts, results)
 }
 
-func (s *FootballDataOrgSource) fetchStadiums(ctx context.Context, opts source.ReadOptions) ([]map[string]interface{}, error) {
+func (s *FootballDataOrgSource) readStadiums(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	items := make([]map[string]interface{}, 0)
 	seen := map[string]bool{}
 
 	teamsPayload, err := s.get(ctx, competitionEndpoint(s.competition, "teams"), map[string]string{"season": s.season}, unfoldConfig{})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	teams, err := extractArray(teamsPayload, "teams")
 	if err != nil {
-		return nil, fmt.Errorf("malformed football-data response from teams: %w", err)
+		return fmt.Errorf("malformed football-data response from teams: %w", err)
 	}
 	for _, team := range teams {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		venueName := strings.TrimSpace(valueString(team["venue"]))
 		if venueName == "" {
 			continue
@@ -290,25 +300,30 @@ func (s *FootballDataOrgSource) fetchStadiums(ctx context.Context, opts source.R
 			continue
 		}
 		seen[key] = true
-		items = append(items, normalizeMap(map[string]interface{}{
+		items = append(items, map[string]interface{}{
 			"venue_key":      key,
-			"venue_name":     venueName,
+			"venue":          venueName,
 			"source_context": "team",
 			"team_id":        team["id"],
-			"team_name":      team["name"],
 			"match_id":       nil,
 			"raw":            team,
-		}))
+		})
 		if opts.Limit > 0 && len(items) >= opts.Limit {
-			return items[:opts.Limit], nil
+			return sendBatch(items[:opts.Limit], opts, results)
 		}
 	}
 
-	matches, err := s.fetchRawMatches(ctx, unfoldConfig{})
+	// stadiums uses the replace strategy, so it always derives from the full
+	// match set. Do not pass the ingestion interval through here, otherwise the
+	// snapshot would be silently scoped to the window.
+	matches, err := s.fetchRawMatches(ctx, source.ReadOptions{}, unfoldConfig{})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for _, match := range matches {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		venueName := strings.TrimSpace(valueString(match["venue"]))
 		if venueName == "" {
 			continue
@@ -318,90 +333,112 @@ func (s *FootballDataOrgSource) fetchStadiums(ctx context.Context, opts source.R
 			continue
 		}
 		seen[key] = true
-		items = append(items, normalizeMap(map[string]interface{}{
+		items = append(items, map[string]interface{}{
 			"venue_key":      key,
-			"venue_name":     venueName,
+			"venue":          venueName,
 			"source_context": "match",
 			"team_id":        nil,
-			"team_name":      nil,
 			"match_id":       match["id"],
 			"raw":            match,
-		}))
+		})
 		if opts.Limit > 0 && len(items) >= opts.Limit {
-			return items[:opts.Limit], nil
+			return sendBatch(items[:opts.Limit], opts, results)
 		}
 	}
 
 	sort.SliceStable(items, func(i, j int) bool {
 		return valueString(items[i]["venue_key"]) < valueString(items[j]["venue_key"])
 	})
-	return items, nil
+	return sendBatch(items, opts, results)
 }
 
-func (s *FootballDataOrgSource) fetchStandings(ctx context.Context, opts source.ReadOptions) ([]map[string]interface{}, error) {
+func (s *FootballDataOrgSource) readStandings(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	payload, err := s.get(ctx, competitionEndpoint(s.competition, "standings"), map[string]string{"season": s.season}, unfoldConfig{})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	standings, err := extractArray(payload, "standings")
 	if err != nil {
-		return nil, fmt.Errorf("malformed football-data response from standings: %w", err)
+		return fmt.Errorf("malformed football-data response from standings: %w", err)
 	}
 
 	competition := nestedMap(payload, "competition")
 	season := nestedMap(payload, "season")
 	out := make([]map[string]interface{}, 0)
 	for _, standing := range standings {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		table := interfaceSlice(standing["table"])
 		for _, rawRow := range table {
 			row, ok := rawRow.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			out = append(out, flattenStanding(competition, season, standing, row))
+			out = append(out, map[string]interface{}{
+				"competition_id": competition["id"],
+				"season_id":      season["id"],
+				"stage":          standing["stage"],
+				"standing_type":  standing["type"],
+				"group_name":     standing["group"],
+				"team_id":        nestedMap(row, "team")["id"],
+				"standing":       row,
+				"competition":    competition,
+				"season":         season,
+			})
 			if opts.Limit > 0 && len(out) >= opts.Limit {
-				return out[:opts.Limit], nil
+				return sendBatch(out[:opts.Limit], opts, results)
 			}
 		}
 	}
-	return out, nil
+	return sendBatch(out, opts, results)
 }
 
-func (s *FootballDataOrgSource) fetchMatches(ctx context.Context, opts source.ReadOptions) ([]map[string]interface{}, error) {
-	matches, err := s.fetchRawMatches(ctx, s.unfold)
+func (s *FootballDataOrgSource) readMatches(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	matches, err := s.fetchRawMatches(ctx, opts, s.unfold)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	out := make([]map[string]interface{}, 0, len(matches))
 	for _, match := range matches {
-		out = append(out, flattenMatch(match))
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		out = append(out, match)
 		if opts.Limit > 0 && len(out) >= opts.Limit {
-			return out[:opts.Limit], nil
+			return sendBatch(out[:opts.Limit], opts, results)
 		}
 	}
-	return out, nil
+	return sendBatch(out, opts, results)
 }
 
-func (s *FootballDataOrgSource) fetchPlayers(ctx context.Context, opts source.ReadOptions) ([]map[string]interface{}, error) {
+func (s *FootballDataOrgSource) readPlayers(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	payload, err := s.get(ctx, competitionEndpoint(s.competition, "teams"), map[string]string{"season": s.season}, unfoldConfig{})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	teams, err := extractArray(payload, "teams")
 	if err != nil {
-		return nil, fmt.Errorf("malformed football-data response from teams: %w", err)
+		return fmt.Errorf("malformed football-data response from teams: %w", err)
 	}
 
+	// The teams table already exposes the squad embedded in the competition
+	// response. Hydrate each team through /teams/<id> instead, so players carry
+	// the richer per-player fields (firstName, lastName, shirtNumber,
+	// marketValue, contract) that the embedded squad omits.
 	out := make([]map[string]interface{}, 0)
 	for _, team := range teams {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		teamID := valueString(team["id"])
 		if teamID == "" {
 			continue
 		}
 		detail, err := s.get(ctx, "/teams/"+url.PathEscape(teamID), nil, unfoldConfig{})
 		if err != nil {
-			return nil, err
+			return err
 		}
 		squad := interfaceSlice(detail["squad"])
 		for _, rawPlayer := range squad {
@@ -409,23 +446,30 @@ func (s *FootballDataOrgSource) fetchPlayers(ctx context.Context, opts source.Re
 			if !ok {
 				continue
 			}
-			out = append(out, flattenPlayer(detail, player))
+			out = append(out, map[string]interface{}{
+				"id":      player["id"],
+				"team_id": team["id"],
+				"player":  player,
+			})
 			if opts.Limit > 0 && len(out) >= opts.Limit {
-				return out[:opts.Limit], nil
+				return sendBatch(out[:opts.Limit], opts, results)
 			}
 		}
 	}
-	return out, nil
+	return sendBatch(out, opts, results)
 }
 
-func (s *FootballDataOrgSource) fetchMatchEvents(ctx context.Context, opts source.ReadOptions) ([]map[string]interface{}, error) {
-	matches, err := s.fetchRawMatches(ctx, unfoldConfig{goals: true, bookings: true, subs: true})
+func (s *FootballDataOrgSource) readMatchEvents(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	matches, err := s.fetchRawMatches(ctx, opts, unfoldConfig{goals: true, bookings: true, subs: true})
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	out := make([]map[string]interface{}, 0)
 	for _, match := range matches {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		matchID := valueString(match["id"])
 		eventGroups := []struct {
 			name string
@@ -441,9 +485,9 @@ func (s *FootballDataOrgSource) fetchMatchEvents(ctx context.Context, opts sourc
 				if !ok {
 					continue
 				}
-				out = append(out, flattenEvent(matchID, group.name, idx, event))
+				out = append(out, makeEvent(matchID, group.name, idx, event))
 				if opts.Limit > 0 && len(out) >= opts.Limit {
-					return out[:opts.Limit], nil
+					return sendBatch(out[:opts.Limit], opts, results)
 				}
 			}
 		}
@@ -453,16 +497,16 @@ func (s *FootballDataOrgSource) fetchMatchEvents(ctx context.Context, opts sourc
 			if !ok {
 				continue
 			}
-			out = append(out, flattenEvent(matchID, "substitution", idx, event))
+			out = append(out, makeEvent(matchID, "substitution", idx, event))
 			if opts.Limit > 0 && len(out) >= opts.Limit {
-				return out[:opts.Limit], nil
+				return sendBatch(out[:opts.Limit], opts, results)
 			}
 		}
 	}
-	return out, nil
+	return sendBatch(out, opts, results)
 }
 
-func (s *FootballDataOrgSource) fetchRawMatches(ctx context.Context, unfold unfoldConfig) ([]map[string]interface{}, error) {
+func (s *FootballDataOrgSource) fetchRawMatches(ctx context.Context, opts source.ReadOptions, unfold unfoldConfig) ([]map[string]interface{}, error) {
 	params := map[string]string{"season": s.season}
 	if s.filters.matchday != "" {
 		params["matchday"] = s.filters.matchday
@@ -482,6 +526,13 @@ func (s *FootballDataOrgSource) fetchRawMatches(ctx context.Context, unfold unfo
 	if s.filters.group != "" {
 		params["group"] = s.filters.group
 	}
+	// The matches endpoint supports server-side date filtering via dateFrom/dateTo
+	// (YYYY-MM-DD). When the URI does not pin the window explicitly, honour the
+	// ingestion interval so matches and the tables derived from them stay scoped.
+	if s.filters.dateFrom == "" && s.filters.dateTo == "" && opts.IntervalStart != nil && opts.IntervalEnd != nil {
+		params["dateFrom"] = opts.IntervalStart.UTC().Format("2006-01-02")
+		params["dateTo"] = opts.IntervalEnd.UTC().Format("2006-01-02")
+	}
 
 	payload, err := s.get(ctx, competitionEndpoint(s.competition, "matches"), params, unfold)
 	if err != nil {
@@ -499,8 +550,7 @@ func (s *FootballDataOrgSource) get(ctx context.Context, endpoint string, params
 		return nil, fmt.Errorf("football-data source is not connected")
 	}
 
-	var payload map[string]interface{}
-	req := s.client.R(ctx).SetResult(&payload)
+	req := s.client.R(ctx)
 	for key, value := range params {
 		if value != "" {
 			req.SetQueryParam(key, value)
@@ -515,12 +565,20 @@ func (s *FootballDataOrgSource) get(ctx context.Context, endpoint string, params
 	if err := checkResponse(endpoint, resp); err != nil {
 		return nil, err
 	}
-	if len(payload) == 0 {
-		if err := resp.JSON(&payload); err != nil {
-			return nil, fmt.Errorf("malformed football-data response from %s: %w", endpoint, err)
-		}
+
+	var payload map[string]interface{}
+	if err := jsonUseNumber(resp.Body(), &payload); err != nil {
+		return nil, fmt.Errorf("malformed football-data response from %s: %w", endpoint, err)
 	}
 	return normalizeMap(payload), nil
+}
+
+// jsonUseNumber decodes JSON while preserving large integers as json.Number,
+// so IDs and counts are not silently degraded through float64.
+func jsonUseNumber(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
 }
 
 func applyUnfoldHeaders(req *httpclient.Request, unfold unfoldConfig) {
@@ -577,186 +635,17 @@ func extractArray(payload map[string]interface{}, key string) ([]map[string]inte
 	return items, nil
 }
 
-func flattenTeam(competition, season, team map[string]interface{}) map[string]interface{} {
-	area := nestedMap(team, "area")
-	out := map[string]interface{}{
-		"id":               team["id"],
-		"name":             team["name"],
-		"short_name":       team["shortName"],
-		"tla":              team["tla"],
-		"crest":            team["crest"],
-		"address":          team["address"],
-		"website":          team["website"],
-		"founded":          team["founded"],
-		"club_colors":      team["clubColors"],
-		"venue":            team["venue"],
-		"last_updated":     team["lastUpdated"],
-		"area_id":          area["id"],
-		"area_name":        area["name"],
-		"area_code":        area["code"],
-		"area_flag":        area["flag"],
-		"competition_id":   competition["id"],
-		"competition_code": competition["code"],
-		"competition_name": competition["name"],
-		"season_id":        season["id"],
-		"season_start":     season["startDate"],
-		"season_end":       season["endDate"],
-		"team":             team,
-		"area":             area,
+func makeEvent(matchID, eventType string, index int, event map[string]interface{}) map[string]interface{} {
+	row := map[string]interface{}{
+		"event_key":   makeEventKey(matchID, eventType, index, event),
+		"match_id":    matchID,
+		"event_type":  eventType,
+		"event_index": index,
 	}
-	return normalizeMap(out)
-}
-
-func flattenStanding(competition, season, standing, row map[string]interface{}) map[string]interface{} {
-	team := nestedMap(row, "team")
-	out := map[string]interface{}{
-		"competition_id":   competition["id"],
-		"competition_code": competition["code"],
-		"competition_name": competition["name"],
-		"season_id":        season["id"],
-		"season_start":     season["startDate"],
-		"season_end":       season["endDate"],
-		"stage":            standing["stage"],
-		"standing_type":    standing["type"],
-		"group_name":       standing["group"],
-		"position":         row["position"],
-		"team_id":          team["id"],
-		"team_name":        team["name"],
-		"team_short_name":  team["shortName"],
-		"team_tla":         team["tla"],
-		"team_crest":       team["crest"],
-		"played_games":     row["playedGames"],
-		"form":             row["form"],
-		"won":              row["won"],
-		"draw":             row["draw"],
-		"lost":             row["lost"],
-		"points":           row["points"],
-		"goals_for":        row["goalsFor"],
-		"goals_against":    row["goalsAgainst"],
-		"goal_difference":  row["goalDifference"],
-		"standing":         standing,
-		"team":             team,
-		"competition":      competition,
-		"season":           season,
+	for key, value := range event {
+		row[key] = value
 	}
-	return normalizeMap(out)
-}
-
-func flattenMatch(match map[string]interface{}) map[string]interface{} {
-	competition := nestedMap(match, "competition")
-	season := nestedMap(match, "season")
-	homeTeam := nestedMap(match, "homeTeam")
-	awayTeam := nestedMap(match, "awayTeam")
-	score := nestedMap(match, "score")
-	fullTime := nestedMap(score, "fullTime")
-	halfTime := nestedMap(score, "halfTime")
-	regularTime := nestedMap(score, "regularTime")
-	extraTime := nestedMap(score, "extraTime")
-	penalties := nestedMap(score, "penalties")
-	out := map[string]interface{}{
-		"id":                     match["id"],
-		"utc_date":               match["utcDate"],
-		"status":                 match["status"],
-		"minute":                 match["minute"],
-		"injury_time":            match["injuryTime"],
-		"attendance":             match["attendance"],
-		"venue":                  match["venue"],
-		"matchday":               match["matchday"],
-		"stage":                  match["stage"],
-		"group_name":             match["group"],
-		"last_updated":           match["lastUpdated"],
-		"competition_id":         competition["id"],
-		"competition_code":       competition["code"],
-		"competition_name":       competition["name"],
-		"season_id":              season["id"],
-		"season_start":           season["startDate"],
-		"season_end":             season["endDate"],
-		"home_team_id":           homeTeam["id"],
-		"home_team_name":         homeTeam["name"],
-		"home_team_short_name":   homeTeam["shortName"],
-		"home_team_tla":          homeTeam["tla"],
-		"home_team_crest":        homeTeam["crest"],
-		"away_team_id":           awayTeam["id"],
-		"away_team_name":         awayTeam["name"],
-		"away_team_short_name":   awayTeam["shortName"],
-		"away_team_tla":          awayTeam["tla"],
-		"away_team_crest":        awayTeam["crest"],
-		"winner":                 score["winner"],
-		"duration":               score["duration"],
-		"fulltime_home_goals":    fullTime["home"],
-		"fulltime_away_goals":    fullTime["away"],
-		"halftime_home_goals":    halfTime["home"],
-		"halftime_away_goals":    halfTime["away"],
-		"regulartime_home_goals": regularTime["home"],
-		"regulartime_away_goals": regularTime["away"],
-		"extratime_home_goals":   extraTime["home"],
-		"extratime_away_goals":   extraTime["away"],
-		"penalty_home_goals":     penalties["home"],
-		"penalty_away_goals":     penalties["away"],
-		"match":                  match,
-		"competition":            competition,
-		"season":                 season,
-		"home_team":              homeTeam,
-		"away_team":              awayTeam,
-		"score":                  score,
-		"referees":               interfaceSlice(match["referees"]),
-		"goals":                  interfaceSlice(match["goals"]),
-		"bookings":               interfaceSlice(match["bookings"]),
-		"substitutions":          firstNonNil(match["substitutions"], match["subs"]),
-	}
-	return normalizeMap(out)
-}
-
-func flattenPlayer(team, player map[string]interface{}) map[string]interface{} {
-	out := map[string]interface{}{
-		"team_id":       team["id"],
-		"team_name":     team["name"],
-		"team_tla":      team["tla"],
-		"id":            player["id"],
-		"name":          player["name"],
-		"first_name":    player["firstName"],
-		"last_name":     player["lastName"],
-		"date_of_birth": player["dateOfBirth"],
-		"nationality":   player["nationality"],
-		"section":       player["section"],
-		"position":      player["position"],
-		"shirt_number":  player["shirtNumber"],
-		"last_updated":  player["lastUpdated"],
-		"player":        player,
-		"team":          team,
-	}
-	return normalizeMap(out)
-}
-
-func flattenEvent(matchID, eventType string, index int, event map[string]interface{}) map[string]interface{} {
-	team := firstNestedMap(event, "team")
-	player := firstNestedMap(event, "player", "scorer")
-	assist := firstNestedMap(event, "assist")
-	playerIn := firstNestedMap(event, "playerIn")
-	playerOut := firstNestedMap(event, "playerOut")
-	out := map[string]interface{}{
-		"event_key":       makeEventKey(matchID, eventType, index, event),
-		"match_id":        matchID,
-		"event_type":      eventType,
-		"event_index":     index,
-		"minute":          firstNonNil(event["minute"], event["time"]),
-		"injury_time":     firstNonNil(event["injuryTime"], event["injury_time"]),
-		"team_id":         team["id"],
-		"team_name":       team["name"],
-		"player_id":       player["id"],
-		"player_name":     player["name"],
-		"assist_id":       assist["id"],
-		"assist_name":     assist["name"],
-		"player_in_id":    playerIn["id"],
-		"player_in_name":  playerIn["name"],
-		"player_out_id":   playerOut["id"],
-		"player_out_name": playerOut["name"],
-		"card":            firstNonNil(event["card"], event["cardType"]),
-		"detail":          firstNonNil(event["type"], event["detail"], event["description"]),
-		"score":           event["score"],
-		"raw":             event,
-	}
-	return normalizeMap(out)
+	return row
 }
 
 func competitionEndpoint(competition, resource string) string {
@@ -880,182 +769,4 @@ func parseBool(value string) bool {
 	default:
 		return false
 	}
-}
-
-func selectColumns(items []map[string]interface{}, columns []schema.Column) []map[string]interface{} {
-	out := make([]map[string]interface{}, 0, len(items))
-	for _, item := range items {
-		selected := make(map[string]interface{}, len(columns))
-		for _, column := range columns {
-			if value, ok := item[column.Name]; ok {
-				selected[column.Name] = value
-			}
-		}
-		out = append(out, selected)
-	}
-	return out
-}
-
-func col(name string, dt schema.DataType) schema.Column {
-	return schema.Column{Name: name, DataType: dt, Nullable: true}
-}
-
-var teamColumns = []schema.Column{
-	col("id", schema.TypeInt64),
-	col("name", schema.TypeString),
-	col("short_name", schema.TypeString),
-	col("tla", schema.TypeString),
-	col("crest", schema.TypeString),
-	col("address", schema.TypeString),
-	col("website", schema.TypeString),
-	col("founded", schema.TypeInt64),
-	col("club_colors", schema.TypeString),
-	col("venue", schema.TypeString),
-	col("last_updated", schema.TypeTimestampTZ),
-	col("area_id", schema.TypeInt64),
-	col("area_name", schema.TypeString),
-	col("area_code", schema.TypeString),
-	col("area_flag", schema.TypeString),
-	col("competition_id", schema.TypeInt64),
-	col("competition_code", schema.TypeString),
-	col("competition_name", schema.TypeString),
-	col("season_id", schema.TypeInt64),
-	col("season_start", schema.TypeDate),
-	col("season_end", schema.TypeDate),
-	col("team", schema.TypeJSON),
-	col("area", schema.TypeJSON),
-}
-
-var stadiumColumns = []schema.Column{
-	col("venue_key", schema.TypeString),
-	col("venue_name", schema.TypeString),
-	col("source_context", schema.TypeString),
-	col("team_id", schema.TypeInt64),
-	col("team_name", schema.TypeString),
-	col("match_id", schema.TypeInt64),
-	col("raw", schema.TypeJSON),
-}
-
-var standingColumns = []schema.Column{
-	col("competition_id", schema.TypeInt64),
-	col("competition_code", schema.TypeString),
-	col("competition_name", schema.TypeString),
-	col("season_id", schema.TypeInt64),
-	col("season_start", schema.TypeDate),
-	col("season_end", schema.TypeDate),
-	col("stage", schema.TypeString),
-	col("standing_type", schema.TypeString),
-	col("group_name", schema.TypeString),
-	col("position", schema.TypeInt64),
-	col("team_id", schema.TypeInt64),
-	col("team_name", schema.TypeString),
-	col("team_short_name", schema.TypeString),
-	col("team_tla", schema.TypeString),
-	col("team_crest", schema.TypeString),
-	col("played_games", schema.TypeInt64),
-	col("form", schema.TypeString),
-	col("won", schema.TypeInt64),
-	col("draw", schema.TypeInt64),
-	col("lost", schema.TypeInt64),
-	col("points", schema.TypeInt64),
-	col("goals_for", schema.TypeInt64),
-	col("goals_against", schema.TypeInt64),
-	col("goal_difference", schema.TypeInt64),
-	col("standing", schema.TypeJSON),
-	col("team", schema.TypeJSON),
-	col("competition", schema.TypeJSON),
-	col("season", schema.TypeJSON),
-}
-
-var matchColumns = []schema.Column{
-	col("id", schema.TypeInt64),
-	col("utc_date", schema.TypeTimestampTZ),
-	col("status", schema.TypeString),
-	col("minute", schema.TypeInt64),
-	col("injury_time", schema.TypeInt64),
-	col("attendance", schema.TypeInt64),
-	col("venue", schema.TypeString),
-	col("matchday", schema.TypeInt64),
-	col("stage", schema.TypeString),
-	col("group_name", schema.TypeString),
-	col("last_updated", schema.TypeTimestampTZ),
-	col("competition_id", schema.TypeInt64),
-	col("competition_code", schema.TypeString),
-	col("competition_name", schema.TypeString),
-	col("season_id", schema.TypeInt64),
-	col("season_start", schema.TypeDate),
-	col("season_end", schema.TypeDate),
-	col("home_team_id", schema.TypeInt64),
-	col("home_team_name", schema.TypeString),
-	col("home_team_short_name", schema.TypeString),
-	col("home_team_tla", schema.TypeString),
-	col("home_team_crest", schema.TypeString),
-	col("away_team_id", schema.TypeInt64),
-	col("away_team_name", schema.TypeString),
-	col("away_team_short_name", schema.TypeString),
-	col("away_team_tla", schema.TypeString),
-	col("away_team_crest", schema.TypeString),
-	col("winner", schema.TypeString),
-	col("duration", schema.TypeString),
-	col("fulltime_home_goals", schema.TypeInt64),
-	col("fulltime_away_goals", schema.TypeInt64),
-	col("halftime_home_goals", schema.TypeInt64),
-	col("halftime_away_goals", schema.TypeInt64),
-	col("regulartime_home_goals", schema.TypeInt64),
-	col("regulartime_away_goals", schema.TypeInt64),
-	col("extratime_home_goals", schema.TypeInt64),
-	col("extratime_away_goals", schema.TypeInt64),
-	col("penalty_home_goals", schema.TypeInt64),
-	col("penalty_away_goals", schema.TypeInt64),
-	col("match", schema.TypeJSON),
-	col("competition", schema.TypeJSON),
-	col("season", schema.TypeJSON),
-	col("home_team", schema.TypeJSON),
-	col("away_team", schema.TypeJSON),
-	col("score", schema.TypeJSON),
-	col("referees", schema.TypeJSON),
-	col("goals", schema.TypeJSON),
-	col("bookings", schema.TypeJSON),
-	col("substitutions", schema.TypeJSON),
-}
-
-var playerColumns = []schema.Column{
-	col("team_id", schema.TypeInt64),
-	col("team_name", schema.TypeString),
-	col("team_tla", schema.TypeString),
-	col("id", schema.TypeInt64),
-	col("name", schema.TypeString),
-	col("first_name", schema.TypeString),
-	col("last_name", schema.TypeString),
-	col("date_of_birth", schema.TypeDate),
-	col("nationality", schema.TypeString),
-	col("section", schema.TypeString),
-	col("position", schema.TypeString),
-	col("shirt_number", schema.TypeInt64),
-	col("last_updated", schema.TypeTimestampTZ),
-	col("player", schema.TypeJSON),
-	col("team", schema.TypeJSON),
-}
-
-var eventColumns = []schema.Column{
-	col("event_key", schema.TypeString),
-	col("match_id", schema.TypeInt64),
-	col("event_type", schema.TypeString),
-	col("event_index", schema.TypeInt64),
-	col("minute", schema.TypeInt64),
-	col("injury_time", schema.TypeInt64),
-	col("team_id", schema.TypeInt64),
-	col("team_name", schema.TypeString),
-	col("player_id", schema.TypeInt64),
-	col("player_name", schema.TypeString),
-	col("assist_id", schema.TypeInt64),
-	col("assist_name", schema.TypeString),
-	col("player_in_id", schema.TypeInt64),
-	col("player_in_name", schema.TypeString),
-	col("player_out_id", schema.TypeInt64),
-	col("player_out_name", schema.TypeString),
-	col("card", schema.TypeString),
-	col("detail", schema.TypeString),
-	col("score", schema.TypeJSON),
-	col("raw", schema.TypeJSON),
 }
