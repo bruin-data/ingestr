@@ -1,6 +1,6 @@
 # BallDontLie FIFA Source Research
 
-Status: BallDontLie FIFA source code exists in `pkg/source/balldontlie_fifa`. This document maps the official API surface for the selected main tables and should guide any follow-up schema changes.
+Status: BallDontLie FIFA source code exists in `pkg/source/balldontlie`. This document maps the official API surface for the selected main tables and should guide any follow-up schema changes.
 
 Primary docs:
 
@@ -158,7 +158,6 @@ These are not in the requested main-table list, but the existing source already 
 
 ## Existing Connector Notes
 
-- Current URI: `balldontlie-fifa://?api_key=<api-key>&season=2026`.
+- Current URI: `balldontlie://?api_key=<api-key>&season=2026`.
 - Current connector sends `Authorization` and `seasons[]` on every table.
-- Current connector handles cursor pagination and lets `ReadOptions.PageSize` reduce page size below the default.
-- One follow-up to consider: `players` and `rosters` docs say omitted `seasons[]` has all-edition behavior, but the connector always sends the configured season. That is correct for the requested World Cup 2026 default.
+- All tables use the `replace` strategy. The API exposes no time-interval/incremental filter parameters (only `seasons[]`, cursor pagination, and ID filters), so each run does a full fetch.
