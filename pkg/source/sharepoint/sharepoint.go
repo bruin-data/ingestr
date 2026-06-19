@@ -17,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablespec"
 )
 
 // Metadata columns emitted on every row.
@@ -264,24 +265,48 @@ func parseURI(uri string) (connConfig, error) {
 	return cfg, nil
 }
 
-// parseTableSpec parses a source-table string of the form
+// sharepointParamKeys are the query parameters recognized by the URL-style
+// source-table form (see parseTableSpec). Kept as the single source of truth for
+// strict validation so a typo errors instead of being silently dropped.
+var sharepointParamKeys = []string{
+	"sheet", "sheets", "skip", "encoding", "sep", "format", "raw", "formatted", "drop_empty", "date_cols",
+}
+
+// parseTableSpec parses a source-table string in one of two forms:
 //
-//	<path>#<format>,<key>=<val>,...
+//	<path>?<key>=<val>&...           (URL-style query parameters; preferred)
+//	<path>#<format>,<key>=<val>,...  (legacy comma-separated hints)
 //
 // The path is literal (may contain spaces and "&") and may include glob
-// wildcards (* ? [ ] {}). The string is split on the LAST "#" only when the
-// suffix parses as a hint list; otherwise the whole string is the path. Use
-// "%23" to embed a literal "#" in the path.
+// wildcards (* ? [ ] {}). The query form is selected only when the text after the
+// last "?" looks like a parameter block, so a "?" used as a glob wildcard (e.g.
+// "Reports/q?.xlsx") stays part of the path; otherwise the legacy form applies and
+// the string is split on the LAST "#" only when the suffix parses as a hint list.
+// Use "%23" to embed a literal "#" in the path, and percent-encode any literal "?"
+// that must sit in the path alongside query parameters.
 func parseTableSpec(name string) (tableSpec, error) {
 	spec := tableSpec{}
-	path := name
 
-	if idx := strings.LastIndex(name, "#"); idx != -1 {
-		suffix := name[idx+1:]
-		if looksLikeHints(suffix) {
-			path = name[:idx]
-			if err := applyHints(&spec, suffix); err != nil {
-				return tableSpec{}, err
+	path, params, hasQuery, err := tablespec.Split(name)
+	if err != nil {
+		return tableSpec{}, err
+	}
+	if hasQuery {
+		if err := tablespec.ValidateKeys(params, sharepointParamKeys...); err != nil {
+			return tableSpec{}, err
+		}
+		if err := applyParams(&spec, params); err != nil {
+			return tableSpec{}, err
+		}
+	} else {
+		path = name
+		if idx := strings.LastIndex(name, "#"); idx != -1 {
+			suffix := name[idx+1:]
+			if looksLikeHints(suffix) {
+				path = name[:idx]
+				if err := applyHints(&spec, suffix); err != nil {
+					return tableSpec{}, err
+				}
 			}
 		}
 	}
@@ -390,6 +415,82 @@ func applyHints(spec *tableSpec, s string) error {
 		}
 	}
 	return nil
+}
+
+// applyParams applies the URL-style query parameters to spec. Keys are read
+// explicitly (not by ranging the map) so behavior is deterministic regardless of
+// query order. A list-valued option accepts either a repeated key
+// (sheets=A&sheets=B) or a single "|"-joined value (sheets=A|B). Unknown keys are
+// rejected earlier by tablespec.ValidateKeys.
+func applyParams(spec *tableSpec, p url.Values) error {
+	for _, v := range p["sheet"] {
+		if v = strings.TrimSpace(v); v != "" {
+			spec.sheets = append(spec.sheets, v)
+		}
+	}
+	for _, v := range p["sheets"] {
+		spec.sheets = append(spec.sheets, splitSheets(v)...)
+	}
+	for _, v := range p["date_cols"] {
+		spec.dateCols = append(spec.dateCols, splitSheets(v)...)
+	}
+
+	if p.Has("skip") {
+		n, err := strconv.Atoi(strings.TrimSpace(p.Get("skip")))
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid skip parameter %q: must be a non-negative integer", p.Get("skip"))
+		}
+		spec.skip = n
+	}
+	if p.Has("encoding") {
+		spec.encoding = strings.TrimSpace(p.Get("encoding"))
+	}
+	if p.Has("sep") {
+		spec.sep = p.Get("sep")
+	}
+	if p.Has("format") {
+		spec.format = parseFormat(p.Get("format"))
+	}
+	if p.Has("formatted") {
+		b, err := parseParamBool("formatted", p.Get("formatted"))
+		if err != nil {
+			return err
+		}
+		spec.formatted = b
+	}
+	if p.Has("raw") {
+		b, err := parseParamBool("raw", p.Get("raw"))
+		if err != nil {
+			return err
+		}
+		if b {
+			spec.formatted = false
+		}
+	}
+	if p.Has("drop_empty") {
+		b, err := parseParamBool("drop_empty", p.Get("drop_empty"))
+		if err != nil {
+			return err
+		}
+		spec.dropEmpty = b
+	}
+
+	return nil
+}
+
+// parseParamBool reads a boolean query parameter. A bare key (empty value, e.g.
+// "?raw") is treated as true to keep flag ergonomics; otherwise the value must
+// parse as a Go boolean.
+func parseParamBool(key, val string) (bool, error) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return true, nil
+	}
+	b, err := strconv.ParseBool(val)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s parameter %q: expected a boolean (true/false)", key, val)
+	}
+	return b, nil
 }
 
 // splitSheets splits a sheets= union on "|" (since "," separates hints).

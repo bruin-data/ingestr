@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablespec"
 )
 
 const (
@@ -283,12 +285,15 @@ func (s *MondaySource) Close(ctx context.Context) error {
 }
 
 func (s *MondaySource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
-	tableName, _ := parseTableSpec(req.Name)
-	if !isValidTable(tableName) {
+	spec, err := parseMondaySpec(req.Name)
+	if err != nil {
+		return nil, err
+	}
+	if !isValidTable(spec.table) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", req.Name, strings.Join(supportedTables, ", "))
 	}
 
-	tableSchema, err := s.getSchema(ctx, tableName)
+	tableSchema, err := s.getSchema(ctx, spec.table)
 	if err != nil {
 		return nil, err
 	}
@@ -297,13 +302,13 @@ func (s *MondaySource) GetTable(ctx context.Context, req source.TableRequest) (s
 	incrementalKey := ""
 	strategy := config.StrategyReplace
 
-	if tableName == "boards" || tableName == "updates" {
+	if spec.table == "boards" || spec.table == "updates" {
 		incrementalKey = "updated_at"
 		strategy = config.StrategyMerge
 	}
 
 	return &source.DynamicSourceTable{
-		TableName:           tableName,
+		TableName:           spec.table,
 		TablePrimaryKeys:    tableSchema.PrimaryKeys, // Use primary keys from schema
 		TableIncrementalKey: incrementalKey,
 		TableStrategy:       strategy,
@@ -312,7 +317,7 @@ func (s *MondaySource) GetTable(ctx context.Context, req source.TableRequest) (s
 			return tableSchema, nil
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, req.Name, opts)
+			return s.read(ctx, spec, opts)
 		},
 	}, nil
 }
@@ -372,44 +377,14 @@ func (s *MondaySource) getSchema(ctx context.Context, table string) (*schema.Tab
 	}, nil
 }
 
-func (s *MondaySource) read(ctx context.Context, table string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	tableName, params := parseTableSpec(table)
-	if !isValidTable(tableName) {
-		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", table, strings.Join(supportedTables, ", "))
-	}
-
-	// The board-aware tables accept a `:<board_id>[,<id>...]` param to scope to
-	// specific boards (empty -> all boards in the account):
-	//   items:<ids> / items:<master>:linked / updates:<ids> /
-	//   board_columns:<ids> / board_views:<ids> / boards:<ids>
-	var boardIDParams []string
-	itemsLinked := false
-	if len(params) > 0 {
-		switch tableName {
-		case "items", "updates", "board_columns", "board_views", "boards":
-		default:
-			return nil, fmt.Errorf("%s table must be in the format `%s`", tableName, tableName)
-		}
-		if tableName == "items" && params[len(params)-1] == "linked" {
-			itemsLinked = true
-			params = params[:len(params)-1]
-		}
-		for _, p := range params {
-			for _, id := range strings.Split(p, ",") {
-				if trimmed := strings.TrimSpace(id); trimmed != "" {
-					boardIDParams = append(boardIDParams, trimmed)
-				}
-			}
-		}
-	}
-
+func (s *MondaySource) read(ctx context.Context, spec mondayReadSpec, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
 		defer close(results)
 
 		var err error
-		switch tableName {
+		switch spec.table {
 		case "account":
 			err = s.readAccount(ctx, opts, results)
 		case "account_roles":
@@ -417,15 +392,15 @@ func (s *MondaySource) read(ctx context.Context, table string, opts source.ReadO
 		case "users":
 			err = s.readUsers(ctx, opts, results)
 		case "boards":
-			err = s.readBoards(ctx, opts, results, boardIDParams)
+			err = s.readBoards(ctx, opts, results, spec.boardIDs)
 		case "items":
-			err = s.readItems(ctx, opts, results, boardIDParams, itemsLinked)
+			err = s.readItems(ctx, opts, results, spec.boardIDs, spec.linked)
 		case "workspaces":
 			err = s.readWorkspaces(ctx, opts, results)
 		case "webhooks":
 			err = s.readWebhooks(ctx, opts, results)
 		case "updates":
-			err = s.readUpdates(ctx, opts, results, boardIDParams)
+			err = s.readUpdates(ctx, opts, results, spec.boardIDs)
 		case "teams":
 			err = s.readTeams(ctx, opts, results)
 		case "tags":
@@ -433,11 +408,11 @@ func (s *MondaySource) read(ctx context.Context, table string, opts source.ReadO
 		case "custom_activities":
 			err = s.readCustomActivities(ctx, opts, results)
 		case "board_columns":
-			err = s.readBoardColumns(ctx, opts, results, boardIDParams)
+			err = s.readBoardColumns(ctx, opts, results, spec.boardIDs)
 		case "board_views":
-			err = s.readBoardViews(ctx, opts, results, boardIDParams)
+			err = s.readBoardViews(ctx, opts, results, spec.boardIDs)
 		default:
-			err = fmt.Errorf("unsupported table: %s", table)
+			err = fmt.Errorf("unsupported table: %s", spec.table)
 		}
 
 		if err != nil {
@@ -464,6 +439,108 @@ func isValidTable(table string) bool {
 		}
 	}
 	return false
+}
+
+// mondayReadSpec is the parsed source-table: the base table plus an optional
+// board-id scope and the items-only "linked" flag.
+type mondayReadSpec struct {
+	table    string
+	boardIDs []string
+	linked   bool
+}
+
+// mondayParamKeys are the query parameters recognized by the URL-style
+// source-table form (see parseMondaySpec).
+var mondayParamKeys = []string{"board_ids", "linked"}
+
+// boardAwareTables accept a board-id scope.
+var boardAwareTables = map[string]bool{
+	"items":         true,
+	"updates":       true,
+	"board_columns": true,
+	"board_views":   true,
+	"boards":        true,
+}
+
+// parseMondaySpec parses a source-table string in either form:
+//
+//	items?board_ids=12345&board_ids=67890&linked=true   (URL-style; preferred)
+//	items:12345,67890   /   items:<id>:linked            (legacy colon form)
+//
+// Board-id scoping is only valid for board-aware tables and the linked flag only
+// for items, matching the legacy contract. The query form is selected only when
+// the table string carries a parameter block (see tablespec.Split).
+func parseMondaySpec(name string) (mondayReadSpec, error) {
+	path, params, hasQuery, err := tablespec.Split(name)
+	if err != nil {
+		return mondayReadSpec{}, err
+	}
+
+	if hasQuery {
+		if err := tablespec.ValidateKeys(params, mondayParamKeys...); err != nil {
+			return mondayReadSpec{}, err
+		}
+		spec := mondayReadSpec{table: strings.TrimSpace(path)}
+		for _, v := range params["board_ids"] {
+			spec.boardIDs = append(spec.boardIDs, splitBoardIDs(v)...)
+		}
+		if params.Has("linked") {
+			linked, err := parseLinkedParam(params.Get("linked"))
+			if err != nil {
+				return mondayReadSpec{}, err
+			}
+			spec.linked = linked
+		}
+		if len(spec.boardIDs) > 0 && !boardAwareTables[spec.table] {
+			return mondayReadSpec{}, fmt.Errorf("%s table does not accept a board_ids parameter", spec.table)
+		}
+		if spec.linked && spec.table != "items" {
+			return mondayReadSpec{}, fmt.Errorf("linked parameter is only valid for the items table")
+		}
+		return spec, nil
+	}
+
+	// Legacy colon form, preserved exactly.
+	base, segs := parseTableSpec(name)
+	spec := mondayReadSpec{table: base}
+	if len(segs) > 0 {
+		if !boardAwareTables[base] {
+			return mondayReadSpec{}, fmt.Errorf("%s table must be in the format `%s`", base, base)
+		}
+		if base == "items" && segs[len(segs)-1] == "linked" {
+			spec.linked = true
+			segs = segs[:len(segs)-1]
+		}
+		for _, p := range segs {
+			spec.boardIDs = append(spec.boardIDs, splitBoardIDs(p)...)
+		}
+	}
+	return spec, nil
+}
+
+// splitBoardIDs splits a comma-separated id segment into trimmed, non-empty ids.
+func splitBoardIDs(v string) []string {
+	var ids []string
+	for _, id := range strings.Split(v, ",") {
+		if t := strings.TrimSpace(id); t != "" {
+			ids = append(ids, t)
+		}
+	}
+	return ids
+}
+
+// parseLinkedParam reads the linked query value; a bare key (empty value) is
+// treated as true to keep flag ergonomics.
+func parseLinkedParam(val string) (bool, error) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return true, nil
+	}
+	b, err := strconv.ParseBool(val)
+	if err != nil {
+		return false, fmt.Errorf("invalid linked parameter %q: expected a boolean (true/false)", val)
+	}
+	return b, nil
 }
 
 // GraphQL types
