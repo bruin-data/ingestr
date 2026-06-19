@@ -226,7 +226,7 @@ Recommended ingestion flow:
 - Default competition is `WC`; default season is `2026`.
 - Schema is inferred (`KnownSchema: false`) — nested provider objects are preserved as JSON columns and scalar fields are typed automatically. Fields are not flattened into per-attribute columns.
 - Strategy per table: merge where the table accepts a time filter or returns `lastUpdated` (`teams`, `matches`, `match_events`); replace otherwise (`stadiums`, `group_standings`, `players`).
-- `HandlesIncrementality()` is `true`. `matches` and `match_events` pass `--interval-start`/`--interval-end` to the API as server-side `dateFrom`/`dateTo`; explicit URI `date_from`/`date_to` take precedence. Replace tables ignore the interval and always full-fetch.
+- `HandlesIncrementality()` is `true`. `matches` and `match_events` pass `--interval-start`/`--interval-end` to the API as server-side `dateFrom`/`dateTo`. Replace tables ignore the interval and always full-fetch.
 - The HTTP client is rate-limited to ~80% of the free tier's 10 requests/minute, and responses are decoded with `json.Number` to preserve large-integer precision.
 - Stadiums and match events are derived tables because the API has no first-class stadium or unified event resource; `players` is derived from team squads.
 - Deep player/event fields are subscription-dependent: `match_events` loads 0 rows without the Deep Data plan, and `players` requires `/teams/{id}` access.
