@@ -1,10 +1,10 @@
-# BallDontLie
+# BallDontLie FIFA
 
 [BallDontLie](https://www.balldontlie.io/) provides FIFA World Cup API endpoints for teams, stadiums, matches, players, rosters, lineups, events, and match analytics.
 
-`ingestr` supports BallDontLie as a keyed source for richer World Cup data, including player and match-level tables.
+`ingestr` supports BallDontLie FIFA as a keyed source for richer World Cup data, including player and match-level tables.
 
-For endpoint parameters, plan tiers, and implementation notes across the selected soccer providers, see the [BallDontLie source research](../soccer-sources/balldontlie.md).
+For endpoint parameters, plan tiers, and implementation notes across the selected soccer providers, see the [BallDontLie FIFA source research](../soccer-sources/balldontlie.md).
 
 ## URI format
 

@@ -1,6 +1,6 @@
-# BallDontLie Source Research
+# BallDontLie FIFA Source Research
 
-Status: BallDontLie source code exists in `pkg/source/balldontlie`. This document maps the official API surface for the selected main tables and should guide any follow-up schema changes.
+Status: BallDontLie FIFA source code exists in `pkg/source/balldontlie`. This document maps the official API surface for the selected main tables and should guide any follow-up schema changes.
 
 Primary docs:
 

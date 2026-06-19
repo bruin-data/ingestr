@@ -359,7 +359,7 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
-        <td>BallDontLie</td>
+        <td>BallDontLie FIFA</td>
         <td>✅</td>
         <td>-</td>
     </tr>
