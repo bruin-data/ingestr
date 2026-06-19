@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"sort"
@@ -206,7 +207,7 @@ func (s *APIFootballSource) read(ctx context.Context, cfg tableConfig, opts sour
 
 // sendBatch converts a page of items to an Arrow record and streams it to the
 // results channel. Empty pages are skipped so no zero-row batch is emitted.
-func sendBatch(items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func sendBatch(items []map[string]any, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	if len(items) == 0 {
 		return nil
 	}
@@ -232,9 +233,9 @@ func (s *APIFootballSource) readTeams(ctx context.Context, opts source.ReadOptio
 		return fmt.Errorf("malformed api-football response from /teams: %w", err)
 	}
 
-	out := make([]map[string]interface{}, 0, len(items))
+	out := make([]map[string]any, 0, len(items))
 	for _, item := range items {
-		out = append(out, map[string]interface{}{
+		out = append(out, map[string]any{
 			"id":    nestedMap(item, "team")["id"],
 			"team":  item["team"],
 			"venue": item["venue"],
@@ -250,7 +251,7 @@ func (s *APIFootballSource) readStadiums(ctx context.Context, opts source.ReadOp
 		return err
 	}
 
-	fallbacks := make(map[string]map[string]interface{})
+	fallbacks := make(map[string]map[string]any)
 	ids := make([]string, 0)
 	seen := make(map[string]bool)
 	for _, fixture := range fixtures {
@@ -281,13 +282,13 @@ func (s *APIFootballSource) readStadiums(ctx context.Context, opts source.ReadOp
 		if err != nil {
 			return fmt.Errorf("malformed api-football response from /venues: %w", err)
 		}
-		var venue map[string]interface{}
+		var venue map[string]any
 		if len(items) == 0 {
 			venue = fallbacks[id]
 		} else {
 			venue = items[0]
 		}
-		if err := sendBatch([]map[string]interface{}{venue}, opts, results); err != nil {
+		if err := sendBatch([]map[string]any{venue}, opts, results); err != nil {
 			return err
 		}
 	}
@@ -308,33 +309,33 @@ func (s *APIFootballSource) readStandings(ctx context.Context, opts source.ReadO
 		return fmt.Errorf("malformed api-football response from /standings: %w", err)
 	}
 
-	out := make([]map[string]interface{}, 0)
+	out := make([]map[string]any, 0)
 	for _, item := range items {
 		league := nestedMap(item, "league")
 		// Keep the league object raw, minus the standings array it embeds
 		// (which would otherwise duplicate the whole table in every row).
-		leagueHeader := make(map[string]interface{}, len(league))
+		leagueHeader := make(map[string]any, len(league))
 		for key, value := range league {
 			if key == "standings" {
 				continue
 			}
 			leagueHeader[key] = value
 		}
-		rawStandings, ok := league["standings"].([]interface{})
+		rawStandings, ok := league["standings"].([]any)
 		if !ok {
 			continue
 		}
 		for _, rawGroup := range rawStandings {
-			group, ok := rawGroup.([]interface{})
+			group, ok := rawGroup.([]any)
 			if !ok {
 				continue
 			}
 			for _, rawStanding := range group {
-				standing, ok := rawStanding.(map[string]interface{})
+				standing, ok := rawStanding.(map[string]any)
 				if !ok {
 					continue
 				}
-				out = append(out, map[string]interface{}{
+				out = append(out, map[string]any{
 					"league_id":  league["id"],
 					"season":     league["season"],
 					"group_name": standing["group"],
@@ -354,9 +355,9 @@ func (s *APIFootballSource) readMatches(ctx context.Context, opts source.ReadOpt
 	if err != nil {
 		return err
 	}
-	out := make([]map[string]interface{}, 0, len(fixtures))
+	out := make([]map[string]any, 0, len(fixtures))
 	for _, item := range fixtures {
-		out = append(out, map[string]interface{}{
+		out = append(out, map[string]any{
 			"id":      nestedMap(item, "fixture")["id"],
 			"fixture": item["fixture"],
 			"league":  item["league"],
@@ -390,9 +391,9 @@ func (s *APIFootballSource) readPlayers(ctx context.Context, opts source.ReadOpt
 		if err != nil {
 			return fmt.Errorf("malformed api-football response from /players: %w", err)
 		}
-		out := make([]map[string]interface{}, 0, len(items))
+		out := make([]map[string]any, 0, len(items))
 		for _, item := range items {
-			out = append(out, map[string]interface{}{
+			out = append(out, map[string]any{
 				"id":         nestedMap(item, "player")["id"],
 				"player":     item["player"],
 				"statistics": item["statistics"],
@@ -436,12 +437,10 @@ func (s *APIFootballSource) readMatchEvents(ctx context.Context, opts source.Rea
 		if err != nil {
 			return fmt.Errorf("malformed api-football response from /fixtures/events: %w", err)
 		}
-		out := make([]map[string]interface{}, 0, len(items))
+		out := make([]map[string]any, 0, len(items))
 		for idx, item := range items {
-			row := map[string]interface{}{}
-			for key, value := range item {
-				row[key] = value
-			}
+			row := make(map[string]any, len(item)+2)
+			maps.Copy(row, item)
 			// Set synthetic keys after copying so raw API fields can never
 			// overwrite the merge primary key.
 			row["event_key"] = makeEventKey(fixtureID, idx, item)
@@ -455,7 +454,7 @@ func (s *APIFootballSource) readMatchEvents(ctx context.Context, opts source.Rea
 	return nil
 }
 
-func (s *APIFootballSource) fetchFixtures(ctx context.Context, opts source.ReadOptions) ([]map[string]interface{}, error) {
+func (s *APIFootballSource) fetchFixtures(ctx context.Context, opts source.ReadOptions) ([]map[string]any, error) {
 	params := map[string]string{
 		"league": s.league,
 		"season": s.season,
@@ -480,12 +479,12 @@ func (s *APIFootballSource) fetchFixtures(ctx context.Context, opts source.ReadO
 	return items, nil
 }
 
-func (s *APIFootballSource) get(ctx context.Context, endpoint string, params map[string]string) (map[string]interface{}, error) {
+func (s *APIFootballSource) get(ctx context.Context, endpoint string, params map[string]string) (map[string]any, error) {
 	if s.client == nil {
 		return nil, fmt.Errorf("api-football source is not connected")
 	}
 
-	var payload map[string]interface{}
+	var payload map[string]any
 	req := s.client.R(ctx).SetResult(&payload)
 	for key, value := range params {
 		if value != "" {
@@ -525,17 +524,17 @@ func checkResponse(endpoint string, resp *httpclient.Response) error {
 	}
 }
 
-func checkAPIError(endpoint string, payload map[string]interface{}) error {
+func checkAPIError(endpoint string, payload map[string]any) error {
 	errorsValue, ok := payload["errors"]
 	if !ok || errorsValue == nil {
 		return nil
 	}
 	switch v := errorsValue.(type) {
-	case []interface{}:
+	case []any:
 		if len(v) > 0 {
 			return fmt.Errorf("api-football API error for %s: %v", endpoint, v)
 		}
-	case map[string]interface{}:
+	case map[string]any:
 		if len(v) > 0 {
 			return fmt.Errorf("api-football API error for %s: %v", endpoint, v)
 		}
@@ -547,14 +546,14 @@ func checkAPIError(endpoint string, payload map[string]interface{}) error {
 	return nil
 }
 
-func extractResponse(payload map[string]interface{}) ([]map[string]interface{}, error) {
-	raw, ok := payload["response"].([]interface{})
+func extractResponse(payload map[string]any) ([]map[string]any, error) {
+	raw, ok := payload["response"].([]any)
 	if !ok {
 		return nil, fmt.Errorf("missing response array")
 	}
-	items := make([]map[string]interface{}, 0, len(raw))
+	items := make([]map[string]any, 0, len(raw))
 	for i, rawItem := range raw {
-		item, ok := rawItem.(map[string]interface{})
+		item, ok := rawItem.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("response item %d is not an object", i)
 		}
@@ -563,12 +562,12 @@ func extractResponse(payload map[string]interface{}) ([]map[string]interface{}, 
 	return items, nil
 }
 
-func paging(payload map[string]interface{}) (current, total int) {
+func paging(payload map[string]any) (current, total int) {
 	pg := nestedMap(payload, "paging")
 	return valueInt(pg["current"]), valueInt(pg["total"])
 }
 
-func makeEventKey(fixtureID string, index int, item map[string]interface{}) string {
+func makeEventKey(fixtureID string, index int, item map[string]any) string {
 	parts := []string{
 		fixtureID,
 		strconv.Itoa(index),
@@ -583,33 +582,33 @@ func makeEventKey(fixtureID string, index int, item map[string]interface{}) stri
 	return hex.EncodeToString(sum[:])
 }
 
-func nestedMap(item map[string]interface{}, key string) map[string]interface{} {
-	raw, ok := item[key].(map[string]interface{})
+func nestedMap(item map[string]any, key string) map[string]any {
+	raw, ok := item[key].(map[string]any)
 	if !ok || raw == nil {
-		return map[string]interface{}{}
+		return map[string]any{}
 	}
 	return raw
 }
 
-func normalizeMap(item map[string]interface{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(item))
+func normalizeMap(item map[string]any) map[string]any {
+	out := make(map[string]any, len(item))
 	for key, value := range item {
 		out[key] = normalizeValue(value)
 	}
 	return out
 }
 
-func normalizeValue(value interface{}) interface{} {
+func normalizeValue(value any) any {
 	switch v := value.(type) {
 	case string:
 		if strings.EqualFold(strings.TrimSpace(v), "null") {
 			return nil
 		}
 		return v
-	case map[string]interface{}:
+	case map[string]any:
 		return normalizeMap(v)
-	case []interface{}:
-		out := make([]interface{}, len(v))
+	case []any:
+		out := make([]any, len(v))
 		for i, item := range v {
 			out[i] = normalizeValue(item)
 		}
@@ -619,7 +618,7 @@ func normalizeValue(value interface{}) interface{} {
 	}
 }
 
-func valueString(value interface{}) string {
+func valueString(value any) string {
 	switch v := value.(type) {
 	case nil:
 		return ""
@@ -636,7 +635,7 @@ func valueString(value interface{}) string {
 	}
 }
 
-func valueInt(value interface{}) int {
+func valueInt(value any) int {
 	switch v := value.(type) {
 	case float64:
 		return int(v)

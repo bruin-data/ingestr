@@ -54,7 +54,7 @@ func TestAPIFootballReadTeamsUsesAuthLeagueAndSeason(t *testing.T) {
 	require.ElementsMatch(t, []string{"id", "team", "venue"}, columnNames(record))
 	require.Equal(t, "50", fmt.Sprint(decodeUnknown(t, record, "id", 0)))
 	// Nested objects are preserved as JSON, not flattened into top-level columns.
-	team := decodeUnknown(t, record, "team", 0).(map[string]interface{})
+	team := decodeUnknown(t, record, "team", 0).(map[string]any)
 	require.Equal(t, "Brazil", team["name"])
 }
 
@@ -110,8 +110,8 @@ func TestAPIFootballMatchesPreserveNestedObjects(t *testing.T) {
 	require.EqualValues(t, 1, record.NumRows())
 	require.ElementsMatch(t, []string{"id", "fixture", "league", "teams", "goals", "score"}, columnNames(record))
 	require.Equal(t, "1001", fmt.Sprint(decodeUnknown(t, record, "id", 0)))
-	teams := decodeUnknown(t, record, "teams", 0).(map[string]interface{})
-	home := teams["home"].(map[string]interface{})
+	teams := decodeUnknown(t, record, "teams", 0).(map[string]any)
+	home := teams["home"].(map[string]any)
 	require.Equal(t, "50", fmt.Sprint(home["id"]))
 }
 
@@ -219,7 +219,7 @@ func columnNames(record arrow.RecordBatch) []string {
 
 // decodeUnknown reads a value from an inference-driven Unknown column, which
 // stores each value as a JSON-encoded string in extension-array storage.
-func decodeUnknown(t *testing.T, record arrow.RecordBatch, col string, row int) interface{} {
+func decodeUnknown(t *testing.T, record arrow.RecordBatch, col string, row int) any {
 	t.Helper()
 	idx := -1
 	for i, f := range record.Schema().Fields() {
