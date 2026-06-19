@@ -9,7 +9,7 @@ For endpoint parameters, plan tiers, and implementation notes across the selecte
 ## URI format
 
 ```plaintext
-football-data://?api_key=<api-token>&competition=WC&season=2026
+footballdata://?api_key=<api-token>&competition=WC&season=2026
 ```
 
 URI parameters:
@@ -31,7 +31,7 @@ Load World Cup 2026 matches into DuckDB:
 
 ```sh
 ingestr ingest \
-  --source-uri 'football-data://?api_key=<api-token>&competition=WC&season=2026' \
+  --source-uri 'footballdata://?api_key=<api-token>&competition=WC&season=2026' \
   --source-table 'matches' \
   --dest-uri 'duckdb:///worldcup2026.duckdb' \
   --dest-table 'soccer.matches'
@@ -41,7 +41,7 @@ Load derived World Cup 2026 match events:
 
 ```sh
 ingestr ingest \
-  --source-uri 'football-data://?api_key=<api-token>&competition=WC&season=2026' \
+  --source-uri 'footballdata://?api_key=<api-token>&competition=WC&season=2026' \
   --source-table 'match_events' \
   --dest-uri 'duckdb:///worldcup2026.duckdb' \
   --dest-table 'soccer.match_events'

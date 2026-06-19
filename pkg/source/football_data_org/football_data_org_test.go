@@ -19,16 +19,16 @@ import (
 
 func TestFootballDataOrgMissingAPIKey(t *testing.T) {
 	src := NewFootballDataOrgSource()
-	err := src.Connect(context.Background(), "football-data://")
+	err := src.Connect(context.Background(), "footballdata://")
 	require.ErrorContains(t, err, "api_key")
 }
 
 func TestFootballDataOrgRejectsInvalidSeasonAndMatchday(t *testing.T) {
 	src := NewFootballDataOrgSource()
-	err := src.Connect(context.Background(), "football-data://?api_key=test&season=26")
+	err := src.Connect(context.Background(), "footballdata://?api_key=test&season=26")
 	require.ErrorContains(t, err, "season")
 
-	err = src.Connect(context.Background(), "football-data://?api_key=test&matchday=final")
+	err = src.Connect(context.Background(), "footballdata://?api_key=test&matchday=final")
 	require.ErrorContains(t, err, "matchday")
 }
 
@@ -41,7 +41,7 @@ func TestFootballDataOrgReadTeamsPreservesNestedObjects(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "teams"})
 	require.NoError(t, err)
@@ -78,7 +78,7 @@ func TestFootballDataOrgMatchesUsesFiltersAndOptionalUnfoldHeaders(t *testing.T)
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	uri := "football-data://?api_key=test-token&matchday=1&status=SCHEDULED&date_from=2026-06-11&date_to=2026-06-12&stage=GROUP_STAGE&group=GROUP_A&unfold_goals=true&unfold_bookings=true&base_url=" + url.QueryEscape(server.URL)
+	uri := "footballdata://?api_key=test-token&matchday=1&status=SCHEDULED&date_from=2026-06-11&date_to=2026-06-12&stage=GROUP_STAGE&group=GROUP_A&unfold_goals=true&unfold_bookings=true&base_url=" + url.QueryEscape(server.URL)
 	require.NoError(t, src.Connect(context.Background(), uri))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "matches"})
 	require.NoError(t, err)
@@ -104,7 +104,7 @@ func TestFootballDataOrgMatchesAppliesIngestionInterval(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "matches"})
 	require.NoError(t, err)
 
@@ -125,7 +125,7 @@ func TestFootballDataOrgMatchesURIFiltersOverrideInterval(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	uri := "football-data://?api_key=test-token&date_from=2026-07-01&date_to=2026-07-10&base_url=" + url.QueryEscape(server.URL)
+	uri := "footballdata://?api_key=test-token&date_from=2026-07-01&date_to=2026-07-10&base_url=" + url.QueryEscape(server.URL)
 	require.NoError(t, src.Connect(context.Background(), uri))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "matches"})
 	require.NoError(t, err)
@@ -145,7 +145,7 @@ func TestFootballDataOrgStandingsEmitsTableRowsRaw(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "group_standings"})
 	require.NoError(t, err)
 	require.Equal(t, "replace", string(table.Strategy()))
@@ -176,7 +176,7 @@ func TestFootballDataOrgStadiumsDeriveAndDeduplicate(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "stadiums"})
 	require.NoError(t, err)
 	require.Equal(t, "replace", string(table.Strategy()))
@@ -207,7 +207,7 @@ func TestFootballDataOrgPlayersHydrateTeamDetails(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "players"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"team_id", "id"}, table.PrimaryKeys())
@@ -239,7 +239,7 @@ func TestFootballDataOrgMatchEventsUseUnfoldHeaders(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "match_events"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"event_key"}, table.PrimaryKeys())
@@ -263,7 +263,7 @@ func TestFootballDataOrgReadRespectsExcludeColumns(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "teams"})
 	require.NoError(t, err)
 
@@ -282,7 +282,7 @@ func TestFootballDataOrgReadReturnsAPIError(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "teams"})
 	require.NoError(t, err)
 
@@ -293,12 +293,12 @@ func TestFootballDataOrgReadReturnsAPIError(t *testing.T) {
 }
 
 func TestFootballDataOrgRegistryLookup(t *testing.T) {
-	constructor, err := registry.Default.GetSourceConstructor("football-data")
+	constructor, err := registry.Default.GetSourceConstructor("footballdata")
 	require.NoError(t, err)
 	src, ok := constructor().(source.Source)
 	require.True(t, ok)
 	require.NotNil(t, src)
-	require.Contains(t, src.Schemes(), "football-data")
+	require.Contains(t, src.Schemes(), "footballdata")
 }
 
 func TestFootballDataOrgUnsupportedTable(t *testing.T) {

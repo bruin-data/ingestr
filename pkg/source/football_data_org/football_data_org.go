@@ -51,7 +51,7 @@ func NewFootballDataOrgSource() *FootballDataOrgSource {
 }
 
 func (s *FootballDataOrgSource) Schemes() []string {
-	return []string{"football-data"}
+	return []string{"footballdata"}
 }
 
 func (s *FootballDataOrgSource) Connect(ctx context.Context, uri string) error {
@@ -106,8 +106,8 @@ func parseURI(raw string) (uriConfig, error) {
 	if err != nil {
 		return uriConfig{}, fmt.Errorf("failed to parse football-data URI: %w", err)
 	}
-	if parsed.Scheme != "football-data" {
-		return uriConfig{}, fmt.Errorf("invalid football-data URI: must start with football-data://")
+	if parsed.Scheme != "footballdata" {
+		return uriConfig{}, fmt.Errorf("invalid football-data URI: must start with footballdata://")
 	}
 
 	values := parsed.Query()

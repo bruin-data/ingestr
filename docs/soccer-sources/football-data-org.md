@@ -222,7 +222,7 @@ Recommended ingestion flow:
 
 ## Implementation Notes (as shipped)
 
-- URI: `football-data://?api_key=<token>&competition=WC&season=2026`. Auth via the `X-Auth-Token` header, not a query parameter. `base_url` is supported for tests.
+- URI: `footballdata://?api_key=<token>&competition=WC&season=2026`. Auth via the `X-Auth-Token` header, not a query parameter. `base_url` is supported for tests.
 - Default competition is `WC`; default season is `2026`.
 - Schema is inferred (`KnownSchema: false`) — nested provider objects are preserved as JSON columns and scalar fields are typed automatically. Fields are not flattened into per-attribute columns.
 - Strategy per table: merge where the table accepts a time filter or returns `lastUpdated` (`teams`, `matches`, `match_events`); replace otherwise (`stadiums`, `group_standings`, `players`).
