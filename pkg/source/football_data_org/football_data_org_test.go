@@ -7,29 +7,32 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/registry"
+	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 )
 
 func TestFootballDataOrgMissingAPIKey(t *testing.T) {
 	src := NewFootballDataOrgSource()
-	err := src.Connect(context.Background(), "football-data://")
+	err := src.Connect(context.Background(), "footballdata://")
 	require.ErrorContains(t, err, "api_key")
 }
 
 func TestFootballDataOrgRejectsInvalidSeasonAndMatchday(t *testing.T) {
 	src := NewFootballDataOrgSource()
-	err := src.Connect(context.Background(), "football-data://?api_key=test&season=26")
+	err := src.Connect(context.Background(), "footballdata://?api_key=test&season=26")
 	require.ErrorContains(t, err, "season")
 
-	err = src.Connect(context.Background(), "football-data://?api_key=test&matchday=final")
+	err = src.Connect(context.Background(), "footballdata://?api_key=test&matchday=final")
 	require.ErrorContains(t, err, "matchday")
 }
 
-func TestFootballDataOrgReadTeamsUsesAuthCompetitionAndSeason(t *testing.T) {
+func TestFootballDataOrgReadTeamsPreservesNestedObjects(t *testing.T) {
 	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/competitions/WC/teams", r.URL.Path)
 		require.Equal(t, "2026", r.URL.Query().Get("season"))
@@ -38,25 +41,24 @@ func TestFootballDataOrgReadTeamsUsesAuthCompetitionAndSeason(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "teams"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"id"}, table.PrimaryKeys())
+	require.Equal(t, "merge", string(table.Strategy()))
 
-	results, err := table.Read(context.Background(), source.ReadOptions{})
-	require.NoError(t, err)
-	result := <-results
-	require.NoError(t, result.Err)
-	defer result.Batch.Release()
+	record := readOnce(t, table, source.ReadOptions{})
+	defer record.Release()
 
-	require.EqualValues(t, 2, result.Batch.NumRows())
-	ids := result.Batch.Column(0).(*array.Int64)
-	require.EqualValues(t, 764, ids.Value(0))
-	names := result.Batch.Column(1).(*array.String)
-	require.Equal(t, "Brazil", names.Value(0))
-	venues := result.Batch.Column(9).(*array.String)
-	require.Equal(t, "Maracana", venues.Value(0))
+	require.EqualValues(t, 2, record.NumRows())
+	require.Equal(t, "764", fmt.Sprint(decodeUnknown(t, record, "id", 0)))
+	require.Equal(t, "Brazil", decodeUnknown(t, record, "name", 0))
+	require.Equal(t, "Maracana", decodeUnknown(t, record, "venue", 0))
+	// Nested objects are preserved as JSON, not flattened into top-level columns.
+	require.NotContains(t, columnNames(record), "area_id")
+	area := decodeUnknown(t, record, "area", 0).(map[string]interface{})
+	require.Equal(t, "Brazil", area["name"])
 }
 
 func TestFootballDataOrgMatchesUsesFiltersAndOptionalUnfoldHeaders(t *testing.T) {
@@ -76,25 +78,66 @@ func TestFootballDataOrgMatchesUsesFiltersAndOptionalUnfoldHeaders(t *testing.T)
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	uri := "football-data://?api_key=test-token&matchday=1&status=SCHEDULED&date_from=2026-06-11&date_to=2026-06-12&stage=GROUP_STAGE&group=GROUP_A&unfold_goals=true&unfold_bookings=true&base_url=" + url.QueryEscape(server.URL)
+	uri := "footballdata://?api_key=test-token&matchday=1&status=SCHEDULED&date_from=2026-06-11&date_to=2026-06-12&stage=GROUP_STAGE&group=GROUP_A&unfold_goals=true&unfold_bookings=true&base_url=" + url.QueryEscape(server.URL)
+	require.NoError(t, src.Connect(context.Background(), uri))
+	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "matches"})
+	require.NoError(t, err)
+	require.Equal(t, "merge", string(table.Strategy()))
+
+	record := readOnce(t, table, source.ReadOptions{})
+	defer record.Release()
+
+	require.EqualValues(t, 1, record.NumRows())
+	require.Equal(t, "4001", fmt.Sprint(decodeUnknown(t, record, "id", 0)))
+	require.NotContains(t, columnNames(record), "home_team_id")
+	homeTeam := decodeUnknown(t, record, "homeTeam", 0).(map[string]interface{})
+	require.Equal(t, "764", fmt.Sprint(homeTeam["id"]))
+}
+
+func TestFootballDataOrgMatchesAppliesIngestionInterval(t *testing.T) {
+	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/competitions/WC/matches", r.URL.Path)
+		require.Equal(t, "2026-06-11", r.URL.Query().Get("dateFrom"))
+		require.Equal(t, "2026-06-20", r.URL.Query().Get("dateTo"))
+		_, _ = fmt.Fprint(w, matchesPayload())
+	})
+	defer server.Close()
+
+	src := NewFootballDataOrgSource()
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "matches"})
+	require.NoError(t, err)
+
+	start := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
+	record := readOnce(t, table, source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+	defer record.Release()
+	require.EqualValues(t, 1, record.NumRows())
+}
+
+func TestFootballDataOrgMatchesURIFiltersOverrideInterval(t *testing.T) {
+	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Explicit URI date filters take precedence over the ingestion interval.
+		require.Equal(t, "2026-07-01", r.URL.Query().Get("dateFrom"))
+		require.Equal(t, "2026-07-10", r.URL.Query().Get("dateTo"))
+		_, _ = fmt.Fprint(w, matchesPayload())
+	})
+	defer server.Close()
+
+	src := NewFootballDataOrgSource()
+	uri := "footballdata://?api_key=test-token&date_from=2026-07-01&date_to=2026-07-10&base_url=" + url.QueryEscape(server.URL)
 	require.NoError(t, src.Connect(context.Background(), uri))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "matches"})
 	require.NoError(t, err)
 
-	results, err := table.Read(context.Background(), source.ReadOptions{})
-	require.NoError(t, err)
-	result := <-results
-	require.NoError(t, result.Err)
-	defer result.Batch.Release()
-
-	require.EqualValues(t, 1, result.Batch.NumRows())
-	ids := result.Batch.Column(0).(*array.Int64)
-	require.EqualValues(t, 4001, ids.Value(0))
-	homeTeamIDs := result.Batch.Column(17).(*array.Int64)
-	require.EqualValues(t, 764, homeTeamIDs.Value(0))
+	start := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
+	record := readOnce(t, table, source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+	defer record.Release()
+	require.EqualValues(t, 1, record.NumRows())
 }
 
-func TestFootballDataOrgStandingsFlattenTableRows(t *testing.T) {
+func TestFootballDataOrgStandingsEmitsTableRowsRaw(t *testing.T) {
 	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/competitions/WC/standings", r.URL.Path)
 		_, _ = fmt.Fprint(w, standingsPayload())
@@ -102,21 +145,21 @@ func TestFootballDataOrgStandingsFlattenTableRows(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "group_standings"})
 	require.NoError(t, err)
+	require.Equal(t, "replace", string(table.Strategy()))
 
-	results, err := table.Read(context.Background(), source.ReadOptions{})
-	require.NoError(t, err)
-	result := <-results
-	require.NoError(t, result.Err)
-	defer result.Batch.Release()
+	record := readOnce(t, table, source.ReadOptions{})
+	defer record.Release()
 
-	require.EqualValues(t, 1, result.Batch.NumRows())
-	groupNames := result.Batch.Column(8).(*array.String)
-	require.Equal(t, "GROUP_A", groupNames.Value(0))
-	points := result.Batch.Column(20).(*array.Int64)
-	require.EqualValues(t, 3, points.Value(0))
+	require.EqualValues(t, 1, record.NumRows())
+	require.Equal(t, "GROUP_A", decodeUnknown(t, record, "group_name", 0))
+	require.Equal(t, "764", fmt.Sprint(decodeUnknown(t, record, "team_id", 0)))
+	// The full standing row is kept as a nested object instead of flattened.
+	require.NotContains(t, columnNames(record), "points")
+	standing := decodeUnknown(t, record, "standing", 0).(map[string]interface{})
+	require.Equal(t, "3", fmt.Sprint(standing["points"]))
 }
 
 func TestFootballDataOrgStadiumsDeriveAndDeduplicate(t *testing.T) {
@@ -133,22 +176,22 @@ func TestFootballDataOrgStadiumsDeriveAndDeduplicate(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "stadiums"})
 	require.NoError(t, err)
+	require.Equal(t, "replace", string(table.Strategy()))
 
-	results, err := table.Read(context.Background(), source.ReadOptions{})
-	require.NoError(t, err)
-	result := <-results
-	require.NoError(t, result.Err)
-	defer result.Batch.Release()
+	record := readOnce(t, table, source.ReadOptions{})
+	defer record.Release()
 
-	require.EqualValues(t, 2, result.Batch.NumRows())
-	names := result.Batch.Column(1).(*array.String)
-	require.ElementsMatch(t, []string{"Maracana", "MetLife Stadium"}, []string{names.Value(0), names.Value(1)})
+	require.EqualValues(t, 2, record.NumRows())
+	require.ElementsMatch(t, []string{"Maracana", "MetLife Stadium"}, []string{
+		fmt.Sprint(decodeUnknown(t, record, "venue", 0)),
+		fmt.Sprint(decodeUnknown(t, record, "venue", 1)),
+	})
 }
 
-func TestFootballDataOrgPlayersHydrateTeamSquads(t *testing.T) {
+func TestFootballDataOrgPlayersHydrateTeamDetails(t *testing.T) {
 	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/competitions/WC/teams":
@@ -164,25 +207,28 @@ func TestFootballDataOrgPlayersHydrateTeamSquads(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "players"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"team_id", "id"}, table.PrimaryKeys())
+	require.Equal(t, "replace", string(table.Strategy()))
 
-	results, err := table.Read(context.Background(), source.ReadOptions{Limit: 1})
-	require.NoError(t, err)
-	result := <-results
-	require.NoError(t, result.Err)
-	defer result.Batch.Release()
+	record := readOnce(t, table, source.ReadOptions{Limit: 1})
+	defer record.Release()
 
-	require.EqualValues(t, 1, result.Batch.NumRows())
-	teamIDs := result.Batch.Column(0).(*array.Int64)
-	require.EqualValues(t, 764, teamIDs.Value(0))
-	playerIDs := result.Batch.Column(3).(*array.Int64)
-	require.EqualValues(t, 10, playerIDs.Value(0))
+	require.EqualValues(t, 1, record.NumRows())
+	require.Equal(t, "764", fmt.Sprint(decodeUnknown(t, record, "team_id", 0)))
+	require.Equal(t, "10", fmt.Sprint(decodeUnknown(t, record, "id", 0)))
+	require.NotContains(t, columnNames(record), "first_name")
+	// The raw player object is kept as JSON and carries the richer fields the
+	// /teams/<id> detail endpoint returns beyond the embedded squad.
+	player := decodeUnknown(t, record, "player", 0).(map[string]interface{})
+	require.Equal(t, "Forward One", player["name"])
+	require.Equal(t, "Forward", player["firstName"])
+	require.Equal(t, "10", fmt.Sprint(player["shirtNumber"]))
 }
 
-func TestFootballDataOrgMatchEventsUseUnfoldHeadersAndFlatten(t *testing.T) {
+func TestFootballDataOrgMatchEventsUseUnfoldHeaders(t *testing.T) {
 	server := footballDataServer(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/competitions/WC/matches", r.URL.Path)
 		require.Equal(t, "true", r.Header.Get("X-Unfold-Goals"))
@@ -193,23 +239,21 @@ func TestFootballDataOrgMatchEventsUseUnfoldHeadersAndFlatten(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "match_events"})
 	require.NoError(t, err)
+	require.Equal(t, []string{"event_key"}, table.PrimaryKeys())
+	require.Equal(t, "merge", string(table.Strategy()))
 
-	results, err := table.Read(context.Background(), source.ReadOptions{})
-	require.NoError(t, err)
-	result := <-results
-	require.NoError(t, result.Err)
-	defer result.Batch.Release()
+	record := readOnce(t, table, source.ReadOptions{})
+	defer record.Release()
 
-	require.EqualValues(t, 3, result.Batch.NumRows())
-	eventTypes := result.Batch.Column(2).(*array.String)
-	require.Equal(t, "goal", eventTypes.Value(0))
-	require.Equal(t, "booking", eventTypes.Value(1))
-	require.Equal(t, "substitution", eventTypes.Value(2))
-	playerIDs := result.Batch.Column(8).(*array.Int64)
-	require.EqualValues(t, 10, playerIDs.Value(0))
+	require.EqualValues(t, 3, record.NumRows())
+	require.Subset(t, columnNames(record), []string{"event_key", "match_id", "event_type", "event_index"})
+	require.Equal(t, "goal", decodeUnknown(t, record, "event_type", 0))
+	require.Equal(t, "booking", decodeUnknown(t, record, "event_type", 1))
+	require.Equal(t, "substitution", decodeUnknown(t, record, "event_type", 2))
+	require.NotEmpty(t, decodeUnknown(t, record, "event_key", 0))
 }
 
 func TestFootballDataOrgReadRespectsExcludeColumns(t *testing.T) {
@@ -219,18 +263,16 @@ func TestFootballDataOrgReadRespectsExcludeColumns(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "teams"})
 	require.NoError(t, err)
 
-	results, err := table.Read(context.Background(), source.ReadOptions{Limit: 1, ExcludeColumns: []string{"team", "area"}})
-	require.NoError(t, err)
-	result := <-results
-	require.NoError(t, result.Err)
-	defer result.Batch.Release()
+	record := readOnce(t, table, source.ReadOptions{Limit: 1, ExcludeColumns: []string{"area", "lastUpdated"}})
+	defer record.Release()
 
-	require.EqualValues(t, 1, result.Batch.NumRows())
-	require.EqualValues(t, len(teamColumns)-2, int(result.Batch.NumCols()))
+	require.EqualValues(t, 1, record.NumRows())
+	require.NotContains(t, columnNames(record), "area")
+	require.NotContains(t, columnNames(record), "lastUpdated")
 }
 
 func TestFootballDataOrgReadReturnsAPIError(t *testing.T) {
@@ -240,7 +282,7 @@ func TestFootballDataOrgReadReturnsAPIError(t *testing.T) {
 	defer server.Close()
 
 	src := NewFootballDataOrgSource()
-	require.NoError(t, src.Connect(context.Background(), "football-data://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
+	require.NoError(t, src.Connect(context.Background(), "footballdata://?api_key=test-token&base_url="+url.QueryEscape(server.URL)))
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "teams"})
 	require.NoError(t, err)
 
@@ -251,18 +293,58 @@ func TestFootballDataOrgReadReturnsAPIError(t *testing.T) {
 }
 
 func TestFootballDataOrgRegistryLookup(t *testing.T) {
-	constructor, err := registry.Default.GetSourceConstructor("football-data")
+	constructor, err := registry.Default.GetSourceConstructor("footballdata")
 	require.NoError(t, err)
 	src, ok := constructor().(source.Source)
 	require.True(t, ok)
 	require.NotNil(t, src)
-	require.Contains(t, src.Schemes(), "football-data")
+	require.Contains(t, src.Schemes(), "footballdata")
 }
 
 func TestFootballDataOrgUnsupportedTable(t *testing.T) {
 	src := NewFootballDataOrgSource()
 	_, err := src.GetTable(context.Background(), source.TableRequest{Name: "odds"})
 	require.ErrorContains(t, err, "unsupported table")
+}
+
+func readOnce(t *testing.T, table source.SourceTable, opts source.ReadOptions) arrow.RecordBatch {
+	t.Helper()
+	results, err := table.Read(context.Background(), opts)
+	require.NoError(t, err)
+	result := <-results
+	require.NoError(t, result.Err)
+	require.NotNil(t, result.Batch)
+	return result.Batch
+}
+
+func columnNames(record arrow.RecordBatch) []string {
+	names := make([]string, 0, record.Schema().NumFields())
+	for _, f := range record.Schema().Fields() {
+		names = append(names, f.Name)
+	}
+	return names
+}
+
+// decodeUnknown reads a value from an inference-driven Unknown column, which
+// stores each value as a JSON-encoded string in extension-array storage.
+func decodeUnknown(t *testing.T, record arrow.RecordBatch, col string, row int) interface{} {
+	t.Helper()
+	idx := -1
+	for i, f := range record.Schema().Fields() {
+		if f.Name == col {
+			idx = i
+			break
+		}
+	}
+	require.GreaterOrEqualf(t, idx, 0, "column %q not found", col)
+
+	ext, ok := record.Column(idx).(array.ExtensionArray)
+	require.Truef(t, ok, "column %q is not an extension array", col)
+	raw, ok := schemainfer.StringValueAt(ext.Storage(), row)
+	require.Truef(t, ok, "column %q storage is not string-backed", col)
+	value, err := schemainfer.DecodeUnknownValue(raw)
+	require.NoError(t, err)
+	return value
 }
 
 func footballDataServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
@@ -274,7 +356,7 @@ func footballDataServer(t *testing.T, handler http.HandlerFunc) *httptest.Server
 }
 
 func teamsPayload() string {
-	return `{"competition":{"id":2000,"name":"FIFA World Cup","code":"WC","type":"CUP","emblem":"wc.png"},"season":{"id":2026,"startDate":"2026-06-11","endDate":"2026-07-19"},"teams":[{"id":764,"name":"Brazil","shortName":"Brazil","tla":"BRA","crest":"bra.png","address":"Rio","website":"https://cbf.example","founded":1914,"clubColors":"Yellow / Green","venue":"Maracana","lastUpdated":"2025-12-01T00:00:00Z","area":{"id":2032,"name":"Brazil","code":"BRA","flag":"br.png"}},{"id":773,"name":"France","shortName":"France","tla":"FRA","crest":"fra.png","address":"Paris","website":"https://fff.example","founded":1919,"clubColors":"Blue","venue":"Maracana","lastUpdated":"2025-12-01T00:00:00Z","area":{"id":2081,"name":"France","code":"FRA","flag":"fr.png"}}]}`
+	return `{"competition":{"id":2000,"name":"FIFA World Cup","code":"WC","type":"CUP","emblem":"wc.png"},"season":{"id":2026,"startDate":"2026-06-11","endDate":"2026-07-19"},"teams":[{"id":764,"name":"Brazil","shortName":"Brazil","tla":"BRA","crest":"bra.png","address":"Rio","website":"https://cbf.example","founded":1914,"clubColors":"Yellow / Green","venue":"Maracana","lastUpdated":"2025-12-01T00:00:00Z","area":{"id":2032,"name":"Brazil","code":"BRA","flag":"br.png"},"squad":[{"id":10,"name":"Forward One","position":"Attacker","dateOfBirth":"1999-01-02","nationality":"Brazil"}]},{"id":773,"name":"France","shortName":"France","tla":"FRA","crest":"fra.png","address":"Paris","website":"https://fff.example","founded":1919,"clubColors":"Blue","venue":"Maracana","lastUpdated":"2025-12-01T00:00:00Z","area":{"id":2081,"name":"France","code":"FRA","flag":"fr.png"},"squad":[{"id":11,"name":"Forward Two","position":"Attacker","dateOfBirth":"2000-02-02","nationality":"France"}]}]}`
 }
 
 func standingsPayload() string {
@@ -285,6 +367,9 @@ func matchesPayload() string {
 	return `{"filters":{"season":"2026"},"resultSet":{"count":1},"matches":[{"id":4001,"utcDate":"2026-06-11T20:00:00Z","status":"SCHEDULED","minute":null,"injuryTime":null,"attendance":null,"venue":"MetLife Stadium","matchday":1,"stage":"GROUP_STAGE","group":"GROUP_A","lastUpdated":"2025-12-01T00:00:00Z","competition":{"id":2000,"name":"FIFA World Cup","code":"WC"},"season":{"id":2026,"startDate":"2026-06-11","endDate":"2026-07-19"},"homeTeam":{"id":764,"name":"Brazil","shortName":"Brazil","tla":"BRA","crest":"bra.png"},"awayTeam":{"id":773,"name":"France","shortName":"France","tla":"FRA","crest":"fra.png"},"score":{"winner":null,"duration":"REGULAR","fullTime":{"home":null,"away":null},"halfTime":{"home":null,"away":null},"regularTime":{"home":null,"away":null},"extraTime":{"home":null,"away":null},"penalties":{"home":null,"away":null}},"referees":[{"id":1,"name":"Ref Name","type":"REFEREE","nationality":"USA"}],"goals":[{"minute":23,"injuryTime":null,"type":"REGULAR","team":{"id":764,"name":"Brazil"},"scorer":{"id":10,"name":"Forward One"},"assist":{"id":12,"name":"Creator"},"score":{"home":1,"away":0}}],"bookings":[{"minute":40,"card":"YELLOW","team":{"id":773,"name":"France"},"player":{"id":11,"name":"Forward Two"}}],"substitutions":[{"minute":65,"team":{"id":764,"name":"Brazil"},"playerOut":{"id":10,"name":"Forward One"},"playerIn":{"id":20,"name":"Fresh Legs"}}]}]}`
 }
 
+// teamDetailPayload mirrors the /teams/<id> detail endpoint, whose squad
+// members carry richer fields (firstName, lastName, shirtNumber, ...) than the
+// squad embedded in the competition teams response.
 func teamDetailPayload(teamID int, teamName, tla string, playerID int, playerName string) string {
-	return fmt.Sprintf(`{"id":%d,"name":%q,"tla":%q,"squad":[{"id":%d,"name":%q,"firstName":"Forward","lastName":"One","dateOfBirth":"1999-01-02","nationality":%q,"section":"Offence","position":"Attacker","shirtNumber":10,"lastUpdated":"2025-12-01T00:00:00Z"}]}`, teamID, teamName, tla, playerID, playerName, teamName)
+	return fmt.Sprintf(`{"id":%d,"name":%q,"tla":%q,"squad":[{"id":%d,"name":%q,"firstName":"Forward","lastName":"One","dateOfBirth":"1999-01-02","nationality":%q,"position":"Attacker","shirtNumber":10,"marketValue":1000000,"contract":{"start":"2022-07","until":"2026-06"}}]}`, teamID, teamName, tla, playerID, playerName, teamName)
 }
