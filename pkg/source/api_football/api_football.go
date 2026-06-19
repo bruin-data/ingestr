@@ -51,7 +51,7 @@ func NewAPIFootballSource() *APIFootballSource {
 }
 
 func (s *APIFootballSource) Schemes() []string {
-	return []string{"api-football"}
+	return []string{"apifootball"}
 }
 
 func (s *APIFootballSource) Connect(ctx context.Context, uri string) error {
@@ -88,8 +88,8 @@ func parseURI(raw string) (uriConfig, error) {
 	if err != nil {
 		return uriConfig{}, fmt.Errorf("failed to parse api-football URI: %w", err)
 	}
-	if parsed.Scheme != "api-football" {
-		return uriConfig{}, fmt.Errorf("invalid api-football URI: must start with api-football://")
+	if parsed.Scheme != "apifootball" {
+		return uriConfig{}, fmt.Errorf("invalid api-football URI: must start with apifootball://")
 	}
 
 	values := parsed.Query()

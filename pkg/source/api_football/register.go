@@ -4,7 +4,7 @@ import "github.com/bruin-data/ingestr/internal/registry"
 
 func init() {
 	registry.RegisterSource(
-		[]string{"api-football"},
+		[]string{"apifootball"},
 		func() interface{} { return NewAPIFootballSource() },
 	)
 }
