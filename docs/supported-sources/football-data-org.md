@@ -19,7 +19,6 @@ URI parameters:
 - `season`: Season year. Defaults to `2026`.
 - `matchday`: Optional matchday filter for `matches`, `stadiums`, and `match_events`.
 - `status`: Optional match status filter for `matches`, `stadiums`, and `match_events`.
-- `date_from` / `date_to`: Optional date filters passed as `dateFrom` and `dateTo`.
 - `stage`: Optional match stage filter.
 - `group`: Optional group filter.
 - `unfold_goals`, `unfold_bookings`, `unfold_subs`, `unfold_lineups`: Optional `true`/`false` flags for `matches`. These require plan access when football-data.org gates deep data.
