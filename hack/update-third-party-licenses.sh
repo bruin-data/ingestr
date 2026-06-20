@@ -33,6 +33,7 @@ disallowed_license_types="${LICENSE_DISALLOWED_TYPES:-forbidden,restricted,unkno
 packages="${LICENSE_PACKAGES:-./...}"
 license_targets="${LICENSE_TARGETS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64}"
 include_tests="${LICENSE_INCLUDE_TESTS:-true}"
+license_lock_file="${LICENSE_LOCK_FILE:-$repo_root/licenses.lock.yml}"
 module_path="$(cd "$repo_root" && go list -m)"
 
 tmpdir="$(mktemp -d)"
@@ -42,14 +43,6 @@ go_licenses_bin="$tmpdir/bin/go-licenses$(go env GOEXE)"
 active_goroot="$(go env GOROOT)"
 
 (cd "$repo_root" && GOBIN="$tmpdir/bin" go install "$go_licenses_module")
-
-sha256_file() {
-	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum "$1" | awk '{print $1}'
-	else
-		shasum -a 256 "$1" | awk '{print $1}'
-	fi
-}
 
 copy_notice_file() {
 	local rel="$1"
@@ -66,99 +59,10 @@ copy_notice_file() {
 	} >>"$out"
 }
 
-append_manual_module_license() {
-	local module="$1"
-	local expected_version="$2"
-	local license_file="$3"
-	local license_name="$4"
-	local expected_sha256="$5"
-	local out="$6"
-
-	local module_info version dir downloaded_dir selected_sha256
-
-	if ! module_info="$(cd "$repo_root" && go list -m -f '{{.Version}}	{{.Dir}}' "$module" 2>/dev/null)"; then
-		return 0
-	fi
-
-	version="${module_info%%	*}"
-	dir="${module_info#*	}"
-
-	if [[ "$version" != "$expected_version" ]]; then
-		cat >&2 <<EOF
-Manual license audit for $module is pinned to $expected_version, but go.mod selects $version.
-Review $module's license, then update hack/update-third-party-licenses.sh and regenerate THIRD_PARTY_LICENSES.txt.
-EOF
-		return 1
-	fi
-
-	if [[ ! -f "$dir/$license_file" ]]; then
-		# go list -m can return an empty Dir in clean module caches when the
-		# package is ignored above. Download the pinned module before auditing.
-		if downloaded_dir="$(cd "$repo_root" && go mod download -json "$module@$expected_version" | awk -F '"' '$2 == "Dir" { print $4; exit }')" && [[ -n "$downloaded_dir" ]]; then
-			dir="$downloaded_dir"
-		fi
-	fi
-
-	if [[ ! -f "$dir/$license_file" ]]; then
-		cat >&2 <<EOF
-Manual license audit for $module expected $license_file, but it was not found in $dir.
-Review $module's license, then update hack/update-third-party-licenses.sh and regenerate THIRD_PARTY_LICENSES.txt.
-EOF
-		return 1
-	fi
-
-	selected_sha256="$(sha256_file "$dir/$license_file")"
-	if [[ "$selected_sha256" != "$expected_sha256" ]]; then
-		cat >&2 <<EOF
-Manual license audit for $module expected SHA-256 $expected_sha256, but found $selected_sha256.
-Review $module's license, then update hack/update-third-party-licenses.sh and regenerate THIRD_PARTY_LICENSES.txt.
-EOF
-		return 1
-	fi
-
-	{
-		printf '\n'
-		printf '===============================================================================\n'
-		printf '%s/%s (%s, manually audited)\n' "$module" "$license_file" "$license_name"
-		printf '===============================================================================\n\n'
-		sed 's/[[:blank:]]*$//' "$dir/$license_file"
-	} >>"$out"
-}
-
 append_manual_module_licenses() {
 	local out="$1"
 
-	append_manual_module_license \
-		"github.com/segmentio/asm" \
-		"v1.2.1" \
-		"LICENSE" \
-		"MIT No Attribution" \
-		"cca993712df289a5958bdef69031a5dac0f951ac15afeb313f9eeea55ed59443" \
-		"$out"
-
-	append_manual_module_license \
-		"modernc.org/mathutil" \
-		"v1.7.1" \
-		"LICENSE" \
-		"BSD-3-Clause" \
-		"bfa9bf72a72ca009fd62a8f84fca3dca67e51d93af96352723646599898b6cf5" \
-		"$out"
-
-	append_manual_module_license \
-		"github.com/DATA-DOG/go-sqlmock" \
-		"v1.5.2" \
-		"LICENSE" \
-		"BSD-3-Clause" \
-		"e3a6ae97f6eef8ce17e44d5f22adba594c4ea2b592c4be7ee9b387c441ef34d6" \
-		"$out"
-
-	append_manual_module_license \
-		"github.com/99designs/go-keychain" \
-		"v0.0.0-20191008050251-8e49817e8af4" \
-		"LICENSE" \
-		"MIT" \
-		"039c69774070226d213bced933176be4ec396c9b101cd9a13e82a2c390c6c90a" \
-		"$out"
+	(cd "$repo_root" && go run ./cmd/licenseaudit --mode append-manual-notices --lock "$license_lock_file" --output "$out")
 }
 
 save_root="$tmpdir/go-licenses"
@@ -166,15 +70,13 @@ generated_file="$tmpdir/THIRD_PARTY_LICENSES.txt"
 
 ignore_flags=(
 	--ignore "$module_path"
-	# go-licenses v1.6.0 cannot classify these current license files. Keep them
-	# pinned below so version or license text changes force a manual review.
-	--ignore "github.com/segmentio/asm"
-	--ignore "modernc.org/mathutil"
-	--ignore "github.com/DATA-DOG/go-sqlmock"
-	# This Darwin/cgo package is selected differently by host settings. Keep the
-	# required notice deterministic across local machines and CI.
-	--ignore "github.com/99designs/go-keychain"
 )
+
+while IFS= read -r module; do
+	if [[ -n "$module" ]]; then
+		ignore_flags+=(--ignore "$module")
+	fi
+done < <((cd "$repo_root" && go run ./cmd/licenseaudit --mode ignored-modules --lock "$license_lock_file"))
 
 license_test_flags=()
 case "$include_tests" in
