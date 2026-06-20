@@ -106,6 +106,89 @@ func TestColumnAdder_OutputSchema(t *testing.T) {
 	assert.Equal(t, "new_col", outputSchema.Field(1).Name)
 }
 
+func TestLoadTimestamp_AddsSingleTimestamp(t *testing.T) {
+	allocator := memory.DefaultAllocator
+	inputSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+	}, nil)
+
+	idBuilder := array.NewInt64Builder(allocator)
+	defer idBuilder.Release()
+	idBuilder.AppendValues([]int64{1, 2, 3}, nil)
+	idArray := idBuilder.NewArray()
+	defer idArray.Release()
+
+	inputBatch := array.NewRecordBatch(inputSchema, []arrow.Array{idArray}, 3)
+	defer inputBatch.Release()
+
+	ts := time.Date(2026, 6, 19, 12, 34, 56, 123456789, time.UTC)
+	transformer := NewLoadTimestamp(schema.Column{
+		Name:     "_ingestr_loaded_at",
+		DataType: schema.TypeTimestampTZ,
+		Nullable: false,
+	}, ts)
+
+	result, err := transformer.Transform(inputBatch)
+	require.NoError(t, err)
+	defer result.Release()
+
+	assert.Equal(t, int64(2), result.NumCols())
+	assert.Equal(t, "_ingestr_loaded_at", result.ColumnName(1))
+
+	loadedAt := result.Column(1).(*array.Timestamp)
+	for i := 0; i < 3; i++ {
+		assert.False(t, loadedAt.IsNull(i))
+		assert.Equal(t, ts.UnixMicro(), int64(loadedAt.Value(i)))
+	}
+}
+
+func TestLoadTimestamp_ReplacesExistingColumnIdempotently(t *testing.T) {
+	allocator := memory.DefaultAllocator
+	inputSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "_ingestr_loaded_at", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	idBuilder := array.NewInt64Builder(allocator)
+	defer idBuilder.Release()
+	idBuilder.AppendValues([]int64{1, 2}, nil)
+	idArray := idBuilder.NewArray()
+	defer idArray.Release()
+
+	existingBuilder := array.NewStringBuilder(allocator)
+	defer existingBuilder.Release()
+	existingBuilder.AppendValues([]string{"old", "old"}, nil)
+	existingArray := existingBuilder.NewArray()
+	defer existingArray.Release()
+
+	inputBatch := array.NewRecordBatch(inputSchema, []arrow.Array{idArray, existingArray}, 2)
+	defer inputBatch.Release()
+
+	ts := time.Date(2026, 6, 19, 13, 0, 0, 987654321, time.UTC)
+	transformer := NewLoadTimestamp(schema.Column{
+		Name:     "_INGESTR_LOADED_AT",
+		DataType: schema.TypeTimestampTZ,
+		Nullable: true,
+	}, ts)
+
+	first, err := transformer.Transform(inputBatch)
+	require.NoError(t, err)
+	defer first.Release()
+
+	second, err := transformer.Transform(first)
+	require.NoError(t, err)
+	defer second.Release()
+
+	assert.Equal(t, int64(2), second.NumCols())
+	assert.Equal(t, "_INGESTR_LOADED_AT", second.ColumnName(1))
+	assert.True(t, second.Schema().Field(1).Nullable)
+
+	loadedAt := second.Column(1).(*array.Timestamp)
+	for i := 0; i < 2; i++ {
+		assert.Equal(t, ts.UnixMicro(), int64(loadedAt.Value(i)))
+	}
+}
+
 func TestChainedTransformer(t *testing.T) {
 	allocator := memory.DefaultAllocator
 

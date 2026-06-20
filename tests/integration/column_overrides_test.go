@@ -65,11 +65,13 @@ func TestColumnOverrides_CSVToDuckDB(t *testing.T) {
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
 	types := readDuckDBColumnTypes(t, duckDBPath, "main.users")
+	requireLoadTimestampColumn(t, types)
+	userTypes := withoutLoadTimestampTypes(types)
 	assert.Equal(t, "VARCHAR", types["id"])
 	assert.Equal(t, "VARCHAR", types["name"])
 	assert.Equal(t, "VARCHAR", types["email"])
 	assert.Equal(t, "VARCHAR", types["age"])
-	assert.Equal(t, 4, len(types))
+	assert.Equal(t, 4, len(userTypes))
 	assert.Equal(t, 3, readDuckDBRowCount(t, duckDBPath, "main.users"))
 }
 
@@ -273,11 +275,13 @@ func TestColumnOverrides_EmptyCSV_WithOverrides_TableCreatedFromOverrides(t *tes
 		"destination table should be created from --columns when source has no rows")
 
 	types := readDuckDBColumnTypes(t, duckDBPath, "main.empty")
+	requireLoadTimestampColumn(t, types)
+	userTypes := withoutLoadTimestampTypes(types)
 	assert.Equal(t, "BIGINT", types["id"])
 	assert.Equal(t, "VARCHAR", types["name"])
 	assert.Equal(t, "VARCHAR", types["email"])
 	assert.Equal(t, "SMALLINT", types["age"])
-	assert.Equal(t, 4, len(types), "table should have exactly the 4 overridden columns")
+	assert.Equal(t, 4, len(userTypes), "table should have exactly the 4 overridden user columns")
 
 	assert.Equal(t, 0, readDuckDBRowCount(t, duckDBPath, "main.empty"),
 		"empty source should produce zero rows in destination")
@@ -335,10 +339,12 @@ func TestColumnOverrides_ExtraColumn_AddedWithNulls(t *testing.T) {
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
 	types := readDuckDBColumnTypes(t, duckDBPath, "main.users")
+	requireLoadTimestampColumn(t, types)
+	userTypes := withoutLoadTimestampTypes(types)
 	assert.Equal(t, "BIGINT", types["id"], "id override should apply")
 	assert.Equal(t, "VARCHAR", types["does_not_exist"],
 		"override for a column not in the schema-less source should be added with NULL values")
-	assert.Equal(t, 5, len(types), "4 source columns + 1 added override column")
+	assert.Equal(t, 5, len(userTypes), "4 source columns + 1 added override column")
 
 	db := openDuckDBForTest(t, duckDBPath)
 	defer func() { _ = db.Close() }()
@@ -430,11 +436,13 @@ func TestColumnOverrides_EmptyCSV_AutoAddsPKColumn(t *testing.T) {
 	require.True(t, duckDBTableExists(t, duckDBPath, "main", "empty"))
 
 	types := readDuckDBColumnTypes(t, duckDBPath, "main.empty")
+	requireLoadTimestampColumn(t, types)
+	userTypes := withoutLoadTimestampTypes(types)
 	assert.Equal(t, "BIGINT", types["id"])
 	assert.Equal(t, "VARCHAR", types["name"])
 	assert.Equal(t, "VARCHAR", types["user_uid"],
 		"PK column missing from --columns should be auto-added as VARCHAR so merge-style destinations accept the CREATE TABLE")
-	assert.Equal(t, 3, len(types), "expected id + name + user_uid (the resolved PK)")
+	assert.Equal(t, 3, len(userTypes), "expected id + name + user_uid (the resolved PK)")
 }
 
 // --- helpers ---------------------------------------------------------------

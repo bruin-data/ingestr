@@ -68,6 +68,7 @@ type IngestConfig struct {
 	NoInference       bool   // Skip schema inference for unknown-schema sources and use Columns as the schema
 	Mask              []string
 	TrimWhitespace    bool
+	NoLoadTimestamp   bool
 
 	PipelinesDir   string
 	StagingBucket  string

@@ -32,27 +32,27 @@ func TestSCD2NonDataColumns(t *testing.T) {
 		{
 			name:        "no primary keys",
 			primaryKeys: nil,
-			expected:    []string{"_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+			expected:    []string{"_scd_valid_from", "_scd_valid_to", "_scd_is_current", "_ingestr_loaded_at"},
 		},
 		{
 			name:        "empty primary keys",
 			primaryKeys: []string{},
-			expected:    []string{"_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+			expected:    []string{"_scd_valid_from", "_scd_valid_to", "_scd_is_current", "_ingestr_loaded_at"},
 		},
 		{
 			name:        "single primary key",
 			primaryKeys: []string{"id"},
-			expected:    []string{"id", "_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+			expected:    []string{"id", "_scd_valid_from", "_scd_valid_to", "_scd_is_current", "_ingestr_loaded_at"},
 		},
 		{
 			name:        "multiple primary keys",
 			primaryKeys: []string{"id", "tenant_id"},
-			expected:    []string{"id", "tenant_id", "_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+			expected:    []string{"id", "tenant_id", "_scd_valid_from", "_scd_valid_to", "_scd_is_current", "_ingestr_loaded_at"},
 		},
 		{
 			name:        "primary key overlaps scd metadata",
 			primaryKeys: []string{"_scd_valid_from"},
-			expected:    []string{"_scd_valid_from", "_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+			expected:    []string{"_scd_valid_from", "_scd_valid_from", "_scd_valid_to", "_scd_is_current", "_ingestr_loaded_at"},
 		},
 	}
 

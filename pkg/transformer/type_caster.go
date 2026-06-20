@@ -9,10 +9,15 @@ import (
 // Used when --columns specifies type overrides for known-schema sources.
 type TypeCaster struct {
 	targetSchema *arrow.Schema
+	safe         bool
 }
 
 func NewTypeCaster(targetSchema *arrow.Schema) *TypeCaster {
 	return &TypeCaster{targetSchema: targetSchema}
+}
+
+func NewSafeTypeCaster(targetSchema *arrow.Schema) *TypeCaster {
+	return &TypeCaster{targetSchema: targetSchema, safe: true}
 }
 
 func (tc *TypeCaster) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
@@ -20,7 +25,7 @@ func (tc *TypeCaster) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, err
 		batch.Retain()
 		return batch, nil
 	}
-	return databuffer.CastRecordToSchema(batch, tc.targetSchema, false)
+	return databuffer.CastRecordToSchema(batch, tc.targetSchema, tc.safe)
 }
 
 func (tc *TypeCaster) OutputSchema(_ *arrow.Schema) *arrow.Schema {

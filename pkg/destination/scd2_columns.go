@@ -3,6 +3,8 @@ package destination
 import (
 	"slices"
 	"strings"
+
+	"github.com/bruin-data/ingestr/pkg/naming"
 )
 
 // SCD2 metadata column names. Strategies and destinations must agree on these.
@@ -21,9 +23,10 @@ func SCD2MetadataColumns() []string {
 // columns).
 func SCD2NonDataColumns(primaryKeys []string) []string {
 	scd := SCD2MetadataColumns()
-	out := make([]string, 0, len(primaryKeys)+len(scd))
+	out := make([]string, 0, len(primaryKeys)+len(scd)+1)
 	out = append(out, primaryKeys...)
 	out = append(out, scd...)
+	out = append(out, naming.IngestrLoadedAtColumn)
 	return out
 }
 
