@@ -167,6 +167,27 @@ func TestStreaming_IntervalTriggerFlushes(t *testing.T) {
 	assert.Equal(t, 1, writeCallCount(dest))
 }
 
+func TestStreamingExecutor_PassesFlushOptionsToSource(t *testing.T) {
+	job, src, _ := minimalJob()
+	job.Config.FlushInterval = 123 * time.Millisecond
+	job.Config.FlushRecords = 7
+	src.readCh = mustClosedRecords()
+
+	exec := NewStreamingExecutor(StreamingOptions{
+		FlushInterval: job.Config.FlushInterval,
+		FlushRecords:  int64(job.Config.FlushRecords),
+		Strategy:      config.StrategyAppend,
+	})
+	require.NoError(t, exec.Execute(context.Background(), job))
+
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	require.True(t, src.readCalled)
+	assert.True(t, src.readOpts.Streaming)
+	assert.Equal(t, 123*time.Millisecond, src.readOpts.FlushInterval)
+	assert.Equal(t, 7, src.readOpts.FlushRecords)
+}
+
 func TestStreaming_EmptyCyclesSkipped(t *testing.T) {
 	dest := &fakeDestination{}
 	committer := &fakeCommitter{}

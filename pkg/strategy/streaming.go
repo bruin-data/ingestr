@@ -77,6 +77,8 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 		CDCResumeLSN:   job.Config.CDCResumeLSN,
 		CDCSlotSuffix:  job.Config.CDCSlotSuffix,
 		Streaming:      true,
+		FlushInterval:  job.Config.FlushInterval,
+		FlushRecords:   job.Config.FlushRecords,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
@@ -144,6 +146,8 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 			PageSize:      job.Config.PageSize,
 			CDCSlotSuffix: job.Config.CDCSlotSuffix,
 			Streaming:     true,
+			FlushInterval: job.Config.FlushInterval,
+			FlushRecords:  job.Config.FlushRecords,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})
