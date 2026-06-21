@@ -389,7 +389,7 @@ func (s *MongoDBCDCSource) getTables(ctx context.Context, filter []string) ([]so
 
 func mongoCDCMatchesTable(filter []string, db, collection string) bool {
 	for _, table := range filter {
-		if strings.EqualFold(table, collection) || strings.EqualFold(table, db+"."+collection) {
+		if table == collection || table == db+"."+collection {
 			return true
 		}
 	}

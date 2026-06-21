@@ -404,6 +404,23 @@ func TestParseMongoCDCNamespace(t *testing.T) {
 	}
 }
 
+func TestMongoCDCMatchesTableIsCaseSensitive(t *testing.T) {
+	filter := []string{"users", "app.orders"}
+
+	if !mongoCDCMatchesTable(filter, "app", "users") {
+		t.Fatal("expected exact collection match")
+	}
+	if !mongoCDCMatchesTable(filter, "app", "orders") {
+		t.Fatal("expected exact qualified collection match")
+	}
+	if mongoCDCMatchesTable(filter, "app", "Users") {
+		t.Fatal("did not expect case-insensitive collection match")
+	}
+	if mongoCDCMatchesTable(filter, "App", "orders") {
+		t.Fatal("did not expect case-insensitive database match")
+	}
+}
+
 func TestMongoCDCLSNRoundTrip(t *testing.T) {
 	token := bson.Raw{0x05, 0x00, 0x00, 0x00, 0x00}
 	ts := primitive.Timestamp{T: 123, I: 45}
