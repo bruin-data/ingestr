@@ -450,6 +450,38 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		insertSource = dedupSource("")
 	}
 
+	targetHasRows := true
+	if !isCDC {
+		var err error
+		targetHasRows, err = d.tableHasRowsLocked(ctx, quotedTargetTable)
+		if err != nil {
+			return fmt.Errorf("failed to check target table rows: %w", err)
+		}
+	}
+
+	if !targetHasRows {
+		insertSQL := fmt.Sprintf(
+			`INSERT INTO %s (%s) SELECT %s FROM %s`,
+			quotedTargetTable,
+			strings.Join(destQuoted, ", "),
+			strings.Join(destQuoted, ", "),
+			insertSource,
+		)
+		config.Debug("[DUCKDB MERGE] Executing empty-target INSERT: %s", insertSQL)
+
+		if err := d.exec(ctx, insertSQL); err != nil {
+			return fmt.Errorf("failed to insert new records: %w", err)
+		}
+
+		if err := d.exec(ctx, "COMMIT"); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		commit = true
+
+		config.Debug("[DUCKDB MERGE] Merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	if len(nonPKColumns) > 0 {
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,
@@ -503,6 +535,43 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	config.Debug("[DUCKDB MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func (d *DuckDBDestination) tableHasRowsLocked(ctx context.Context, quotedTable string) (bool, error) {
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = stmt.Close() }()
+
+	query := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s LIMIT 1)", quotedTable)
+	if err := stmt.SetSqlQuery(query); err != nil {
+		config.LogFailedQuery(query, err)
+		return false, err
+	}
+
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		config.LogFailedQuery(query, err)
+		return false, err
+	}
+	defer reader.Release()
+
+	if !reader.Next() {
+		if err := reader.Err(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	batch := reader.RecordBatch()
+	if batch.NumRows() == 0 || batch.NumCols() == 0 || batch.Column(0).IsNull(0) {
+		return false, nil
+	}
+	if col, ok := batch.Column(0).(*array.Boolean); ok {
+		return col.Value(0), nil
+	}
+	return false, fmt.Errorf("unexpected EXISTS result type %s", batch.Column(0).DataType())
 }
 
 func (d *DuckDBDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {

@@ -726,6 +726,78 @@ func TestMergeTable(t *testing.T) {
 	assert.Equal(t, 300, value)
 }
 
+func TestMergeTable_EmptyTargetDedupesStagingByPK(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR,
+			updated_at BIGINT
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR,
+			updated_at BIGINT
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(1, 'Alice Old', 10),
+			(1, 'Alice New', 20),
+			(2, 'Bob', 15)
+	`)
+	require.NoError(t, err)
+
+	err = dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable:   "staging_table",
+		TargetTable:    "target_table",
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "name", "updated_at"},
+		IncrementalKey: "updated_at",
+	})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+	var total, id1Count int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM target_table").Scan(&total))
+	assert.Equal(t, 2, total)
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM target_table WHERE id = 1").Scan(&id1Count))
+	assert.Equal(t, 1, id1Count)
+
+	var nameRaw []byte
+	var updatedAt int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT name, updated_at FROM target_table WHERE id = 1").Scan(&nameRaw, &updatedAt))
+	assert.Equal(t, "Alice New", string(append([]byte(nil), nameRaw...)))
+	assert.Equal(t, 20, updatedAt)
+}
+
+func TestTableHasRowsLocked(t *testing.T) {
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `CREATE TABLE target_table (id BIGINT)`)
+	require.NoError(t, err)
+
+	hasRows, err := dest.tableHasRowsLocked(ctx, destination.QuoteTableName("target_table"))
+	require.NoError(t, err)
+	assert.False(t, hasRows)
+
+	err = dest.Exec(ctx, `INSERT INTO target_table VALUES (1)`)
+	require.NoError(t, err)
+
+	hasRows, err = dest.tableHasRowsLocked(ctx, destination.QuoteTableName("target_table"))
+	require.NoError(t, err)
+	assert.True(t, hasRows)
+}
+
 func TestMergeTable_CDCMaterializesDeleteOnlyTombstone(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)
