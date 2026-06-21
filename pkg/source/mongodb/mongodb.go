@@ -1,6 +1,7 @@
 package mongodb
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )
 
 const defaultBatchSize = 10000
@@ -748,11 +750,12 @@ func normalizeBatchSize(size int) int {
 }
 
 type mongoBatchBuilder struct {
-	mem        memory.Allocator
-	excludeMap map[string]bool
-	fieldOrder []string
-	cols       map[string]*typedColumnBuilder
-	rowCount   int
+	mem         memory.Allocator
+	excludeMap  map[string]bool
+	hasExcludes bool
+	fieldOrder  []string
+	cols        map[string]*typedColumnBuilder
+	rowCount    int
 }
 
 type mongoRecordBatchBuilder interface {
@@ -769,17 +772,18 @@ func newMongoBatchBuilder(excludeColumns []string) *mongoBatchBuilder {
 	}
 
 	return &mongoBatchBuilder{
-		mem:        memory.NewGoAllocator(),
-		excludeMap: excludeMap,
-		fieldOrder: make([]string, 0),
-		cols:       make(map[string]*typedColumnBuilder),
+		mem:         memory.NewGoAllocator(),
+		excludeMap:  excludeMap,
+		hasExcludes: len(excludeMap) > 0,
+		fieldOrder:  make([]string, 0),
+		cols:        make(map[string]*typedColumnBuilder),
 	}
 }
 
 func (b *mongoBatchBuilder) AppendDocument(doc bson.M) error {
 	seen := make(map[string]bool, len(doc))
 	for key, value := range doc {
-		if b.excludeMap[strings.ToLower(key)] {
+		if b.isExcludedKey(key) {
 			continue
 		}
 		col, ok := b.cols[key]
@@ -854,11 +858,12 @@ func (b *mongoBatchBuilder) reset() {
 }
 
 type mongoRawBatchBuilder struct {
-	mem        memory.Allocator
-	excludeMap map[string]bool
-	fieldOrder []string
-	cols       map[string]*typedColumnBuilder
-	rowCount   int
+	mem         memory.Allocator
+	excludeMap  map[string]bool
+	hasExcludes bool
+	fieldOrder  []string
+	cols        map[string]*typedColumnBuilder
+	rowCount    int
 }
 
 func newMongoRawBatchBuilder(excludeColumns []string) *mongoRawBatchBuilder {
@@ -868,10 +873,11 @@ func newMongoRawBatchBuilder(excludeColumns []string) *mongoRawBatchBuilder {
 	}
 
 	return &mongoRawBatchBuilder{
-		mem:        memory.NewGoAllocator(),
-		excludeMap: excludeMap,
-		fieldOrder: make([]string, 0),
-		cols:       make(map[string]*typedColumnBuilder),
+		mem:         memory.NewGoAllocator(),
+		excludeMap:  excludeMap,
+		hasExcludes: len(excludeMap) > 0,
+		fieldOrder:  make([]string, 0),
+		cols:        make(map[string]*typedColumnBuilder),
 	}
 }
 
@@ -884,6 +890,18 @@ func (b *mongoRawBatchBuilder) AppendDocument(doc bson.M) error {
 }
 
 func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
+	hasDuplicate, err := b.hasDuplicateIncludedRawKey(doc)
+	if err != nil {
+		return err
+	}
+	if !hasDuplicate {
+		return b.appendRawDocumentDirect(doc)
+	}
+
+	return b.appendRawDocumentCollapsed(doc)
+}
+
+func (b *mongoRawBatchBuilder) appendRawDocumentCollapsed(doc bson.Raw) error {
 	elements, err := doc.Elements()
 	if err != nil {
 		return err
@@ -893,7 +911,7 @@ func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
 	keys := make([]string, 0, len(elements))
 	for _, elem := range elements {
 		key := elem.Key()
-		if b.excludeMap[strings.ToLower(key)] {
+		if b.isExcludedKey(key) {
 			continue
 		}
 		if _, ok := values[key]; !ok {
@@ -922,6 +940,104 @@ func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
 
 	b.rowCount++
 	return nil
+}
+
+func (b *mongoRawBatchBuilder) appendRawDocumentDirect(doc bson.Raw) error {
+	length, rem, ok := bsoncore.ReadLength(doc)
+	if !ok {
+		return bsoncore.NewInsufficientBytesError(doc, rem)
+	}
+	length -= 4
+
+	for length > 1 {
+		elem, next, ok := bsoncore.ReadElement(rem)
+		if !ok {
+			return bsoncore.NewInsufficientBytesError(doc, rem)
+		}
+		length -= int32(len(elem))
+		rem = next
+
+		key, err := elem.KeyErr()
+		if err != nil {
+			return err
+		}
+		if b.isExcludedKey(key) {
+			continue
+		}
+		val, err := elem.ValueErr()
+		if err != nil {
+			return err
+		}
+
+		col, ok := b.cols[key]
+		if !ok {
+			col = newTypedColumnBuilder(b.mem)
+			col.AppendNulls(b.rowCount)
+			b.cols[key] = col
+			b.fieldOrder = append(b.fieldOrder, key)
+		}
+		col.AppendRaw(rawValueFromCore(val))
+	}
+
+	for _, field := range b.fieldOrder {
+		col := b.cols[field]
+		if col.rowCount <= b.rowCount {
+			col.AppendNull()
+		}
+	}
+
+	b.rowCount++
+	return nil
+}
+
+func (b *mongoRawBatchBuilder) hasDuplicateIncludedRawKey(doc bson.Raw) (bool, error) {
+	length, rem, ok := bsoncore.ReadLength(doc)
+	if !ok {
+		return false, bsoncore.NewInsufficientBytesError(doc, rem)
+	}
+	length -= 4
+
+	var stackKeys [64][]byte
+	keys := stackKeys[:0]
+	for length > 1 {
+		elem, next, ok := bsoncore.ReadElement(rem)
+		if !ok {
+			return false, bsoncore.NewInsufficientBytesError(doc, rem)
+		}
+		length -= int32(len(elem))
+		rem = next
+
+		key, err := elem.KeyBytesErr()
+		if err != nil {
+			return false, err
+		}
+		if b.isExcludedRawKey(key) {
+			continue
+		}
+		for _, seen := range keys {
+			if bytes.Equal(seen, key) {
+				return true, nil
+			}
+		}
+		keys = append(keys, key)
+	}
+	return false, nil
+}
+
+func (b *mongoBatchBuilder) isExcludedKey(key string) bool {
+	return b.hasExcludes && b.excludeMap[strings.ToLower(key)]
+}
+
+func (b *mongoRawBatchBuilder) isExcludedKey(key string) bool {
+	return b.hasExcludes && b.excludeMap[strings.ToLower(key)]
+}
+
+func (b *mongoRawBatchBuilder) isExcludedRawKey(key []byte) bool {
+	return b.hasExcludes && b.excludeMap[strings.ToLower(string(key))]
+}
+
+func rawValueFromCore(val bsoncore.Value) bson.RawValue {
+	return bson.RawValue{Type: val.Type, Value: val.Data}
 }
 
 func (b *mongoRawBatchBuilder) NewRecordBatch() (arrow.RecordBatch, error) {
