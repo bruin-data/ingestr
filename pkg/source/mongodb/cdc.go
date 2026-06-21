@@ -401,26 +401,28 @@ func (s *MongoDBCDCSource) inferCollectionSchema(ctx context.Context, ns mongoNa
 	builder := newMongoBatchBuilder(nil)
 	defer builder.Release()
 
-	findOpts := options.Find().SetLimit(int64(s.cdcConfig.SchemaSampleSize))
-	cursor, err := collection.Find(ctx, bson.D{}, findOpts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sample collection %s.%s: %w", ns.Database, ns.Collection, err)
-	}
-	defer func() { _ = cursor.Close(ctx) }()
-
 	rows := 0
-	for cursor.Next(ctx) {
-		var doc bson.M
-		if err := cursor.Decode(&doc); err != nil {
-			return nil, fmt.Errorf("failed to decode sample document: %w", err)
+	if s.cdcConfig.SchemaSampleSize > 0 {
+		findOpts := options.Find().SetLimit(int64(s.cdcConfig.SchemaSampleSize))
+		cursor, err := collection.Find(ctx, bson.D{}, findOpts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to sample collection %s.%s: %w", ns.Database, ns.Collection, err)
 		}
-		if err := builder.AppendDocument(doc); err != nil {
-			return nil, fmt.Errorf("failed to build sample schema: %w", err)
+		defer func() { _ = cursor.Close(ctx) }()
+
+		for cursor.Next(ctx) {
+			var doc bson.M
+			if err := cursor.Decode(&doc); err != nil {
+				return nil, fmt.Errorf("failed to decode sample document: %w", err)
+			}
+			if err := builder.AppendDocument(doc); err != nil {
+				return nil, fmt.Errorf("failed to build sample schema: %w", err)
+			}
+			rows++
 		}
-		rows++
-	}
-	if err := cursor.Err(); err != nil {
-		return nil, fmt.Errorf("sample cursor error: %w", err)
+		if err := cursor.Err(); err != nil {
+			return nil, fmt.Errorf("sample cursor error: %w", err)
+		}
 	}
 
 	var columns []schema.Column

@@ -182,3 +182,59 @@ func TestMongoDBCDC_MultiTableSQLite(t *testing.T) {
 	assert.Equal(t, 2, tableCount("users"))
 	assert.Equal(t, 3, tableCount("orders"))
 }
+
+func TestMongoDBCDC_ZeroSchemaSampleSQLite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	container, mongoURI := setupMongoDBCDCContainer(t, ctx)
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
+
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Disconnect(ctx) })
+
+	coll := client.Database("cdc_zero_sample").Collection("items")
+	_, err = coll.InsertOne(ctx, bson.M{"_id": int64(1), "name": "item1", "value": int64(100)})
+	require.NoError(t, err)
+
+	sqlitePath := filepath.Join(t.TempDir(), "mongodb_cdc_zero_sample.db")
+	cfg := &config.IngestConfig{
+		SourceURI:   mongodbCDCURI(t, mongoURI, "cdc_zero_sample", map[string]string{"mode": "batch", "schema_sample_size": "0", "max_await_time": "500ms"}),
+		SourceTable: "cdc_zero_sample.items",
+		DestURI:     "sqlite:///" + sqlitePath,
+		DestTable:   "items_dest",
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	dest, err := sql.Open("sqlite3", sqlitePath)
+	require.NoError(t, err)
+	defer func() { _ = dest.Close() }()
+
+	columns := map[string]bool{}
+	rows, err := dest.Query(`PRAGMA table_info(items_dest)`)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		require.NoError(t, rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk))
+		columns[name] = true
+	}
+	require.NoError(t, rows.Err())
+
+	assert.True(t, columns["_id"])
+	assert.True(t, columns["_cdc_lsn"])
+	assert.False(t, columns["name"])
+	assert.False(t, columns["value"])
+
+	var count int
+	require.NoError(t, dest.QueryRow(`SELECT COUNT(*) FROM items_dest WHERE "_cdc_deleted" = 0`).Scan(&count))
+	assert.Equal(t, 1, count)
+}
