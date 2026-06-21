@@ -31,7 +31,7 @@
 </head>
 <body class="bg-gray-50 min-h-screen text-gray-700">
   <div id="app" v-cloak>
-    <div class="container mx-auto px-4 py-6 max-w-5xl">
+    <div class="container mx-auto px-4 py-6 max-w-6xl">
       <h1 class="text-xl font-semibold text-gray-800 mb-5 tracking-tight">ingestr</h1>
 
       <!-- Tab Navigation -->
@@ -71,7 +71,7 @@
               <select v-if="field.type === 'select'" v-model="newConnFields[field.name]" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
                 <option v-for="opt in field.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
               </select>
-              <input v-else-if="field.type === 'checkbox'" type="checkbox" v-model="newConnFields[field.name]" class="rounded border-gray-300 text-gray-700 focus:ring-gray-300 h-3.5 w-3.5">
+              <input v-else-if="field.type === 'checkbox'" type="checkbox" v-model="newConnFields[field.name]" true-value="true" false-value="false" class="rounded border-gray-300 text-gray-700 focus:ring-gray-300 h-3.5 w-3.5">
               <input v-else :type="field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'" v-model="newConnFields[field.name]" :placeholder="field.placeholder" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
             </div>
           </div>
@@ -109,7 +109,7 @@
               </select>
             </div>
             <div>
-              <label class="block text-xs font-medium text-gray-500 mb-1">Table Name<span class="text-red-400 ml-0.5">*</span></label>
+              <label class="block text-xs font-medium text-gray-500 mb-1">Table Name</label>
               <input type="text" v-model="sourceTable" placeholder="schema.table_name" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
             </div>
           </div>
@@ -133,32 +133,180 @@
 
         <!-- Options -->
         <div class="bg-white rounded-md border border-gray-200 p-4 mb-4">
-          <h2 class="text-sm font-semibold mb-3 text-gray-700 uppercase tracking-wide">Options</h2>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div>
-              <label class="block text-xs font-medium text-gray-500 mb-1">Strategy</label>
-              <select v-model="strategy" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
-                <option value="replace">Replace</option>
-                <option value="append">Append</option>
-                <option value="merge">Merge</option>
-                <option value="delete+insert">Delete + Insert</option>
-              </select>
+          <button type="button" @click="optionsExpanded = !optionsExpanded" :aria-expanded="optionsExpanded.toString()" class="w-full flex items-center justify-between text-left">
+            <span class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Options</span>
+            <span class="inline-flex h-6 w-6 items-center justify-center rounded border border-gray-200 text-gray-400 text-sm font-medium" aria-hidden="true">{{ optionsExpanded ? '-' : '+' }}</span>
+          </button>
+          <div v-if="optionsExpanded" class="mt-3">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Strategy</label>
+                <select v-model="incrementalStrategy" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
+                  <option value="">Auto</option>
+                  <option value="replace">Replace</option>
+                  <option value="truncate+insert">Truncate + Insert</option>
+                  <option value="append">Append</option>
+                  <option value="delete+insert">Delete + Insert</option>
+                  <option value="merge">Merge</option>
+                  <option value="scd2">SCD2</option>
+                  <option value="none">None</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Primary Keys</label>
+                <input type="text" v-model="primaryKeys" placeholder="id, user_id" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Incremental Key</label>
+                <input type="text" v-model="incrementalKey" placeholder="updated_at" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Full Refresh</label>
+                <input type="checkbox" v-model="fullRefresh" class="rounded border-gray-300 text-gray-700 focus:ring-gray-300 h-3.5 w-3.5 mt-2">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Interval Start</label>
+                <input type="text" v-model="intervalStart" placeholder="2026-01-01T00:00:00" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Interval End</label>
+                <input type="text" v-model="intervalEnd" placeholder="2026-01-02T00:00:00" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Partition By</label>
+                <input type="text" v-model="partitionBy" placeholder="created_at" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Cluster By</label>
+                <input type="text" v-model="clusterBy" placeholder="account_id, region" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
             </div>
-            <div>
-              <label class="block text-xs font-medium text-gray-500 mb-1">Primary Keys</label>
-              <input type="text" v-model="primaryKeys" placeholder="id, user_id" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+
+          <div class="border-t border-gray-100 mt-4 pt-4">
+            <h3 class="text-[11px] font-semibold mb-3 text-gray-400 uppercase tracking-wide">Schema and SQL</h3>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Schema Contract</label>
+                <select v-model="schemaContract" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
+                  <option value="evolve">Evolve</option>
+                  <option value="freeze">Freeze</option>
+                  <option value="discard_row">Discard Row</option>
+                  <option value="discard_value">Discard Value</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Schema Naming</label>
+                <select v-model="schemaNaming" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
+                  <option value="">Default</option>
+                  <option value="direct">Direct</option>
+                  <option value="snake_case">Snake Case</option>
+                  <option value="auto">Auto</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Page Size</label>
+                <input type="number" v-model.number="pageSize" min="1" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Extract Parallelism</label>
+                <input type="number" v-model.number="extractParallelism" min="1" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">SQL Limit</label>
+                <input type="number" v-model.number="sqlLimit" min="0" placeholder="0" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Exclude Columns</label>
+                <input type="text" v-model="sqlExcludeColumns" placeholder="col_a, col_b" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div class="md:col-span-2">
+                <label class="block text-xs font-medium text-gray-500 mb-1">Columns</label>
+                <input type="text" v-model="columns" placeholder="id:bigint,name:string:source_name" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">No Inference</label>
+                <input type="checkbox" v-model="noInference" class="rounded border-gray-300 text-gray-700 focus:ring-gray-300 h-3.5 w-3.5 mt-2">
+              </div>
             </div>
-            <div>
-              <label class="block text-xs font-medium text-gray-500 mb-1">Incremental Key</label>
-              <input type="text" v-model="incrementalKey" placeholder="updated_at" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+          </div>
+
+          <div class="border-t border-gray-100 mt-4 pt-4">
+            <h3 class="text-[11px] font-semibold mb-3 text-gray-400 uppercase tracking-wide">Transforms and Loading</h3>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div class="md:col-span-2">
+                <label class="block text-xs font-medium text-gray-500 mb-1">Mask</label>
+                <input type="text" v-model="mask" placeholder="email:email, phone:phone" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Trim Whitespace</label>
+                <input type="checkbox" v-model="trimWhitespace" class="rounded border-gray-300 text-gray-700 focus:ring-gray-300 h-3.5 w-3.5 mt-2">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">No Load Timestamp</label>
+                <input type="checkbox" v-model="noLoadTimestamp" class="rounded border-gray-300 text-gray-700 focus:ring-gray-300 h-3.5 w-3.5 mt-2">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Loader File Size</label>
+                <input type="number" v-model.number="loaderFileSize" min="1" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Loader File Format</label>
+                <input type="text" v-model="loaderFileFormat" placeholder="parquet" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Staging Bucket</label>
+                <input type="text" v-model="stagingBucket" placeholder="s3://bucket/path" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Staging Dataset</label>
+                <input type="text" v-model="stagingDataset" placeholder="staging" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Pipelines Dir</label>
+                <input type="text" v-model="pipelinesDir" placeholder=".ingestr" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
             </div>
+          </div>
+
+          <div class="border-t border-gray-100 mt-4 pt-4">
+            <h3 class="text-[11px] font-semibold mb-3 text-gray-400 uppercase tracking-wide">Streaming and Debug</h3>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Stream</label>
+                <input type="checkbox" v-model="stream" class="rounded border-gray-300 text-gray-700 focus:ring-gray-300 h-3.5 w-3.5 mt-2">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Flush Interval</label>
+                <input type="text" v-model="flushInterval" :disabled="!stream" placeholder="30s" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 disabled:bg-gray-50 disabled:text-gray-400">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Flush Records</label>
+                <input type="number" v-model.number="flushRecords" :disabled="!stream" min="1" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 disabled:bg-gray-50 disabled:text-gray-400">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Debug</label>
+                <input type="checkbox" v-model="debug" class="rounded border-gray-300 text-gray-700 focus:ring-gray-300 h-3.5 w-3.5 mt-2">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">SQL Backend</label>
+                <input type="text" v-model="sqlBackend" placeholder="backend" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+              <div class="md:col-span-3">
+                <label class="block text-xs font-medium text-gray-500 mb-1">Query Annotations</label>
+                <input type="text" v-model="queryAnnotations" placeholder='{"pipeline":"daily","asset":"orders"}' class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+              </div>
+            </div>
+          </div>
           </div>
         </div>
 
         <!-- Run Button -->
-        <div class="flex justify-center mb-4">
+        <div class="flex justify-center gap-2 mb-4">
           <button @click="runJob" :disabled="isRunning || !canRun" class="bg-gray-800 text-white px-5 py-2 rounded text-sm font-medium hover:bg-gray-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors">
             {{ isRunning ? 'Running...' : 'Run Ingestion' }}
+          </button>
+          <button v-if="isRunning" @click="cancelJob" class="border border-gray-300 text-gray-600 px-5 py-2 rounded text-sm font-medium hover:bg-gray-100 transition-colors">
+            Stop
           </button>
         </div>
 
@@ -204,7 +352,8 @@
                         <span :class="{
                           'bg-green-50 text-green-600 border-green-200': run.status === 'completed',
                           'bg-red-50 text-red-600 border-red-200': run.status === 'failed',
-                          'bg-amber-50 text-amber-600 border-amber-200': run.status === 'running'
+                          'bg-amber-50 text-amber-600 border-amber-200': run.status === 'running',
+                          'bg-gray-50 text-gray-500 border-gray-200': run.status === 'canceled'
                         }" class="px-1.5 py-0.5 text-[10px] rounded border font-medium">{{ run.status }}</span>
                       </td>
                       <td class="px-3 py-2 text-xs text-gray-600 font-mono">{{ run.sourceTable }}</td>
@@ -278,9 +427,37 @@
         const destFields = ref({});
         const sourceTable = ref('');
         const destTable = ref('');
-        const strategy = ref('replace');
+        const optionsExpanded = ref(false);
+        const incrementalStrategy = ref('');
         const primaryKeys = ref('');
         const incrementalKey = ref('');
+        const intervalStart = ref('');
+        const intervalEnd = ref('');
+        const partitionBy = ref('');
+        const clusterBy = ref('');
+        const fullRefresh = ref(false);
+        const schemaContract = ref('evolve');
+        const schemaNaming = ref('');
+        const pageSize = ref(25000);
+        const loaderFileSize = ref(25000);
+        const loaderFileFormat = ref('');
+        const extractParallelism = ref(5);
+        const sqlLimit = ref('');
+        const sqlExcludeColumns = ref('');
+        const sqlBackend = ref('');
+        const columns = ref('');
+        const noInference = ref(false);
+        const mask = ref('');
+        const trimWhitespace = ref(false);
+        const noLoadTimestamp = ref(false);
+        const pipelinesDir = ref('');
+        const stagingBucket = ref('');
+        const stagingDataset = ref('');
+        const debug = ref(false);
+        const stream = ref(false);
+        const flushInterval = ref('30s');
+        const flushRecords = ref(50000);
+        const queryAnnotations = ref('');
 
         // Job state
         const isRunning = ref(false);
@@ -308,11 +485,12 @@
           return credentials.value.filter(c => ids.has(c.connectorId));
         });
 
-        const canRun = computed(() => sourceTable.value.trim() !== '' && selectedSourceCred.value && selectedDestCred.value);
+        const canRun = computed(() => selectedSourceCred.value && selectedDestCred.value);
         const statusClass = computed(() => ({
           'bg-amber-500/20 text-amber-400': jobStatus.value === 'running',
           'bg-green-500/20 text-green-400': jobStatus.value === 'completed',
-          'bg-red-500/20 text-red-400': jobStatus.value === 'failed'
+          'bg-red-500/20 text-red-400': jobStatus.value === 'failed',
+          'bg-gray-500/20 text-gray-400': jobStatus.value === 'canceled'
         }));
 
         const getConnectorName = (connectorId) => {
@@ -368,7 +546,7 @@
           const cred = {
             name: newConnName.value,
             connectorId: newConnConnector.value,
-            fields: { ...newConnFields.value }
+            fields: normalizeFields(newConnFields.value)
           };
           await fetch('/api/credentials', {
             method: 'POST',
@@ -379,6 +557,14 @@
           resetNewConnFields();
           await loadData();
           alert('Connection saved!');
+        }
+
+        function normalizeFields(fields) {
+          return Object.fromEntries(Object.entries(fields).map(([key, value]) => {
+            if (value === true) return [key, 'true'];
+            if (value === false) return [key, 'false'];
+            return [key, value == null ? '' : String(value)];
+          }));
         }
 
         async function deleteConnection(id) {
@@ -401,63 +587,47 @@
           }
         }
 
-        function buildURI(connectorId, fields) {
-          const f = fields;
-          switch (connectorId) {
-            case 'postgres':
-              return `postgres://${f.user}:${f.password}@${f.host}:${f.port || '5432'}/${f.database}${f.sslmode ? '?sslmode=' + f.sslmode : ''}`;
-            case 'mysql':
-              return `mysql://${f.user}:${f.password}@${f.host}:${f.port || '3306'}/${f.database}`;
-            case 'mssql':
-              return `mssql://${f.user}:${f.password}@${f.host}:${f.port || '1433'}/${f.database}`;
-            case 'mongodb':
-              const scheme = f.srv === 'true' || f.srv === true ? 'mongodb+srv' : 'mongodb';
-              return `${scheme}://${f.user}:${f.password}@${f.host}:${f.port || '27017'}/${f.database}`;
-            case 'duckdb':
-              return `duckdb:///${f.path}`;
-            case 'sqlite':
-              return `sqlite:///${f.path}`;
-            case 'csv':
-              return `csv://${f.path}`;
-            case 'parquet':
-              return `parquet://${f.path}`;
-            case 'jsonl':
-              return `jsonl://${f.path}`;
-            case 'bigquery':
-              let uri = `bigquery://${f.project}/${f.dataset}`;
-              const params = [];
-              if (f.credentials_path) params.push(`credentials_path=${f.credentials_path}`);
-              if (f.location) params.push(`location=${f.location}`);
-              if (params.length) uri += '?' + params.join('&');
-              return uri;
-            case 'snowflake':
-              let sfUri = `snowflake://${f.user}:${f.password}@${f.account}/${f.database}`;
-              if (f.schema) sfUri += '/' + f.schema;
-              if (f.warehouse) sfUri += '?warehouse=' + f.warehouse;
-              return sfUri;
-            default:
-              return '';
-          }
-        }
-
         async function runJob() {
           logs.value = [];
           jobStatus.value = 'running';
           isRunning.value = true;
 
-          const sourceCred = credentials.value.find(c => c.id === selectedSourceCred.value);
-          const destCred = credentials.value.find(c => c.id === selectedDestCred.value);
-          const sourceUri = buildURI(sourceCred.connectorId, sourceCred.fields);
-          const destUri = buildURI(destCred.connectorId, destCred.fields);
-
           const req = {
-            sourceUri,
-            destUri,
+            sourceCredentialId: selectedSourceCred.value,
+            destCredentialId: selectedDestCred.value,
             sourceTable: sourceTable.value,
             destTable: destTable.value || sourceTable.value,
-            strategy: strategy.value,
-            primaryKeys: primaryKeys.value ? primaryKeys.value.split(',').map(s => s.trim()) : [],
-            incrementalKey: incrementalKey.value
+            incrementalStrategy: incrementalStrategy.value,
+            primaryKeys: parseList(primaryKeys.value),
+            incrementalKey: incrementalKey.value,
+            intervalStart: intervalStart.value,
+            intervalEnd: intervalEnd.value,
+            partitionBy: partitionBy.value,
+            clusterBy: clusterBy.value,
+            fullRefresh: fullRefresh.value,
+            schemaContract: schemaContract.value,
+            schemaNaming: schemaNaming.value,
+            progress: 'log',
+            pageSize: numberOrZero(pageSize.value),
+            loaderFileSize: numberOrZero(loaderFileSize.value),
+            loaderFileFormat: loaderFileFormat.value,
+            extractParallelism: numberOrZero(extractParallelism.value),
+            sqlLimit: numberOrZero(sqlLimit.value),
+            sqlExcludeColumns: parseList(sqlExcludeColumns.value),
+            sqlBackend: parseList(sqlBackend.value),
+            columns: columns.value,
+            noInference: noInference.value,
+            mask: parseList(mask.value),
+            trimWhitespace: trimWhitespace.value,
+            noLoadTimestamp: noLoadTimestamp.value,
+            pipelinesDir: pipelinesDir.value,
+            stagingBucket: stagingBucket.value,
+            stagingDataset: stagingDataset.value,
+            debug: debug.value,
+            stream: stream.value,
+            flushInterval: stream.value ? flushInterval.value : '',
+            flushRecords: stream.value ? numberOrZero(flushRecords.value) : 0,
+            queryAnnotations: queryAnnotations.value
           };
 
           try {
@@ -478,7 +648,8 @@
             const data = await res.json();
             jobId.value = data.jobId;
 
-            const ws = new WebSocket(`ws://${location.host}/api/ws/logs/${data.jobId}`);
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${wsProtocol}//${location.host}/api/ws/logs/${data.jobId}`);
             ws.onmessage = (e) => {
               const log = JSON.parse(e.data);
               logs.value.push(log);
@@ -503,6 +674,20 @@
             jobStatus.value = 'failed';
             isRunning.value = false;
           }
+        }
+
+        function parseList(value) {
+          return value ? value.split(',').map(s => s.trim()).filter(Boolean) : [];
+        }
+
+        function numberOrZero(value) {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+        }
+
+        async function cancelJob() {
+          if (!jobId.value) return;
+          await fetch(`/api/jobs/${jobId.value}/cancel`, { method: 'POST' });
         }
 
         async function toggleRunLogs(run) {
@@ -541,6 +726,12 @@
           }
         });
 
+        watch(stream, (enabled) => {
+          if (enabled && incrementalStrategy.value === 'replace') {
+            incrementalStrategy.value = '';
+          }
+        });
+
         onMounted(() => {
           loadData();
         });
@@ -549,13 +740,19 @@
           activeTab, connectors, credentials, runs,
           newConnConnector, newConnName, newConnFields, currentNewConnConnector,
           selectedSourceCred, selectedDestCred, sourceFields, destFields,
-          sourceTable, destTable, strategy, primaryKeys, incrementalKey,
+          sourceTable, destTable, optionsExpanded, incrementalStrategy, primaryKeys, incrementalKey,
+          intervalStart, intervalEnd, partitionBy, clusterBy, fullRefresh,
+          schemaContract, schemaNaming, pageSize, loaderFileSize,
+          loaderFileFormat, extractParallelism, sqlLimit, sqlExcludeColumns,
+          sqlBackend, columns, noInference, mask, trimWhitespace, noLoadTimestamp,
+          pipelinesDir, stagingBucket, stagingDataset, debug, stream,
+          flushInterval, flushRecords, queryAnnotations,
           isRunning, jobId, jobStatus, logs, logContainer,
           expandedRunId, selectedRunLogs, totalRuns, runsOffset, runsPerPage,
           sourceConnectors, destConnectors, sourceCredentials, destCredentials,
           canRun, statusClass,
           getConnectorName, resetNewConnFields, saveNewConnection, deleteConnection,
-          loadSourceCred, loadDestCred, runJob, toggleRunLogs, loadRuns,
+          loadSourceCred, loadDestCred, runJob, cancelJob, toggleRunLogs, loadRuns,
           prevPage, nextPage, formatTime, formatDateTime, logClass
         };
       }
