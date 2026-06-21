@@ -779,6 +779,106 @@ func TestMergeTable_EmptyTargetDedupesStagingByPK(t *testing.T) {
 	assert.Equal(t, 20, updatedAt)
 }
 
+func TestMergeTable_EmptyTargetUniqueStagingInsertsRows(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(1, 'Alice'),
+			(2, 'Bob')
+	`)
+	require.NoError(t, err)
+
+	err = dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		TargetTable:  "target_table",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id", "name"},
+	})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+	var total int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM target_table").Scan(&total))
+	assert.Equal(t, 2, total)
+
+	var nameRaw []byte
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT name FROM target_table WHERE id = 2").Scan(&nameRaw))
+	assert.Equal(t, "Bob", string(append([]byte(nil), nameRaw...)))
+}
+
+func TestStagingPrimaryKeysUniqueLocked(t *testing.T) {
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `
+		CREATE TABLE staging_table (
+			id BIGINT,
+			part BIGINT,
+			name VARCHAR
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(1, 10, 'Alice'),
+			(2, 10, 'Bob')
+	`)
+	require.NoError(t, err)
+
+	unique, err := dest.stagingPrimaryKeysUniqueLocked(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		PrimaryKeys:  []string{"id"},
+	})
+	require.NoError(t, err)
+	assert.True(t, unique)
+
+	err = dest.Exec(ctx, `INSERT INTO staging_table VALUES (2, 20, 'Bob duplicate')`)
+	require.NoError(t, err)
+
+	unique, err = dest.stagingPrimaryKeysUniqueLocked(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		PrimaryKeys:  []string{"id"},
+	})
+	require.NoError(t, err)
+	assert.False(t, unique)
+
+	unique, err = dest.stagingPrimaryKeysUniqueLocked(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		PrimaryKeys:  []string{"id", "part"},
+	})
+	require.NoError(t, err)
+	assert.True(t, unique)
+
+	err = dest.Exec(ctx, `INSERT INTO staging_table VALUES (NULL, 30, 'No id')`)
+	require.NoError(t, err)
+
+	unique, err = dest.stagingPrimaryKeysUniqueLocked(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		PrimaryKeys:  []string{"id", "part"},
+	})
+	require.NoError(t, err)
+	assert.False(t, unique)
+}
+
 func TestTableHasRowsLocked(t *testing.T) {
 	ctx := context.Background()
 	dest, _ := connectTestDuckDB(t, ctx)

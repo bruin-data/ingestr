@@ -656,6 +656,17 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}
 
 	if !targetHasRows {
+		stagingKeysUnique, err := d.stagingPrimaryKeysUniqueLocked(ctx, opts)
+		if err != nil {
+			return fmt.Errorf("failed to check staging primary key uniqueness: %w", err)
+		}
+		if stagingKeysUnique {
+			config.Debug("[DUCKDB MERGE] Empty-target staging keys are unique; using direct INSERT")
+			insertSource = fmt.Sprintf(`%s AS source`, destination.QuoteTableName(opts.StagingTable))
+		} else {
+			config.Debug("[DUCKDB MERGE] Empty-target staging keys need deduplication")
+		}
+
 		insertSQL := fmt.Sprintf(
 			`INSERT INTO %s (%s) SELECT %s FROM %s`,
 			quotedTargetTable,
@@ -731,6 +742,96 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	config.Debug("[DUCKDB MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func (d *DuckDBDestination) stagingPrimaryKeysUniqueLocked(ctx context.Context, opts destination.MergeOptions) (bool, error) {
+	if len(opts.PrimaryKeys) == 0 {
+		return false, nil
+	}
+
+	totalExpr := "COUNT(*)"
+	nullChecks := make([]string, len(opts.PrimaryKeys))
+	for i, pk := range opts.PrimaryKeys {
+		nullChecks[i] = fmt.Sprintf("%s IS NULL", destination.QuoteIdentifier(pk))
+	}
+
+	distinctExpr := ""
+	if len(opts.PrimaryKeys) == 1 {
+		distinctExpr = fmt.Sprintf("COUNT(DISTINCT %s)", destination.QuoteIdentifier(opts.PrimaryKeys[0]))
+	} else {
+		distinctExpr = fmt.Sprintf("COUNT(DISTINCT (%s))", strings.Join(quoteColumns(opts.PrimaryKeys), ", "))
+	}
+
+	query := fmt.Sprintf(
+		`SELECT %s AS total_rows, %s AS distinct_keys, COUNT(*) FILTER (WHERE %s) AS null_keys FROM %s`,
+		totalExpr,
+		distinctExpr,
+		strings.Join(nullChecks, " OR "),
+		destination.QuoteTableName(opts.StagingTable),
+	)
+
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = stmt.Close() }()
+
+	if err := stmt.SetSqlQuery(query); err != nil {
+		config.LogFailedQuery(query, err)
+		return false, err
+	}
+
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		config.LogFailedQuery(query, err)
+		return false, err
+	}
+	defer reader.Release()
+
+	if !reader.Next() {
+		if err := reader.Err(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	batch := reader.RecordBatch()
+	if batch.NumRows() == 0 || batch.NumCols() != 3 {
+		return false, fmt.Errorf("unexpected uniqueness check result shape")
+	}
+
+	total, ok := int64ValueAt(batch.Column(0), 0)
+	if !ok {
+		return false, fmt.Errorf("unexpected total row count type %s", batch.Column(0).DataType())
+	}
+	distinctKeys, ok := int64ValueAt(batch.Column(1), 0)
+	if !ok {
+		return false, fmt.Errorf("unexpected distinct key count type %s", batch.Column(1).DataType())
+	}
+	nullKeys, ok := int64ValueAt(batch.Column(2), 0)
+	if !ok {
+		return false, fmt.Errorf("unexpected null key count type %s", batch.Column(2).DataType())
+	}
+
+	return nullKeys == 0 && total == distinctKeys, nil
+}
+
+func int64ValueAt(arr arrow.Array, index int) (int64, bool) {
+	if arr.IsNull(index) {
+		return 0, false
+	}
+
+	switch col := arr.(type) {
+	case *array.Int64:
+		return col.Value(index), true
+	case *array.Uint64:
+		v := col.Value(index)
+		if v > uint64(^uint64(0)>>1) {
+			return 0, false
+		}
+		return int64(v), true
+	}
+	return 0, false
 }
 
 func (d *DuckDBDestination) tableHasRowsLocked(ctx context.Context, quotedTable string) (bool, error) {
