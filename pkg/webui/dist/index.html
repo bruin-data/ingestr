@@ -188,6 +188,7 @@
               <div>
                 <label class="block text-xs font-medium text-gray-500 mb-1">Schema Contract</label>
                 <select v-model="schemaContract" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300 bg-white">
+                  <option value="">Default</option>
                   <option value="evolve">Evolve</option>
                   <option value="freeze">Freeze</option>
                   <option value="discard_row">Discard Row</option>
@@ -205,11 +206,11 @@
               </div>
               <div>
                 <label class="block text-xs font-medium text-gray-500 mb-1">Page Size</label>
-                <input type="number" v-model.number="pageSize" min="1" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+                <input type="number" v-model.number="pageSize" placeholder="CLI default" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
               </div>
               <div>
                 <label class="block text-xs font-medium text-gray-500 mb-1">Extract Parallelism</label>
-                <input type="number" v-model.number="extractParallelism" min="1" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+                <input type="number" v-model.number="extractParallelism" placeholder="CLI default" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
               </div>
               <div>
                 <label class="block text-xs font-medium text-gray-500 mb-1">SQL Limit</label>
@@ -247,7 +248,7 @@
               </div>
               <div>
                 <label class="block text-xs font-medium text-gray-500 mb-1">Loader File Size</label>
-                <input type="number" v-model.number="loaderFileSize" min="1" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
+                <input type="number" v-model.number="loaderFileSize" placeholder="CLI default" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:ring-1 focus:ring-gray-300 focus:border-gray-300">
               </div>
               <div>
                 <label class="block text-xs font-medium text-gray-500 mb-1">Loader File Format</label>
@@ -436,12 +437,12 @@
         const partitionBy = ref('');
         const clusterBy = ref('');
         const fullRefresh = ref(false);
-        const schemaContract = ref('evolve');
+        const schemaContract = ref('');
         const schemaNaming = ref('');
-        const pageSize = ref(25000);
-        const loaderFileSize = ref(25000);
+        const pageSize = ref('');
+        const loaderFileSize = ref('');
         const loaderFileFormat = ref('');
-        const extractParallelism = ref(5);
+        const extractParallelism = ref('');
         const sqlLimit = ref('');
         const sqlExcludeColumns = ref('');
         const sqlBackend = ref('');
