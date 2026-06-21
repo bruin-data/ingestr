@@ -538,23 +538,31 @@ func (s *MongoDBSource) consumeCursor(ctx context.Context, cursor *mongo.Cursor,
 		}
 
 		startBatch := time.Now()
-		var builder mongoRecordBatchBuilder = newMongoBatchBuilder(opts.ExcludeColumns)
+		var builder mongoRecordBatchBuilder = newMongoRawBatchBuilder(opts.ExcludeColumns)
 		if opts.Schema != nil {
 			builder = newMongoSchemaBatchBuilder(opts.Schema.Columns, opts.ExcludeColumns)
 		}
 		batchRows := 0
 
 		for batchRows < batchSize && cursor.Next(ctx) {
-			var doc bson.M
-			if err := cursor.Decode(&doc); err != nil {
-				builder.Release()
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to decode document: %w", err)}
-				return
-			}
-			if err := builder.AppendDocument(doc); err != nil {
-				builder.Release()
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to build Arrow batch: %w", err)}
-				return
+			if opts.Schema == nil {
+				if err := builder.AppendRawDocument(cursor.Current); err != nil {
+					builder.Release()
+					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to build Arrow batch: %w", err)}
+					return
+				}
+			} else {
+				var doc bson.M
+				if err := cursor.Decode(&doc); err != nil {
+					builder.Release()
+					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to decode document: %w", err)}
+					return
+				}
+				if err := builder.AppendDocument(doc); err != nil {
+					builder.Release()
+					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to build Arrow batch: %w", err)}
+					return
+				}
 			}
 			batchRows++
 		}
@@ -623,6 +631,114 @@ func convertBSONValue(val any) any {
 	}
 }
 
+func convertRawBSONValue(val bson.RawValue) any {
+	switch val.Type {
+	case bson.TypeDouble:
+		if v, ok := val.DoubleOK(); ok {
+			return v
+		}
+	case bson.TypeString:
+		if v, ok := val.StringValueOK(); ok {
+			return v
+		}
+	case bson.TypeEmbeddedDocument:
+		if doc, ok := val.DocumentOK(); ok {
+			return convertRawDocument(doc)
+		}
+	case bson.TypeArray:
+		if arr, ok := val.ArrayOK(); ok {
+			return convertRawArray(arr)
+		}
+	case bson.TypeBinary:
+		if _, data, ok := val.BinaryOK(); ok {
+			return data
+		}
+	case bson.TypeObjectID:
+		if v, ok := val.ObjectIDOK(); ok {
+			return v.Hex()
+		}
+	case bson.TypeBoolean:
+		if v, ok := val.BooleanOK(); ok {
+			return v
+		}
+	case bson.TypeDateTime:
+		if v, ok := val.DateTimeOK(); ok {
+			return time.UnixMilli(v)
+		}
+	case bson.TypeRegex:
+		if pattern, _, ok := val.RegexOK(); ok {
+			return pattern
+		}
+	case bson.TypeJavaScript:
+		if v, ok := val.JavaScriptOK(); ok {
+			return primitive.JavaScript(v)
+		}
+	case bson.TypeSymbol:
+		if v, ok := val.SymbolOK(); ok {
+			return primitive.Symbol(v)
+		}
+	case bson.TypeDBPointer:
+		if ns, oid, ok := val.DBPointerOK(); ok {
+			return primitive.DBPointer{DB: ns, Pointer: oid}
+		}
+	case bson.TypeInt32:
+		if v, ok := val.Int32OK(); ok {
+			return v
+		}
+	case bson.TypeTimestamp:
+		if t, _, ok := val.TimestampOK(); ok {
+			return time.Unix(int64(t), 0)
+		}
+	case bson.TypeInt64:
+		if v, ok := val.Int64OK(); ok {
+			return v
+		}
+	case bson.TypeDecimal128:
+		if v, ok := val.Decimal128OK(); ok {
+			return v.String()
+		}
+	case bson.TypeUndefined:
+		return primitive.Undefined{}
+	case bson.TypeNull:
+		return nil
+	case bson.TypeMinKey:
+		return primitive.MinKey{}
+	case bson.TypeMaxKey:
+		return primitive.MaxKey{}
+	}
+	var decoded any
+	if err := val.Unmarshal(&decoded); err == nil {
+		return decoded
+	}
+	return val.String()
+}
+
+func convertRawDocument(doc bson.Raw) map[string]any {
+	elements, err := doc.Elements()
+	if err != nil {
+		return map[string]any{}
+	}
+
+	result := make(map[string]any, len(elements))
+	for _, elem := range elements {
+		result[elem.Key()] = convertRawBSONValue(elem.Value())
+	}
+	return result
+}
+
+func convertRawArray(arr bson.Raw) []any {
+	values, err := arr.Values()
+	if err != nil {
+		return []any{}
+	}
+
+	result := make([]any, len(values))
+	for i, value := range values {
+		result[i] = convertRawBSONValue(value)
+	}
+	return result
+}
+
 func normalizeBatchSize(size int) int {
 	if size <= 0 {
 		return defaultBatchSize
@@ -641,6 +757,7 @@ type mongoBatchBuilder struct {
 
 type mongoRecordBatchBuilder interface {
 	AppendDocument(doc bson.M) error
+	AppendRawDocument(doc bson.Raw) error
 	NewRecordBatch() (arrow.RecordBatch, error)
 	Release()
 }
@@ -687,6 +804,14 @@ func (b *mongoBatchBuilder) AppendDocument(doc bson.M) error {
 	return nil
 }
 
+func (b *mongoBatchBuilder) AppendRawDocument(doc bson.Raw) error {
+	var decoded bson.M
+	if err := bson.Unmarshal(doc, &decoded); err != nil {
+		return err
+	}
+	return b.AppendDocument(decoded)
+}
+
 func (b *mongoBatchBuilder) NewRecordBatch() (arrow.RecordBatch, error) {
 	if len(b.fieldOrder) == 0 {
 		emptySchema := arrow.NewSchema([]arrow.Field{}, nil)
@@ -723,6 +848,118 @@ func (b *mongoBatchBuilder) Release() {
 }
 
 func (b *mongoBatchBuilder) reset() {
+	b.fieldOrder = b.fieldOrder[:0]
+	b.cols = make(map[string]*typedColumnBuilder)
+	b.rowCount = 0
+}
+
+type mongoRawBatchBuilder struct {
+	mem        memory.Allocator
+	excludeMap map[string]bool
+	fieldOrder []string
+	cols       map[string]*typedColumnBuilder
+	rowCount   int
+}
+
+func newMongoRawBatchBuilder(excludeColumns []string) *mongoRawBatchBuilder {
+	excludeMap := make(map[string]bool, len(excludeColumns))
+	for _, col := range excludeColumns {
+		excludeMap[strings.ToLower(col)] = true
+	}
+
+	return &mongoRawBatchBuilder{
+		mem:        memory.NewGoAllocator(),
+		excludeMap: excludeMap,
+		fieldOrder: make([]string, 0),
+		cols:       make(map[string]*typedColumnBuilder),
+	}
+}
+
+func (b *mongoRawBatchBuilder) AppendDocument(doc bson.M) error {
+	raw, err := bson.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return b.AppendRawDocument(raw)
+}
+
+func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
+	elements, err := doc.Elements()
+	if err != nil {
+		return err
+	}
+
+	values := make(map[string]bson.RawValue, len(elements))
+	keys := make([]string, 0, len(elements))
+	for _, elem := range elements {
+		key := elem.Key()
+		if b.excludeMap[strings.ToLower(key)] {
+			continue
+		}
+		if _, ok := values[key]; !ok {
+			keys = append(keys, key)
+		}
+		values[key] = elem.Value()
+	}
+
+	for _, key := range keys {
+		col, ok := b.cols[key]
+		if !ok {
+			col = newTypedColumnBuilder(b.mem)
+			col.AppendNulls(b.rowCount)
+			b.cols[key] = col
+			b.fieldOrder = append(b.fieldOrder, key)
+		}
+		col.AppendRaw(values[key])
+	}
+
+	for _, field := range b.fieldOrder {
+		if _, ok := values[field]; ok {
+			continue
+		}
+		b.cols[field].AppendNull()
+	}
+
+	b.rowCount++
+	return nil
+}
+
+func (b *mongoRawBatchBuilder) NewRecordBatch() (arrow.RecordBatch, error) {
+	if len(b.fieldOrder) == 0 {
+		emptySchema := arrow.NewSchema([]arrow.Field{}, nil)
+		return array.NewRecordBatch(emptySchema, []arrow.Array{}, 0), nil
+	}
+
+	fieldOrder := append([]string(nil), b.fieldOrder...)
+	sort.Strings(fieldOrder)
+
+	fields := make([]arrow.Field, len(fieldOrder))
+	arrays := make([]arrow.Array, len(fieldOrder))
+	for i, name := range fieldOrder {
+		arr, field := b.cols[name].Build(b.rowCount)
+		field.Name = name
+		fields[i] = field
+		arrays[i] = arr
+	}
+
+	record := array.NewRecordBatch(arrow.NewSchema(fields, nil), arrays, int64(b.rowCount))
+
+	for _, arr := range arrays {
+		arr.Release()
+	}
+	b.reset()
+
+	return record, nil
+}
+
+func (b *mongoRawBatchBuilder) Release() {
+	for _, col := range b.cols {
+		col.Release()
+	}
+	b.reset()
+}
+
+func (b *mongoRawBatchBuilder) reset() {
 	b.fieldOrder = b.fieldOrder[:0]
 	b.cols = make(map[string]*typedColumnBuilder)
 	b.rowCount = 0
@@ -771,6 +1008,14 @@ func (b *mongoSchemaBatchBuilder) AppendDocument(doc bson.M) error {
 	}
 	b.rowCount++
 	return nil
+}
+
+func (b *mongoSchemaBatchBuilder) AppendRawDocument(doc bson.Raw) error {
+	var decoded bson.M
+	if err := bson.Unmarshal(doc, &decoded); err != nil {
+		return err
+	}
+	return b.AppendDocument(decoded)
 }
 
 func (b *mongoSchemaBatchBuilder) NewRecordBatch() (arrow.RecordBatch, error) {
