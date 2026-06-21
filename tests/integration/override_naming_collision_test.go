@@ -70,7 +70,9 @@ func TestAppLovinAssetShape_OverridesAndTypesAppliedAcrossRenames(t *testing.T) 
 	})
 
 	types := readDuckDBColumnTypes(t, duckDBPath, "main.input")
-	require.Equal(t, 16, len(types), "got: %v", types)
+	requireLoadTimestampColumn(t, types)
+	userTypes := withoutLoadTimestampTypes(types)
+	require.Equal(t, 16, len(userTypes), "got: %v", types)
 	assert.Equal(t, "VARCHAR", types["ad_format"])
 	assert.Equal(t, "VARCHAR", types["ad_unit_id"])
 	assert.Equal(t, "VARCHAR", types["device_type"])
@@ -103,7 +105,8 @@ func TestSnakeCase_NoDuplicateAppended(t *testing.T) {
 				cfg.Columns = tc.override + ",country:string"
 			})
 			types := readDuckDBColumnTypes(t, duckDBPath, "main.input")
-			require.Equal(t, 2, len(types), "got: %v", types)
+			requireLoadTimestampColumn(t, types)
+			require.Equal(t, 2, len(withoutLoadTimestampTypes(types)), "got: %v", types)
 		})
 	}
 }
@@ -115,7 +118,8 @@ func TestSnakeCase_TrulyMissingOverrideColumnIsStillAppended(t *testing.T) {
 	})
 
 	types := readDuckDBColumnTypes(t, duckDBPath, "main.input")
-	require.Equal(t, 3, len(types), "got: %v", types)
+	requireLoadTimestampColumn(t, types)
+	require.Equal(t, 3, len(withoutLoadTimestampTypes(types)), "got: %v", types)
 	assert.Equal(t, "VARCHAR", types["ad_format"])
 	assert.Equal(t, "VARCHAR", types["country"])
 	assert.Equal(t, "BIGINT", types["extra_col"])
@@ -129,7 +133,8 @@ func TestDirectNaming_OverrideInSourceFormStillWorks(t *testing.T) {
 	})
 
 	types := readDuckDBColumnTypes(t, duckDBPath, "main.input")
-	require.Equal(t, 3, len(types))
+	requireLoadTimestampColumn(t, types)
+	require.Equal(t, 3, len(withoutLoadTimestampTypes(types)))
 	assert.Equal(t, "DOUBLE", types["revenue"], "got: %v", types)
 }
 

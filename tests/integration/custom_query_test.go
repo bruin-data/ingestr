@@ -105,6 +105,7 @@ func TestCustomQuery_PostgresToSQLite(t *testing.T) {
 				cols, err := rows.Columns()
 				require.NoError(t, err)
 				_ = rows.Close()
+				cols = withoutLoadTimestampColumns(cols)
 				assert.Equal(t, 2, len(cols), "should only have id and amount columns")
 
 				var minAmount float64

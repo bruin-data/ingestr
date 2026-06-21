@@ -55,11 +55,13 @@ func TestColumnOverrides_CSVToPostgres_EmptySourceWithOverrides(t *testing.T) {
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
 	types := readPostgresColumnTypes(t, pgDest.uri, schemaName, "empty")
+	requireLoadTimestampColumn(t, types)
+	userTypes := withoutLoadTimestampTypes(types)
 	assert.Equal(t, "bigint", types["id"])
 	assert.Equal(t, "text", types["name"])
 	assert.Equal(t, "text", types["email"])
 	assert.Equal(t, "smallint", types["age"])
-	assert.Equal(t, 4, len(types), "table should have exactly the 4 overridden columns")
+	assert.Equal(t, 4, len(userTypes), "table should have exactly the 4 overridden user columns")
 
 	assert.Equal(t, 0, readPostgresRowCount(t, pgDest.uri, schemaName, "empty"))
 }

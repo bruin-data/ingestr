@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
@@ -60,6 +61,50 @@ func TestIngestionJob_GetRecords_AppliesTransformation(t *testing.T) {
 	names := result.Batch.Column(1).(*array.String)
 	if got := names.Value(0); got != "alice" {
 		t.Fatalf("trimmed name = %q, want alice", got)
+	}
+}
+
+func TestIngestionJob_GetRecords_AddsSameLoadTimestampToEveryBatch(t *testing.T) {
+	job, _, _ := minimalJob()
+	job.BufferedRecords = mustClosedRecords(
+		source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil)},
+		source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{3}, nil)},
+	)
+
+	ts := time.Date(2026, 6, 19, 10, 11, 12, 345678901, time.UTC)
+	job.LoadTimestamp = transformer.NewLoadTimestamp(schema.Column{
+		Name:     "_ingestr_loaded_at",
+		DataType: schema.TypeTimestampTZ,
+		Nullable: false,
+	}, ts)
+
+	records, err := job.GetRecords(context.Background(), source.ReadOptions{})
+	if err != nil {
+		t.Fatalf("GetRecords returned error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		result := <-records
+		if result.Err != nil {
+			t.Fatalf("record %d returned error: %v", i, result.Err)
+		}
+		if result.Batch == nil {
+			t.Fatalf("record %d batch is nil", i)
+		}
+		if got := result.Batch.ColumnName(1); got != "_ingestr_loaded_at" {
+			t.Fatalf("record %d column 1 = %q, want _ingestr_loaded_at", i, got)
+		}
+		loadedAt := result.Batch.Column(1).(*array.Timestamp)
+		for row := 0; row < int(result.Batch.NumRows()); row++ {
+			if got := int64(loadedAt.Value(row)); got != ts.UnixMicro() {
+				t.Fatalf("record %d row %d timestamp = %d, want %d", i, row, got, ts.UnixMicro())
+			}
+		}
+		result.Batch.Release()
+	}
+
+	if _, ok := <-records; ok {
+		t.Fatal("records channel still open after two batches")
 	}
 }
 
