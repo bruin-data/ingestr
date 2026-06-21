@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
+	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -227,6 +228,27 @@ func TestBuildBigQuerySchema_DefaultNumericOmitsPrecisionScale(t *testing.T) {
 	}
 	if result[0].Scale != 0 {
 		t.Fatalf("field scale = %d, want 0 for bare NUMERIC", result[0].Scale)
+	}
+}
+
+func TestBuildBigQuerySchema_LoadTimestampIsNullable(t *testing.T) {
+	result := BuildBigQuerySchema(&schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: naming.IngestrLoadedAtColumn, DataType: schema.TypeTimestampTZ, Nullable: true},
+		},
+	})
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 field, got %d", len(result))
+	}
+	if result[0].Name != naming.IngestrLoadedAtColumn {
+		t.Fatalf("field name = %s, want %s", result[0].Name, naming.IngestrLoadedAtColumn)
+	}
+	if result[0].Type != bigquery.TimestampFieldType {
+		t.Fatalf("field type = %v, want TimestampFieldType", result[0].Type)
+	}
+	if result[0].Required {
+		t.Fatal("load timestamp field should not be required")
 	}
 }
 

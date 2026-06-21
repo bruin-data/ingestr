@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/annotation"
@@ -336,6 +337,14 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
+	var loadTimestamp time.Time
+	if !p.config.NoLoadTimestamp {
+		if !p.config.Stream {
+			loadTimestamp = time.Now().UTC().Truncate(time.Microsecond)
+		}
+		destSchema = addLoadTimestampColumn(destSchema)
+	}
+
 	// Capture the schema before evolution: on incremental runs against an
 	// existing table, evolution replaces destSchema with FinalSchema, which is
 	// built from the destination's columns and therefore drops staging-only
@@ -347,7 +356,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
 	var evolutionPlan *schemaevolution.EvolutionPlan
 	if resolvedStrategy != config.StrategyReplace {
-		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, p.config.DestTable, destSchema)
+		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, p.config.DestTable, destSchema, resolvedStrategy)
 		if err != nil {
 			return fmt.Errorf("schema evolution failed: %w", err)
 		}
@@ -355,9 +364,17 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			destSchema = evolutionPlan.FinalSchema
 		}
 	}
+	if p.config.NoLoadTimestamp {
+		destSchema = removeLoadTimestampColumn(destSchema)
+		fullSchema = removeLoadTimestampColumn(fullSchema)
+	} else {
+		destSchema = addLoadTimestampColumn(destSchema)
+		fullSchema = addLoadTimestampColumn(fullSchema)
+	}
 
 	// Staging mirrors the destination schema, with staging-only CDC columns retained.
 	ingestSchema := destination.StagingIngestSchema(fullSchema, destSchema)
+	ingestSchema = preserveSourceCDCColumnTypes(ingestSchema, fullSchema)
 
 	if inferBuffer != nil {
 		bufferTarget := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
@@ -428,6 +445,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		whitespaceTrimmer = transformer.NewWhitespaceTrimmer()
 	}
 
+	var loadTimestampTransformer *transformer.LoadTimestamp
+	if !p.config.NoLoadTimestamp && !p.config.Stream {
+		loadTimestampTransformer = transformer.NewLoadTimestamp(loadTimestampColumnForSchema(ingestSchema), loadTimestamp)
+	}
+
 	job := &strategy.IngestionJob{
 		Config:              &resolvedConfig,
 		Table:               table,
@@ -442,6 +464,8 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		IngestrColumnFiller: p.ingestrColumnFiller,
 		ColumnMasker:        columnMasker,
 		WhitespaceTrimmer:   whitespaceTrimmer,
+		LoadTimestamp:       loadTimestampTransformer,
+		SchemaAligner:       transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()),
 		EvolutionPlan:       evolutionPlan,
 	}
 
@@ -742,7 +766,7 @@ func arrowField(name string, col schema.Column, nullable bool) arrow.Field {
 
 func isSCD2MetadataColumn(name string) bool {
 	for _, scd := range destination.SCD2MetadataColumns() {
-		if scd == name {
+		if strings.EqualFold(scd, name) {
 			return true
 		}
 	}
@@ -831,6 +855,16 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	config.Debug("[PIPELINE] Multi-table mode: %d tables", len(tables))
 
+	var loadTimestamp time.Time
+	if !p.config.NoLoadTimestamp {
+		if !p.config.Stream {
+			loadTimestamp = time.Now().UTC().Truncate(time.Microsecond)
+		}
+		for i := range tables {
+			tables[i].Schema = addLoadTimestampColumn(tables[i].Schema)
+		}
+	}
+
 	resolvedStrategy := p.config.IncrementalStrategy
 	if p.config.Stream && resolvedStrategy == "" {
 		if ss, ok := src.(source.StreamingSource); ok {
@@ -907,7 +941,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	if resolvedStrategy != config.StrategyReplace {
 		evolutionPlans = make(map[string]*schemaevolution.EvolutionPlan)
 		for _, table := range tables {
-			plan, err := p.evolveSchemaIfNeeded(ctx, tableDestNames[table.Name], table.Schema)
+			plan, err := p.evolveSchemaIfNeeded(ctx, tableDestNames[table.Name], table.Schema, resolvedStrategy)
 			if err != nil {
 				return fmt.Errorf("schema evolution failed for table %s: %w", table.Name, err)
 			}
@@ -944,6 +978,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		whitespaceTrimmer = transformer.NewWhitespaceTrimmer()
 	}
 
+	var loadTimestampTransformer *transformer.LoadTimestamp
+	if !p.config.NoLoadTimestamp && !p.config.Stream {
+		loadTimestampTransformer = transformer.NewLoadTimestamp(loadTimestampColumnForSchema(nil), loadTimestamp)
+	}
+
 	job := &strategy.MultiTableIngestionJob{
 		Config:            &resolvedConfig,
 		Source:            src,
@@ -954,6 +993,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		CDCResumeLSNs:     cdcResumeLSNs,
 		EvolutionPlans:    evolutionPlans,
 		WhitespaceTrimmer: whitespaceTrimmer,
+		LoadTimestamp:     loadTimestampTransformer,
 	}
 
 	if p.config.Stream {
@@ -979,7 +1019,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 // evolveSchemaIfNeeded inspects the destination's current schema and builds an
 // EvolutionPlan describing how it should change to accommodate sourceSchema.
-func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, sourceSchema *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
+func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, sourceSchema *schema.TableSchema, strategy config.IncrementalStrategy) (*schemaevolution.EvolutionPlan, error) {
 	// Get destination table schema (nil if table doesn't exist)
 	destSchema, err := p.dest.GetTableSchema(ctx, destTable)
 	if err != nil {
@@ -990,8 +1030,14 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 		return nil, nil
 	}
 
-	// Store destination schema for use by strategies
-	p.destinationSchema = destSchema
+	comparisonDestSchema := destSchema
+	if strategy == config.StrategySCD2 {
+		comparisonDestSchema = removeSCD2MetadataColumns(destSchema)
+	}
+	comparisonDestSchema = preserveSourceCDCColumnTypes(comparisonDestSchema, sourceSchema)
+
+	// Store destination schema for use by strategies.
+	p.destinationSchema = comparisonDestSchema
 
 	// Parse schema contract mode
 	contractMode, err := schemaevolution.ParseContractMode(p.config.SchemaContract)
@@ -1012,14 +1058,14 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 
 	// Compare schemas with overrides. Staging-only CDC columns are not persisted on the destination.
 	opts := &schemaevolution.CompareOptions{Overrides: overrides}
-	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, opts)
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), comparisonDestSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
 	}
 	if !comparison.HasChanges {
 		config.Debug("[SCHEMA EVOLUTION] No schema changes detected")
 		return &schemaevolution.EvolutionPlan{
-			FinalSchema: schemaevolution.BuildFinalSchema(destSchema, nil),
+			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, nil),
 			Migration:   nil,
 		}, nil
 	}
@@ -1048,7 +1094,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 		}
 		p.filteredSchemaComparison = comparison
 		return &schemaevolution.EvolutionPlan{
-			FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
+			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
 			Migration:   nil,
 		}, nil
 
@@ -1093,7 +1139,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 				HasChanges: false,
 			}
 			return &schemaevolution.EvolutionPlan{
-				FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
+				FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
 				Migration:   nil,
 			}, nil
 		}
@@ -1113,7 +1159,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	if dialect == nil {
 		config.Debug("[SCHEMA EVOLUTION] No dialect registered for scheme %s, skipping", p.dest.GetScheme())
 		return &schemaevolution.EvolutionPlan{
-			FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
+			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
 			Migration:   nil,
 		}, nil
 	}
@@ -1137,7 +1183,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 
 	// Build the plan; migration is NOT applied here.
 	plan := &schemaevolution.EvolutionPlan{
-		FinalSchema: schemaevolution.BuildFinalSchema(destSchema, p.filteredSchemaComparison),
+		FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
 		Migration:   migration,
 	}
 	config.Debug("[SCHEMA EVOLUTION] Built plan with %d statements (deferred apply)", len(migration.Statements))
@@ -1155,15 +1201,26 @@ func (p *Pipeline) setupIngestrColumns(ctx context.Context, sourceSchema *schema
 	}
 
 	ingestrCols := naming.GetIngestrColumns(destSchema)
-	p.ingestrColumnFiller = schemaevolution.NewIngestrColumnFiller(ingestrCols)
-	config.Debug("[INGESTR] Will fill %d ingestr columns with '-': %v", len(ingestrCols), ingestrCols)
+	legacyCols := make([]string, 0, len(ingestrCols))
+	for _, colName := range ingestrCols {
+		if strings.EqualFold(colName, naming.IngestrLoadedAtColumn) {
+			continue
+		}
+		legacyCols = append(legacyCols, colName)
+	}
+	if len(legacyCols) == 0 {
+		return nil, nil
+	}
+
+	p.ingestrColumnFiller = schemaevolution.NewIngestrColumnFiller(legacyCols)
+	config.Debug("[INGESTR] Will fill %d ingestr columns with '-': %v", len(legacyCols), legacyCols)
 
 	// Copy the source schema so the original stays clean for source SELECT queries.
 	copied := *sourceSchema
 	copied.Columns = make([]schema.Column, len(sourceSchema.Columns))
 	copy(copied.Columns, sourceSchema.Columns)
 
-	for _, colName := range ingestrCols {
+	for _, colName := range legacyCols {
 		exists := false
 		for _, col := range copied.Columns {
 			if col.Name == colName {
@@ -1181,6 +1238,106 @@ func (p *Pipeline) setupIngestrColumns(ctx context.Context, sourceSchema *schema
 	}
 
 	return &copied, nil
+}
+
+func addLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+
+	result := *s
+	result.Columns = append([]schema.Column{}, s.Columns...)
+
+	for i, col := range result.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+			result.Columns[i] = loadTimestampColumnWithName(col.Name, true)
+			return &result
+		}
+	}
+
+	result.Columns = append(result.Columns, loadTimestampColumnWithName(naming.IngestrLoadedAtColumn, true))
+	return &result
+}
+
+func removeLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+
+	result := *s
+	result.Columns = make([]schema.Column, 0, len(s.Columns))
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+			continue
+		}
+		result.Columns = append(result.Columns, col)
+	}
+	return &result
+}
+
+func removeSCD2MetadataColumns(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+
+	result := *s
+	result.Columns = make([]schema.Column, 0, len(s.Columns))
+	for _, col := range s.Columns {
+		if isSCD2MetadataColumn(col.Name) {
+			continue
+		}
+		result.Columns = append(result.Columns, col)
+	}
+	return &result
+}
+
+func preserveSourceCDCColumnTypes(ingestSchema, sourceSchema *schema.TableSchema) *schema.TableSchema {
+	if ingestSchema == nil || sourceSchema == nil {
+		return ingestSchema
+	}
+
+	sourceColumns := make(map[string]schema.Column, len(sourceSchema.Columns))
+	for _, col := range sourceSchema.Columns {
+		if destination.IsCDCColumn(col.Name) || destination.IsCDCStagingOnlyColumn(col.Name) {
+			sourceColumns[strings.ToLower(col.Name)] = col
+		}
+	}
+	if len(sourceColumns) == 0 {
+		return ingestSchema
+	}
+
+	result := *ingestSchema
+	result.Columns = append([]schema.Column{}, ingestSchema.Columns...)
+	for i, col := range result.Columns {
+		sourceCol, ok := sourceColumns[strings.ToLower(col.Name)]
+		if !ok {
+			continue
+		}
+		result.Columns[i].DataType = sourceCol.DataType
+		result.Columns[i].Precision = sourceCol.Precision
+		result.Columns[i].Scale = sourceCol.Scale
+		result.Columns[i].ArrayType = sourceCol.ArrayType
+	}
+	return &result
+}
+
+func loadTimestampColumnForSchema(s *schema.TableSchema) schema.Column {
+	if s != nil {
+		for _, col := range s.Columns {
+			if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+				return loadTimestampColumnWithName(col.Name, true)
+			}
+		}
+	}
+	return loadTimestampColumnWithName(naming.IngestrLoadedAtColumn, true)
+}
+
+func loadTimestampColumnWithName(name string, nullable bool) schema.Column {
+	return schema.Column{
+		Name:     name,
+		DataType: schema.TypeTimestampTZ,
+		Nullable: nullable,
+	}
 }
 
 func (p *Pipeline) setupNamingConvention(ctx context.Context, sourceSchema *schema.TableSchema) error {

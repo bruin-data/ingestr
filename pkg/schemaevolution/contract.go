@@ -3,6 +3,8 @@ package schemaevolution
 import (
 	"fmt"
 	"strings"
+
+	"github.com/bruin-data/ingestr/pkg/naming"
 )
 
 // ContractViolation represents a schema contract violation.
@@ -57,6 +59,10 @@ func ApplyContract(contract SchemaContract, comparison *SchemaComparison) *Contr
 
 	case ContractFreeze:
 		for _, change := range comparison.Changes {
+			if isInternalAllowedChange(change) {
+				result.Allowed = append(result.Allowed, change)
+				continue
+			}
 			result.Violations = append(result.Violations, ContractViolation{
 				ColumnName:  change.ColumnName,
 				ChangeType:  change.Type,
@@ -66,7 +72,7 @@ func ApplyContract(contract SchemaContract, comparison *SchemaComparison) *Contr
 
 	case ContractDiscardRow:
 		for _, change := range comparison.Changes {
-			if change.Type == ChangeRemoveColumn {
+			if change.Type == ChangeRemoveColumn || isInternalAllowedChange(change) {
 				result.Allowed = append(result.Allowed, change)
 			} else {
 				result.Violations = append(result.Violations, ContractViolation{
@@ -92,6 +98,10 @@ func ApplyContract(contract SchemaContract, comparison *SchemaComparison) *Contr
 	}
 
 	return result
+}
+
+func isInternalAllowedChange(change SchemaChange) bool {
+	return change.Type == ChangeAddColumn && strings.EqualFold(change.ColumnName, naming.IngestrLoadedAtColumn)
 }
 
 func describeChange(change SchemaChange) string {

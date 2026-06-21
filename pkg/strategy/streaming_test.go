@@ -2,15 +2,23 @@ package strategy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +70,81 @@ func (d *truncatingDest) TruncateTable(_ context.Context, table string) error {
 	return nil
 }
 
+type capturingDestination struct {
+	*fakeDestination
+	valuesMu sync.Mutex
+	values   []string
+}
+
+func (d *capturingDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	fd := d.fakeDestination
+	fd.mu.Lock()
+	fd.calls = append(fd.calls, "WriteParallel")
+	fd.writeCalls = append(fd.writeCalls, opts)
+	writeErr := fd.writeErr
+	fd.mu.Unlock()
+
+	for result := range records {
+		if result.Batch != nil {
+			names := result.Batch.Column(1).(*array.String)
+			d.valuesMu.Lock()
+			d.values = append(d.values, names.Value(0))
+			d.valuesMu.Unlock()
+			result.Batch.Release()
+		}
+		if result.Err != nil {
+			return result.Err
+		}
+	}
+	return writeErr
+}
+
+type timestampCapturingDest struct {
+	*fakeDestination
+	mu              sync.Mutex
+	writeTimestamps [][]int64
+}
+
+func (d *timestampCapturingDest) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	d.fakeDestination.mu.Lock()
+	d.calls = append(d.calls, "WriteParallel")
+	d.writeCalls = append(d.writeCalls, opts)
+	writeErr := d.writeErr
+	d.fakeDestination.mu.Unlock()
+
+	var timestamps []int64
+	for result := range records {
+		if result.Batch != nil {
+			values, err := loadTimestampValues(result.Batch)
+			if err != nil {
+				result.Batch.Release()
+				return err
+			}
+			timestamps = append(timestamps, values...)
+			result.Batch.Release()
+		}
+		if result.Err != nil {
+			return result.Err
+		}
+	}
+
+	d.mu.Lock()
+	d.writeTimestamps = append(d.writeTimestamps, timestamps)
+	d.mu.Unlock()
+	return writeErr
+}
+
+func (d *timestampCapturingDest) capturedTimestamps() [][]int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	out := make([][]int64, len(d.writeTimestamps))
+	for i, values := range d.writeTimestamps {
+		out[i] = append([]int64(nil), values...)
+	}
+	return out
+}
+
 func streamTestSchema() *schema.TableSchema {
 	return &schema.TableSchema{
 		Columns: []schema.Column{
@@ -69,6 +152,18 @@ func streamTestSchema() *schema.TableSchema {
 		},
 		PrimaryKeys: []string{"id"},
 	}
+}
+
+func streamTestSchemaWithLoadTimestamp() *schema.TableSchema {
+	s := streamTestSchema()
+	result := *s
+	result.Columns = append([]schema.Column{}, s.Columns...)
+	result.Columns = append(result.Columns, schema.Column{
+		Name:     naming.IngestrLoadedAtColumn,
+		DataType: schema.TypeTimestampTZ,
+		Nullable: true,
+	})
+	return &result
 }
 
 func mergeTableState(name string) *streamTableState {
@@ -88,6 +183,35 @@ func writeCallCount(d *fakeDestination) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.writeCalls)
+}
+
+func sha256Hex(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func loadTimestampValues(batch arrow.RecordBatch) ([]int64, error) {
+	idx := -1
+	for i := 0; i < int(batch.NumCols()); i++ {
+		if strings.EqualFold(batch.ColumnName(i), naming.IngestrLoadedAtColumn) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, fmt.Errorf("missing %s column", naming.IngestrLoadedAtColumn)
+	}
+
+	col, ok := batch.Column(idx).(*array.Timestamp)
+	if !ok {
+		return nil, fmt.Errorf("%s column is %T, want *array.Timestamp", naming.IngestrLoadedAtColumn, batch.Column(idx))
+	}
+
+	values := make([]int64, int(batch.NumRows()))
+	for row := 0; row < int(batch.NumRows()); row++ {
+		values[row] = int64(col.Value(row))
+	}
+	return values, nil
 }
 
 func TestStreaming_CountTriggerFlushes(t *testing.T) {
@@ -132,6 +256,52 @@ func TestStreaming_CountTriggerFlushes(t *testing.T) {
 	baseDest.mu.Unlock()
 	// Cumulative token semantics: only the newest token is committed.
 	assert.Equal(t, []any{3}, committer.committed())
+
+	cancel()
+	close(records)
+	require.NoError(t, <-done)
+}
+
+func TestStreaming_LoadTimestampIsSetPerFlushCycle(t *testing.T) {
+	dest := &timestampCapturingDest{fakeDestination: &fakeDestination{}}
+	loop := newTestLoop(dest, StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  4,
+		Strategy:      config.StrategyAppend,
+	}, map[string]*streamTableState{"": {destTable: "ds.tbl", schema: streamTestSchemaWithLoadTimestamp()}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	records := make(chan source.RecordBatchResult)
+	done := make(chan error, 1)
+	go func() { done <- loop.run(ctx, records) }()
+
+	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil)}
+	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{3, 4}, nil)}
+
+	require.Eventually(t, func() bool {
+		return len(dest.capturedTimestamps()) == 1
+	}, 5*time.Second, time.Millisecond)
+
+	first := dest.capturedTimestamps()[0]
+	require.Len(t, first, 4)
+	for _, value := range first[1:] {
+		assert.Equal(t, first[0], value, "all rows in one flush should share a timestamp")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{5, 6, 7, 8}, nil)}
+
+	require.Eventually(t, func() bool {
+		return len(dest.capturedTimestamps()) == 2
+	}, 5*time.Second, time.Millisecond)
+
+	second := dest.capturedTimestamps()[1]
+	require.Len(t, second, 4)
+	for _, value := range second[1:] {
+		assert.Equal(t, second[0], value, "all rows in one flush should share a timestamp")
+	}
+	assert.NotEqual(t, first[0], second[0], "later flushes should get a fresh load timestamp")
 
 	cancel()
 	close(records)
@@ -186,6 +356,31 @@ func TestStreamingExecutor_PassesFlushOptionsToSource(t *testing.T) {
 	assert.True(t, src.readOpts.Streaming)
 	assert.Equal(t, 123*time.Millisecond, src.readOpts.FlushInterval)
 	assert.Equal(t, 7, src.readOpts.FlushRecords)
+}
+func TestStreaming_ExecuteAppliesBatchTransformationsOnce(t *testing.T) {
+	job, src, _ := minimalJob()
+	dest := &capturingDestination{fakeDestination: &fakeDestination{}}
+	job.Destination = dest
+	src.readCh = mustClosedRecords(source.RecordBatchResult{
+		Batch: intStringRecordBatch(t, "id", []int64{1}, "name", []string{"  secret  "}),
+	})
+	job.WhitespaceTrimmer = transformer.NewWhitespaceTrimmer()
+	masker, err := transformer.NewColumnMasker([]string{"name:hash"})
+	require.NoError(t, err)
+	job.ColumnMasker = masker
+
+	exec := NewStreamingExecutor(StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  1,
+		Strategy:      config.StrategyAppend,
+	})
+
+	require.NoError(t, exec.Execute(context.Background(), job))
+
+	dest.valuesMu.Lock()
+	defer dest.valuesMu.Unlock()
+	require.Equal(t, []string{sha256Hex("secret")}, dest.values)
+	assert.NotEqual(t, sha256Hex(sha256Hex("secret")), dest.values[0], "masking must not run twice")
 }
 
 func TestStreaming_EmptyCyclesSkipped(t *testing.T) {

@@ -81,6 +81,33 @@ func TestApplyContract_Freeze(t *testing.T) {
 	assert.Contains(t, err.Error(), "freeze")
 }
 
+func TestApplyContract_FreezeAllowsIngestrLoadedAt(t *testing.T) {
+	comparison := &SchemaComparison{
+		HasChanges: true,
+		Changes: []SchemaChange{
+			{
+				Type:       ChangeAddColumn,
+				ColumnName: "_ingestr_loaded_at",
+				NewColumn:  schema.Column{Name: "_ingestr_loaded_at", DataType: schema.TypeTimestampTZ},
+			},
+			{
+				Type:       ChangeAddColumn,
+				ColumnName: "new_col",
+				NewColumn:  schema.Column{Name: "new_col", DataType: schema.TypeString},
+			},
+		},
+	}
+
+	contract := SchemaContract{Mode: ContractFreeze}
+	result := ApplyContract(contract, comparison)
+
+	assert.True(t, result.HasViolations())
+	assert.Len(t, result.Allowed, 1)
+	assert.Equal(t, "_ingestr_loaded_at", result.Allowed[0].ColumnName)
+	assert.Len(t, result.Violations, 1)
+	assert.Equal(t, "new_col", result.Violations[0].ColumnName)
+}
+
 func TestApplyContract_DiscardRow(t *testing.T) {
 	comparison := &SchemaComparison{
 		HasChanges: true,

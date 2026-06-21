@@ -188,6 +188,7 @@ func TestMSSQLSource_TableToSQLite_CustomSchemaFiltersAndExcludeColumns(t *testi
 	assert.Equal(t, 2, count, "custom schema read should honor TOP limit")
 
 	cols := sqliteColumns(t, destDB, "filtered_rows")
+	cols = withoutLoadTimestampColumns(cols)
 	assert.Equal(t, []string{"id", "name", "updated_at"}, cols, "excluded MSSQL columns should be removed from the destination schema")
 
 	var minTS, maxTS string
