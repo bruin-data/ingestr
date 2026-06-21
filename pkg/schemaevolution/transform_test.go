@@ -8,6 +8,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -159,9 +160,124 @@ func TestIngestrColumnFiller_Transform(t *testing.T) {
 	})
 }
 
+func TestTransformBatchStream_ReleasesReplacedInputBatch(t *testing.T) {
+	mem := newCheckedAllocator(t)
+
+	filler := NewIngestrColumnFiller([]string{"_dlt_load_id"})
+	filler.allocator = mem
+	input := make(chan source.RecordBatchResult, 1)
+	input <- source.RecordBatchResult{
+		Batch:       createTestBatchWithAllocator(mem, []string{"id"}, 2),
+		TableName:   "public.users",
+		CommitToken: "token-1",
+	}
+	close(input)
+
+	out := TransformBatchStream(context.Background(), input, filler)
+	result := <-out
+	require.NoError(t, result.Err)
+	require.NotNil(t, result.Batch)
+	assert.Equal(t, "public.users", result.TableName)
+	assert.Equal(t, "token-1", result.CommitToken)
+	result.Batch.Release()
+
+	_, ok := <-out
+	assert.False(t, ok)
+}
+
+func TestTransformBatchStream_PassesNilBatchResultThrough(t *testing.T) {
+	filler := NewIngestrColumnFiller([]string{"_dlt_load_id"})
+	input := make(chan source.RecordBatchResult, 1)
+	input <- source.RecordBatchResult{CommitToken: "keepalive"}
+	close(input)
+
+	out := TransformBatchStream(context.Background(), input, filler)
+	result := <-out
+	require.NoError(t, result.Err)
+	assert.Nil(t, result.Batch)
+	assert.Equal(t, "keepalive", result.CommitToken)
+}
+
+func TestDiscardValueTransformer_ReleasesTemporaryArrays(t *testing.T) {
+	mem := newCheckedAllocator(t)
+
+	comparison := &SchemaComparison{
+		HasChanges: true,
+		Changes: []SchemaChange{
+			{
+				Type:       ChangeWidenType,
+				ColumnName: "age",
+				OldColumn:  &schema.Column{Name: "age", DataType: schema.TypeInt64},
+				NewColumn:  schema.Column{Name: "age", DataType: schema.TypeString},
+			},
+		},
+	}
+	destSchema := &schema.TableSchema{
+		Columns: []schema.Column{{Name: "age", DataType: schema.TypeInt64, Nullable: true}},
+	}
+	transformer := NewDiscardValueTransformer(comparison, nil, destSchema)
+	transformer.allocator = mem
+
+	batch := createTestBatchWithAllocator(mem, []string{"age", "name"}, 2)
+	result, err := transformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	result.Release()
+	batch.Release()
+}
+
+func TestRemovedColumnTransformer_ReleasesTemporaryArrays(t *testing.T) {
+	mem := newCheckedAllocator(t)
+
+	transformer := NewRemovedColumnTransformer(&SchemaComparison{
+		HasChanges: true,
+		Changes: []SchemaChange{
+			{
+				Type:       ChangeRemoveColumn,
+				ColumnName: "removed",
+				OldColumn:  &schema.Column{Name: "removed", DataType: schema.TypeString, Nullable: true},
+			},
+		},
+	})
+	transformer.allocator = mem
+
+	batch := createTestBatchWithAllocator(mem, []string{"id"}, 2)
+	result, err := transformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	result.Release()
+	batch.Release()
+}
+
+func TestDiscardRowTransformer_ReleasesFilteredEmptyBatch(t *testing.T) {
+	mem := newCheckedAllocator(t)
+
+	transformer := NewDiscardRowTransformer(nil, nil, &SchemaComparison{
+		HasChanges: true,
+		Changes: []SchemaChange{
+			{
+				Type:       ChangeWidenType,
+				ColumnName: "id",
+				OldColumn:  &schema.Column{Name: "id", DataType: schema.TypeString, Nullable: true},
+				NewColumn:  schema.Column{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+			},
+		},
+	})
+	transformer.allocator = mem
+
+	batch := createTestBatchWithAllocator(mem, []string{"id"}, 2)
+	result, err := transformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), result.NumRows())
+	result.Release()
+	batch.Release()
+}
+
 // createTestBatch creates a simple Arrow batch with string columns for testing.
 func createTestBatch(colNames []string, numRows int) arrow.RecordBatch {
 	mem := memory.DefaultAllocator
+	return createTestBatchWithAllocator(mem, colNames, numRows)
+}
+
+func createTestBatchWithAllocator(mem memory.Allocator, colNames []string, numRows int) arrow.RecordBatch {
 	fields := make([]arrow.Field, len(colNames))
 	arrays := make([]arrow.Array, len(colNames))
 
@@ -181,4 +297,14 @@ func createTestBatch(colNames []string, numRows int) arrow.RecordBatch {
 		arr.Release()
 	}
 	return batch
+}
+
+func newCheckedAllocator(t *testing.T) *memory.CheckedAllocator {
+	t.Helper()
+
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	t.Cleanup(func() {
+		mem.AssertSize(t, 0)
+	})
+	return mem
 }
