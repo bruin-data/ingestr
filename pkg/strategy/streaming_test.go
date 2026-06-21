@@ -2,15 +2,19 @@ package strategy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +66,35 @@ func (d *truncatingDest) TruncateTable(_ context.Context, table string) error {
 	return nil
 }
 
+type capturingDestination struct {
+	*fakeDestination
+	valuesMu sync.Mutex
+	values   []string
+}
+
+func (d *capturingDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	fd := d.fakeDestination
+	fd.mu.Lock()
+	fd.calls = append(fd.calls, "WriteParallel")
+	fd.writeCalls = append(fd.writeCalls, opts)
+	writeErr := fd.writeErr
+	fd.mu.Unlock()
+
+	for result := range records {
+		if result.Batch != nil {
+			names := result.Batch.Column(1).(*array.String)
+			d.valuesMu.Lock()
+			d.values = append(d.values, names.Value(0))
+			d.valuesMu.Unlock()
+			result.Batch.Release()
+		}
+		if result.Err != nil {
+			return result.Err
+		}
+	}
+	return writeErr
+}
+
 func streamTestSchema() *schema.TableSchema {
 	return &schema.TableSchema{
 		Columns: []schema.Column{
@@ -88,6 +121,11 @@ func writeCallCount(d *fakeDestination) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.writeCalls)
+}
+
+func sha256Hex(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func TestStreaming_CountTriggerFlushes(t *testing.T) {
@@ -165,6 +203,32 @@ func TestStreaming_IntervalTriggerFlushes(t *testing.T) {
 	require.NoError(t, <-done)
 	// Nothing was buffered after the flush, so shutdown adds no extra writes.
 	assert.Equal(t, 1, writeCallCount(dest))
+}
+
+func TestStreaming_ExecuteAppliesBatchTransformationsOnce(t *testing.T) {
+	job, src, _ := minimalJob()
+	dest := &capturingDestination{fakeDestination: &fakeDestination{}}
+	job.Destination = dest
+	src.readCh = mustClosedRecords(source.RecordBatchResult{
+		Batch: intStringRecordBatch(t, "id", []int64{1}, "name", []string{"  secret  "}),
+	})
+	job.WhitespaceTrimmer = transformer.NewWhitespaceTrimmer()
+	masker, err := transformer.NewColumnMasker([]string{"name:hash"})
+	require.NoError(t, err)
+	job.ColumnMasker = masker
+
+	exec := NewStreamingExecutor(StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  1,
+		Strategy:      config.StrategyAppend,
+	})
+
+	require.NoError(t, exec.Execute(context.Background(), job))
+
+	dest.valuesMu.Lock()
+	defer dest.valuesMu.Unlock()
+	require.Equal(t, []string{sha256Hex("secret")}, dest.values)
+	assert.NotEqual(t, sha256Hex(sha256Hex("secret")), dest.values[0], "masking must not run twice")
 }
 
 func TestStreaming_EmptyCyclesSkipped(t *testing.T) {

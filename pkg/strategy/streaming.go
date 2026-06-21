@@ -82,11 +82,6 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
-	}
-
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
 	}
