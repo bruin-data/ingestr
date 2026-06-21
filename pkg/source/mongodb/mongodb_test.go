@@ -2,6 +2,7 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -476,7 +477,7 @@ func TestMongoCDCStreamingFlushOptions(t *testing.T) {
 	}
 }
 
-func TestMongoCDCEventBufferRejectsFieldsOutsideSchema(t *testing.T) {
+func TestMongoCDCEventBufferAllowsFieldsOutsideSchema(t *testing.T) {
 	tableSchema := addMongoCDCColumns(&schema.TableSchema{
 		Name: "items",
 		Columns: []schema.Column{
@@ -494,11 +495,11 @@ func TestMongoCDCEventBufferRejectsFieldsOutsideSchema(t *testing.T) {
 		"name":  "item1",
 		"value": int64(100),
 	}, nil)
-	if err == nil {
-		t.Fatal("expected unknown field error")
-	}
-	if !strings.Contains(err.Error(), "value") || !strings.Contains(err.Error(), "schema_sample_size") {
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if buffer.rows != 1 {
+		t.Fatalf("buffer rows = %d, want 1", buffer.rows)
 	}
 }
 
@@ -522,6 +523,35 @@ func TestMongoCDCEventBufferAllowsExcludedUnknownFields(t *testing.T) {
 	})
 	if len(unknown) != 0 {
 		t.Fatalf("unknown fields = %v, want none", unknown)
+	}
+}
+
+func TestMongoCDCEventBufferFlushBlockingHonorsCanceledContext(t *testing.T) {
+	tableSchema := addMongoCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "_id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"_id"},
+	})
+
+	buffer := newMongoCDCEventBuffer(tableSchema, nil, "items", 10)
+	defer buffer.release()
+
+	err := buffer.append(context.Background(), bson.M{
+		"_id":  int64(1),
+		"name": "item1",
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected append error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = buffer.flushBlocking(ctx, make(chan source.RecordBatchResult))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("flushBlocking error = %v, want context.Canceled", err)
 	}
 }
 

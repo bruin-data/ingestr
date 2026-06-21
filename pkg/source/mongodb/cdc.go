@@ -89,6 +89,7 @@ type mongoCDCEventBuffer struct {
 	rows            int
 	allowedColumns  map[string]struct{}
 	excludedColumns map[string]struct{}
+	warnedUnknown   map[string]struct{}
 }
 
 func NewMongoDBCDCSource() *MongoDBCDCSource {
@@ -353,7 +354,7 @@ func (s *MongoDBCDCSource) getTables(ctx context.Context, filter []string) ([]so
 		return nil, fmt.Errorf("MongoDB CDC multi-table mode requires a database in the source URI")
 	}
 
-	collections, err := s.client.Database(s.database).ListCollectionNames(ctx, bson.D{})
+	collections, err := s.client.Database(s.database).ListCollectionNames(ctx, bson.D{{Key: "type", Value: "collection"}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list collections in database %q: %w", s.database, err)
 	}
@@ -674,7 +675,7 @@ func (s *MongoDBCDCSource) streamCollection(ctx context.Context, ns mongoNamespa
 		if err := stream.Err(); err != nil {
 			if ctx.Err() != nil {
 				if opts.Streaming {
-					if flushErr := buffer.flushBlocking(results); flushErr != nil {
+					if flushErr := buffer.flushBlocking(ctx, results); flushErr != nil {
 						return flushErr
 					}
 				}
@@ -693,7 +694,7 @@ func (s *MongoDBCDCSource) streamCollection(ctx context.Context, ns mongoNamespa
 
 		if ctx.Err() != nil {
 			if opts.Streaming {
-				if flushErr := buffer.flushBlocking(results); flushErr != nil {
+				if flushErr := buffer.flushBlocking(ctx, results); flushErr != nil {
 					return flushErr
 				}
 			}
@@ -823,16 +824,13 @@ func newMongoCDCEventBuffer(tableSchema *schema.TableSchema, excludeColumns []st
 		builder:         newMongoSchemaBatchBuilder(tableSchema.Columns, excludeColumns),
 		allowedColumns:  allowedColumns,
 		excludedColumns: excludedColumns,
+		warnedUnknown:   make(map[string]struct{}),
 	}
 }
 
 func (b *mongoCDCEventBuffer) append(ctx context.Context, doc bson.M, results chan<- source.RecordBatchResult) error {
 	if unknown := b.unknownDocumentFields(doc); len(unknown) > 0 {
-		tableName := b.tableName
-		if tableName == "" && b.tableSchema != nil {
-			tableName = b.tableSchema.Name
-		}
-		return fmt.Errorf("MongoDB CDC document for %s contains fields not present in the inferred schema: %s; increase schema_sample_size so these fields are sampled before advancing the CDC cursor", tableName, strings.Join(unknown, ", "))
+		b.debugUnknownDocumentFields(unknown)
 	}
 	if err := b.builder.AppendDocument(doc); err != nil {
 		return fmt.Errorf("failed to build MongoDB CDC Arrow batch: %w", err)
@@ -859,6 +857,25 @@ func (b *mongoCDCEventBuffer) unknownDocumentFields(doc bson.M) []string {
 	return unknown
 }
 
+func (b *mongoCDCEventBuffer) debugUnknownDocumentFields(fields []string) {
+	newFields := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if _, ok := b.warnedUnknown[field]; ok {
+			continue
+		}
+		b.warnedUnknown[field] = struct{}{}
+		newFields = append(newFields, field)
+	}
+	if len(newFields) == 0 {
+		return
+	}
+	tableName := b.tableName
+	if tableName == "" && b.tableSchema != nil {
+		tableName = b.tableSchema.Name
+	}
+	config.Debug("[MONGODB CDC] Ignoring fields not present in inferred schema for %s: %s", tableName, strings.Join(newFields, ", "))
+}
+
 func (b *mongoCDCEventBuffer) flush(ctx context.Context, results chan<- source.RecordBatchResult) error {
 	if b.rows == 0 {
 		return nil
@@ -876,7 +893,7 @@ func (b *mongoCDCEventBuffer) flush(ctx context.Context, results chan<- source.R
 	return nil
 }
 
-func (b *mongoCDCEventBuffer) flushBlocking(results chan<- source.RecordBatchResult) error {
+func (b *mongoCDCEventBuffer) flushBlocking(ctx context.Context, results chan<- source.RecordBatchResult) error {
 	if b.rows == 0 {
 		return nil
 	}
@@ -884,7 +901,10 @@ func (b *mongoCDCEventBuffer) flushBlocking(results chan<- source.RecordBatchRes
 	if err != nil {
 		return fmt.Errorf("failed to convert MongoDB CDC batch to Arrow: %w", err)
 	}
-	results <- source.RecordBatchResult{Batch: record, TableName: b.tableName}
+	if !sendMongoCDCResult(ctx, results, source.RecordBatchResult{Batch: record, TableName: b.tableName}) {
+		record.Release()
+		return ctx.Err()
+	}
 	b.builder = newMongoSchemaBatchBuilder(b.tableSchema.Columns, b.excludeColumns)
 	b.rows = 0
 	return nil
