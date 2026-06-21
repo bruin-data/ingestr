@@ -267,10 +267,37 @@ func (c *typedColumnBuilder) tryAppendRaw(val bson.RawValue) bool {
 		b.Append(data)
 		return true
 	case *array.ExtensionBuilder:
+		if appendRawExtensionValue(b, val) {
+			return true
+		}
 		arrowconv.AppendValue(b, convertRawBSONValue(val))
 		return true
 	}
 	return false
+}
+
+func appendRawExtensionValue(builder *array.ExtensionBuilder, val bson.RawValue) bool {
+	extType, ok := builder.Type().(arrow.ExtensionType)
+	if !ok || extType.ExtensionName() != schema.UnknownExtensionName {
+		return false
+	}
+
+	storage, ok := builder.StorageBuilder().(*array.StringBuilder)
+	if !ok {
+		return false
+	}
+
+	switch val.Type {
+	case bson.TypeEmbeddedDocument, bson.TypeArray:
+		encoded, ok := rawBSONValueAsJSONString(val)
+		if !ok {
+			return false
+		}
+		storage.Append(encoded)
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *typedColumnBuilder) promoteToUnknown() {
