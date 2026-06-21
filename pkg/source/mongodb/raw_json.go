@@ -134,7 +134,7 @@ func appendRawBSONJSONValue(buf *bytes.Buffer, val bson.RawValue) bool {
 		return true
 	case bson.TypeDateTime:
 		v, ok := val.DateTimeOK()
-		return ok && appendRawJSONValue(buf, time.UnixMilli(v))
+		return ok && appendJSONTime(buf, time.UnixMilli(v))
 	case bson.TypeRegex:
 		pattern, _, ok := val.RegexOK()
 		if !ok {
@@ -165,7 +165,7 @@ func appendRawBSONJSONValue(buf *bytes.Buffer, val bson.RawValue) bool {
 		return true
 	case bson.TypeTimestamp:
 		t, _, ok := val.TimestampOK()
-		return ok && appendRawJSONValue(buf, time.Unix(int64(t), 0))
+		return ok && appendJSONTime(buf, time.Unix(int64(t), 0))
 	case bson.TypeInt64:
 		v, ok := val.Int64OK()
 		if !ok {
@@ -192,6 +192,12 @@ func appendRawBSONJSONValue(buf *bytes.Buffer, val bson.RawValue) bool {
 }
 
 func appendJSONString(buf *bytes.Buffer, value string) {
+	if stringNeedsNoEscaping(value) {
+		buf.WriteByte('"')
+		buf.WriteString(value)
+		buf.WriteByte('"')
+		return
+	}
 	if !utf8.ValidString(value) {
 		_ = appendRawJSONValue(buf, value)
 		return
@@ -238,6 +244,19 @@ func appendJSONString(buf *bytes.Buffer, value string) {
 	buf.WriteByte('"')
 }
 
+func stringNeedsNoEscaping(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c < 0x20 || c == '\\' || c == '"' {
+			return false
+		}
+		if c >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
 func appendJSONFloat64(buf *bytes.Buffer, value float64) {
 	format := byte('f')
 	abs := math.Abs(value)
@@ -257,6 +276,36 @@ func appendJSONFloat64(buf *bytes.Buffer, value float64) {
 		}
 	}
 	buf.Write(out)
+}
+
+func appendJSONTime(buf *bytes.Buffer, value time.Time) bool {
+	start := buf.Len()
+	buf.WriteByte('"')
+	formatted := value.AppendFormat(buf.AvailableBuffer(), time.RFC3339Nano)
+	if !strictRFC3339Time(formatted) {
+		buf.Truncate(start)
+		return appendRawJSONValue(buf, value)
+	}
+
+	buf.Write(formatted)
+	buf.WriteByte('"')
+	return true
+}
+
+func strictRFC3339Time(value []byte) bool {
+	if len(value) <= len("9999") || value[len("9999")] != '-' {
+		return false
+	}
+	if value[len(value)-1] == 'Z' {
+		return true
+	}
+
+	c := value[len(value)-len("Z07:00")]
+	if '0' <= c && c <= '9' {
+		return false
+	}
+	zoneHour := 10*(value[len(value)-len("07:00")]-'0') + (value[len(value)-len("7:00")] - '0')
+	return zoneHour < 24
 }
 
 func appendRawJSONValue(buf *bytes.Buffer, value any) bool {

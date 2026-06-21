@@ -1,6 +1,8 @@
 package mongodb
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -764,6 +766,47 @@ func TestMongoRawBatchBuilder_NestedTemporalValuesMatchDecodedPath(t *testing.T)
 	}
 	if got, want := arrowutil.Value(rawRecord.Column(0), 0), arrowutil.Value(decodedRecord.Column(0), 0); got != want {
 		t.Fatalf("raw nested value = %#v, want decoded value %#v", got, want)
+	}
+}
+
+func TestAppendJSONTimeMatchesEncodingJSON(t *testing.T) {
+	tests := []time.Time{
+		time.UnixMilli(1_782_003_600_123),
+		time.Date(2026, 6, 21, 2, 0, 0, 123_000_000, time.UTC),
+		time.Date(2026, 6, 21, 2, 0, 0, 0, time.FixedZone("", -23*3600-59*60)),
+	}
+
+	for _, tt := range tests {
+		var got bytes.Buffer
+		if !appendJSONTime(&got, tt) {
+			t.Fatalf("appendJSONTime(%v) returned false", tt)
+		}
+
+		want, err := json.Marshal(tt)
+		if err != nil {
+			t.Fatalf("json.Marshal(%v) error = %v", tt, err)
+		}
+		if got.String() != string(want) {
+			t.Fatalf("appendJSONTime(%v) = %q, want %q", tt, got.String(), want)
+		}
+	}
+}
+
+func TestAppendJSONTimeInvalidRFC3339FallsBack(t *testing.T) {
+	tests := []time.Time{
+		time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 21, 2, 0, 0, 0, time.FixedZone("", 24*3600)),
+	}
+
+	for _, tt := range tests {
+		var got bytes.Buffer
+		got.WriteString("prefix")
+		if appendJSONTime(&got, tt) {
+			t.Fatalf("appendJSONTime(%v) returned true", tt)
+		}
+		if got.String() != "prefix" {
+			t.Fatalf("appendJSONTime(%v) changed buffer to %q", tt, got.String())
+		}
 	}
 }
 
