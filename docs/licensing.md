@@ -13,16 +13,17 @@ ingestr uses three separate license checks. CI runs the first two on PRs:
 
 Use these statuses in `licenses.lock.yml`:
 
-- `allowed`: permissive or already accepted license metadata.
+- `allowed`: default-accepted or already reviewed license metadata.
 - `manual-review`: accepted after human review, usually because the scanner
   cannot classify the license file or the dependency has special obligations.
 - `needs-review`: generated placeholder for new or changed dependencies. Do not
   merge with this status.
 - `blocked`: dependency must not be used.
 
-Typical default-allowed licenses are MIT, BSD, Apache-2.0, ISC, and similar
-permissive licenses. Unknown, custom, GPL, AGPL, LGPL, CDDL, or proprietary
-licenses need manual review before use.
+Default-allowed scanner licenses are `Apache-2.0`, `BSD-2-Clause`,
+`BSD-3-Clause`, `ISC`, `MIT`, `MPL-2.0`, `0BSD`, `CC0-1.0`, `Unlicense`, and
+`Zlib`. Unknown, custom, GPL, AGPL, LGPL, CDDL, or proprietary licenses need
+manual review before use.
 
 ## Updating The Audit Lock
 
@@ -38,9 +39,10 @@ If it fails because dependencies changed, regenerate the lock:
 make licenses-audit-update
 ```
 
-New or changed entries are written with `status: needs-review`. Review each one,
-then set the status to `allowed`, `manual-review`, or `blocked` with a short
-note when the decision is not obvious.
+New or changed entries with only default-allowed licenses are written with
+`status: allowed`. Everything else is written with `status: needs-review`.
+Review the lock diff, then only edit entries that need a different decision,
+such as `manual-review` or `blocked`.
 
 Manual license pins live under `manual_audits` in `licenses.lock.yml`. The
 notice generator validates their selected version and license file SHA before

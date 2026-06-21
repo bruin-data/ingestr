@@ -88,7 +88,7 @@ func run() error {
 	flag.StringVar(&csvPath, "csv", "", "go-licenses csv output")
 	flag.StringVar(&modulesPath, "modules", "", "go list -m all output")
 	flag.StringVar(&outputPath, "output", "", "output file for append-manual-notices")
-	flag.StringVar(&newStatus, "new-status", "needs-review", "status for new or changed dependencies in write mode")
+	flag.StringVar(&newStatus, "new-status", "needs-review", "fallback status for new or changed dependencies whose licenses are not default-allowed")
 	flag.StringVar(&tool, "tool", "", "scanner tool metadata for write mode")
 	flag.StringVar(&packages, "packages", "", "package pattern metadata for write mode")
 	flag.StringVar(&targets, "targets", "", "space-separated target metadata for write mode")
@@ -333,15 +333,16 @@ func mergeDependencies(existing []dependencyReview, scanned []scanEntry, newStat
 	next := make([]dependencyReview, 0, len(scanned))
 	for _, scan := range scanned {
 		old, ok := byModule[scan.Module]
-		status := newStatus
-		note := ""
+		status, note := defaultReviewStatus(scan, newStatus)
 		if ok {
 			if old.Version == scan.Version && sameStrings(old.Licenses, scan.Licenses) {
 				status = old.Status
 				note = old.Note
-			} else {
+			} else if old.Status == "manual-review" {
 				status = "needs-review"
-				note = "Version or license changed; review before setting status."
+				note = "Manual-reviewed dependency changed; review before setting status."
+			} else {
+				status, note = changedReviewStatus(scan, newStatus)
 			}
 		}
 		next = append(next, dependencyReview{
@@ -354,6 +355,57 @@ func mergeDependencies(existing []dependencyReview, scanned []scanEntry, newStat
 	}
 	sortDependencies(next)
 	return next
+}
+
+func changedReviewStatus(scan scanEntry, fallbackStatus string) (string, string) {
+	status, note := defaultReviewStatus(scan, fallbackStatus)
+	if status == "needs-review" {
+		note = "Version or license changed; review before setting status."
+	}
+	return status, note
+}
+
+func defaultReviewStatus(scan scanEntry, fallbackStatus string) (string, string) {
+	if defaultAllowedLicenses(scan.Licenses) {
+		return "allowed", ""
+	}
+	if fallbackStatus == "" {
+		fallbackStatus = "needs-review"
+	}
+	if fallbackStatus == "needs-review" {
+		return fallbackStatus, "License is not in the default allowlist; review before setting status."
+	}
+	return fallbackStatus, ""
+}
+
+func defaultAllowedLicenses(licenses []string) bool {
+	if len(licenses) == 0 {
+		return false
+	}
+	for _, license := range licenses {
+		if !defaultAllowedLicense(license) {
+			return false
+		}
+	}
+	return true
+}
+
+func defaultAllowedLicense(license string) bool {
+	switch license {
+	case "0BSD",
+		"Apache-2.0",
+		"BSD-2-Clause",
+		"BSD-3-Clause",
+		"CC0-1.0",
+		"ISC",
+		"MIT",
+		"MPL-2.0",
+		"Unlicense",
+		"Zlib":
+		return true
+	default:
+		return false
+	}
 }
 
 func appendManualNotices(audits []manualAudit, outputPath string) (err error) {
