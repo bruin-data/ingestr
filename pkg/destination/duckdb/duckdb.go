@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-adbc/go/adbc"
@@ -245,6 +246,9 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 			config.Debug("[DUCKDB] Invalid INGESTR_DUCKDB_CHECKPOINT_ROWS=%q, checkpointing disabled: %v", v, err)
 		}
 	}
+	if checkpointEvery == 0 {
+		return d.writeViaSingleADBCIngest(ctx, records, tableName, ingestOpts, startTotal)
+	}
 
 	var totalRows int64
 	var rowsSinceCheckpoint int64
@@ -294,6 +298,198 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 	config.Debug("[DUCKDB] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), totalRate)
 	return nil
 }
+
+func (d *DuckDBDestination) writeViaSingleADBCIngest(ctx context.Context, records <-chan source.RecordBatchResult, tableName string, ingestOpts adbc.IngestStreamOptions, startTotal time.Time) error {
+	first, err := nextNonEmptyRecord(ctx, records)
+	if err != nil {
+		return err
+	}
+	if first == nil {
+		config.Debug("[DUCKDB] Total: 0 rows written in %v (0 rows/sec)", time.Since(startTotal))
+		return nil
+	}
+
+	reader := newChannelRecordReader(ctx, records, first)
+	_, ingestErr := adbc.IngestStream(ctx, d.conn, reader, tableName, adbc.OptionValueIngestModeAppend, ingestOpts)
+	totalRows := reader.rowsWritten()
+	readerErr := reader.Err()
+	reader.Release()
+
+	if ingestErr != nil {
+		config.Debug("[DUCKDB] IngestStream error: %v", ingestErr)
+		return fmt.Errorf("failed to ingest batch: %w", ingestErr)
+	}
+	if readerErr != nil {
+		return readerErr
+	}
+
+	totalRate := float64(totalRows) / time.Since(startTotal).Seconds()
+	config.Debug("[DUCKDB] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), totalRate)
+	return nil
+}
+
+func nextNonEmptyRecord(ctx context.Context, records <-chan source.RecordBatchResult) (arrow.RecordBatch, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case res, ok := <-records:
+			if !ok {
+				return nil, nil
+			}
+			if res.Err != nil {
+				if res.Batch != nil {
+					res.Batch.Release()
+				}
+				return nil, res.Err
+			}
+			if res.Batch == nil {
+				continue
+			}
+			if res.Batch.NumRows() == 0 {
+				res.Batch.Release()
+				continue
+			}
+			return res.Batch, nil
+		}
+	}
+}
+
+type channelRecordReader struct {
+	refCount atomic.Int64
+	ctx      context.Context
+	records  <-chan source.RecordBatchResult
+	schema   *arrow.Schema
+	first    arrow.RecordBatch
+	current  arrow.RecordBatch
+	err      error
+	rows     atomic.Int64
+}
+
+func newChannelRecordReader(ctx context.Context, records <-chan source.RecordBatchResult, first arrow.RecordBatch) *channelRecordReader {
+	reader := &channelRecordReader{
+		ctx:     ctx,
+		records: records,
+		schema:  first.Schema(),
+		first:   first,
+	}
+	reader.refCount.Add(1)
+	return reader
+}
+
+func (r *channelRecordReader) Retain() {
+	r.refCount.Add(1)
+}
+
+func (r *channelRecordReader) Release() {
+	if r.refCount.Add(-1) != 0 {
+		return
+	}
+	if r.current != nil {
+		r.current.Release()
+		r.current = nil
+	}
+	if r.first != nil {
+		r.first.Release()
+		r.first = nil
+	}
+}
+
+func (r *channelRecordReader) Schema() *arrow.Schema {
+	return r.schema
+}
+
+func (r *channelRecordReader) Next() bool {
+	if r.current != nil {
+		r.current.Release()
+		r.current = nil
+	}
+	if r.err != nil {
+		return false
+	}
+	if r.first != nil {
+		r.current = r.first
+		r.first = nil
+		r.rows.Add(r.current.NumRows())
+		return true
+	}
+
+	for {
+		select {
+		case <-r.ctx.Done():
+			r.err = r.ctx.Err()
+			return false
+		case res, ok := <-r.records:
+			if !ok {
+				return false
+			}
+			if res.Err != nil {
+				if res.Batch != nil {
+					res.Batch.Release()
+				}
+				r.err = res.Err
+				return false
+			}
+			if res.Batch == nil {
+				continue
+			}
+			if res.Batch.NumRows() == 0 {
+				res.Batch.Release()
+				continue
+			}
+			batch := res.Batch
+			if !batch.Schema().Equal(r.schema) {
+				rewrapped, ok := rewrapRecordBatchWithSchema(batch, r.schema)
+				if !ok {
+					batch.Release()
+					r.err = fmt.Errorf("record batch schema changed during DuckDB ingest")
+					return false
+				}
+				res.Batch.Release()
+				batch = rewrapped
+			}
+			r.current = batch
+			r.rows.Add(r.current.NumRows())
+			return true
+		}
+	}
+}
+
+func rewrapRecordBatchWithSchema(batch arrow.RecordBatch, target *arrow.Schema) (arrow.RecordBatch, bool) {
+	if batch.Schema().NumFields() != target.NumFields() {
+		return nil, false
+	}
+
+	cols := make([]arrow.Array, batch.NumCols())
+	for i := 0; i < int(batch.NumCols()); i++ {
+		sourceField := batch.Schema().Field(i)
+		targetField := target.Field(i)
+		if sourceField.Name != targetField.Name || !arrow.TypeEqual(sourceField.Type, targetField.Type) {
+			return nil, false
+		}
+		cols[i] = batch.Column(i)
+	}
+
+	return array.NewRecordBatch(target, cols, batch.NumRows()), true
+}
+
+func (r *channelRecordReader) RecordBatch() arrow.RecordBatch {
+	return r.current
+}
+
+func (r *channelRecordReader) Record() arrow.RecordBatch {
+	return r.RecordBatch()
+}
+
+func (r *channelRecordReader) Err() error {
+	return r.err
+}
+
+func (r *channelRecordReader) rowsWritten() int64 {
+	return r.rows.Load()
+}
+
+var _ array.RecordReader = (*channelRecordReader)(nil)
 
 func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()

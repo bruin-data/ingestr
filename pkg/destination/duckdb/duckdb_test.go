@@ -798,6 +798,86 @@ func TestTableHasRowsLocked(t *testing.T) {
 	assert.True(t, hasRows)
 }
 
+func TestChannelRecordReaderSkipsEmptyBatches(t *testing.T) {
+	ctx := context.Background()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	first := makeDuckDBRecordBatch(t, schema, []int64{1})
+	empty := makeDuckDBRecordBatch(t, schema, nil)
+	second := makeDuckDBRecordBatch(t, schema, []int64{2, 3})
+
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{Batch: empty}
+	records <- source.RecordBatchResult{Batch: second}
+	close(records)
+
+	reader := newChannelRecordReader(ctx, records, first)
+	defer reader.Release()
+
+	require.True(t, reader.Next())
+	assert.Equal(t, int64(1), reader.RecordBatch().NumRows())
+	require.True(t, reader.Next())
+	assert.Equal(t, int64(2), reader.RecordBatch().NumRows())
+	assert.False(t, reader.Next())
+	assert.NoError(t, reader.Err())
+	assert.Equal(t, int64(3), reader.rowsWritten())
+}
+
+func TestChannelRecordReaderRewrapsCompatibleSchema(t *testing.T) {
+	ctx := context.Background()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false}}, nil)
+	nullableSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+	first := makeDuckDBRecordBatch(t, schema, []int64{1})
+	second := makeDuckDBRecordBatch(t, nullableSchema, []int64{2})
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: second}
+	close(records)
+
+	reader := newChannelRecordReader(ctx, records, first)
+	defer reader.Release()
+
+	require.True(t, reader.Next())
+	assert.True(t, reader.RecordBatch().Schema().Equal(schema))
+	require.True(t, reader.Next())
+	assert.True(t, reader.RecordBatch().Schema().Equal(schema))
+	assert.Equal(t, int64(2), reader.rowsWritten())
+	assert.False(t, reader.Next())
+	assert.NoError(t, reader.Err())
+}
+
+func TestChannelRecordReaderReportsSchemaChange(t *testing.T) {
+	ctx := context.Background()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	otherSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	first := makeDuckDBRecordBatch(t, schema, []int64{1})
+	second := makeDuckDBRecordBatch(t, otherSchema, []int64{2})
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: second}
+	close(records)
+
+	reader := newChannelRecordReader(ctx, records, first)
+	defer reader.Release()
+
+	require.True(t, reader.Next())
+	assert.False(t, reader.Next())
+	assert.ErrorContains(t, reader.Err(), "schema changed")
+}
+
+func makeDuckDBRecordBatch(t *testing.T, schema *arrow.Schema, values []int64) arrow.RecordBatch {
+	t.Helper()
+
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	defer builder.Release()
+	for _, value := range values {
+		builder.Append(value)
+	}
+	arr := builder.NewArray()
+	defer arr.Release()
+
+	return array.NewRecordBatch(schema, []arrow.Array{arr}, int64(len(values)))
+}
+
 func TestMergeTable_CDCMaterializesDeleteOnlyTombstone(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)
