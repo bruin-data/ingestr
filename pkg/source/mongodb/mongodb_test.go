@@ -672,6 +672,57 @@ func TestMongoRawBatchBuilder_LegacyBSONTypesMatchDecodedPath(t *testing.T) {
 	}
 }
 
+func TestMongoRawBatchBuilder_RawStringAndObjectIDMatchDecodedPath(t *testing.T) {
+	oid := primitive.NewObjectID()
+	rawDoc := bsoncore.NewDocumentBuilder().
+		AppendString("plain", "hello").
+		AppendString("nul", "a\x00b").
+		AppendObjectID("oid", oid).
+		Build()
+
+	var decoded bson.M
+	if err := bson.Unmarshal(rawDoc, &decoded); err != nil {
+		t.Fatalf("bson.Unmarshal error = %v", err)
+	}
+
+	decodedBuilder := newMongoBatchBuilder(nil)
+	if err := decodedBuilder.AppendDocument(decoded); err != nil {
+		t.Fatalf("decoded AppendDocument error = %v", err)
+	}
+	decodedRecord, err := decodedBuilder.NewRecordBatch()
+	if err != nil {
+		t.Fatalf("decoded NewRecordBatch error = %v", err)
+	}
+	defer decodedRecord.Release()
+
+	rawBuilder := newMongoRawBatchBuilder(nil)
+	if err := rawBuilder.AppendRawDocument(bson.Raw(rawDoc)); err != nil {
+		t.Fatalf("raw AppendRawDocument error = %v", err)
+	}
+	rawRecord, err := rawBuilder.NewRecordBatch()
+	if err != nil {
+		t.Fatalf("raw NewRecordBatch error = %v", err)
+	}
+	defer rawRecord.Release()
+
+	if got, want := rawRecord.NumCols(), decodedRecord.NumCols(); got != want {
+		t.Fatalf("raw NumCols = %d, want decoded %d", got, want)
+	}
+	for i := 0; i < int(decodedRecord.NumCols()); i++ {
+		decodedField := decodedRecord.Schema().Field(i)
+		rawField := rawRecord.Schema().Field(i)
+		if rawField.Name != decodedField.Name {
+			t.Fatalf("field %d name = %q, want %q", i, rawField.Name, decodedField.Name)
+		}
+		if rawField.Type.String() != decodedField.Type.String() {
+			t.Fatalf("%s raw type = %s, want decoded %s", rawField.Name, rawField.Type, decodedField.Type)
+		}
+		if got, want := arrowutil.Value(rawRecord.Column(i), 0), arrowutil.Value(decodedRecord.Column(i), 0); got != want {
+			t.Fatalf("%s raw value = %#v, want decoded value %#v", rawField.Name, got, want)
+		}
+	}
+}
+
 func TestMongoRawBatchBuilder_DuplicateKeysMatchDecodedPath(t *testing.T) {
 	duplicateRaw := bsoncore.NewDocumentBuilder().
 		AppendInt32("x", 1).

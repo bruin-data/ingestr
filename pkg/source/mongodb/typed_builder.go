@@ -1,6 +1,7 @@
 package mongodb
 
 import (
+	"encoding/hex"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -10,6 +11,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )
 
 // typedColumnBuilder lazily picks an Arrow type from the first non-null value
@@ -174,18 +176,14 @@ func (c *typedColumnBuilder) tryAppendRaw(val bson.RawValue) bool {
 	case *array.StringBuilder:
 		switch val.Type {
 		case bson.TypeString:
-			v, ok := val.StringValueOK()
-			if !ok {
+			if !appendRawStringValue(b, val) {
 				return false
 			}
-			b.Append(v)
 			return true
 		case bson.TypeObjectID:
-			v, ok := val.ObjectIDOK()
-			if !ok {
+			if !appendRawObjectIDHex(b, val) {
 				return false
 			}
-			b.Append(v.Hex())
 			return true
 		case bson.TypeDecimal128:
 			v, ok := val.Decimal128OK()
@@ -298,6 +296,26 @@ func appendRawExtensionValue(builder *array.ExtensionBuilder, val bson.RawValue)
 	default:
 		return false
 	}
+}
+
+func appendRawStringValue(builder *array.StringBuilder, val bson.RawValue) bool {
+	length, rem, ok := bsoncore.ReadLength(val.Value)
+	if !ok || length == 0 || len(val.Value[4:]) < int(length) {
+		return false
+	}
+	builder.BinaryBuilder.Append(rem[:length-1])
+	return true
+}
+
+func appendRawObjectIDHex(builder *array.StringBuilder, val bson.RawValue) bool {
+	if len(val.Value) < 12 {
+		return false
+	}
+
+	var buf [24]byte
+	hex.Encode(buf[:], val.Value[:12])
+	builder.BinaryBuilder.Append(buf[:])
+	return true
 }
 
 func (c *typedColumnBuilder) promoteToUnknown() {
