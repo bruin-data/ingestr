@@ -110,8 +110,9 @@ func TestInsertIntoEmptyTargetDirectSuccess(t *testing.T) {
 
 	dest := &MSSQLDestination{db: db}
 	target := "dbo.events_staging_normalised_123"
-	directSQL := buildInsertDirectSQL(target, "_bruin_staging.events_raw", []string{"id", "name"})
-	dedupSQL := buildInsertDedupSQL(target, "_bruin_staging.events_raw", []string{"id"}, []string{"id", "name"}, "")
+	staging := "_bruin_staging.events_raw"
+	directSQL := buildInsertDirectSQL(target, staging, []string{"id", "name"})
+	dedupSQL := buildInsertDedupSQL(target, staging, []string{"id"}, []string{"id", "name"}, "")
 
 	mock.ExpectBegin()
 	expectEmptyTableCheck(mock, target)
@@ -142,8 +143,9 @@ func TestInsertIntoEmptyTargetFallsBackWhenDirectPrimaryKeyFails(t *testing.T) {
 
 	dest := &MSSQLDestination{db: db}
 	target := "dbo.events_staging_normalised_123"
-	directSQL := buildInsertDirectSQL(target, "_bruin_staging.events_raw", []string{"id", "name"})
-	dedupSQL := buildInsertDedupSQL(target, "_bruin_staging.events_raw", []string{"id"}, []string{"id", "name"}, "")
+	staging := "_bruin_staging.events_raw"
+	directSQL := buildInsertDirectSQL(target, staging, []string{"id", "name"})
+	dedupSQL := buildInsertDedupSQL(target, staging, []string{"id"}, []string{"id", "name"}, "")
 
 	mock.ExpectBegin()
 	expectEmptyTableCheck(mock, target)
@@ -154,6 +156,47 @@ func TestInsertIntoEmptyTargetFallsBackWhenDirectPrimaryKeyFails(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("ROLLBACK TRANSACTION bruin_direct_insert")).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectDropPrimaryKey(mock, target, "PK_events")
 	mock.ExpectExec(regexp.QuoteMeta(dedupSQL)).WillReturnResult(sqlmock.NewResult(0, 10))
+	expectAddPrimaryKey(mock, target, "PK_events")
+	mock.ExpectCommit()
+
+	inserted, err := dest.insertIntoEmptyTarget(context.Background(), target, []string{"id"}, directSQL, dedupSQL)
+	if err != nil {
+		t.Fatalf("insertIntoEmptyTarget() error = %v", err)
+	}
+	if !inserted {
+		t.Fatal("insertIntoEmptyTarget() inserted = false, want true")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInsertIntoEmptyTargetRetriesDedupWhenDirectRollbackFails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	dest := &MSSQLDestination{db: db}
+	target := "dbo.events_staging_normalised_123"
+	staging := "_bruin_staging.events_raw"
+	directSQL := buildInsertDirectSQL(target, staging, []string{"id", "name"})
+	dedupSQL := buildInsertDedupSQL(target, staging, []string{"id"}, []string{"id", "name"}, "")
+
+	mock.ExpectBegin()
+	expectEmptyTableCheck(mock, target)
+	mock.ExpectExec(regexp.QuoteMeta("SAVE TRANSACTION bruin_direct_insert")).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectDropPrimaryKey(mock, target, "PK_events")
+	mock.ExpectExec(regexp.QuoteMeta(directSQL)).WillReturnResult(sqlmock.NewResult(0, 10))
+	expectAddPrimaryKeyError(mock, target, "PK_events", errors.New("duplicate key"))
+	mock.ExpectExec(regexp.QuoteMeta("ROLLBACK TRANSACTION bruin_direct_insert")).WillReturnError(errors.New("transaction aborted"))
+	mock.ExpectRollback()
+
+	mock.ExpectBegin()
+	expectEmptyTableCheck(mock, target)
+	expectDropPrimaryKey(mock, target, "PK_events")
+	mock.ExpectExec(regexp.QuoteMeta(dedupSQL)).WillReturnResult(sqlmock.NewResult(0, 3))
 	expectAddPrimaryKey(mock, target, "PK_events")
 	mock.ExpectCommit()
 

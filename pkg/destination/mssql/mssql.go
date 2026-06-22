@@ -27,6 +27,8 @@ type MSSQLDestination struct {
 	database string
 }
 
+var errDirectInsertRequiresRetry = errors.New("direct insert transaction cannot be reused")
+
 func NewMSSQLDestination() *MSSQLDestination {
 	return &MSSQLDestination{}
 }
@@ -560,13 +562,18 @@ func buildTableIsEmptyForUpdateSQL(table string) string {
 }
 
 func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTable string, primaryKeys []string, directInsertSQL, dedupInsertSQL string) (bool, error) {
+	return d.insertIntoEmptyTargetWithDirect(ctx, targetTable, primaryKeys, directInsertSQL, dedupInsertSQL, true)
+}
+
+func (d *MSSQLDestination) insertIntoEmptyTargetWithDirect(ctx context.Context, targetTable string, primaryKeys []string, directInsertSQL, dedupInsertSQL string, allowDirect bool) (bool, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to begin deduplicated insert transaction: %w", err)
 	}
 	committed := false
+	txClosed := false
 	defer func() {
-		if !committed {
+		if !committed && !txClosed {
 			_ = tx.Rollback()
 		}
 	}()
@@ -579,9 +586,17 @@ func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTabl
 		return false, nil
 	}
 
-	if isNormalisedStagingTable(targetTable) {
+	if allowDirect && isNormalisedStagingTable(targetTable) {
 		inserted, err := insertDirectIntoEmptyTarget(ctx, tx, targetTable, primaryKeys, directInsertSQL)
 		if err != nil {
+			if errors.Is(err, errDirectInsertRequiresRetry) {
+				config.Debug("[MERGE] Direct insert transaction cannot be reused, retrying deduplicated insert: %v", err)
+				if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+					return false, fmt.Errorf("failed to roll back direct insert transaction: %w", rollbackErr)
+				}
+				txClosed = true
+				return d.insertIntoEmptyTargetWithDirect(ctx, targetTable, primaryKeys, directInsertSQL, dedupInsertSQL, false)
+			}
 			return false, err
 		}
 		if inserted {
@@ -628,8 +643,10 @@ func insertDirectIntoEmptyTarget(ctx context.Context, tx *sql.Tx, targetTable st
 	}
 
 	rollback := func() error {
-		_, err := tx.ExecContext(ctx, "ROLLBACK TRANSACTION "+savepoint)
-		return err
+		if _, err := tx.ExecContext(ctx, "ROLLBACK TRANSACTION "+savepoint); err != nil {
+			return fmt.Errorf("%w: %v", errDirectInsertRequiresRetry, err)
+		}
+		return nil
 	}
 
 	pkName, droppedPK, err := dropPrimaryKeyIfExists(ctx, tx, targetTable)
