@@ -659,6 +659,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Twilio</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Wise</td>
         <td>✅</td>
         <td>-</td>
