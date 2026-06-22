@@ -111,7 +111,7 @@ func GetConnectors() []ConnectorType {
 		{
 			ID:            "mongodb",
 			Name:          "MongoDB",
-			Schemes:       []string{"mongodb", "mongodb+srv"},
+			Schemes:       []string{"mongodb", "mongodb+srv", "mongodb+cdc", "mongodb+srv+cdc"},
 			IsSource:      true,
 			IsDestination: true,
 			Fields: []ConnectorField{
