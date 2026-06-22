@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -209,6 +211,7 @@ func (d *PostgresDestination) Write(ctx context.Context, records <-chan source.R
 		// Use CopyFromSlice for streaming conversion without materializing all rows
 		// Pre-allocate row buffer and reuse it for each row to reduce allocations
 		tableIdent := parseTableIdentifier(opts.Table)
+		getters := postgresValueGetters(record)
 		rowBuf := make([]any, numCols)
 		copyCount, err := d.pool.CopyFrom(
 			ctx,
@@ -216,7 +219,7 @@ func (d *PostgresDestination) Write(ctx context.Context, records <-chan source.R
 			columns,
 			pgx.CopyFromSlice(int(numRows), func(i int) ([]any, error) {
 				for j := 0; j < int(numCols); j++ {
-					rowBuf[j] = arrowutil.Value(record.Column(j), i)
+					rowBuf[j] = getters[j](i)
 				}
 				return rowBuf, nil
 			}),
@@ -294,6 +297,7 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 				// Use CopyFromSlice for streaming conversion
 				// Pre-allocate row buffer and reuse it for each row
 				tableIdent := parseTableIdentifier(opts.Table)
+				getters := postgresValueGetters(record)
 				rowBuf := make([]any, numCols)
 				copyCount, err := d.pool.CopyFrom(
 					ctx,
@@ -301,7 +305,7 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 					columns,
 					pgx.CopyFromSlice(int(numRows), func(i int) ([]any, error) {
 						for j := 0; j < int(numCols); j++ {
-							rowBuf[j] = arrowutil.Value(record.Column(j), i)
+							rowBuf[j] = getters[j](i)
 						}
 						return rowBuf, nil
 					}),
@@ -341,6 +345,155 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 
 	config.Debug("[DEST] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), float64(totalRows)/time.Since(startTotal).Seconds())
 	return nil
+}
+
+func postgresValueGetters(record arrow.RecordBatch) []func(int) any {
+	getters := make([]func(int) any, int(record.NumCols()))
+	for i := range getters {
+		getters[i] = postgresValueGetter(record.Column(i))
+	}
+	return getters
+}
+
+func postgresValueGetter(col arrow.Array) func(int) any {
+	switch a := col.(type) {
+	case *array.Boolean:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.Int8:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.Int16:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.Int32:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.Int64:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.Float32:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.Float64:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.String:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.LargeString:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.Binary:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.LargeBinary:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i)
+		}
+	case *array.Decimal128:
+		dt := a.DataType().(*arrow.Decimal128Type)
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i).ToFloat64(dt.Scale)
+		}
+	case *array.Date32:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i).ToTime()
+		}
+	case *array.Date64:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i).ToTime()
+		}
+	case *array.Time64:
+		timeType := a.DataType().(*arrow.Time64Type)
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			v := a.Value(i)
+			var duration time.Duration
+			switch timeType.Unit {
+			case arrow.Microsecond:
+				duration = time.Duration(v) * time.Microsecond
+			case arrow.Nanosecond:
+				duration = time.Duration(v) * time.Nanosecond
+			default:
+				return nil
+			}
+			h := duration / time.Hour
+			duration %= time.Hour
+			m := duration / time.Minute
+			duration %= time.Minute
+			s := duration / time.Second
+			duration %= time.Second
+			return time.Date(0, 1, 1, int(h), int(m), int(s), int(duration), time.UTC)
+		}
+	case *array.Timestamp:
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return a.Value(i).ToTime(arrow.Microsecond)
+		}
+	case array.ExtensionArray:
+		return postgresValueGetter(a.Storage())
+	default:
+		return func(i int) any {
+			return arrowutil.Value(col, i)
+		}
+	}
 }
 
 func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
