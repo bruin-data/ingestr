@@ -726,6 +726,258 @@ func TestMergeTable(t *testing.T) {
 	assert.Equal(t, 300, value)
 }
 
+func TestMergeTable_EmptyTargetDedupesStagingByPK(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR,
+			updated_at BIGINT
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR,
+			updated_at BIGINT
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(1, 'Alice Old', 10),
+			(1, 'Alice New', 20),
+			(2, 'Bob', 15)
+	`)
+	require.NoError(t, err)
+
+	err = dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable:   "staging_table",
+		TargetTable:    "target_table",
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "name", "updated_at"},
+		IncrementalKey: "updated_at",
+	})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+	var total, id1Count int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM target_table").Scan(&total))
+	assert.Equal(t, 2, total)
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM target_table WHERE id = 1").Scan(&id1Count))
+	assert.Equal(t, 1, id1Count)
+
+	var nameRaw []byte
+	var updatedAt int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT name, updated_at FROM target_table WHERE id = 1").Scan(&nameRaw, &updatedAt))
+	assert.Equal(t, "Alice New", string(append([]byte(nil), nameRaw...)))
+	assert.Equal(t, 20, updatedAt)
+}
+
+func TestMergeTable_EmptyTargetUniqueStagingInsertsRows(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(1, 'Alice'),
+			(2, 'Bob')
+	`)
+	require.NoError(t, err)
+
+	err = dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		TargetTable:  "target_table",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id", "name"},
+	})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+	var total int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM target_table").Scan(&total))
+	assert.Equal(t, 2, total)
+
+	var nameRaw []byte
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT name FROM target_table WHERE id = 2").Scan(&nameRaw))
+	assert.Equal(t, "Bob", string(append([]byte(nil), nameRaw...)))
+}
+
+func TestStagingPrimaryKeysUniqueLocked(t *testing.T) {
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `
+		CREATE TABLE staging_table (
+			id BIGINT,
+			part BIGINT,
+			name VARCHAR
+		)
+	`)
+	require.NoError(t, err)
+
+	err = dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(1, 10, 'Alice'),
+			(2, 10, 'Bob')
+	`)
+	require.NoError(t, err)
+
+	unique, err := dest.stagingPrimaryKeysUniqueLocked(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		PrimaryKeys:  []string{"id"},
+	})
+	require.NoError(t, err)
+	assert.True(t, unique)
+
+	err = dest.Exec(ctx, `INSERT INTO staging_table VALUES (2, 20, 'Bob duplicate')`)
+	require.NoError(t, err)
+
+	unique, err = dest.stagingPrimaryKeysUniqueLocked(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		PrimaryKeys:  []string{"id"},
+	})
+	require.NoError(t, err)
+	assert.False(t, unique)
+
+	unique, err = dest.stagingPrimaryKeysUniqueLocked(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		PrimaryKeys:  []string{"id", "part"},
+	})
+	require.NoError(t, err)
+	assert.True(t, unique)
+
+	err = dest.Exec(ctx, `INSERT INTO staging_table VALUES (NULL, 30, 'No id')`)
+	require.NoError(t, err)
+
+	unique, err = dest.stagingPrimaryKeysUniqueLocked(ctx, destination.MergeOptions{
+		StagingTable: "staging_table",
+		PrimaryKeys:  []string{"id", "part"},
+	})
+	require.NoError(t, err)
+	assert.False(t, unique)
+}
+
+func TestTableHasRowsLocked(t *testing.T) {
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `CREATE TABLE target_table (id BIGINT)`)
+	require.NoError(t, err)
+
+	hasRows, err := dest.tableHasRowsLocked(ctx, destination.QuoteTableName("target_table"))
+	require.NoError(t, err)
+	assert.False(t, hasRows)
+
+	err = dest.Exec(ctx, `INSERT INTO target_table VALUES (1)`)
+	require.NoError(t, err)
+
+	hasRows, err = dest.tableHasRowsLocked(ctx, destination.QuoteTableName("target_table"))
+	require.NoError(t, err)
+	assert.True(t, hasRows)
+}
+
+func TestChannelRecordReaderSkipsEmptyBatches(t *testing.T) {
+	ctx := context.Background()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	first := makeDuckDBRecordBatch(t, schema, []int64{1})
+	empty := makeDuckDBRecordBatch(t, schema, nil)
+	second := makeDuckDBRecordBatch(t, schema, []int64{2, 3})
+
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{Batch: empty}
+	records <- source.RecordBatchResult{Batch: second}
+	close(records)
+
+	reader := newChannelRecordReader(ctx, records, first)
+	defer reader.Release()
+
+	require.True(t, reader.Next())
+	assert.Equal(t, int64(1), reader.RecordBatch().NumRows())
+	require.True(t, reader.Next())
+	assert.Equal(t, int64(2), reader.RecordBatch().NumRows())
+	assert.False(t, reader.Next())
+	assert.NoError(t, reader.Err())
+	assert.Equal(t, int64(3), reader.rowsWritten())
+}
+
+func TestChannelRecordReaderRewrapsCompatibleSchema(t *testing.T) {
+	ctx := context.Background()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false}}, nil)
+	nullableSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+	first := makeDuckDBRecordBatch(t, schema, []int64{1})
+	second := makeDuckDBRecordBatch(t, nullableSchema, []int64{2})
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: second}
+	close(records)
+
+	reader := newChannelRecordReader(ctx, records, first)
+	defer reader.Release()
+
+	require.True(t, reader.Next())
+	assert.True(t, reader.RecordBatch().Schema().Equal(schema))
+	require.True(t, reader.Next())
+	assert.True(t, reader.RecordBatch().Schema().Equal(schema))
+	assert.Equal(t, int64(2), reader.rowsWritten())
+	assert.False(t, reader.Next())
+	assert.NoError(t, reader.Err())
+}
+
+func TestChannelRecordReaderReportsSchemaChange(t *testing.T) {
+	ctx := context.Background()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	otherSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	first := makeDuckDBRecordBatch(t, schema, []int64{1})
+	second := makeDuckDBRecordBatch(t, otherSchema, []int64{2})
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: second}
+	close(records)
+
+	reader := newChannelRecordReader(ctx, records, first)
+	defer reader.Release()
+
+	require.True(t, reader.Next())
+	assert.False(t, reader.Next())
+	assert.ErrorContains(t, reader.Err(), "schema changed")
+}
+
+func makeDuckDBRecordBatch(t *testing.T, schema *arrow.Schema, values []int64) arrow.RecordBatch {
+	t.Helper()
+
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	defer builder.Release()
+	for _, value := range values {
+		builder.Append(value)
+	}
+	arr := builder.NewArray()
+	defer arr.Release()
+
+	return array.NewRecordBatch(schema, []arrow.Array{arr}, int64(len(values)))
+}
+
 func TestMergeTable_CDCMaterializesDeleteOnlyTombstone(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)

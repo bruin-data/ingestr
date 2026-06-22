@@ -27,6 +27,8 @@ type MSSQLDestination struct {
 	database string
 }
 
+var errDirectInsertRequiresRetry = errors.New("direct insert transaction cannot be reused")
+
 func NewMSSQLDestination() *MSSQLDestination {
 	return &MSSQLDestination{}
 }
@@ -518,13 +520,14 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	startMerge := time.Now()
 
 	if len(opts.PrimaryKeys) > 0 && !destination.HasCDCDeletedColumn(opts.Columns) {
-		insertSQL := buildInsertDedupSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
-		inserted, err := d.insertIntoEmptyTarget(ctx, opts.TargetTable, opts.PrimaryKeys, insertSQL)
+		directInsertSQL := buildInsertDirectSQL(opts.TargetTable, opts.StagingTable, opts.Columns)
+		dedupInsertSQL := buildInsertDedupSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
+		inserted, err := d.insertIntoEmptyTarget(ctx, opts.TargetTable, opts.PrimaryKeys, directInsertSQL, dedupInsertSQL)
 		if err != nil {
 			return err
 		}
 		if inserted {
-			config.Debug("[MERGE] Deduplicated insert completed in %v", time.Since(startMerge))
+			config.Debug("[MERGE] Empty-target insert completed in %v", time.Since(startMerge))
 			return nil
 		}
 	}
@@ -558,14 +561,19 @@ func buildTableIsEmptyForUpdateSQL(table string) string {
 	return fmt.Sprintf("SELECT TOP (1) 1 FROM %s WITH (TABLOCKX, HOLDLOCK)", quoteTable(table))
 }
 
-func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTable string, primaryKeys []string, insertSQL string) (bool, error) {
+func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTable string, primaryKeys []string, directInsertSQL, dedupInsertSQL string) (bool, error) {
+	return d.insertIntoEmptyTargetWithDirect(ctx, targetTable, primaryKeys, directInsertSQL, dedupInsertSQL, true)
+}
+
+func (d *MSSQLDestination) insertIntoEmptyTargetWithDirect(ctx context.Context, targetTable string, primaryKeys []string, directInsertSQL, dedupInsertSQL string, allowDirect bool) (bool, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to begin deduplicated insert transaction: %w", err)
 	}
 	committed := false
+	txClosed := false
 	defer func() {
-		if !committed {
+		if !committed && !txClosed {
 			_ = tx.Rollback()
 		}
 	}()
@@ -578,6 +586,28 @@ func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTabl
 		return false, nil
 	}
 
+	if allowDirect && isNormalisedStagingTable(targetTable) {
+		inserted, err := insertDirectIntoEmptyTarget(ctx, tx, targetTable, primaryKeys, directInsertSQL)
+		if err != nil {
+			if errors.Is(err, errDirectInsertRequiresRetry) {
+				config.Debug("[MERGE] Direct insert transaction cannot be reused, retrying deduplicated insert: %v", err)
+				if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+					return false, fmt.Errorf("failed to roll back direct insert transaction: %w", rollbackErr)
+				}
+				txClosed = true
+				return d.insertIntoEmptyTargetWithDirect(ctx, targetTable, primaryKeys, directInsertSQL, dedupInsertSQL, false)
+			}
+			return false, err
+		}
+		if inserted {
+			if err := tx.Commit(); err != nil {
+				return false, fmt.Errorf("failed to commit direct insert transaction: %w", err)
+			}
+			committed = true
+			return true, nil
+		}
+	}
+
 	var pkName string
 	var droppedPK bool
 	if isNormalisedStagingTable(targetTable) {
@@ -587,9 +617,9 @@ func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTabl
 		}
 	}
 
-	config.Debug("[MERGE] Empty target, executing deduplicated INSERT: %s", insertSQL)
-	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
-		config.LogFailedQuery(insertSQL, err)
+	config.Debug("[MERGE] Empty target, executing deduplicated INSERT: %s", dedupInsertSQL)
+	if _, err := tx.ExecContext(ctx, dedupInsertSQL); err != nil {
+		config.LogFailedQuery(dedupInsertSQL, err)
 		return false, fmt.Errorf("failed to insert deduplicated records: %w", err)
 	}
 
@@ -603,6 +633,54 @@ func (d *MSSQLDestination) insertIntoEmptyTarget(ctx context.Context, targetTabl
 		return false, fmt.Errorf("failed to commit deduplicated insert transaction: %w", err)
 	}
 	committed = true
+	return true, nil
+}
+
+func insertDirectIntoEmptyTarget(ctx context.Context, tx *sql.Tx, targetTable string, primaryKeys []string, insertSQL string) (bool, error) {
+	savepoint := "bruin_direct_insert"
+	if _, err := tx.ExecContext(ctx, "SAVE TRANSACTION "+savepoint); err != nil {
+		return false, fmt.Errorf("failed to create direct insert savepoint: %w", err)
+	}
+
+	rollback := func() error {
+		if _, err := tx.ExecContext(ctx, "ROLLBACK TRANSACTION "+savepoint); err != nil {
+			return fmt.Errorf("%w: %v", errDirectInsertRequiresRetry, err)
+		}
+		return nil
+	}
+
+	pkName, droppedPK, err := dropPrimaryKeyIfExists(ctx, tx, targetTable)
+	if err != nil {
+		if rollbackErr := rollback(); rollbackErr != nil {
+			return false, fmt.Errorf("failed to roll back direct insert: %w", rollbackErr)
+		}
+		return false, err
+	}
+	if !droppedPK {
+		if rollbackErr := rollback(); rollbackErr != nil {
+			return false, fmt.Errorf("failed to roll back direct insert: %w", rollbackErr)
+		}
+		return false, nil
+	}
+
+	config.Debug("[MERGE] Empty target, trying direct INSERT before deduplication: %s", insertSQL)
+	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
+		config.Debug("[MERGE] Direct INSERT failed, falling back to deduplicated insert: %v", err)
+		if rollbackErr := rollback(); rollbackErr != nil {
+			return false, fmt.Errorf("failed to roll back direct insert: %w", rollbackErr)
+		}
+		return false, nil
+	}
+
+	if err := addPrimaryKey(ctx, tx, targetTable, pkName, primaryKeys); err != nil {
+		config.Debug("[MERGE] Direct INSERT produced non-unique keys, falling back to deduplicated insert: %v", err)
+		if rollbackErr := rollback(); rollbackErr != nil {
+			return false, fmt.Errorf("failed to roll back direct insert: %w", rollbackErr)
+		}
+		return false, nil
+	}
+
+	config.Debug("[MERGE] Direct insert completed without deduplication")
 	return true, nil
 }
 
@@ -640,7 +718,7 @@ func addPrimaryKey(ctx context.Context, tx *sql.Tx, table, constraintName string
 		constraintClause = " CONSTRAINT " + quoteColumn(constraintName)
 	}
 
-	addSQL := fmt.Sprintf("ALTER TABLE %s ADD%s PRIMARY KEY (%s)", quoteTable(table), constraintClause, quotedKeys)
+	addSQL := fmt.Sprintf("ALTER TABLE %s ADD%s PRIMARY KEY (%s) WITH (SORT_IN_TEMPDB = ON)", quoteTable(table), constraintClause, quotedKeys)
 	config.Debug("[MERGE] Recreating target primary key after bulk insert: %s", addSQL)
 	if _, err := tx.ExecContext(ctx, addSQL); err != nil {
 		config.LogFailedQuery(addSQL, err)
@@ -666,6 +744,12 @@ func buildInsertDedupSQL(targetTable, stagingTable string, primaryKeys, columns 
 	)
 
 	return buildInsertSQL(targetTable, colList, selectClause)
+}
+
+func buildInsertDirectSQL(targetTable, stagingTable string, columns []string) string {
+	quotedColumns := quoteColumns(columns)
+	colList := strings.Join(quotedColumns, ", ")
+	return buildInsertSQL(targetTable, colList, fmt.Sprintf("SELECT %s FROM %s", colList, quoteTable(stagingTable)))
 }
 
 func buildInsertSQL(targetTable, colList, selectClause string) string {

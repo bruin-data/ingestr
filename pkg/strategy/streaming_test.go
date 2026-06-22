@@ -357,6 +357,7 @@ func TestStreamingExecutor_PassesFlushOptionsToSource(t *testing.T) {
 	assert.Equal(t, 123*time.Millisecond, src.readOpts.FlushInterval)
 	assert.Equal(t, 7, src.readOpts.FlushRecords)
 }
+
 func TestStreaming_ExecuteAppliesBatchTransformationsOnce(t *testing.T) {
 	job, src, _ := minimalJob()
 	dest := &capturingDestination{fakeDestination: &fakeDestination{}}
