@@ -194,6 +194,42 @@ func TestParseSchemaTable(t *testing.T) {
 	}
 }
 
+func TestReplaceStagingPolicy(t *testing.T) {
+	dest := NewDuckDBDestination()
+
+	policy := dest.ReplaceStagingPolicy()
+	if policy.DefaultPlacement != destination.ReplaceStagingTargetSchema {
+		t.Fatalf("DefaultPlacement = %q, want %q", policy.DefaultPlacement, destination.ReplaceStagingTargetSchema)
+	}
+	if policy.DefaultTargetSchema != "main" {
+		t.Fatalf("DefaultTargetSchema = %q, want main", policy.DefaultTargetSchema)
+	}
+}
+
+func TestDuckDBSwapTable_MainSchemaStagingToUnqualifiedTargetUsesRename(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE users (id BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO users VALUES (1)`))
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE main.users_staging (id BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO main.users_staging VALUES (2)`))
+
+	require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
+		StagingTable: "main.users_staging",
+		TargetTable:  "users",
+	}))
+
+	db := openDuckDB(t, ctx, path)
+	var got int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT id FROM users`).Scan(&got))
+	assert.Equal(t, int64(2), got)
+
+	var stagingCount int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'main' AND table_name = 'users_staging'`).Scan(&stagingCount))
+	assert.Equal(t, int64(0), stagingCount)
+}
+
 func TestQuoteColumns(t *testing.T) {
 	tests := []struct {
 		name     string
