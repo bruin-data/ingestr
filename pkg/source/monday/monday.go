@@ -450,17 +450,11 @@ type mondayReadSpec struct {
 
 // mondayParams is the URL-style query-parameter form of the source table; its
 // fields are the single source of truth for which parameters are accepted, and
-// tablespec.Decode populates it. board_ids accepts a repeated key or a
+// tablespec.Parse populates it. board_ids accepts a repeated key or a
 // comma-joined value.
 type mondayParams struct {
 	BoardIDs []string `mapstructure:"board_ids"`
 	Linked   bool     `mapstructure:"linked"`
-}
-
-// mondaySpec is the decode target shaped like the parsed table string.
-type mondaySpec struct {
-	Table  string       `mapstructure:"table"`
-	Params mondayParams `mapstructure:"parameters"`
 }
 
 // boardAwareTables accept a board-id scope.
@@ -479,22 +473,19 @@ var boardAwareTables = map[string]bool{
 //
 // Board-id scoping is only valid for board-aware tables and the linked flag only
 // for items, matching the legacy contract. The query form is selected only when
-// the table string carries a parameter block (see tablespec.Split).
+// the table string carries a parameter block (see tablespec.Parse).
 func parseMondaySpec(name string) (mondayReadSpec, error) {
-	path, params, hasQuery, err := tablespec.Split(name)
+	var p mondayParams
+	path, hasParams, err := tablespec.Parse(name, &p, tablespec.WithListSeparator(","))
 	if err != nil {
 		return mondayReadSpec{}, err
 	}
 
-	if hasQuery {
-		var decoded mondaySpec
-		if err := tablespec.Decode(path, params, &decoded, tablespec.WithListSeparator(",")); err != nil {
-			return mondayReadSpec{}, err
-		}
+	if hasParams {
 		spec := mondayReadSpec{
-			table:    strings.TrimSpace(decoded.Table),
-			boardIDs: decoded.Params.BoardIDs,
-			linked:   decoded.Params.Linked,
+			table:    strings.TrimSpace(path),
+			boardIDs: p.BoardIDs,
+			linked:   p.Linked,
 		}
 		if len(spec.boardIDs) > 0 && !boardAwareTables[spec.table] {
 			return mondayReadSpec{}, fmt.Errorf("%s table does not accept a board_ids parameter", spec.table)

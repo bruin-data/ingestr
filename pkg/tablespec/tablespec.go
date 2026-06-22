@@ -1,7 +1,8 @@
 // Package tablespec parses ingestr table strings that carry URL-style query
 // parameters on top of a base path or object name, e.g.
-// "Reports/q1.xlsx?sheet=Sheet1&skip=2". Split separates the two parts and
-// Decode maps the parameters onto a struct via mapstructure tags.
+// "Reports/q1.xlsx?sheet=Sheet1&skip=2". Parse is the single entry point a
+// connector uses: it returns the base path and decodes any parameters onto a
+// struct via mapstructure tags.
 package tablespec
 
 import (
@@ -79,8 +80,8 @@ func ValidateKeys(params url.Values, known ...string) error {
 		strings.Join(unknown, ", "), strings.Join(known, ", "))
 }
 
-// DecodeOption configures Decode.
-type DecodeOption func(*decodeConfig)
+// ParseOption configures Parse.
+type ParseOption func(*decodeConfig)
 
 type decodeConfig struct {
 	listSep string
@@ -88,26 +89,40 @@ type decodeConfig struct {
 
 // WithListSeparator sets the separator used to split a single string value into a
 // slice field. Defaults to ",". A repeated query key forms a slice regardless.
-func WithListSeparator(sep string) DecodeOption {
+func WithListSeparator(sep string) ParseOption {
 	return func(c *decodeConfig) { c.listSep = sep }
 }
 
-// Decode maps a table path and the query parameters from Split onto out, a struct
-// with "table" and "parameters" mapstructure fields. String values are coerced to
-// each field's type: a repeated/separator-joined value fills a []string, a bare
-// flag sets a bool to true, and dotted keys nest ("a.b=c"). Unknown parameters are
-// rejected, so the struct defines what the connector accepts.
-func Decode(table string, params url.Values, out any, opts ...DecodeOption) error {
+// Parse is the single entry point for the URL-style table form. It splits raw into
+// the base path and, when a query block is present, decodes the parameters onto
+// out (a struct with mapstructure tags) and returns hasParams=true. When no query
+// block is present, out is untouched and hasParams is false, so the caller runs
+// its legacy table-string parser on the returned path. path is always returned.
+//
+// String values are coerced to each field's type: a repeated or separator-joined
+// value fills a []string, a bare flag (?x with no value) sets a bool to true, and
+// dotted keys nest ("a.b=c"). A parameter with no matching field is rejected, so
+// the struct defines what the connector accepts.
+func Parse(raw string, out any, opts ...ParseOption) (path string, hasParams bool, err error) {
 	cfg := decodeConfig{listSep: ","}
 	for _, fn := range opts {
 		fn(&cfg)
 	}
 
-	input := map[string]any{
-		"table":      table,
-		"parameters": valuesToNestedMap(params),
+	var params url.Values
+	path, params, hasParams, err = Split(raw)
+	if err != nil || !hasParams {
+		return path, hasParams, err
 	}
+	if err = decode(params, out, cfg); err != nil {
+		return path, hasParams, err
+	}
+	return path, hasParams, nil
+}
 
+// decode maps the query parameters onto out via mapstructure, applying the list
+// and bool conventions and rejecting any key without a matching field.
+func decode(params url.Values, out any, cfg decodeConfig) error {
 	var md mapstructure.Metadata
 	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
 		Result:           out,
@@ -121,12 +136,12 @@ func Decode(table string, params url.Values, out any, opts ...DecodeOption) erro
 	if err != nil {
 		return fmt.Errorf("invalid table parameters: %w", err)
 	}
-	if err := dec.Decode(input); err != nil {
+	if err := dec.Decode(valuesToNestedMap(params)); err != nil {
 		return fmt.Errorf("invalid table parameters: %w", err)
 	}
-	if unknown := unusedParamKeys(md.Unused); len(unknown) > 0 {
-		sort.Strings(unknown)
-		return fmt.Errorf("unknown table parameter(s): %s", strings.Join(unknown, ", "))
+	if len(md.Unused) > 0 {
+		sort.Strings(md.Unused)
+		return fmt.Errorf("unknown table parameter(s): %s", strings.Join(md.Unused, ", "))
 	}
 	return nil
 }
@@ -155,16 +170,6 @@ func assignNested(m map[string]any, path []string, val any) {
 		m = next
 	}
 	m[path[len(path)-1]] = val
-}
-
-// unusedParamKeys strips the "parameters." prefix mapstructure prepends so error
-// messages read in the user's terms.
-func unusedParamKeys(unused []string) []string {
-	out := make([]string, 0, len(unused))
-	for _, k := range unused {
-		out = append(out, strings.TrimPrefix(k, "parameters."))
-	}
-	return out
 }
 
 // stringToBoolHook decodes a string into a bool: an empty value (a bare flag) is

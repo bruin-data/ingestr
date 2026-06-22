@@ -267,8 +267,8 @@ func parseURI(uri string) (connConfig, error) {
 
 // sharepointParams is the URL-style query-parameter form of the source table; its
 // fields are the single source of truth for which parameters are accepted, and
-// tablespec.Decode populates it (a typo errors rather than being silently
-// dropped). sheet/sheets/date_cols accept a repeated key or a "|"-joined value.
+// tablespec.Parse populates it (a typo errors rather than being silently dropped).
+// sheet/sheets/date_cols accept a repeated key or a "|"-joined value.
 type sharepointParams struct {
 	Sheet     []string `mapstructure:"sheet"`
 	Sheets    []string `mapstructure:"sheets"`
@@ -280,12 +280,6 @@ type sharepointParams struct {
 	Formatted bool     `mapstructure:"formatted"`
 	DropEmpty bool     `mapstructure:"drop_empty"`
 	DateCols  []string `mapstructure:"date_cols"`
-}
-
-// sharepointSpec is the decode target shaped like the parsed table string.
-type sharepointSpec struct {
-	Table  string           `mapstructure:"table"`
-	Params sharepointParams `mapstructure:"parameters"`
 }
 
 // parseTableSpec parses a source-table string in one of two forms:
@@ -303,16 +297,13 @@ type sharepointSpec struct {
 func parseTableSpec(name string) (tableSpec, error) {
 	spec := tableSpec{}
 
-	path, params, hasQuery, err := tablespec.Split(name)
+	var p sharepointParams
+	path, hasParams, err := tablespec.Parse(name, &p, tablespec.WithListSeparator("|"))
 	if err != nil {
 		return tableSpec{}, err
 	}
-	if hasQuery {
-		var decoded sharepointSpec
-		if err := tablespec.Decode(path, params, &decoded, tablespec.WithListSeparator("|")); err != nil {
-			return tableSpec{}, err
-		}
-		if err := applyParams(&spec, decoded.Params); err != nil {
+	if hasParams {
+		if err := applyParams(&spec, p); err != nil {
 			return tableSpec{}, err
 		}
 	} else {
