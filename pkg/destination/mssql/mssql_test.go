@@ -2,10 +2,16 @@ package mssql
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal"
@@ -82,6 +88,114 @@ func TestBuildInsertDedupSQLAllowsNoIncrementalKey(t *testing.T) {
 	)
 
 	assertContains(t, sql, "ROW_NUMBER() OVER (PARTITION BY [id] ORDER BY (SELECT NULL))")
+}
+
+func TestBuildInsertDirectSQL(t *testing.T) {
+	sql := buildInsertDirectSQL(
+		"dbo.events",
+		"_bruin_staging.events_raw",
+		[]string{"id", "name"},
+	)
+
+	assertContains(t, sql, "INSERT INTO [dbo].[events] WITH (TABLOCK) ([id], [name])")
+	assertContains(t, sql, "SELECT [id], [name] FROM [_bruin_staging].[events_raw]")
+}
+
+func TestInsertIntoEmptyTargetDirectSuccess(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	dest := &MSSQLDestination{db: db}
+	target := "dbo.events_staging_normalised_123"
+	directSQL := buildInsertDirectSQL(target, "_bruin_staging.events_raw", []string{"id", "name"})
+	dedupSQL := buildInsertDedupSQL(target, "_bruin_staging.events_raw", []string{"id"}, []string{"id", "name"}, "")
+
+	mock.ExpectBegin()
+	expectEmptyTableCheck(mock, target)
+	mock.ExpectExec(regexp.QuoteMeta("SAVE TRANSACTION bruin_direct_insert")).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectDropPrimaryKey(mock, target, "PK_events")
+	mock.ExpectExec(regexp.QuoteMeta(directSQL)).WillReturnResult(sqlmock.NewResult(0, 10))
+	expectAddPrimaryKey(mock, target, "PK_events")
+	mock.ExpectCommit()
+
+	inserted, err := dest.insertIntoEmptyTarget(context.Background(), target, []string{"id"}, directSQL, dedupSQL)
+	if err != nil {
+		t.Fatalf("insertIntoEmptyTarget() error = %v", err)
+	}
+	if !inserted {
+		t.Fatal("insertIntoEmptyTarget() inserted = false, want true")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInsertIntoEmptyTargetFallsBackWhenDirectPrimaryKeyFails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	dest := &MSSQLDestination{db: db}
+	target := "dbo.events_staging_normalised_123"
+	directSQL := buildInsertDirectSQL(target, "_bruin_staging.events_raw", []string{"id", "name"})
+	dedupSQL := buildInsertDedupSQL(target, "_bruin_staging.events_raw", []string{"id"}, []string{"id", "name"}, "")
+
+	mock.ExpectBegin()
+	expectEmptyTableCheck(mock, target)
+	mock.ExpectExec(regexp.QuoteMeta("SAVE TRANSACTION bruin_direct_insert")).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectDropPrimaryKey(mock, target, "PK_events")
+	mock.ExpectExec(regexp.QuoteMeta(directSQL)).WillReturnResult(sqlmock.NewResult(0, 10))
+	expectAddPrimaryKeyError(mock, target, "PK_events", errors.New("duplicate key"))
+	mock.ExpectExec(regexp.QuoteMeta("ROLLBACK TRANSACTION bruin_direct_insert")).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectDropPrimaryKey(mock, target, "PK_events")
+	mock.ExpectExec(regexp.QuoteMeta(dedupSQL)).WillReturnResult(sqlmock.NewResult(0, 10))
+	expectAddPrimaryKey(mock, target, "PK_events")
+	mock.ExpectCommit()
+
+	inserted, err := dest.insertIntoEmptyTarget(context.Background(), target, []string{"id"}, directSQL, dedupSQL)
+	if err != nil {
+		t.Fatalf("insertIntoEmptyTarget() error = %v", err)
+	}
+	if !inserted {
+		t.Fatal("insertIntoEmptyTarget() inserted = false, want true")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func expectEmptyTableCheck(mock sqlmock.Sqlmock, table string) {
+	mock.ExpectQuery(regexp.QuoteMeta(buildTableIsEmptyForUpdateSQL(table))).
+		WillReturnError(sql.ErrNoRows)
+}
+
+func expectDropPrimaryKey(mock sqlmock.Sqlmock, table, constraintName string) {
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT kc.name
+FROM sys.key_constraints AS kc
+WHERE kc.parent_object_id = OBJECT_ID(@p1) AND kc.[type] = 'PK'`)).
+		WithArgs(table).
+		WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow(constraintName))
+	mock.ExpectExec(regexp.QuoteMeta(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", quoteTable(table), quoteColumn(constraintName)))).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+func expectAddPrimaryKey(mock sqlmock.Sqlmock, table, constraintName string) {
+	mock.ExpectExec(regexp.QuoteMeta(buildAddPrimaryKeySQLForTest(table, constraintName))).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+func expectAddPrimaryKeyError(mock sqlmock.Sqlmock, table, constraintName string, err error) {
+	mock.ExpectExec(regexp.QuoteMeta(buildAddPrimaryKeySQLForTest(table, constraintName))).
+		WillReturnError(err)
+}
+
+func buildAddPrimaryKeySQLForTest(table, constraintName string) string {
+	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY ([id]) WITH (SORT_IN_TEMPDB = ON, MAXDOP = 4)", quoteTable(table), quoteColumn(constraintName))
 }
 
 func TestDialectTypeNameUsesDestinationTypeMapping(t *testing.T) {
