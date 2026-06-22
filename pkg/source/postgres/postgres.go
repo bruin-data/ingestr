@@ -514,6 +514,9 @@ func convertValue(val interface{}, col schema.Column) interface{} {
 	if val == nil {
 		return nil
 	}
+	if col.DataType == schema.TypeUUID {
+		return convertUUIDValue(val)
+	}
 	switch v := val.(type) {
 	case pgtype.Numeric:
 		if !v.Valid || v.NaN {
@@ -541,6 +544,31 @@ func numericToBigInt(num pgtype.Numeric, targetScale int) *big.Int {
 	}
 
 	return result
+}
+
+func convertUUIDValue(val interface{}) interface{} {
+	switch v := val.(type) {
+	case pgtype.UUID:
+		if !v.Valid {
+			return nil
+		}
+		return v.String()
+	case [16]byte:
+		return pgtype.UUID{Bytes: v, Valid: true}.String()
+	case []byte:
+		if len(v) == 16 {
+			var bytes [16]byte
+			copy(bytes[:], v)
+			return pgtype.UUID{Bytes: bytes, Valid: true}.String()
+		}
+		return string(v)
+	case string:
+		return v
+	case fmt.Stringer:
+		return v.String()
+	default:
+		return val
+	}
 }
 
 var _ source.Source = (*PostgresSource)(nil)

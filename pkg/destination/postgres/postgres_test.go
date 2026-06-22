@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestBuildDeleteInsertLockSQL(t *testing.T) {
@@ -57,6 +58,42 @@ func TestPostgresValueGetterMatchesArrowutilValue(t *testing.T) {
 				t.Fatalf("%s[%d]: postgresValueGetter = %#v (%T), arrowutil.Value = %#v (%T)", arr.DataType(), i, got, got, want, want)
 			}
 		}
+	}
+}
+
+func TestPostgresValueGettersConvertsUUIDColumns(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+
+	b := array.NewStringBuilder(mem)
+	defer b.Release()
+	b.Append("0f364130-da0b-4909-b824-5413d795aa93")
+	b.AppendNull()
+	uuidArray := b.NewArray()
+	defer uuidArray.Release()
+
+	recordSchema := arrow.NewSchema([]arrow.Field{{
+		Name:     "uuid_col",
+		Type:     arrow.BinaryTypes.String,
+		Nullable: true,
+	}}, nil)
+	record := array.NewRecordBatch(recordSchema, []arrow.Array{uuidArray}, 2)
+	defer record.Release()
+
+	getters := postgresValueGetters(record, &schema.TableSchema{
+		Columns: []schema.Column{{Name: "uuid_col", DataType: schema.TypeUUID, Nullable: true}},
+	})
+
+	got := getters[0](0)
+	uuid, ok := got.(pgtype.UUID)
+	if !ok {
+		t.Fatalf("UUID getter returned %T, want pgtype.UUID", got)
+	}
+	if uuid.String() != "0f364130-da0b-4909-b824-5413d795aa93" {
+		t.Fatalf("UUID getter returned %q", uuid.String())
+	}
+	if got := getters[0](1); got != nil {
+		t.Fatalf("UUID getter null = %#v, want nil", got)
 	}
 }
 
