@@ -66,7 +66,7 @@ func TestParseURI(t *testing.T) {
 }
 
 func TestIsValidTable(t *testing.T) {
-	valid := []string{"messages", "calls", "recordings", "incoming_phone_numbers", "usage_records"}
+	valid := []string{"messages", "calls", "recordings", "incoming_phone_numbers", "usage_records", "usage_records:daily", "usage_records:monthly"}
 	for _, table := range valid {
 		if !isValidTable(table) {
 			t.Errorf("expected %q to be valid", table)

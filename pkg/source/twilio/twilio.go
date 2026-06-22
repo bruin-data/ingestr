@@ -258,8 +258,8 @@ func (s *TwilioSource) GetTable(ctx context.Context, req source.TableRequest) (s
 }
 
 func isValidTable(table string) bool {
-	_, ok := supportedTables[table]
-	return ok
+	_, err := resolveTableConfig(table)
+	return err == nil
 }
 
 func supportedTableNames() string {
