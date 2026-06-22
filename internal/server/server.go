@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/webui"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -26,6 +25,10 @@ type Server struct {
 }
 
 func New(port int, credsFile string, logsDir string, dbPath string) (*Server, error) {
+	return NewWithBinary(port, credsFile, logsDir, dbPath, "")
+}
+
+func NewWithBinary(port int, credsFile string, logsDir string, dbPath string, binaryPath string) (*Server, error) {
 	repo, err := NewSQLiteRepository(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create repository: %w", err)
@@ -34,7 +37,7 @@ func New(port int, credsFile string, logsDir string, dbPath string) (*Server, er
 	s := &Server{
 		port:  port,
 		creds: NewCredentialsManager(credsFile),
-		jobs:  NewJobManager(logsDir, repo),
+		jobs:  NewJobManager(logsDir, repo, binaryPath),
 		repo:  repo,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
@@ -56,6 +59,7 @@ func (s *Server) setupRoutes() {
 		r.Delete("/credentials/{id}", s.handleDeleteCredential)
 		r.Post("/run", s.handleRunJob)
 		r.Get("/jobs/{id}", s.handleGetJob)
+		r.Post("/jobs/{id}/cancel", s.handleCancelJob)
 		r.Get("/runs", s.handleListRuns)
 		r.Get("/runs/{id}", s.handleGetRun)
 		r.Get("/runs/{id}/logs", s.handleGetRunLogs)
@@ -141,16 +145,6 @@ func (s *Server) handleDeleteCredential(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-type RunJobRequest struct {
-	SourceURI      string   `json:"sourceUri"`
-	DestURI        string   `json:"destUri"`
-	SourceTable    string   `json:"sourceTable"`
-	DestTable      string   `json:"destTable"`
-	Strategy       string   `json:"strategy"`
-	PrimaryKeys    []string `json:"primaryKeys"`
-	IncrementalKey string   `json:"incrementalKey"`
-}
-
 func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	var req RunJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -158,28 +152,19 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := config.DefaultConfig()
-	cfg.SourceURI = req.SourceURI
-	cfg.DestURI = req.DestURI
-	cfg.SourceTable = req.SourceTable
-	cfg.DestTable = req.DestTable
-	if cfg.DestTable == "" {
-		cfg.DestTable = cfg.SourceTable
-	}
-	if req.Strategy != "" {
-		cfg.IncrementalStrategy = config.IncrementalStrategy(req.Strategy)
-		cfg.IncrementalStrategyExplicit = true
-	}
-	cfg.PrimaryKeys = req.PrimaryKeys
-	cfg.IncrementalKey = req.IncrementalKey
-	cfg.Yes = true
-
-	if err := cfg.Validate(); err != nil {
+	if err := s.resolveRunRequest(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	jobID, err := s.jobs.StartJob(r.Context(), cfg)
+	jobID, err := s.jobs.StartJob(r.Context(), JobSpec{
+		Args:        req.IngestArgs(),
+		SourceURI:   req.SourceURI,
+		DestURI:     req.DestURI,
+		SourceTable: req.SourceTable,
+		DestTable:   req.DestTable,
+		Strategy:    req.IncrementalStrategy,
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -187,6 +172,37 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"jobId": jobID})
+}
+
+func (s *Server) resolveRunRequest(req *RunJobRequest) error {
+	if req.SourceCredentialID != "" {
+		cred, ok := s.creds.Get(req.SourceCredentialID)
+		if !ok {
+			return fmt.Errorf("source credential not found")
+		}
+		req.SourceURI = BuildURI(cred.ConnectorID, cred.Fields)
+	}
+	if req.DestCredentialID != "" {
+		cred, ok := s.creds.Get(req.DestCredentialID)
+		if !ok {
+			return fmt.Errorf("destination credential not found")
+		}
+		req.DestURI = BuildURI(cred.ConnectorID, cred.Fields)
+	}
+	if req.SourceURI == "" {
+		return fmt.Errorf("source-uri is required")
+	}
+	if req.DestURI == "" {
+		return fmt.Errorf("dest-uri is required")
+	}
+	if req.DestTable == "" {
+		req.DestTable = req.SourceTable
+	}
+	if req.IncrementalStrategy == "" && req.Strategy != "" {
+		req.IncrementalStrategy = req.Strategy
+	}
+	req.Progress = "log"
+	return nil
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
@@ -199,6 +215,15 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(job)
+}
+
+func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if !s.jobs.CancelJob(id) {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleLogsWebSocket(w http.ResponseWriter, r *http.Request) {

@@ -36,6 +36,11 @@ func ServerCommand() *cli.Command {
 				Value:   "ingestr.db",
 				Sources: cli.EnvVars("INGESTR_DB"),
 			},
+			&cli.StringFlag{
+				Name:    "ingestr-binary",
+				Usage:   "Path to the ingestr binary used by the web UI to run ingestion jobs",
+				Sources: cli.EnvVars("INGESTR_BINARY"),
+			},
 		},
 		Action: runServer,
 	}
@@ -51,10 +56,11 @@ func runServer(ctx context.Context, c *cli.Command) (err error) {
 	credsFile := c.String("creds-file")
 	logsDir := c.String("logs-dir")
 	dbPath := c.String("db")
+	binaryPath := c.String("ingestr-binary")
 
 	trackCommandRunning(ctx, "server", nil)
 
-	s, err := server.New(port, credsFile, logsDir, dbPath)
+	s, err := server.NewWithBinary(port, credsFile, logsDir, dbPath, binaryPath)
 	if err != nil {
 		return err
 	}
