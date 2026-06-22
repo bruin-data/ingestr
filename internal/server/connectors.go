@@ -84,6 +84,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("mysql-cdc", "MySQL CDC", []string{"mysql+cdc", "mysql+pymysql+cdc", "mariadb+cdc"}, true, false),
 		genericURIConnector("mssql-cdc", "SQL Server CDC", []string{"mssql+cdc", "sqlserver+cdc", "azuresql+cdc", "azure-sql+cdc"}, true, false),
 		genericURIConnector("mssql-ct", "SQL Server Change Tracking", []string{"mssql+ct", "sqlserver+ct", "azuresql+ct", "azure-sql+ct"}, true, false),
+		genericURIConnector("mongodb-cdc", "MongoDB CDC", []string{"mongodb+cdc", "mongodb+srv+cdc"}, true, false),
 		{
 			ID:            "azuresql",
 			Name:          "Azure SQL",
