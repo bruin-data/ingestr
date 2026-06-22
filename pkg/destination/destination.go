@@ -169,3 +169,29 @@ type ExactRowCountWaiter interface {
 type TruncateCapable interface {
 	TruncateTable(ctx context.Context, table string) error
 }
+
+// ReplaceStagingPlacement declares the default schema placement for replace
+// staging tables.
+type ReplaceStagingPlacement string
+
+const (
+	// ReplaceStagingManagedSchema stages in a destination-managed schema such as
+	// _bruin_staging.
+	ReplaceStagingManagedSchema ReplaceStagingPlacement = "managed_schema"
+	// ReplaceStagingTargetSchema stages in the target table's schema by default.
+	ReplaceStagingTargetSchema ReplaceStagingPlacement = "target_schema"
+)
+
+// ReplaceStagingPolicy declares how replace should choose staging table names
+// for a destination.
+type ReplaceStagingPolicy struct {
+	DefaultPlacement     ReplaceStagingPlacement
+	DefaultManagedSchema string
+	DefaultTargetSchema  string
+}
+
+// ReplaceStagingPolicyProvider lets a destination declare where replace
+// staging tables should live while keeping strategy orchestration generic.
+type ReplaceStagingPolicyProvider interface {
+	ReplaceStagingPolicy() ReplaceStagingPolicy
+}

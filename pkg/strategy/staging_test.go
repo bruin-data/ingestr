@@ -3,6 +3,8 @@ package strategy
 import (
 	"strings"
 	"testing"
+
+	"github.com/bruin-data/ingestr/pkg/destination"
 )
 
 func TestGenerateStagingTableName(t *testing.T) {
@@ -37,6 +39,58 @@ func TestGenerateStagingTableName(t *testing.T) {
 			}
 			if strings.HasSuffix(got, "_") {
 				t.Fatalf("unexpected trailing underscore: %q", got)
+			}
+		})
+	}
+}
+
+func TestGenerateReplaceStagingTableName(t *testing.T) {
+	tests := []struct {
+		name           string
+		targetTable    string
+		stagingDataset string
+		policy         destination.ReplaceStagingPolicy
+		wantPrefix     string
+	}{
+		{
+			name:        "default managed schema",
+			targetTable: "analytics.users",
+			wantPrefix:  "_bruin_staging.analytics__users_staging_",
+		},
+		{
+			name:        "target schema placement",
+			targetTable: "analytics.users",
+			policy: destination.ReplaceStagingPolicy{
+				DefaultPlacement: destination.ReplaceStagingTargetSchema,
+			},
+			wantPrefix: "analytics.users_staging_",
+		},
+		{
+			name:        "target schema placement with unqualified target",
+			targetTable: "users",
+			policy: destination.ReplaceStagingPolicy{
+				DefaultPlacement:    destination.ReplaceStagingTargetSchema,
+				DefaultTargetSchema: "main",
+			},
+			wantPrefix: "main.users_staging_",
+		},
+		{
+			name:           "explicit staging dataset with target policy",
+			targetTable:    "analytics.users",
+			stagingDataset: "scratch",
+			policy: destination.ReplaceStagingPolicy{
+				DefaultPlacement: destination.ReplaceStagingTargetSchema,
+			},
+			wantPrefix: "scratch.analytics__users_staging_",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GenerateReplaceStagingTableName(tt.targetTable, "staging", tt.stagingDataset, tt.policy)
+			if !strings.HasPrefix(got, tt.wantPrefix) {
+				t.Fatalf("GenerateReplaceStagingTableName(%q, %q) = %q, want prefix %q",
+					tt.targetTable, tt.stagingDataset, got, tt.wantPrefix)
 			}
 		})
 	}

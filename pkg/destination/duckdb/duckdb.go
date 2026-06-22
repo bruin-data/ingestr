@@ -77,6 +77,13 @@ func (d *DuckDBDestination) Schemes() []string {
 	return []string{"duckdb", "motherduck", "md"}
 }
 
+func (d *DuckDBDestination) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {
+	return destination.ReplaceStagingPolicy{
+		DefaultPlacement:    destination.ReplaceStagingTargetSchema,
+		DefaultTargetSchema: "main",
+	}
+}
+
 func (d *DuckDBDestination) Connect(ctx context.Context, uri string) error {
 	path, err := parseDuckDBPath(uri)
 	if err != nil {
@@ -316,7 +323,7 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		}
 	}()
 
-	if stagingSchema == targetSchema {
+	if duckDBSchemaEquivalent(stagingSchema, targetSchema) {
 		// Same schema: cheap rename swap.
 		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("duckdb"))
@@ -954,6 +961,17 @@ func parseSchemaTable(table string) (string, string) {
 		return parts[0], parts[1]
 	}
 	return "", table
+}
+
+func duckDBSchemaEquivalent(left, right string) bool {
+	return canonicalDuckDBSchema(left) == canonicalDuckDBSchema(right)
+}
+
+func canonicalDuckDBSchema(name string) string {
+	if name == "" {
+		return "main"
+	}
+	return name
 }
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {

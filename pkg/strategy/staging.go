@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/bruin-data/ingestr/pkg/destination"
 )
 
 const DefaultStagingSchema = "_bruin_staging"
@@ -35,6 +37,63 @@ func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string
 		embeddedName = fmt.Sprintf("%s__%s", originSchema, tableName)
 	}
 
+	return buildStagingTableName(stagingSchema, embeddedName, suffix)
+}
+
+func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy) string {
+	policy = normaliseReplaceStagingPolicy(policy)
+	targetSchema, tableName := splitSchemaTable(targetTable)
+
+	stagingSchema := stagingDataset
+	if stagingSchema == "" {
+		switch policy.DefaultPlacement {
+		case destination.ReplaceStagingTargetSchema:
+			stagingSchema = targetSchema
+			if stagingSchema == "" {
+				stagingSchema = policy.DefaultTargetSchema
+			}
+		default:
+			stagingSchema = policy.DefaultManagedSchema
+		}
+	}
+	if stagingSchema == "" {
+		stagingSchema = policy.DefaultManagedSchema
+	}
+
+	embeddedName := tableName
+	if targetSchema != "" && (stagingDataset != "" || stagingSchema != targetSchema) {
+		embeddedName = fmt.Sprintf("%s__%s", targetSchema, tableName)
+	}
+
+	return buildStagingTableName(stagingSchema, embeddedName, suffix)
+}
+
+func defaultReplaceStagingPolicy() destination.ReplaceStagingPolicy {
+	return destination.ReplaceStagingPolicy{
+		DefaultPlacement:     destination.ReplaceStagingManagedSchema,
+		DefaultManagedSchema: DefaultStagingSchema,
+	}
+}
+
+func normaliseReplaceStagingPolicy(policy destination.ReplaceStagingPolicy) destination.ReplaceStagingPolicy {
+	if policy.DefaultPlacement == "" {
+		policy.DefaultPlacement = destination.ReplaceStagingManagedSchema
+	}
+	if policy.DefaultManagedSchema == "" {
+		policy.DefaultManagedSchema = DefaultStagingSchema
+	}
+	return policy
+}
+
+func splitSchemaTable(table string) (string, string) {
+	parts := strings.SplitN(table, ".", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "", table
+}
+
+func buildStagingTableName(stagingSchema, embeddedName, suffix string) string {
 	nano := fmt.Sprintf("%d", time.Now().UnixNano())
 	tail := fmt.Sprintf("_%s_%s", suffix, nano)
 	// If the name would exceed the per-engine identifier limit, hash the
