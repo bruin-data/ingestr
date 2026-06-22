@@ -21,6 +21,7 @@ type BatchTransformer interface {
 type DiscardValueTransformer struct {
 	violations map[string]bool // column name -> has violation
 	destSchema *schema.TableSchema
+	allocator  memory.Allocator
 }
 
 // NewDiscardValueTransformer creates a transformer for discard_value mode.
@@ -29,6 +30,7 @@ func NewDiscardValueTransformer(comparison *SchemaComparison, _ *schema.TableSch
 	transformer := &DiscardValueTransformer{
 		violations: make(map[string]bool),
 		destSchema: destSchema,
+		allocator:  memory.DefaultAllocator,
 	}
 
 	if comparison != nil {
@@ -54,6 +56,7 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 	// Create a copy of the schema to modify
 	batchSchema := batch.Schema()
 	columns := make([]arrow.Array, batch.NumCols())
+	allocator := allocatorOrDefault(t.allocator)
 
 	// For each column with violations, replace with NULL values
 	for colIdx := 0; colIdx < int(batch.NumCols()); colIdx++ {
@@ -73,13 +76,13 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 				}
 			}
 
-			builder := array.NewBuilder(memory.DefaultAllocator, targetType)
-			defer builder.Release()
+			builder := array.NewBuilder(allocator, targetType)
 
 			for i := 0; i < int(batch.NumRows()); i++ {
 				builder.AppendNull()
 			}
 			columns[colIdx] = builder.NewArray()
+			builder.Release()
 		} else {
 			// Keep original column
 			columns[colIdx] = batch.Column(colIdx)
@@ -100,6 +103,11 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 	}
 	newSchema := arrow.NewSchema(newFields, nil)
 	newBatch := array.NewRecordBatch(newSchema, columns, batch.NumRows())
+	for i, col := range columns {
+		if t.violations[batchSchema.Field(i).Name] {
+			col.Release()
+		}
+	}
 	return newBatch, nil
 }
 
@@ -108,6 +116,7 @@ type DiscardRowTransformer struct {
 	violations map[string]bool // column name -> has violation
 	schema     *schema.TableSchema
 	destSchema *schema.TableSchema
+	allocator  memory.Allocator
 }
 
 // NewDiscardRowTransformer creates a transformer for discard_row mode.
@@ -116,6 +125,7 @@ func NewDiscardRowTransformer(sourceSchema, destSchema *schema.TableSchema, comp
 		violations: make(map[string]bool),
 		schema:     sourceSchema,
 		destSchema: destSchema,
+		allocator:  memory.DefaultAllocator,
 	}
 
 	if comparison != nil {
@@ -150,10 +160,11 @@ func (t *DiscardRowTransformer) Transform(ctx context.Context, batch arrow.Recor
 	if len(violationCols) == 0 {
 		return batch, nil
 	}
+	allocator := allocatorOrDefault(t.allocator)
 
 	// Create a boolean filter array: true for rows to keep, false for rows to discard
 	// Keep rows where all violation columns are NULL
-	filterBuilder := array.NewBooleanBuilder(memory.DefaultAllocator)
+	filterBuilder := array.NewBooleanBuilder(allocator)
 	defer filterBuilder.Release()
 
 	for rowIdx := 0; rowIdx < int(batch.NumRows()); rowIdx++ {
@@ -176,14 +187,17 @@ func (t *DiscardRowTransformer) Transform(ctx context.Context, batch arrow.Recor
 
 	// Apply filter using compute function
 	opts := compute.DefaultFilterOptions()
-	filtered, err := compute.FilterRecordBatch(ctx, batch, filterArray, opts)
+	filtered, err := compute.FilterRecordBatch(compute.WithAllocator(ctx, allocator), batch, filterArray, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to filter rows: %w", err)
 	}
 
 	if filtered == nil || filtered.NumRows() == 0 {
+		if filtered != nil {
+			filtered.Release()
+		}
 		// Return empty batch if all rows filtered out
-		return createEmptyBatch(batch), nil
+		return createEmptyBatchWithAllocator(batch, allocator), nil
 	}
 
 	return filtered, nil
@@ -197,19 +211,21 @@ func TransformBatchStream(ctx context.Context, batches <-chan source.RecordBatch
 		defer close(out)
 
 		for result := range batches {
-			// Pass through errors
-			if result.Err != nil {
+			if result.Err != nil || result.Batch == nil {
 				out <- result
 				continue
 			}
 
-			// Transform batch
 			transformed, err := transformer.Transform(ctx, result.Batch)
 			if err != nil {
+				result.Batch.Release()
 				out <- source.RecordBatchResult{Err: err, TableName: result.TableName}
 				continue
 			}
 
+			if transformed != result.Batch {
+				result.Batch.Release()
+			}
 			result.Batch = transformed
 			out <- result
 		}
@@ -221,12 +237,14 @@ func TransformBatchStream(ctx context.Context, batches <-chan source.RecordBatch
 // RemovedColumnTransformer adds NULL columns for columns that exist in destination but not in source.
 type RemovedColumnTransformer struct {
 	removedColumns []schema.Column
+	allocator      memory.Allocator
 }
 
 // NewRemovedColumnTransformer creates a transformer that adds NULL columns for removed columns.
 func NewRemovedColumnTransformer(comparison *SchemaComparison) *RemovedColumnTransformer {
 	transformer := &RemovedColumnTransformer{
 		removedColumns: make([]schema.Column, 0),
+		allocator:      memory.DefaultAllocator,
 	}
 
 	if comparison != nil {
@@ -260,6 +278,7 @@ func (t *RemovedColumnTransformer) Transform(ctx context.Context, batch arrow.Re
 	newNumCols := int(batch.NumCols()) + len(t.removedColumns)
 	newFields := make([]arrow.Field, newNumCols)
 	columns := make([]arrow.Array, newNumCols)
+	allocator := allocatorOrDefault(t.allocator)
 
 	// Copy existing columns
 	for i := 0; i < int(batch.NumCols()); i++ {
@@ -277,7 +296,7 @@ func (t *RemovedColumnTransformer) Transform(ctx context.Context, batch arrow.Re
 			Nullable: true,
 		}
 
-		builder := array.NewBuilder(memory.DefaultAllocator, arrowType)
+		builder := array.NewBuilder(allocator, arrowType)
 		for j := 0; j < int(batch.NumRows()); j++ {
 			builder.AppendNull()
 		}
@@ -286,16 +305,21 @@ func (t *RemovedColumnTransformer) Transform(ctx context.Context, batch arrow.Re
 	}
 
 	newSchema := arrow.NewSchema(newFields, nil)
-	return array.NewRecordBatch(newSchema, columns, batch.NumRows()), nil
+	newBatch := array.NewRecordBatch(newSchema, columns, batch.NumRows())
+	for i := int(batch.NumCols()); i < len(columns); i++ {
+		columns[i].Release()
+	}
+	return newBatch, nil
 }
 
 // IngestrColumnFiller adds ingestr metadata columns with "-" to each batch.
 type IngestrColumnFiller struct {
 	columnNames []string
+	allocator   memory.Allocator
 }
 
 func NewIngestrColumnFiller(columnNames []string) *IngestrColumnFiller {
-	return &IngestrColumnFiller{columnNames: columnNames}
+	return &IngestrColumnFiller{columnNames: columnNames, allocator: memory.DefaultAllocator}
 }
 
 func (t *IngestrColumnFiller) HasColumns() bool {
@@ -327,6 +351,7 @@ func (t *IngestrColumnFiller) Transform(ctx context.Context, batch arrow.RecordB
 	newNumCols := int(batch.NumCols()) + len(colsToAdd)
 	newFields := make([]arrow.Field, newNumCols)
 	columns := make([]arrow.Array, newNumCols)
+	allocator := allocatorOrDefault(t.allocator)
 
 	for i := 0; i < int(batch.NumCols()); i++ {
 		newFields[i] = batchSchema.Field(i)
@@ -341,7 +366,7 @@ func (t *IngestrColumnFiller) Transform(ctx context.Context, batch arrow.RecordB
 			Nullable: false,
 		}
 
-		builder := array.NewStringBuilder(memory.DefaultAllocator)
+		builder := array.NewStringBuilder(allocator)
 		for j := 0; j < int(batch.NumRows()); j++ {
 			builder.Append("-")
 		}
@@ -350,20 +375,36 @@ func (t *IngestrColumnFiller) Transform(ctx context.Context, batch arrow.RecordB
 	}
 
 	newSchema := arrow.NewSchema(newFields, nil)
-	return array.NewRecordBatch(newSchema, columns, batch.NumRows()), nil
+	newBatch := array.NewRecordBatch(newSchema, columns, batch.NumRows())
+	for i := int(batch.NumCols()); i < len(columns); i++ {
+		columns[i].Release()
+	}
+	return newBatch, nil
 }
 
 // Helper functions
 
-func createEmptyBatch(template arrow.RecordBatch) arrow.RecordBatch {
+func createEmptyBatchWithAllocator(template arrow.RecordBatch, allocator memory.Allocator) arrow.RecordBatch {
 	schema := template.Schema()
 	emptyColumns := make([]arrow.Array, schema.NumFields())
+	allocator = allocatorOrDefault(allocator)
 
 	for i := 0; i < schema.NumFields(); i++ {
-		builder := array.NewBuilder(memory.DefaultAllocator, schema.Field(i).Type)
-		defer builder.Release()
+		builder := array.NewBuilder(allocator, schema.Field(i).Type)
 		emptyColumns[i] = builder.NewArray()
+		builder.Release()
 	}
 
-	return array.NewRecordBatch(schema, emptyColumns, 0)
+	emptyBatch := array.NewRecordBatch(schema, emptyColumns, 0)
+	for _, col := range emptyColumns {
+		col.Release()
+	}
+	return emptyBatch
+}
+
+func allocatorOrDefault(allocator memory.Allocator) memory.Allocator {
+	if allocator != nil {
+		return allocator
+	}
+	return memory.DefaultAllocator
 }
