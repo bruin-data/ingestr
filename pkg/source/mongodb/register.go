@@ -7,4 +7,8 @@ func init() {
 		[]string{"mongodb", "mongodb+srv"},
 		func() interface{} { return NewMongoDBSource() },
 	)
+	registry.RegisterSource(
+		[]string{"mongodb+cdc", "mongodb+srv+cdc"},
+		func() interface{} { return NewMongoDBCDCSource() },
+	)
 }

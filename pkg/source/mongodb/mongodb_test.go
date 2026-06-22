@@ -2,13 +2,17 @@ package mongodb
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
@@ -318,6 +322,316 @@ func TestNormalizeBatchSize(t *testing.T) {
 				t.Fatalf("normalizeBatchSize(%d) = %d, want %d", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseMongoDBCDCURI(t *testing.T) {
+	t.Run("mongodb cdc strips cdc params and keeps driver params", func(t *testing.T) {
+		cfg, normalized, err := parseMongoDBCDCURI("mongodb+cdc://user:pass@localhost:27017/app?mode=stream&dest_schema=raw&max_await_time=2s&schema_sample_size=42&replicaSet=rs0")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Mode != MongoDBCDCModeStream {
+			t.Fatalf("mode = %s, want stream", cfg.Mode)
+		}
+		if cfg.DestSchema != "raw" {
+			t.Fatalf("dest schema = %q, want raw", cfg.DestSchema)
+		}
+		if cfg.MaxAwaitTime != 2*time.Second {
+			t.Fatalf("max await = %v, want 2s", cfg.MaxAwaitTime)
+		}
+		if cfg.SchemaSampleSize != 42 {
+			t.Fatalf("sample size = %d, want 42", cfg.SchemaSampleSize)
+		}
+		if !strings.HasPrefix(normalized, "mongodb://") {
+			t.Fatalf("normalized URI = %q, want mongodb scheme", normalized)
+		}
+		if strings.Contains(normalized, "mode=") || strings.Contains(normalized, "dest_schema=") || strings.Contains(normalized, "max_await_time=") {
+			t.Fatalf("normalized URI still contains CDC-only params: %s", normalized)
+		}
+		if !strings.Contains(normalized, "replicaSet=rs0") {
+			t.Fatalf("normalized URI dropped driver param: %s", normalized)
+		}
+	})
+
+	t.Run("mongodb srv cdc keeps srv base scheme", func(t *testing.T) {
+		_, normalized, err := parseMongoDBCDCURI("mongodb+srv+cdc://cluster.example.com/app?mode=batch")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.HasPrefix(normalized, "mongodb+srv://") {
+			t.Fatalf("normalized URI = %q, want mongodb+srv scheme", normalized)
+		}
+	})
+
+	t.Run("invalid mode", func(t *testing.T) {
+		_, _, err := parseMongoDBCDCURI("mongodb+cdc://localhost:27017/app?mode=once")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
+func TestParseMongoCDCNamespace(t *testing.T) {
+	tests := []struct {
+		name      string
+		defaultDB string
+		table     string
+		wantDB    string
+		wantColl  string
+		wantName  string
+		wantErr   bool
+	}{
+		{name: "qualified table", table: "app.users", wantDB: "app", wantColl: "users", wantName: "app.users"},
+		{name: "plain collection uses uri db", defaultDB: "app", table: "users", wantDB: "app", wantColl: "users", wantName: "users"},
+		{name: "plain collection without uri db errors", table: "users", wantErr: true},
+		{name: "aggregation pipeline rejected", defaultDB: "app", table: `users:[{"$match":{}}]`, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseMongoCDCNamespace(tt.defaultDB, tt.table)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Database != tt.wantDB || got.Collection != tt.wantColl || got.Name != tt.wantName {
+				t.Fatalf("got %+v, want db=%q coll=%q name=%q", got, tt.wantDB, tt.wantColl, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestMongoCDCMatchesTableIsCaseSensitive(t *testing.T) {
+	filter := []string{"users", "app.orders"}
+
+	if !mongoCDCMatchesTable(filter, "app", "users") {
+		t.Fatal("expected exact collection match")
+	}
+	if !mongoCDCMatchesTable(filter, "app", "orders") {
+		t.Fatal("expected exact qualified collection match")
+	}
+	if mongoCDCMatchesTable(filter, "app", "Users") {
+		t.Fatal("did not expect case-insensitive collection match")
+	}
+	if mongoCDCMatchesTable(filter, "App", "orders") {
+		t.Fatal("did not expect case-insensitive database match")
+	}
+}
+
+func TestMongoCDCLSNRoundTrip(t *testing.T) {
+	token := bson.Raw{0x05, 0x00, 0x00, 0x00, 0x00}
+	ts := primitive.Timestamp{T: 123, I: 45}
+
+	lsn := formatMongoCDCLSN(ts, token)
+	start, err := parseMongoCDCLSN(lsn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if start.OperationTime != ts {
+		t.Fatalf("operation time = %+v, want %+v", start.OperationTime, ts)
+	}
+	if string(start.ResumeToken) != string(token) {
+		t.Fatalf("resume token = %x, want %x", []byte(start.ResumeToken), []byte(token))
+	}
+
+	snapshotLSN := formatMongoCDCLSN(ts, nil)
+	start, err = parseMongoCDCLSN(snapshotLSN)
+	if err != nil {
+		t.Fatalf("unexpected snapshot parse error: %v", err)
+	}
+	if len(start.ResumeToken) != 0 {
+		t.Fatalf("snapshot resume token = %x, want empty", []byte(start.ResumeToken))
+	}
+}
+
+func TestMongoCDCAfterBatchTarget(t *testing.T) {
+	target := primitive.Timestamp{T: 100, I: 5}
+	tests := []struct {
+		name string
+		ts   primitive.Timestamp
+		want bool
+	}{
+		{name: "before second", ts: primitive.Timestamp{T: 99, I: 99}, want: false},
+		{name: "before increment", ts: primitive.Timestamp{T: 100, I: 4}, want: false},
+		{name: "equal target", ts: primitive.Timestamp{T: 100, I: 5}, want: false},
+		{name: "after increment", ts: primitive.Timestamp{T: 100, I: 6}, want: true},
+		{name: "after second", ts: primitive.Timestamp{T: 101, I: 0}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mongoCDCAfterBatchTarget(tt.ts, &target); got != tt.want {
+				t.Fatalf("mongoCDCAfterBatchTarget() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	if mongoCDCAfterBatchTarget(primitive.Timestamp{T: 101}, nil) {
+		t.Fatal("nil target should not stop batch")
+	}
+}
+
+func TestMongoCDCStreamingFlushOptions(t *testing.T) {
+	batchOpts := source.ReadOptions{PageSize: 123}
+	if got := mongoCDCSourceBatchSize(batchOpts); got != 123 {
+		t.Fatalf("batch size = %d, want page size", got)
+	}
+
+	streamOpts := source.ReadOptions{
+		Streaming:     true,
+		PageSize:      123,
+		FlushRecords:  7,
+		FlushInterval: 250 * time.Millisecond,
+	}
+	if got := mongoCDCSourceBatchSize(streamOpts); got != 7 {
+		t.Fatalf("streaming batch size = %d, want flush records", got)
+	}
+	if got := mongoCDCFlushInterval(streamOpts); got != 250*time.Millisecond {
+		t.Fatalf("streaming flush interval = %v, want 250ms", got)
+	}
+}
+
+func TestMongoCDCEventBufferAllowsFieldsOutsideSchema(t *testing.T) {
+	tableSchema := addMongoCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "_id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"_id"},
+	})
+
+	buffer := newMongoCDCEventBuffer(tableSchema, nil, "items", 10)
+	defer buffer.release()
+
+	err := buffer.append(context.Background(), bson.M{
+		"_id":   int64(1),
+		"name":  "item1",
+		"value": int64(100),
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if buffer.rows != 1 {
+		t.Fatalf("buffer rows = %d, want 1", buffer.rows)
+	}
+}
+
+func TestMongoCDCEventBufferAllowsExcludedUnknownFields(t *testing.T) {
+	tableSchema := addMongoCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "_id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"_id"},
+	})
+
+	buffer := newMongoCDCEventBuffer(tableSchema, []string{"value"}, "items", 10)
+	defer buffer.release()
+
+	unknown := buffer.unknownDocumentFields(bson.M{
+		"_id":   int64(1),
+		"name":  "item1",
+		"value": int64(100),
+	})
+	if len(unknown) != 0 {
+		t.Fatalf("unknown fields = %v, want none", unknown)
+	}
+}
+
+func TestMongoCDCEventBufferFlushBlockingHonorsCanceledContext(t *testing.T) {
+	tableSchema := addMongoCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "_id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"_id"},
+	})
+
+	buffer := newMongoCDCEventBuffer(tableSchema, nil, "items", 10)
+	defer buffer.release()
+
+	err := buffer.append(context.Background(), bson.M{
+		"_id":  int64(1),
+		"name": "item1",
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected append error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = buffer.flushBlocking(ctx, make(chan source.RecordBatchResult))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("flushBlocking error = %v, want context.Canceled", err)
+	}
+}
+
+func TestMongoCDCEventDocument(t *testing.T) {
+	t.Run("update uses full document and keeps document key", func(t *testing.T) {
+		doc, deleted, ok := mongoCDCEventDocument(mongoCDCChangeEvent{
+			OperationType: "update",
+			DocumentKey:   bson.M{"_id": int64(1)},
+			FullDocument:  bson.M{"name": "alice"},
+		})
+		if !ok || deleted {
+			t.Fatalf("ok=%v deleted=%v, want ok active", ok, deleted)
+		}
+		if doc["_id"] != int64(1) || doc["name"] != "alice" {
+			t.Fatalf("unexpected doc: %#v", doc)
+		}
+	})
+
+	t.Run("delete uses document key", func(t *testing.T) {
+		doc, deleted, ok := mongoCDCEventDocument(mongoCDCChangeEvent{
+			OperationType: "delete",
+			DocumentKey:   bson.M{"_id": int64(2)},
+		})
+		if !ok || !deleted {
+			t.Fatalf("ok=%v deleted=%v, want ok deleted", ok, deleted)
+		}
+		if doc["_id"] != int64(2) {
+			t.Fatalf("unexpected doc: %#v", doc)
+		}
+	})
+
+	t.Run("update without full document ignored", func(t *testing.T) {
+		_, _, ok := mongoCDCEventDocument(mongoCDCChangeEvent{
+			OperationType: "update",
+			DocumentKey:   bson.M{"_id": int64(3)},
+		})
+		if ok {
+			t.Fatal("expected incomplete update event to be ignored")
+		}
+	})
+
+	t.Run("non data event ignored", func(t *testing.T) {
+		_, _, ok := mongoCDCEventDocument(mongoCDCChangeEvent{OperationType: "drop"})
+		if ok {
+			t.Fatal("expected non-data event to be ignored")
+		}
+	})
+}
+
+func TestMongoCDCPrimaryKeys(t *testing.T) {
+	pks, err := mongoCDCPrimaryKeys(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pks) != 1 || pks[0] != "_id" {
+		t.Fatalf("primary keys = %v, want [_id]", pks)
+	}
+
+	if _, err := mongoCDCPrimaryKeys([]string{"id"}); err == nil {
+		t.Fatal("expected custom primary key error")
 	}
 }
 
