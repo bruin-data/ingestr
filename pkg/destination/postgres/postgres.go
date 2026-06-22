@@ -529,41 +529,12 @@ func postgresColumnTypesByName(tableSchema *schema.TableSchema) map[string]schem
 	return types
 }
 
-func postgresUUIDValue(value any) any {
-	switch v := value.(type) {
-	case pgtype.UUID:
-		if !v.Valid {
-			return nil
-		}
-		return v
-	case string:
-		var uuid pgtype.UUID
-		if err := uuid.Scan(v); err != nil {
-			return v
-		}
-		return uuid
-	case []byte:
-		if len(v) == 16 {
-			var bytes [16]byte
-			copy(bytes[:], v)
-			return pgtype.UUID{Bytes: bytes, Valid: true}
-		}
-		var uuid pgtype.UUID
-		if err := uuid.Scan(string(v)); err != nil {
-			return v
-		}
-		return uuid
-	case [16]byte:
-		return pgtype.UUID{Bytes: v, Valid: true}
-	case fmt.Stringer:
-		var uuid pgtype.UUID
-		if err := uuid.Scan(v.String()); err != nil {
-			return value
-		}
-		return uuid
-	default:
+func postgresUUIDValue(value string) any {
+	var uuid pgtype.UUID
+	if err := uuid.Scan(value); err != nil {
 		return value
 	}
+	return uuid
 }
 
 func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
