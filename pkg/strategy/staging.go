@@ -61,7 +61,7 @@ func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string,
 	}
 
 	embeddedName := tableName
-	if targetSchema != "" && (stagingDataset != "" || stagingSchema != targetSchema) {
+	if targetSchema != "" && stagingSchema != targetSchema {
 		embeddedName = fmt.Sprintf("%s__%s", targetSchema, tableName)
 	}
 

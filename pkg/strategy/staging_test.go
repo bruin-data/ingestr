@@ -83,6 +83,15 @@ func TestGenerateReplaceStagingTableName(t *testing.T) {
 			},
 			wantPrefix: "scratch.analytics__users_staging_",
 		},
+		{
+			name:           "explicit staging dataset matching target schema",
+			targetTable:    "analytics.users",
+			stagingDataset: "analytics",
+			policy: destination.ReplaceStagingPolicy{
+				DefaultPlacement: destination.ReplaceStagingTargetSchema,
+			},
+			wantPrefix: "analytics.users_staging_",
+		},
 	}
 
 	for _, tt := range tests {
