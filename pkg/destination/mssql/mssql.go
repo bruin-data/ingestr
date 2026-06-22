@@ -701,7 +701,7 @@ func addPrimaryKey(ctx context.Context, tx *sql.Tx, table, constraintName string
 		constraintClause = " CONSTRAINT " + quoteColumn(constraintName)
 	}
 
-	addSQL := fmt.Sprintf("ALTER TABLE %s ADD%s PRIMARY KEY (%s) WITH (SORT_IN_TEMPDB = ON, MAXDOP = 4)", quoteTable(table), constraintClause, quotedKeys)
+	addSQL := fmt.Sprintf("ALTER TABLE %s ADD%s PRIMARY KEY (%s) WITH (SORT_IN_TEMPDB = ON)", quoteTable(table), constraintClause, quotedKeys)
 	config.Debug("[MERGE] Recreating target primary key after bulk insert: %s", addSQL)
 	if _, err := tx.ExecContext(ctx, addSQL); err != nil {
 		config.LogFailedQuery(addSQL, err)

@@ -1,7 +1,6 @@
 package mongodb
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -866,6 +865,11 @@ type mongoRawBatchBuilder struct {
 	rowCount    int
 }
 
+type rawDocumentField struct {
+	key   string
+	value bson.RawValue
+}
+
 func newMongoRawBatchBuilder(excludeColumns []string) *mongoRawBatchBuilder {
 	excludeMap := make(map[string]bool, len(excludeColumns))
 	for _, col := range excludeColumns {
@@ -890,34 +894,65 @@ func (b *mongoRawBatchBuilder) AppendDocument(doc bson.M) error {
 }
 
 func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
-	hasDuplicate, err := b.hasDuplicateIncludedRawKey(doc)
-	if err != nil {
-		return err
+	length, rem, ok := bsoncore.ReadLength(doc)
+	if !ok {
+		return bsoncore.NewInsufficientBytesError(doc, rem)
 	}
-	if !hasDuplicate {
-		return b.appendRawDocumentDirect(doc)
-	}
+	length -= 4
 
-	return b.appendRawDocumentCollapsed(doc)
-}
+	var stackFields [64]rawDocumentField
+	fields := stackFields[:0]
+	var stackKeys [64]string
+	keys := stackKeys[:0]
+	hasDuplicate := false
 
-func (b *mongoRawBatchBuilder) appendRawDocumentCollapsed(doc bson.Raw) error {
-	elements, err := doc.Elements()
-	if err != nil {
-		return err
-	}
+	for length > 1 {
+		elem, next, ok := bsoncore.ReadElement(rem)
+		if !ok {
+			return bsoncore.NewInsufficientBytesError(doc, rem)
+		}
+		length -= int32(len(elem))
+		rem = next
 
-	values := make(map[string]bson.RawValue, len(elements))
-	keys := make([]string, 0, len(elements))
-	for _, elem := range elements {
-		key := elem.Key()
+		key, err := elem.KeyErr()
+		if err != nil {
+			return err
+		}
 		if b.isExcludedKey(key) {
 			continue
 		}
-		if _, ok := values[key]; !ok {
+		val, err := elem.ValueErr()
+		if err != nil {
+			return err
+		}
+
+		isNewKey := true
+		for _, seen := range keys {
+			if seen == key {
+				hasDuplicate = true
+				isNewKey = false
+				break
+			}
+		}
+		if isNewKey {
 			keys = append(keys, key)
 		}
-		values[key] = elem.Value()
+		fields = append(fields, rawDocumentField{
+			key:   key,
+			value: rawValueFromCore(val),
+		})
+	}
+
+	if hasDuplicate {
+		return b.appendRawFieldsCollapsed(fields, keys)
+	}
+	return b.appendRawFieldsDirect(fields)
+}
+
+func (b *mongoRawBatchBuilder) appendRawFieldsCollapsed(fields []rawDocumentField, keys []string) error {
+	values := make(map[string]bson.RawValue, len(keys))
+	for _, field := range fields {
+		values[field.key] = field.value
 	}
 
 	for _, key := range keys {
@@ -942,41 +977,16 @@ func (b *mongoRawBatchBuilder) appendRawDocumentCollapsed(doc bson.Raw) error {
 	return nil
 }
 
-func (b *mongoRawBatchBuilder) appendRawDocumentDirect(doc bson.Raw) error {
-	length, rem, ok := bsoncore.ReadLength(doc)
-	if !ok {
-		return bsoncore.NewInsufficientBytesError(doc, rem)
-	}
-	length -= 4
-
-	for length > 1 {
-		elem, next, ok := bsoncore.ReadElement(rem)
-		if !ok {
-			return bsoncore.NewInsufficientBytesError(doc, rem)
-		}
-		length -= int32(len(elem))
-		rem = next
-
-		key, err := elem.KeyErr()
-		if err != nil {
-			return err
-		}
-		if b.isExcludedKey(key) {
-			continue
-		}
-		val, err := elem.ValueErr()
-		if err != nil {
-			return err
-		}
-
-		col, ok := b.cols[key]
+func (b *mongoRawBatchBuilder) appendRawFieldsDirect(fields []rawDocumentField) error {
+	for _, field := range fields {
+		col, ok := b.cols[field.key]
 		if !ok {
 			col = newTypedColumnBuilder(b.mem)
 			col.AppendNulls(b.rowCount)
-			b.cols[key] = col
-			b.fieldOrder = append(b.fieldOrder, key)
+			b.cols[field.key] = col
+			b.fieldOrder = append(b.fieldOrder, field.key)
 		}
-		col.AppendRaw(rawValueFromCore(val))
+		col.AppendRaw(field.value)
 	}
 
 	for _, field := range b.fieldOrder {
@@ -990,50 +1000,12 @@ func (b *mongoRawBatchBuilder) appendRawDocumentDirect(doc bson.Raw) error {
 	return nil
 }
 
-func (b *mongoRawBatchBuilder) hasDuplicateIncludedRawKey(doc bson.Raw) (bool, error) {
-	length, rem, ok := bsoncore.ReadLength(doc)
-	if !ok {
-		return false, bsoncore.NewInsufficientBytesError(doc, rem)
-	}
-	length -= 4
-
-	var stackKeys [64][]byte
-	keys := stackKeys[:0]
-	for length > 1 {
-		elem, next, ok := bsoncore.ReadElement(rem)
-		if !ok {
-			return false, bsoncore.NewInsufficientBytesError(doc, rem)
-		}
-		length -= int32(len(elem))
-		rem = next
-
-		key, err := elem.KeyBytesErr()
-		if err != nil {
-			return false, err
-		}
-		if b.isExcludedRawKey(key) {
-			continue
-		}
-		for _, seen := range keys {
-			if bytes.Equal(seen, key) {
-				return true, nil
-			}
-		}
-		keys = append(keys, key)
-	}
-	return false, nil
-}
-
 func (b *mongoBatchBuilder) isExcludedKey(key string) bool {
 	return b.hasExcludes && b.excludeMap[strings.ToLower(key)]
 }
 
 func (b *mongoRawBatchBuilder) isExcludedKey(key string) bool {
 	return b.hasExcludes && b.excludeMap[strings.ToLower(key)]
-}
-
-func (b *mongoRawBatchBuilder) isExcludedRawKey(key []byte) bool {
-	return b.hasExcludes && b.excludeMap[strings.ToLower(string(key))]
 }
 
 func rawValueFromCore(val bsoncore.Value) bson.RawValue {

@@ -195,7 +195,7 @@ func expectAddPrimaryKeyError(mock sqlmock.Sqlmock, table, constraintName string
 }
 
 func buildAddPrimaryKeySQLForTest(table, constraintName string) string {
-	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY ([id]) WITH (SORT_IN_TEMPDB = ON, MAXDOP = 4)", quoteTable(table), quoteColumn(constraintName))
+	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY ([id]) WITH (SORT_IN_TEMPDB = ON)", quoteTable(table), quoteColumn(constraintName))
 }
 
 func TestDialectTypeNameUsesDestinationTypeMapping(t *testing.T) {

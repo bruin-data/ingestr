@@ -300,7 +300,7 @@ func appendRawExtensionValue(builder *array.ExtensionBuilder, val bson.RawValue)
 
 func appendRawStringValue(builder *array.StringBuilder, val bson.RawValue) bool {
 	length, rem, ok := bsoncore.ReadLength(val.Value)
-	if !ok || length == 0 || len(val.Value[4:]) < int(length) {
+	if !ok || length <= 0 || len(val.Value[4:]) < int(length) {
 		return false
 	}
 	builder.BinaryBuilder.Append(rem[:length-1])
