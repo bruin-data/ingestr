@@ -58,7 +58,7 @@ func NewNATSSource() *NATSSource {
 }
 
 func (s *NATSSource) Schemes() []string {
-	return []string{"nats", "tls", "ws", "wss"}
+	return []string{"nats"}
 }
 
 func (s *NATSSource) Connect(_ context.Context, raw string) error {
@@ -178,7 +178,7 @@ func parseNATSURI(raw string) (natsConfig, error) {
 		return natsConfig{}, fmt.Errorf("invalid NATS URI: %w", err)
 	}
 	switch u.Scheme {
-	case "nats", "tls", "ws", "wss":
+	case "nats":
 	default:
 		return natsConfig{}, fmt.Errorf("invalid NATS URI: unsupported scheme %q", u.Scheme)
 	}
@@ -270,7 +270,6 @@ func (s *NATSSource) read(ctx context.Context, stream string, opts source.ReadOp
 	subOpts := []natsgo.SubOpt{
 		natsgo.BindStream(stream),
 		natsgo.AckExplicit(),
-		natsgo.DeliverAll(),
 		natsgo.PullMaxWaiting(1),
 	}
 	if opts.Streaming {
@@ -286,6 +285,8 @@ func (s *NATSSource) read(ctx context.Context, stream string, opts source.ReadOp
 		} else {
 			subOpts = append(subOpts, natsgo.AckWait(natsAckWait(s.cfg.BatchTimeout, opts.FlushInterval)))
 		}
+	} else {
+		subOpts = append(subOpts, natsgo.DeliverAll())
 	}
 	subject := s.cfg.Subject
 	if opts.Streaming && s.cfg.BindConsumer {

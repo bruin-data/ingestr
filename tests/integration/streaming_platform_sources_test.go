@@ -390,8 +390,12 @@ func newPulsarClient(t *testing.T, pulsarURI string) pulsargo.Client {
 
 func publishPulsarMessages(t *testing.T, client pulsargo.Client, topic string, startID, count int) {
 	t.Helper()
-	producer, err := client.CreateProducer(pulsargo.ProducerOptions{Topic: topic})
-	require.NoError(t, err)
+	var producer pulsargo.Producer
+	var err error
+	require.Eventually(t, func() bool {
+		producer, err = client.CreateProducer(pulsargo.ProducerOptions{Topic: topic})
+		return err == nil
+	}, 30*time.Second, 500*time.Millisecond, "failed to create Pulsar producer: %v", err)
 	defer producer.Close()
 	for i := 0; i < count; i++ {
 		id := startID + i

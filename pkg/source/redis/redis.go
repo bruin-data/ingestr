@@ -410,7 +410,7 @@ func (s *RedisSource) ensureConsumerGroup(ctx context.Context, stream string) er
 	if err != nil && !strings.Contains(strings.ToUpper(err.Error()), "BUSYGROUP") {
 		return fmt.Errorf("failed to create Redis consumer group %s for stream %s: %w", s.cfg.Group, stream, err)
 	}
-	if err := s.client.XGroupCreateConsumer(ctx, stream, s.cfg.Group, s.cfg.Consumer).Err(); err != nil && err != goredis.Nil {
+	if err := s.client.XGroupCreateConsumer(ctx, stream, s.cfg.Group, s.cfg.Consumer).Err(); err != nil {
 		return fmt.Errorf("failed to create Redis consumer %s in group %s: %w", s.cfg.Consumer, s.cfg.Group, err)
 	}
 	return nil

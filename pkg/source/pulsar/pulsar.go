@@ -479,27 +479,25 @@ func (s *PulsarSource) CommitStream(_ context.Context, token any) error {
 		return fmt.Errorf("pulsar: unexpected commit token type %T", token)
 	}
 	s.mu.Lock()
-	consumer := s.streamConsumer
+	defer s.mu.Unlock()
+	if s.streamConsumer == nil {
+		config.Debug("[PULSAR] CommitStream: no active consumer, skipping ack")
+		return nil
+	}
 	remaining := s.pending[:0]
-	ackIDs := make([]pulsargo.MessageID, 0)
-	for _, pending := range s.pending {
+	for i, pending := range s.pending {
 		if pending.seq <= tok.MaxSeq {
-			ackIDs = append(ackIDs, pending.id)
+			if err := s.streamConsumer.AckID(pending.id); err != nil {
+				remaining = append(remaining, pending)
+				remaining = append(remaining, s.pending[i+1:]...)
+				s.pending = remaining
+				return fmt.Errorf("failed to ack Pulsar message: %w", err)
+			}
 		} else {
 			remaining = append(remaining, pending)
 		}
 	}
 	s.pending = remaining
-	s.mu.Unlock()
-	if consumer == nil {
-		config.Debug("[PULSAR] CommitStream: no active consumer, skipping ack")
-		return nil
-	}
-	for _, id := range ackIDs {
-		if err := consumer.AckID(id); err != nil {
-			return fmt.Errorf("failed to ack Pulsar message: %w", err)
-		}
-	}
 	return nil
 }
 

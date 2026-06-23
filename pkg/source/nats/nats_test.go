@@ -36,6 +36,16 @@ func TestParseNATSURI(t *testing.T) {
 	}
 }
 
+func TestNATSSchemes(t *testing.T) {
+	schemes := NewNATSSource().Schemes()
+	if len(schemes) != 1 || schemes[0] != "nats" {
+		t.Fatalf("Schemes = %v, want [nats]", schemes)
+	}
+	if _, err := parseNATSURI("tls://localhost:4222"); err == nil {
+		t.Fatal("parseNATSURI accepted transport scheme as source scheme")
+	}
+}
+
 func TestParseNATSURIConsumerBindsExistingConsumer(t *testing.T) {
 	cfg, err := parseNATSURI("nats://localhost:4222?stream=EVENTS&consumer=existing")
 	if err != nil {
