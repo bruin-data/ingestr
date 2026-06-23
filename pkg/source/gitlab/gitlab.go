@@ -281,6 +281,7 @@ func (s *GitLabSource) stream(ctx context.Context, cfg tableConfig, opts source.
 
 	return nil
 }
+
 func retryAfter(resp *httpclient.Response) time.Duration {
 	value := strings.TrimSpace(resp.Header().Get("Retry-After"))
 	if value == "" {
