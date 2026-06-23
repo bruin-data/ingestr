@@ -51,7 +51,7 @@ The `user_data` table exports the users of one or more segments along with their
 --source-table "user_data:<segment_id_1>,<segment_id_2>"
 ```
 
-You can find segment identifiers in the Braze dashboard. Each run produces a fresh full snapshot of those segments' users, and every row is tagged with the `segment_id` it came from (so the same user can appear under multiple segments). Exported fields include the subscription state (`email_subscribe`, `push_subscribe`, and their opt-in/unsubscribe timestamps), identifiers (`braze_id`, `external_id`, `email`, `phone`), profile fields (name, country, language, time zone, …), and per-product `purchases`.
+You can find segment identifiers in the Braze dashboard. Each run produces a fresh full snapshot of those segments' users, and every row is tagged with the `segment_id` it came from (so the same user can appear under multiple segments). Exported fields include the subscription state (`email_subscribe`, `push_subscribe`, plus the opt-in/unsubscribe timestamps Braze returns automatically alongside them), identifiers (`braze_id`, `external_id`, `email`, `phone`), profile fields (name, country, language, time zone, …), and per-product `purchases`.
 
 ### Per-app KPIs
 

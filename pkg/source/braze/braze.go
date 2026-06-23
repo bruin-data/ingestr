@@ -62,6 +62,8 @@ var supportedTables = []string{
 
 // userDataFields are the fields requested from the user export: identifiers,
 // subscription state, and bounded profile fields (heavy unbounded history is omitted).
+// Braze also auto-returns the subscription opt-in/unsubscribe timestamps alongside
+// email_subscribe/push_subscribe; they are not separately requestable here.
 var userDataFields = []string{
 	"external_id",
 	"braze_id",
@@ -542,7 +544,10 @@ func (s *BrazeSource) exportSegment(ctx context.Context, segmentID string) ([]by
 			return nil, ctx.Err()
 		case <-time.After(exportPollInterval):
 		}
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, export.URL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, export.URL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build segment export download request: %w", err)
+		}
 		dl, err := client.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("failed to download segment export: %w", err)
