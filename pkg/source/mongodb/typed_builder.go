@@ -1,6 +1,7 @@
 package mongodb
 
 import (
+	"encoding/hex"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -8,7 +9,9 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )
 
 // typedColumnBuilder lazily picks an Arrow type from the first non-null value
@@ -66,6 +69,26 @@ func (c *typedColumnBuilder) Append(val any) {
 
 	c.promoteToUnknown()
 	arrowconv.AppendValue(c.builder, convertBSONValue(val))
+	c.rowCount++
+}
+
+func (c *typedColumnBuilder) AppendRaw(val bson.RawValue) {
+	if val.Type == bson.TypeNull {
+		c.AppendNull()
+		return
+	}
+
+	if c.builder == nil {
+		c.materialize(inferTypeFromRawBSONValue(val))
+	}
+
+	if c.tryAppendRaw(val) {
+		c.rowCount++
+		return
+	}
+
+	c.promoteToUnknown()
+	arrowconv.AppendValue(c.builder, convertRawBSONValue(val))
 	c.rowCount++
 }
 
@@ -148,6 +171,153 @@ func (c *typedColumnBuilder) tryAppend(val any) bool {
 	return false
 }
 
+func (c *typedColumnBuilder) tryAppendRaw(val bson.RawValue) bool {
+	switch b := c.builder.(type) {
+	case *array.StringBuilder:
+		switch val.Type {
+		case bson.TypeString:
+			if !appendRawStringValue(b, val) {
+				return false
+			}
+			return true
+		case bson.TypeObjectID:
+			if !appendRawObjectIDHex(b, val) {
+				return false
+			}
+			return true
+		case bson.TypeDecimal128:
+			v, ok := val.Decimal128OK()
+			if !ok {
+				return false
+			}
+			b.Append(v.String())
+			return true
+		}
+	case *array.Int64Builder:
+		switch val.Type {
+		case bson.TypeInt32:
+			v, ok := val.Int32OK()
+			if !ok {
+				return false
+			}
+			b.Append(int64(v))
+			return true
+		case bson.TypeInt64:
+			v, ok := val.Int64OK()
+			if !ok {
+				return false
+			}
+			b.Append(v)
+			return true
+		}
+	case *array.Float64Builder:
+		switch val.Type {
+		case bson.TypeDouble:
+			v, ok := val.DoubleOK()
+			if !ok {
+				return false
+			}
+			b.Append(v)
+			return true
+		case bson.TypeInt32:
+			v, ok := val.Int32OK()
+			if !ok {
+				return false
+			}
+			b.Append(float64(v))
+			return true
+		case bson.TypeInt64:
+			v, ok := val.Int64OK()
+			if !ok {
+				return false
+			}
+			b.Append(float64(v))
+			return true
+		}
+	case *array.BooleanBuilder:
+		if val.Type != bson.TypeBoolean {
+			return false
+		}
+		v, ok := val.BooleanOK()
+		if !ok {
+			return false
+		}
+		b.Append(v)
+		return true
+	case *array.TimestampBuilder:
+		if val.Type != bson.TypeDateTime {
+			return false
+		}
+		v, ok := val.DateTimeOK()
+		if !ok {
+			return false
+		}
+		b.Append(arrow.Timestamp(v * 1000))
+		return true
+	case *array.BinaryBuilder:
+		if val.Type != bson.TypeBinary {
+			return false
+		}
+		_, data, ok := val.BinaryOK()
+		if !ok {
+			return false
+		}
+		b.Append(data)
+		return true
+	case *array.ExtensionBuilder:
+		if appendRawExtensionValue(b, val) {
+			return true
+		}
+		arrowconv.AppendValue(b, convertRawBSONValue(val))
+		return true
+	}
+	return false
+}
+
+func appendRawExtensionValue(builder *array.ExtensionBuilder, val bson.RawValue) bool {
+	extType, ok := builder.Type().(arrow.ExtensionType)
+	if !ok || extType.ExtensionName() != schema.UnknownExtensionName {
+		return false
+	}
+
+	storage, ok := builder.StorageBuilder().(*array.StringBuilder)
+	if !ok {
+		return false
+	}
+
+	switch val.Type {
+	case bson.TypeEmbeddedDocument, bson.TypeArray:
+		encoded, ok := rawBSONValueAsJSONString(val)
+		if !ok {
+			return false
+		}
+		storage.Append(encoded)
+		return true
+	default:
+		return false
+	}
+}
+
+func appendRawStringValue(builder *array.StringBuilder, val bson.RawValue) bool {
+	length, rem, ok := bsoncore.ReadLength(val.Value)
+	if !ok || length <= 0 || len(val.Value[4:]) < int(length) {
+		return false
+	}
+	builder.BinaryBuilder.Append(rem[:length-1])
+	return true
+}
+
+func appendRawObjectIDHex(builder *array.StringBuilder, val bson.RawValue) bool {
+	if len(val.Value) < 12 {
+		return false
+	}
+
+	var buf [24]byte
+	hex.Encode(buf[:], val.Value[:12])
+	builder.BinaryBuilder.Append(buf[:])
+	return true
+}
+
 func (c *typedColumnBuilder) promoteToUnknown() {
 	if isUnknownType(c.typ) {
 		return
@@ -208,6 +378,24 @@ func inferTypeFromBSONValue(val any) arrow.DataType {
 	case primitive.Decimal128:
 		return arrow.BinaryTypes.String
 	case primitive.Binary:
+		return arrow.BinaryTypes.Binary
+	}
+	return schema.UnknownArrowType
+}
+
+func inferTypeFromRawBSONValue(val bson.RawValue) arrow.DataType {
+	switch val.Type {
+	case bson.TypeString, bson.TypeObjectID, bson.TypeDecimal128:
+		return arrow.BinaryTypes.String
+	case bson.TypeInt32, bson.TypeInt64:
+		return arrow.PrimitiveTypes.Int64
+	case bson.TypeDouble:
+		return arrow.PrimitiveTypes.Float64
+	case bson.TypeBoolean:
+		return arrow.FixedWidthTypes.Boolean
+	case bson.TypeDateTime:
+		return arrow.FixedWidthTypes.Timestamp_us
+	case bson.TypeBinary:
 		return arrow.BinaryTypes.Binary
 	}
 	return schema.UnknownArrowType

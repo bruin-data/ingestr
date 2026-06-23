@@ -183,6 +183,14 @@ func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTa
 
 type ReplaceStrategy struct{}
 
+func replaceStagingTableName(dest destination.Destination, targetTable, stagingDataset string) string {
+	policy := defaultReplaceStagingPolicy()
+	if provider, ok := dest.(destination.ReplaceStagingPolicyProvider); ok {
+		policy = provider.ReplaceStagingPolicy()
+	}
+	return GenerateReplaceStagingTableName(targetTable, "staging", stagingDataset, policy)
+}
+
 func (s *ReplaceStrategy) Name() config.IncrementalStrategy {
 	return config.StrategyReplace
 }
@@ -207,7 +215,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	targetTable := job.Config.DestTable
 	writeTable := targetTable
 	if useStaging {
-		writeTable = GenerateStagingTableName(targetTable, "staging", job.Config.StagingDataset)
+		writeTable = replaceStagingTableName(job.Destination, targetTable, job.Config.StagingDataset)
 		fmt.Printf("[STRATEGY] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), writeTable)
 	} else {
 		config.Debug("[STRATEGY] Direct write to target (no staging): %s", writeTable)
@@ -377,7 +385,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			destTable := job.GetDestTableName(ti.Name)
 			writeTable := destTable
 			if useStaging {
-				writeTable = GenerateStagingTableName(destTable, "staging", job.Config.StagingDataset)
+				writeTable = replaceStagingTableName(job.Destination, destTable, job.Config.StagingDataset)
 			}
 
 			prepareOpts := destination.PrepareOptions{

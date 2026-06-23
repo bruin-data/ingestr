@@ -1,6 +1,9 @@
 package server
 
-import "net/url"
+import (
+	"net/url"
+	"strings"
+)
 
 type ConnectorField struct {
 	Name        string        `json:"name"`
@@ -27,11 +30,11 @@ type ConnectorType struct {
 }
 
 func GetConnectors() []ConnectorType {
-	return []ConnectorType{
+	connectors := []ConnectorType{
 		{
 			ID:            "postgres",
 			Name:          "PostgreSQL",
-			Schemes:       []string{"postgres", "postgresql"},
+			Schemes:       []string{"postgres", "postgresql", "postgresql+psycopg2"},
 			IsSource:      true,
 			IsDestination: true,
 			Fields: []ConnectorField{
@@ -52,7 +55,7 @@ func GetConnectors() []ConnectorType {
 		{
 			ID:            "mysql",
 			Name:          "MySQL",
-			Schemes:       []string{"mysql", "mariadb"},
+			Schemes:       []string{"mysql", "mysql+pymysql", "mariadb"},
 			IsSource:      true,
 			IsDestination: true,
 			Fields: []ConnectorField{
@@ -66,7 +69,7 @@ func GetConnectors() []ConnectorType {
 		{
 			ID:            "mssql",
 			Name:          "SQL Server",
-			Schemes:       []string{"mssql", "sqlserver"},
+			Schemes:       []string{"mssql", "sqlserver", "mssql+pyodbc"},
 			IsSource:      true,
 			IsDestination: true,
 			Fields: []ConnectorField{
@@ -77,6 +80,11 @@ func GetConnectors() []ConnectorType {
 				{Name: "database", Label: "Database", Type: "string", Required: true, Placeholder: "master"},
 			},
 		},
+		genericURIConnector("postgres-cdc", "PostgreSQL CDC", []string{"postgres+cdc", "postgresql+cdc"}, true, false),
+		genericURIConnector("mysql-cdc", "MySQL CDC", []string{"mysql+cdc", "mysql+pymysql+cdc", "mariadb+cdc"}, true, false),
+		genericURIConnector("mssql-cdc", "SQL Server CDC", []string{"mssql+cdc", "sqlserver+cdc", "azuresql+cdc", "azure-sql+cdc"}, true, false),
+		genericURIConnector("mssql-ct", "SQL Server Change Tracking", []string{"mssql+ct", "sqlserver+ct", "azuresql+ct", "azure-sql+ct"}, true, false),
+		genericURIConnector("mongodb-cdc", "MongoDB CDC", []string{"mongodb+cdc", "mongodb+srv+cdc"}, true, false),
 		{
 			ID:            "azuresql",
 			Name:          "Azure SQL",
@@ -236,6 +244,141 @@ func GetConnectors() []ConnectorType {
 			},
 		},
 	}
+
+	connectors = append(
+		connectors,
+		genericURIConnector("adjust", "Adjust", []string{"adjust"}, true, false),
+		genericURIConnector("airtable", "Airtable", []string{"airtable"}, true, false),
+		genericURIConnector("allium", "Allium", []string{"allium"}, true, false),
+		genericURIConnector("anthropic", "Anthropic", []string{"anthropic"}, true, false),
+		genericURIConnector("apifootball", "API Football", []string{"apifootball"}, true, false),
+		genericURIConnector("appleads", "Apple Ads", []string{"appleads"}, true, false),
+		genericURIConnector("applovin", "AppLovin", []string{"applovin"}, true, false),
+		genericURIConnector("applovinmax", "AppLovin MAX", []string{"applovinmax"}, true, false),
+		genericURIConnector("appsflyer", "AppsFlyer", []string{"appsflyer"}, true, false),
+		genericURIConnector("appstore", "App Store Connect", []string{"appstore"}, true, false),
+		genericURIConnector("arrowstream", "Arrow Stream", []string{"arrow-stream", "arrowstream"}, true, false),
+		genericURIConnector("asana", "Asana", []string{"asana"}, true, false),
+		genericURIConnector("athena", "Amazon Athena", []string{"athena"}, true, true),
+		genericURIConnector("attio", "Attio", []string{"attio"}, true, false),
+		genericURIConnector("avro", "Avro File", []string{"avro"}, true, false),
+		genericURIConnector("balldontlie", "balldontlie", []string{"balldontlie"}, true, false),
+		genericURIConnector("blobstore", "Object Storage", []string{"s3", "gs", "gcs", "az", "azure", "adls", "adlsgen2", "azdatalake", "abfs", "abfss"}, true, true),
+		genericURIConnector("bruin", "Bruin", []string{"bruin"}, true, false),
+		genericURIConnector("chess", "Chess.com", []string{"chess"}, true, false),
+		genericURIConnector("clickhouse", "ClickHouse", []string{"clickhouse"}, true, true),
+		genericURIConnector("clickup", "ClickUp", []string{"clickup"}, true, false),
+		genericURIConnector("couchbase", "Couchbase", []string{"couchbase"}, true, false),
+		genericURIConnector("cratedb", "CrateDB", []string{"cratedb"}, true, true),
+		genericURIConnector("cursor", "Cursor", []string{"cursor"}, true, false),
+		genericURIConnector("customerio", "Customer.io", []string{"customerio"}, true, false),
+		genericURIConnector("databricks", "Databricks", []string{"databricks"}, true, true),
+		genericURIConnector("db2", "Db2", []string{"db2", "ibmdb2"}, true, false),
+		genericURIConnector("discard", "Discard", []string{"discard"}, false, true),
+		genericURIConnector("docebo", "Docebo", []string{"docebo"}, true, false),
+		genericURIConnector("ducklake", "DuckLake", []string{"ducklake"}, true, true),
+		genericURIConnector("dune", "Dune", []string{"dune"}, true, false),
+		genericURIConnector("dynamodb", "DynamoDB", []string{"dynamodb"}, true, true),
+		genericURIConnector("elasticsearch", "Elasticsearch", []string{"elasticsearch"}, true, true),
+		genericURIConnector("espn", "ESPN", []string{"espn"}, true, false),
+		genericURIConnector("fabric", "Microsoft Fabric", []string{"fabric"}, true, true),
+		genericURIConnector("facebookads", "Facebook Ads", []string{"facebookads"}, true, false),
+		genericURIConnector("fireflies", "Fireflies", []string{"fireflies"}, true, false),
+		genericURIConnector("fluxx", "Fluxx", []string{"fluxx"}, true, false),
+		genericURIConnector("footballdata", "Football Data", []string{"footballdata"}, true, false),
+		genericURIConnector("frankfurter", "Frankfurter", []string{"frankfurter"}, true, false),
+		genericURIConnector("freshdesk", "Freshdesk", []string{"freshdesk"}, true, false),
+		genericURIConnector("fundraiseup", "Fundraise Up", []string{"fundraiseup"}, true, false),
+		genericURIConnector("g2", "G2", []string{"g2"}, true, false),
+		genericURIConnector("github", "GitHub", []string{"github"}, true, false),
+		genericURIConnector("googleanalytics", "Google Analytics", []string{"googleanalytics"}, true, false),
+		genericURIConnector("googleads", "Google Ads", []string{"googleads"}, true, false),
+		genericURIConnector("gsheets", "Google Sheets", []string{"gsheets"}, true, false),
+		genericURIConnector("gorgias", "Gorgias", []string{"gorgias"}, true, false),
+		genericURIConnector("granola", "Granola", []string{"granola"}, true, false),
+		genericURIConnector("hostaway", "Hostaway", []string{"hostaway"}, true, false),
+		genericURIConnector("http", "HTTP", []string{"http", "https"}, true, false),
+		genericURIConnector("hubspot", "HubSpot", []string{"hubspot"}, true, false),
+		genericURIConnector("indeed", "Indeed", []string{"indeed"}, true, false),
+		genericURIConnector("influxdb", "InfluxDB", []string{"influxdb"}, true, false),
+		genericURIConnector("intercom", "Intercom", []string{"intercom"}, true, false),
+		genericURIConnector("isoc-pulse", "ISOC Pulse", []string{"isoc-pulse"}, true, false),
+		genericURIConnector("jira", "Jira", []string{"jira"}, true, false),
+		genericURIConnector("jobtread", "JobTread", []string{"jobtread"}, true, false),
+		genericURIConnector("json", "JSON File", []string{"json"}, true, false),
+		genericURIConnector("kafka", "Kafka", []string{"kafka"}, true, false),
+		genericURIConnector("kalshi", "Kalshi", []string{"kalshi"}, true, false),
+		genericURIConnector("kinesis", "Kinesis", []string{"kinesis"}, true, false),
+		genericURIConnector("klaviyo", "Klaviyo", []string{"klaviyo"}, true, false),
+		genericURIConnector("linear", "Linear", []string{"linear"}, true, false),
+		genericURIConnector("linkedinads", "LinkedIn Ads", []string{"linkedinads"}, true, false),
+		genericURIConnector("mailchimp", "Mailchimp", []string{"mailchimp"}, true, false),
+		genericURIConnector("manifold", "Manifold", []string{"manifold"}, true, false),
+		genericURIConnector("maxcompute", "MaxCompute", []string{"maxcompute", "odps"}, true, true),
+		genericURIConnector("mixpanel", "Mixpanel", []string{"mixpanel"}, true, false),
+		genericURIConnector("mmap", "Memory-mapped File", []string{"mmap"}, true, false),
+		genericURIConnector("monday", "monday.com", []string{"monday"}, true, false),
+		genericURIConnector("motherduck", "MotherDuck", []string{"motherduck", "md"}, true, true),
+		genericURIConnector("notion", "Notion", []string{"notion"}, true, false),
+		genericURIConnector("onelake", "OneLake", []string{"onelake"}, false, true),
+		genericURIConnector("oracle", "Oracle", []string{"oracle", "oracle+cx_oracle"}, true, false),
+		genericURIConnector("paddle", "Paddle", []string{"paddle"}, true, false),
+		genericURIConnector("personio", "Personio", []string{"personio"}, true, false),
+		genericURIConnector("phantombuster", "PhantomBuster", []string{"phantombuster"}, true, false),
+		genericURIConnector("pinterest", "Pinterest", []string{"pinterest"}, true, false),
+		genericURIConnector("pipedrive", "Pipedrive", []string{"pipedrive"}, true, false),
+		genericURIConnector("plusvibeai", "PlusVibe AI", []string{"plusvibeai"}, true, false),
+		genericURIConnector("polymarket", "Polymarket", []string{"polymarket"}, true, false),
+		genericURIConnector("posthog", "PostHog", []string{"posthog"}, true, false),
+		genericURIConnector("primer", "Primer", []string{"primer"}, true, false),
+		genericURIConnector("pubsub", "Pub/Sub", []string{"pubsub"}, true, false),
+		genericURIConnector("quickbooks", "QuickBooks", []string{"quickbooks"}, true, false),
+		genericURIConnector("rabbitmq", "RabbitMQ", []string{"amqp", "amqps"}, true, false),
+		genericURIConnector("redshift", "Redshift", []string{"redshift", "redshift+psycopg2"}, true, true),
+		genericURIConnector("revenuecat", "RevenueCat", []string{"revenuecat"}, true, false),
+		genericURIConnector("salesforce", "Salesforce", []string{"salesforce"}, true, false),
+		genericURIConnector("sendgrid", "SendGrid", []string{"sendgrid"}, true, false),
+		genericURIConnector("sharepoint", "SharePoint", []string{"sharepoint"}, true, false),
+		genericURIConnector("shopify", "Shopify", []string{"shopify"}, true, false),
+		genericURIConnector("slack", "Slack", []string{"slack"}, true, false),
+		genericURIConnector("smartsheet", "Smartsheet", []string{"smartsheet"}, true, false),
+		genericURIConnector("snapchatads", "Snapchat Ads", []string{"snapchatads"}, true, false),
+		genericURIConnector("socrata", "Socrata", []string{"socrata"}, true, false),
+		genericURIConnector("solidgate", "Solidgate", []string{"solidgate"}, true, false),
+		genericURIConnector("spanner", "Spanner", []string{"spanner"}, true, false),
+		genericURIConnector("sqs", "SQS", []string{"sqs"}, true, false),
+		genericURIConnector("stripe", "Stripe", []string{"stripe"}, true, false),
+		genericURIConnector("surveymonkey", "SurveyMonkey", []string{"surveymonkey"}, true, false),
+		genericURIConnector("synapse", "Azure Synapse", []string{"synapse"}, false, true),
+		genericURIConnector("tiktok", "TikTok Ads", []string{"tiktok"}, true, false),
+		genericURIConnector("trino", "Trino", []string{"trino"}, true, true),
+		genericURIConnector("trustpilot", "Trustpilot", []string{"trustpilot"}, true, false),
+		genericURIConnector("wise", "Wise", []string{"wise"}, true, false),
+		genericURIConnector("wistia", "Wistia", []string{"wistia"}, true, false),
+		genericURIConnector("zendesk", "Zendesk", []string{"zendesk"}, true, false),
+		genericURIConnector("zoom", "Zoom", []string{"zoom"}, true, false),
+	)
+
+	return connectors
+}
+
+func genericURIConnector(id string, name string, schemes []string, isSource bool, isDestination bool) ConnectorType {
+	return ConnectorType{
+		ID:            id,
+		Name:          name,
+		Schemes:       schemes,
+		IsSource:      isSource,
+		IsDestination: isDestination,
+		Fields: []ConnectorField{
+			{
+				Name:        "uri",
+				Label:       "URI",
+				Type:        "string",
+				Required:    true,
+				Placeholder: schemes[0] + "://...",
+			},
+		},
+	}
 }
 
 func GetConnectorByID(id string) *ConnectorType {
@@ -248,6 +391,10 @@ func GetConnectorByID(id string) *ConnectorType {
 }
 
 func BuildURI(connectorID string, fields map[string]string) string {
+	if raw := strings.TrimSpace(fields["uri"]); raw != "" {
+		return raw
+	}
+
 	switch connectorID {
 	case "postgres":
 		return buildStandardURI("postgres", fields, "5432")
