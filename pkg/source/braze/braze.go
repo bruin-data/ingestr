@@ -1,11 +1,15 @@
 package braze
 
 import (
+	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -35,6 +39,12 @@ const (
 
 	// Braze expects ISO-8601 datetimes; the trailing Z marks the values (always UTC) as UTC.
 	brazeTimeLayout = "2006-01-02T15:04:05Z"
+
+	// Segment exports are asynchronous: Braze returns a download URL that becomes
+	// available once the export finishes, so we poll it.
+	exportPollInterval = 10 * time.Second
+	exportMaxPolls     = 90 // ~15 minutes
+	subscriptionsBatch = 1000
 )
 
 var supportedTables = []string{
@@ -47,6 +57,41 @@ var supportedTables = []string{
 	"kpi_mau",
 	"kpi_new_users",
 	"kpi_uninstalls",
+	"user_data",
+}
+
+// userDataFields are the fields requested from the user export: identifiers,
+// subscription state, and bounded profile fields (heavy unbounded history is omitted).
+var userDataFields = []string{
+	"external_id",
+	"braze_id",
+	"user_aliases",
+	"email",
+	"phone",
+	"first_name",
+	"last_name",
+	"country",
+	"home_city",
+	"language",
+	"time_zone",
+	"dob",
+	"gender",
+	"email_subscribe",
+	"push_subscribe",
+	"push_tokens",
+	"devices",
+	"apps",
+	"attributed_campaign",
+	"attributed_source",
+	"attributed_adgroup",
+	"attributed_ad",
+	"total_revenue",
+	"purchases",
+	"random_bucket",
+	"last_coordinates",
+	"created_at",
+	"created_from",
+	"uninstalled_at",
 }
 
 type BrazeSource struct {
@@ -158,18 +203,25 @@ func isValidTable(table string) bool {
 }
 
 func (s *BrazeSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
-	base, appIDs := parseTableParam(req.Name)
+	base, params := parseTableParam(req.Name)
 
 	if !isValidTable(base) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", req.Name, strings.Join(supportedTables, ", "))
 	}
-	if len(appIDs) > 0 && !isKPITable(base) {
-		return nil, fmt.Errorf("the :app_id parameter is only supported for kpi_* tables, not %q", base)
+	switch {
+	case base == "user_data":
+		if len(params) == 0 {
+			return nil, fmt.Errorf("user_data requires at least one segment id, e.g. user_data:<segment_id>[,<segment_id>]")
+		}
+	case isKPITable(base):
+		// app_id list is optional
+	case len(params) > 0:
+		return nil, fmt.Errorf("the :param suffix is only supported for kpi_* and user_data tables, not %q", base)
 	}
 
 	primaryKeys, incrementalKey, strategy := tableMetadata(base)
 	// Per-app KPI rows share a date, so app_id must be part of the merge key.
-	if isKPITable(base) && len(appIDs) > 0 {
+	if isKPITable(base) && len(params) > 0 {
 		primaryKeys = []string{"time", "app_id"}
 	}
 	if len(req.PrimaryKeys) > 0 {
@@ -186,7 +238,7 @@ func (s *BrazeSource) GetTable(ctx context.Context, req source.TableRequest) (so
 			return nil, fmt.Errorf("braze source does not have a predefined schema; schema inference is required")
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, base, appIDs, opts)
+			return s.read(ctx, base, params, opts)
 		},
 	}, nil
 }
@@ -206,12 +258,16 @@ func tableMetadata(table string) ([]string, string, config.IncrementalStrategy) 
 	case "kpi_dau", "kpi_mau", "kpi_new_users", "kpi_uninstalls":
 		// daily series keyed on date; merge updates the still-changing latest day
 		return []string{"time"}, "time", config.StrategyMerge
+	case "user_data":
+		// point-in-time snapshot of users (and their subscription state) per segment;
+		// segment_id is part of the key so a user can appear in multiple segments
+		return []string{"braze_id", "segment_id"}, "", config.StrategyReplace
 	default:
 		return nil, "", config.StrategyReplace
 	}
 }
 
-func (s *BrazeSource) read(ctx context.Context, table string, appIDs []string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *BrazeSource) read(ctx context.Context, table string, params []string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -230,13 +286,15 @@ func (s *BrazeSource) read(ctx context.Context, table string, appIDs []string, o
 		case "products":
 			err = s.readProducts(ctx, opts, results)
 		case "kpi_dau":
-			err = s.readKPISeries(ctx, "/kpi/dau/data_series", appIDs, opts, results)
+			err = s.readKPISeries(ctx, "/kpi/dau/data_series", params, opts, results)
 		case "kpi_mau":
-			err = s.readKPISeries(ctx, "/kpi/mau/data_series", appIDs, opts, results)
+			err = s.readKPISeries(ctx, "/kpi/mau/data_series", params, opts, results)
 		case "kpi_new_users":
-			err = s.readKPISeries(ctx, "/kpi/new_users/data_series", appIDs, opts, results)
+			err = s.readKPISeries(ctx, "/kpi/new_users/data_series", params, opts, results)
 		case "kpi_uninstalls":
-			err = s.readKPISeries(ctx, "/kpi/uninstalls/data_series", appIDs, opts, results)
+			err = s.readKPISeries(ctx, "/kpi/uninstalls/data_series", params, opts, results)
+		case "user_data":
+			err = s.readUserData(ctx, params, opts, results)
 		default:
 			err = fmt.Errorf("unsupported table: %s", table)
 		}
@@ -442,6 +500,128 @@ func (s *BrazeSource) readSegments(ctx context.Context, opts source.ReadOptions,
 	return s.paginateList(ctx, s.client, "/segments/list", "segments", maxListPageSize, nil, asMap, nil, opts, results)
 }
 
+// readUserData exports the users of one or more segments via the async
+// /users/export/segment endpoint, tagging each row with its segment_id.
+func (s *BrazeSource) readUserData(ctx context.Context, segmentIDs []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	for _, segmentID := range segmentIDs {
+		data, err := s.exportSegment(ctx, segmentID)
+		if err != nil {
+			return fmt.Errorf("segment %s: %w", segmentID, err)
+		}
+		if err := emitSegmentExport(ctx, data, segmentID, opts, results); err != nil {
+			return fmt.Errorf("segment %s: %w", segmentID, err)
+		}
+	}
+	return nil
+}
+
+// exportSegment starts the async segment export and returns the zipped result,
+// polling the download URL (which 404/403s until the export materializes).
+func (s *BrazeSource) exportSegment(ctx context.Context, segmentID string) ([]byte, error) {
+	config.Debug("[BRAZE] exporting user_data for segment %s", segmentID)
+	body := map[string]interface{}{"segment_id": segmentID, "fields_to_export": userDataFields}
+	resp, err := s.client.R(ctx).SetBody(body).Post("/users/export/segment")
+	if err != nil {
+		return nil, fmt.Errorf("failed to start segment export: %w", err)
+	}
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("/users/export/segment returned status %d: %s", resp.StatusCode(), resp.String())
+	}
+	var export struct{ URL, Message string } // json matches url/message case-insensitively
+	if err := decodeBody(resp.Body(), &export); err != nil {
+		return nil, fmt.Errorf("failed to parse segment export response: %w", err)
+	}
+	if export.URL == "" {
+		return nil, fmt.Errorf("segment export returned no download URL (cloud-storage exports are unsupported); message: %s", export.Message)
+	}
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	for i := 0; i < exportMaxPolls; i++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(exportPollInterval):
+		}
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, export.URL, nil)
+		dl, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to download segment export: %w", err)
+		}
+		if dl.StatusCode == http.StatusOK {
+			data, readErr := io.ReadAll(dl.Body)
+			_ = dl.Body.Close()
+			return data, readErr
+		}
+		_ = dl.Body.Close()
+		// 403/404 mean the export is not ready yet; anything else is unexpected.
+		if dl.StatusCode != http.StatusNotFound && dl.StatusCode != http.StatusForbidden {
+			return nil, fmt.Errorf("unexpected status %d while downloading segment export", dl.StatusCode)
+		}
+	}
+	return nil, fmt.Errorf("segment export did not complete after %s", time.Duration(exportMaxPolls)*exportPollInterval)
+}
+
+// emitSegmentExport parses the zipped export (newline-delimited JSON users),
+// tags each record with its segment_id, and streams them in batches.
+func emitSegmentExport(ctx context.Context, data []byte, segmentID string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return fmt.Errorf("failed to open segment export archive: %w", err)
+	}
+
+	batch := make([]map[string]interface{}, 0, subscriptionsBatch)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert user_data to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = batch[:0]
+		return nil
+	}
+
+	for _, f := range zr.File {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return fmt.Errorf("failed to read export entry %s: %w", f.Name, err)
+		}
+		scanner := bufio.NewScanner(rc)
+		scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
+		for scanner.Scan() {
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
+				continue
+			}
+			var user map[string]interface{}
+			if err := decodeBody(line, &user); err != nil {
+				_ = rc.Close()
+				return fmt.Errorf("failed to parse user record: %w", err)
+			}
+			user["segment_id"] = segmentID
+			batch = append(batch, user)
+			if len(batch) >= subscriptionsBatch {
+				if err := flush(); err != nil {
+					_ = rc.Close()
+					return err
+				}
+			}
+		}
+		scanErr := scanner.Err()
+		_ = rc.Close()
+		if scanErr != nil {
+			return fmt.Errorf("failed to scan export entry %s: %w", f.Name, scanErr)
+		}
+	}
+
+	return flush()
+}
+
 func (s *BrazeSource) readEvents(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[BRAZE] reading events")
 	// events/list returns an array of event-name strings; lift each to a record.
@@ -468,9 +648,8 @@ func (s *BrazeSource) readProducts(ctx context.Context, opts source.ReadOptions,
 	return s.paginateList(ctx, s.lowClient, "/purchases/product_list", "products", 0, nil, itemFn, nil, opts, results)
 }
 
-// readKPISeries fetches a daily KPI series. With no app IDs it returns the
-// all-apps aggregate; with app IDs it fetches one per-app series each (tagged
-// with an app_id column).
+// readKPISeries fetches a daily KPI series: the all-apps aggregate with no app
+// IDs, or one per-app series each (tagged with an app_id column) when given.
 func (s *BrazeSource) readKPISeries(ctx context.Context, endpoint string, appIDs []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[BRAZE] reading %s (apps: %d)", endpoint, len(appIDs))
 	if len(appIDs) == 0 {
@@ -484,9 +663,8 @@ func (s *BrazeSource) readKPISeries(ctx context.Context, endpoint string, appIDs
 	return nil
 }
 
-// fetchKPIWindows walks the series in 100-day windows (length 1-100 + ending_at)
-// back to interval-start; with no interval it fetches the last 100 days. A
-// non-empty appID scopes the call and stamps each row with an app_id column.
+// fetchKPIWindows walks the series in 100-day windows back to interval-start (last
+// 100 days with no interval); a non-empty appID scopes it and adds an app_id column.
 func (s *BrazeSource) fetchKPIWindows(ctx context.Context, endpoint, appID string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	end := time.Now().UTC()
 	if opts.IntervalEnd != nil {

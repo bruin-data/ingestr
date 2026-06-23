@@ -180,6 +180,29 @@ func TestGetTableAppIDValidation(t *testing.T) {
 			t.Errorf("PrimaryKeys = %v, want [time app_id]", pk)
 		}
 	})
+
+	t.Run("user_data requires a segment id", func(t *testing.T) {
+		if _, err := s.GetTable(ctx, source.TableRequest{Name: "user_data"}); err == nil {
+			t.Error("expected error for user_data without segment id, got nil")
+		}
+	})
+
+	t.Run("user_data with one segment id uses composite PK", func(t *testing.T) {
+		tbl, err := s.GetTable(ctx, source.TableRequest{Name: "user_data:seg-123"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		pk := tbl.PrimaryKeys()
+		if len(pk) != 2 || pk[0] != "braze_id" || pk[1] != "segment_id" {
+			t.Errorf("PrimaryKeys = %v, want [braze_id segment_id]", pk)
+		}
+	})
+
+	t.Run("user_data accepts multiple segment ids", func(t *testing.T) {
+		if _, err := s.GetTable(ctx, source.TableRequest{Name: "user_data:a,b,c"}); err != nil {
+			t.Errorf("unexpected error for multiple segment ids: %v", err)
+		}
+	})
 }
 
 func TestTableMetadata(t *testing.T) {
