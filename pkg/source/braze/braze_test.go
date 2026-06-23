@@ -283,6 +283,58 @@ func TestFilterItemsByInterval(t *testing.T) {
 	})
 }
 
+func TestPlanKPIWindows(t *testing.T) {
+	t.Parallel()
+
+	end := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
+
+	t.Run("no interval is a single 100-day window", func(t *testing.T) {
+		w := planKPIWindows(nil, end)
+		if len(w) != 1 || w[0].length != maxKPILength || !w[0].endingAt.Equal(end) {
+			t.Fatalf("got %+v, want one length-100 window ending at end", w)
+		}
+	})
+
+	// For each span, the union of covered days must equal [start, end] exactly —
+	// no gaps, no duplicates. Spans include exact 100-day multiples (the off-by-one).
+	for _, spanDays := range []int{0, 1, 7, 99, 100, 101, 150, 200, 250} {
+		t.Run(strconv.Itoa(spanDays)+"-day span", func(t *testing.T) {
+			start := end.AddDate(0, 0, -spanDays)
+			windows := planKPIWindows(&start, end)
+
+			covered := map[string]int{}
+			for _, w := range windows {
+				for i := 0; i < w.length; i++ {
+					day := w.endingAt.AddDate(0, 0, -i).Format("2006-01-02")
+					covered[day]++
+				}
+			}
+
+			want := map[string]bool{}
+			for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+				want[d.Format("2006-01-02")] = true
+			}
+
+			if len(covered) != len(want) {
+				t.Errorf("covered %d distinct days, want %d", len(covered), len(want))
+			}
+			for day, n := range covered {
+				if n != 1 {
+					t.Errorf("day %s covered %d times (want exactly 1)", day, n)
+				}
+				if !want[day] {
+					t.Errorf("day %s covered but outside [start,end]", day)
+				}
+			}
+			for day := range want {
+				if covered[day] == 0 {
+					t.Errorf("day %s in [start,end] but never covered", day)
+				}
+			}
+		})
+	}
+}
+
 // TestDecodeBodyUseNumber verifies large integers survive JSON decoding without
 // float64 precision loss, and that floats and invalid JSON behave as expected.
 func TestDecodeBodyUseNumber(t *testing.T) {

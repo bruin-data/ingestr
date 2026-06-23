@@ -498,28 +498,16 @@ func (s *BrazeSource) fetchKPIWindows(ctx context.Context, endpoint, appID strin
 		start = &st
 	}
 
-	windowEnd := end
-	for {
+	for _, w := range planKPIWindows(start, end) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		length := maxKPILength
-		if start != nil {
-			days := int(windowEnd.Sub(*start).Hours()/24) + 1
-			if days <= 0 {
-				break
-			}
-			if days < length {
-				length = days
-			}
-		}
-
 		req := s.client.R(ctx).
-			SetQueryParam("length", strconv.Itoa(length)).
-			SetQueryParam("ending_at", windowEnd.Format(brazeTimeLayout))
+			SetQueryParam("length", strconv.Itoa(w.length)).
+			SetQueryParam("ending_at", w.endingAt.Format(brazeTimeLayout))
 		if appID != "" {
 			req.SetQueryParam("app_id", appID)
 		}
@@ -550,17 +538,46 @@ func (s *BrazeSource) fetchKPIWindows(ctx context.Context, endpoint, appID strin
 				return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
 			}
 			results <- source.RecordBatchResult{Batch: record}
-			config.Debug("[BRAZE] %s window ending %s: sent %d", endpoint, windowEnd.Format(brazeTimeLayout), len(body.Data))
+			config.Debug("[BRAZE] %s window ending %s: sent %d", endpoint, w.endingAt.Format(brazeTimeLayout), len(body.Data))
 		}
+	}
+
+	return nil
+}
+
+type kpiWindow struct {
+	length   int
+	endingAt time.Time
+}
+
+// planKPIWindows splits [start, end] into <=100-day windows ending at successively
+// earlier dates. With start nil it returns a single 100-day window ending at end.
+func planKPIWindows(start *time.Time, end time.Time) []kpiWindow {
+	var windows []kpiWindow
+	windowEnd := end
+	for {
+		length := maxKPILength
+		if start != nil {
+			days := int(windowEnd.Sub(*start).Hours()/24) + 1
+			if days <= 0 {
+				break
+			}
+			if days < length {
+				length = days
+			}
+		}
+
+		windows = append(windows, kpiWindow{length: length, endingAt: windowEnd})
 
 		if start == nil {
 			break
 		}
 		windowEnd = windowEnd.AddDate(0, 0, -length)
-		if !windowEnd.After(*start) {
+		// Stop only once we've stepped past start; landing exactly on start still
+		// needs one final 1-day window to cover the start day itself.
+		if windowEnd.Before(*start) {
 			break
 		}
 	}
-
-	return nil
+	return windows
 }
