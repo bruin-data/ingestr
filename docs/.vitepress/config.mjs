@@ -187,6 +187,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Google Analytics", link: "/supported-sources/google_analytics.md" },
               { text: "Google Ads", link: "/supported-sources/google-ads.md" },
               { text: "GitHub", link: "/supported-sources/github.md" },
+              { text: "GitLab", link: "/supported-sources/gitlab.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
               { text: "Granola", link: "/supported-sources/granola.md" },
               { text: "Hostaway", link: "/supported-sources/hostaway.md" },
