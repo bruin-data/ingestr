@@ -364,6 +364,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Braze</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Bruin</td>
         <td>✅</td>
         <td>-</td>
@@ -435,6 +440,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>GitHub</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>GitLab</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -655,6 +665,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>Trustpilot</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Twilio</td>
         <td>✅</td>
         <td>-</td>
     </tr>

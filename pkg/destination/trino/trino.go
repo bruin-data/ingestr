@@ -309,8 +309,8 @@ func (d *TrinoDestination) SCD2Table(ctx context.Context, opts destination.SCD2O
 	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingCatalog), quoteIdentifier(stagingSchema), quoteIdentifier(stagingName))
 	targetFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(targetName))
 
-	// Build column comparison for change detection (excluding SCD columns and PKs)
-	nonPKColumns := filterSCD2Columns(opts.Columns, opts.PrimaryKeys)
+	// Build column comparison for change detection (excluding metadata columns and PKs)
+	nonPKColumns := filterSCD2Columns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
 
 	// Build PK match condition for correlated subquery (target columns reference outer table)
 	pkMatchCondition := buildSCD2PKMatchCondition(opts.PrimaryKeys)

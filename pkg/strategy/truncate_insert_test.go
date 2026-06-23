@@ -10,7 +10,8 @@ import (
 )
 
 func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
-	job, src, _ := minimalJob()
+	job, src, dest := minimalJob()
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
 	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
 	job.Config.FullRefresh = true
 	job.Config.PrimaryKeys = nil

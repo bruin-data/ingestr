@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-adbc/go/adbc"
@@ -75,6 +76,13 @@ func (d *DuckDBDestination) forgetSchema(table string) {
 
 func (d *DuckDBDestination) Schemes() []string {
 	return []string{"duckdb", "motherduck", "md"}
+}
+
+func (d *DuckDBDestination) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {
+	return destination.ReplaceStagingPolicy{
+		DefaultPlacement:    destination.ReplaceStagingTargetSchema,
+		DefaultTargetSchema: "main",
+	}
 }
 
 func (d *DuckDBDestination) Connect(ctx context.Context, uri string) error {
@@ -245,6 +253,9 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 			config.Debug("[DUCKDB] Invalid INGESTR_DUCKDB_CHECKPOINT_ROWS=%q, checkpointing disabled: %v", v, err)
 		}
 	}
+	if checkpointEvery == 0 {
+		return d.writeViaSingleADBCIngest(ctx, records, tableName, ingestOpts, startTotal)
+	}
 
 	var totalRows int64
 	var rowsSinceCheckpoint int64
@@ -295,6 +306,198 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 	return nil
 }
 
+func (d *DuckDBDestination) writeViaSingleADBCIngest(ctx context.Context, records <-chan source.RecordBatchResult, tableName string, ingestOpts adbc.IngestStreamOptions, startTotal time.Time) error {
+	first, err := nextNonEmptyRecord(ctx, records)
+	if err != nil {
+		return err
+	}
+	if first == nil {
+		config.Debug("[DUCKDB] Total: 0 rows written in %v (0 rows/sec)", time.Since(startTotal))
+		return nil
+	}
+
+	reader := newChannelRecordReader(ctx, records, first)
+	_, ingestErr := adbc.IngestStream(ctx, d.conn, reader, tableName, adbc.OptionValueIngestModeAppend, ingestOpts)
+	totalRows := reader.rowsWritten()
+	readerErr := reader.Err()
+	reader.Release()
+
+	if ingestErr != nil {
+		config.Debug("[DUCKDB] IngestStream error: %v", ingestErr)
+		return fmt.Errorf("failed to ingest batch: %w", ingestErr)
+	}
+	if readerErr != nil {
+		return readerErr
+	}
+
+	totalRate := float64(totalRows) / time.Since(startTotal).Seconds()
+	config.Debug("[DUCKDB] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), totalRate)
+	return nil
+}
+
+func nextNonEmptyRecord(ctx context.Context, records <-chan source.RecordBatchResult) (arrow.RecordBatch, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case res, ok := <-records:
+			if !ok {
+				return nil, nil
+			}
+			if res.Err != nil {
+				if res.Batch != nil {
+					res.Batch.Release()
+				}
+				return nil, res.Err
+			}
+			if res.Batch == nil {
+				continue
+			}
+			if res.Batch.NumRows() == 0 {
+				res.Batch.Release()
+				continue
+			}
+			return res.Batch, nil
+		}
+	}
+}
+
+type channelRecordReader struct {
+	refCount atomic.Int64
+	ctx      context.Context
+	records  <-chan source.RecordBatchResult
+	schema   *arrow.Schema
+	first    arrow.RecordBatch
+	current  arrow.RecordBatch
+	err      error
+	rows     atomic.Int64
+}
+
+func newChannelRecordReader(ctx context.Context, records <-chan source.RecordBatchResult, first arrow.RecordBatch) *channelRecordReader {
+	reader := &channelRecordReader{
+		ctx:     ctx,
+		records: records,
+		schema:  first.Schema(),
+		first:   first,
+	}
+	reader.refCount.Add(1)
+	return reader
+}
+
+func (r *channelRecordReader) Retain() {
+	r.refCount.Add(1)
+}
+
+func (r *channelRecordReader) Release() {
+	if r.refCount.Add(-1) != 0 {
+		return
+	}
+	if r.current != nil {
+		r.current.Release()
+		r.current = nil
+	}
+	if r.first != nil {
+		r.first.Release()
+		r.first = nil
+	}
+}
+
+func (r *channelRecordReader) Schema() *arrow.Schema {
+	return r.schema
+}
+
+func (r *channelRecordReader) Next() bool {
+	if r.current != nil {
+		r.current.Release()
+		r.current = nil
+	}
+	if r.err != nil {
+		return false
+	}
+	if r.first != nil {
+		r.current = r.first
+		r.first = nil
+		r.rows.Add(r.current.NumRows())
+		return true
+	}
+
+	for {
+		select {
+		case <-r.ctx.Done():
+			r.err = r.ctx.Err()
+			return false
+		case res, ok := <-r.records:
+			if !ok {
+				return false
+			}
+			if res.Err != nil {
+				if res.Batch != nil {
+					res.Batch.Release()
+				}
+				r.err = res.Err
+				return false
+			}
+			if res.Batch == nil {
+				continue
+			}
+			if res.Batch.NumRows() == 0 {
+				res.Batch.Release()
+				continue
+			}
+			batch := res.Batch
+			if !batch.Schema().Equal(r.schema) {
+				rewrapped, ok := rewrapRecordBatchWithSchema(batch, r.schema)
+				if !ok {
+					batch.Release()
+					r.err = fmt.Errorf("record batch schema changed during DuckDB ingest")
+					return false
+				}
+				res.Batch.Release()
+				batch = rewrapped
+			}
+			r.current = batch
+			r.rows.Add(r.current.NumRows())
+			return true
+		}
+	}
+}
+
+func rewrapRecordBatchWithSchema(batch arrow.RecordBatch, target *arrow.Schema) (arrow.RecordBatch, bool) {
+	if batch.Schema().NumFields() != target.NumFields() {
+		return nil, false
+	}
+
+	cols := make([]arrow.Array, batch.NumCols())
+	for i := 0; i < int(batch.NumCols()); i++ {
+		sourceField := batch.Schema().Field(i)
+		targetField := target.Field(i)
+		if sourceField.Name != targetField.Name || !arrow.TypeEqual(sourceField.Type, targetField.Type) {
+			return nil, false
+		}
+		cols[i] = batch.Column(i)
+	}
+
+	return array.NewRecordBatch(target, cols, batch.NumRows()), true
+}
+
+func (r *channelRecordReader) RecordBatch() arrow.RecordBatch {
+	return r.current
+}
+
+func (r *channelRecordReader) Record() arrow.RecordBatch {
+	return r.RecordBatch()
+}
+
+func (r *channelRecordReader) Err() error {
+	return r.err
+}
+
+func (r *channelRecordReader) rowsWritten() int64 {
+	return r.rows.Load()
+}
+
+var _ array.RecordReader = (*channelRecordReader)(nil)
+
 func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
@@ -316,7 +519,7 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		}
 	}()
 
-	if stagingSchema == targetSchema {
+	if duckDBSchemaEquivalent(stagingSchema, targetSchema) {
 		// Same schema: cheap rename swap.
 		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("duckdb"))
@@ -450,6 +653,49 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		insertSource = dedupSource("")
 	}
 
+	targetHasRows := true
+	if !isCDC {
+		var err error
+		targetHasRows, err = d.tableHasRowsLocked(ctx, quotedTargetTable)
+		if err != nil {
+			return fmt.Errorf("failed to check target table rows: %w", err)
+		}
+	}
+
+	if !targetHasRows {
+		stagingKeysUnique, err := d.stagingPrimaryKeysUniqueLocked(ctx, opts)
+		if err != nil {
+			return fmt.Errorf("failed to check staging primary key uniqueness: %w", err)
+		}
+		if stagingKeysUnique {
+			config.Debug("[DUCKDB MERGE] Empty-target staging keys are unique; using direct INSERT")
+			insertSource = fmt.Sprintf(`%s AS source`, destination.QuoteTableName(opts.StagingTable))
+		} else {
+			config.Debug("[DUCKDB MERGE] Empty-target staging keys need deduplication")
+		}
+
+		insertSQL := fmt.Sprintf(
+			`INSERT INTO %s (%s) SELECT %s FROM %s`,
+			quotedTargetTable,
+			strings.Join(destQuoted, ", "),
+			strings.Join(destQuoted, ", "),
+			insertSource,
+		)
+		config.Debug("[DUCKDB MERGE] Executing empty-target INSERT: %s", insertSQL)
+
+		if err := d.exec(ctx, insertSQL); err != nil {
+			return fmt.Errorf("failed to insert new records: %w", err)
+		}
+
+		if err := d.exec(ctx, "COMMIT"); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		commit = true
+
+		config.Debug("[DUCKDB MERGE] Merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	if len(nonPKColumns) > 0 {
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,
@@ -503,6 +749,133 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	config.Debug("[DUCKDB MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func (d *DuckDBDestination) stagingPrimaryKeysUniqueLocked(ctx context.Context, opts destination.MergeOptions) (bool, error) {
+	if len(opts.PrimaryKeys) == 0 {
+		return false, nil
+	}
+
+	totalExpr := "COUNT(*)"
+	nullChecks := make([]string, len(opts.PrimaryKeys))
+	for i, pk := range opts.PrimaryKeys {
+		nullChecks[i] = fmt.Sprintf("%s IS NULL", destination.QuoteIdentifier(pk))
+	}
+
+	distinctExpr := ""
+	if len(opts.PrimaryKeys) == 1 {
+		distinctExpr = fmt.Sprintf("COUNT(DISTINCT %s)", destination.QuoteIdentifier(opts.PrimaryKeys[0]))
+	} else {
+		distinctExpr = fmt.Sprintf("COUNT(DISTINCT (%s))", strings.Join(quoteColumns(opts.PrimaryKeys), ", "))
+	}
+
+	query := fmt.Sprintf(
+		`SELECT %s AS total_rows, %s AS distinct_keys, COUNT(*) FILTER (WHERE %s) AS null_keys FROM %s`,
+		totalExpr,
+		distinctExpr,
+		strings.Join(nullChecks, " OR "),
+		destination.QuoteTableName(opts.StagingTable),
+	)
+
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = stmt.Close() }()
+
+	if err := stmt.SetSqlQuery(query); err != nil {
+		config.LogFailedQuery(query, err)
+		return false, err
+	}
+
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		config.LogFailedQuery(query, err)
+		return false, err
+	}
+	defer reader.Release()
+
+	if !reader.Next() {
+		if err := reader.Err(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	batch := reader.RecordBatch()
+	if batch.NumRows() == 0 || batch.NumCols() != 3 {
+		return false, fmt.Errorf("unexpected uniqueness check result shape")
+	}
+
+	total, ok := int64ValueAt(batch.Column(0), 0)
+	if !ok {
+		return false, fmt.Errorf("unexpected total row count type %s", batch.Column(0).DataType())
+	}
+	distinctKeys, ok := int64ValueAt(batch.Column(1), 0)
+	if !ok {
+		return false, fmt.Errorf("unexpected distinct key count type %s", batch.Column(1).DataType())
+	}
+	nullKeys, ok := int64ValueAt(batch.Column(2), 0)
+	if !ok {
+		return false, fmt.Errorf("unexpected null key count type %s", batch.Column(2).DataType())
+	}
+
+	return nullKeys == 0 && total == distinctKeys, nil
+}
+
+func int64ValueAt(arr arrow.Array, index int) (int64, bool) {
+	if arr.IsNull(index) {
+		return 0, false
+	}
+
+	switch col := arr.(type) {
+	case *array.Int64:
+		return col.Value(index), true
+	case *array.Uint64:
+		v := col.Value(index)
+		if v > uint64(^uint64(0)>>1) {
+			return 0, false
+		}
+		return int64(v), true
+	}
+	return 0, false
+}
+
+func (d *DuckDBDestination) tableHasRowsLocked(ctx context.Context, quotedTable string) (bool, error) {
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = stmt.Close() }()
+
+	query := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s LIMIT 1)", quotedTable)
+	if err := stmt.SetSqlQuery(query); err != nil {
+		config.LogFailedQuery(query, err)
+		return false, err
+	}
+
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		config.LogFailedQuery(query, err)
+		return false, err
+	}
+	defer reader.Release()
+
+	if !reader.Next() {
+		if err := reader.Err(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	batch := reader.RecordBatch()
+	if batch.NumRows() == 0 || batch.NumCols() == 0 || batch.Column(0).IsNull(0) {
+		return false, nil
+	}
+	if col, ok := batch.Column(0).(*array.Boolean); ok {
+		return col.Value(0), nil
+	}
+	return false, fmt.Errorf("unexpected EXISTS result type %s", batch.Column(0).DataType())
 }
 
 func (d *DuckDBDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
@@ -954,6 +1327,17 @@ func parseSchemaTable(table string) (string, string) {
 		return parts[0], parts[1]
 	}
 	return "", table
+}
+
+func duckDBSchemaEquivalent(left, right string) bool {
+	return canonicalDuckDBSchema(left) == canonicalDuckDBSchema(right)
+}
+
+func canonicalDuckDBSchema(name string) string {
+	if name == "" {
+		return "main"
+	}
+	return name
 }
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {

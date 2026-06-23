@@ -129,6 +129,7 @@ func (d *fakeDestination) SupportsDeleteInsertStrategy() bool { return !d.noDele
 func (d *fakeDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *fakeDestination) SupportsAtomicSwap() bool           { return true }
 func (d *fakeDestination) GetScheme() string                  { return "fake" }
+
 func (d *fakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	return nil, nil
 }
@@ -235,6 +236,16 @@ func (d *fakeDestination) WaitForExactRowCount(ctx context.Context, table string
 	waitErr := d.waitErr
 	d.mu.Unlock()
 	return waitErr
+}
+
+type fakeReplaceStagingPolicyProvider struct {
+	*fakeDestination
+
+	policy destination.ReplaceStagingPolicy
+}
+
+func (d *fakeReplaceStagingPolicyProvider) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {
+	return d.policy
 }
 
 func int64RecordBatch(t *testing.T, colName string, values []int64, nullAt map[int]bool) arrow.RecordBatch {

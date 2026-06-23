@@ -1,12 +1,16 @@
 package kinesis
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 func TestParseKinesisURI(t *testing.T) {
@@ -28,6 +32,18 @@ func TestParseKinesisURI(t *testing.T) {
 				}
 				if c.Region != "us-east-1" {
 					t.Errorf("Region = %q, want %q", c.Region, "us-east-1")
+				}
+			},
+		},
+		{
+			name: "host endpoint",
+			uri:  "kinesis://172.17.0.1:4566?aws_access_key_id=AKID&aws_secret_access_key=SECRET&region_name=us-east-1",
+			check: func(t *testing.T, c kinesisCredentials) {
+				if c.EndpointURL != "http://172.17.0.1:4566" {
+					t.Errorf("EndpointURL = %q, want %q", c.EndpointURL, "http://172.17.0.1:4566")
+				}
+				if c.AccessKeyID != "AKID" || c.SecretAccessKey != "SECRET" || c.Region != "us-east-1" {
+					t.Errorf("unexpected credentials: %#v", c)
 				}
 			},
 		},
@@ -159,5 +175,81 @@ func TestBuildRecordItem_NonJSON(t *testing.T) {
 
 	if item["data"] != "not json data" {
 		t.Errorf("data = %v, want 'not json data'", item["data"])
+	}
+}
+
+func TestReadShardsConcurrentlyWithStreamingStartsAllShards(t *testing.T) {
+	src := NewKinesisSource()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan string, 2)
+	done := make(chan error, 1)
+	read := func(ctx context.Context, shardID string) error {
+		started <- shardID
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	go func() {
+		done <- src.readShardsConcurrentlyWith(ctx, []string{"child-a", "child-b"}, source.ReadOptions{Streaming: true}, read)
+	}()
+
+	got := make(map[string]bool, 2)
+	deadline := time.After(time.Second)
+	for len(got) < 2 {
+		select {
+		case shardID := <-started:
+			got[shardID] = true
+		case <-deadline:
+			t.Fatalf("started shards = %v, want both child shards", got)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatalf("readShardsConcurrentlyWith error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("readShardsConcurrentlyWith did not stop after cancellation")
+	}
+}
+
+func TestReadShardsConcurrentlyReturnsShardError(t *testing.T) {
+	src := NewKinesisSource()
+	shardErr := errors.New("boom")
+
+	err := src.readShardsConcurrentlyWith(
+		context.Background(),
+		[]string{"shard-a"},
+		source.ReadOptions{Streaming: true},
+		func(context.Context, string) error {
+			return shardErr
+		},
+	)
+	if err == nil {
+		t.Fatal("expected shard error")
+	}
+	if !errors.Is(err, shardErr) {
+		t.Fatalf("error = %v, want wrapped shard error", err)
+	}
+	if strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("error = %v, should not be replaced with context cancellation", err)
+	}
+}
+
+func TestClaimStreamShardsSkipsDuplicates(t *testing.T) {
+	src := NewKinesisSource()
+
+	first := src.claimStreamShards([]string{"parent-a", "parent-b", "parent-a"})
+	if len(first) != 2 || first[0] != "parent-a" || first[1] != "parent-b" {
+		t.Fatalf("first claim = %v, want [parent-a parent-b]", first)
+	}
+
+	second := src.claimStreamShards([]string{"parent-b", "child-c"})
+	if len(second) != 1 || second[0] != "child-c" {
+		t.Fatalf("second claim = %v, want [child-c]", second)
 	}
 }

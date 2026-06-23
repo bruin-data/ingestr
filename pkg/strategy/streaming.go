@@ -3,13 +3,16 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
 const (
@@ -77,14 +80,11 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 		CDCResumeLSN:   job.Config.CDCResumeLSN,
 		CDCSlotSuffix:  job.Config.CDCSlotSuffix,
 		Streaming:      true,
+		FlushInterval:  job.Config.FlushInterval,
+		FlushRecords:   job.Config.FlushRecords,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
-	}
-
-	records, err = job.ApplyBatchTransformation(ctx, records)
-	if err != nil {
-		return fmt.Errorf("failed to apply batch transformation: %w", err)
 	}
 
 	if job.Tracker != nil {
@@ -144,6 +144,8 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 			PageSize:      job.Config.PageSize,
 			CDCSlotSuffix: job.Config.CDCSlotSuffix,
 			Streaming:     true,
+			FlushInterval: job.Config.FlushInterval,
+			FlushRecords:  job.Config.FlushRecords,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})
@@ -312,6 +314,7 @@ func (l *flushLoop) buffer(res source.RecordBatchResult) {
 // position and the merge is idempotent by primary key.
 func (l *flushLoop) flush(ctx context.Context) error {
 	start := time.Now()
+	loadTimestamp := start.UTC().Truncate(time.Microsecond)
 	var flushedRows int64
 
 	for name, st := range l.tables {
@@ -342,9 +345,12 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			writeOpts.StagingTable = true
 		}
 
-		ch := prefilledBatchChannel(batches)
-		if err := l.dest.WriteParallel(ctx, ch, writeOpts); err != nil {
-			drainAndRelease(ch)
+		records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(batches))
+		if col, ok := loadTimestampColumn(st.schema); ok {
+			records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
+		}
+		if err := l.dest.WriteParallel(ctx, records, writeOpts); err != nil {
+			drainAndRelease(records)
 			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", rows, displayName, err)
 		}
 
@@ -468,6 +474,18 @@ func (l *flushLoop) parallelism() int {
 		return l.cfg.ExtractParallelism
 	}
 	return 4
+}
+
+func loadTimestampColumn(s *schema.TableSchema) (schema.Column, bool) {
+	if s == nil {
+		return schema.Column{}, false
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+			return col, true
+		}
+	}
+	return schema.Column{}, false
 }
 
 // prefilledBatchChannel wraps already-buffered batches in a closed channel so

@@ -5,9 +5,11 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
@@ -60,6 +62,50 @@ func TestIngestionJob_GetRecords_AppliesTransformation(t *testing.T) {
 	names := result.Batch.Column(1).(*array.String)
 	if got := names.Value(0); got != "alice" {
 		t.Fatalf("trimmed name = %q, want alice", got)
+	}
+}
+
+func TestIngestionJob_GetRecords_AddsSameLoadTimestampToEveryBatch(t *testing.T) {
+	job, _, _ := minimalJob()
+	job.BufferedRecords = mustClosedRecords(
+		source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil)},
+		source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{3}, nil)},
+	)
+
+	ts := time.Date(2026, 6, 19, 10, 11, 12, 345678901, time.UTC)
+	job.LoadTimestamp = transformer.NewLoadTimestamp(schema.Column{
+		Name:     "_ingestr_loaded_at",
+		DataType: schema.TypeTimestampTZ,
+		Nullable: false,
+	}, ts)
+
+	records, err := job.GetRecords(context.Background(), source.ReadOptions{})
+	if err != nil {
+		t.Fatalf("GetRecords returned error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		result := <-records
+		if result.Err != nil {
+			t.Fatalf("record %d returned error: %v", i, result.Err)
+		}
+		if result.Batch == nil {
+			t.Fatalf("record %d batch is nil", i)
+		}
+		if got := result.Batch.ColumnName(1); got != "_ingestr_loaded_at" {
+			t.Fatalf("record %d column 1 = %q, want _ingestr_loaded_at", i, got)
+		}
+		loadedAt := result.Batch.Column(1).(*array.Timestamp)
+		for row := 0; row < int(result.Batch.NumRows()); row++ {
+			if got := int64(loadedAt.Value(row)); got != ts.UnixMicro() {
+				t.Fatalf("record %d row %d timestamp = %d, want %d", i, row, got, ts.UnixMicro())
+			}
+		}
+		result.Batch.Release()
+	}
+
+	if _, ok := <-records; ok {
+		t.Fatal("records channel still open after two batches")
 	}
 }
 
@@ -220,6 +266,34 @@ func TestReplaceStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing
 	}
 	if len(dest.swapCalls) != 1 || dest.swapCalls[0][0] != dest.prepareCalls[0].Table {
 		t.Fatalf("expected staging table to be swapped directly, got swaps=%v prepares=%v", dest.swapCalls, dest.prepareCalls)
+	}
+}
+
+func TestReplaceStrategy_Execute_UsesDestinationReplaceStagingPolicy(t *testing.T) {
+	job, src, dest := minimalJob()
+	provider := &fakeReplaceStagingPolicyProvider{
+		fakeDestination: dest,
+		policy: destination.ReplaceStagingPolicy{
+			DefaultPlacement: destination.ReplaceStagingTargetSchema,
+		},
+	}
+	job.Destination = provider
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	job.SourceSchema.PrimaryKeys = nil
+	src.primaryKeys = nil
+	src.readCh = mustClosedRecords()
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.prepareCalls) != 1 {
+		t.Fatalf("expected 1 PrepareTable call, got %d", len(dest.prepareCalls))
+	}
+	if stagingTable := dest.prepareCalls[0].Table; !strings.HasPrefix(stagingTable, "ds.tbl_staging_") {
+		t.Fatalf("PrepareTable.Table = %q, want target-schema staging prefix %q", stagingTable, "ds.tbl_staging_")
 	}
 }
 

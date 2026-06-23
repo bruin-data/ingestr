@@ -23,6 +23,8 @@ type ReadOptions struct {
 	FullRefresh    bool
 	Columns        string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
 	Streaming      bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
+	FlushInterval  time.Duration
+	FlushRecords   int
 }
 
 type RecordBatchResult struct {

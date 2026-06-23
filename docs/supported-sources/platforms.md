@@ -11,6 +11,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Apple Ads](/supported-sources/appleads.md)
 - [Applovin](/supported-sources/applovin.md)
 - [Applovin Max](/supported-sources/applovin_max.md)
+- [Braze](/supported-sources/braze.md)
 - [Facebook Ads](/supported-sources/facebook-ads.md)
 - [Google Ads](/supported-sources/google-ads.md)
 - [Klaviyo](/supported-sources/klaviyo.md)
@@ -81,12 +82,14 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 
 - [Allium](/supported-sources/allium.md)
 - [Amazon Kinesis](/supported-sources/kinesis.md)
+- [Amazon SQS](/supported-sources/sqs.md)
 - [Anthropic](/supported-sources/anthropic.md)
 - [Azure Data Lake Storage Gen2](/supported-sources/adls.md)
 - [Bruin](/supported-sources/bruin.md)
 - [Cursor](/supported-sources/cursor.md)
 - [Dune](/supported-sources/dune.md)
 - [GitHub](/supported-sources/github.md)
+- [Google Cloud Pub/Sub](/supported-sources/pubsub.md)
 - [Google Cloud Storage (GCS)](/supported-sources/gcs.md)
 - [Google Sheets](/supported-sources/gsheets.md)
 - [Manifold](/supported-sources/manifold.md)
@@ -97,7 +100,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 ## Sports, games, and public data
 
 - [API-Football](/supported-sources/api-football.md)
-- [BallDontLie FIFA](/supported-sources/balldontlie-fifa.md)
+- [BallDontLie FIFA](/supported-sources/balldontlie.md)
 - [Chess.com](/supported-sources/chess.md)
 - [ESPN](/supported-sources/espn.md)
 - [football-data.org](/supported-sources/football-data-org.md)
