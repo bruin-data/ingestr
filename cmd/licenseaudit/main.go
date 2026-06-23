@@ -304,7 +304,11 @@ func checkLock(lock *lockFile, scanned []scanEntry) error {
 			problems = append(problems, fmt.Sprintf("%s has manual audit status %q; set an accepted status after review", audit.Module, audit.Status))
 		}
 		if err := validateManualAudit(audit); err != nil {
-			problems = append(problems, err.Error())
+			if errors.Is(err, errModuleNotSelected) {
+				problems = append(problems, fmt.Sprintf("manual audit for %s is stale: module is not selected by go.mod; remove it from licenses.lock.yml", audit.Module))
+			} else {
+				problems = append(problems, err.Error())
+			}
 		}
 	}
 
@@ -339,8 +343,7 @@ func mergeDependencies(existing []dependencyReview, scanned []scanEntry, newStat
 				status = old.Status
 				note = old.Note
 			} else if old.Status == "manual-review" {
-				status = "needs-review"
-				note = "Manual-reviewed dependency changed; review before setting status."
+				status, note = manualReviewChangedStatus(scan, newStatus)
 			} else {
 				status, note = changedReviewStatus(scan, newStatus)
 			}
@@ -363,6 +366,13 @@ func changedReviewStatus(scan scanEntry, fallbackStatus string) (string, string)
 		note = "Version or license changed; review before setting status."
 	}
 	return status, note
+}
+
+func manualReviewChangedStatus(scan scanEntry, fallbackStatus string) (string, string) {
+	if fallbackStatus != "" && fallbackStatus != "needs-review" {
+		return fallbackStatus, ""
+	}
+	return "needs-review", "Manual-reviewed dependency changed; review before setting status."
 }
 
 func defaultReviewStatus(scan scanEntry, fallbackStatus string) (string, string) {
@@ -447,7 +457,7 @@ func appendManualNotices(audits []manualAudit, outputPath string) (err error) {
 var errModuleNotSelected = errors.New("module is not selected")
 
 func validateManualAudit(audit manualAudit) error {
-	if audit.Module == "" || audit.Version == "" || audit.LicenseFile == "" || audit.LicenseSHA256 == "" {
+	if audit.Module == "" || audit.Version == "" || audit.License == "" || audit.LicenseFile == "" || audit.LicenseSHA256 == "" {
 		return fmt.Errorf("manual audit for %q is incomplete", audit.Module)
 	}
 
@@ -497,7 +507,14 @@ func goListModule(module string) (string, string, bool, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); ok {
-			return "", "", false, nil
+			stderrText := strings.TrimSpace(stderr.String())
+			if moduleNotSelected(stderrText) {
+				return "", "", false, nil
+			}
+			if stderrText == "" {
+				stderrText = err.Error()
+			}
+			return "", "", false, fmt.Errorf("go list -m %s failed: %s", module, stderrText)
 		}
 		return "", "", false, fmt.Errorf("go list -m %s: %w", module, err)
 	}
@@ -508,6 +525,10 @@ func goListModule(module string) (string, string, bool, error) {
 		dir = parts[1]
 	}
 	return version, dir, true, nil
+}
+
+func moduleNotSelected(stderr string) bool {
+	return strings.Contains(stderr, "not a known dependency")
 }
 
 func goModDownloadDir(module, version string) (string, error) {
