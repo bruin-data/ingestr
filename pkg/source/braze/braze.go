@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -32,8 +33,8 @@ const (
 	lowRateLimit      = 1000 * 0.8 / 3600.0 // ~0.22 req/s
 	lowRateLimitBurst = 5
 
-	// Braze expects ISO-8601 datetimes for its time filters.
-	brazeTimeLayout = "2006-01-02T15:04:05"
+	// Braze expects ISO-8601 datetimes; the trailing Z marks the values (always UTC) as UTC.
+	brazeTimeLayout = "2006-01-02T15:04:05Z"
 )
 
 var supportedTables = []string{
@@ -97,16 +98,14 @@ func (s *BrazeSource) Connect(ctx context.Context, uri string) error {
 }
 
 func (s *BrazeSource) Close(ctx context.Context) error {
-	var err error
+	var errs []error
 	if s.client != nil {
-		err = s.client.Close()
+		errs = append(errs, s.client.Close())
 	}
 	if s.lowClient != nil {
-		if cerr := s.lowClient.Close(); cerr != nil && err == nil {
-			err = cerr
-		}
+		errs = append(errs, s.lowClient.Close())
 	}
-	return err
+	return errors.Join(errs...)
 }
 
 type brazeCredentials struct {
@@ -327,6 +326,11 @@ func firstTimestamp(item map[string]interface{}, fields []string) (time.Time, bo
 			}
 			if ts, err := dateparse.ParseAny(v); err == nil {
 				return ts.UTC(), true
+			}
+		case json.Number:
+			// decodeBody uses UseNumber(); treat a numeric timestamp as Unix epoch seconds.
+			if sec, err := v.Int64(); err == nil {
+				return time.Unix(sec, 0).UTC(), true
 			}
 		case time.Time:
 			return v.UTC(), true

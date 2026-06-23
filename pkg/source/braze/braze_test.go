@@ -3,6 +3,7 @@ package braze
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 
@@ -267,6 +268,17 @@ func TestFilterItemsByInterval(t *testing.T) {
 		// Only Feb, plus the unparseable row.
 		if len(got) != 2 {
 			t.Errorf("got %d items, want 2", len(got))
+		}
+	})
+
+	t.Run("json.Number epoch seconds parsed", func(t *testing.T) {
+		feb := time.Date(2026, 2, 10, 0, 0, 0, 0, time.UTC)
+		numItems := []map[string]interface{}{{"ts": json.Number(strconv.FormatInt(feb.Unix(), 10))}}
+		if got := filterItemsByInterval(numItems, []string{"ts"}, tm("2026-02-01T00:00:00Z"), tm("2026-03-01T00:00:00Z")); len(got) != 1 {
+			t.Errorf("inside interval: got %d, want 1", len(got))
+		}
+		if got := filterItemsByInterval(numItems, []string{"ts"}, tm("2026-03-01T00:00:00Z"), nil); len(got) != 0 {
+			t.Errorf("after interval: got %d, want 0", len(got))
 		}
 	})
 }
