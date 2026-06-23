@@ -1437,7 +1437,12 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 		pruningSkipReason = fmt.Sprintf("partition field %s requires source casting", pruning.Column)
 		pruning = nil
 	} else if pruning == nil && targetMeta != nil && targetMeta.TimePartitioning != nil && targetMeta.TimePartitioning.Field != "" {
-		pruningSkipReason = fmt.Sprintf("partition field %s is not part of the merge primary key", targetMeta.TimePartitioning.Field)
+		partitionField := targetMeta.TimePartitioning.Field
+		if !containsIdentifier(opts.PrimaryKeys, partitionField) {
+			pruningSkipReason = fmt.Sprintf("partition field %s is not part of the merge primary key", partitionField)
+		} else {
+			pruningSkipReason = fmt.Sprintf("partition field %s has an unsupported type or was not found in schema", partitionField)
+		}
 	}
 	if pruning != nil {
 		config.Debug("[MERGE] Applying target partition pruning on %s", pruning.Column)
