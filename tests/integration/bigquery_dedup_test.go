@@ -264,6 +264,66 @@ func TestBigQuery_MergeTable_DedupsDuplicateStagingPKs(t *testing.T) {
 	require.Equal(t, "pre-existing", rows[0][0])
 }
 
+func TestBigQuery_MergeTable_PartitionPrunedPrimaryKey(t *testing.T) {
+	dest, client, project, dataset := bqDedupSetup(t)
+	ctx := context.Background()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stagingTbl := fmt.Sprintf("partition_merge_staging_%s", suffix)
+	targetTbl := fmt.Sprintf("partition_merge_target_%s", suffix)
+	defer bqDropTables(ctx, client, dataset, stagingTbl, targetTbl)
+	defer func() { _ = dest.Close(ctx) }()
+
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+		"CREATE TABLE `%s.%s.%s` (id INT64, day DATE, name STRING)",
+		project, dataset, stagingTbl,
+	)))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+		"CREATE TABLE `%s.%s.%s` (id INT64, day DATE, name STRING) PARTITION BY day",
+		project, dataset, targetTbl,
+	)))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO `+"`%s.%s.%s`"+` VALUES
+		(1, DATE '2024-01-01', 'old'),
+		(2, DATE '2024-01-02', 'outside-window'),
+		(3, NULL, 'null-old')`, project, dataset, targetTbl)))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO `+"`%s.%s.%s`"+` VALUES
+		(1, DATE '2024-01-01', 'new'),
+		(4, DATE '2024-01-01', 'inserted'),
+		(3, NULL, 'null-new')`, project, dataset, stagingTbl)))
+
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: dataset + "." + stagingTbl,
+		TargetTable:  dataset + "." + targetTbl,
+		PrimaryKeys:  []string{"id", "day"},
+		Columns:      []string{"id", "day", "name"},
+	}))
+
+	rows := bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT COUNT(*) FROM `%s.%s.%s`", project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1)
+	require.EqualValues(t, 4, rows[0][0], "expected updated row, untouched outside row, null-partition update, and inserted row")
+
+	rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT name FROM `%s.%s.%s` WHERE id = 1 AND day = DATE '2024-01-01'", project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1)
+	require.Equal(t, "new", rows[0][0])
+
+	rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT name FROM `%s.%s.%s` WHERE id = 2 AND day = DATE '2024-01-02'", project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1)
+	require.Equal(t, "outside-window", rows[0][0])
+
+	rows = bqRunQuery(t, ctx, client, fmt.Sprintf(
+		"SELECT COUNT(*), ANY_VALUE(name) FROM `%s.%s.%s` WHERE id = 3 AND day IS NULL", project, dataset, targetTbl,
+	))
+	require.Len(t, rows, 1)
+	require.EqualValues(t, 1, rows[0][0], "NULL partition row should be updated, not duplicated")
+	require.Equal(t, "null-new", rows[0][1])
+}
+
 // TestBigQuery_DeleteInsertTable_DedupsDuplicateStagingPKs verifies that
 // DeleteInsertTable inserts one row per primary key from staging into target,
 // even when staging has duplicate PKs in the same incremental window.

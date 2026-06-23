@@ -1350,6 +1350,47 @@ func TestPartitionByClause(t *testing.T) {
 	}
 }
 
+func TestBuildMergePartitionPruning(t *testing.T) {
+	meta := &bigquery.TableMetadata{
+		Schema: bigquery.Schema{
+			{Name: "id", Type: bigquery.IntegerFieldType},
+			{Name: "day", Type: bigquery.DateFieldType},
+			{Name: "created_at", Type: bigquery.TimestampFieldType},
+		},
+		TimePartitioning: &bigquery.TimePartitioning{Field: "day"},
+	}
+
+	pruning := buildMergePartitionPruning(meta, []string{"id", "DAY"})
+	if pruning == nil {
+		t.Fatal("expected pruning when the partition column is part of the primary key")
+	}
+	if pruning.Column != "day" || !pruning.IsDate {
+		t.Fatalf("unexpected pruning config: %+v", pruning)
+	}
+
+	if got := buildMergePartitionPruning(meta, []string{"id"}); got != nil {
+		t.Fatalf("expected no pruning when partition column is not part of primary key, got %+v", got)
+	}
+
+	meta.TimePartitioning.Field = "created_at"
+	pruning = buildMergePartitionPruning(meta, []string{"id", "created_at"})
+	if pruning == nil {
+		t.Fatal("expected pruning for timestamp partition primary key")
+	}
+	if pruning.Column != "created_at" || pruning.IsDate {
+		t.Fatalf("unexpected timestamp pruning config: %+v", pruning)
+	}
+
+	meta.TimePartitioning.Field = ""
+	if got := buildMergePartitionPruning(meta, []string{"id", "created_at"}); got != nil {
+		t.Fatalf("expected no pruning for ingestion-time partitioned table, got %+v", got)
+	}
+
+	if !hasCastForColumn(map[string]string{"Day": "DATE"}, "day") {
+		t.Fatal("expected cast map lookup to be case-insensitive")
+	}
+}
+
 func TestBuildMergeSQL(t *testing.T) {
 	dest := NewBigQueryDestination()
 	dest.projectID = "my-project"
@@ -1490,6 +1531,42 @@ func TestBuildMergeSQL(t *testing.T) {
 
 		if contains(sql, "_cdc_unchanged_cols") {
 			t.Fatalf("sql must not reference _cdc_unchanged_cols when absent:\n%s", sql)
+		}
+	})
+
+	t.Run("date_partition_pruning_when_partition_column_is_pk", func(t *testing.T) {
+		sql := dest.buildMergeSQLWithPartitionPruning(
+			"target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id", "day"}, []string{"id", "day", "name"}, nil, "",
+			&mergePartitionPruning{Column: "day", IsDate: true},
+		)
+
+		if !contains(sql, "DECLARE _ingestr_merge_partition_min DATE DEFAULT (SELECT MIN(`day`) FROM `my-project`.`staging_ds`.`staging_tbl`);\n") {
+			t.Fatalf("sql missing date partition min declaration:\n%s", sql)
+		}
+		if !contains(sql, "DECLARE _ingestr_merge_partition_max DATE DEFAULT (SELECT MAX(`day`) FROM `my-project`.`staging_ds`.`staging_tbl`);\n") {
+			t.Fatalf("sql missing date partition max declaration:\n%s", sql)
+		}
+		if !contains(sql, "DECLARE _ingestr_merge_partition_has_null BOOL DEFAULT (SELECT COALESCE(LOGICAL_OR(`day` IS NULL), FALSE) FROM `my-project`.`staging_ds`.`staging_tbl`);\n") {
+			t.Fatalf("sql missing partition null declaration:\n%s", sql)
+		}
+		if !contains(sql, "AND (t.`day` BETWEEN _ingestr_merge_partition_min AND _ingestr_merge_partition_max OR (_ingestr_merge_partition_has_null AND t.`day` IS NULL))\n") {
+			t.Fatalf("sql missing target partition pruning predicate:\n%s", sql)
+		}
+	})
+
+	t.Run("timestamp_partition_pruning_uses_date_expression", func(t *testing.T) {
+		sql := dest.buildMergeSQLWithPartitionPruning(
+			"target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id", "created_at"}, []string{"id", "created_at", "name"}, nil, "",
+			&mergePartitionPruning{Column: "created_at"},
+		)
+
+		if !contains(sql, "DECLARE _ingestr_merge_partition_min DATE DEFAULT (SELECT MIN(DATE(`created_at`)) FROM `my-project`.`staging_ds`.`staging_tbl`);\n") {
+			t.Fatalf("sql missing timestamp partition min declaration:\n%s", sql)
+		}
+		if !contains(sql, "AND (DATE(t.`created_at`) BETWEEN _ingestr_merge_partition_min AND _ingestr_merge_partition_max OR (_ingestr_merge_partition_has_null AND t.`created_at` IS NULL))\n") {
+			t.Fatalf("sql missing timestamp target partition pruning predicate:\n%s", sql)
 		}
 	})
 }
