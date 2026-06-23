@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -26,6 +27,7 @@ const (
 	maxRateLimitRetries   = 5
 	rateLimitFallbackWait = 5 * time.Second
 	rateLimitMaxWait      = 5 * time.Minute
+	defaultParallelism    = 5
 )
 
 type GitLabSource struct {
@@ -49,10 +51,8 @@ type tableConfig struct {
 	strategy              config.IncrementalStrategy
 	incrementalKey        string
 	supportsUpdatedFilter bool
-	scopes                []string
+	perProjectResource    string
 }
-
-var bothScopes = []string{"created_by_me", "assigned_to_me"}
 
 var tables = map[string]tableConfig{
 	"projects": {
@@ -75,22 +75,20 @@ var tables = map[string]tableConfig{
 		strategy:    config.StrategyReplace,
 	},
 	"issues": {
-		endpoint:              "/issues",
 		queryParams:           map[string]string{"order_by": "updated_at", "sort": "asc"},
 		primaryKeys:           []string{"id"},
 		strategy:              config.StrategyMerge,
 		incrementalKey:        "updated_at",
 		supportsUpdatedFilter: true,
-		scopes:                bothScopes,
+		perProjectResource:    "issues",
 	},
 	"merge_requests": {
-		endpoint:              "/merge_requests",
 		queryParams:           map[string]string{"order_by": "updated_at", "sort": "asc"},
 		primaryKeys:           []string{"id"},
 		strategy:              config.StrategyMerge,
 		incrementalKey:        "updated_at",
 		supportsUpdatedFilter: true,
-		scopes:                bothScopes,
+		perProjectResource:    "merge_requests",
 	},
 }
 
@@ -172,7 +170,20 @@ func (s *GitLabSource) read(ctx context.Context, cfg tableConfig, opts source.Re
 
 	go func() {
 		defer close(results)
-		if err := s.stream(ctx, cfg, opts, results); err != nil {
+		var err error
+		if cfg.perProjectResource != "" {
+			err = s.streamPerProject(ctx, cfg, opts, results)
+		} else {
+			err = s.paginate(ctx, cfg.endpoint, cfg.queryParams, cfg.supportsUpdatedFilter, opts, func(items []map[string]interface{}) error {
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to convert gitlab data to Arrow: %w", err)
+				}
+				results <- source.RecordBatchResult{Batch: record}
+				return nil
+			})
+		}
+		if err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -180,122 +191,162 @@ func (s *GitLabSource) read(ctx context.Context, cfg tableConfig, opts source.Re
 	return results, nil
 }
 
-func (s *GitLabSource) stream(ctx context.Context, cfg tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+// streamPerProject lists the membership projects, then fans out the per-project endpoint
+func (s *GitLabSource) streamPerProject(ctx context.Context, cfg tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	if s.client == nil {
 		return fmt.Errorf("gitlab source is not connected")
 	}
-	config.Debug("[GITLAB] reading %s", cfg.endpoint)
+
+	var projectIDs []string
+	listParams := map[string]string{"membership": "true", "order_by": "id", "sort": "asc"}
+	err := s.paginate(ctx, "/projects", listParams, false, source.ReadOptions{}, func(items []map[string]interface{}) error {
+		for _, item := range items {
+			if id, ok := item["id"]; ok && id != nil {
+				projectIDs = append(projectIDs, fmt.Sprint(id))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	parallelism := opts.Parallelism
+	if parallelism <= 0 {
+		parallelism = defaultParallelism
+	}
+	config.Debug("[GITLAB] %s: fanning out over %d projects with parallelism %d", cfg.perProjectResource, len(projectIDs), parallelism)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	projectChan := make(chan string, len(projectIDs))
+	var wg sync.WaitGroup
+	for i := 0; i < parallelism; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for id := range projectChan {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				endpoint := "/projects/" + id + "/" + cfg.perProjectResource
+				err := s.paginate(ctx, endpoint, cfg.queryParams, cfg.supportsUpdatedFilter, opts, func(items []map[string]interface{}) error {
+					record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+					if err != nil {
+						return fmt.Errorf("failed to convert gitlab data to Arrow: %w", err)
+					}
+					results <- source.RecordBatchResult{Batch: record}
+					return nil
+				})
+				if err != nil {
+					results <- source.RecordBatchResult{Err: err}
+					cancel()
+					return
+				}
+			}
+		}()
+	}
+
+	for _, id := range projectIDs {
+		projectChan <- id
+	}
+	close(projectChan)
+
+	wg.Wait()
+	return nil
+}
+
+// paginate walks every page of endpoint (honoring 429 Retry-After)
+func (s *GitLabSource) paginate(ctx context.Context, endpoint string, params map[string]string, applyInterval bool, opts source.ReadOptions, emit func([]map[string]interface{}) error) error {
+	if s.client == nil {
+		return fmt.Errorf("gitlab source is not connected")
+	}
+	config.Debug("[GITLAB] reading %s", endpoint)
 
 	perPage := defaultPerPage
 	if opts.PageSize > 0 && opts.PageSize < perPage {
 		perPage = opts.PageSize
 	}
 
-	scopes := cfg.scopes
-	if len(scopes) == 0 {
-		scopes = []string{""}
-	}
+	page := "1"
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
-	for _, scope := range scopes {
-		page := "1"
-		for {
-			if err := ctx.Err(); err != nil {
+		var resp *httpclient.Response
+		for attempt := 0; ; attempt++ {
+			req := s.client.R(ctx).
+				SetQueryParam("per_page", strconv.Itoa(perPage)).
+				SetQueryParam("page", page)
+			for key, value := range params {
+				req.SetQueryParam(key, value)
+			}
+			if applyInterval {
+				if opts.IntervalStart != nil {
+					req.SetQueryParam("updated_after", opts.IntervalStart.UTC().Format(time.RFC3339))
+				}
+				if opts.IntervalEnd != nil {
+					req.SetQueryParam("updated_before", opts.IntervalEnd.UTC().Format(time.RFC3339))
+				}
+			}
+
+			var err error
+			resp, err = req.Get(endpoint)
+			if err != nil {
+				return fmt.Errorf("failed to fetch gitlab endpoint %s: %w", endpoint, err)
+			}
+			// GitLab returns 429 with a Retry-After header when the rate limit is
+			// hit. Honor it and retry the same page instead of failing the run.
+			if resp.StatusCode() == http.StatusTooManyRequests && attempt < maxRateLimitRetries {
+				wait := rateLimitFallbackWait
+				if secs, perr := strconv.Atoi(strings.TrimSpace(resp.Header().Get("Retry-After"))); perr == nil && secs > 0 {
+					if wait = time.Duration(secs) * time.Second; wait > rateLimitMaxWait {
+						wait = rateLimitMaxWait
+					}
+				}
+				config.Debug("[GITLAB] 429 from %s, waiting %v before retry %d/%d", endpoint, wait, attempt+1, maxRateLimitRetries)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(wait):
+				}
+				continue
+			}
+			break
+		}
+		if err := checkResponse(endpoint, resp); err != nil {
+			return err
+		}
+
+		dec := json.NewDecoder(bytes.NewReader(resp.Body()))
+		dec.UseNumber()
+		var raw []interface{}
+		if err := dec.Decode(&raw); err != nil {
+			return fmt.Errorf("malformed gitlab response from %s: %w", endpoint, err)
+		}
+		items := make([]map[string]interface{}, 0, len(raw))
+		for i, rawItem := range raw {
+			item, ok := rawItem.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("data item %d from %s is not an object", i, endpoint)
+			}
+			items = append(items, item)
+		}
+		if len(items) > 0 {
+			if err := emit(items); err != nil {
 				return err
 			}
+		}
 
-			var resp *httpclient.Response
-			for attempt := 0; ; attempt++ {
-				req := s.client.R(ctx).
-					SetQueryParam("per_page", strconv.Itoa(perPage)).
-					SetQueryParam("page", page)
-				for key, value := range cfg.queryParams {
-					req.SetQueryParam(key, value)
-				}
-				if scope != "" {
-					req.SetQueryParam("scope", scope)
-				}
-				if cfg.supportsUpdatedFilter {
-					if opts.IntervalStart != nil {
-						req.SetQueryParam("updated_after", opts.IntervalStart.UTC().Format(time.RFC3339))
-					}
-					if opts.IntervalEnd != nil {
-						req.SetQueryParam("updated_before", opts.IntervalEnd.UTC().Format(time.RFC3339))
-					}
-				}
-
-				r, err := req.Get(cfg.endpoint)
-				if err != nil {
-					return fmt.Errorf("failed to fetch gitlab endpoint %s: %w", cfg.endpoint, err)
-				}
-				// GitLab returns 429 with a Retry-After header when the rate limit
-				// is hit. Honor it and retry instead of failing the whole run; only
-				// the final attempt falls through to checkResponse as a hard error.
-				if r.StatusCode() == http.StatusTooManyRequests && attempt < maxRateLimitRetries {
-					wait := retryAfter(r)
-					config.Debug("[GITLAB] 429 from %s, waiting %v before retry %d/%d", cfg.endpoint, wait, attempt+1, maxRateLimitRetries)
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(wait):
-					}
-					continue
-				}
-				resp = r
-				break
-			}
-
-			if err := checkResponse(cfg.endpoint, resp); err != nil {
-				return err
-			}
-
-			dec := json.NewDecoder(bytes.NewReader(resp.Body()))
-			dec.UseNumber()
-			var raw []interface{}
-			if err := dec.Decode(&raw); err != nil {
-				return fmt.Errorf("malformed gitlab response from %s: %w", cfg.endpoint, err)
-			}
-			items := make([]map[string]interface{}, 0, len(raw))
-			for i, rawItem := range raw {
-				item, ok := rawItem.(map[string]interface{})
-				if !ok {
-					return fmt.Errorf("malformed gitlab response from %s: data item %d is not an object", cfg.endpoint, i)
-				}
-				items = append(items, item)
-			}
-
-			if len(items) > 0 {
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-				if err != nil {
-					return fmt.Errorf("failed to convert gitlab data to Arrow: %w", err)
-				}
-				results <- source.RecordBatchResult{Batch: record}
-			}
-
-			next := strings.TrimSpace(resp.Header().Get("X-Next-Page"))
-			if next == "" {
-				break
-			}
-			page = next
+		page = strings.TrimSpace(resp.Header().Get("X-Next-Page"))
+		if page == "" {
+			return nil
 		}
 	}
-
-	return nil
-}
-
-func retryAfter(resp *httpclient.Response) time.Duration {
-	value := strings.TrimSpace(resp.Header().Get("Retry-After"))
-	if value == "" {
-		return rateLimitFallbackWait
-	}
-	seconds, err := strconv.Atoi(value)
-	if err != nil || seconds <= 0 {
-		return rateLimitFallbackWait
-	}
-	wait := time.Duration(seconds) * time.Second
-	if wait > rateLimitMaxWait {
-		return rateLimitMaxWait
-	}
-	return wait
 }
 
 func checkResponse(endpoint string, resp *httpclient.Response) error {
