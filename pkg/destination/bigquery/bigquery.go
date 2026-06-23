@@ -377,6 +377,100 @@ func partitionByClause(column string, isDateColumn bool) string {
 	return fmt.Sprintf("PARTITION BY DATE(%s)\n", quoteIdentifier(column))
 }
 
+type mergePartitionPruning struct {
+	Column string
+	IsDate bool
+}
+
+func buildMergePartitionPruning(meta *bigquery.TableMetadata, primaryKeys []string) *mergePartitionPruning {
+	if meta == nil || meta.TimePartitioning == nil || meta.TimePartitioning.Field == "" {
+		return nil
+	}
+	partitionColumn := meta.TimePartitioning.Field
+	if !containsIdentifier(primaryKeys, partitionColumn) {
+		return nil
+	}
+	fieldType, ok := partitionFieldType(meta.Schema, partitionColumn)
+	if !ok {
+		return nil
+	}
+	switch fieldType {
+	case bigquery.DateFieldType:
+		return &mergePartitionPruning{Column: partitionColumn, IsDate: true}
+	case bigquery.TimestampFieldType, bigquery.DateTimeFieldType:
+		return &mergePartitionPruning{Column: partitionColumn}
+	default:
+		return nil
+	}
+}
+
+func containsIdentifier(values []string, value string) bool {
+	for _, item := range values {
+		if strings.EqualFold(item, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCastForColumn(castMap map[string]string, column string) bool {
+	for castColumn := range castMap {
+		if strings.EqualFold(castColumn, column) {
+			return true
+		}
+	}
+	return false
+}
+
+func partitionFieldType(s bigquery.Schema, column string) (bigquery.FieldType, bool) {
+	for _, field := range s {
+		if strings.EqualFold(field.Name, column) {
+			return field.Type, true
+		}
+	}
+	return "", false
+}
+
+func mergePartitionExpr(alias, column string, isDate bool) string {
+	ref := quoteIdentifier(column)
+	if alias != "" {
+		ref = alias + "." + ref
+	}
+	if isDate {
+		return ref
+	}
+	return fmt.Sprintf("DATE(%s)", ref)
+}
+
+func mergePartitionPruningDeclarations(stagingRef string, pruning *mergePartitionPruning) string {
+	if pruning == nil {
+		return ""
+	}
+	partitionExpr := mergePartitionExpr("", pruning.Column, pruning.IsDate)
+	partitionCol := quoteIdentifier(pruning.Column)
+	return fmt.Sprintf(
+		"DECLARE _ingestr_merge_partition_min DATE DEFAULT (SELECT MIN(%s) FROM %s);\n"+
+			"DECLARE _ingestr_merge_partition_max DATE DEFAULT (SELECT MAX(%s) FROM %s);\n"+
+			"DECLARE _ingestr_merge_partition_has_null BOOL DEFAULT (SELECT COALESCE(LOGICAL_OR(%s IS NULL), FALSE) FROM %s);\n\n",
+		partitionExpr, stagingRef,
+		partitionExpr, stagingRef,
+		partitionCol, stagingRef,
+	)
+}
+
+func mergePartitionTargetPredicate(pruning *mergePartitionPruning) string {
+	if pruning == nil {
+		return ""
+	}
+	targetExpr := mergePartitionExpr("t", pruning.Column, pruning.IsDate)
+	targetCol := fmt.Sprintf("t.%s", quoteIdentifier(pruning.Column))
+	return fmt.Sprintf(
+		"(%s BETWEEN _ingestr_merge_partition_min AND _ingestr_merge_partition_max OR (_ingestr_merge_partition_has_null AND %s IS NULL))",
+		targetExpr,
+		targetCol,
+	)
+}
+
 // PrepareTable creates or recreates a table with the given schema.
 func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
 	ctx = annotation.WithStep(ctx, annotation.StepDDL)
@@ -1330,11 +1424,29 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 		}
 	}
 
+	targetMeta, err := d.client.Dataset(targetDataset).Table(targetTableName).Metadata(ctx)
+	if err != nil {
+		config.Debug("[MERGE] Could not fetch target metadata for partition pruning: %v", err)
+	}
 	// Fetch target and staging table schemas to detect type mismatches
 	castMap := d.buildCastMap(ctx, targetDataset, targetTableName, stagingDataset, stagingTableName)
 
+	pruning := buildMergePartitionPruning(targetMeta, opts.PrimaryKeys)
+	pruningSkipReason := ""
+	if pruning != nil && hasCastForColumn(castMap, pruning.Column) {
+		pruningSkipReason = fmt.Sprintf("partition field %s requires source casting", pruning.Column)
+		pruning = nil
+	} else if pruning == nil && targetMeta != nil && targetMeta.TimePartitioning != nil && targetMeta.TimePartitioning.Field != "" {
+		pruningSkipReason = fmt.Sprintf("partition field %s is not part of the merge primary key", targetMeta.TimePartitioning.Field)
+	}
+	if pruning != nil {
+		config.Debug("[MERGE] Applying target partition pruning on %s", pruning.Column)
+	} else if pruningSkipReason != "" {
+		config.Debug("[MERGE] Skipping target partition pruning: %s", pruningSkipReason)
+	}
+
 	// Build MERGE statement
-	mergeSQL := d.buildMergeSQL(targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey)
+	mergeSQL := d.buildMergeSQLWithPartitionPruning(targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, pruning)
 
 	config.Debug("[MERGE] Executing MERGE statement")
 	config.Debug("[MERGE] SQL: %s", mergeSQL)
@@ -1660,11 +1772,18 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 
 // buildMergeSQL constructs a BigQuery MERGE statement
 func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string) string {
+	return d.buildMergeSQLWithPartitionPruning(targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nil)
+}
+
+func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, pruning *mergePartitionPruning) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		sourceCol := castSourceCol(pk, castMap)
 		onConditions[i] = fmt.Sprintf("(t.%s = %s OR (t.%s IS NULL AND %s IS NULL))", quoteIdentifier(pk), sourceCol, quoteIdentifier(pk), sourceCol)
+	}
+	if partitionPredicate := mergePartitionTargetPredicate(pruning); partitionPredicate != "" {
+		onConditions = append(onConditions, partitionPredicate)
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -1705,6 +1824,8 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 	}
 
 	var sql strings.Builder
+	stagingRef := fmt.Sprintf("%s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable))
+	sql.WriteString(mergePartitionPruningDeclarations(stagingRef, pruning))
 	fmt.Fprintf(&sql, "MERGE %s.%s.%s AS t\n", quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTable))
 
 	if hasCDCDeleted && len(primaryKeys) > 0 {
@@ -1732,7 +1853,6 @@ func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingD
 		}
 		selectCols = append(selectCols, "act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active`")
 
-		stagingRef := fmt.Sprintf("%s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable))
 		fmt.Fprintf(
 			&sql,
 			"USING (SELECT %s FROM (SELECT * FROM %s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) = 1) AS la LEFT JOIN (SELECT * FROM %s WHERE `_cdc_deleted` = false QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY `_cdc_lsn` DESC) = 1) AS act ON %s) AS s\n",
