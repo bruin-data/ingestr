@@ -49,8 +49,8 @@ GitLab source allows ingesting the following resources into separate tables:
 | `projects`       | `id` | `updated_at` | merge        | Projects the token is a member of (`membership=true`). Scoped to the run interval via `updated_after`/`updated_before`. |
 | `groups`         | `id` | –            | replace      | Groups the token is a member of. Full reload on each run.                                      |
 | `users`          | `id` | –            | replace      | Users visible to the token. Full reload on each run. **See the note below before using on gitlab.com.** |
-| `issues`         | `id` | `updated_at` | merge        | Issues created by the authenticated user (`scope=created_by_me`). Scoped to the run interval via `updated_after`/`updated_before`. |
-| `merge_requests` | `id` | `updated_at` | merge        | Merge requests created by the authenticated user (`scope=created_by_me`). Scoped to the run interval via `updated_after`/`updated_before`. |
+| `issues`         | `id` | `updated_at` | merge        | Issues the authenticated user created or is assigned to. Scoped to the run interval via `updated_after`/`updated_before`. |
+| `merge_requests` | `id` | `updated_at` | merge        | Merge requests the authenticated user created or is assigned to. Scoped to the run interval via `updated_after`/`updated_before`. |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
 

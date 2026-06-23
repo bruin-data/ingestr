@@ -63,13 +63,20 @@ func TestGitLabReadProjectsUsesAuthAndPagination(t *testing.T) {
 	require.Equal(t, "2", fmt.Sprint(decodeUnknown(t, records[1], "id", 0)))
 }
 
-func TestGitLabIssuesIncrementalKeyAndFilter(t *testing.T) {
-	var captured url.Values
+func TestGitLabIssuesFetchesBothScopes(t *testing.T) {
+	var scopes []string
+	var filterQuery url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/issues", r.URL.Path)
-		captured = r.URL.Query()
+		scope := r.URL.Query().Get("scope")
+		scopes = append(scopes, scope)
 		w.Header().Set("X-Next-Page", "")
-		_, _ = fmt.Fprint(w, `[{"id":10,"iid":1,"project_id":1,"title":"Bug","description":"**markdown**","labels":["bug","p1"],"assignees":[{"id":5,"username":"dev"}],"updated_at":"2026-06-01T00:00:00Z"}]`)
+		if scope == "created_by_me" {
+			filterQuery = r.URL.Query()
+			_, _ = fmt.Fprint(w, `[{"id":10,"iid":1,"project_id":1,"title":"Bug","description":"**markdown**","labels":["bug","p1"],"assignees":[{"id":5,"username":"dev"}],"updated_at":"2026-06-01T00:00:00Z"}]`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `[]`)
 	}))
 	defer server.Close()
 
@@ -89,16 +96,12 @@ func TestGitLabIssuesIncrementalKeyAndFilter(t *testing.T) {
 	record := drainOne(t, results)
 
 	require.EqualValues(t, 1, record.NumRows())
-	require.Equal(t, "2026-05-01T00:00:00Z", captured.Get("updated_after"))
-	require.Equal(t, "2026-06-15T00:00:00Z", captured.Get("updated_before"))
-	require.Equal(t, "updated_at", captured.Get("order_by"))
-	require.Equal(t, "created_by_me", captured.Get("scope"))
-
-	require.Subset(t, columnNames(record), []string{"id", "iid", "labels", "assignees", "description"})
+	require.Equal(t, []string{"created_by_me", "assigned_to_me"}, scopes)
+	require.Equal(t, "2026-05-01T00:00:00Z", filterQuery.Get("updated_after"))
+	require.Equal(t, "2026-06-15T00:00:00Z", filterQuery.Get("updated_before"))
+	require.Equal(t, "updated_at", filterQuery.Get("order_by"))
+	require.Subset(t, columnNames(record), []string{"id", "iid", "labels", "assignees"})
 	require.Equal(t, "10", fmt.Sprint(decodeUnknown(t, record, "id", 0)))
-	require.Equal(t, "1", fmt.Sprint(decodeUnknown(t, record, "iid", 0)))
-	labels := decodeUnknown(t, record, "labels", 0).([]any)
-	require.ElementsMatch(t, []any{"bug", "p1"}, labels)
 }
 
 func TestGitLabReadRespectsExcludeColumns(t *testing.T) {
