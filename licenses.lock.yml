@@ -1,0 +1,1373 @@
+version: 1
+generated:
+    tool: github.com/google/go-licenses@v1.6.0
+    packages: ./...
+    targets:
+        - linux/amd64
+    include_tests: false
+manual_audits:
+    - module: github.com/99designs/go-keychain
+      version: v0.0.0-20191008050251-8e49817e8af4
+      license: MIT
+      license_file: LICENSE
+      license_sha256: 039c69774070226d213bced933176be4ec396c9b101cd9a13e82a2c390c6c90a
+      status: manual-review
+      note: Darwin/cgo package selected differently by host settings; keep notice deterministic.
+    - module: github.com/DATA-DOG/go-sqlmock
+      version: v1.5.2
+      license: BSD-3-Clause
+      license_file: LICENSE
+      license_sha256: e3a6ae97f6eef8ce17e44d5f22adba594c4ea2b592c4be7ee9b387c441ef34d6
+      status: manual-review
+      note: go-licenses v1.6.0 cannot classify the current license file.
+    - module: github.com/segmentio/asm
+      version: v1.2.1
+      license: MIT No Attribution
+      license_file: LICENSE
+      license_sha256: cca993712df289a5958bdef69031a5dac0f951ac15afeb313f9eeea55ed59443
+      status: manual-review
+      note: go-licenses v1.6.0 cannot classify the current license file.
+    - module: modernc.org/mathutil
+      version: v1.7.1
+      license: BSD-3-Clause
+      license_file: LICENSE
+      license_sha256: bfa9bf72a72ca009fd62a8f84fca3dca67e51d93af96352723646599898b6cf5
+      status: manual-review
+      note: go-licenses v1.6.0 cannot classify the current license file.
+dependencies:
+    - module: cel.dev/expr
+      version: v0.25.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go
+      version: v0.123.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/auth
+      version: v0.18.2
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/auth/oauth2adapt
+      version: v0.2.8
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/bigquery
+      version: v1.72.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/compute/metadata
+      version: v0.9.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/iam
+      version: v1.5.3
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/longrunning
+      version: v0.8.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/monitoring
+      version: v1.24.3
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/pubsub
+      version: v1.50.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/pubsub/v2
+      version: v2.0.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/spanner
+      version: v1.87.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: cloud.google.com/go/storage
+      version: v1.56.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: dario.cat/mergo
+      version: v1.0.2
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: filippo.io/edwards25519
+      version: v1.1.1
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/Azure/azure-sdk-for-go/sdk/azcore
+      version: v1.21.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/Azure/azure-sdk-for-go/sdk/azidentity
+      version: v1.13.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/Azure/azure-sdk-for-go/sdk/internal
+      version: v1.12.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/Azure/azure-sdk-for-go/sdk/storage/azblob
+      version: v1.6.3
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake
+      version: v1.4.4
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/AzureAD/microsoft-authentication-library-for-go
+      version: v1.6.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/BurntSushi/toml
+      version: v1.4.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/ClickHouse/ch-go
+      version: v0.69.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/ClickHouse/clickhouse-go/v2
+      version: v2.42.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/GoogleCloudPlatform/grpc-gcp-go/grpcgcp
+      version: v1.5.3
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp
+      version: v1.30.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric
+      version: v0.53.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping
+      version: v0.53.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/InfluxCommunity/influxdb3-go/v2
+      version: v2.13.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/Masterminds/semver/v3
+      version: v3.4.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/ProtonMail/go-crypto
+      version: v1.3.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/ProtonMail/gopenpgp/v3
+      version: v3.3.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/SAP/go-hdb
+      version: v1.16.2
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/alecthomas/chroma/v2
+      version: v2.23.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/alibabacloud-go/debug
+      version: v1.0.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/alibabacloud-go/tea
+      version: v1.2.2
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aliyun/aliyun-odps-go-sdk
+      version: v0.4.22
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aliyun/credentials-go
+      version: v1.3.10
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/andybalholm/brotli
+      version: v1.2.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/apache/arrow-adbc/go/adbc
+      version: v1.9.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/apache/arrow-go/v18
+      version: v18.5.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/apache/arrow/go/v15
+      version: v15.0.2
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/apache/cassandra-gocql-driver/v2
+      version: v2.1.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/apache/thrift
+      version: v0.23.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/apapsch/go-jsonmerge/v2
+      version: v2.0.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/araddon/dateparse
+      version: v0.0.0-20210429162001-6b43995a97de
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/aws/aws-msk-iam-sasl-signer-go
+      version: v1.0.4
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2
+      version: v1.41.5
+      licenses:
+        - Apache-2.0
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream
+      version: v1.7.8
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/config
+      version: v1.32.6
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/credentials
+      version: v1.19.6
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue
+      version: v1.20.37
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/feature/ec2/imds
+      version: v1.18.16
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/feature/s3/manager
+      version: v1.17.11
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/internal/configsources
+      version: v1.4.21
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/internal/endpoints/v2
+      version: v2.7.21
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/internal/ini
+      version: v1.8.4
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/internal/v4a
+      version: v1.4.22
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/athena
+      version: v1.56.4
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/dynamodb
+      version: v1.57.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/dynamodbstreams
+      version: v1.32.14
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding
+      version: v1.13.7
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/internal/checksum
+      version: v1.9.13
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery
+      version: v1.11.21
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/internal/presigned-url
+      version: v1.13.21
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/internal/s3shared
+      version: v1.19.21
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/kinesis
+      version: v1.43.5
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/s3
+      version: v1.97.3
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/signin
+      version: v1.0.4
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/sqs
+      version: v1.42.20
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/sso
+      version: v1.30.8
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/ssooidc
+      version: v1.35.12
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/service/sts
+      version: v1.41.5
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/aws/smithy-go
+      version: v1.24.2
+      licenses:
+        - Apache-2.0
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/aymanbagabas/go-osc52/v2
+      version: v2.0.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/bmatcuk/doublestar/v4
+      version: v4.9.2
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/cenkalti/backoff/v4
+      version: v4.3.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/cespare/xxhash/v2
+      version: v2.3.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/clipperhouse/displaywidth
+      version: v0.11.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/clipperhouse/uax29/v2
+      version: v2.7.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/cloudflare/circl
+      version: v1.6.3
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/cncf/xds/go
+      version: v0.0.0-20251210132809-ee656c7534f5
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/columnar-tech/dbc
+      version: v0.3.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/containerd/errdefs
+      version: v1.0.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/containerd/errdefs/pkg
+      version: v0.3.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/containerd/log
+      version: v0.1.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/containerd/platforms
+      version: v0.2.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/couchbase/gocb/v2
+      version: v2.12.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/couchbase/gocbcore/v10
+      version: v10.9.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/couchbase/gocbcoreps
+      version: v0.1.5-0.20260107140814-1c3a03f888f8
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/couchbase/goprotostellar
+      version: v1.0.5
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/couchbaselabs/gocbconnstr/v2
+      version: v2.0.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/cpuguy83/dockercfg
+      version: v0.3.2
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/databricks/databricks-sdk-go
+      version: v0.95.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/davecgh/go-spew
+      version: v1.1.2-0.20180830191138-d8f796af33cc
+      licenses:
+        - ISC
+      status: allowed
+    - module: github.com/denisbrodbeck/machineid
+      version: v1.0.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/distribution/reference
+      version: v0.6.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/dlclark/regexp2
+      version: v1.11.5
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/docker/go-connections
+      version: v0.6.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/docker/go-units
+      version: v0.5.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/dustin/go-humanize
+      version: v1.0.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/elastic/elastic-transport-go/v8
+      version: v8.8.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/elastic/go-elasticsearch/v9
+      version: v9.3.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/envoyproxy/go-control-plane/envoy
+      version: v1.36.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/envoyproxy/protoc-gen-validate
+      version: v1.3.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/fatih/color
+      version: v1.18.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/felixge/httpsnoop
+      version: v1.0.4
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/gabriel-vasile/mimetype
+      version: v1.4.7
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/go-chi/chi/v5
+      version: v5.2.3
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/go-faster/city
+      version: v1.0.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/go-faster/errors
+      version: v0.7.1
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/go-faster/jx
+      version: v1.2.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/go-faster/yaml
+      version: v0.4.6
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/go-jose/go-jose/v4
+      version: v4.1.4
+      licenses:
+        - Apache-2.0
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/go-logr/logr
+      version: v1.4.3
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/go-logr/stdr
+      version: v1.2.2
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/go-mysql-org/go-mysql
+      version: v1.13.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/go-sql-driver/mysql
+      version: v1.9.3
+      licenses:
+        - MPL-2.0
+      status: allowed
+    - module: github.com/go-viper/mapstructure/v2
+      version: v2.4.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/goccy/go-json
+      version: v0.10.5
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/golang-jwt/jwt/v5
+      version: v5.3.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/golang-sql/civil
+      version: v0.0.0-20220223132316-b832511892a9
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/golang-sql/sqlexp
+      version: v0.1.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/golang/groupcache
+      version: v0.0.0-20210331224755-41bb18bfe9da
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/golang/snappy
+      version: v1.0.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/google/flatbuffers
+      version: v25.12.19+incompatible
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/google/go-querystring
+      version: v1.1.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/google/s2a-go
+      version: v0.1.9
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/google/uuid
+      version: v1.6.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/googleapis/enterprise-certificate-proxy
+      version: v0.3.14
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/googleapis/gax-go/v2
+      version: v2.17.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/gorilla/websocket
+      version: v1.5.3
+      licenses:
+        - BSD-2-Clause
+      status: allowed
+    - module: github.com/hamba/avro/v2
+      version: v2.31.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/hashicorp/go-uuid
+      version: v1.0.3
+      licenses:
+        - MPL-2.0
+      status: allowed
+    - module: github.com/influxdata/influxdb-client-go/v2
+      version: v2.14.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/influxdata/line-protocol
+      version: v0.0.0-20200327222509-2487e7298839
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/influxdata/line-protocol/v2
+      version: v2.2.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/jackc/pgio
+      version: v1.0.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/jackc/pglogrepl
+      version: v0.0.0-20251213150135-2e8d0df862c1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/jackc/pgpassfile
+      version: v1.0.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/jackc/pgservicefile
+      version: v0.0.0-20240606120523-5a60cdf6a761
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/jackc/pgx/v5
+      version: v5.9.2
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/jackc/puddle/v2
+      version: v2.2.2
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/jcmturner/aescts/v2
+      version: v2.0.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/jcmturner/dnsutils/v2
+      version: v2.0.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/jcmturner/gofork
+      version: v1.7.6
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/jcmturner/goidentity/v6
+      version: v6.0.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/jcmturner/gokrb5/v8
+      version: v8.4.4
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/jcmturner/rpc/v2
+      version: v2.0.3
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/json-iterator/go
+      version: v1.1.12
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/klauspost/compress
+      version: v1.18.5
+      licenses:
+        - Apache-2.0
+        - BSD-3-Clause
+        - MIT
+      status: allowed
+    - module: github.com/klauspost/cpuid/v2
+      version: v2.3.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/kr/fs
+      version: v0.1.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/kylelemons/godebug
+      version: v1.1.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/lucasb-eyer/go-colorful
+      version: v1.3.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/magiconair/properties
+      version: v1.8.10
+      licenses:
+        - BSD-2-Clause
+      status: allowed
+    - module: github.com/mattn/go-colorable
+      version: v0.1.13
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/mattn/go-isatty
+      version: v0.0.20
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/mattn/go-runewidth
+      version: v0.0.20
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/mattn/go-sqlite3
+      version: v1.14.32
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/microsoft/go-mssqldb
+      version: v1.10.0
+      licenses:
+        - BSD-3-Clause
+        - MIT
+      status: allowed
+    - module: github.com/mitchellh/colorstring
+      version: v0.0.0-20190213212951-d06e56a500db
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/moby/docker-image-spec
+      version: v1.3.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/moby/go-archive
+      version: v0.2.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/moby/moby/api
+      version: v1.54.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/moby/moby/client
+      version: v0.4.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/moby/patternmatcher
+      version: v0.6.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/moby/sys/sequential
+      version: v0.6.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/moby/sys/user
+      version: v0.4.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/moby/sys/userns
+      version: v0.1.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/moby/term
+      version: v0.5.2
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/modern-go/concurrent
+      version: v0.0.0-20180306012644-bacd9c7ef1dd
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/modern-go/reflect2
+      version: v1.0.2
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/montanaflynn/stats
+      version: v0.7.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/muesli/termenv
+      version: v0.16.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/oapi-codegen/runtime
+      version: v1.0.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/olekukonko/cat
+      version: v0.0.0-20250911104152-50322a0618f6
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/olekukonko/errors
+      version: v1.1.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/olekukonko/ll
+      version: v0.1.3
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/olekukonko/tablewriter
+      version: v1.1.2
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/opencontainers/go-digest
+      version: v1.0.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/opencontainers/image-spec
+      version: v1.1.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/paulmach/orb
+      version: v0.12.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/pelletier/go-toml/v2
+      version: v2.2.4
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/pierrec/lz4
+      version: v2.6.1+incompatible
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/pierrec/lz4/v4
+      version: v4.1.23
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/pingcap/errors
+      version: v0.11.5-0.20250318082626-8f80e5cb09ec
+      licenses:
+        - BSD-2-Clause
+      status: allowed
+    - module: github.com/pingcap/log
+      version: v1.1.1-0.20241212030209-7e3ff8601a2a
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/pingcap/tidb/pkg/parser
+      version: v0.0.0-20250421232622-526b2c79173d
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/pkg/browser
+      version: v0.0.0-20240102092130-5ac0b6a4141c
+      licenses:
+        - BSD-2-Clause
+      status: allowed
+    - module: github.com/pkg/errors
+      version: v0.9.1
+      licenses:
+        - BSD-2-Clause
+      status: allowed
+    - module: github.com/pkg/sftp
+      version: v1.13.10
+      licenses:
+        - BSD-2-Clause
+      status: allowed
+    - module: github.com/pmezard/go-difflib
+      version: v1.0.1-0.20181226105442-5d4384ee4fb2
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/rabbitmq/amqp091-go
+      version: v1.10.0
+      licenses:
+        - BSD-2-Clause
+      status: allowed
+    - module: github.com/remyoudompheng/bigfft
+      version: v0.0.0-20230129092748-24d4a6f8daec
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/richardlehane/mscfb
+      version: v1.0.6
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/richardlehane/msoleps
+      version: v1.0.6
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/rivo/uniseg
+      version: v0.4.7
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/schollz/progressbar/v3
+      version: v3.18.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/segmentio/kafka-go
+      version: v0.4.50
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/shenzhencenter/google-ads-pb
+      version: v1.23.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/shirou/gopsutil/v4
+      version: v4.26.3
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/shopspring/decimal
+      version: v1.4.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/sijms/go-ora/v2
+      version: v2.9.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/simpleforce/simpleforce
+      version: v0.0.0-20220429021116-acf4ac67ef68
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/sirupsen/logrus
+      version: v1.9.4
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/snowflakedb/gosnowflake
+      version: v1.18.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/sourcegraph/conc
+      version: v0.3.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/spiffe/go-spiffe/v2
+      version: v2.6.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/stretchr/testify
+      version: v1.11.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/stripe/stripe-go/v81
+      version: v81.4.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/testcontainers/testcontainers-go
+      version: v0.42.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/tiendc/go-deepcopy
+      version: v1.7.2
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/tklauser/go-sysconf
+      version: v0.3.16
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/tklauser/numcpus
+      version: v0.11.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/trinodb/trino-go-client
+      version: v0.333.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/urfave/cli/v3
+      version: v3.0.0-beta1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/xdg-go/pbkdf2
+      version: v1.0.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/xdg-go/scram
+      version: v1.1.2
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/xdg-go/stringprep
+      version: v1.0.4
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/xuri/efp
+      version: v0.0.1
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/xuri/excelize/v2
+      version: v2.10.1
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/xuri/nfp
+      version: v0.0.2-0.20250530014748-2ddeb826f9a9
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/youmark/pkcs8
+      version: v0.0.0-20240726163527-a2c0da244d78
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/zeebo/xxh3
+      version: v1.0.2
+      licenses:
+        - BSD-2-Clause
+      status: allowed
+    - module: github.com/zeroshade/machine-id
+      version: v0.0.0-20251223181436-930511047eef
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.mongodb.org/mongo-driver
+      version: v1.17.6
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opencensus.io
+      version: v0.24.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opentelemetry.io/auto/sdk
+      version: v1.2.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opentelemetry.io/contrib/detectors/gcp
+      version: v1.39.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc
+      version: v0.65.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp
+      version: v0.61.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opentelemetry.io/otel
+      version: v1.43.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opentelemetry.io/otel/metric
+      version: v1.43.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opentelemetry.io/otel/sdk
+      version: v1.43.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opentelemetry.io/otel/sdk/metric
+      version: v1.43.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opentelemetry.io/otel/trace
+      version: v1.43.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.uber.org/atomic
+      version: v1.11.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: go.uber.org/multierr
+      version: v1.11.0
+      licenses:
+        - MIT
+      status: allowed
+    - module: go.uber.org/zap
+      version: v1.27.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: go.yaml.in/yaml/v3
+      version: v3.0.4
+      licenses:
+        - MIT
+      status: allowed
+    - module: golang.org/x/crypto
+      version: v0.50.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: golang.org/x/exp
+      version: v0.0.0-20251209150349-8475f28825e9
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: golang.org/x/mod
+      version: v0.34.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: golang.org/x/net
+      version: v0.53.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: golang.org/x/oauth2
+      version: v0.36.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: golang.org/x/sync
+      version: v0.20.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: golang.org/x/sys
+      version: v0.43.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: golang.org/x/term
+      version: v0.42.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: golang.org/x/text
+      version: v0.36.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: golang.org/x/time
+      version: v0.15.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: golang.org/x/xerrors
+      version: v0.0.0-20240903120638-7835f813f4da
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: google.golang.org/api
+      version: v0.271.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: google.golang.org/genproto
+      version: v0.0.0-20260203192932-546029d2fa20
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: google.golang.org/genproto/googleapis/api
+      version: v0.0.0-20260203192932-546029d2fa20
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: google.golang.org/genproto/googleapis/rpc
+      version: v0.0.0-20260226221140-a57be14db171
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: google.golang.org/grpc
+      version: v1.79.3
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: google.golang.org/protobuf
+      version: v1.36.11
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: gopkg.in/inf.v0
+      version: v0.9.1
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: gopkg.in/ini.v1
+      version: v1.67.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: gopkg.in/natefinch/lumberjack.v2
+      version: v2.2.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: gopkg.in/yaml.v3
+      version: v3.0.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: modernc.org/libc
+      version: v1.66.10
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: modernc.org/memory
+      version: v1.11.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: modernc.org/sqlite
+      version: v1.40.1
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: resty.dev/v3
+      version: v3.0.0-beta.5
+      licenses:
+        - MIT
+      status: allowed
