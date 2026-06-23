@@ -353,6 +353,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("tiktok", "TikTok Ads", []string{"tiktok"}, true, false),
 		genericURIConnector("trino", "Trino", []string{"trino"}, true, true),
 		genericURIConnector("trustpilot", "Trustpilot", []string{"trustpilot"}, true, false),
+		genericURIConnector("twilio", "Twilio", []string{"twilio"}, true, false),
 		genericURIConnector("wise", "Wise", []string{"wise"}, true, false),
 		genericURIConnector("wistia", "Wistia", []string{"wistia"}, true, false),
 		genericURIConnector("zendesk", "Zendesk", []string{"zendesk"}, true, false),
