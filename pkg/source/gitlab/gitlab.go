@@ -72,7 +72,7 @@ var tables = map[string]tableConfig{
 	},
 	"users": {
 		primaryKeys:        []string{"id"},
-		strategy:           config.StrategyMerge,
+		strategy:           config.StrategyReplace,
 		perProjectResource: "users",
 	},
 	"issues": {

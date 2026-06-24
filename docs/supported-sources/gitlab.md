@@ -48,7 +48,7 @@ GitLab source allows ingesting the following resources into separate tables:
 | ---------------- | ---- | ------------ | ------------ | --------------------------------------------------------------------------------------------- |
 | `projects`       | `id` | `updated_at` | merge        | Projects the token is a member of. Scoped to the run interval via `updated_after`/`updated_before`. |
 | `groups`         | `id` | –            | replace      | Groups the token is a member of. Full reload on each run.                                      |
-| `users`          | `id` | –            | merge        | Users across the projects the token is a member of. The same user can appear in multiple projects but shares one `id`, so merge deduplicates them into a single row. |
+| `users`          | `id` | –            | replace      | Users across the projects the token is a member of. Full reload on each run. |
 | `issues`         | `id` | `updated_at` | merge        | All issues across the projects the token is a member of. Scoped to the run interval via `updated_after`/`updated_before`. |
 | `merge_requests` | `id` | `updated_at` | merge        | All merge requests across the projects the token is a member of. Scoped to the run interval via `updated_after`/`updated_before`. |
 
