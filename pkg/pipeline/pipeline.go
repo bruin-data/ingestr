@@ -916,19 +916,15 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	tableDestNames := make(map[string]string)
 	namer, _ := p.dest.(destination.MultiTableNamer)
 	for _, table := range tables {
-		destName := table.Name
+		// When funneling into a dest schema, the source-schema qualifier is
+		// flattened into the table name ("dbo.orders" -> "<dest>.dbo_orders") so
+		// the result is an unambiguous two-part name rather than something that
+		// looks like a catalog.schema.table reference. Without a dest schema the
+		// source layout is mirrored. Destinations with their own naming rules
+		// (e.g. BigQuery) override via MultiTableNamer.
+		destName := destination.DefaultMultiTableName(table.DestSchema, table.Name)
 		if namer != nil {
 			destName = namer.DestTableName(table.DestSchema, table.Name)
-		} else if table.DestSchema != "" {
-			// TODO(turtledev): When a publication in a non-public
-			// schema is created, the tables names may (?) have a schema.
-			//
-			// We need to verify this and if it's affirmitive, we need to
-			// combine it with dest schema.
-			// Possible formats:
-			//  - {dest_schema}.{src_schema}_{name}
-			//  - {dest_schema}_{src_schema}.{name}
-			destName = table.DestSchema + "." + table.Name
 		}
 		tableDestNames[table.Name] = destName
 	}

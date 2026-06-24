@@ -2,6 +2,7 @@ package destination
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -148,13 +149,28 @@ type AtomicCommitWriter interface {
 	SupportsAtomicCommitWrites() bool
 }
 
-// MultiTableNamer is an optional interface for destinations whose table names
-// cannot embed a multi-table source's qualified name verbatim (e.g. BigQuery
-// table IDs cannot contain dots). It maps a source table name like
-// "dbo.orders" plus the configured destination schema to a destination table
-// name. Destinations without this interface get "<destSchema>.<sourceTable>".
+// MultiTableNamer is an optional interface for destinations that need full
+// control over multi-table destination naming (e.g. BigQuery, which keys off the
+// connection dataset). Destinations without it use DefaultMultiTableName.
 type MultiTableNamer interface {
 	DestTableName(destSchema, sourceTable string) string
+}
+
+// DefaultMultiTableName builds the destination table name for a multi-table
+// source table on destinations that don't implement MultiTableNamer.
+//
+// When a destination schema is configured, all tables are funneled into it and
+// any source-schema qualifier is flattened into the table name
+// ("dbo.orders" -> "<destSchema>.dbo_orders"), yielding an unambiguous two-part
+// name. Without a destination schema the source name is mirrored verbatim
+// ("dbo.orders" -> "dbo.orders"), recreating the source's schema layout on the
+// destination. Flattening matters because a name like "<destSchema>.dbo.orders"
+// is otherwise indistinguishable from a catalog.schema.table reference.
+func DefaultMultiTableName(destSchema, sourceTable string) string {
+	if destSchema == "" {
+		return sourceTable
+	}
+	return destSchema + "." + strings.ReplaceAll(sourceTable, ".", "_")
 }
 
 // ExactRowCountWaiter is an optional interface for destinations that can

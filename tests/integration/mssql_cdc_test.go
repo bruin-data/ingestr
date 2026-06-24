@@ -478,9 +478,9 @@ func TestMSSQLCDC_MultiTable_Postgres(t *testing.T) {
 	t.Cleanup(func() { _ = pg.Close() })
 
 	var count int
-	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q."dbo.items"`, destSchema)).Scan(&count))
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q."dbo_items"`, destSchema)).Scan(&count))
 	assert.Equal(t, 3, count, "items snapshot")
-	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q."dbo.orders"`, destSchema)).Scan(&count))
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q."dbo_orders"`, destSchema)).Scan(&count))
 	assert.Equal(t, 2, count, "orders snapshot")
 
 	_, err = db.ExecContext(ctx, `UPDATE dbo.orders SET qty = 99 WHERE order_id = 1001`)
@@ -497,13 +497,13 @@ func TestMSSQLCDC_MultiTable_Postgres(t *testing.T) {
 
 	var qty int
 	var deleted bool
-	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT qty, "_cdc_deleted" FROM %q."dbo.orders" WHERE order_id = 1001`, destSchema)).Scan(&qty, &deleted))
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT qty, "_cdc_deleted" FROM %q."dbo_orders" WHERE order_id = 1001`, destSchema)).Scan(&qty, &deleted))
 	assert.Equal(t, 99, qty, "orders update should be applied")
 	assert.False(t, deleted)
 
-	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT "_cdc_deleted" FROM %q."dbo.orders" WHERE order_id = 1002`, destSchema)).Scan(&deleted))
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT "_cdc_deleted" FROM %q."dbo_orders" WHERE order_id = 1002`, destSchema)).Scan(&deleted))
 	assert.True(t, deleted, "orders delete should be soft-applied")
 
-	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q."dbo.items"`, destSchema)).Scan(&count))
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q."dbo_items"`, destSchema)).Scan(&count))
 	assert.Equal(t, 4, count, "items insert should be applied")
 }
