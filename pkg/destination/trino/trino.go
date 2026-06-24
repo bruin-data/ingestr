@@ -15,6 +15,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	_ "github.com/trinodb/trino-go-client/trino"
 )
 
@@ -525,15 +526,11 @@ func isReservedURIKey(key string) bool {
 }
 
 func (d *TrinoDestination) parseTableName(table string) (catalog, schemaName, tableName string) {
-	parts := strings.Split(table, ".")
-	switch len(parts) {
-	case 3:
-		return parts[0], parts[1], parts[2]
-	case 2:
-		return d.catalog, parts[0], parts[1]
-	default:
+	tn, err := tablename.Trino.Parse(table, tablename.Defaults{Catalog: d.catalog, Schema: d.schema})
+	if err != nil {
 		return d.catalog, d.schema, table
 	}
+	return tn.Catalog, tn.Schema, tn.Table
 }
 
 func buildCreateTableSQL(catalog, schemaName, table string, columns []schema.Column) string {

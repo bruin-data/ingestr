@@ -86,6 +86,33 @@ type DatasetConnector interface {
 	BuildConnectionStringWithDataset(uri string, dataset string) (string, error)
 }
 
+// CatalogAwareDialect is implemented by dialects whose tables live in a
+// three-level namespace (catalog.schema.table): DuckDB (attached catalog),
+// Snowflake (database), BigQuery (project). It surfaces the catalog that the
+// two-return ParseTableName would otherwise discard.
+type CatalogAwareDialect interface {
+	Dialect
+
+	// ParseTableNameWithCatalog parses catalog.schema.table / schema.table /
+	// table. catalog and schema are "" (or filled from defaults) when absent.
+	ParseTableNameWithCatalog(table string) (catalog, schemaName, tableName string)
+}
+
+// CatalogSQLDialect is implemented by catalog-aware dialects that fetch schema
+// via the generic SQL path (e.g. DuckDB) and need catalog-qualified queries
+// when a catalog is present in the table name.
+type CatalogSQLDialect interface {
+	CatalogAwareDialect
+
+	// SchemaQueryForCatalog returns a schema query whose parameters are
+	// (catalog, schemaName, tableName).
+	SchemaQueryForCatalog() string
+
+	// PrimaryKeyQueryForCatalog returns a PK query whose parameters are
+	// (catalog, tableName). Returns "" if PK detection is unsupported.
+	PrimaryKeyQueryForCatalog() string
+}
+
 // SchemaProvider is an optional interface for dialects that can fetch schema
 // directly using native APIs instead of SQL queries. This is typically much faster
 // than querying INFORMATION_SCHEMA.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
 const DefaultStagingSchema = "_bruin_staging"
@@ -18,14 +19,7 @@ const DefaultStagingSchema = "_bruin_staging"
 const maxStagingTableNameLen = 60
 
 func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string {
-	parts := strings.SplitN(targetTable, ".", 2)
-	originSchema := ""
-	tableName := targetTable
-
-	if len(parts) == 2 {
-		originSchema = parts[0]
-		tableName = parts[1]
-	}
+	catalog, originSchema, tableName := splitCatalogSchemaTable(targetTable)
 
 	stagingSchema := stagingDataset
 	if stagingSchema == "" {
@@ -37,12 +31,12 @@ func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string
 		embeddedName = fmt.Sprintf("%s__%s", originSchema, tableName)
 	}
 
-	return buildStagingTableName(stagingSchema, embeddedName, suffix)
+	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix))
 }
 
 func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy) string {
 	policy = normaliseReplaceStagingPolicy(policy)
-	targetSchema, tableName := splitSchemaTable(targetTable)
+	catalog, targetSchema, tableName := splitCatalogSchemaTable(targetTable)
 
 	stagingSchema := stagingDataset
 	if stagingSchema == "" {
@@ -65,7 +59,7 @@ func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string,
 		embeddedName = fmt.Sprintf("%s__%s", targetSchema, tableName)
 	}
 
-	return buildStagingTableName(stagingSchema, embeddedName, suffix)
+	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix))
 }
 
 func defaultReplaceStagingPolicy() destination.ReplaceStagingPolicy {
@@ -85,12 +79,31 @@ func normaliseReplaceStagingPolicy(policy destination.ReplaceStagingPolicy) dest
 	return policy
 }
 
-func splitSchemaTable(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+// splitCatalogSchemaTable splits a possibly catalog-qualified table name into
+// (catalog, schema, table). For a three-part name the leading component(s) are
+// the catalog/database/project; for two parts the catalog is empty. Quoting is
+// honored via tablename.Split.
+func splitCatalogSchemaTable(table string) (catalog, schema, tableName string) {
+	parts := tablename.Split(table)
+	switch len(parts) {
+	case 0:
+		return "", "", table
+	case 1:
+		return "", "", parts[0]
+	case 2:
+		return "", parts[0], parts[1]
+	default:
+		return strings.Join(parts[:len(parts)-2], "."), parts[len(parts)-2], parts[len(parts)-1]
 	}
-	return "", table
+}
+
+// qualifyCatalog prepends the catalog component to a staging name when present,
+// so a staging table for a three-part target lives in the same catalog.
+func qualifyCatalog(catalog, name string) string {
+	if catalog == "" {
+		return name
+	}
+	return catalog + "." + name
 }
 
 func buildStagingTableName(stagingSchema, embeddedName, suffix string) string {
@@ -119,12 +132,10 @@ func buildStagingTableName(stagingSchema, embeddedName, suffix string) string {
 // TARGET table's own schema (not the staging schema).
 func GenerateNormalisedStagingTableName(targetTable, stagingDataset string) string {
 	staged := GenerateStagingTableName(targetTable, "staging_normalised", stagingDataset)
-	name := staged
-	if i := strings.Index(staged, "."); i >= 0 {
-		name = staged[i+1:]
-	}
-	if parts := strings.SplitN(targetTable, ".", 2); len(parts) == 2 {
-		return parts[0] + "." + name
-	}
-	return name
+	stagedParts := tablename.Split(staged)
+	bare := stagedParts[len(stagedParts)-1]
+
+	// Re-qualify the transient table in the target's own catalog/schema.
+	catalog, schema, _ := splitCatalogSchemaTable(targetTable)
+	return tablename.TableName{Catalog: catalog, Schema: schema, Table: bare}.String()
 }

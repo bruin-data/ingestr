@@ -17,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1433,15 +1434,15 @@ func TestEnsureSchemaExists(t *testing.T) {
 	dest, path := connectTestDuckDB(t, ctx)
 
 	// Test that main schema is skipped
-	err := dest.ensureSchemaExists(ctx, "main")
+	err := dest.ensureSchemaExists(ctx, tablename.TableName{Schema: "main"})
 	require.NoError(t, err)
 
 	// Test that empty schema is skipped
-	err = dest.ensureSchemaExists(ctx, "")
+	err = dest.ensureSchemaExists(ctx, tablename.TableName{})
 	require.NoError(t, err)
 
 	// Test that custom schema is created
-	err = dest.ensureSchemaExists(ctx, "custom_schema")
+	err = dest.ensureSchemaExists(ctx, tablename.TableName{Schema: "custom_schema"})
 	require.NoError(t, err)
 
 	// Verify schema exists

@@ -345,6 +345,7 @@ func TestParseTableName(t *testing.T) {
 	tests := []struct {
 		name        string
 		input       string
+		wantProject string
 		wantDataset string
 		wantTable   string
 		wantErr     bool
@@ -371,8 +372,16 @@ func TestParseTableName(t *testing.T) {
 			errContains: "must include dataset",
 		},
 		{
-			name:        "too_many_parts",
+			name:        "project_qualified",
 			input:       "project.dataset.table",
+			wantProject: "project",
+			wantDataset: "dataset",
+			wantTable:   "table",
+			wantErr:     false,
+		},
+		{
+			name:        "too_many_parts",
+			input:       "a.b.c.d",
 			wantErr:     true,
 			errContains: "invalid BigQuery table name format",
 		},
@@ -386,7 +395,7 @@ func TestParseTableName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dataset, table, err := ParseTableName(tt.input)
+			project, dataset, table, err := ParseTableName(tt.input)
 
 			if tt.wantErr {
 				if err == nil {
@@ -404,6 +413,9 @@ func TestParseTableName(t *testing.T) {
 				return
 			}
 
+			if project != tt.wantProject {
+				t.Errorf("project = %s, want %s", project, tt.wantProject)
+			}
 			if dataset != tt.wantDataset {
 				t.Errorf("dataset = %s, want %s", dataset, tt.wantDataset)
 			}

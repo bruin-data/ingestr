@@ -1197,7 +1197,7 @@ func TestBuildDeleteInsertTransactionScript(t *testing.T) {
 		PrimaryKeys:        []string{"id"},
 	}
 
-	deleteSQL, insertSQL := dest.buildDeleteInsertStatements("staging_ds", "staging_tbl", "target_ds", "target_tbl", opts)
+	deleteSQL, insertSQL := dest.buildDeleteInsertStatements("my-project", "staging_ds", "staging_tbl", "target_ds", "target_tbl", opts)
 	got := buildBigQueryTransactionScript(deleteSQL, insertSQL)
 	want := "BEGIN TRANSACTION;\n" +
 		"DELETE FROM `my-project`.`target_ds`.`target_tbl` WHERE `ts` >= 1 AND `ts` <= 10;\n" +
@@ -1246,7 +1246,7 @@ func TestBuildAlterColumnTypeRewriteSQL(t *testing.T) {
 		},
 	}
 
-	sql, err := dest.buildAlterColumnTypeRewriteSQL("my_dataset", "my_table", "age", "STRING", meta)
+	sql, err := dest.buildAlterColumnTypeRewriteSQL("my-project", "my_dataset", "my_table", "age", "STRING", meta)
 	if err != nil {
 		t.Fatalf("buildAlterColumnTypeRewriteSQL returned error: %v", err)
 	}
@@ -1278,7 +1278,7 @@ func TestBuildAlterColumnTypeRewriteSQL_DatePartitionNotWrapped(t *testing.T) {
 		},
 	}
 
-	sql, err := dest.buildAlterColumnTypeRewriteSQL("my_dataset", "my_table", "age", "STRING", meta)
+	sql, err := dest.buildAlterColumnTypeRewriteSQL("my-project", "my_dataset", "my_table", "age", "STRING", meta)
 	if err != nil {
 		t.Fatalf("buildAlterColumnTypeRewriteSQL returned error: %v", err)
 	}
@@ -1396,7 +1396,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	dest.projectID = "my-project"
 
 	t.Run("single_pk", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, nil, "")
+		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, nil, "")
 
 		if !contains(sql, "MERGE `my-project`.`target_ds`.`target_tbl` AS t\n") {
 			t.Fatalf("sql missing merge header:\n%s", sql)
@@ -1425,7 +1425,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("all_columns_are_pk_no_update", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id"}, nil, "")
+		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id"}, nil, "")
 		if contains(sql, "WHEN MATCHED THEN") {
 			t.Fatalf("sql should not include matched update when there are no non-PK columns:\n%s", sql)
 		}
@@ -1435,7 +1435,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("on_clause_is_null_safe_single_pk", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name"}, nil, "")
+		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, []string{"id", "name"}, nil, "")
 
 		if !contains(sql, "ON (t.`id` = s.`id` OR (t.`id` IS NULL AND s.`id` IS NULL))\n") {
 			t.Fatalf("sql missing null-safe on clause:\n%s", sql)
@@ -1446,7 +1446,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("on_clause_is_null_safe_composite_pk", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"tenant_id", "user_id"}, []string{"tenant_id", "user_id", "value"}, nil, "")
+		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"tenant_id", "user_id"}, []string{"tenant_id", "user_id", "value"}, nil, "")
 
 		expected := "ON (t.`tenant_id` = s.`tenant_id` OR (t.`tenant_id` IS NULL AND s.`tenant_id` IS NULL)) AND (t.`user_id` = s.`user_id` OR (t.`user_id` IS NULL AND s.`user_id` IS NULL))\n"
 		if !contains(sql, expected) {
@@ -1459,7 +1459,7 @@ func TestBuildMergeSQL(t *testing.T) {
 
 	t.Run("with_cast_map", func(t *testing.T) {
 		castMap := map[string]string{"day": "STRING"}
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id", "day"}, []string{"id", "day", "amount"}, castMap, "")
+		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id", "day"}, []string{"id", "day", "amount"}, castMap, "")
 
 		if !contains(sql, "(t.`day` = CAST(s.`day` AS STRING) OR (t.`day` IS NULL AND CAST(s.`day` AS STRING) IS NULL))") {
 			t.Fatalf("sql missing cast in ON clause:\n%s", sql)
@@ -1476,7 +1476,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("cdc_mode", func(t *testing.T) {
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl",
+		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
 			[]string{"id"}, []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}, nil, "")
 
 		if !contains(sql, "SELECT la.`id`, act.`name`, la.`_cdc_lsn`, la.`_cdc_deleted`, la.`_cdc_synced_at`, act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active`") {
@@ -1507,7 +1507,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		// column names; a destination table created with cased columns must
 		// still match them, so the containment check compares lower-cased.
 		columns := []string{"id", "Name", "CONFIG_DATA", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at", "_cdc_unchanged_cols"}
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl",
+		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
 			[]string{"id"}, columns, nil, "")
 
 		if !contains(sql, "t.`CONFIG_DATA` = IF('config_data' IN UNNEST(IFNULL(JSON_EXTRACT_STRING_ARRAY(LOWER(s.`_cdc_unchanged_cols`)), [])), t.`CONFIG_DATA`, s.`CONFIG_DATA`)") {
@@ -1526,7 +1526,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		// Sources that materialize full change rows (e.g. SQL Server CDC) emit
 		// no _cdc_unchanged_cols; the merge must not reference it.
 		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
-		sql := dest.buildMergeSQL("target_ds", "target_tbl", "staging_ds", "staging_tbl",
+		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
 			[]string{"id"}, columns, nil, "")
 
 		if contains(sql, "_cdc_unchanged_cols") {
@@ -1536,7 +1536,7 @@ func TestBuildMergeSQL(t *testing.T) {
 
 	t.Run("date_partition_pruning_when_partition_column_is_pk", func(t *testing.T) {
 		sql := dest.buildMergeSQLWithPartitionPruning(
-			"target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
 			[]string{"id", "day"}, []string{"id", "day", "name"}, nil, "",
 			&mergePartitionPruning{Column: "day", IsDate: true},
 		)
@@ -1557,7 +1557,7 @@ func TestBuildMergeSQL(t *testing.T) {
 
 	t.Run("timestamp_partition_pruning_uses_date_expression", func(t *testing.T) {
 		sql := dest.buildMergeSQLWithPartitionPruning(
-			"target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
 			[]string{"id", "created_at"}, []string{"id", "created_at", "name"}, nil, "",
 			&mergePartitionPruning{Column: "created_at"},
 		)

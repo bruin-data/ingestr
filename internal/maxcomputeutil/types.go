@@ -6,6 +6,7 @@ import (
 
 	"github.com/aliyun/aliyun-odps-go-sdk/odps/datatype"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
 func MapMaxComputeType(typeName string) (schema.DataType, int, int, schema.DataType) {
@@ -138,13 +139,15 @@ func QuoteTable(table string) string {
 }
 
 func SplitSchemaTable(table string, defaultSchema string) (string, string) {
-	parts := strings.Split(table, ".")
-	switch len(parts) {
-	case 0:
+	tn, err := tablename.MaxCompute.Parse(table, tablename.Defaults{Schema: defaultSchema})
+	if err != nil {
+		// Preserve the historical "second-to-last, last" behavior for inputs
+		// outside the supported range (e.g. four-part names).
+		parts := strings.Split(table, ".")
+		if len(parts) >= 2 {
+			return parts[len(parts)-2], parts[len(parts)-1]
+		}
 		return defaultSchema, table
-	case 1:
-		return defaultSchema, parts[0]
-	default:
-		return parts[len(parts)-2], parts[len(parts)-1]
 	}
+	return tn.Schema, tn.Table
 }

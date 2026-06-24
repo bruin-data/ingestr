@@ -12,6 +12,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source/adbc"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
 // SQL templates for DuckDB
@@ -32,6 +33,28 @@ const (
 			SELECT unnest(constraint_column_names) as col
 			FROM duckdb_constraints()
 			WHERE database_name = current_database() AND table_name = ? AND constraint_type = 'PRIMARY KEY'
+		)
+	`
+
+	// Catalog-qualified variants, used when a catalog (attached database) is
+	// present in the table name. Parameters: (catalog, schema, table) and
+	// (catalog, table) respectively.
+	schemaQueryForCatalogSQL = `
+		SELECT
+			column_name,
+			data_type,
+			is_nullable
+		FROM information_schema.columns
+		WHERE table_catalog = ? AND table_schema = ? AND table_name = ?
+		ORDER BY ordinal_position
+	`
+
+	primaryKeyQueryForCatalogSQL = `
+		SELECT string_agg(col, ',') as pk_cols
+		FROM (
+			SELECT unnest(constraint_column_names) as col
+			FROM duckdb_constraints()
+			WHERE database_name = ? AND table_name = ? AND constraint_type = 'PRIMARY KEY'
 		)
 	`
 )
@@ -169,11 +192,25 @@ func (d *Dialect) DefaultSchema() string {
 }
 
 func (d *Dialect) ParseTableName(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+	_, schemaName, tableName := d.ParseTableNameWithCatalog(table)
+	return schemaName, tableName
+}
+
+// ParseTableNameWithCatalog implements adbc.CatalogSQLDialect. DuckDB tables
+// live in a catalog.schema.table namespace where the catalog is an attached
+// database (or MotherDuck database).
+func (d *Dialect) ParseTableNameWithCatalog(table string) (string, string, string) {
+	tn, err := tablename.DuckDB.Parse(table, tablename.Defaults{Schema: d.DefaultSchema()})
+	if err != nil {
+		// Best-effort fallback for unexpected input; the schema query will then
+		// surface a clear "table not found" error.
+		parts := strings.SplitN(table, ".", 2)
+		if len(parts) == 2 {
+			return "", parts[0], parts[1]
+		}
+		return "", d.DefaultSchema(), table
 	}
-	return d.DefaultSchema(), table
+	return tn.Catalog, tn.Schema, tn.Table
 }
 
 func (d *Dialect) SchemaQuery() string {
@@ -182,6 +219,14 @@ func (d *Dialect) SchemaQuery() string {
 
 func (d *Dialect) PrimaryKeyQuery() string {
 	return primaryKeyQuerySQL
+}
+
+func (d *Dialect) SchemaQueryForCatalog() string {
+	return schemaQueryForCatalogSQL
+}
+
+func (d *Dialect) PrimaryKeyQueryForCatalog() string {
+	return primaryKeyQueryForCatalogSQL
 }
 
 func (d *Dialect) MapDataType(dbType string) (schema.DataType, int, int, schema.DataType) {

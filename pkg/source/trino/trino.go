@@ -16,6 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	_ "github.com/trinodb/trino-go-client/trino"
 )
 
@@ -270,15 +271,11 @@ func (s *TrinoSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 }
 
 func (s *TrinoSource) parseTableName(table string) (catalog, schemaName, tableName string) {
-	parts := strings.Split(table, ".")
-	switch len(parts) {
-	case 3:
-		return parts[0], parts[1], parts[2]
-	case 2:
-		return s.catalog, parts[0], parts[1]
-	default:
+	tn, err := tablename.Trino.Parse(table, tablename.Defaults{Catalog: s.catalog, Schema: s.schema})
+	if err != nil {
 		return s.catalog, s.schema, table
 	}
+	return tn.Catalog, tn.Schema, tn.Table
 }
 
 func quoteIdentifier(name string) string {

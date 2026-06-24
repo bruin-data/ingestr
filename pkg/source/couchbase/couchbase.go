@@ -11,6 +11,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/couchbase/gocb/v2"
 )
 
@@ -167,18 +168,14 @@ func escapeIdentifier(s string) (string, error) {
 }
 
 func parseTableName(table, defaultBucket string) (bucket, scope, collection string, err error) {
-	parts := strings.Split(table, ".")
-	switch len(parts) {
-	case 3:
-		return parts[0], parts[1], parts[2], nil
-	case 2:
-		if defaultBucket == "" {
-			return "", "", "", fmt.Errorf("table format requires 3 parts (bucket.scope.collection) when bucket is not in URI, got: %s", table)
-		}
-		return defaultBucket, parts[0], parts[1], nil
-	default:
+	tn, parseErr := tablename.Couchbase.Parse(table, tablename.Defaults{Catalog: defaultBucket})
+	if parseErr != nil {
 		return "", "", "", fmt.Errorf("invalid table format: expected bucket.scope.collection or scope.collection, got: %s", table)
 	}
+	if tn.Catalog == "" {
+		return "", "", "", fmt.Errorf("table format requires 3 parts (bucket.scope.collection) when bucket is not in URI, got: %s", table)
+	}
+	return tn.Catalog, tn.Schema, tn.Table, nil
 }
 
 func (s *CouchbaseSource) read(ctx context.Context, bucket, scope, collection string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {

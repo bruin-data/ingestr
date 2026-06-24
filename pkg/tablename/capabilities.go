@@ -1,0 +1,68 @@
+package tablename
+
+// Per-platform capabilities. Values mirror Bruin CLI's pkg/tablename
+// (bruin-data/bruin#2231) so the two tools agree on what each platform accepts.
+
+// TwoLevel returns the capability for a platform that supports at most
+// schema.table (most relational engines: Postgres, MySQL, etc.). A bare table
+// name is allowed; a three-part name is rejected.
+func TwoLevel(platform string) Capability {
+	return Capability{
+		Platform:      platform,
+		MinComponents: 1,
+		MaxComponents: 2,
+		Labels:        [3]string{"", "schema", "table"},
+		FormatDesc:    "schema.table",
+	}
+}
+
+var (
+	// Snowflake: database.schema.table.
+	Snowflake = Capability{
+		Platform: "snowflake", MinComponents: 1, MaxComponents: 3,
+		Labels: [3]string{"database", "schema", "table"}, FormatDesc: "database.schema.table",
+	}
+
+	// BigQuery: project.dataset.table (dataset is required).
+	BigQuery = Capability{
+		Platform: "bigquery", MinComponents: 2, MaxComponents: 3,
+		Labels: [3]string{"project", "dataset", "table"}, FormatDesc: "project.dataset.table",
+	}
+
+	// Databricks: catalog.schema.table (schema is required).
+	Databricks = Capability{
+		Platform: "databricks", MinComponents: 2, MaxComponents: 3,
+		Labels: [3]string{"catalog", "schema", "table"}, FormatDesc: "catalog.schema.table",
+	}
+
+	// Trino: catalog.schema.table.
+	Trino = Capability{
+		Platform: "trino", MinComponents: 1, MaxComponents: 3,
+		Labels: [3]string{"catalog", "schema", "table"}, FormatDesc: "catalog.schema.table",
+	}
+
+	// DuckDB / MotherDuck: catalog.schema.table (catalog = attached database).
+	DuckDB = Capability{
+		Platform: "duckdb", MinComponents: 1, MaxComponents: 3,
+		Labels: [3]string{"catalog", "schema", "table"}, FormatDesc: "catalog.schema.table",
+	}
+
+	// MSSQL: database.schema.table, plus linked-server names with more
+	// components (server.database.schema.table), hence Unbounded.
+	MSSQL = Capability{
+		Platform: "mssql", MinComponents: 1, MaxComponents: 3, Unbounded: true,
+		Labels: [3]string{"database", "schema", "table"}, FormatDesc: "database.schema.table",
+	}
+
+	// Couchbase: bucket.scope.collection (bucket may come from the default).
+	Couchbase = Capability{
+		Platform: "couchbase", MinComponents: 2, MaxComponents: 3,
+		Labels: [3]string{"bucket", "scope", "collection"}, FormatDesc: "bucket.scope.collection",
+	}
+
+	// MaxCompute: project.schema.table.
+	MaxCompute = Capability{
+		Platform: "maxcompute", MinComponents: 1, MaxComponents: 3,
+		Labels: [3]string{"project", "schema", "table"}, FormatDesc: "project.schema.table",
+	}
+)

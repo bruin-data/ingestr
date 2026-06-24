@@ -24,6 +24,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	srcduckdb "github.com/bruin-data/ingestr/pkg/source/duckdb"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
 type DuckDBDestination struct {
@@ -176,8 +177,7 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	schemaName, _ := parseSchemaTable(opts.Table)
-	if err := d.ensureSchemaExistsLocked(ctx, schemaName); err != nil {
+	if err := d.ensureSchemaExistsLocked(ctx, duckTable(opts.Table)); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
 	}
 
@@ -201,23 +201,28 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 	return nil
 }
 
-func (d *DuckDBDestination) ensureSchemaExists(ctx context.Context, schemaName string) error {
+func (d *DuckDBDestination) ensureSchemaExists(ctx context.Context, tn tablename.TableName) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.ensureSchemaExistsLocked(ctx, schemaName)
+	return d.ensureSchemaExistsLocked(ctx, tn)
 }
 
-// ensureSchemaExistsLocked assumes the mutex is already held.
-func (d *DuckDBDestination) ensureSchemaExistsLocked(ctx context.Context, schemaName string) error {
-	if schemaName == "" || schemaName == "main" {
+// ensureSchemaExistsLocked assumes the mutex is already held. When the table
+// carries a catalog (attached database), the schema is created within it.
+func (d *DuckDBDestination) ensureSchemaExistsLocked(ctx context.Context, tn tablename.TableName) error {
+	if tn.Schema == "" || tn.Schema == "main" {
 		return nil
 	}
 
-	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", destination.QuoteIdentifier(schemaName))
-	if err := d.exec(ctx, createSchemaSQL); err != nil {
-		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
+	target := destination.QuoteIdentifier(tn.Schema)
+	if tn.Catalog != "" {
+		target = destination.QuoteIdentifier(tn.Catalog) + "." + target
 	}
-	config.Debug("[DUCKDB] Ensured schema exists: %s", schemaName)
+	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", target)
+	if err := d.exec(ctx, createSchemaSQL); err != nil {
+		return fmt.Errorf("failed to create schema %s: %w", tn.Schema, err)
+	}
+	config.Debug("[DUCKDB] Ensured schema exists: %s", tn.Schema)
 	return nil
 }
 
@@ -236,10 +241,14 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	schemaName, tableName := parseSchemaTable(opts.Table)
+	tn := duckTable(opts.Table)
+	tableName := tn.Table
 	ingestOpts := adbc.IngestStreamOptions{}
-	if schemaName != "" {
-		ingestOpts.DBSchema = schemaName
+	if tn.Schema != "" {
+		ingestOpts.DBSchema = tn.Schema
+	}
+	if tn.Catalog != "" {
+		ingestOpts.Catalog = tn.Catalog
 	}
 
 	// Optional periodic CHECKPOINT to bound DuckDB's WAL/buffer pool growth
@@ -503,8 +512,9 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
-	targetSchema, targetName := parseSchemaTable(targetTable)
-	stagingSchema, _ := parseSchemaTable(stagingTable)
+	targetTn := duckTable(targetTable)
+	stagingTn := duckTable(stagingTable)
+	targetName := targetTn.Table
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -519,14 +529,12 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		}
 	}()
 
-	if duckDBSchemaEquivalent(stagingSchema, targetSchema) {
-		// Same schema: cheap rename swap.
+	if duckSameNamespace(stagingTn, targetTn) {
+		// Same catalog+schema: cheap rename swap.
 		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("duckdb"))
-		oldTable := oldName
-		if stagingSchema != "" {
-			oldTable = stagingSchema + "." + oldName
-		}
+		// The renamed-away target keeps the target's catalog+schema.
+		oldTable := tablename.TableName{Catalog: targetTn.Catalog, Schema: targetTn.Schema, Table: oldName}.String()
 
 		if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", destination.QuoteTableName(targetTable), destination.QuoteIdentifier(oldName))); err != nil {
 			config.Debug("[DUCKDB] No existing table to rename (this is OK for first run)")
@@ -549,7 +557,7 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 
 		// Replace only PrepareTables the staging side, so the target schema may
 		// not exist yet (DuckDB doesn't auto-create "public" for fresh DBs).
-		if err := d.ensureSchemaExistsLocked(ctx, targetSchema); err != nil {
+		if err := d.ensureSchemaExistsLocked(ctx, targetTn); err != nil {
 			return fmt.Errorf("failed to ensure target schema exists: %w", err)
 		}
 
@@ -1321,16 +1329,31 @@ func parseMotherDuckURI(uri string) (string, error) {
 	return fmt.Sprintf("md:%s?motherduck_token=%s", database, token), nil
 }
 
-func parseSchemaTable(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+// duckTable parses a possibly catalog-qualified DuckDB table name
+// (catalog.schema.table), where the catalog is an attached database.
+func duckTable(table string) tablename.TableName {
+	tn, err := tablename.DuckDB.Parse(table, tablename.Defaults{})
+	if err != nil {
+		parts := strings.SplitN(table, ".", 2)
+		if len(parts) == 2 {
+			return tablename.TableName{Schema: parts[0], Table: parts[1]}
+		}
+		return tablename.TableName{Table: table}
 	}
-	return "", table
+	return tn
 }
 
-func duckDBSchemaEquivalent(left, right string) bool {
-	return canonicalDuckDBSchema(left) == canonicalDuckDBSchema(right)
+func parseSchemaTable(table string) (string, string) {
+	tn := duckTable(table)
+	return tn.Schema, tn.Table
+}
+
+// duckSameNamespace reports whether two tables live in the same catalog+schema,
+// which is required for DuckDB's ALTER TABLE ... RENAME (it cannot move a table
+// across schemas or catalogs).
+func duckSameNamespace(left, right tablename.TableName) bool {
+	return canonicalDuckDBSchema(left.Schema) == canonicalDuckDBSchema(right.Schema) &&
+		left.Catalog == right.Catalog
 }
 
 func canonicalDuckDBSchema(name string) string {
