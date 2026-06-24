@@ -234,7 +234,7 @@ func TestTableMetadata(t *testing.T) {
 		{"campaigns", []string{"id"}, "last_edited", config.StrategyMerge},
 		{"canvases", []string{"id"}, "last_edited", config.StrategyMerge},
 		{"segments", []string{"id"}, "", config.StrategyReplace},
-		{"events", []string{"event_name"}, "", config.StrategyReplace},
+		{"events", []string{"name"}, "", config.StrategyReplace},
 		{"products", []string{"product_id"}, "", config.StrategyReplace},
 		{"kpi_dau", []string{"time"}, "time", config.StrategyMerge},
 		{"kpi_mau", []string{"time"}, "time", config.StrategyMerge},

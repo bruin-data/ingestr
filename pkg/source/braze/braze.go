@@ -24,10 +24,9 @@ import (
 )
 
 const (
-	maxListPageSize  = 100 // campaigns, canvases, segments, products: groups of 100
-	maxEventPageSize = 250 // events/list: returns 250 event names per page
-	maxKPILength     = 100 // kpi data_series: length must be between 1 and 100 days
-	maxListPages     = 10000
+	maxListPageSize = 100 // campaigns, canvases, segments, products: groups of 100
+	maxKPILength    = 100 // kpi data_series: length must be between 1 and 100 days
+	maxListPages    = 10000
 
 	// Braze's default pool (list + data_series endpoints) is 250,000 requests/hour.
 	rateLimit      = 250000 * 0.8 / 3600.0 // ~55.5 req/s
@@ -255,7 +254,8 @@ func tableMetadata(table string) ([]string, string, config.IncrementalStrategy) 
 	case "segments":
 		return []string{"id"}, "", config.StrategyReplace
 	case "events":
-		return []string{"event_name"}, "", config.StrategyReplace
+		// /events catalog objects are keyed by their name
+		return []string{"name"}, "", config.StrategyReplace
 	case "products":
 		return []string{"product_id"}, "", config.StrategyReplace
 	case "kpi_dau", "kpi_mau", "kpi_new_users", "kpi_uninstalls":
@@ -635,15 +635,71 @@ func emitSegmentExport(ctx context.Context, data []byte, segmentID string, opts 
 
 func (s *BrazeSource) readEvents(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[BRAZE] reading events")
-	// events/list returns an array of event-name strings; lift each to a record.
-	itemFn := func(v interface{}) map[string]interface{} {
-		name, ok := v.(string)
-		if !ok {
-			return nil
+	return s.paginateEvents(ctx, func(events []map[string]interface{}) error {
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(events, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert events to Arrow: %w", err)
 		}
-		return map[string]interface{}{"event_name": name}
+		results <- source.RecordBatchResult{Batch: record}
+		return nil
+	})
+}
+
+// paginateEvents pages the cursor-based GET /events catalog (rich event objects:
+// name, description, status, tag_names, ...), invoking fn for each page.
+func (s *BrazeSource) paginateEvents(ctx context.Context, fn func([]map[string]interface{}) error) error {
+	cursor := ""
+	for page := 0; page < maxListPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		req := s.lowClient.R(ctx)
+		if cursor != "" {
+			req.SetQueryParam("cursor", cursor)
+		}
+		resp, err := req.Get("/events")
+		if err != nil {
+			return fmt.Errorf("failed to fetch /events: %w", err)
+		}
+		if !resp.IsSuccess() {
+			return fmt.Errorf("/events returned status %d: %s", resp.StatusCode(), resp.String())
+		}
+		var body struct {
+			Events []map[string]interface{} `json:"events"`
+		}
+		if err := decodeBody(resp.Body(), &body); err != nil {
+			return fmt.Errorf("failed to parse /events response: %w", err)
+		}
+		if len(body.Events) > 0 {
+			if err := fn(body.Events); err != nil {
+				return err
+			}
+		}
+		cursor = nextCursor(resp.Header().Get("Link"))
+		if cursor == "" {
+			break
+		}
 	}
-	return s.paginateList(ctx, s.lowClient, "/events/list", "events", maxEventPageSize, nil, itemFn, nil, opts, results)
+	return nil
+}
+
+// nextCursor extracts the cursor value from a Link header's rel="next" entry.
+func nextCursor(link string) string {
+	for _, part := range strings.Split(link, ",") {
+		if !strings.Contains(part, `rel="next"`) {
+			continue
+		}
+		i := strings.Index(part, "cursor=")
+		if i < 0 {
+			return ""
+		}
+		c := part[i+len("cursor="):]
+		if j := strings.IndexAny(c, "&>"); j >= 0 {
+			c = c[:j]
+		}
+		return c
+	}
+	return ""
 }
 
 func (s *BrazeSource) readProducts(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -694,35 +750,18 @@ func (s *BrazeSource) readEventSeries(ctx context.Context, eventNames []string, 
 	return nil
 }
 
-// listEventNames pages through /events/list and returns all custom event names.
+// listEventNames returns all custom event names from the /events catalog.
 func (s *BrazeSource) listEventNames(ctx context.Context) ([]string, error) {
 	var names []string
-	for page := 0; page < maxListPages; page++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	err := s.paginateEvents(ctx, func(events []map[string]interface{}) error {
+		for _, e := range events {
+			if n, ok := e["name"].(string); ok {
+				names = append(names, n)
+			}
 		}
-		resp, err := s.lowClient.R(ctx).SetQueryParam("page", strconv.Itoa(page)).Get("/events/list")
-		if err != nil {
-			return nil, fmt.Errorf("failed to list events: %w", err)
-		}
-		if !resp.IsSuccess() {
-			return nil, fmt.Errorf("/events/list returned status %d: %s", resp.StatusCode(), resp.String())
-		}
-		var body struct {
-			Events []string `json:"events"`
-		}
-		if err := decodeBody(resp.Body(), &body); err != nil {
-			return nil, fmt.Errorf("failed to parse /events/list response: %w", err)
-		}
-		if len(body.Events) == 0 {
-			break
-		}
-		names = append(names, body.Events...)
-		if len(body.Events) < maxEventPageSize {
-			break
-		}
-	}
-	return names, nil
+		return nil
+	})
+	return names, err
 }
 
 // fetchKPIWindows walks the series in 100-day windows back to interval-start (last
