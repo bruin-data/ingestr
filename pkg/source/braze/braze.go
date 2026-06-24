@@ -52,6 +52,7 @@ var supportedTables = []string{
 	"canvases",
 	"segments",
 	"events",
+	"event_series",
 	"products",
 	"kpi_dau",
 	"kpi_mau",
@@ -215,10 +216,10 @@ func (s *BrazeSource) GetTable(ctx context.Context, req source.TableRequest) (so
 		if len(params) == 0 {
 			return nil, fmt.Errorf("user_data requires at least one segment id, e.g. user_data:<segment_id>[,<segment_id>]")
 		}
-	case isKPITable(base):
-		// app_id list is optional
+	case isKPITable(base) || base == "event_series":
+		// optional param: app_id list for kpi, event-name filter for event_series
 	case len(params) > 0:
-		return nil, fmt.Errorf("the :param suffix is only supported for kpi_* and user_data tables, not %q", base)
+		return nil, fmt.Errorf("the :param suffix is only supported for kpi_*, user_data, and event_series tables, not %q", base)
 	}
 
 	primaryKeys, incrementalKey, strategy := tableMetadata(base)
@@ -260,6 +261,9 @@ func tableMetadata(table string) ([]string, string, config.IncrementalStrategy) 
 	case "kpi_dau", "kpi_mau", "kpi_new_users", "kpi_uninstalls":
 		// daily series keyed on date; merge updates the still-changing latest day
 		return []string{"time"}, "time", config.StrategyMerge
+	case "event_series":
+		// daily count series per custom event; event_name is part of the key
+		return []string{"time", "event_name"}, "time", config.StrategyMerge
 	case "user_data":
 		// point-in-time snapshot of users (and their subscription state) per segment;
 		// segment_id is part of the key so a user can appear in multiple segments
@@ -297,6 +301,8 @@ func (s *BrazeSource) read(ctx context.Context, table string, params []string, o
 			err = s.readKPISeries(ctx, "/kpi/uninstalls/data_series", params, opts, results)
 		case "user_data":
 			err = s.readUserData(ctx, params, opts, results)
+		case "event_series":
+			err = s.readEventSeries(ctx, params, opts, results)
 		default:
 			err = fmt.Errorf("unsupported table: %s", table)
 		}
@@ -658,19 +664,72 @@ func (s *BrazeSource) readProducts(ctx context.Context, opts source.ReadOptions,
 func (s *BrazeSource) readKPISeries(ctx context.Context, endpoint string, appIDs []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[BRAZE] reading %s (apps: %d)", endpoint, len(appIDs))
 	if len(appIDs) == 0 {
-		return s.fetchKPIWindows(ctx, endpoint, "", opts, results)
+		return s.fetchSeries(ctx, endpoint, nil, nil, opts, results)
 	}
 	for _, appID := range appIDs {
-		if err := s.fetchKPIWindows(ctx, endpoint, appID, opts, results); err != nil {
+		if err := s.fetchSeries(ctx, endpoint, map[string]string{"app_id": appID}, map[string]interface{}{"app_id": appID}, opts, results); err != nil {
 			return fmt.Errorf("%s for app_id %s: %w", endpoint, appID, err)
 		}
 	}
 	return nil
 }
 
+// readEventSeries fetches the daily count series for custom events, tagging each
+// row with its event_name. With no names it first lists all events, then fetches
+// each one's series; names act as an optional filter.
+func (s *BrazeSource) readEventSeries(ctx context.Context, eventNames []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if len(eventNames) == 0 {
+		all, err := s.listEventNames(ctx)
+		if err != nil {
+			return err
+		}
+		eventNames = all
+	}
+	config.Debug("[BRAZE] reading /events/data_series (events: %d)", len(eventNames))
+	for _, name := range eventNames {
+		if err := s.fetchSeries(ctx, "/events/data_series", map[string]string{"event": name}, map[string]interface{}{"event_name": name}, opts, results); err != nil {
+			return fmt.Errorf("/events/data_series for event %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// listEventNames pages through /events/list and returns all custom event names.
+func (s *BrazeSource) listEventNames(ctx context.Context) ([]string, error) {
+	var names []string
+	for page := 0; page < maxListPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		resp, err := s.lowClient.R(ctx).SetQueryParam("page", strconv.Itoa(page)).Get("/events/list")
+		if err != nil {
+			return nil, fmt.Errorf("failed to list events: %w", err)
+		}
+		if !resp.IsSuccess() {
+			return nil, fmt.Errorf("/events/list returned status %d: %s", resp.StatusCode(), resp.String())
+		}
+		var body struct {
+			Events []string `json:"events"`
+		}
+		if err := decodeBody(resp.Body(), &body); err != nil {
+			return nil, fmt.Errorf("failed to parse /events/list response: %w", err)
+		}
+		if len(body.Events) == 0 {
+			break
+		}
+		names = append(names, body.Events...)
+		if len(body.Events) < maxEventPageSize {
+			break
+		}
+	}
+	return names, nil
+}
+
 // fetchKPIWindows walks the series in 100-day windows back to interval-start (last
 // 100 days with no interval); a non-empty appID scopes it and adds an app_id column.
-func (s *BrazeSource) fetchKPIWindows(ctx context.Context, endpoint, appID string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+// fetchSeries walks a /*/data_series endpoint in 100-day windows. params are
+// extra query params (e.g. app_id, event); tag columns are stamped onto each row.
+func (s *BrazeSource) fetchSeries(ctx context.Context, endpoint string, params map[string]string, tag map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	end := time.Now().UTC()
 	if opts.IntervalEnd != nil {
 		end = opts.IntervalEnd.UTC()
@@ -691,8 +750,8 @@ func (s *BrazeSource) fetchKPIWindows(ctx context.Context, endpoint, appID strin
 		req := s.client.R(ctx).
 			SetQueryParam("length", strconv.Itoa(w.length)).
 			SetQueryParam("ending_at", w.endingAt.Format(brazeTimeLayout))
-		if appID != "" {
-			req.SetQueryParam("app_id", appID)
+		for k, v := range params {
+			req.SetQueryParam(k, v)
 		}
 
 		resp, err := req.Get(endpoint)
@@ -711,9 +770,9 @@ func (s *BrazeSource) fetchKPIWindows(ctx context.Context, endpoint, appID strin
 		}
 
 		if len(body.Data) > 0 {
-			if appID != "" {
-				for _, row := range body.Data {
-					row["app_id"] = appID
+			for _, row := range body.Data {
+				for k, v := range tag {
+					row[k] = v
 				}
 			}
 			record, err := arrowconv.ItemsToArrowRecordWithSchema(body.Data, nil, opts.ExcludeColumns)

@@ -203,6 +203,23 @@ func TestGetTableAppIDValidation(t *testing.T) {
 			t.Errorf("unexpected error for multiple segment ids: %v", err)
 		}
 	})
+
+	t.Run("event_series valid with no names and composite PK", func(t *testing.T) {
+		tbl, err := s.GetTable(ctx, source.TableRequest{Name: "event_series"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		pk := tbl.PrimaryKeys()
+		if len(pk) != 2 || pk[0] != "time" || pk[1] != "event_name" {
+			t.Errorf("PrimaryKeys = %v, want [time event_name]", pk)
+		}
+	})
+
+	t.Run("event_series accepts an event-name filter", func(t *testing.T) {
+		if _, err := s.GetTable(ctx, source.TableRequest{Name: "event_series:purchase,signup"}); err != nil {
+			t.Errorf("unexpected error for event names: %v", err)
+		}
+	})
 }
 
 func TestTableMetadata(t *testing.T) {

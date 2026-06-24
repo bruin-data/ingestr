@@ -38,6 +38,7 @@ Braze source allows ingesting the following resources into separate tables:
 | [kpi_mau](https://www.braze.com/docs/api/endpoints/export/kpi/get_kpi_mau_30_days) | time | time | merge | Monthly active users (rolling 30-day) by date. |
 | [kpi_new_users](https://www.braze.com/docs/api/endpoints/export/kpi/get_kpi_daily_new_users_date) | time | time | merge | New users by date. |
 | [kpi_uninstalls](https://www.braze.com/docs/api/endpoints/export/kpi/get_kpi_uninstalls_date) | time | time | merge | App uninstalls by date. |
+| [event_series](https://www.braze.com/docs/api/endpoints/export/custom_events/get_custom_events_analytics) | time, event_name | time | merge | Daily occurrence count per custom event. Fetches all events by default; an optional `event_series:<name>[,<name>]` filter limits it. |
 | [user_data](https://www.braze.com/docs/api/endpoints/export/user_data/post_users_segment) | braze_id, segment_id | – | replace | Users in a segment with their email/push subscription state and profile fields (a point-in-time snapshot). |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
