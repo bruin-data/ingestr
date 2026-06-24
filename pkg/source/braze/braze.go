@@ -817,6 +817,8 @@ func (s *BrazeSource) listSegmentIDs(ctx context.Context) ([]string, error) {
 		for _, seg := range body.Segments {
 			if id, ok := seg["id"].(string); ok {
 				ids = append(ids, id)
+			} else {
+				config.Debug("[BRAZE] skipping segment with non-string id: %v", seg["id"])
 			}
 		}
 		if len(body.Segments) < maxListPageSize {
