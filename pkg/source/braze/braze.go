@@ -697,6 +697,10 @@ func nextCursor(link string) string {
 		if j := strings.IndexAny(c, "&>"); j >= 0 {
 			c = c[:j]
 		}
+		// The header value is percent-encoded; decode so SetQueryParam re-encodes it once.
+		if decoded, err := url.QueryUnescape(c); err == nil {
+			c = decoded
+		}
 		return c
 	}
 	return ""
@@ -764,8 +768,6 @@ func (s *BrazeSource) listEventNames(ctx context.Context) ([]string, error) {
 	return names, err
 }
 
-// fetchKPIWindows walks the series in 100-day windows back to interval-start (last
-// 100 days with no interval); a non-empty appID scopes it and adds an app_id column.
 // fetchSeries walks a /*/data_series endpoint in 100-day windows. params are
 // extra query params (e.g. app_id, event); tag columns are stamped onto each row.
 func (s *BrazeSource) fetchSeries(ctx context.Context, endpoint string, params map[string]string, tag map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
