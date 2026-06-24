@@ -15,7 +15,6 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	"github.com/bruin-data/ingestr/pkg/tablename"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -111,9 +110,6 @@ func (d *MySQLDestination) Close(ctx context.Context) error {
 }
 
 func (d *MySQLDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
-	if err := tablename.TwoLevel("mysql").CheckName(opts.Table); err != nil {
-		return err
-	}
 	if database, _ := splitDatabaseTable(opts.Table); database != "" {
 		if err := d.ensureDatabaseExists(ctx, database); err != nil {
 			return err

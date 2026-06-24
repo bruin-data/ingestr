@@ -16,7 +16,6 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	"github.com/bruin-data/ingestr/pkg/tablename"
 	_ "modernc.org/sqlite"
 )
 
@@ -167,9 +166,6 @@ func (d *SQLiteDestination) Close(ctx context.Context) error {
 }
 
 func (d *SQLiteDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
-	if err := tablename.TwoLevel("sqlite").CheckName(opts.Table); err != nil {
-		return err
-	}
 	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
 
 	if err := d.ensureSchemaAttached(ctx, schemaOf(opts.Table)); err != nil {

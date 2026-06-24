@@ -167,7 +167,7 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.Destination, cfg *config.IngestConfig, st *streamTableState) error {
 	switch e.opts.Strategy {
 	case config.StrategyMerge:
-		st.stagingTable = GenerateStagingTableName(st.destTable, "stream", cfg.StagingDataset)
+		st.stagingTable = GenerateStagingTableName(st.destTable, "stream", cfg.StagingDataset, catalogAware(dest))
 		fmt.Printf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 		return prepareMergeTables(ctx, dest, mergeTableParams{
 			DestTable:    st.destTable,

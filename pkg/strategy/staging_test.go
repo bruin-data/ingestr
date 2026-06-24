@@ -32,7 +32,7 @@ func TestGenerateStagingTableName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GenerateStagingTableName(tt.targetTable, tt.suffix, tt.stagingDataset)
+			got := GenerateStagingTableName(tt.targetTable, tt.suffix, tt.stagingDataset, false)
 			if !strings.HasPrefix(got, tt.wantPrefix) {
 				t.Fatalf("GenerateStagingTableName(%q, %q, %q) = %q, want prefix %q",
 					tt.targetTable, tt.suffix, tt.stagingDataset, got, tt.wantPrefix)
@@ -96,7 +96,7 @@ func TestGenerateReplaceStagingTableName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GenerateReplaceStagingTableName(tt.targetTable, "staging", tt.stagingDataset, tt.policy)
+			got := GenerateReplaceStagingTableName(tt.targetTable, "staging", tt.stagingDataset, tt.policy, false)
 			if !strings.HasPrefix(got, tt.wantPrefix) {
 				t.Fatalf("GenerateReplaceStagingTableName(%q, %q) = %q, want prefix %q",
 					tt.targetTable, tt.stagingDataset, got, tt.wantPrefix)

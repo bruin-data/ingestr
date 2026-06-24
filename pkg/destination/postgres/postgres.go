@@ -18,7 +18,6 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -75,9 +74,6 @@ func (d *PostgresDestination) Close(ctx context.Context) error {
 }
 
 func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
-	if err := tablename.TwoLevel("postgres").CheckName(opts.Table); err != nil {
-		return err
-	}
 	if opts.Schema == nil {
 		return fmt.Errorf("schema is required")
 	}

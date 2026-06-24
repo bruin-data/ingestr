@@ -14,7 +14,6 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	"github.com/bruin-data/ingestr/pkg/tablename"
 	_ "github.com/microsoft/go-mssqldb"
 )
 
@@ -115,9 +114,6 @@ func (d *SynapseDestination) Close(ctx context.Context) error {
 }
 
 func (d *SynapseDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
-	if err := tablename.TwoLevel("synapse").CheckName(opts.Table); err != nil {
-		return err
-	}
 	schemaName, _ := parseTableName(opts.Table)
 	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
