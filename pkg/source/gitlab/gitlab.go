@@ -71,9 +71,9 @@ var tables = map[string]tableConfig{
 		strategy:    config.StrategyReplace,
 	},
 	"users": {
-		endpoint:    "/users",
-		primaryKeys: []string{"id"},
-		strategy:    config.StrategyReplace,
+		primaryKeys:        []string{"id"},
+		strategy:           config.StrategyMerge,
+		perProjectResource: "users",
 	},
 	"issues": {
 		queryParams:           map[string]string{"order_by": "updated_at", "sort": "asc"},
