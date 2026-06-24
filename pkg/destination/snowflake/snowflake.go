@@ -21,6 +21,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	sf "github.com/snowflakedb/gosnowflake"
 )
 
@@ -95,12 +96,12 @@ func (d *SnowflakeDestination) PrepareTable(ctx context.Context, opts destinatio
 		return fmt.Errorf("schema is required")
 	}
 
-	schemaName, tableName := parseSchemaTable(opts.Table)
-	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
+	tn := sfTable(opts.Table)
+	if err := d.ensureSchemaExists(ctx, tn); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
 	}
 
-	fullTable := quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName)
+	fullTable := quoteFQN(tn)
 
 	if opts.DropFirst {
 		startDrop := time.Now()
@@ -123,28 +124,73 @@ func (d *SnowflakeDestination) PrepareTable(ctx context.Context, opts destinatio
 	return nil
 }
 
-func (d *SnowflakeDestination) ensureSchemaExists(ctx context.Context, schemaName string) error {
+func (d *SnowflakeDestination) ensureSchemaExists(ctx context.Context, tn tablename.TableName) error {
+	// When the table carries a database, ensure it exists first so the schema is
+	// created in (and checked against) that database rather than the connection
+	// default. Bruin's Snowflake assets follow the same database.schema.table
+	// convention, so the database is auto-created when missing.
+	if tn.Catalog != "" {
+		if err := d.ensureDatabaseExists(ctx, tn.Catalog); err != nil {
+			return err
+		}
+	}
+
+	schemaName := tn.Schema
 	if schemaName == "" || strings.ToUpper(schemaName) == "PUBLIC" {
 		return nil
+	}
+
+	infoSchemata := "INFORMATION_SCHEMA.SCHEMATA"
+	createTarget := quoteIdentifier(schemaName)
+	if tn.Catalog != "" {
+		infoSchemata = quoteIdentifier(tn.Catalog) + ".INFORMATION_SCHEMA.SCHEMATA"
+		createTarget = quoteIdentifier(tn.Catalog) + "." + quoteIdentifier(schemaName)
 	}
 
 	// Snowflake enforces CREATE SCHEMA privilege before evaluating IF NOT EXISTS, so check first.
 	var count int
 	if err := d.db.QueryRowContext(
 		ctx,
-		"SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?",
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE SCHEMA_NAME = ?", infoSchemata),
 		strings.ToUpper(schemaName),
 	).Scan(&count); err == nil && count > 0 {
 		config.Debug("[DEST] Schema %s already exists, skipping creation", schemaName)
 		return nil
 	}
 
-	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quoteIdentifier(schemaName))
+	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", createTarget)
 	if _, err := d.db.ExecContext(ctx, createSchemaSQL); err != nil {
 		config.LogFailedQuery(createSchemaSQL, err)
 		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
 	}
 	config.Debug("[DEST] Ensured schema exists: %s", schemaName)
+	return nil
+}
+
+func (d *SnowflakeDestination) ensureDatabaseExists(ctx context.Context, database string) error {
+	if database == "" {
+		return nil
+	}
+
+	// Snowflake enforces CREATE DATABASE privilege before evaluating IF NOT
+	// EXISTS, so check first to avoid a hard error when the database already
+	// exists but the role lacks CREATE DATABASE.
+	var count int
+	if err := d.db.QueryRowContext(
+		ctx,
+		"SELECT COUNT(*) FROM INFORMATION_SCHEMA.DATABASES WHERE DATABASE_NAME = ?",
+		strings.ToUpper(database),
+	).Scan(&count); err == nil && count > 0 {
+		config.Debug("[DEST] Database %s already exists, skipping creation", database)
+		return nil
+	}
+
+	createDatabaseSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", quoteIdentifier(database))
+	if _, err := d.db.ExecContext(ctx, createDatabaseSQL); err != nil {
+		config.LogFailedQuery(createDatabaseSQL, err)
+		return fmt.Errorf("failed to create database %s: %w", database, err)
+	}
+	config.Debug("[DEST] Ensured database exists: %s", database)
 	return nil
 }
 
@@ -163,12 +209,17 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 	config.Debug("[DEST] Starting parallel write with %d workers using stage-based loading", parallelism)
 	startTotal := time.Now()
 
-	schemaName, tableName := parseSchemaTable(opts.Table)
-	fullTable := quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName)
+	tn := sfTable(opts.Table)
+	fullTable := quoteFQN(tn)
 
 	// Use the implicit table stage (@%table_name) which exists automatically
-	// for every table and doesn't require CREATE STAGE privilege
-	stageName := fmt.Sprintf(`%s.%%%s`, quoteIdentifier(schemaName), quoteIdentifier(tableName))
+	// for every table and doesn't require CREATE STAGE privilege. The stage is
+	// qualified by the table's database/schema.
+	stagePrefix := quoteIdentifier(tn.Schema)
+	if tn.Catalog != "" {
+		stagePrefix = quoteIdentifier(tn.Catalog) + "." + stagePrefix
+	}
+	stageName := fmt.Sprintf(`%s.%%%s`, stagePrefix, quoteIdentifier(tn.Table))
 	loadID := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	type uploadResult struct {
@@ -336,15 +387,15 @@ func (d *SnowflakeDestination) SwapTable(ctx context.Context, opts destination.S
 
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
-	stagingSchema, stagingName := parseSchemaTable(stagingTable)
-	targetSchema, targetName := parseSchemaTable(targetTable)
+	stagingTn := sfTable(stagingTable)
+	targetTn := sfTable(targetTable)
 
-	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
-	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
+	stagingFull := quoteFQN(stagingTn)
+	targetFull := quoteFQN(targetTn)
 
 	// Replace only PrepareTables the staging side, so the target schema may
 	// not exist yet. Both SWAP WITH and the rename fallback require it.
-	if err := d.ensureSchemaExists(ctx, targetSchema); err != nil {
+	if err := d.ensureSchemaExists(ctx, targetTn); err != nil {
 		return fmt.Errorf("failed to ensure target schema exists: %w", err)
 	}
 
@@ -352,10 +403,10 @@ func (d *SnowflakeDestination) SwapTable(ctx context.Context, opts destination.S
 	if _, err := d.db.ExecContext(ctx, swapSQL); err != nil {
 		config.Debug("[DEST] SWAP WITH failed (target may not exist yet): %v, falling back to rename", err)
 
-		tempNameCandidate := fmt.Sprintf("%s_OLD_%d", targetName, time.Now().UnixNano())
+		tempNameCandidate := fmt.Sprintf("%s_OLD_%d", targetTn.Table, time.Now().UnixNano())
 		tempName := destination.ShortenIdentifier(tempNameCandidate, tempNameCandidate, destination.MaxIdentifierLength("snowflake"))
-		tempFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(tempName)
-		targetFullNew := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
+		tempFull := quoteSibling(targetTn, tempName)
+		targetFullNew := targetFull
 
 		tx, txErr := d.db.BeginTx(ctx, nil)
 		if txErr != nil {
@@ -409,11 +460,8 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 
 func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string) string {
 	destColumns := destination.DestinationColumns(allColumns)
-	stagingSchema, stagingName := parseSchemaTable(stagingTable)
-	targetSchema, targetName := parseSchemaTable(targetTable)
-
-	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
-	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
+	stagingFull := quoteFQN(sfTable(stagingTable))
+	targetFull := quoteFQN(sfTable(targetTable))
 
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
@@ -582,11 +630,8 @@ func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts desti
 	ctx = d.annotate(ctx, annotation.StepDeleteInsert)
 	startOp := time.Now()
 
-	stagingSchema, stagingName := parseSchemaTable(opts.StagingTable)
-	targetSchema, targetName := parseSchemaTable(opts.TargetTable)
-
-	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
-	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
+	stagingFull := quoteFQN(sfTable(opts.StagingTable))
+	targetFull := quoteFQN(sfTable(opts.TargetTable))
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -632,11 +677,8 @@ func (d *SnowflakeDestination) SCD2Table(ctx context.Context, opts destination.S
 	ctx = d.annotate(ctx, annotation.StepSCD2)
 	startOp := time.Now()
 
-	stagingSchema, stagingName := parseSchemaTable(opts.StagingTable)
-	targetSchema, targetName := parseSchemaTable(opts.TargetTable)
-
-	stagingFull := quoteIdentifier(stagingSchema) + "." + quoteIdentifier(stagingName)
-	targetFull := quoteIdentifier(targetSchema) + "." + quoteIdentifier(targetName)
+	stagingFull := quoteFQN(sfTable(opts.StagingTable))
+	targetFull := quoteFQN(sfTable(opts.TargetTable))
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -732,8 +774,7 @@ func (d *SnowflakeDestination) SCD2Table(ctx context.Context, opts destination.S
 
 func (d *SnowflakeDestination) DropTable(ctx context.Context, table string) error {
 	ctx = d.annotate(ctx, annotation.StepCleanup)
-	schemaName, tableName := parseSchemaTable(table)
-	fullTable := quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName)
+	fullTable := quoteFQN(sfTable(table))
 
 	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", fullTable)
 	_, err := d.db.ExecContext(ctx, dropSQL)
@@ -747,8 +788,7 @@ func (d *SnowflakeDestination) DropTable(ctx context.Context, table string) erro
 
 func (d *SnowflakeDestination) TruncateTable(ctx context.Context, table string) error {
 	ctx = d.annotate(ctx, annotation.StepTruncate)
-	schemaName, tableName := parseSchemaTable(table)
-	fullTable := quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName)
+	fullTable := quoteFQN(sfTable(table))
 
 	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s", fullTable)
 	if _, err := d.db.ExecContext(ctx, truncateSQL); err != nil {
@@ -824,8 +864,7 @@ func (d *SnowflakeDestination) SupportsAtomicSwap() bool           { return true
 func (d *SnowflakeDestination) GetScheme() string { return "snowflake" }
 
 func (d *SnowflakeDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
-	schemaName, tableName := parseSchemaTable(table)
-	fullTable := quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName)
+	fullTable := quoteFQN(sfTable(table))
 	query := fmt.Sprintf("SELECT MAX(%s) FROM %s", quoteIdentifier("_cdc_lsn"), fullTable)
 
 	var maxLSN sql.NullString
@@ -849,11 +888,11 @@ func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
 func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }
 
 func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := parseSchemaTable(table)
+	tn := sfTable(table)
 
 	query := fmt.Sprintf(
-		`DESCRIBE TABLE %s.%s ->> SELECT "name", "type", "null?" FROM $1`,
-		quoteIdentifier(schemaName), quoteIdentifier(tableName),
+		`DESCRIBE TABLE %s ->> SELECT "name", "type", "null?" FROM $1`,
+		quoteFQN(tn),
 	)
 
 	rows, err := d.db.QueryContext(ctx, query)
@@ -892,8 +931,8 @@ func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string)
 	}
 
 	return &schema.TableSchema{
-		Name:    tableName,
-		Schema:  schemaName,
+		Name:    tn.Table,
+		Schema:  tn.Schema,
 		Columns: columns,
 	}, nil
 }
@@ -942,12 +981,43 @@ func mapSnowflakeTypeToSchema(dataType string) schema.DataType {
 	}
 }
 
-func parseSchemaTable(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return strings.ToUpper(parts[0]), strings.ToUpper(parts[1])
+// sfTable parses a possibly database-qualified Snowflake table name
+// (database.schema.table), upper-casing identifiers per Snowflake's unquoted
+// convention.
+func sfTable(table string) tablename.TableName {
+	tn, err := tablename.Snowflake.Parse(table, tablename.Defaults{Schema: "PUBLIC"})
+	if err != nil {
+		parts := strings.SplitN(table, ".", 2)
+		if len(parts) == 2 {
+			return tablename.TableName{Schema: strings.ToUpper(parts[0]), Table: strings.ToUpper(parts[1])}
+		}
+		return tablename.TableName{Schema: "PUBLIC", Table: strings.ToUpper(table)}
 	}
-	return "PUBLIC", strings.ToUpper(table)
+	return tn.Upper()
+}
+
+// quoteFQN returns the fully-qualified, quoted identifier
+// (database.schema.table), omitting any absent leading components.
+func quoteFQN(tn tablename.TableName) string {
+	out := quoteIdentifier(tn.Table)
+	if tn.Schema != "" {
+		out = quoteIdentifier(tn.Schema) + "." + out
+	}
+	if tn.Catalog != "" {
+		out = quoteIdentifier(tn.Catalog) + "." + out
+	}
+	return out
+}
+
+// quoteSibling returns the FQN of a table sharing tn's catalog/schema but with
+// a different (bare) table name — used for temp/rename targets.
+func quoteSibling(tn tablename.TableName, table string) string {
+	return quoteFQN(tablename.TableName{Catalog: tn.Catalog, Schema: tn.Schema, Table: table})
+}
+
+func parseSchemaTable(table string) (string, string) {
+	tn := sfTable(table)
+	return tn.Schema, tn.Table
 }
 
 func quoteIdentifier(name string) string {

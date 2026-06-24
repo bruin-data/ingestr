@@ -137,10 +137,10 @@ func TestParseSchemaTable(t *testing.T) {
 			wantTable:  "GROUPS",
 		},
 		{
-			name:       "multiple dots uses first as schema",
+			name:       "three-part database.schema.table uses middle as schema",
 			input:      "a.b.c",
-			wantSchema: "A",
-			wantTable:  "B.C",
+			wantSchema: "B",
+			wantTable:  "C",
 		},
 	}
 

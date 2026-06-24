@@ -181,8 +181,8 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 		}
 	}
 
-	// Parse table name to extract dataset/schema
-	schemaName, _ := s.dialect.ParseTableName(table)
+	// Parse table name to extract dataset/schema (catalog-aware when supported)
+	_, schemaName, _ := s.parseTableName(table)
 
 	// Check if dialect needs dataset in the connection (e.g., BigQuery)
 	// This must happen BEFORE using SchemaProvider or SQL queries
@@ -202,26 +202,27 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 	// Fallback to SQL-based schema fetching
 	config.Debug("[%s] Using SQL-based schema fetching", s.dialect.Name())
 
-	// Re-parse to get both schema and table name for SQL query
-	schemaName, tableName := s.dialect.ParseTableName(table)
+	// Re-parse to get catalog/schema/table for the SQL query
+	catalog, schemaName, tableName := s.parseTableName(table)
 
-	// Determine the schema query to use
+	// Determine the schema query and its parameters. BigQuery-like dialects
+	// embed the dataset in the query path (only tableName is a parameter);
+	// catalog-aware dialects with a catalog present qualify by catalog.
 	var schemaQuery string
-	if datasetDialect, ok := s.dialect.(DatasetAwareDialect); ok {
-		// For BigQuery-like databases, dataset is embedded in query path
-		schemaQuery = datasetDialect.SchemaQueryForDataset(schemaName)
-	} else {
+	var schemaArgs []any
+	switch {
+	case isDatasetAware(s.dialect):
+		schemaQuery = s.dialect.(DatasetAwareDialect).SchemaQueryForDataset(schemaName)
+		schemaArgs = []any{tableName}
+	case catalog != "" && isCatalogSQL(s.dialect):
+		schemaQuery = s.dialect.(CatalogSQLDialect).SchemaQueryForCatalog()
+		schemaArgs = []any{catalog, schemaName, tableName}
+	default:
 		schemaQuery = s.dialect.SchemaQuery()
+		schemaArgs = []any{schemaName, tableName}
 	}
 
-	// Execute schema query - BigQuery only needs tableName, others need both
-	var rows *sql.Rows
-	var err error
-	if _, ok := s.dialect.(DatasetAwareDialect); ok {
-		rows, err = s.db.QueryContext(ctx, schemaQuery, tableName)
-	} else {
-		rows, err = s.db.QueryContext(ctx, schemaQuery, schemaName, tableName)
-	}
+	rows, err := s.db.QueryContext(ctx, schemaQuery, schemaArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query schema: %w", err)
 	}
@@ -256,7 +257,7 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 	}
 
 	// Get primary keys using dialect's SQL template
-	primaryKeys := s.fetchPrimaryKeys(ctx, schemaName, tableName)
+	primaryKeys := s.fetchPrimaryKeys(ctx, catalog, schemaName, tableName)
 	config.Debug("[%s] Detected primary keys: %v", s.dialect.Name(), primaryKeys)
 
 	// Mark primary key columns
@@ -277,19 +278,46 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 	}, nil
 }
 
+// parseTableName resolves the table identifier into (catalog, schema, table).
+// Catalog is "" for dialects that are not catalog-aware.
+func (s *ADBCSource) parseTableName(table string) (catalog, schemaName, tableName string) {
+	if ca, ok := s.dialect.(CatalogAwareDialect); ok {
+		return ca.ParseTableNameWithCatalog(table)
+	}
+	schemaName, tableName = s.dialect.ParseTableName(table)
+	return "", schemaName, tableName
+}
+
+func isDatasetAware(d Dialect) bool {
+	_, ok := d.(DatasetAwareDialect)
+	return ok
+}
+
+func isCatalogSQL(d Dialect) bool {
+	_, ok := d.(CatalogSQLDialect)
+	return ok
+}
+
 // fetchPrimaryKeys executes the PK query and parses results via dialect.
-func (s *ADBCSource) fetchPrimaryKeys(ctx context.Context, schemaName, tableName string) []string {
+func (s *ADBCSource) fetchPrimaryKeys(ctx context.Context, catalog, schemaName, tableName string) []string {
 	var pkSQL string
-	if datasetDialect, ok := s.dialect.(DatasetAwareDialect); ok {
-		pkSQL = datasetDialect.PrimaryKeyQueryForDataset(schemaName)
-	} else {
+	var args []any
+	switch {
+	case isDatasetAware(s.dialect):
+		pkSQL = s.dialect.(DatasetAwareDialect).PrimaryKeyQueryForDataset(schemaName)
+		args = []any{tableName}
+	case catalog != "" && isCatalogSQL(s.dialect):
+		pkSQL = s.dialect.(CatalogSQLDialect).PrimaryKeyQueryForCatalog()
+		args = []any{catalog, tableName}
+	default:
 		pkSQL = s.dialect.PrimaryKeyQuery()
+		args = []any{tableName}
 	}
 	if pkSQL == "" {
 		return nil
 	}
 
-	rows, err := s.db.QueryContext(ctx, pkSQL, tableName)
+	rows, err := s.db.QueryContext(ctx, pkSQL, args...)
 	if err != nil {
 		config.Debug("[%s] Failed to query primary keys: %v", s.dialect.Name(), err)
 		return nil

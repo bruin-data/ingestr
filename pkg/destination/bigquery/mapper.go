@@ -136,22 +136,23 @@ func BuildTableMetadata(tableSchema *schema.TableSchema, primaryKeys []string, l
 	return metadata
 }
 
-// ParseTableName splits a BigQuery table name into dataset and table.
-// BigQuery requires dataset.table format.
-func ParseTableName(tableName string) (dataset string, table string, err error) {
-	// BigQuery table names must be in format: dataset.table
-	// We don't support project.dataset.table in this implementation
+// ParseTableName splits a BigQuery table name into its project, dataset and
+// table. It accepts dataset.table or project.dataset.table; project is "" when
+// omitted.
+func ParseTableName(tableName string) (project, dataset, table string, err error) {
 	parts := splitTableName(tableName)
 
-	if len(parts) == 2 {
-		return parts[0], parts[1], nil
+	switch len(parts) {
+	case 2:
+		return "", parts[0], parts[1], nil
+	case 3:
+		return parts[0], parts[1], parts[2], nil
+	default:
+		if len(parts) <= 1 {
+			return "", "", "", fmt.Errorf("BigQuery table name must include dataset (format: [project.]dataset.table), got: %s", tableName)
+		}
+		return "", "", "", fmt.Errorf("invalid BigQuery table name format: %s (expected: [project.]dataset.table)", tableName)
 	}
-
-	if len(parts) <= 1 {
-		return "", "", fmt.Errorf("BigQuery table name must include dataset (format: dataset.table), got: %s", tableName)
-	}
-
-	return "", "", fmt.Errorf("invalid BigQuery table name format: %s (expected: dataset.table)", tableName)
 }
 
 // splitTableName splits a table name by periods

@@ -16,6 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	mssqldb "github.com/microsoft/go-mssqldb"
 	_ "github.com/microsoft/go-mssqldb/azuread"
 )
@@ -563,53 +564,11 @@ func (r mssqlTableRef) informationSchemaQualifier() string {
 	return quotedCatalog + ".INFORMATION_SCHEMA"
 }
 
+// splitMSSQLIdentifierPath splits a possibly multi-part, bracket/quote-aware
+// identifier into its normalized components. It delegates to the shared
+// tablename.Split so source and destination split names identically.
 func splitMSSQLIdentifierPath(path string) []string {
-	path = strings.TrimSpace(path)
-	var rawParts []string
-	var current strings.Builder
-	inBracket := false
-
-	for i := 0; i < len(path); i++ {
-		ch := path[i]
-		if inBracket {
-			current.WriteByte(ch)
-			if ch == ']' {
-				if i+1 < len(path) && path[i+1] == ']' {
-					i++
-					current.WriteByte(path[i])
-					continue
-				}
-				inBracket = false
-			}
-			continue
-		}
-
-		switch ch {
-		case '[':
-			inBracket = true
-			current.WriteByte(ch)
-		case '.':
-			rawParts = append(rawParts, current.String())
-			current.Reset()
-		default:
-			current.WriteByte(ch)
-		}
-	}
-	rawParts = append(rawParts, current.String())
-
-	parts := make([]string, len(rawParts))
-	for i, part := range rawParts {
-		parts[i] = normalizeMSSQLIdentifierPart(part)
-	}
-	return parts
-}
-
-func normalizeMSSQLIdentifierPart(part string) string {
-	part = strings.TrimSpace(part)
-	if len(part) >= 2 && part[0] == '[' && part[len(part)-1] == ']' {
-		return strings.ReplaceAll(part[1:len(part)-1], "]]", "]")
-	}
-	return part
+	return tablename.Split(path)
 }
 
 func filterColumns(columns []schema.Column, exclude []string) []schema.Column {

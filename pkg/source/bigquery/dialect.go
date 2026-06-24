@@ -14,6 +14,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source/adbc"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"google.golang.org/api/option"
 )
 
@@ -145,13 +146,24 @@ func (d *Dialect) DefaultSchema() string {
 }
 
 func (d *Dialect) ParseTableName(table string) (string, string) {
-	// BigQuery: dataset.table - dataset is REQUIRED
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+	_, schemaName, tableName := d.ParseTableNameWithCatalog(table)
+	return schemaName, tableName
+}
+
+// ParseTableNameWithCatalog implements adbc.CatalogAwareDialect. BigQuery
+// tables live in a project.dataset.table namespace; the project defaults to
+// the connection project from the URI.
+func (d *Dialect) ParseTableNameWithCatalog(table string) (string, string, string) {
+	tn, err := tablename.BigQuery.Parse(table, tablename.Defaults{Catalog: d.projectID})
+	if err != nil {
+		// Best-effort fallback; ValidateTableName surfaces the real error.
+		parts := strings.SplitN(table, ".", 2)
+		if len(parts) == 2 {
+			return d.projectID, parts[0], parts[1]
+		}
+		return d.projectID, "", table
 	}
-	// Return empty dataset - caller should validate
-	return "", table
+	return tn.Catalog, tn.Schema, tn.Table
 }
 
 func (d *Dialect) SchemaQuery() string {
@@ -191,11 +203,7 @@ func (d *Dialect) PrimaryKeyQueryForDataset(dataset string) string {
 }
 
 func (d *Dialect) ValidateTableName(table string) error {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) != 2 || parts[0] == "" {
-		return errors.New("BigQuery table name must include dataset (e.g., dataset.table)")
-	}
-	return nil
+	return tablename.BigQuery.CheckName(table)
 }
 
 func (d *Dialect) quoteIdentifier(name string) string {
@@ -244,7 +252,7 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 		return nil, err
 	}
 
-	dataset, tableName := d.ParseTableName(table)
+	project, dataset, tableName := d.ParseTableNameWithCatalog(table)
 
 	// Create BigQuery client with appropriate credentials
 	var client *bigquery.Client
@@ -257,6 +265,8 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 		options = append(options, option.WithAuthCredentialsJSON(option.ServiceAccount, []byte(d.credJSON)))
 	}
 
+	// The client uses the connection (billing) project; the table is read from
+	// its own project, which may differ for a three-part name.
 	client, err = bigquery.NewClient(ctx, d.projectID, options...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create BigQuery client: %w", err)
@@ -264,7 +274,7 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 	defer func() { _ = client.Close() }()
 
 	// Get table metadata
-	tableRef := client.Dataset(dataset).Table(tableName)
+	tableRef := client.DatasetInProject(project, dataset).Table(tableName)
 	metadata, err := tableRef.Metadata(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get table metadata: %w", err)

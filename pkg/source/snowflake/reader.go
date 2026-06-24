@@ -20,6 +20,7 @@ import (
 	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
 	"github.com/bruin-data/ingestr/pkg/source"
 	srcadbc "github.com/bruin-data/ingestr/pkg/source/adbc"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	sf "github.com/snowflakedb/gosnowflake"
 )
 
@@ -59,8 +60,8 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 
 	// Build the query
 	columns := srcadbc.FilterColumns(opts.Schema.Columns, opts.ExcludeColumns)
-	schemaName, tableName := d.ParseTableName(table)
-	fullTable := fmt.Sprintf("%s.%s", schemaName, tableName)
+	catalog, schemaName, tableName := d.ParseTableNameWithCatalog(table)
+	fullTable := tablename.TableName{Catalog: catalog, Schema: schemaName, Table: tableName}.String()
 	query := srcadbc.BuildSelectQuery(fullTable, columns, opts, d.QuoteIdentifier)
 	config.Debug("[SNOWFLAKE-NATIVE] Query: %s", query)
 

@@ -12,6 +12,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
 	"github.com/bruin-data/ingestr/pkg/source/adbc"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
 // SQL templates for Snowflake
@@ -123,12 +124,25 @@ func (d *Dialect) DefaultSchema() string {
 }
 
 func (d *Dialect) ParseTableName(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		// Snowflake treats unquoted identifiers as uppercase
-		return strings.ToUpper(parts[0]), strings.ToUpper(parts[1])
+	_, schemaName, tableName := d.ParseTableNameWithCatalog(table)
+	return schemaName, tableName
+}
+
+// ParseTableNameWithCatalog implements adbc.CatalogAwareDialect. Snowflake
+// tables live in a database.schema.table namespace.
+func (d *Dialect) ParseTableNameWithCatalog(table string) (string, string, string) {
+	tn, err := tablename.Snowflake.Parse(table, tablename.Defaults{Schema: d.DefaultSchema()})
+	if err != nil {
+		// Best-effort fallback preserving the legacy 2-part behavior.
+		parts := strings.SplitN(table, ".", 2)
+		if len(parts) == 2 {
+			return "", strings.ToUpper(parts[0]), strings.ToUpper(parts[1])
+		}
+		return "", d.DefaultSchema(), strings.ToUpper(table)
 	}
-	return d.DefaultSchema(), strings.ToUpper(table)
+	// Snowflake treats unquoted identifiers as uppercase.
+	tn = tn.Upper()
+	return tn.Catalog, tn.Schema, tn.Table
 }
 
 func (d *Dialect) SchemaQuery() string {
@@ -179,8 +193,8 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 		return nil, errors.New("database connection not available")
 	}
 
-	schemaName, tableName := d.ParseTableName(table)
-	fullTable := fmt.Sprintf("%s.%s", schemaName, tableName)
+	catalog, schemaName, tableName := d.ParseTableNameWithCatalog(table)
+	fullTable := tablename.TableName{Catalog: catalog, Schema: schemaName, Table: tableName}.String()
 
 	config.Debug("[SNOWFLAKE] Using DESCRIBE TABLE for schema fetching: %s", fullTable)
 

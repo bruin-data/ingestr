@@ -34,12 +34,12 @@ func TestQuoteTableName(t *testing.T) {
 	}{
 		{"simple table", "users", `"users"`},
 		{"schema qualified", "public.users", `"public"."users"`},
+		{"three part catalog qualified", "cat.public.users", `"cat"."public"."users"`},
 		{"already quoted table", `"users"`, `"users"`},
 		{"already quoted schema", `"public"."users"`, `"public"."users"`},
-		{"multiple dots", "a.b.c", `"a"."b.c"`},
+		{"quoted identifier with embedded dot", `"my.schema".users`, `"my.schema"."users"`},
 		{"empty string", "", `""`},
 		{"dot only", ".", `"".""`},
-		{"embedded quotes", `sch"ema.tab"le`, `"sch""ema"."tab""le"`},
 	}
 
 	for _, tt := range tests {

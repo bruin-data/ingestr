@@ -234,12 +234,13 @@ func (d *BigQueryDestination) Close(ctx context.Context) error {
 }
 
 // ensureDatasetExists creates the dataset if it doesn't exist.
-func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, datasetID string) error {
-	if d.knownDatasets[datasetID] {
+func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, datasetID string) error {
+	datasetKey := project + "." + datasetID
+	if d.knownDatasets[datasetKey] {
 		return nil
 	}
 
-	ds := d.client.Dataset(datasetID)
+	ds := d.client.DatasetInProject(project, datasetID)
 
 	// Check if dataset exists
 	_, err := ds.Metadata(ctx)
@@ -247,7 +248,7 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, datasetID
 		if d.knownDatasets == nil {
 			d.knownDatasets = make(map[string]bool)
 		}
-		d.knownDatasets[datasetID] = true
+		d.knownDatasets[datasetKey] = true
 		return nil
 	}
 
@@ -256,7 +257,7 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, datasetID
 	}
 
 	// Dataset doesn't exist, create it
-	config.Debug("[DEST] Creating dataset: %s", datasetID)
+	config.Debug("[DEST] Creating dataset: %s", datasetKey)
 
 	metadata := &bigquery.DatasetMetadata{}
 	if d.location != "" {
@@ -273,18 +274,33 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, datasetID
 		return fmt.Errorf("failed to create dataset: %w", err)
 	}
 
-	config.Debug("[DEST] Dataset created: %s", datasetID)
+	config.Debug("[DEST] Dataset created: %s", datasetKey)
 	if d.knownDatasets == nil {
 		d.knownDatasets = make(map[string]bool)
 	}
-	d.knownDatasets[datasetID] = true
+	d.knownDatasets[datasetKey] = true
 	return nil
 }
 
-func (d *BigQueryDestination) resolveTable(table string) (string, string, string, error) {
-	dataset, tableName, err := ParseTableName(table)
+// parseTable resolves a possibly project-qualified destination table into its
+// project, dataset and table. The project defaults to the connection project
+// when omitted; a different project performs a cross-project write (the query
+// is still billed to the connection project).
+func (d *BigQueryDestination) parseTable(table string) (project, dataset, tableName string, err error) {
+	project, dataset, tableName, err = ParseTableName(table)
 	if err != nil {
 		return "", "", "", err
+	}
+	if project == "" {
+		project = d.projectID
+	}
+	return project, dataset, tableName, nil
+}
+
+func (d *BigQueryDestination) resolveTable(table string) (project, dataset, tableName, tableKey string, err error) {
+	project, dataset, tableName, err = d.parseTable(table)
+	if err != nil {
+		return "", "", "", "", err
 	}
 
 	if dataset == "" && d.datasetID != "" {
@@ -292,10 +308,10 @@ func (d *BigQueryDestination) resolveTable(table string) (string, string, string
 	}
 
 	if dataset == "" {
-		return "", "", "", errors.New("dataset must be specified in table name (dataset.table) or URI path")
+		return "", "", "", "", errors.New("dataset must be specified in table name (dataset.table) or URI path")
 	}
 
-	return dataset, tableName, dataset + "." + tableName, nil
+	return project, dataset, tableName, project + "." + dataset + "." + tableName, nil
 }
 
 func (d *BigQueryDestination) setPendingTableErr(tableKey string, errCh chan error) {
@@ -474,12 +490,12 @@ func mergePartitionTargetPredicate(pruning *mergePartitionPruning) string {
 // PrepareTable creates or recreates a table with the given schema.
 func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
 	ctx = annotation.WithStep(ctx, annotation.StepDDL)
-	dataset, table, tableKey, err := d.resolveTable(opts.Table)
+	project, dataset, table, tableKey, err := d.resolveTable(opts.Table)
 	if err != nil {
 		return err
 	}
 
-	tableRef := d.client.Dataset(dataset).Table(table)
+	tableRef := d.client.DatasetInProject(project, dataset).Table(table)
 
 	// Store partition and cluster information for use in SwapTable
 	d.partitionBy = opts.PartitionBy
@@ -498,7 +514,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		errCh := make(chan error, 1)
 		d.setPendingTableErr(tableKey, errCh)
 		go func() {
-			truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(table))
+			truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table))
 			config.Debug("[DEST] Truncating table: %s", opts.Table)
 			query := d.client.Query(annotation.Prepend(ctx, truncateSQL))
 			if d.location != "" {
@@ -507,7 +523,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 			job, err := query.Run(ctx)
 			if err != nil {
 				// TRUNCATE failed to submit — table likely doesn't exist
-				errCh <- d.createTableFresh(ctx, tableRef, dataset, metadata)
+				errCh <- d.createTableFresh(ctx, tableRef, project, dataset, metadata)
 				return
 			}
 			for {
@@ -519,7 +535,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 				if status.Done() {
 					if status.Err() != nil {
 						if isNotFoundError(status.Err()) {
-							errCh <- d.createTableFresh(ctx, tableRef, dataset, metadata)
+							errCh <- d.createTableFresh(ctx, tableRef, project, dataset, metadata)
 							return
 						}
 						errCh <- fmt.Errorf("truncate error (job %s): %w", jobRef(job), status.Err())
@@ -591,7 +607,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	}
 
 	// Table doesn't exist — ensure dataset exists and create
-	if err := d.ensureDatasetExists(ctx, dataset); err != nil {
+	if err := d.ensureDatasetExists(ctx, project, dataset); err != nil {
 		return fmt.Errorf("failed to ensure dataset exists: %w", err)
 	}
 
@@ -609,8 +625,8 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	return nil
 }
 
-func (d *BigQueryDestination) createTableFresh(ctx context.Context, tableRef *bigquery.Table, dataset string, metadata *bigquery.TableMetadata) error {
-	if err := d.ensureDatasetExists(ctx, dataset); err != nil {
+func (d *BigQueryDestination) createTableFresh(ctx context.Context, tableRef *bigquery.Table, project, dataset string, metadata *bigquery.TableMetadata) error {
+	if err := d.ensureDatasetExists(ctx, project, dataset); err != nil {
 		return fmt.Errorf("failed to ensure dataset exists: %w", err)
 	}
 	if err := tableRef.Create(ctx, metadata); err != nil {
@@ -774,7 +790,7 @@ func (d *BigQueryDestination) Write(ctx context.Context, records <-chan source.R
 
 // WriteParallel writes records to BigQuery using Storage Write API with Arrow format.
 func (d *BigQueryDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	dataset, table, tableKey, err := d.resolveTable(opts.Table)
+	project, dataset, table, tableKey, err := d.resolveTable(opts.Table)
 	if err != nil {
 		return err
 	}
@@ -791,10 +807,10 @@ func (d *BigQueryDestination) WriteParallel(ctx context.Context, records <-chan 
 			return d.loadJobWriter(ctx, dataset, table, records, opts)
 		}
 		config.Debug("[DEST] Using BigQuery load job for %s.%s", dataset, table)
-		return d.writeWithLoadJob(ctx, dataset, table, records, opts)
+		return d.writeWithLoadJob(ctx, project, dataset, table, records, opts)
 	}
 
-	tablePath := fmt.Sprintf("projects/%s/datasets/%s/tables/%s", d.projectID, dataset, table)
+	tablePath := fmt.Sprintf("projects/%s/datasets/%s/tables/%s", project, dataset, table)
 
 	if opts.AtomicCommit {
 		parallelism := d.resolvePendingWriteParallelism(opts.Parallelism)
@@ -866,7 +882,7 @@ func (d *BigQueryDestination) WaitForExactRowCount(ctx context.Context, table st
 		return fmt.Errorf("expected row count must be non-negative, got %d", expectedRows)
 	}
 
-	dataset, tableName, err := ParseTableName(table)
+	project, dataset, tableName, err := d.parseTable(table)
 	if err != nil {
 		return fmt.Errorf("invalid table name: %w", err)
 	}
@@ -883,7 +899,7 @@ func (d *BigQueryDestination) WaitForExactRowCount(ctx context.Context, table st
 
 	var lastCount int64 = -1
 	for {
-		actualRows, err := d.queryTableRowCount(waitCtx, dataset, tableName)
+		actualRows, err := d.queryTableRowCount(waitCtx, project, dataset, tableName)
 		if err == nil {
 			lastCount = actualRows
 			if actualRows == expectedRows {
@@ -913,8 +929,8 @@ func (d *BigQueryDestination) WaitForExactRowCount(ctx context.Context, table st
 	}
 }
 
-func (d *BigQueryDestination) queryTableRowCount(ctx context.Context, dataset, table string) (int64, error) {
-	sql := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(table))
+func (d *BigQueryDestination) queryTableRowCount(ctx context.Context, project, dataset, table string) (int64, error) {
+	sql := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table))
 	q := d.client.Query(sql)
 	it, err := q.Read(ctx)
 	if err != nil {
@@ -944,12 +960,12 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 	ctx = annotation.WithStep(ctx, annotation.StepSwap)
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
-	stagingDataset, stagingTableName, err := ParseTableName(stagingTable)
+	stagingProject, stagingDataset, stagingTableName, err := d.parseTable(stagingTable)
 	if err != nil {
 		return fmt.Errorf("invalid staging table name: %w", err)
 	}
 
-	targetDataset, targetTableName, err := ParseTableName(targetTable)
+	targetProject, targetDataset, targetTableName, err := d.parseTable(targetTable)
 	if err != nil {
 		return fmt.Errorf("invalid target table name: %w", err)
 	}
@@ -957,17 +973,17 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 	// Replace only PrepareTables the staging side, so the target dataset may
 	// not exist yet. BigQuery's CREATE OR REPLACE TABLE and Copy jobs do NOT
 	// auto-create the dataset — they fail with "Not found: Dataset ...".
-	if err := d.ensureDatasetExists(ctx, targetDataset); err != nil {
+	if err := d.ensureDatasetExists(ctx, targetProject, targetDataset); err != nil {
 		return fmt.Errorf("failed to ensure target dataset exists: %w", err)
 	}
 
-	stagingRef := d.client.Dataset(stagingDataset).Table(stagingTableName)
+	stagingRef := d.client.DatasetInProject(stagingProject, stagingDataset).Table(stagingTableName)
 
 	config.Debug("[DEST] Swapping tables: %s → %s", stagingTable, targetTable)
 
 	// Copy jobs can't dedup.
 	if d.effectiveLoadMethod() == loadMethodLoadJob && len(opts.PrimaryKeys) == 0 {
-		if err := d.swapTableWithCopyJob(ctx, stagingDataset, stagingTableName, targetDataset, targetTableName); err != nil {
+		if err := d.swapTableWithCopyJob(ctx, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName); err != nil {
 			return err
 		}
 		config.Debug("[DEST] Copy completed, deleting staging table")
@@ -979,12 +995,12 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		return nil
 	}
 
-	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName))
+	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingProject), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName))
 	selectClause := buildBigQueryDedupSelect(stagingFQN, opts.PrimaryKeys, opts.IncrementalKey)
 
 	if d.partitionBy != "" || len(d.clusterBy) > 0 {
 		// For partitioned/clustered tables, must use SQL to apply partitioning
-		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName))
+		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName))
 
 		if d.partitionBy != "" {
 			sql += partitionByClause(d.partitionBy, isDatePartitionColumn(opts.Schema, d.partitionBy))
@@ -1013,7 +1029,7 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		// Use SQL CREATE OR REPLACE TABLE AS SELECT * — Copy Jobs don't read
 		// from the streaming buffer, so they'd copy 0 rows after Storage Write API writes.
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s AS %s",
-			quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName), selectClause)
+			quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName), selectClause)
 
 		config.Debug("[DEST] Executing SQL swap: %s", sql)
 
@@ -1302,18 +1318,18 @@ func (d *BigQueryDestination) execAlterColumnTypeWithRewrite(ctx context.Context
 		return fmt.Errorf("not an ALTER COLUMN TYPE statement: %s", originalSQL)
 	}
 
-	dataset, table, err := ParseTableName(tableName)
+	project, dataset, table, err := d.parseTable(tableName)
 	if err != nil {
 		return err
 	}
 
-	tableRef := d.client.Dataset(dataset).Table(table)
+	tableRef := d.client.DatasetInProject(project, dataset).Table(table)
 	meta, err := tableRef.Metadata(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch table metadata for rewrite: %w", err)
 	}
 
-	rewrittenSQL, err := d.buildAlterColumnTypeRewriteSQL(dataset, table, columnName, newType, meta)
+	rewrittenSQL, err := d.buildAlterColumnTypeRewriteSQL(project, dataset, table, columnName, newType, meta)
 	if err != nil {
 		return err
 	}
@@ -1341,6 +1357,7 @@ func (d *BigQueryDestination) execAlterColumnTypeWithRewrite(ctx context.Context
 }
 
 func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
+	project string,
 	dataset string,
 	table string,
 	columnName string,
@@ -1372,7 +1389,7 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	}
 
 	var sqlBuilder strings.Builder
-	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(table))
+	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table))
 	if meta.TimePartitioning != nil && meta.TimePartitioning.Field != "" {
 		sqlBuilder.WriteString(partitionByClause(meta.TimePartitioning.Field, partitionFieldIsDate(meta.Schema, meta.TimePartitioning.Field)))
 	}
@@ -1387,7 +1404,7 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 		&sqlBuilder,
 		"AS SELECT %s FROM %s.%s.%s",
 		strings.Join(selectExprs, ", "),
-		quoteIdentifier(d.projectID),
+		quoteIdentifier(project),
 		quoteIdentifier(dataset),
 		quoteIdentifier(table),
 	)
@@ -1403,12 +1420,14 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 		return errors.New("merge requires at least one primary key")
 	}
 
-	stagingDataset, stagingTableName, err := ParseTableName(opts.StagingTable)
+	// Staging is always co-located with the target (same project/dataset family),
+	// so a single resolved project qualifies both sides.
+	project, stagingDataset, stagingTableName, err := d.parseTable(opts.StagingTable)
 	if err != nil {
 		return fmt.Errorf("invalid staging table name: %w", err)
 	}
 
-	targetDataset, targetTableName, err := ParseTableName(opts.TargetTable)
+	_, targetDataset, targetTableName, err := d.parseTable(opts.TargetTable)
 	if err != nil {
 		return fmt.Errorf("invalid target table name: %w", err)
 	}
@@ -1416,7 +1435,7 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	// The merge target may have just been created asynchronously by PrepareTable
 	// (e.g. the deduplicated replace table). Wait for that creation to finish so
 	// the MERGE doesn't 404 on a not-yet-visible table.
-	if _, _, tableKey, resolveErr := d.resolveTable(opts.TargetTable); resolveErr == nil {
+	if _, _, _, tableKey, resolveErr := d.resolveTable(opts.TargetTable); resolveErr == nil {
 		if pendingErr := d.takePendingTableErr(tableKey); pendingErr != nil {
 			if err := <-pendingErr; err != nil {
 				return fmt.Errorf("failed to prepare merge target table: %w", err)
@@ -1424,12 +1443,12 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 		}
 	}
 
-	targetMeta, err := d.client.Dataset(targetDataset).Table(targetTableName).Metadata(ctx)
+	targetMeta, err := d.client.DatasetInProject(project, targetDataset).Table(targetTableName).Metadata(ctx)
 	if err != nil {
 		config.Debug("[MERGE] Could not fetch target metadata for partition pruning: %v", err)
 	}
 	// Fetch target and staging table schemas to detect type mismatches
-	castMap := d.buildCastMap(ctx, targetDataset, targetTableName, stagingDataset, stagingTableName)
+	castMap := d.buildCastMap(ctx, project, targetDataset, targetTableName, stagingDataset, stagingTableName)
 
 	pruning := buildMergePartitionPruning(targetMeta, opts.PrimaryKeys)
 	pruningSkipReason := ""
@@ -1451,7 +1470,7 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	}
 
 	// Build MERGE statement
-	mergeSQL := d.buildMergeSQLWithPartitionPruning(targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, pruning)
+	mergeSQL := d.buildMergeSQLWithPartitionPruning(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, pruning)
 
 	config.Debug("[MERGE] Executing MERGE statement")
 	config.Debug("[MERGE] SQL: %s", mergeSQL)
@@ -1472,17 +1491,17 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 // DeleteInsertTable performs a DELETE + INSERT operation for BigQuery.
 func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
 	ctx = annotation.WithStep(ctx, annotation.StepDeleteInsert)
-	stagingDataset, stagingTableName, err := ParseTableName(opts.StagingTable)
+	project, stagingDataset, stagingTableName, err := d.parseTable(opts.StagingTable)
 	if err != nil {
 		return fmt.Errorf("invalid staging table name: %w", err)
 	}
 
-	targetDataset, targetTableName, err := ParseTableName(opts.TargetTable)
+	_, targetDataset, targetTableName, err := d.parseTable(opts.TargetTable)
 	if err != nil {
 		return fmt.Errorf("invalid target table name: %w", err)
 	}
 
-	deleteSQL, insertSQL := d.buildDeleteInsertStatements(stagingDataset, stagingTableName, targetDataset, targetTableName, opts)
+	deleteSQL, insertSQL := d.buildDeleteInsertStatements(project, stagingDataset, stagingTableName, targetDataset, targetTableName, opts)
 	transactionSQL := buildBigQueryTransactionScript(deleteSQL, insertSQL)
 
 	config.Debug("[DELETE+INSERT] Executing transaction")
@@ -1502,13 +1521,13 @@ func (d *BigQueryDestination) DeleteInsertTable(ctx context.Context, opts destin
 	return nil
 }
 
-func (d *BigQueryDestination) buildDeleteInsertStatements(stagingDataset, stagingTableName, targetDataset, targetTableName string, opts destination.DeleteInsertOptions) (string, string) {
+func (d *BigQueryDestination) buildDeleteInsertStatements(project, stagingDataset, stagingTableName, targetDataset, targetTableName string, opts destination.DeleteInsertOptions) (string, string) {
 	startVal := formatBigQueryValue(opts.IntervalStart, opts.IncrementalKeyType)
 	endVal := formatBigQueryValue(opts.IntervalEnd, opts.IncrementalKeyType)
 
 	deleteSQL := fmt.Sprintf(
 		"DELETE FROM %s.%s.%s WHERE %s >= %s AND %s <= %s",
-		quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
+		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
 		quoteIdentifier(opts.IncrementalKey), startVal,
 		quoteIdentifier(opts.IncrementalKey), endVal,
 	)
@@ -1521,7 +1540,7 @@ func (d *BigQueryDestination) buildDeleteInsertStatements(stagingDataset, stagin
 	selectClause := fmt.Sprintf(
 		"SELECT %s FROM %s.%s.%s",
 		strings.Join(quotedCols, ", "),
-		quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
+		quoteIdentifier(project), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
 	)
 	if len(opts.PrimaryKeys) > 0 {
 		pkCols := make([]string, len(opts.PrimaryKeys))
@@ -1533,7 +1552,7 @@ func (d *BigQueryDestination) buildDeleteInsertStatements(stagingDataset, stagin
 
 	insertSQL := fmt.Sprintf(
 		"INSERT INTO %s.%s.%s (%s) %s",
-		quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
+		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
 		strings.Join(quotedCols, ", "),
 		selectClause,
 	)
@@ -1546,12 +1565,12 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	ctx = annotation.WithStep(ctx, annotation.StepSCD2)
 	startOp := time.Now()
 
-	stagingDataset, stagingTableName, err := ParseTableName(opts.StagingTable)
+	project, stagingDataset, stagingTableName, err := d.parseTable(opts.StagingTable)
 	if err != nil {
 		return fmt.Errorf("invalid staging table name: %w", err)
 	}
 
-	targetDataset, targetTableName, err := ParseTableName(opts.TargetTable)
+	_, targetDataset, targetTableName, err := d.parseTable(opts.TargetTable)
 	if err != nil {
 		return fmt.Errorf("invalid target table name: %w", err)
 	}
@@ -1574,8 +1593,8 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 		WHEN MATCHED THEN UPDATE SET
 			t._scd_valid_to = s._scd_valid_from,
 			t._scd_is_current = false`,
-		quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
-		quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
+		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
+		quoteIdentifier(project), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
 		onClause,
 		changeConditions,
 	)
@@ -1603,9 +1622,9 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 				SELECT 1 FROM %s.%s.%s AS s
 				WHERE %s
 			  )`,
-			quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
+			quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
 			tsLiteral,
-			quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
+			quoteIdentifier(project), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
 			onClause,
 		)
 		config.Debug("[BIGQUERY SCD2] Step 2 - Soft-delete missing: %s", softDeleteSQL)
@@ -1631,11 +1650,11 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 			WHERE %s
 			  AND t._scd_is_current = true
 		)`,
-		quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
+		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedColumns, ", "),
-		quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
-		quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
+		quoteIdentifier(project), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
+		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
 		onClause,
 	)
 	config.Debug("[BIGQUERY SCD2] Step 3 - Insert new versions: %s", insertSQL)
@@ -1711,12 +1730,12 @@ func formatBigQueryValue(v interface{}, keyType schema.DataType) string {
 
 // buildCastMap compares target and staging table schemas and returns a map of
 // column name → target BigQuery type name for columns that need casting.
-func (d *BigQueryDestination) buildCastMap(ctx context.Context, targetDataset, targetTable, stagingDataset, stagingTable string) map[string]string {
-	targetMeta, err := d.client.Dataset(targetDataset).Table(targetTable).Metadata(ctx)
+func (d *BigQueryDestination) buildCastMap(ctx context.Context, project, targetDataset, targetTable, stagingDataset, stagingTable string) map[string]string {
+	targetMeta, err := d.client.DatasetInProject(project, targetDataset).Table(targetTable).Metadata(ctx)
 	if err != nil {
 		return nil
 	}
-	stagingMeta, err := d.client.Dataset(stagingDataset).Table(stagingTable).Metadata(ctx)
+	stagingMeta, err := d.client.DatasetInProject(project, stagingDataset).Table(stagingTable).Metadata(ctx)
 	if err != nil {
 		return nil
 	}
@@ -1776,11 +1795,11 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 }
 
 // buildMergeSQL constructs a BigQuery MERGE statement
-func (d *BigQueryDestination) buildMergeSQL(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string) string {
-	return d.buildMergeSQLWithPartitionPruning(targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nil)
+func (d *BigQueryDestination) buildMergeSQL(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string) string {
+	return d.buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nil)
 }
 
-func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, pruning *mergePartitionPruning) string {
+func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, pruning *mergePartitionPruning) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
@@ -1829,9 +1848,9 @@ func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(targetDataset, t
 	}
 
 	var sql strings.Builder
-	stagingRef := fmt.Sprintf("%s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable))
+	stagingRef := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable))
 	sql.WriteString(mergePartitionPruningDeclarations(stagingRef, pruning))
-	fmt.Fprintf(&sql, "MERGE %s.%s.%s AS t\n", quoteIdentifier(d.projectID), quoteIdentifier(targetDataset), quoteIdentifier(targetTable))
+	fmt.Fprintf(&sql, "MERGE %s.%s.%s AS t\n", quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTable))
 
 	if hasCDCDeleted && len(primaryKeys) > 0 {
 		// CDC mode: compose the merge source from two per-PK dedups of staging:
@@ -1884,7 +1903,7 @@ func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(targetDataset, t
 		fmt.Fprintf(
 			&sql,
 			"USING (SELECT * FROM %s.%s.%s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s%s) = 1) AS s\n",
-			quoteIdentifier(d.projectID), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable), strings.Join(pkPartition, ", "), dedupOrderBy,
+			quoteIdentifier(project), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable), strings.Join(pkPartition, ", "), dedupOrderBy,
 		)
 	}
 
@@ -1996,7 +2015,7 @@ func (t *bigQueryTransaction) Rollback(_ context.Context) error {
 
 // DropTable drops a table if it exists.
 func (d *BigQueryDestination) DropTable(ctx context.Context, table string) error {
-	dataset, tableName, err := ParseTableName(table)
+	project, dataset, tableName, err := d.parseTable(table)
 	if err != nil {
 		return fmt.Errorf("invalid table name: %w", err)
 	}
@@ -2010,7 +2029,7 @@ func (d *BigQueryDestination) DropTable(ctx context.Context, table string) error
 		return errors.New("dataset must be specified in table name (dataset.table) or URI path")
 	}
 
-	tableRef := d.client.Dataset(dataset).Table(tableName)
+	tableRef := d.client.DatasetInProject(project, dataset).Table(tableName)
 	if err := tableRef.Delete(ctx); err != nil && !isNotFoundError(err) {
 		return fmt.Errorf("failed to drop table %s: %w", table, err)
 	}
@@ -2021,7 +2040,7 @@ func (d *BigQueryDestination) DropTable(ctx context.Context, table string) error
 // TruncateTable empties a table while preserving its definition and dependents.
 func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) error {
 	ctx = annotation.WithStep(ctx, annotation.StepTruncate)
-	dataset, tableName, err := ParseTableName(table)
+	project, dataset, tableName, err := d.parseTable(table)
 	if err != nil {
 		return fmt.Errorf("invalid table name: %w", err)
 	}
@@ -2033,7 +2052,7 @@ func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) e
 		return errors.New("dataset must be specified in table name (dataset.table) or URI path")
 	}
 
-	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
 	query := d.client.Query(annotation.Prepend(ctx, truncateSQL))
 	if d.location != "" {
 		query.Location = d.location
@@ -2074,7 +2093,7 @@ func (d *BigQueryDestination) SupportsAtomicSwap() bool { return true }
 func (d *BigQueryDestination) GetScheme() string { return "bigquery" }
 
 func (d *BigQueryDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	dataset, tableName, err := ParseTableName(table)
+	project, dataset, tableName, err := d.parseTable(table)
 	if err != nil {
 		return nil, err
 	}
@@ -2087,7 +2106,7 @@ func (d *BigQueryDestination) GetTableSchema(ctx context.Context, table string) 
 		return nil, errors.New("dataset must be specified in table name (dataset.table) or URI path")
 	}
 
-	tableRef := d.client.Dataset(dataset).Table(tableName)
+	tableRef := d.client.DatasetInProject(project, dataset).Table(tableName)
 
 	metadata, err := tableRef.Metadata(ctx)
 	if err != nil {
@@ -2198,7 +2217,7 @@ func (d *BigQueryDestination) SupportsCDCMerge() bool {
 }
 
 func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
-	dataset, tableName, err := ParseTableName(table)
+	project, dataset, tableName, err := d.parseTable(table)
 	if err != nil {
 		return "", err
 	}
@@ -2211,7 +2230,7 @@ func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 		return "", errors.New("dataset must be specified in table name (dataset.table) or URI path")
 	}
 
-	query := d.client.Query(fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s.%s.%s", quoteIdentifier(d.projectID), quoteIdentifier(dataset), quoteIdentifier(tableName)))
+	query := d.client.Query(fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName)))
 	if d.location != "" {
 		query.Location = d.location
 	}

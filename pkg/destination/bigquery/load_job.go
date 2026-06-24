@@ -103,6 +103,7 @@ func (b *bufferedWriteCloser) CloseWithError(err error) error {
 
 func (d *BigQueryDestination) writeWithLoadJob(
 	ctx context.Context,
+	project string,
 	dataset string,
 	table string,
 	records <-chan source.RecordBatchResult,
@@ -117,7 +118,7 @@ func (d *BigQueryDestination) writeWithLoadJob(
 	// files, causing BigQuery to reject the load. Switch to JSONL which
 	// natively supports JSON.
 	if format == loadJobFormatParquet {
-		tableRef := d.client.Dataset(dataset).Table(table)
+		tableRef := d.client.DatasetInProject(project, dataset).Table(table)
 		if meta, err := tableRef.Metadata(ctx); err == nil {
 			for _, f := range meta.Schema {
 				if f.Type == gcbq.JSONFieldType {
@@ -164,7 +165,7 @@ func (d *BigQueryDestination) writeWithLoadJob(
 			table,
 		)
 	}
-	if err := d.runLoadJobs(ctx, dataset, table, staged, loadParallelism); err != nil {
+	if err := d.runLoadJobs(ctx, project, dataset, table, staged, loadParallelism); err != nil {
 		return err
 	}
 
@@ -369,13 +370,15 @@ func (d *BigQueryDestination) ensureGCSClient(ctx context.Context) error {
 
 func (d *BigQueryDestination) swapTableWithCopyJob(
 	ctx context.Context,
+	stagingProject string,
 	stagingDataset string,
 	stagingTable string,
+	targetProject string,
 	targetDataset string,
 	targetTable string,
 ) error {
-	stagingRef := d.client.Dataset(stagingDataset).Table(stagingTable)
-	targetRef := d.client.Dataset(targetDataset).Table(targetTable)
+	stagingRef := d.client.DatasetInProject(stagingProject, stagingDataset).Table(stagingTable)
+	targetRef := d.client.DatasetInProject(targetProject, targetDataset).Table(targetTable)
 
 	copier := targetRef.CopierFrom(stagingRef)
 	copier.CreateDisposition = gcbq.CreateIfNeeded
@@ -554,6 +557,7 @@ func buildStagingGCSObjectAttrs(format loadJobFileFormat) gcsstorage.ObjectAttrs
 
 func (d *BigQueryDestination) runLoadJobs(
 	ctx context.Context,
+	project string,
 	dataset string,
 	table string,
 	staged *stagedLoadSet,
@@ -564,7 +568,7 @@ func (d *BigQueryDestination) runLoadJobs(
 	}
 	if staged.hasOnlyGCSObjects() {
 		config.Debug("[DEST] Loading %d staged %s chunk(s) into %s.%s with a single multi-URI load job", len(staged.chunks), staged.format, dataset, table)
-		return d.runCombinedGCSLoadJob(ctx, dataset, table, staged.format, staged.chunks)
+		return d.runCombinedGCSLoadJob(ctx, project, dataset, table, staged.format, staged.chunks)
 	}
 	if parallelism <= 0 {
 		parallelism = 1
@@ -586,7 +590,7 @@ func (d *BigQueryDestination) runLoadJobs(
 		go func() {
 			defer wg.Done()
 			for chunk := range work {
-				if err := d.runSingleLoadJob(loadCtx, dataset, table, staged.format, chunk); err != nil {
+				if err := d.runSingleLoadJob(loadCtx, project, dataset, table, staged.format, chunk); err != nil {
 					select {
 					case errCh <- err:
 						cancel()
@@ -622,6 +626,7 @@ dispatch:
 
 func (d *BigQueryDestination) runCombinedGCSLoadJob(
 	ctx context.Context,
+	project string,
 	dataset string,
 	table string,
 	format loadJobFileFormat,
@@ -632,7 +637,7 @@ func (d *BigQueryDestination) runCombinedGCSLoadJob(
 		return err
 	}
 
-	tableRef := d.client.Dataset(dataset).Table(table)
+	tableRef := d.client.DatasetInProject(project, dataset).Table(table)
 	loader := tableRef.LoaderFrom(loadSource)
 	loader.CreateDisposition = gcbq.CreateNever
 	loader.WriteDisposition = gcbq.WriteAppend
@@ -657,6 +662,7 @@ func (d *BigQueryDestination) runCombinedGCSLoadJob(
 
 func (d *BigQueryDestination) runSingleLoadJob(
 	ctx context.Context,
+	project string,
 	dataset string,
 	table string,
 	format loadJobFileFormat,
@@ -679,7 +685,7 @@ func (d *BigQueryDestination) runSingleLoadJob(
 			return err
 		}
 
-		tableRef := d.client.Dataset(dataset).Table(table)
+		tableRef := d.client.DatasetInProject(project, dataset).Table(table)
 		loader := tableRef.LoaderFrom(loadSource)
 		loader.CreateDisposition = gcbq.CreateNever
 		loader.WriteDisposition = gcbq.WriteAppend

@@ -18,6 +18,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	mssqldb "github.com/microsoft/go-mssqldb"
 )
 
@@ -167,12 +168,18 @@ func (d *MSSQLDestination) ensureSchemaExists(ctx context.Context, schemaName st
 	return nil
 }
 
+// parseTableName resolves the schema and table from a possibly multi-part
+// name (database.schema.table or linked-server server.database.schema.table),
+// mirroring the source's parseMSSQLTableRef: the table is the last component,
+// the schema the second-to-last.
 func parseTableName(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+	parts := tablename.Split(table)
+	tableName := parts[len(parts)-1]
+	schemaName := "dbo"
+	if len(parts) > 1 && parts[len(parts)-2] != "" {
+		schemaName = parts[len(parts)-2]
 	}
-	return "dbo", table
+	return schemaName, tableName
 }
 
 func (d *MSSQLDestination) DropTable(ctx context.Context, table string) error {
@@ -1190,11 +1197,12 @@ func mapMSSQLTypeToSchema(dataType string) schema.DataType {
 }
 
 func quoteTable(table string) string {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return fmt.Sprintf("[%s].[%s]", strings.ReplaceAll(parts[0], "]", "]]"), strings.ReplaceAll(parts[1], "]", "]]"))
+	parts := tablename.Split(table)
+	quoted := make([]string, len(parts))
+	for i, p := range parts {
+		quoted[i] = "[" + strings.ReplaceAll(p, "]", "]]") + "]"
 	}
-	return fmt.Sprintf("[%s]", strings.ReplaceAll(table, "]", "]]"))
+	return strings.Join(quoted, ".")
 }
 
 func quoteColumn(col string) string {
@@ -1257,7 +1265,9 @@ func buildChangeConditionsMSSQL(columns []string, targetAlias, sourceAlias strin
 }
 
 func escapeTableNameForObjectID(table string) string {
-	return strings.ReplaceAll(table, "'", "''")
+	// OBJECT_ID takes the (bracket-quoted) name as a string literal, so escape
+	// single quotes for the surrounding literal.
+	return strings.ReplaceAll(quoteTable(table), "'", "''")
 }
 
 func escapeTableNameForRename(table string) string {

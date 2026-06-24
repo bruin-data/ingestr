@@ -17,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/databricks/databricks-sdk-go"
 	"github.com/databricks/databricks-sdk-go/service/files"
 	dbsql "github.com/databricks/databricks-sdk-go/service/sql"
@@ -566,15 +567,11 @@ func (d *DatabricksDestination) executeStatement(ctx context.Context, sql string
 }
 
 func (d *DatabricksDestination) parseTableName(table string) (schemaName, tableName string) {
-	parts := strings.Split(table, ".")
-	switch len(parts) {
-	case 3:
-		return parts[1], parts[2]
-	case 2:
-		return parts[0], parts[1]
-	default:
+	tn, err := tablename.Databricks.Parse(table, tablename.Defaults{Schema: d.schemaName})
+	if err != nil {
 		return d.schemaName, table
 	}
+	return tn.Schema, tn.Table
 }
 
 func (d *DatabricksDestination) quoteFullTable(schemaName, tableName string) string {

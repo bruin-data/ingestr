@@ -42,10 +42,11 @@ func (d *Dialect) createStorageClient(ctx context.Context) (*storage.BigQueryRea
 
 // createReadSession sets up a BigQuery Storage Read API session with filters and column selection.
 func createReadSession(ctx context.Context, client *storage.BigQueryReadClient,
-	projectID, dataset, table string, opts source.ReadOptions, tableSchema *schema.TableSchema, parallelism int,
+	billingProject, dataProject, dataset, table string, opts source.ReadOptions, tableSchema *schema.TableSchema, parallelism int,
 ) (*storagepb.ReadSession, error) {
-	// Build the table reference
-	tableRef := fmt.Sprintf("projects/%s/datasets/%s/tables/%s", projectID, dataset, table)
+	// Build the table reference using the table's own project (may differ from
+	// the billing project for a three-part name).
+	tableRef := fmt.Sprintf("projects/%s/datasets/%s/tables/%s", dataProject, dataset, table)
 
 	// Determine selected fields (all columns minus excluded ones)
 	selectedFields := make([]string, 0, len(tableSchema.Columns))
@@ -91,7 +92,7 @@ func createReadSession(ctx context.Context, client *storage.BigQueryReadClient,
 	// Use single stream for optimal performance, matching SQLAlchemy's approach
 	// Multiple streams add coordination overhead without benefit for most queries
 	req := &storagepb.CreateReadSessionRequest{
-		Parent:                  fmt.Sprintf("projects/%s", projectID),
+		Parent:                  fmt.Sprintf("projects/%s", billingProject),
 		ReadSession:             session,
 		MaxStreamCount:          int32(parallelism),
 		PreferredMinStreamCount: int32(parallelism),
@@ -340,14 +341,14 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, tableName string, opts
 		return nil, fmt.Errorf("failed to create storage client: %w", err)
 	}
 
-	// 2. Parse table name
-	dataset, table := d.ParseTableName(tableName)
+	// 2. Parse table name (project defaults to the connection project)
+	project, dataset, table := d.ParseTableNameWithCatalog(tableName)
 	if dataset == "" || table == "" {
 		_ = client.Close()
 		return nil, fmt.Errorf("invalid table name format, expected dataset.table")
 	}
 
-	config.Debug("[BIGQUERY] Creating read session for %s.%s", dataset, table)
+	config.Debug("[BIGQUERY] Creating read session for %s.%s.%s", project, dataset, table)
 
 	// 3. Get or use provided schema
 	var tableSchema *schema.TableSchema
@@ -367,7 +368,7 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, tableName string, opts
 	}
 
 	// 4. Create read session with filters
-	session, err := createReadSession(ctx, client, d.projectID, dataset, table, opts, tableSchema, parallelism)
+	session, err := createReadSession(ctx, client, d.projectID, project, dataset, table, opts, tableSchema, parallelism)
 	if err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("failed to create read session: %w", err)
