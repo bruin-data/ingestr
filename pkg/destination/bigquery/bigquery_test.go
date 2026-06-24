@@ -1000,8 +1000,8 @@ func TestWriteParallel_WaitsOnlyForMatchingPendingTable(t *testing.T) {
 	targetCh := make(chan error, 1)
 	targetCh <- nil
 	dest.pendingTableErrs = map[string]chan error{
-		"other_dataset.other_table": otherCh,
-		"my_dataset.my_table":       targetCh,
+		"my-project.other_dataset.other_table": otherCh,
+		"my-project.my_dataset.my_table":       targetCh,
 	}
 
 	records := make(chan source.RecordBatchResult)
@@ -1023,10 +1023,10 @@ func TestWriteParallel_WaitsOnlyForMatchingPendingTable(t *testing.T) {
 		t.Fatal("WriteParallel blocked on unrelated pending table state")
 	}
 
-	if _, ok := dest.pendingTableErrs["my_dataset.my_table"]; ok {
+	if _, ok := dest.pendingTableErrs["my-project.my_dataset.my_table"]; ok {
 		t.Fatal("matching pending table state was not cleared")
 	}
-	if _, ok := dest.pendingTableErrs["other_dataset.other_table"]; !ok {
+	if _, ok := dest.pendingTableErrs["my-project.other_dataset.other_table"]; !ok {
 		t.Fatal("unrelated pending table state should remain")
 	}
 	if gotDataset != "my_dataset" || gotTable != "my_table" {
@@ -1047,7 +1047,7 @@ func TestWriteParallel_ClearsPendingTableAfterPrepareError(t *testing.T) {
 	targetCh := make(chan error, 1)
 	targetCh <- errors.New("prepare failed")
 	dest.pendingTableErrs = map[string]chan error{
-		"my_dataset.my_table": targetCh,
+		"my-project.my_dataset.my_table": targetCh,
 	}
 
 	records := make(chan source.RecordBatchResult)
@@ -1061,7 +1061,7 @@ func TestWriteParallel_ClearsPendingTableAfterPrepareError(t *testing.T) {
 	}
 
 	if dest.pendingTableErrs != nil {
-		if _, ok := dest.pendingTableErrs["my_dataset.my_table"]; ok {
+		if _, ok := dest.pendingTableErrs["my-project.my_dataset.my_table"]; ok {
 			t.Fatal("failed pending table state was not cleared")
 		}
 	}
