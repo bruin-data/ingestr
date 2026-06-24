@@ -240,6 +240,10 @@ func TestTableMetadata(t *testing.T) {
 		{"kpi_mau", []string{"time"}, "time", config.StrategyMerge},
 		{"kpi_new_users", []string{"time"}, "time", config.StrategyMerge},
 		{"kpi_uninstalls", []string{"time"}, "time", config.StrategyMerge},
+		{"sessions", []string{"time"}, "time", config.StrategyMerge},
+		{"purchase_quantity", []string{"time"}, "time", config.StrategyMerge},
+		{"purchase_revenue", []string{"time"}, "time", config.StrategyMerge},
+		{"segment_series", []string{"time", "segment_id"}, "time", config.StrategyMerge},
 	}
 
 	for _, tt := range tests {

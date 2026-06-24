@@ -39,6 +39,10 @@ Braze source allows ingesting the following resources into separate tables:
 | [kpi_new_users](https://www.braze.com/docs/api/endpoints/export/kpi/get_kpi_daily_new_users_date) | time | time | merge | New users by date. |
 | [kpi_uninstalls](https://www.braze.com/docs/api/endpoints/export/kpi/get_kpi_uninstalls_date) | time | time | merge | App uninstalls by date. |
 | [event_series](https://www.braze.com/docs/api/endpoints/export/custom_events/get_custom_events_analytics) | time, event_name | time | merge | Daily occurrence count per custom event. Fetches all events by default; an optional `event_series:<name>[,<name>]` filter limits it. |
+| [segment_series](https://www.braze.com/docs/api/endpoints/export/segments/get_segment_analytics) | time, segment_id | time | merge | Daily size per segment. Fetches all segments by default; an optional `segment_series:<id>[,<id>]` filter limits it. |
+| [sessions](https://www.braze.com/docs/api/endpoints/export/sessions/get_sessions_analytics) | time | time | merge | Daily session count. |
+| [purchase_quantity](https://www.braze.com/docs/api/endpoints/export/purchases/get_number_of_purchases) | time | time | merge | Daily total number of purchases. |
+| [purchase_revenue](https://www.braze.com/docs/api/endpoints/export/purchases/get_revenue_series) | time | time | merge | Daily total revenue. |
 | [user_data](https://www.braze.com/docs/api/endpoints/export/user_data/post_users_segment) | braze_id, segment_id | – | replace | Users in a segment with their email/push subscription state and profile fields (a point-in-time snapshot). |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
