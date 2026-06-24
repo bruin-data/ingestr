@@ -183,7 +183,7 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 
 	if opts.DropFirst {
 		startDrop := time.Now()
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTableName(opts.Table))
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(opts.Table))
 		if err := d.exec(ctx, dropSQL); err != nil {
 			return fmt.Errorf("failed to drop table: %w", err)
 		}
@@ -191,7 +191,7 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 	}
 
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(quoteTableName(opts.Table), opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, opts.PrimaryKeys)
 	config.Debug("[DUCKDB] CREATE SQL: %s", createSQL)
 	if err := d.exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
@@ -536,15 +536,15 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		// The renamed-away target keeps the target's catalog+schema.
 		oldTable := tablename.TableName{Catalog: targetTn.Catalog, Schema: targetTn.Schema, Table: oldName}.String()
 
-		if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", quoteTableName(targetTable), destination.QuoteIdentifier(oldName))); err != nil {
+		if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", destination.QuoteTableName(targetTable), destination.QuoteIdentifier(oldName))); err != nil {
 			config.Debug("[DUCKDB] No existing table to rename (this is OK for first run)")
 		}
 
-		if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", quoteTableName(stagingTable), destination.QuoteIdentifier(targetName))); err != nil {
+		if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", destination.QuoteTableName(stagingTable), destination.QuoteIdentifier(targetName))); err != nil {
 			return fmt.Errorf("failed to rename staging to target: %w", err)
 		}
 
-		_ = d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTableName(oldTable)))
+		_ = d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(oldTable)))
 	} else {
 		// Cross-schema swap: DuckDB's ALTER TABLE RENAME doesn't support cross-schema.
 		// Recreate the target with the staging table's recorded schema (preserving
@@ -561,11 +561,11 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 			return fmt.Errorf("failed to ensure target schema exists: %w", err)
 		}
 
-		if err := d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTableName(targetTable))); err != nil {
+		if err := d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(targetTable))); err != nil {
 			return fmt.Errorf("failed to drop target table: %w", err)
 		}
 
-		createSQL := buildCreateTableSQL(quoteTableName(targetTable), sch.Columns, sch.PrimaryKeys)
+		createSQL := buildCreateTableSQL(destination.QuoteTableName(targetTable), sch.Columns, sch.PrimaryKeys)
 		if err := d.exec(ctx, createSQL); err != nil {
 			return fmt.Errorf("failed to recreate target table: %w", err)
 		}
@@ -576,14 +576,14 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		}
 		colList := strings.Join(quotedCols, ", ")
 		copySQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
-			quoteTableName(targetTable),
+			destination.QuoteTableName(targetTable),
 			colList, colList,
-			quoteTableName(stagingTable))
+			destination.QuoteTableName(stagingTable))
 		if err := d.exec(ctx, copySQL); err != nil {
 			return fmt.Errorf("failed to copy staging rows into target: %w", err)
 		}
 
-		if err := d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTableName(stagingTable))); err != nil {
+		if err := d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(stagingTable))); err != nil {
 			return fmt.Errorf("failed to drop staging table: %w", err)
 		}
 		d.forgetSchema(stagingTable)
@@ -620,7 +620,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		}
 	}()
 
-	quotedTargetTable := quoteTableName(opts.TargetTable)
+	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 
 	// Build dedup subquery to handle duplicate PKs in staging. For CDC data the
@@ -646,7 +646,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 			strings.Join(stagingQuoted, ", "),
 			strings.Join(quotedPKs, ", "),
 			dedupOrderBy,
-			quoteTableName(opts.StagingTable),
+			destination.QuoteTableName(opts.StagingTable),
 			where,
 		)
 	}
@@ -677,7 +677,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		}
 		if stagingKeysUnique {
 			config.Debug("[DUCKDB MERGE] Empty-target staging keys are unique; using direct INSERT")
-			insertSource = fmt.Sprintf(`%s AS source`, quoteTableName(opts.StagingTable))
+			insertSource = fmt.Sprintf(`%s AS source`, destination.QuoteTableName(opts.StagingTable))
 		} else {
 			config.Debug("[DUCKDB MERGE] Empty-target staging keys need deduplication")
 		}
@@ -782,7 +782,7 @@ func (d *DuckDBDestination) stagingPrimaryKeysUniqueLocked(ctx context.Context, 
 		totalExpr,
 		distinctExpr,
 		strings.Join(nullChecks, " OR "),
-		quoteTableName(opts.StagingTable),
+		destination.QuoteTableName(opts.StagingTable),
 	)
 
 	stmt, err := d.conn.NewStatement()
@@ -904,8 +904,8 @@ func (d *DuckDBDestination) DeleteInsertTable(ctx context.Context, opts destinat
 		}
 	}()
 
-	quotedTargetTable := quoteTableName(opts.TargetTable)
-	quotedStagingTable := quoteTableName(opts.StagingTable)
+	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
+	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
 	deleteSQL := fmt.Sprintf(
 		`DELETE FROM %s WHERE %s >= ? AND %s <= ?`,
@@ -958,8 +958,8 @@ func (d *DuckDBDestination) SCD2Table(ctx context.Context, opts destination.SCD2
 	changeConditions := buildChangeConditions(nonPKColumns, "target", "source")
 	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 
-	quotedTargetTable := quoteTableName(opts.TargetTable)
-	quotedStagingTable := quoteTableName(opts.StagingTable)
+	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
+	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
 	// Step 1: Close changed records (update _scd_valid_to and _scd_is_current)
 	updateSQL := fmt.Sprintf(
@@ -1044,7 +1044,7 @@ func (d *DuckDBDestination) DropTable(ctx context.Context, table string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if err := d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTableName(table))); err != nil {
+	if err := d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(table))); err != nil {
 		return fmt.Errorf("failed to drop table %s: %w", table, err)
 	}
 	config.Debug("[DUCKDB] Dropped table: %s", table)
@@ -1055,7 +1055,7 @@ func (d *DuckDBDestination) TruncateTable(ctx context.Context, table string) err
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if err := d.exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", quoteTableName(table))); err != nil {
+	if err := d.exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", destination.QuoteTableName(table))); err != nil {
 		return fmt.Errorf("failed to truncate table %s: %w", table, err)
 	}
 	config.Debug("[DUCKDB] Truncated table: %s", table)
@@ -1124,7 +1124,7 @@ func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, quoteTableName(table))
+	query := fmt.Sprintf(`SELECT MAX("_cdc_lsn") FROM %s`, destination.QuoteTableName(table))
 	stmt, err := d.conn.NewStatement()
 	if err != nil {
 		return "", err
@@ -1173,7 +1173,7 @@ func (d *DuckDBDestination) GetTableSchema(ctx context.Context, table string) (*
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	query := fmt.Sprintf("DESCRIBE %s", quoteTableName(table))
+	query := fmt.Sprintf("DESCRIBE %s", destination.QuoteTableName(table))
 	stmt, err := d.conn.NewStatement()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create statement: %w", err)
@@ -1346,22 +1346,6 @@ func duckTable(table string) tablename.TableName {
 func parseSchemaTable(table string) (string, string) {
 	tn := duckTable(table)
 	return tn.Schema, tn.Table
-}
-
-// quoteTableName returns the catalog-aware, fully-qualified quoted identifier
-// for a DuckDB table (catalog.schema.table), omitting absent leading
-// components. DuckDB is a three-level engine, so it does not use the shared
-// (two-level) destination.QuoteTableName.
-func quoteTableName(table string) string {
-	tn := duckTable(table)
-	out := destination.QuoteIdentifier(tn.Table)
-	if tn.Schema != "" {
-		out = destination.QuoteIdentifier(tn.Schema) + "." + out
-	}
-	if tn.Catalog != "" {
-		out = destination.QuoteIdentifier(tn.Catalog) + "." + out
-	}
-	return out
 }
 
 // duckSameNamespace reports whether two tables live in the same catalog+schema,

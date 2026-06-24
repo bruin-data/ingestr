@@ -18,15 +18,8 @@ const DefaultStagingSchema = "_bruin_staging"
 // identifiers don't collide via silent truncation and don't fail on MySQL.
 const maxStagingTableNameLen = 60
 
-// catalogAware reports whether the destination treats the leading component of a
-// multi-part name as a catalog (three-level engines). Two-level engines keep the
-// legacy split where everything after the first dot is the table name.
-func catalogAware(dest destination.Destination) bool {
-	return dest != nil && tablename.SchemeSupportsCatalog(dest.GetScheme())
-}
-
-func GenerateStagingTableName(targetTable, suffix, stagingDataset string, catalogAware bool) string {
-	catalog, originSchema, tableName := splitTargetName(targetTable, catalogAware)
+func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string {
+	catalog, originSchema, tableName := splitCatalogSchemaTable(targetTable)
 
 	stagingSchema := stagingDataset
 	if stagingSchema == "" {
@@ -41,9 +34,9 @@ func GenerateStagingTableName(targetTable, suffix, stagingDataset string, catalo
 	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix))
 }
 
-func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy, catalogAware bool) string {
+func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy) string {
 	policy = normaliseReplaceStagingPolicy(policy)
-	catalog, targetSchema, tableName := splitTargetName(targetTable, catalogAware)
+	catalog, targetSchema, tableName := splitCatalogSchemaTable(targetTable)
 
 	stagingSchema := stagingDataset
 	if stagingSchema == "" {
@@ -84,23 +77,6 @@ func normaliseReplaceStagingPolicy(policy destination.ReplaceStagingPolicy) dest
 		policy.DefaultManagedSchema = DefaultStagingSchema
 	}
 	return policy
-}
-
-// splitTargetName splits a target table into (catalog, schema, table). For a
-// two-level destination (catalogAware == false) the legacy behavior is kept:
-// the first component is the schema and everything after the first dot is the
-// table name (so multi-table CDC names like "destschema.sourceschema.table"
-// stay intact and the catalog is always empty). For a three-level destination
-// the leading component is the catalog.
-func splitTargetName(table string, catalogAware bool) (catalog, schema, tableName string) {
-	if catalogAware {
-		return splitCatalogSchemaTable(table)
-	}
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return "", parts[0], parts[1]
-	}
-	return "", "", table
 }
 
 // splitCatalogSchemaTable splits a possibly catalog-qualified table name into
@@ -153,22 +129,9 @@ func buildStagingTableName(stagingSchema, embeddedName, suffix string) string {
 }
 
 // GenerateNormalisedStagingTableName returns a transient table name in the
-// TARGET table's own schema (not the staging schema).
-func GenerateNormalisedStagingTableName(targetTable, stagingDataset string, catalogAware bool) string {
-	staged := GenerateStagingTableName(targetTable, "staging_normalised", stagingDataset, catalogAware)
-	if !catalogAware {
-		// Legacy two-level behavior: take everything after the first dot as the
-		// (possibly dotted) table name, re-qualified in the target's schema.
-		name := staged
-		if i := strings.Index(staged, "."); i >= 0 {
-			name = staged[i+1:]
-		}
-		if parts := strings.SplitN(targetTable, ".", 2); len(parts) == 2 {
-			return parts[0] + "." + name
-		}
-		return name
-	}
-
+// TARGET table's own catalog/schema (not the staging schema).
+func GenerateNormalisedStagingTableName(targetTable, stagingDataset string) string {
+	staged := GenerateStagingTableName(targetTable, "staging_normalised", stagingDataset)
 	stagedParts := tablename.Split(staged)
 	bare := stagedParts[len(stagedParts)-1]
 	// Re-qualify the transient table in the target's own catalog/schema.

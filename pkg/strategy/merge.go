@@ -98,7 +98,7 @@ func (s *MergeStrategy) RequiresIncrementalKey() bool {
 
 func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// Generate staging table name
-	stagingTable := GenerateStagingTableName(job.Config.DestTable, "merge", job.Config.StagingDataset, catalogAware(job.Destination))
+	stagingTable := GenerateStagingTableName(job.Config.DestTable, "merge", job.Config.StagingDataset)
 	fmt.Printf("[MERGE] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 	isCDC := hasCDCColumns(job.Schema)
 	if isCDC {
@@ -214,7 +214,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			defer wg.Done()
 
 			destTable := job.GetDestTableName(ti.Name)
-			stagingTable := GenerateStagingTableName(destTable, "merge", job.Config.StagingDataset, catalogAware(job.Destination))
+			stagingTable := GenerateStagingTableName(destTable, "merge", job.Config.StagingDataset)
 
 			if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
 				errChan <- fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)

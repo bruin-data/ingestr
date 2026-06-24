@@ -17,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -73,6 +74,9 @@ func (d *CrateDBDestination) Close(ctx context.Context) error {
 }
 
 func (d *CrateDBDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if err := tablename.TwoLevel("cratedb").CheckName(opts.Table); err != nil {
+		return err
+	}
 	if opts.Schema == nil {
 		return fmt.Errorf("schema is required")
 	}

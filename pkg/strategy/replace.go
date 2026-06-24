@@ -146,7 +146,7 @@ func intersects(left, right []string) bool {
 // schema (so the swap is a same-schema atomic rename rather than a second
 // recreate+copy). Staging tables are cleaned up on error.
 func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTable, targetTable, stagingDataset, incrementalKey string, tableSchema *schema.TableSchema, primaryKeys []string, partitionBy string, clusterBy []string) (string, error) {
-	normalised := GenerateNormalisedStagingTableName(targetTable, stagingDataset, catalogAware(dest))
+	normalised := GenerateNormalisedStagingTableName(targetTable, stagingDataset)
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        normalised,
 		Schema:       tableSchema,
@@ -188,7 +188,7 @@ func replaceStagingTableName(dest destination.Destination, targetTable, stagingD
 	if provider, ok := dest.(destination.ReplaceStagingPolicyProvider); ok {
 		policy = provider.ReplaceStagingPolicy()
 	}
-	return GenerateReplaceStagingTableName(targetTable, "staging", stagingDataset, policy, catalogAware(dest))
+	return GenerateReplaceStagingTableName(targetTable, "staging", stagingDataset, policy)
 }
 
 func (s *ReplaceStrategy) Name() config.IncrementalStrategy {

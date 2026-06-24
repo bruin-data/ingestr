@@ -39,7 +39,7 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 	processTimestamp := time.Now().UTC()
 
 	// Generate staging table name
-	stagingTable := GenerateStagingTableName(job.Config.DestTable, "scd2", job.Config.StagingDataset, catalogAware(job.Destination))
+	stagingTable := GenerateStagingTableName(job.Config.DestTable, "scd2", job.Config.StagingDataset)
 	fmt.Printf("[SCD2] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 	config.Debug("[SCD2] Using process timestamp: %s", processTimestamp.Format(time.RFC3339Nano))
 

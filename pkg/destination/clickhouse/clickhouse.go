@@ -21,6 +21,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/shopspring/decimal"
 )
 
@@ -73,6 +74,9 @@ func (d *ClickHouseDestination) Close(ctx context.Context) error {
 }
 
 func (d *ClickHouseDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if err := tablename.TwoLevel("clickhouse").CheckName(opts.Table); err != nil {
+		return err
+	}
 	if opts.Schema == nil {
 		return fmt.Errorf("schema is required")
 	}

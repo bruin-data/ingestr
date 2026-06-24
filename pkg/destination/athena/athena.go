@@ -17,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
 type AthenaDestination struct {
@@ -117,6 +118,9 @@ func (d *AthenaDestination) Close(ctx context.Context) error {
 }
 
 func (d *AthenaDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if err := tablename.TwoLevel("athena").CheckName(opts.Table); err != nil {
+		return err
+	}
 	if opts.Schema == nil {
 		return errors.New("schema is required")
 	}

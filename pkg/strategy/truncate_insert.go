@@ -130,7 +130,7 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 	}
 
 	targetTable := job.Config.DestTable
-	stagingTable := GenerateStagingTableName(targetTable, "ti", job.Config.StagingDataset, catalogAware(job.Destination))
+	stagingTable := GenerateStagingTableName(targetTable, "ti", job.Config.StagingDataset)
 	fmt.Printf("[TRUNCATE+INSERT] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{

@@ -1,24 +1,7 @@
 package tablename
 
-import "strings"
-
 // Per-platform capabilities. Values mirror Bruin CLI's pkg/tablename
 // (bruin-data/bruin#2231) so the two tools agree on what each platform accepts.
-
-// SchemeSupportsCatalog reports whether a destination scheme treats the leading
-// component of a multi-part table name as a catalog/database/project (three-part
-// naming) rather than as part of a dotted table name. It gates catalog-aware
-// staging-name generation so two-level engines (Postgres, MySQL, …) keep their
-// legacy behavior — important for multi-table CDC, where a destination name like
-// "destschema.sourceschema.table" must be read as schema + dotted table.
-func SchemeSupportsCatalog(scheme string) bool {
-	switch strings.ToLower(scheme) {
-	case "snowflake", "bigquery", "databricks", "trino", "duckdb", "ducklake", "motherduck", "md", "mssql", "sqlserver", "maxcompute":
-		return true
-	default:
-		return false
-	}
-}
 
 // TwoLevel returns the capability for a platform that supports at most
 // schema.table (most relational engines: Postgres, MySQL, etc.). A bare table
