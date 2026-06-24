@@ -21,6 +21,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -215,7 +216,7 @@ func (d *PostgresDestination) Write(ctx context.Context, records <-chan source.R
 		// Use CopyFromSlice for streaming conversion without materializing all rows
 		// Pre-allocate row buffer and reuse it for each row to reduce allocations
 		tableIdent := parseTableIdentifier(opts.Table)
-		getters := postgresValueGetters(record)
+		getters := postgresValueGetters(record, opts.Schema)
 		rowBuf := make([]any, numCols)
 		copyCount, err := d.pool.CopyFrom(
 			ctx,
@@ -301,7 +302,7 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 				// Use CopyFromSlice for streaming conversion
 				// Pre-allocate row buffer and reuse it for each row
 				tableIdent := parseTableIdentifier(opts.Table)
-				getters := postgresValueGetters(record)
+				getters := postgresValueGetters(record, opts.Schema)
 				rowBuf := make([]any, numCols)
 				copyCount, err := d.pool.CopyFrom(
 					ctx,
@@ -351,15 +352,20 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 	return nil
 }
 
-func postgresValueGetters(record arrow.RecordBatch) []func(int) any {
+func postgresValueGetters(record arrow.RecordBatch, tableSchema *schema.TableSchema) []func(int) any {
+	columnTypes := postgresColumnTypesByName(tableSchema)
 	getters := make([]func(int) any, int(record.NumCols()))
 	for i := range getters {
-		getters[i] = postgresValueGetter(record.Column(i))
+		getters[i] = postgresValueGetterForType(record.Column(i), columnTypes[record.ColumnName(i)])
 	}
 	return getters
 }
 
 func postgresValueGetter(col arrow.Array) func(int) any {
+	return postgresValueGetterForType(col, schema.TypeUnknown)
+}
+
+func postgresValueGetterForType(col arrow.Array, dataType schema.DataType) func(int) any {
 	switch a := col.(type) {
 	case *array.Boolean:
 		return func(i int) any {
@@ -411,6 +417,14 @@ func postgresValueGetter(col arrow.Array) func(int) any {
 			return a.Value(i)
 		}
 	case *array.String:
+		if dataType == schema.TypeUUID {
+			return func(i int) any {
+				if a.IsNull(i) {
+					return nil
+				}
+				return postgresUUIDValue(a.Value(i))
+			}
+		}
 		return func(i int) any {
 			if a.IsNull(i) {
 				return nil
@@ -418,6 +432,14 @@ func postgresValueGetter(col arrow.Array) func(int) any {
 			return a.Value(i)
 		}
 	case *array.LargeString:
+		if dataType == schema.TypeUUID {
+			return func(i int) any {
+				if a.IsNull(i) {
+					return nil
+				}
+				return postgresUUIDValue(a.Value(i))
+			}
+		}
 		return func(i int) any {
 			if a.IsNull(i) {
 				return nil
@@ -492,12 +514,31 @@ func postgresValueGetter(col arrow.Array) func(int) any {
 			return a.Value(i).ToTime(arrow.Microsecond)
 		}
 	case array.ExtensionArray:
-		return postgresValueGetter(a.Storage())
+		return postgresValueGetterForType(a.Storage(), dataType)
 	default:
 		return func(i int) any {
 			return arrowutil.Value(col, i)
 		}
 	}
+}
+
+func postgresColumnTypesByName(tableSchema *schema.TableSchema) map[string]schema.DataType {
+	if tableSchema == nil {
+		return nil
+	}
+	types := make(map[string]schema.DataType, len(tableSchema.Columns))
+	for _, col := range tableSchema.Columns {
+		types[col.Name] = col.DataType
+	}
+	return types
+}
+
+func postgresUUIDValue(value string) any {
+	var uuid pgtype.UUID
+	if err := uuid.Scan(value); err != nil {
+		return value
+	}
+	return uuid
 }
 
 func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {

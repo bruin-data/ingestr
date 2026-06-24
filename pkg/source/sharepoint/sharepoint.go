@@ -17,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablespec"
 )
 
 // Metadata columns emitted on every row.
@@ -264,24 +265,56 @@ func parseURI(uri string) (connConfig, error) {
 	return cfg, nil
 }
 
-// parseTableSpec parses a source-table string of the form
+// sharepointParams is the URL-style query-parameter form of the source table; its
+// fields are the single source of truth for which parameters are accepted, and
+// tablespec.Parse populates it (a typo errors rather than being silently dropped).
+// sheet/sheets/date_cols accept a repeated key or a "|"-joined value.
+type sharepointParams struct {
+	Sheet     []string `mapstructure:"sheet"`
+	Sheets    []string `mapstructure:"sheets"`
+	Skip      int      `mapstructure:"skip"`
+	Encoding  string   `mapstructure:"encoding"`
+	Sep       string   `mapstructure:"sep"`
+	Format    string   `mapstructure:"format"`
+	Raw       bool     `mapstructure:"raw"`
+	Formatted bool     `mapstructure:"formatted"`
+	DropEmpty bool     `mapstructure:"drop_empty"`
+	DateCols  []string `mapstructure:"date_cols"`
+}
+
+// parseTableSpec parses a source-table string in one of two forms:
 //
-//	<path>#<format>,<key>=<val>,...
+//	<path>?<key>=<val>&...           (URL-style query parameters; preferred)
+//	<path>#<format>,<key>=<val>,...  (legacy comma-separated hints)
 //
 // The path is literal (may contain spaces and "&") and may include glob
-// wildcards (* ? [ ] {}). The string is split on the LAST "#" only when the
-// suffix parses as a hint list; otherwise the whole string is the path. Use
-// "%23" to embed a literal "#" in the path.
+// wildcards (* ? [ ] {}). The query form is selected only when the text after the
+// last "?" looks like a parameter block, so a "?" used as a glob wildcard (e.g.
+// "Reports/q?.xlsx") stays part of the path; otherwise the legacy form applies and
+// the string is split on the LAST "#" only when the suffix parses as a hint list.
+// Use "%23" to embed a literal "#" in the path, and percent-encode any literal "?"
+// that must sit in the path alongside query parameters.
 func parseTableSpec(name string) (tableSpec, error) {
 	spec := tableSpec{}
-	path := name
 
-	if idx := strings.LastIndex(name, "#"); idx != -1 {
-		suffix := name[idx+1:]
-		if looksLikeHints(suffix) {
-			path = name[:idx]
-			if err := applyHints(&spec, suffix); err != nil {
-				return tableSpec{}, err
+	var p sharepointParams
+	path, hasParams, err := tablespec.Parse(name, &p, tablespec.WithListSeparator("|"))
+	if err != nil {
+		return tableSpec{}, err
+	}
+	if hasParams {
+		if err := applyParams(&spec, p); err != nil {
+			return tableSpec{}, err
+		}
+	} else {
+		path = name
+		if idx := strings.LastIndex(name, "#"); idx != -1 {
+			suffix := name[idx+1:]
+			if looksLikeHints(suffix) {
+				path = name[:idx]
+				if err := applyHints(&spec, suffix); err != nil {
+					return tableSpec{}, err
+				}
 			}
 		}
 	}
@@ -389,6 +422,34 @@ func applyHints(spec *tableSpec, s string) error {
 			spec.dropEmpty = true
 		}
 	}
+	return nil
+}
+
+// applyParams maps the decoded query parameters onto spec. sheet and sheets both
+// contribute to the sheet set (sheet first); raw inverts formatted, matching the
+// legacy hint semantics. Type coercion, list splitting, bare-flag booleans, and
+// unknown-key rejection are handled by tablespec.Decode.
+func applyParams(spec *tableSpec, p sharepointParams) error {
+	var sheets []string
+	sheets = append(sheets, p.Sheet...)
+	sheets = append(sheets, p.Sheets...)
+	spec.sheets = sheets
+	spec.dateCols = p.DateCols
+
+	if p.Skip < 0 {
+		return fmt.Errorf("invalid skip parameter %d: must be a non-negative integer", p.Skip)
+	}
+	spec.skip = p.Skip
+	spec.encoding = strings.TrimSpace(p.Encoding)
+	spec.sep = p.Sep
+	if p.Format != "" {
+		spec.format = parseFormat(p.Format)
+	}
+	spec.formatted = p.Formatted
+	if p.Raw {
+		spec.formatted = false
+	}
+	spec.dropEmpty = p.DropEmpty
 	return nil
 }
 
