@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,20 +64,29 @@ func TestGitLabReadProjectsUsesAuthAndPagination(t *testing.T) {
 	require.Equal(t, "2", fmt.Sprint(decodeUnknown(t, records[1], "id", 0)))
 }
 
-func TestGitLabIssuesFetchesBothScopes(t *testing.T) {
-	var scopes []string
-	var filterQuery url.Values
+func TestGitLabIssuesFanOutPerProject(t *testing.T) {
+	var mu sync.Mutex
+	issueFilterQueries := map[string]url.Values{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/issues", r.URL.Path)
-		scope := r.URL.Query().Get("scope")
-		scopes = append(scopes, scope)
 		w.Header().Set("X-Next-Page", "")
-		if scope == "created_by_me" {
-			filterQuery = r.URL.Query()
-			_, _ = fmt.Fprint(w, `[{"id":10,"iid":1,"project_id":1,"title":"Bug","description":"**markdown**","labels":["bug","p1"],"assignees":[{"id":5,"username":"dev"}],"updated_at":"2026-06-01T00:00:00Z"}]`)
-			return
+		switch r.URL.Path {
+		case "/projects":
+			// project discovery: membership=true, two projects
+			require.Equal(t, "true", r.URL.Query().Get("membership"))
+			_, _ = fmt.Fprint(w, `[{"id":1,"name":"a"},{"id":2,"name":"b"}]`)
+		case "/projects/1/issues":
+			mu.Lock()
+			issueFilterQueries["1"] = r.URL.Query()
+			mu.Unlock()
+			_, _ = fmt.Fprint(w, `[{"id":10,"iid":1,"project_id":1,"title":"Bug","labels":["bug"],"assignees":[{"id":5}],"updated_at":"2026-06-01T00:00:00Z"}]`)
+		case "/projects/2/issues":
+			mu.Lock()
+			issueFilterQueries["2"] = r.URL.Query()
+			mu.Unlock()
+			_, _ = fmt.Fprint(w, `[{"id":20,"iid":1,"project_id":2,"title":"Feature","updated_at":"2026-06-02T00:00:00Z"}]`)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
 		}
-		_, _ = fmt.Fprint(w, `[]`)
 	}))
 	defer server.Close()
 
@@ -93,15 +103,72 @@ func TestGitLabIssuesFetchesBothScopes(t *testing.T) {
 	end := mustTime(t, "2026-06-15T00:00:00Z")
 	results, err := table.Read(context.Background(), source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
 	require.NoError(t, err)
-	record := drainOne(t, results)
 
-	require.EqualValues(t, 1, record.NumRows())
-	require.Equal(t, []string{"created_by_me", "assigned_to_me"}, scopes)
-	require.Equal(t, "2026-05-01T00:00:00Z", filterQuery.Get("updated_after"))
-	require.Equal(t, "2026-06-15T00:00:00Z", filterQuery.Get("updated_before"))
-	require.Equal(t, "updated_at", filterQuery.Get("order_by"))
-	require.Subset(t, columnNames(record), []string{"id", "iid", "labels", "assignees"})
-	require.Equal(t, "10", fmt.Sprint(decodeUnknown(t, record, "id", 0)))
+	// One batch per project (fan-out); collect ids across batches.
+	var ids []string
+	for result := range results {
+		require.NoError(t, result.Err)
+		if result.Batch == nil {
+			continue
+		}
+		for i := 0; i < int(result.Batch.NumRows()); i++ {
+			ids = append(ids, fmt.Sprint(decodeUnknown(t, result.Batch, "id", i)))
+		}
+		result.Batch.Release()
+	}
+	require.ElementsMatch(t, []string{"10", "20"}, ids)
+
+	// Each per-project request carried the interval + ordering, and no global scope.
+	require.Len(t, issueFilterQueries, 2)
+	for _, q := range issueFilterQueries {
+		require.Equal(t, "2026-05-01T00:00:00Z", q.Get("updated_after"))
+		require.Equal(t, "2026-06-15T00:00:00Z", q.Get("updated_before"))
+		require.Equal(t, "updated_at", q.Get("order_by"))
+		require.Empty(t, q.Get("scope"))
+	}
+}
+
+func TestGitLabFanOutSkipsInaccessibleProjects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Next-Page", "")
+		switch r.URL.Path {
+		case "/projects":
+			_, _ = fmt.Fprint(w, `[{"id":1},{"id":2},{"id":3}]`)
+		case "/projects/1/issues":
+			_, _ = fmt.Fprint(w, `[{"id":10,"updated_at":"2026-06-01T00:00:00Z"}]`)
+		case "/projects/2/issues":
+			// issues disabled for this project
+			http.Error(w, `{"message":"404 Not Found"}`, http.StatusNotFound)
+		case "/projects/3/issues":
+			// token lacks issue-read access for this project
+			http.Error(w, `{"message":"403 Forbidden"}`, http.StatusForbidden)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	src := NewGitLabSource()
+	require.NoError(t, src.Connect(context.Background(), "gitlab://?access_token=test-token&base_url="+url.QueryEscape(server.URL)))
+
+	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "issues"})
+	require.NoError(t, err)
+
+	results, err := table.Read(context.Background(), source.ReadOptions{})
+	require.NoError(t, err)
+
+	var ids []string
+	for result := range results {
+		require.NoError(t, result.Err) // 404/403 projects are skipped, not fatal
+		if result.Batch == nil {
+			continue
+		}
+		for i := 0; i < int(result.Batch.NumRows()); i++ {
+			ids = append(ids, fmt.Sprint(decodeUnknown(t, result.Batch, "id", i)))
+		}
+		result.Batch.Release()
+	}
+	require.ElementsMatch(t, []string{"10"}, ids)
 }
 
 func TestGitLabReadRespectsExcludeColumns(t *testing.T) {
