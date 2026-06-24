@@ -110,6 +110,11 @@ dependencies:
       licenses:
         - BSD-3-Clause
       status: allowed
+    - module: github.com/AthenZ/athenz
+      version: v1.12.13
+      licenses:
+        - Apache-2.0
+      status: allowed
     - module: github.com/Azure/azure-sdk-for-go/sdk/azcore
       version: v1.21.1
       licenses:
@@ -155,6 +160,11 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
+    - module: github.com/DataDog/zstd
+      version: v1.5.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
     - module: github.com/GoogleCloudPlatform/grpc-gcp-go/grpcgcp
       version: v1.5.3
       licenses:
@@ -194,6 +204,11 @@ dependencies:
       version: v3.3.0
       licenses:
         - MIT
+      status: allowed
+    - module: github.com/RoaringBitmap/roaring/v2
+      version: v2.8.0
+      licenses:
+        - Apache-2.0
       status: allowed
     - module: github.com/SAP/go-hdb
       version: v1.16.2
@@ -250,6 +265,11 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
+    - module: github.com/apache/pulsar-client-go
+      version: v0.20.0
+      licenses:
+        - Apache-2.0
+      status: allowed
     - module: github.com/apache/thrift
       version: v0.23.0
       licenses:
@@ -264,6 +284,11 @@ dependencies:
       version: v0.0.0-20210429162001-6b43995a97de
       licenses:
         - MIT
+      status: allowed
+    - module: github.com/ardielle/ardielle-go
+      version: v1.5.2
+      licenses:
+        - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-msk-iam-sasl-signer-go
       version: v1.0.4
@@ -412,6 +437,16 @@ dependencies:
       licenses:
         - MIT
       status: allowed
+    - module: github.com/beorn7/perks
+      version: v1.0.1
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/bits-and-blooms/bitset
+      version: v1.12.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
     - module: github.com/bmatcuk/doublestar/v4
       version: v4.9.2
       licenses:
@@ -552,6 +587,11 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
+    - module: github.com/emirpasic/gods
+      version: v1.18.1
+      licenses:
+        - BSD-2-Clause
+      status: allowed
     - module: github.com/envoyproxy/go-control-plane/envoy
       version: v1.36.0
       licenses:
@@ -569,6 +609,11 @@ dependencies:
       status: allowed
     - module: github.com/felixge/httpsnoop
       version: v1.0.4
+      licenses:
+        - MIT
+      status: allowed
+    - module: github.com/fxamacker/cbor/v2
+      version: v2.7.0
       licenses:
         - MIT
       status: allowed
@@ -638,6 +683,11 @@ dependencies:
       licenses:
         - MIT
       status: allowed
+    - module: github.com/gogo/protobuf
+      version: v1.3.2
+      licenses:
+        - BSD-3-Clause
+      status: allowed
     - module: github.com/golang-jwt/jwt/v5
       version: v5.3.1
       licenses:
@@ -673,8 +723,18 @@ dependencies:
       licenses:
         - BSD-3-Clause
       status: allowed
+    - module: github.com/google/gofuzz
+      version: v1.2.0
+      licenses:
+        - Apache-2.0
+      status: allowed
     - module: github.com/google/s2a-go
       version: v0.1.9
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/google/shlex
+      version: v0.0.0-20191202100458-e7afc7fbc510
       licenses:
         - Apache-2.0
       status: allowed
@@ -916,6 +976,26 @@ dependencies:
       licenses:
         - MIT
       status: allowed
+    - module: github.com/munnerz/goautoneg
+      version: v0.0.0-20191010083416-a7dc8b61c822
+      licenses:
+        - BSD-3-Clause
+      status: allowed
+    - module: github.com/nats-io/nats.go
+      version: v1.52.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/nats-io/nkeys
+      version: v0.4.15
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/nats-io/nuid
+      version: v1.0.1
+      licenses:
+        - Apache-2.0
+      status: allowed
     - module: github.com/oapi-codegen/runtime
       version: v1.0.0
       licenses:
@@ -1006,8 +1086,33 @@ dependencies:
       licenses:
         - BSD-3-Clause
       status: allowed
+    - module: github.com/prometheus/client_golang
+      version: v1.20.5
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/prometheus/client_model
+      version: v0.6.2
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/prometheus/common
+      version: v0.55.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/prometheus/procfs
+      version: v0.15.1
+      licenses:
+        - Apache-2.0
+      status: allowed
     - module: github.com/rabbitmq/amqp091-go
       version: v1.10.0
+      licenses:
+        - BSD-2-Clause
+      status: allowed
+    - module: github.com/redis/go-redis/v9
+      version: v9.21.0
       licenses:
         - BSD-2-Clause
       status: allowed
@@ -1081,6 +1186,11 @@ dependencies:
       licenses:
         - MIT
       status: allowed
+    - module: github.com/spaolacci/murmur3
+      version: v1.1.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
     - module: github.com/spiffe/go-spiffe/v2
       version: v2.6.0
       licenses:
@@ -1126,6 +1236,11 @@ dependencies:
       licenses:
         - MIT
       status: allowed
+    - module: github.com/x448/float16
+      version: v0.8.4
+      licenses:
+        - MIT
+      status: allowed
     - module: github.com/xdg-go/pbkdf2
       version: v1.0.0
       licenses:
@@ -1162,7 +1277,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/zeebo/xxh3
-      version: v1.0.2
+      version: v1.1.0
       licenses:
         - BSD-2-Clause
       status: allowed
@@ -1351,6 +1466,28 @@ dependencies:
       licenses:
         - MIT
       status: allowed
+    - module: k8s.io/apimachinery
+      version: v0.32.3
+      licenses:
+        - Apache-2.0
+        - BSD-3-Clause
+      status: allowed
+    - module: k8s.io/client-go
+      version: v0.32.3
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: k8s.io/klog/v2
+      version: v2.130.1
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: k8s.io/utils
+      version: v0.0.0-20250321185631-1f6e0b77f77e
+      licenses:
+        - Apache-2.0
+        - BSD-3-Clause
+      status: allowed
     - module: modernc.org/libc
       version: v1.66.10
       licenses:
@@ -1370,4 +1507,19 @@ dependencies:
       version: v3.0.0-beta.5
       licenses:
         - MIT
+      status: allowed
+    - module: sigs.k8s.io/json
+      version: v0.0.0-20241010143419-9aa6b5e7a4b3
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: sigs.k8s.io/structured-merge-diff/v4
+      version: v4.4.2
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: sigs.k8s.io/yaml
+      version: v1.4.0
+      licenses:
+        - Apache-2.0
       status: allowed
