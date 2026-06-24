@@ -48,7 +48,7 @@ GitLab source allows ingesting the following resources into separate tables:
 | ---------------- | ---- | ------------ | ------------ | --------------------------------------------------------------------------------------------- |
 | `projects`       | `id` | `updated_at` | merge        | Projects the token is a member of (`membership=true`). Scoped to the run interval via `updated_after`/`updated_before`. |
 | `groups`         | `id` | –            | replace      | Groups the token is a member of. Full reload on each run.                                      |
-| `users`          | `id` | –            | replace      | Users visible to the token. Full reload on each run. **See the note below before using on gitlab.com.** |
+| `users`          | `id` | –            | merge        | Users across the projects the token is a member of (`/projects/:id/users`). Deduplicated on `id`. |
 | `issues`         | `id` | `updated_at` | merge        | All issues across the projects the token is a member of. Scoped to the run interval via `updated_after`/`updated_before`. |
 | `merge_requests` | `id` | `updated_at` | merge        | All merge requests across the projects the token is a member of. Scoped to the run interval via `updated_after`/`updated_before`. |
 
@@ -56,7 +56,7 @@ Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
 > **Note**: GitLab objects carry both a global `id` and a project-scoped `iid`. ingestr keys on the global `id`. Nested fields such as `labels`, `assignees`, and `references` are preserved as JSON, and `description` fields remain Markdown strings.
 
-> **Warning — `users` on gitlab.com**: a regular token has no personal scoping on the `/users` endpoint, so on `gitlab.com` it returns the *entire public user directory* and the connector will page through all of it. This table is intended for **self-managed / Dedicated** instances with an **admin** token, where `/users` returns that instance's own user list.
+> **Note**: `users`, `issues`, and `merge_requests` first list the projects the token is a member of, then fan out per project (e.g. `/projects/:id/users`). Projects with the feature disabled (404) or restricted (403) are skipped rather than failing the run.
 
 ### Incremental loads
 
