@@ -25,7 +25,8 @@ import (
 
 const (
 	maxListPageSize = 100 // campaigns, canvases, segments, products: groups of 100
-	maxKPILength    = 100 // kpi data_series: length must be between 1 and 100 days
+	maxSeriesLength = 100 // most data_series endpoints: length must be 1..100 days
+	maxCanvasLength = 14  // canvas/data_series caps length at 14 days
 	maxListPages    = 10000
 
 	// Braze's default pool (list + data_series endpoints) is 250,000 requests/hour.
@@ -48,7 +49,9 @@ const (
 
 var supportedTables = []string{
 	"campaigns",
+	"campaign_series",
 	"canvases",
+	"canvas_series",
 	"segments",
 	"segment_series",
 	"events",
@@ -219,10 +222,10 @@ func (s *BrazeSource) GetTable(ctx context.Context, req source.TableRequest) (so
 		if len(params) == 0 {
 			return nil, fmt.Errorf("user_data requires at least one segment id, e.g. user_data:<segment_id>[,<segment_id>]")
 		}
-	case isKPITable(base) || base == "event_series" || base == "segment_series":
-		// optional param: app_id (kpi), event-name (event_series), segment-id (segment_series) filter
+	case isKPITable(base) || isSeriesTable(base):
+		// optional param: app_id (kpi) or the dimension id/name to filter the series by
 	case len(params) > 0:
-		return nil, fmt.Errorf("the :param suffix is only supported for kpi_*, user_data, event_series, and segment_series tables, not %q", base)
+		return nil, fmt.Errorf("the :param suffix is only supported for kpi_*, user_data, and *_series tables, not %q", base)
 	}
 
 	primaryKeys, incrementalKey, strategy := tableMetadata(base)
@@ -271,6 +274,12 @@ func tableMetadata(table string) ([]string, string, config.IncrementalStrategy) 
 	case "segment_series":
 		// daily size series per segment; segment_id is part of the key
 		return []string{"time", "segment_id"}, "time", config.StrategyMerge
+	case "campaign_series":
+		// daily stats series per campaign; campaign_id is part of the key
+		return []string{"time", "campaign_id"}, "time", config.StrategyMerge
+	case "canvas_series":
+		// daily stats series per canvas; canvas_id is part of the key
+		return []string{"time", "canvas_id"}, "time", config.StrategyMerge
 	case "sessions", "purchase_quantity", "purchase_revenue":
 		// daily aggregate series keyed on date
 		return []string{"time"}, "time", config.StrategyMerge
@@ -315,12 +324,16 @@ func (s *BrazeSource) read(ctx context.Context, table string, params []string, o
 			err = s.readEventSeries(ctx, params, opts, results)
 		case "segment_series":
 			err = s.readSegmentSeries(ctx, params, opts, results)
+		case "campaign_series":
+			err = s.readCampaignSeries(ctx, params, opts, results)
+		case "canvas_series":
+			err = s.readCanvasSeries(ctx, params, opts, results)
 		case "sessions":
-			err = s.fetchSeries(ctx, "/sessions/data_series", nil, nil, opts, results)
+			err = s.fetchSeries(ctx, "/sessions/data_series", nil, nil, maxSeriesLength, opts, results)
 		case "purchase_quantity":
-			err = s.fetchSeries(ctx, "/purchases/quantity_series", nil, nil, opts, results)
+			err = s.fetchSeries(ctx, "/purchases/quantity_series", nil, nil, maxSeriesLength, opts, results)
 		case "purchase_revenue":
-			err = s.fetchSeries(ctx, "/purchases/revenue_series", nil, nil, opts, results)
+			err = s.fetchSeries(ctx, "/purchases/revenue_series", nil, nil, maxSeriesLength, opts, results)
 		default:
 			err = fmt.Errorf("unsupported table: %s", table)
 		}
@@ -351,6 +364,17 @@ func parseTableParam(name string) (string, []string) {
 func isKPITable(t string) bool {
 	switch t {
 	case "kpi_dau", "kpi_mau", "kpi_new_users", "kpi_uninstalls":
+		return true
+	default:
+		return false
+	}
+}
+
+// isSeriesTable reports whether a table fans out over a dimension (events,
+// segments, campaigns, canvases) and accepts an optional id/name filter.
+func isSeriesTable(t string) bool {
+	switch t {
+	case "event_series", "segment_series", "campaign_series", "canvas_series":
 		return true
 	default:
 		return false
@@ -742,10 +766,10 @@ func (s *BrazeSource) readProducts(ctx context.Context, opts source.ReadOptions,
 func (s *BrazeSource) readKPISeries(ctx context.Context, endpoint string, appIDs []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[BRAZE] reading %s (apps: %d)", endpoint, len(appIDs))
 	if len(appIDs) == 0 {
-		return s.fetchSeries(ctx, endpoint, nil, nil, opts, results)
+		return s.fetchSeries(ctx, endpoint, nil, nil, maxSeriesLength, opts, results)
 	}
 	for _, appID := range appIDs {
-		if err := s.fetchSeries(ctx, endpoint, map[string]string{"app_id": appID}, map[string]interface{}{"app_id": appID}, opts, results); err != nil {
+		if err := s.fetchSeries(ctx, endpoint, map[string]string{"app_id": appID}, map[string]interface{}{"app_id": appID}, maxSeriesLength, opts, results); err != nil {
 			return fmt.Errorf("%s for app_id %s: %w", endpoint, appID, err)
 		}
 	}
@@ -765,7 +789,7 @@ func (s *BrazeSource) readEventSeries(ctx context.Context, eventNames []string, 
 	}
 	config.Debug("[BRAZE] reading /events/data_series (events: %d)", len(eventNames))
 	for _, name := range eventNames {
-		if err := s.fetchSeries(ctx, "/events/data_series", map[string]string{"event": name}, map[string]interface{}{"event_name": name}, opts, results); err != nil {
+		if err := s.fetchSeries(ctx, "/events/data_series", map[string]string{"event": name}, map[string]interface{}{"event_name": name}, maxSeriesLength, opts, results); err != nil {
 			return fmt.Errorf("/events/data_series for event %s: %w", name, err)
 		}
 	}
@@ -784,48 +808,160 @@ func (s *BrazeSource) readSegmentSeries(ctx context.Context, segmentIDs []string
 	}
 	config.Debug("[BRAZE] reading /segments/data_series (segments: %d)", len(segmentIDs))
 	for _, id := range segmentIDs {
-		if err := s.fetchSeries(ctx, "/segments/data_series", map[string]string{"segment_id": id}, map[string]interface{}{"segment_id": id}, opts, results); err != nil {
+		if err := s.fetchSeries(ctx, "/segments/data_series", map[string]string{"segment_id": id}, map[string]interface{}{"segment_id": id}, maxSeriesLength, opts, results); err != nil {
 			return fmt.Errorf("/segments/data_series for segment %s: %w", id, err)
 		}
 	}
 	return nil
 }
 
-// listSegmentIDs pages through /segments/list and returns all segment ids.
 func (s *BrazeSource) listSegmentIDs(ctx context.Context) ([]string, error) {
+	return s.listObjectIDs(ctx, "/segments/list", "segments")
+}
+
+// listObjectIDs pages a list endpoint and returns the string ids of its objects.
+func (s *BrazeSource) listObjectIDs(ctx context.Context, endpoint, dataKey string) ([]string, error) {
 	var ids []string
 	for page := 0; page < maxListPages; page++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		resp, err := s.client.R(ctx).SetQueryParam("page", strconv.Itoa(page)).Get("/segments/list")
+		resp, err := s.client.R(ctx).SetQueryParam("page", strconv.Itoa(page)).Get(endpoint)
 		if err != nil {
-			return nil, fmt.Errorf("failed to list segments: %w", err)
+			return nil, fmt.Errorf("failed to list %s: %w", endpoint, err)
 		}
 		if !resp.IsSuccess() {
-			return nil, fmt.Errorf("/segments/list returned status %d: %s", resp.StatusCode(), resp.String())
+			return nil, fmt.Errorf("%s returned status %d: %s", endpoint, resp.StatusCode(), resp.String())
 		}
-		var body struct {
-			Segments []map[string]interface{} `json:"segments"`
-		}
+		var body map[string]interface{}
 		if err := decodeBody(resp.Body(), &body); err != nil {
-			return nil, fmt.Errorf("failed to parse /segments/list response: %w", err)
+			return nil, fmt.Errorf("failed to parse %s response: %w", endpoint, err)
 		}
-		if len(body.Segments) == 0 {
+		raw, _ := body[dataKey].([]interface{})
+		if len(raw) == 0 {
 			break
 		}
-		for _, seg := range body.Segments {
-			if id, ok := seg["id"].(string); ok {
+		for _, r := range raw {
+			obj := asMap(r)
+			if id, ok := obj["id"].(string); ok {
 				ids = append(ids, id)
 			} else {
-				config.Debug("[BRAZE] skipping segment with non-string id: %v", seg["id"])
+				config.Debug("[BRAZE] skipping %s object with non-string id: %v", dataKey, obj["id"])
 			}
 		}
-		if len(body.Segments) < maxListPageSize {
+		if len(raw) < maxListPageSize {
 			break
 		}
 	}
 	return ids, nil
+}
+
+// readCampaignSeries fetches the daily stats series for campaigns, tagging each
+// row with its campaign_id. With no ids it fetches all campaigns; ids act as a filter.
+func (s *BrazeSource) readCampaignSeries(ctx context.Context, ids []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if len(ids) == 0 {
+		all, err := s.listObjectIDs(ctx, "/campaigns/list", "campaigns")
+		if err != nil {
+			return err
+		}
+		ids = all
+	}
+	config.Debug("[BRAZE] reading /campaigns/data_series (campaigns: %d)", len(ids))
+	for _, id := range ids {
+		params := map[string]string{"campaign_id": id}
+		tag := map[string]interface{}{"campaign_id": id}
+		if err := s.fetchSeries(ctx, "/campaigns/data_series", params, tag, maxSeriesLength, opts, results); err != nil {
+			return fmt.Errorf("/campaigns/data_series for campaign %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// readCanvasSeries fetches the daily stats series for canvases, tagging each row
+// with its canvas_id. With no ids it fetches all canvases; ids act as a filter.
+func (s *BrazeSource) readCanvasSeries(ctx context.Context, ids []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if len(ids) == 0 {
+		all, err := s.listObjectIDs(ctx, "/canvas/list", "canvases")
+		if err != nil {
+			return err
+		}
+		ids = all
+	}
+	config.Debug("[BRAZE] reading /canvas/data_series (canvases: %d)", len(ids))
+	for _, id := range ids {
+		if err := s.fetchCanvasSeries(ctx, id, opts, results); err != nil {
+			return fmt.Errorf("/canvas/data_series for canvas %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// fetchCanvasSeries walks /canvas/data_series in <=14-day windows. Its response
+// nests rows under data.stats with metrics in total_stats, which we flatten and
+// tag with canvas_id and canvas_name.
+func (s *BrazeSource) fetchCanvasSeries(ctx context.Context, canvasID string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	end := time.Now().UTC()
+	if opts.IntervalEnd != nil {
+		end = opts.IntervalEnd.UTC()
+	}
+	var start *time.Time
+	if opts.IntervalStart != nil {
+		st := opts.IntervalStart.UTC()
+		start = &st
+	}
+
+	for _, w := range planSeriesWindows(start, end, maxCanvasLength) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		resp, err := s.client.R(ctx).
+			SetQueryParam("canvas_id", canvasID).
+			SetQueryParam("length", strconv.Itoa(w.length)).
+			SetQueryParam("ending_at", w.endingAt.Format(brazeTimeLayout)).
+			Get("/canvas/data_series")
+		if err != nil {
+			return fmt.Errorf("failed to fetch /canvas/data_series: %w", err)
+		}
+		if !resp.IsSuccess() {
+			return fmt.Errorf("/canvas/data_series returned status %d: %s", resp.StatusCode(), resp.String())
+		}
+
+		var body struct {
+			Data struct {
+				Name  string                   `json:"name"`
+				Stats []map[string]interface{} `json:"stats"`
+			} `json:"data"`
+		}
+		if err := decodeBody(resp.Body(), &body); err != nil {
+			return fmt.Errorf("failed to parse /canvas/data_series response: %w", err)
+		}
+
+		rows := make([]map[string]interface{}, 0, len(body.Data.Stats))
+		for _, stat := range body.Data.Stats {
+			row := map[string]interface{}{"canvas_id": canvasID, "canvas_name": body.Data.Name}
+			if t, ok := stat["time"]; ok {
+				row["time"] = t
+			}
+			for k, v := range asMap(stat["total_stats"]) {
+				row[k] = v
+			}
+			rows = append(rows, row)
+		}
+
+		if len(rows) > 0 {
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert /canvas/data_series to Arrow: %w", err)
+			}
+			results <- source.RecordBatchResult{Batch: record}
+			config.Debug("[BRAZE] /canvas/data_series window ending %s: sent %d", w.endingAt.Format(brazeTimeLayout), len(rows))
+		}
+	}
+
+	return nil
 }
 
 // listEventNames returns all custom event names from the /events catalog.
@@ -842,9 +978,9 @@ func (s *BrazeSource) listEventNames(ctx context.Context) ([]string, error) {
 	return names, err
 }
 
-// fetchSeries walks a /*/data_series endpoint in 100-day windows. params are
+// fetchSeries walks a /*/data_series endpoint in maxLen-day windows. params are
 // extra query params (e.g. app_id, event); tag columns are stamped onto each row.
-func (s *BrazeSource) fetchSeries(ctx context.Context, endpoint string, params map[string]string, tag map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *BrazeSource) fetchSeries(ctx context.Context, endpoint string, params map[string]string, tag map[string]interface{}, maxLen int, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	end := time.Now().UTC()
 	if opts.IntervalEnd != nil {
 		end = opts.IntervalEnd.UTC()
@@ -855,7 +991,7 @@ func (s *BrazeSource) fetchSeries(ctx context.Context, endpoint string, params m
 		start = &st
 	}
 
-	for _, w := range planKPIWindows(start, end) {
+	for _, w := range planSeriesWindows(start, end, maxLen) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -907,13 +1043,13 @@ type kpiWindow struct {
 	endingAt time.Time
 }
 
-// planKPIWindows splits [start, end] into <=100-day windows ending at successively
-// earlier dates. With start nil it returns a single 100-day window ending at end.
-func planKPIWindows(start *time.Time, end time.Time) []kpiWindow {
+// planSeriesWindows splits [start, end] into <=maxLen-day windows ending at
+// successively earlier dates. With start nil it returns a single maxLen window.
+func planSeriesWindows(start *time.Time, end time.Time, maxLen int) []kpiWindow {
 	var windows []kpiWindow
 	windowEnd := end
 	for {
-		length := maxKPILength
+		length := maxLen
 		if start != nil {
 			days := int(windowEnd.Sub(*start).Hours()/24) + 1
 			if days <= 0 {
