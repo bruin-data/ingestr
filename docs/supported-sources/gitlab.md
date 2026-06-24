@@ -46,18 +46,15 @@ GitLab source allows ingesting the following resources into separate tables:
 
 | Table            | PK   | Inc Key      | Inc Strategy | Details                                                                                       |
 | ---------------- | ---- | ------------ | ------------ | --------------------------------------------------------------------------------------------- |
-| `projects`       | `id` | `updated_at` | merge        | Projects the token is a member of (`membership=true`). Scoped to the run interval via `updated_after`/`updated_before`. |
+| `projects`       | `id` | `updated_at` | merge        | Projects the token is a member of. Scoped to the run interval via `updated_after`/`updated_before`. |
 | `groups`         | `id` | –            | replace      | Groups the token is a member of. Full reload on each run.                                      |
-| `users`          | `id` | –            | replace      | Users visible to the token. Full reload on each run. **See the note below before using on gitlab.com.** |
+| `users`          | `id` | –            | replace      | Users across the projects the token is a member of. Full reload on each run. |
 | `issues`         | `id` | `updated_at` | merge        | All issues across the projects the token is a member of. Scoped to the run interval via `updated_after`/`updated_before`. |
 | `merge_requests` | `id` | `updated_at` | merge        | All merge requests across the projects the token is a member of. Scoped to the run interval via `updated_after`/`updated_before`. |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
 > **Note**: GitLab objects carry both a global `id` and a project-scoped `iid`. ingestr keys on the global `id`. Nested fields such as `labels`, `assignees`, and `references` are preserved as JSON, and `description` fields remain Markdown strings.
-
-> **Warning — `users` on gitlab.com**: a regular token has no personal scoping on the `/users` endpoint, so on `gitlab.com` it returns the *entire public user directory* and the connector will page through all of it. This table is intended for **self-managed / Dedicated** instances with an **admin** token, where `/users` returns that instance's own user list.
-
 ### Incremental loads
 
 `projects`, `issues`, and `merge_requests` support incremental loading. Provide `--interval-start` (and optionally `--interval-end`) and ingestr pushes them to the GitLab API as `updated_after`/`updated_before`, fetching only records updated within the window and merging them on `id`.
