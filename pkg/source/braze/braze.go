@@ -370,8 +370,6 @@ func isKPITable(t string) bool {
 	}
 }
 
-// isSeriesTable reports whether a table fans out over a dimension (events,
-// segments, campaigns, canvases) and accepts an optional id/name filter.
 func isSeriesTable(t string) bool {
 	switch t {
 	case "event_series", "segment_series", "campaign_series", "canvas_series":
@@ -896,9 +894,8 @@ func (s *BrazeSource) readCanvasSeries(ctx context.Context, ids []string, opts s
 	return nil
 }
 
-// fetchCanvasSeries walks /canvas/data_series in <=14-day windows. Its response
-// nests rows under data.stats with metrics in total_stats, which we flatten and
-// tag with canvas_id and canvas_name.
+// fetchCanvasSeries walks /canvas/data_series in <=14-day windows, flattening its
+// nested data.stats/total_stats rows and tagging them with canvas_id and canvas_name.
 func (s *BrazeSource) fetchCanvasSeries(ctx context.Context, canvasID string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	end := time.Now().UTC()
 	if opts.IntervalEnd != nil {
