@@ -50,9 +50,13 @@ var supportedTables = []string{
 	"campaigns",
 	"canvases",
 	"segments",
+	"segment_series",
 	"events",
 	"event_series",
 	"products",
+	"sessions",
+	"purchase_quantity",
+	"purchase_revenue",
 	"kpi_dau",
 	"kpi_mau",
 	"kpi_new_users",
@@ -215,10 +219,10 @@ func (s *BrazeSource) GetTable(ctx context.Context, req source.TableRequest) (so
 		if len(params) == 0 {
 			return nil, fmt.Errorf("user_data requires at least one segment id, e.g. user_data:<segment_id>[,<segment_id>]")
 		}
-	case isKPITable(base) || base == "event_series":
-		// optional param: app_id list for kpi, event-name filter for event_series
+	case isKPITable(base) || base == "event_series" || base == "segment_series":
+		// optional param: app_id (kpi), event-name (event_series), segment-id (segment_series) filter
 	case len(params) > 0:
-		return nil, fmt.Errorf("the :param suffix is only supported for kpi_*, user_data, and event_series tables, not %q", base)
+		return nil, fmt.Errorf("the :param suffix is only supported for kpi_*, user_data, event_series, and segment_series tables, not %q", base)
 	}
 
 	primaryKeys, incrementalKey, strategy := tableMetadata(base)
@@ -264,6 +268,12 @@ func tableMetadata(table string) ([]string, string, config.IncrementalStrategy) 
 	case "event_series":
 		// daily count series per custom event; event_name is part of the key
 		return []string{"time", "event_name"}, "time", config.StrategyMerge
+	case "segment_series":
+		// daily size series per segment; segment_id is part of the key
+		return []string{"time", "segment_id"}, "time", config.StrategyMerge
+	case "sessions", "purchase_quantity", "purchase_revenue":
+		// daily aggregate series keyed on date
+		return []string{"time"}, "time", config.StrategyMerge
 	case "user_data":
 		// point-in-time snapshot of users (and their subscription state) per segment;
 		// segment_id is part of the key so a user can appear in multiple segments
@@ -303,6 +313,14 @@ func (s *BrazeSource) read(ctx context.Context, table string, params []string, o
 			err = s.readUserData(ctx, params, opts, results)
 		case "event_series":
 			err = s.readEventSeries(ctx, params, opts, results)
+		case "segment_series":
+			err = s.readSegmentSeries(ctx, params, opts, results)
+		case "sessions":
+			err = s.fetchSeries(ctx, "/sessions/data_series", nil, nil, opts, results)
+		case "purchase_quantity":
+			err = s.fetchSeries(ctx, "/purchases/quantity_series", nil, nil, opts, results)
+		case "purchase_revenue":
+			err = s.fetchSeries(ctx, "/purchases/revenue_series", nil, nil, opts, results)
 		default:
 			err = fmt.Errorf("unsupported table: %s", table)
 		}
@@ -752,6 +770,60 @@ func (s *BrazeSource) readEventSeries(ctx context.Context, eventNames []string, 
 		}
 	}
 	return nil
+}
+
+// readSegmentSeries fetches the daily size series for segments, tagging each row
+// with its segment_id. With no ids it fetches all segments; ids act as a filter.
+func (s *BrazeSource) readSegmentSeries(ctx context.Context, segmentIDs []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if len(segmentIDs) == 0 {
+		all, err := s.listSegmentIDs(ctx)
+		if err != nil {
+			return err
+		}
+		segmentIDs = all
+	}
+	config.Debug("[BRAZE] reading /segments/data_series (segments: %d)", len(segmentIDs))
+	for _, id := range segmentIDs {
+		if err := s.fetchSeries(ctx, "/segments/data_series", map[string]string{"segment_id": id}, map[string]interface{}{"segment_id": id}, opts, results); err != nil {
+			return fmt.Errorf("/segments/data_series for segment %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// listSegmentIDs pages through /segments/list and returns all segment ids.
+func (s *BrazeSource) listSegmentIDs(ctx context.Context) ([]string, error) {
+	var ids []string
+	for page := 0; page < maxListPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		resp, err := s.client.R(ctx).SetQueryParam("page", strconv.Itoa(page)).Get("/segments/list")
+		if err != nil {
+			return nil, fmt.Errorf("failed to list segments: %w", err)
+		}
+		if !resp.IsSuccess() {
+			return nil, fmt.Errorf("/segments/list returned status %d: %s", resp.StatusCode(), resp.String())
+		}
+		var body struct {
+			Segments []map[string]interface{} `json:"segments"`
+		}
+		if err := decodeBody(resp.Body(), &body); err != nil {
+			return nil, fmt.Errorf("failed to parse /segments/list response: %w", err)
+		}
+		if len(body.Segments) == 0 {
+			break
+		}
+		for _, seg := range body.Segments {
+			if id, ok := seg["id"].(string); ok {
+				ids = append(ids, id)
+			}
+		}
+		if len(body.Segments) < maxListPageSize {
+			break
+		}
+	}
+	return ids, nil
 }
 
 // listEventNames returns all custom event names from the /events catalog.
