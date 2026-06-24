@@ -128,6 +128,49 @@ func TestGitLabIssuesFanOutPerProject(t *testing.T) {
 	}
 }
 
+func TestGitLabFanOutSkipsInaccessibleProjects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Next-Page", "")
+		switch r.URL.Path {
+		case "/projects":
+			_, _ = fmt.Fprint(w, `[{"id":1},{"id":2},{"id":3}]`)
+		case "/projects/1/issues":
+			_, _ = fmt.Fprint(w, `[{"id":10,"updated_at":"2026-06-01T00:00:00Z"}]`)
+		case "/projects/2/issues":
+			// issues disabled for this project
+			http.Error(w, `{"message":"404 Not Found"}`, http.StatusNotFound)
+		case "/projects/3/issues":
+			// token lacks issue-read access for this project
+			http.Error(w, `{"message":"403 Forbidden"}`, http.StatusForbidden)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	src := NewGitLabSource()
+	require.NoError(t, src.Connect(context.Background(), "gitlab://?access_token=test-token&base_url="+url.QueryEscape(server.URL)))
+
+	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "issues"})
+	require.NoError(t, err)
+
+	results, err := table.Read(context.Background(), source.ReadOptions{})
+	require.NoError(t, err)
+
+	var ids []string
+	for result := range results {
+		require.NoError(t, result.Err) // 404/403 projects are skipped, not fatal
+		if result.Batch == nil {
+			continue
+		}
+		for i := 0; i < int(result.Batch.NumRows()); i++ {
+			ids = append(ids, fmt.Sprint(decodeUnknown(t, result.Batch, "id", i)))
+		}
+		result.Batch.Release()
+	}
+	require.ElementsMatch(t, []string{"10"}, ids)
+}
+
 func TestGitLabReadRespectsExcludeColumns(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Next-Page", "")

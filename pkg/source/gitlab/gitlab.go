@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -254,6 +255,13 @@ func (s *GitLabSource) streamPerProject(ctx context.Context, cfg tableConfig, op
 					return nil
 				})
 				if err != nil {
+					// Member projects routinely disable issues/MRs (404) or
+					// restrict them (403); skip those instead of failing the run.
+					var se *statusError
+					if errors.As(err, &se) && (se.status == http.StatusNotFound || se.status == http.StatusForbidden) {
+						config.Debug("[GITLAB] skipping project %s %s: %s", id, cfg.perProjectResource, err)
+						continue
+					}
 					select {
 					case errChan <- err:
 					default:
@@ -369,18 +377,28 @@ func (s *GitLabSource) paginate(ctx context.Context, endpoint string, params map
 	}
 }
 
+type statusError struct {
+	status  int
+	message string
+}
+
+func (e *statusError) Error() string { return e.message }
+
 func checkResponse(endpoint string, resp *httpclient.Response) error {
 	if resp.IsSuccess() {
 		return nil
 	}
-	switch resp.StatusCode() {
+	status := resp.StatusCode()
+	var message string
+	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("gitlab API authentication or access failed for %s (status %d)", endpoint, resp.StatusCode())
+		message = fmt.Sprintf("gitlab API authentication or access failed for %s (status %d)", endpoint, status)
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("gitlab API rate limit exceeded for %s (status 429)", endpoint)
+		message = fmt.Sprintf("gitlab API rate limit exceeded for %s (status 429)", endpoint)
 	default:
-		return fmt.Errorf("gitlab API error for %s (status %d): %s", endpoint, resp.StatusCode(), resp.String())
+		message = fmt.Sprintf("gitlab API error for %s (status %d): %s", endpoint, status, resp.String())
 	}
+	return &statusError{status: status, message: message}
 }
 
 var _ source.Source = (*GitLabSource)(nil)
