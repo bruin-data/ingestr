@@ -137,6 +137,100 @@ func TestParseTableSpec(t *testing.T) {
 			input:   "#xlsx",
 			wantErr: true,
 		},
+
+		// URL-style query parameter form.
+		{
+			name:  "query: format and sheet",
+			input: "Reports/products.xlsx?format=xlsx&sheet=Sheet1",
+			want:  tableSpec{path: "Reports/products.xlsx", format: formatXLSX, sheets: []string{"Sheet1"}},
+		},
+		{
+			name:  "query: sheet and skip, format from extension, space in path",
+			input: "Reports/parameters file.xlsx?sheet=Forecast&skip=4",
+			want:  tableSpec{path: "Reports/parameters file.xlsx", format: formatXLSX, sheets: []string{"Forecast"}, skip: 4},
+		},
+		{
+			name:  "query: repeated sheets key becomes a union, ampersand in path",
+			input: "Reports/budget & forecast.xlsx?sheets=North&sheets=South&sheets=East",
+			want:  tableSpec{path: "Reports/budget & forecast.xlsx", format: formatXLSX, sheets: []string{"North", "South", "East"}},
+		},
+		{
+			name:  "query: pipe-joined sheets value also unions",
+			input: "Reports/monthly/*.xlsx?sheets=Jan|Feb|Mar",
+			want:  tableSpec{path: "Reports/monthly/*.xlsx", format: formatXLSX, sheets: []string{"Jan", "Feb", "Mar"}},
+		},
+		{
+			name:  "query: percent-encoded sheet name with spaces",
+			input: "Reports/Quarterly Summary.xlsx?sheet=Dept.%20Summary",
+			want:  tableSpec{path: "Reports/Quarterly Summary.xlsx", format: formatXLSX, sheets: []string{"Dept. Summary"}},
+		},
+		{
+			name:  "query: csv with encoding and separator",
+			input: "Reports/export.csv?format=csv&encoding=utf-16le&sep=tab",
+			want:  tableSpec{path: "Reports/export.csv", format: formatCSV, encoding: "utf-16le", sep: "tab"},
+		},
+		{
+			name:  "query: formatted flag",
+			input: "a.xlsx?formatted=true",
+			want:  tableSpec{path: "a.xlsx", format: formatXLSX, formatted: true},
+		},
+		{
+			name:  "query: bare flag treated as true",
+			input: "a.csv?format=csv&drop_empty",
+			want:  tableSpec{path: "a.csv", format: formatCSV, dropEmpty: true},
+		},
+		{
+			name:  "query: date_cols repeated key",
+			input: "a.xlsx?sheet=S&date_cols=DATE&date_cols=MONTH",
+			want:  tableSpec{path: "a.xlsx", format: formatXLSX, sheets: []string{"S"}, dateCols: []string{"DATE", "MONTH"}},
+		},
+		{
+			name:  "query: escaped hash in path",
+			input: "folder/A%23B.csv?format=csv",
+			want:  tableSpec{path: "folder/A#B.csv", format: formatCSV},
+		},
+		{
+			name:    "query: unknown parameter errors",
+			input:   "a.xlsx?sheett=S",
+			wantErr: true,
+		},
+		{
+			name:    "query: negative skip errors",
+			input:   "a.xlsx?skip=-1",
+			wantErr: true,
+		},
+		{
+			name:    "query: non-numeric skip errors",
+			input:   "a.xlsx?skip=abc",
+			wantErr: true,
+		},
+		{
+			name:    "query: invalid boolean errors",
+			input:   "a.xlsx?formatted=maybe",
+			wantErr: true,
+		},
+		{
+			name:    "query: empty path errors",
+			input:   "?format=xlsx",
+			wantErr: true,
+		},
+
+		// "?" glob wildcard must survive the query-form detection.
+		{
+			name:  "query: ? glob with extension stays a path",
+			input: "Reports/q?.xlsx",
+			want:  tableSpec{path: "Reports/q?.xlsx", format: formatXLSX},
+		},
+		{
+			name:  "query: extensionless ? glob defers format",
+			input: "Reports/dump?",
+			want:  tableSpec{path: "Reports/dump?", format: formatUnknown},
+		},
+		{
+			name:  "query: ? glob plus real params (split on last ?)",
+			input: "Reports/q?.xlsx?sheet=Jan",
+			want:  tableSpec{path: "Reports/q?.xlsx", format: formatXLSX, sheets: []string{"Jan"}},
+		},
 	}
 
 	for _, tt := range tests {
