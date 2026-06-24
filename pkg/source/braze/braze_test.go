@@ -220,6 +220,28 @@ func TestGetTableAppIDValidation(t *testing.T) {
 			t.Errorf("unexpected error for event names: %v", err)
 		}
 	})
+
+	t.Run("campaign_series valid with no ids and composite PK", func(t *testing.T) {
+		tbl, err := s.GetTable(ctx, source.TableRequest{Name: "campaign_series"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		pk := tbl.PrimaryKeys()
+		if len(pk) != 2 || pk[0] != "time" || pk[1] != "campaign_id" {
+			t.Errorf("PrimaryKeys = %v, want [time campaign_id]", pk)
+		}
+	})
+
+	t.Run("canvas_series accepts an id filter and composite PK", func(t *testing.T) {
+		tbl, err := s.GetTable(ctx, source.TableRequest{Name: "canvas_series:abc,def"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		pk := tbl.PrimaryKeys()
+		if len(pk) != 2 || pk[0] != "time" || pk[1] != "canvas_id" {
+			t.Errorf("PrimaryKeys = %v, want [time canvas_id]", pk)
+		}
+	})
 }
 
 func TestTableMetadata(t *testing.T) {
@@ -240,6 +262,12 @@ func TestTableMetadata(t *testing.T) {
 		{"kpi_mau", []string{"time"}, "time", config.StrategyMerge},
 		{"kpi_new_users", []string{"time"}, "time", config.StrategyMerge},
 		{"kpi_uninstalls", []string{"time"}, "time", config.StrategyMerge},
+		{"sessions", []string{"time"}, "time", config.StrategyMerge},
+		{"purchase_quantity", []string{"time"}, "time", config.StrategyMerge},
+		{"purchase_revenue", []string{"time"}, "time", config.StrategyMerge},
+		{"segment_series", []string{"time", "segment_id"}, "time", config.StrategyMerge},
+		{"campaign_series", []string{"time", "campaign_id"}, "time", config.StrategyMerge},
+		{"canvas_series", []string{"time", "canvas_id"}, "time", config.StrategyMerge},
 	}
 
 	for _, tt := range tests {
@@ -323,55 +351,62 @@ func TestFilterItemsByInterval(t *testing.T) {
 	})
 }
 
-func TestPlanKPIWindows(t *testing.T) {
+func TestPlanSeriesWindows(t *testing.T) {
 	t.Parallel()
 
 	end := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
 
-	t.Run("no interval is a single 100-day window", func(t *testing.T) {
-		w := planKPIWindows(nil, end)
-		if len(w) != 1 || w[0].length != maxKPILength || !w[0].endingAt.Equal(end) {
+	t.Run("no interval is a single max-length window", func(t *testing.T) {
+		w := planSeriesWindows(nil, end, maxSeriesLength)
+		if len(w) != 1 || w[0].length != maxSeriesLength || !w[0].endingAt.Equal(end) {
 			t.Fatalf("got %+v, want one length-100 window ending at end", w)
 		}
 	})
 
-	// For each span, the union of covered days must equal [start, end] exactly —
-	// no gaps, no duplicates. Spans include exact 100-day multiples (the off-by-one).
-	for _, spanDays := range []int{0, 1, 7, 99, 100, 101, 150, 200, 250} {
-		t.Run(strconv.Itoa(spanDays)+"-day span", func(t *testing.T) {
-			start := end.AddDate(0, 0, -spanDays)
-			windows := planKPIWindows(&start, end)
+	// For each (maxLen, span), the union of covered days must equal [start, end]
+	// exactly — no gaps, no duplicates. Spans include exact maxLen multiples.
+	for _, maxLen := range []int{maxSeriesLength, maxCanvasLength} {
+		for _, spanDays := range []int{0, 1, 7, 13, 14, 15, 99, 100, 101, 150, 200, 250} {
+			t.Run(strconv.Itoa(maxLen)+"max-"+strconv.Itoa(spanDays)+"-day span", func(t *testing.T) {
+				start := end.AddDate(0, 0, -spanDays)
+				windows := planSeriesWindows(&start, end, maxLen)
+				for _, w := range windows {
+					if w.length > maxLen {
+						t.Errorf("window length %d exceeds maxLen %d", w.length, maxLen)
+					}
+				}
 
-			covered := map[string]int{}
-			for _, w := range windows {
-				for i := 0; i < w.length; i++ {
-					day := w.endingAt.AddDate(0, 0, -i).Format("2006-01-02")
-					covered[day]++
+				covered := map[string]int{}
+				for _, w := range windows {
+					for i := 0; i < w.length; i++ {
+						day := w.endingAt.AddDate(0, 0, -i).Format("2006-01-02")
+						covered[day]++
+					}
 				}
-			}
 
-			want := map[string]bool{}
-			for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
-				want[d.Format("2006-01-02")] = true
-			}
+				want := map[string]bool{}
+				for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+					want[d.Format("2006-01-02")] = true
+				}
 
-			if len(covered) != len(want) {
-				t.Errorf("covered %d distinct days, want %d", len(covered), len(want))
-			}
-			for day, n := range covered {
-				if n != 1 {
-					t.Errorf("day %s covered %d times (want exactly 1)", day, n)
+				if len(covered) != len(want) {
+					t.Errorf("covered %d distinct days, want %d", len(covered), len(want))
 				}
-				if !want[day] {
-					t.Errorf("day %s covered but outside [start,end]", day)
+				for day, n := range covered {
+					if n != 1 {
+						t.Errorf("day %s covered %d times (want exactly 1)", day, n)
+					}
+					if !want[day] {
+						t.Errorf("day %s covered but outside [start,end]", day)
+					}
 				}
-			}
-			for day := range want {
-				if covered[day] == 0 {
-					t.Errorf("day %s in [start,end] but never covered", day)
+				for day := range want {
+					if covered[day] == 0 {
+						t.Errorf("day %s in [start,end] but never covered", day)
+					}
 				}
-			}
-		})
+			})
+		}
 	}
 }
 
