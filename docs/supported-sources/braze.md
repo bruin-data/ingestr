@@ -32,12 +32,13 @@ Braze source allows ingesting the following resources into separate tables:
 | [campaigns](https://www.braze.com/docs/api/endpoints/export/campaigns/get_campaigns) | id | last_edited | merge | Marketing campaigns (including archived) with their name, tags, and API flags. |
 | [canvases](https://www.braze.com/docs/api/endpoints/export/canvas/get_canvases) | id | last_edited | merge | Canvas (journey) definitions (including archived) with their name and tags. |
 | [segments](https://www.braze.com/docs/api/endpoints/export/segments/get_segment) | id | – | replace | Audience segments with their name and analytics-tracking flag. |
-| [events](https://www.braze.com/docs/api/endpoints/export/custom_events/get_custom_events) | event_name | – | replace | Names of the custom events tracked in the workspace. |
+| [events](https://www.braze.com/docs/api/endpoints/export/custom_events/get_custom_events_data) | name | – | replace | Custom events catalog: name, description, status, tags, and analytics-report flag. |
 | [products](https://www.braze.com/docs/api/endpoints/export/purchases/get_list_product_id) | product_id | – | replace | Product IDs seen in purchase events. |
 | [kpi_dau](https://www.braze.com/docs/api/endpoints/export/kpi/get_kpi_dau_date) | time | time | merge | Daily active users by date. |
 | [kpi_mau](https://www.braze.com/docs/api/endpoints/export/kpi/get_kpi_mau_30_days) | time | time | merge | Monthly active users (rolling 30-day) by date. |
 | [kpi_new_users](https://www.braze.com/docs/api/endpoints/export/kpi/get_kpi_daily_new_users_date) | time | time | merge | New users by date. |
 | [kpi_uninstalls](https://www.braze.com/docs/api/endpoints/export/kpi/get_kpi_uninstalls_date) | time | time | merge | App uninstalls by date. |
+| [event_series](https://www.braze.com/docs/api/endpoints/export/custom_events/get_custom_events_analytics) | time, event_name | time | merge | Daily occurrence count per custom event. Fetches all events by default; an optional `event_series:<name>[,<name>]` filter limits it. |
 | [user_data](https://www.braze.com/docs/api/endpoints/export/user_data/post_users_segment) | braze_id, segment_id | – | replace | Users in a segment with their email/push subscription state and profile fields (a point-in-time snapshot). |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
