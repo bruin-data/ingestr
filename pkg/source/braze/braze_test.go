@@ -181,9 +181,14 @@ func TestGetTableAppIDValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("user_data requires a segment id", func(t *testing.T) {
-		if _, err := s.GetTable(ctx, source.TableRequest{Name: "user_data"}); err == nil {
-			t.Error("expected error for user_data without segment id, got nil")
+	t.Run("user_data without ids is valid (exports all segments)", func(t *testing.T) {
+		tbl, err := s.GetTable(ctx, source.TableRequest{Name: "user_data"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		pk := tbl.PrimaryKeys()
+		if len(pk) != 2 || pk[0] != "braze_id" || pk[1] != "segment_id" {
+			t.Errorf("PrimaryKeys = %v, want [braze_id segment_id]", pk)
 		}
 	})
 

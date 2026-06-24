@@ -45,20 +45,24 @@ Braze source allows ingesting the following resources into separate tables:
 | [sessions](https://www.braze.com/docs/api/endpoints/export/sessions/get_sessions_analytics) | time | time | merge | Daily session count. |
 | [purchase_quantity](https://www.braze.com/docs/api/endpoints/export/purchases/get_number_of_purchases) | time | time | merge | Daily total number of purchases. |
 | [purchase_revenue](https://www.braze.com/docs/api/endpoints/export/purchases/get_revenue_series) | time | time | merge | Daily total revenue. |
-| [user_data](https://www.braze.com/docs/api/endpoints/export/user_data/post_users_segment) | braze_id, segment_id | – | replace | Users in a segment with their email/push subscription state and profile fields (a point-in-time snapshot). |
+| [user_data](https://www.braze.com/docs/api/endpoints/export/user_data/post_users_segment) | braze_id, segment_id | – | replace | Segment users with their email/push subscription state and profile fields (a point-in-time snapshot). Exports all segments by default; an optional `user_data:<id>[,<id>]` filter limits it. |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
 ### User data
 
-The `user_data` table exports the users of one or more segments along with their subscription state. At least one segment id is required and passed as a comma-separated suffix on the table name:
+The `user_data` table exports the users of one or more segments along with their subscription state. By default it exports **every** segment; pass a comma-separated list of segment ids as a suffix to limit it:
 
 ```
---source-table "user_data:<segment_id>"
---source-table "user_data:<segment_id_1>,<segment_id_2>"
+--source-table "user_data"                                  # all segments
+--source-table "user_data:<segment_id>"                     # one segment
+--source-table "user_data:<segment_id_1>,<segment_id_2>"    # specific segments
 ```
 
-You can find segment identifiers in the Braze dashboard. Each run produces a fresh full snapshot of those segments' users, and every row is tagged with the `segment_id` it came from (so the same user can appear under multiple segments). Exported fields include the subscription state (`email_subscribe`, `push_subscribe`, plus the opt-in/unsubscribe timestamps Braze returns automatically alongside them), identifiers (`braze_id`, `external_id`, `email`, `phone`), profile fields (name, country, language, time zone, …), and per-product `purchases`.
+You can find segment ids by ingesting the `segments` table (its `id` column) or in the Braze dashboard. Each run produces a fresh full snapshot, and every row is tagged with the `segment_id` it came from (so the same user can appear under multiple segments). Exported fields include the subscription state (`email_subscribe`, `push_subscribe`, plus the opt-in/unsubscribe timestamps Braze returns automatically alongside them), identifiers (`braze_id`, `external_id`, `email`, `phone`), profile fields (name, country, language, time zone, …), and per-product `purchases`.
+
+> [!WARNING]
+> Exporting all segments runs one async export per segment and can produce a very large, heavily duplicated dataset (the same user appears in every segment they belong to). Prefer naming the specific segments you need.
 
 ### Per-app KPIs
 

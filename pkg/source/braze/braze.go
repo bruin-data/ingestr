@@ -218,12 +218,8 @@ func (s *BrazeSource) GetTable(ctx context.Context, req source.TableRequest) (so
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", req.Name, strings.Join(supportedTables, ", "))
 	}
 	switch {
-	case base == "user_data":
-		if len(params) == 0 {
-			return nil, fmt.Errorf("user_data requires at least one segment id, e.g. user_data:<segment_id>[,<segment_id>]")
-		}
-	case isKPITable(base) || isSeriesTable(base):
-		// optional param: app_id (kpi) or the dimension id/name to filter the series by
+	case isKPITable(base) || isSeriesTable(base) || base == "user_data":
+		// optional param: app_id (kpi), a series dimension id/name, or segment ids (user_data)
 	case len(params) > 0:
 		return nil, fmt.Errorf("the :param suffix is only supported for kpi_*, user_data, and *_series tables, not %q", base)
 	}
@@ -549,8 +545,17 @@ func (s *BrazeSource) readSegments(ctx context.Context, opts source.ReadOptions,
 }
 
 // readUserData exports the users of one or more segments via the async
-// /users/export/segment endpoint, tagging each row with its segment_id.
+// /users/export/segment endpoint, tagging each row with its segment_id. With no
+// ids it exports every segment; ids act as a filter.
 func (s *BrazeSource) readUserData(ctx context.Context, segmentIDs []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if len(segmentIDs) == 0 {
+		all, err := s.listSegmentIDs(ctx)
+		if err != nil {
+			return err
+		}
+		segmentIDs = all
+	}
+	config.Debug("[BRAZE] reading user_data (segments: %d)", len(segmentIDs))
 	for _, segmentID := range segmentIDs {
 		data, err := s.exportSegment(ctx, segmentID)
 		if err != nil {
