@@ -179,12 +179,19 @@ func (s *GitLabSource) read(ctx context.Context, cfg tableConfig, opts source.Re
 				if err != nil {
 					return fmt.Errorf("failed to convert gitlab data to Arrow: %w", err)
 				}
-				results <- source.RecordBatchResult{Batch: record}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case results <- source.RecordBatchResult{Batch: record}:
+				}
 				return nil
 			})
 		}
 		if err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			select {
+			case <-ctx.Done():
+			case results <- source.RecordBatchResult{Err: err}:
+			}
 		}
 	}()
 
@@ -221,6 +228,7 @@ func (s *GitLabSource) streamPerProject(ctx context.Context, cfg tableConfig, op
 	defer cancel()
 
 	projectChan := make(chan string, len(projectIDs))
+	errChan := make(chan error, 1)
 	var wg sync.WaitGroup
 	for i := 0; i < parallelism; i++ {
 		wg.Add(1)
@@ -238,11 +246,18 @@ func (s *GitLabSource) streamPerProject(ctx context.Context, cfg tableConfig, op
 					if err != nil {
 						return fmt.Errorf("failed to convert gitlab data to Arrow: %w", err)
 					}
-					results <- source.RecordBatchResult{Batch: record}
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case results <- source.RecordBatchResult{Batch: record}:
+					}
 					return nil
 				})
 				if err != nil {
-					results <- source.RecordBatchResult{Err: err}
+					select {
+					case errChan <- err:
+					default:
+					}
 					cancel()
 					return
 				}
@@ -256,7 +271,12 @@ func (s *GitLabSource) streamPerProject(ctx context.Context, cfg tableConfig, op
 	close(projectChan)
 
 	wg.Wait()
-	return nil
+	select {
+	case err := <-errChan:
+		return err
+	default:
+		return nil
+	}
 }
 
 // paginate walks every page of endpoint (honoring 429 Retry-After)
