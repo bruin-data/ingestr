@@ -61,9 +61,6 @@ Reddit Ads source allows ingesting the following sources into separate tables:
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
-> [!NOTE]
-> The entity tables (except `funding_instruments`) are filtered client-side on their modification timestamp (`modified_at`, or `updated_at` for `saved_audiences`) when `--interval-start`/`--interval-end` are provided, and use a `merge` write disposition keyed on `id`. With no interval, all records are loaded. `funding_instruments` has no modification timestamp, so it is always fully replaced.
-
 ### Example
 
 Retrieve all campaigns:
