@@ -107,26 +107,6 @@ func parseTableSpec(table string) (baseName, appTokens, attributionTypes string,
 	return baseName, appTokens, "", nil
 }
 
-var validAttributionTypes = map[string]struct{}{
-	"click":      {},
-	"impression": {},
-	"engaged_ad": {},
-}
-
-// validateAttributionTypes rejects any value outside Adjust's allowed set so a
-// typo fails fast instead of returning an opaque API error.
-func validateAttributionTypes(attributionTypes string) error {
-	for _, t := range strings.Split(attributionTypes, ",") {
-		if t = strings.TrimSpace(t); t == "" {
-			continue
-		}
-		if _, ok := validAttributionTypes[t]; !ok {
-			return fmt.Errorf("unknown attribution_types value %q; valid values are click, impression, engaged_ad", t)
-		}
-	}
-	return nil
-}
-
 // resolveAttributionTypes returns the attribution_types to send (empty = let the
 // API decide). DEPRECATED(2026-07-13): to adopt Adjust's API default, change the
 // pinned return below to `return ""`; callers already skip the param when empty.
@@ -149,9 +129,6 @@ func (s *AdjustSource) GetTable(ctx context.Context, req source.TableRequest) (s
 
 	if attributionTypes != "" && tableName != "campaigns" && tableName != "creatives" {
 		return nil, fmt.Errorf("attribution_types is not supported for the %q table; use it on campaigns or creatives (for custom tables, pass it in the filters section)", tableName)
-	}
-	if err := validateAttributionTypes(attributionTypes); err != nil {
-		return nil, err
 	}
 
 	var primaryKeys []string
