@@ -2,6 +2,7 @@ package redditads
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,7 +113,7 @@ func TestParseURI(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.errContains)
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Fatalf("expected error containing %q, got %q", tt.errContains, err.Error())
 				}
 				return
@@ -257,7 +258,7 @@ func TestParseCustomTable(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.errContains)
 				}
-				if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Fatalf("expected error containing %q, got %q", tt.errContains, err.Error())
 				}
 				return
@@ -522,15 +523,3 @@ func TestSplitAndTrim(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || (len(s) > 0 && containsSubstr(s, substr)))
-}
-
-func containsSubstr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

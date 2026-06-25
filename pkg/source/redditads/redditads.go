@@ -720,19 +720,21 @@ func (s *RedditAdsSource) fetchReport(ctx context.Context, accountID, level stri
 	// Reddit Ads API v3 reports group by "breakdowns"; the level (account/campaign/
 	// ad_group/ad) is the first breakdown dimension. Metrics go into "fields".
 	// Breakdown/field enums are uppercase (the API is case-insensitive but we
-	// normalize). Dates must be RFC3339 date-times.
+	// normalize).
 	reqBreakdowns := make([]string, 0, len(breakdowns)+1)
 	reqBreakdowns = append(reqBreakdowns, strings.ToUpper(levelIDFields[level]))
 	for _, b := range breakdowns {
 		reqBreakdowns = append(reqBreakdowns, strings.ToUpper(b))
 	}
 
+	// starts_at/ends_at must be hourly-aligned RFC3339 (YYYY-MM-DDTHH:00:00Z) — the
+	// API rejects any non-zero minute/second with 400. Truncate to the hour.
 	body := map[string]interface{}{
 		"data": map[string]interface{}{
 			"breakdowns": reqBreakdowns,
 			"fields":     metrics,
-			"starts_at":  startDate.UTC().Format("2006-01-02T15:00:00Z"),
-			"ends_at":    endDate.UTC().Format("2006-01-02T15:00:00Z"),
+			"starts_at":  startDate.UTC().Truncate(time.Hour).Format(time.RFC3339),
+			"ends_at":    endDate.UTC().Truncate(time.Hour).Format(time.RFC3339),
 		},
 	}
 
