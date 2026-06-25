@@ -43,18 +43,37 @@ func TestFilterItemsByInterval(t *testing.T) {
 
 func TestParseURI(t *testing.T) {
 	tests := []struct {
-		name           string
-		uri            string
-		wantToken      string
-		wantAccountIDs []string
-		wantErr        bool
-		errContains    string
+		name             string
+		uri              string
+		wantToken        string
+		wantAccountIDs   []string
+		wantClientID     string
+		wantClientSecret string
+		wantRefreshToken string
+		wantErr          bool
+		errContains      string
 	}{
 		{
 			name:           "valid URI with single account",
 			uri:            "redditads://?access_token=tok123&account_ids=acc1",
 			wantToken:      "tok123",
 			wantAccountIDs: []string{"acc1"},
+		},
+		{
+			name:             "valid URI with oauth app credentials",
+			uri:              "redditads://?client_id=cid&client_secret=csec&access_token=tok123&account_ids=acc1",
+			wantToken:        "tok123",
+			wantAccountIDs:   []string{"acc1"},
+			wantClientID:     "cid",
+			wantClientSecret: "csec",
+		},
+		{
+			name:             "valid URI with refresh credentials and no access token",
+			uri:              "redditads://?client_id=cid&client_secret=csec&refresh_token=rtok&account_ids=acc1",
+			wantAccountIDs:   []string{"acc1"},
+			wantClientID:     "cid",
+			wantClientSecret: "csec",
+			wantRefreshToken: "rtok",
 		},
 		{
 			name:           "valid URI with multiple accounts",
@@ -75,10 +94,16 @@ func TestParseURI(t *testing.T) {
 			errContains: "must start with redditads://",
 		},
 		{
-			name:        "missing access_token",
+			name:        "missing access_token and refresh credentials",
 			uri:         "redditads://?account_ids=acc1",
 			wantErr:     true,
-			errContains: "access_token is required",
+			errContains: "either access_token",
+		},
+		{
+			name:        "refresh credentials missing client_secret",
+			uri:         "redditads://?client_id=cid&refresh_token=rtok&account_ids=acc1",
+			wantErr:     true,
+			errContains: "either access_token",
 		},
 		{
 			name:        "missing account_ids",
@@ -90,13 +115,13 @@ func TestParseURI(t *testing.T) {
 			name:        "empty URI after scheme",
 			uri:         "redditads://",
 			wantErr:     true,
-			errContains: "access_token is required",
+			errContains: "either access_token",
 		},
 		{
 			name:        "only question mark",
 			uri:         "redditads://?",
 			wantErr:     true,
-			errContains: "access_token is required",
+			errContains: "either access_token",
 		},
 		{
 			name:           "token with special characters",
@@ -131,6 +156,15 @@ func TestParseURI(t *testing.T) {
 				if creds.accountIDs[i] != want {
 					t.Fatalf("account ID[%d]: expected %q, got %q", i, want, creds.accountIDs[i])
 				}
+			}
+			if creds.clientID != tt.wantClientID {
+				t.Fatalf("expected client_id %q, got %q", tt.wantClientID, creds.clientID)
+			}
+			if creds.clientSecret != tt.wantClientSecret {
+				t.Fatalf("expected client_secret %q, got %q", tt.wantClientSecret, creds.clientSecret)
+			}
+			if creds.refreshToken != tt.wantRefreshToken {
+				t.Fatalf("expected refresh_token %q, got %q", tt.wantRefreshToken, creds.refreshToken)
 			}
 		})
 	}

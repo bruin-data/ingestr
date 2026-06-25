@@ -7,13 +7,20 @@ Ingestr supports Reddit Ads as a source.
 The URI format for Reddit Ads as a source is as follows:
 
 ```plaintext
+# Recommended: refresh-token credentials (a fresh access token is minted on each run)
+redditads://?client_id=<client_id>&client_secret=<client_secret>&refresh_token=<refresh_token>&account_ids=<account_ids>
+
+# Alternative: a pre-obtained access token (expires in ~24h, so loads will fail once it lapses)
 redditads://?access_token=<access_token>&account_ids=<account_ids>
 ```
 ## URI parameters:
-- `access_token`(required): The OAuth2 access token used for authentication with the Reddit Ads API. This token grants access to the advertising data associated with your Reddit Ads accounts.
 - `account_ids`(required): A comma-separated list of Ad Account IDs specifying the Reddit Ad Accounts for which you want to retrieve data. These IDs uniquely identify the Reddit Ad Accounts associated with your business.
+- `access_token`(optional): An OAuth2 access token for the Reddit Ads API. Access tokens expire (~24h), so prefer supplying `client_id` + `client_secret` + `refresh_token` instead, which lets ingestr mint a fresh access token automatically on each run.
+- `client_id`(optional): Your OAuth application's client ID.
+- `client_secret`(optional): Your OAuth application's client secret.
+- `refresh_token`(optional): A permanent OAuth refresh token. Provide it together with `client_id` and `client_secret` to obtain a fresh access token on every run without manual re-authentication.
 
-Reddit Ads requires an `access_token` and `account_ids` to retrieve data from the [Reddit Ads API v3](https://ads-api.reddit.com/docs/v3/). Please follow these steps to obtain the `access_token` and `account_ids`.
+You must provide **either** an `access_token`, **or** `client_id` + `client_secret` + `refresh_token` (recommended). In both cases `account_ids` is required.
 
 ### Create a Reddit developer application to obtain an access token
 
@@ -26,9 +33,13 @@ Reddit Ads requires an `access_token` and `account_ids` to retrieve data from th
 4. Accept the Ads API Terms and click **Create App**, then open the app to find your **client_id** (App ID) and **client_secret**.
 
 #### Authorize your app and obtain access token
-1. Direct the user to the Reddit authorization URL:
+1. Direct the user to the Reddit authorization URL. Make sure to include `duration=permanent` — this is what makes Reddit return a long-lived `refresh_token`:
    ```
    https://www.reddit.com/api/v1/authorize?client_id=<client_id>&response_type=code&state=<random_string>&redirect_uri=<redirect_uri>&duration=permanent&scope=adsread
+   ```
+   For example:
+   ```
+   https://www.reddit.com/api/v1/authorize?client_id=client_123&response_type=code&state=random_xyz&redirect_uri=http://localhost:8080/callback&duration=permanent&scope=adsread
    ```
 2. After authorization, Reddit redirects to your redirect URI with a `code` parameter.
 3. Exchange the code for an access token:
@@ -36,10 +47,10 @@ Reddit Ads requires an `access_token` and `account_ids` to retrieve data from th
    POST https://www.reddit.com/api/v1/access_token
    ```
    Use HTTP Basic Auth with `client_id:client_secret` and include `grant_type=authorization_code`, `code=<code>`, and `redirect_uri=<redirect_uri>` in the request body.
-4. The response includes an `access_token` and a `refresh_token`.
+4. The response includes an `access_token` and a `refresh_token`. The `duration=permanent` parameter in step 1 is what makes Reddit issue the long-lived `refresh_token`.
 
-> [!NOTE]
-> Access tokens expire after approximately 1 hour. Use the `refresh_token` with `grant_type=refresh_token` to obtain a new access token when needed.
+> [!TIP]
+> Access tokens expire after ~24 hours. Rather than pasting a short-lived `access_token`, supply `client_id`, `client_secret`, and the `refresh_token` in the URI — ingestr exchanges them for a fresh access token automatically on every run (`grant_type=refresh_token`), so you only authorize once.
 
 To find the Ad Account IDs, go to the [Reddit Ads Dashboard](https://ads.reddit.com/) and navigate to your account settings. The account ID is displayed in the URL or account details.
 
@@ -63,10 +74,10 @@ Use these as `--source-table` parameter in the `ingestr ingest` command.
 
 ### Example
 
-Retrieve all campaigns:
+Retrieve all campaigns (using refresh-token credentials, recommended):
 ```sh
 ingestr ingest \
-    --source-uri "redditads://?access_token=token_123&account_ids=id_123,id_456" \
+    --source-uri "redditads://?client_id=client_123&client_secret=secret_123&refresh_token=refresh_123&account_ids=id_123,id_456" \
     --source-table 'campaigns' \
     --dest-uri 'duckdb:///reddit.duckdb' \
     --dest-table 'dest.campaigns'

@@ -24,6 +24,11 @@ const (
 	baseURL   = "https://ads-api.reddit.com/api/v3"
 	userAgent = "ingestr/1.0"
 
+	// OAuth token endpoint used to mint a fresh access token from the OAuth app
+	// credentials + a (permanent) refresh token. Access tokens expire ~24h.
+	oauthBaseURL   = "https://www.reddit.com"
+	oauthTokenPath = "/api/v1/access_token"
+
 	// Reddit does not publish numeric Ads API rate limits; it returns 429 with
 	// X-RateLimit-Remaining/-Reset headers. We throttle conservatively client-side
 	// (~0.8 req/s) and rely on the shared http client's retry-on-429 as a backstop
@@ -100,9 +105,12 @@ var validMetrics = map[string]bool{
 }
 
 type RedditAdsSource struct {
-	accessToken string
-	accountIDs  []string
-	client      *httpclient.Client
+	clientID     string
+	clientSecret string
+	refreshToken string
+	accessToken  string
+	accountIDs   []string
+	client       *httpclient.Client
 }
 
 func NewRedditAdsSource() *RedditAdsSource {
@@ -123,8 +131,22 @@ func (s *RedditAdsSource) Connect(ctx context.Context, uri string) error {
 		return err
 	}
 
+	s.clientID = creds.clientID
+	s.clientSecret = creds.clientSecret
+	s.refreshToken = creds.refreshToken
 	s.accessToken = creds.accessToken
 	s.accountIDs = creds.accountIDs
+
+	// Without a ready access token, mint one from the OAuth app credentials +
+	// refresh token. Reddit access tokens expire ~24h; the refresh token is
+	// permanent, so this keeps the connection working without manual re-auth.
+	if s.accessToken == "" {
+		token, err := s.refreshAccessToken(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to obtain reddit access token: %w", err)
+		}
+		s.accessToken = token
+	}
 
 	s.client = httpclient.New(
 		httpclient.WithBaseURL(baseURL),
@@ -139,7 +161,7 @@ func (s *RedditAdsSource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithAllowNonIdempotentRetry(),
 	)
 
-	config.Debug("[REDDITADS] Connected successfully (accounts: %s)", strings.Join(s.accountIDs, ", "))
+	config.Debug("[REDDITADS] Connected successfully (accounts: %s, oauth_app_creds: %t)", strings.Join(s.accountIDs, ", "), s.clientID != "" && s.clientSecret != "")
 	return nil
 }
 
@@ -151,8 +173,11 @@ func (s *RedditAdsSource) Close(ctx context.Context) error {
 }
 
 type redditAdsCredentials struct {
-	accessToken string
-	accountIDs  []string
+	clientID     string
+	clientSecret string
+	refreshToken string
+	accessToken  string
+	accountIDs   []string
 }
 
 func parseURI(uri string) (*redditAdsCredentials, error) {
@@ -160,12 +185,7 @@ func parseURI(uri string) (*redditAdsCredentials, error) {
 		return nil, fmt.Errorf("invalid redditads URI: must start with redditads://")
 	}
 
-	rest := strings.TrimPrefix(uri, "redditads://")
-	if rest == "" || rest == "?" {
-		return nil, fmt.Errorf("access_token is required in redditads URI")
-	}
-
-	rest = strings.TrimPrefix(rest, "?")
+	rest := strings.TrimPrefix(strings.TrimPrefix(uri, "redditads://"), "?")
 
 	values, err := url.ParseQuery(rest)
 	if err != nil {
@@ -173,8 +193,15 @@ func parseURI(uri string) (*redditAdsCredentials, error) {
 	}
 
 	accessToken := values.Get("access_token")
-	if accessToken == "" {
-		return nil, fmt.Errorf("access_token is required in redditads URI")
+	clientID := values.Get("client_id")
+	clientSecret := values.Get("client_secret")
+	refreshToken := values.Get("refresh_token")
+
+	// Auth: either a ready access_token, or the OAuth app credentials + a refresh
+	// token to mint one at connect time (access tokens expire ~24h; the refresh
+	// token is permanent).
+	if accessToken == "" && (clientID == "" || clientSecret == "" || refreshToken == "") {
+		return nil, fmt.Errorf("redditads requires either access_token, or client_id + client_secret + refresh_token")
 	}
 
 	accountIDsRaw := values.Get("account_ids")
@@ -188,9 +215,49 @@ func parseURI(uri string) (*redditAdsCredentials, error) {
 	}
 
 	return &redditAdsCredentials{
-		accessToken: accessToken,
-		accountIDs:  accountIDs,
+		clientID:     clientID,
+		clientSecret: clientSecret,
+		refreshToken: refreshToken,
+		accessToken:  accessToken,
+		accountIDs:   accountIDs,
 	}, nil
+}
+
+// refreshAccessToken exchanges the OAuth app credentials + refresh token for a
+// fresh access token via Reddit's token endpoint (grant_type=refresh_token,
+// HTTP Basic auth with client_id:client_secret).
+func (s *RedditAdsSource) refreshAccessToken(ctx context.Context) (string, error) {
+	tokenClient := httpclient.New(
+		httpclient.WithBaseURL(oauthBaseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBasicAuth(s.clientID, s.clientSecret)),
+		httpclient.WithUserAgent(userAgent),
+	)
+	defer func() { _ = tokenClient.Close() }()
+
+	var tokenData struct {
+		AccessToken string `json:"access_token"`
+	}
+
+	resp, err := tokenClient.R(ctx).
+		SetFormData(map[string]string{
+			"grant_type":    "refresh_token",
+			"refresh_token": s.refreshToken,
+		}).
+		SetResult(&tokenData).
+		Post(oauthTokenPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to request access token: %w", err)
+	}
+	if !resp.IsSuccess() {
+		return "", fmt.Errorf("reddit token endpoint returned status %d: %s", resp.StatusCode(), resp.String())
+	}
+	if tokenData.AccessToken == "" {
+		return "", fmt.Errorf("access_token missing in reddit token response")
+	}
+
+	return tokenData.AccessToken, nil
 }
 
 func splitAndTrim(s string, sep string) []string {
