@@ -47,6 +47,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 ## Commerce, payments, billing, and finance
 
 - [Apple App Store](/supported-sources/appstore.md)
+- [Chargebee](/supported-sources/chargebee.md)
 - [FundraiseUp](/supported-sources/fundraiseup.md)
 - [Hostaway](/supported-sources/hostaway.md)
 - [Paddle](/supported-sources/paddle.md)

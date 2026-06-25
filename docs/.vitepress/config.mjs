@@ -166,6 +166,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "BallDontLie FIFA", link: "/supported-sources/balldontlie.md" },
               { text: "Braze", link: "/supported-sources/braze.md" },
               { text: "Bruin", link: "/supported-sources/bruin.md" },
+              { text: "Chargebee", link: "/supported-sources/chargebee.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
               { text: "ClickUp", link: "/supported-sources/clickup.md" },
               { text: "Cursor", link: "/supported-sources/cursor.md" },
