@@ -17,9 +17,6 @@ Reddit Ads requires an `access_token` and `account_ids` to retrieve data from th
 
 ### Create a Reddit developer application to obtain an access token
 
-> [!IMPORTANT]
-> The Reddit Ads API only works with applications created through **Reddit Business Manager**. Legacy apps created at `reddit.com/prefs/apps` are **not** authorized for the Ads API — authorization succeeds but the token request fails with `403` when the `adsread` scope is requested.
-
 1. Go to the [Reddit Ads Dashboard](https://ads.reddit.com/) and log in with an account that has access to your ad accounts.
 2. Open **Business Manager** from the account menu, then select **Developer Applications**.
 3. Click **Create a new app** and fill out the form:
