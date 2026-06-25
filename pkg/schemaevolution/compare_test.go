@@ -607,3 +607,48 @@ func TestNeedsWidening(t *testing.T) {
 		})
 	}
 }
+
+// int32 override against an int64 PK column must emit no change (BigQuery merge
+// regression: the ALTER is pointless and is rejected on key columns).
+func TestCompare_OverrideNarrowerThanDest_NoChange(t *testing.T) {
+	source := &schema.TableSchema{
+		Name:    "test",
+		Columns: []schema.Column{{Name: "trakt_id", DataType: schema.TypeInt64}},
+	}
+	dest := &schema.TableSchema{
+		Name:        "test",
+		Columns:     []schema.Column{{Name: "trakt_id", DataType: schema.TypeInt64}},
+		PrimaryKeys: []string{"trakt_id"},
+	}
+	opts := &CompareOptions{Overrides: ColumnOverrides{
+		"trakt_id": {Name: "trakt_id", DataType: schema.TypeInt32},
+	}}
+
+	result, err := Compare(source, dest, opts)
+	require.NoError(t, err)
+	assert.False(t, result.HasChanges, "narrowing override against a wider dest column must not produce a change")
+	assert.Empty(t, result.Changes)
+}
+
+// Guard against over-suppression: a genuine widening override (int32 dest,
+// int64 override) must still produce a change.
+func TestCompare_OverrideWiderThanDest_StillChanges(t *testing.T) {
+	source := &schema.TableSchema{
+		Name:    "test",
+		Columns: []schema.Column{{Name: "val", DataType: schema.TypeInt32}},
+	}
+	dest := &schema.TableSchema{
+		Name:    "test",
+		Columns: []schema.Column{{Name: "val", DataType: schema.TypeInt32}},
+	}
+	opts := &CompareOptions{Overrides: ColumnOverrides{
+		"val": {Name: "val", DataType: schema.TypeInt64},
+	}}
+
+	result, err := Compare(source, dest, opts)
+	require.NoError(t, err)
+	require.True(t, result.HasChanges)
+	require.Len(t, result.Changes, 1)
+	assert.Equal(t, ChangeOverrideType, result.Changes[0].Type)
+	assert.Equal(t, schema.TypeInt64, result.Changes[0].NewColumn.DataType)
+}

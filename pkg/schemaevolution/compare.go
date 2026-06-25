@@ -48,15 +48,20 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 			newCol := override.ApplyToColumn(srcCol)
 			newCol.Nullable = true
 
-			// If destination exists and matches override, no change needed
-			if exists && destCol.DataType == newCol.DataType {
-				if newCol.DataType != schema.TypeDecimal {
-					continue
-				}
-				// For decimal, check integer digits and scale separately
-				destIntDigits := destCol.Precision - destCol.Scale
-				newIntDigits := newCol.Precision - newCol.Scale
-				if destIntDigits >= newIntDigits && destCol.Scale >= newCol.Scale {
+			// Skip when the destination already holds the override: exact match,
+			// or the override is narrower than the stored type (e.g. int32 vs int64).
+			if exists {
+				if destCol.DataType == newCol.DataType {
+					if newCol.DataType != schema.TypeDecimal {
+						continue
+					}
+					// For decimal, check integer digits and scale separately
+					destIntDigits := destCol.Precision - destCol.Scale
+					newIntDigits := newCol.Precision - newCol.Scale
+					if destIntDigits >= newIntDigits && destCol.Scale >= newCol.Scale {
+						continue
+					}
+				} else if CanWiden(newCol.DataType, destCol.DataType) {
 					continue
 				}
 			}
