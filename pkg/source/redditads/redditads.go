@@ -233,6 +233,9 @@ func (s *RedditAdsSource) refreshAccessToken(ctx context.Context) (string, error
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithAuth(httpclient.NewBasicAuth(s.clientID, s.clientSecret)),
 		httpclient.WithUserAgent(userAgent),
+		// The token request is a POST; allow retrying it on 429/5xx (resty skips
+		// retries for non-idempotent methods otherwise).
+		httpclient.WithAllowNonIdempotentRetry(),
 	)
 	defer func() { _ = tokenClient.Close() }()
 
