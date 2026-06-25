@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -497,6 +498,7 @@ func joinMapKeys(m map[string]bool) string {
 	for k := range m {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 	return strings.Join(keys, ", ")
 }
 
