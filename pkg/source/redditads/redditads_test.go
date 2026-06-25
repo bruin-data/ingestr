@@ -522,4 +522,3 @@ func TestSplitAndTrim(t *testing.T) {
 		}
 	}
 }
-
