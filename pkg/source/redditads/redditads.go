@@ -26,7 +26,8 @@ const (
 
 	// Reddit does not publish numeric Ads API rate limits; it returns 429 with
 	// X-RateLimit-Remaining/-Reset headers. We throttle conservatively client-side
-	// (~0.8 req/s) and rely on the shared http client's retry-on-429 as a backstop.
+	// (~0.8 req/s) and rely on the shared http client's retry-on-429 as a backstop
+	// (enabled for POST via WithAllowNonIdempotentRetry in Connect).
 	rateLimit      = 0.8
 	rateLimitBurst = 5
 
@@ -132,6 +133,10 @@ func (s *RedditAdsSource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithAuth(httpclient.NewBearerAuth(s.accessToken)),
 		httpclient.WithUserAgent(userAgent),
+		// The reports endpoint is a POST; every request this source makes is a
+		// read with no side effects, so allow retrying POSTs (otherwise resty
+		// skips the 429/5xx retry for non-idempotent methods).
+		httpclient.WithAllowNonIdempotentRetry(),
 	)
 
 	config.Debug("[REDDITADS] Connected successfully (accounts: %s)", strings.Join(s.accountIDs, ", "))
