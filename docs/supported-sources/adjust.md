@@ -50,7 +50,7 @@ This works for `events`, `campaigns`, and `creatives` tables. For custom tables,
 
 ### Attribution Types
 
-The `campaigns` and `creatives` tables default to `click,engaged_ad` attribution. You can override which attribution types are included with the `attribution_types` query parameter. Valid values are `click`, `impression`, and `engaged_ad`, comma-separated:
+The `campaigns` and `creatives` tables default to `click,engaged_ad` attribution. You can override which attribution types are included with the `attribution_types` query parameter, given as a comma-separated list of the [attribution types supported by Adjust](https://dev.adjust.com/en/api/rs-api/reports/):
 
 > [!WARNING]
 > Adjust is changing its API-side default on **July 13, 2026** to include **all** attribution types (including `impression`). ingestr currently pins `click,engaged_ad` for these tables to preserve existing behavior. To keep your metrics stable regardless of Adjust's default, set `attribution_types` explicitly for the behavior you want.
