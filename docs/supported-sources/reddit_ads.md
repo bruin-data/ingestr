@@ -8,19 +8,20 @@ The URI format for Reddit Ads as a source is as follows:
 
 ```plaintext
 # Recommended: refresh-token credentials (a fresh access token is minted on each run)
-redditads://?client_id=<client_id>&client_secret=<client_secret>&refresh_token=<refresh_token>&account_ids=<account_ids>
+redditads://?client_id=<client_id>&client_secret=<client_secret>&refresh_token=<refresh_token>
 
 # Alternative: a pre-obtained access token (expires in ~24h, so loads will fail once it lapses)
-redditads://?access_token=<access_token>&account_ids=<account_ids>
+redditads://?access_token=<access_token>
 ```
 ## URI parameters:
-- `account_ids`(required): A comma-separated list of Ad Account IDs specifying the Reddit Ad Accounts for which you want to retrieve data. These IDs uniquely identify the Reddit Ad Accounts associated with your business.
 - `access_token`(optional): An OAuth2 access token for the Reddit Ads API. Access tokens expire (~24h), so prefer supplying `client_id` + `client_secret` + `refresh_token` instead, which lets ingestr mint a fresh access token automatically on each run.
 - `client_id`(optional): Your OAuth application's client ID.
 - `client_secret`(optional): Your OAuth application's client secret.
 - `refresh_token`(optional): A permanent OAuth refresh token. Provide it together with `client_id` and `client_secret` to obtain a fresh access token on every run without manual re-authentication.
 
-You must provide **either** an `access_token`, **or** `client_id` + `client_secret` + `refresh_token` (recommended). In both cases `account_ids` is required.
+You must provide **either** an `access_token`, **or** `client_id` + `client_secret` + `refresh_token` (recommended).
+
+Account selection is done via the table name, not the URI: by default ingestr syncs **all** ad accounts the authenticated user can access (across every business they belong to). To restrict a table to specific accounts, append them to the `--source-table` value (e.g. `campaigns:id_123,id_456`).
 
 ### Create a Reddit developer application to obtain an access token
 
@@ -60,7 +61,7 @@ Reddit Ads source allows ingesting the following sources into separate tables:
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 | ----- | -- | ------- | ------------ | ------- |
-| accounts | id | modified_at | merge | Retrieves the ad accounts listed in `account_ids`. |
+| accounts | id | modified_at | merge | Retrieves the ad accounts the authenticated user can access (or those scoped via the table name). |
 | campaigns | id | modified_at | merge | Retrieves campaigns for each ad account. |
 | ad_groups | id | modified_at | merge | Retrieves ad groups for each ad account. |
 | ads | id | modified_at | merge | Retrieves ads for each ad account. |
@@ -70,24 +71,24 @@ Reddit Ads source allows ingesting the following sources into separate tables:
 | funding_instruments | id | - | replace | Retrieves funding instruments (payment methods) for each ad account. |
 | custom | [level_id, breakdowns] | date | merge | Custom reports of performance metrics by level, breakdowns, and metrics. |
 
-Use these as `--source-table` parameter in the `ingestr ingest` command.
+Use these as `--source-table` parameter in the `ingestr ingest` command. To pull an entity table for specific accounts (instead of the connection default / all accessible accounts), append the account IDs to the table name, e.g. `--source-table 'campaigns:id_123,id_456'`.
 
 ### Example
 
-Retrieve all campaigns (using refresh-token credentials, recommended):
+Retrieve campaigns for all accessible accounts (refresh-token credentials, recommended):
 ```sh
 ingestr ingest \
-    --source-uri "redditads://?client_id=client_123&client_secret=secret_123&refresh_token=refresh_123&account_ids=id_123,id_456" \
+    --source-uri "redditads://?client_id=client_123&client_secret=secret_123&refresh_token=refresh_123" \
     --source-table 'campaigns' \
     --dest-uri 'duckdb:///reddit.duckdb' \
     --dest-table 'dest.campaigns'
 ```
 
-Retrieve all ad groups:
+Retrieve ad groups for specific accounts (scoped in the table name):
 ```sh
 ingestr ingest \
-    --source-uri "redditads://?access_token=token_123&account_ids=id_123" \
-    --source-table 'ad_groups' \
+    --source-uri "redditads://?access_token=token_123" \
+    --source-table 'ad_groups:id_123,id_456' \
     --dest-uri 'duckdb:///reddit.duckdb' \
     --dest-table 'dest.ad_groups'
 ```
@@ -117,7 +118,7 @@ custom:<level>,<breakdowns>:<metrics>
 Retrieve daily campaign performance data:
 ```sh
 ingestr ingest \
-    --source-uri "redditads://?access_token=token_123&account_ids=id_123,id_456" \
+    --source-uri "redditads://?access_token=token_123" \
     --source-table 'custom:campaign,date:impressions,clicks,spend' \
     --dest-uri 'duckdb:///reddit.duckdb' \
     --dest-table 'dest.campaign_daily'
@@ -131,7 +132,7 @@ The applied parameters for the report are:
 Retrieve ad group performance by country for a specific date range:
 ```sh
 ingestr ingest \
-    --source-uri "redditads://?access_token=token_123&account_ids=id_123" \
+    --source-uri "redditads://?access_token=token_123" \
     --source-table 'custom:ad_group,date,country:impressions,reach,ctr' \
     --dest-uri 'duckdb:///reddit.duckdb' \
     --dest-table 'dest.ad_group_country' \
@@ -147,7 +148,7 @@ The applied parameters for the report are:
 Retrieve account-level spend data:
 ```sh
 ingestr ingest \
-    --source-uri "redditads://?access_token=token_123&account_ids=id_123,id_456" \
+    --source-uri "redditads://?access_token=token_123" \
     --source-table 'custom:account,date:spend,impressions' \
     --dest-uri 'duckdb:///reddit.duckdb' \
     --dest-table 'dest.account_spend'

@@ -1,6 +1,7 @@
 package redditads
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -46,7 +47,6 @@ func TestParseURI(t *testing.T) {
 		name             string
 		uri              string
 		wantToken        string
-		wantAccountIDs   []string
 		wantClientID     string
 		wantClientSecret string
 		wantRefreshToken string
@@ -54,38 +54,23 @@ func TestParseURI(t *testing.T) {
 		errContains      string
 	}{
 		{
-			name:           "valid URI with single account",
-			uri:            "redditads://?access_token=tok123&account_ids=acc1",
-			wantToken:      "tok123",
-			wantAccountIDs: []string{"acc1"},
+			name:      "valid URI with access token",
+			uri:       "redditads://?access_token=tok123",
+			wantToken: "tok123",
 		},
 		{
-			name:             "valid URI with oauth app credentials",
-			uri:              "redditads://?client_id=cid&client_secret=csec&access_token=tok123&account_ids=acc1",
+			name:             "valid URI with oauth app credentials and access token",
+			uri:              "redditads://?client_id=cid&client_secret=csec&access_token=tok123",
 			wantToken:        "tok123",
-			wantAccountIDs:   []string{"acc1"},
 			wantClientID:     "cid",
 			wantClientSecret: "csec",
 		},
 		{
 			name:             "valid URI with refresh credentials and no access token",
-			uri:              "redditads://?client_id=cid&client_secret=csec&refresh_token=rtok&account_ids=acc1",
-			wantAccountIDs:   []string{"acc1"},
+			uri:              "redditads://?client_id=cid&client_secret=csec&refresh_token=rtok",
 			wantClientID:     "cid",
 			wantClientSecret: "csec",
 			wantRefreshToken: "rtok",
-		},
-		{
-			name:           "valid URI with multiple accounts",
-			uri:            "redditads://?access_token=tok123&account_ids=acc1,acc2,acc3",
-			wantToken:      "tok123",
-			wantAccountIDs: []string{"acc1", "acc2", "acc3"},
-		},
-		{
-			name:           "trims whitespace in account IDs",
-			uri:            "redditads://?access_token=tok123&account_ids=acc1, acc2 , acc3",
-			wantToken:      "tok123",
-			wantAccountIDs: []string{"acc1", "acc2", "acc3"},
 		},
 		{
 			name:        "wrong scheme",
@@ -95,25 +80,13 @@ func TestParseURI(t *testing.T) {
 		},
 		{
 			name:        "missing access_token and refresh credentials",
-			uri:         "redditads://?account_ids=acc1",
+			uri:         "redditads://",
 			wantErr:     true,
 			errContains: "either access_token",
 		},
 		{
 			name:        "refresh credentials missing client_secret",
-			uri:         "redditads://?client_id=cid&refresh_token=rtok&account_ids=acc1",
-			wantErr:     true,
-			errContains: "either access_token",
-		},
-		{
-			name:        "missing account_ids",
-			uri:         "redditads://?access_token=tok123",
-			wantErr:     true,
-			errContains: "account_ids is required",
-		},
-		{
-			name:        "empty URI after scheme",
-			uri:         "redditads://",
+			uri:         "redditads://?client_id=cid&refresh_token=rtok",
 			wantErr:     true,
 			errContains: "either access_token",
 		},
@@ -124,10 +97,9 @@ func TestParseURI(t *testing.T) {
 			errContains: "either access_token",
 		},
 		{
-			name:           "token with special characters",
-			uri:            "redditads://?access_token=abc.DEF-123_456&account_ids=id1",
-			wantToken:      "abc.DEF-123_456",
-			wantAccountIDs: []string{"id1"},
+			name:      "token with special characters",
+			uri:       "redditads://?access_token=abc.DEF-123_456",
+			wantToken: "abc.DEF-123_456",
 		},
 	}
 
@@ -149,14 +121,6 @@ func TestParseURI(t *testing.T) {
 			if creds.accessToken != tt.wantToken {
 				t.Fatalf("expected token %q, got %q", tt.wantToken, creds.accessToken)
 			}
-			if len(creds.accountIDs) != len(tt.wantAccountIDs) {
-				t.Fatalf("expected %d account IDs, got %d", len(tt.wantAccountIDs), len(creds.accountIDs))
-			}
-			for i, want := range tt.wantAccountIDs {
-				if creds.accountIDs[i] != want {
-					t.Fatalf("account ID[%d]: expected %q, got %q", i, want, creds.accountIDs[i])
-				}
-			}
 			if creds.clientID != tt.wantClientID {
 				t.Fatalf("expected client_id %q, got %q", tt.wantClientID, creds.clientID)
 			}
@@ -167,6 +131,60 @@ func TestParseURI(t *testing.T) {
 				t.Fatalf("expected refresh_token %q, got %q", tt.wantRefreshToken, creds.refreshToken)
 			}
 		})
+	}
+}
+
+func TestParseEntityTableName(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		wantTable   string
+		wantAccount []string
+	}{
+		{name: "no account override", raw: "campaigns", wantTable: "campaigns", wantAccount: nil},
+		{name: "single account", raw: "campaigns:acc1", wantTable: "campaigns", wantAccount: []string{"acc1"}},
+		{name: "multiple accounts", raw: "ads:acc1,acc2", wantTable: "ads", wantAccount: []string{"acc1", "acc2"}},
+		{name: "trims whitespace", raw: "pixels: acc1 , acc2 ", wantTable: "pixels", wantAccount: []string{"acc1", "acc2"}},
+		{name: "trailing colon no ids", raw: "campaigns:", wantTable: "campaigns", wantAccount: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			table, accounts := parseEntityTableName(tt.raw)
+			if table != tt.wantTable {
+				t.Fatalf("expected table %q, got %q", tt.wantTable, table)
+			}
+			if len(accounts) != len(tt.wantAccount) {
+				t.Fatalf("expected %d accounts, got %d (%v)", len(tt.wantAccount), len(accounts), accounts)
+			}
+			for i, want := range tt.wantAccount {
+				if accounts[i] != want {
+					t.Fatalf("account[%d]: expected %q, got %q", i, want, accounts[i])
+				}
+			}
+		})
+	}
+}
+
+func TestResolveAccountIDs(t *testing.T) {
+	// table-level account IDs are used as-is, without discovery
+	s := &RedditAdsSource{}
+	got, err := s.resolveAccountIDs(context.Background(), []string{"tbl1", "tbl2"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 || got[0] != "tbl1" {
+		t.Fatalf("expected table accounts [tbl1 tbl2], got %v", got)
+	}
+
+	// with no table accounts, a previously-discovered (cached) set is returned
+	// without re-discovering
+	cached := &RedditAdsSource{accountIDs: []string{"disc1"}}
+	got, err = cached.resolveAccountIDs(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0] != "disc1" {
+		t.Fatalf("expected cached [disc1], got %v", got)
 	}
 }
 

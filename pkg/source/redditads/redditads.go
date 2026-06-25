@@ -135,7 +135,6 @@ func (s *RedditAdsSource) Connect(ctx context.Context, uri string) error {
 	s.clientSecret = creds.clientSecret
 	s.refreshToken = creds.refreshToken
 	s.accessToken = creds.accessToken
-	s.accountIDs = creds.accountIDs
 
 	// Without a ready access token, mint one from the OAuth app credentials +
 	// refresh token. Reddit access tokens expire ~24h; the refresh token is
@@ -161,8 +160,61 @@ func (s *RedditAdsSource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithAllowNonIdempotentRetry(),
 	)
 
-	config.Debug("[REDDITADS] Connected successfully (accounts: %s, oauth_app_creds: %t)", strings.Join(s.accountIDs, ", "), s.clientID != "" && s.clientSecret != "")
+	config.Debug("[REDDITADS] Connected successfully (oauth_app_creds: %t)", s.clientID != "" && s.clientSecret != "")
 	return nil
+}
+
+// discoverAccountIDs lists every ad account the authenticated user can reach by
+// walking their businesses (/me/businesses) and each business's ad accounts.
+func (s *RedditAdsSource) discoverAccountIDs(ctx context.Context) ([]string, error) {
+	businessIDs, err := s.fetchIDs(ctx, "/me/businesses")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list businesses: %w", err)
+	}
+
+	var accountIDs []string
+	for _, businessID := range businessIDs {
+		ids, err := s.fetchIDs(ctx, fmt.Sprintf("/businesses/%s/ad_accounts", businessID))
+		if err != nil {
+			return nil, fmt.Errorf("failed to list ad accounts for business %s: %w", businessID, err)
+		}
+		accountIDs = append(accountIDs, ids...)
+	}
+	return accountIDs, nil
+}
+
+// fetchIDs collects the "id" of every item across all pages of a list endpoint.
+func (s *RedditAdsSource) fetchIDs(ctx context.Context, endpoint string) ([]string, error) {
+	var ids []string
+	currentURL := endpoint
+
+	for page := 1; page <= maxPages; page++ {
+		resp, err := s.client.R(ctx).Get(currentURL)
+		if err != nil {
+			return nil, err
+		}
+		if !resp.IsSuccess() {
+			return nil, fmt.Errorf("redditads API %s returned status %d: %s", endpoint, resp.StatusCode(), resp.String())
+		}
+
+		var body map[string]any
+		if err := jsonUseNumber(resp.Body(), &body); err != nil {
+			return nil, err
+		}
+
+		for _, item := range extractItems(body) {
+			if id, ok := item["id"].(string); ok && id != "" {
+				ids = append(ids, id)
+			}
+		}
+
+		next := getNextURL(body)
+		if next == "" {
+			break
+		}
+		currentURL = next
+	}
+	return ids, nil
 }
 
 func (s *RedditAdsSource) Close(ctx context.Context) error {
@@ -177,7 +229,6 @@ type redditAdsCredentials struct {
 	clientSecret string
 	refreshToken string
 	accessToken  string
-	accountIDs   []string
 }
 
 func parseURI(uri string) (*redditAdsCredentials, error) {
@@ -204,22 +255,11 @@ func parseURI(uri string) (*redditAdsCredentials, error) {
 		return nil, fmt.Errorf("redditads requires either access_token, or client_id + client_secret + refresh_token")
 	}
 
-	accountIDsRaw := values.Get("account_ids")
-	if accountIDsRaw == "" {
-		return nil, fmt.Errorf("account_ids is required in redditads URI")
-	}
-
-	accountIDs := splitAndTrim(accountIDsRaw, ",")
-	if len(accountIDs) == 0 {
-		return nil, fmt.Errorf("account_ids must contain at least one account ID")
-	}
-
 	return &redditAdsCredentials{
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		refreshToken: refreshToken,
 		accessToken:  accessToken,
-		accountIDs:   accountIDs,
 	}, nil
 }
 
@@ -276,14 +316,21 @@ func splitAndTrim(s string, sep string) []string {
 }
 
 func (s *RedditAdsSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
-	tableName := req.Name
-
-	if strings.HasPrefix(tableName, "custom:") {
-		return s.getCustomReportTable(tableName)
+	if strings.HasPrefix(req.Name, "custom:") {
+		return s.getCustomReportTable(req.Name)
 	}
+
+	// account_ids may be scoped per table via "<table>:<id1>,<id2>"; otherwise all
+	// ad accounts the authenticated user can access are used.
+	tableName, tableAccountIDs := parseEntityTableName(req.Name)
 
 	if !isValidEntityTable(tableName) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s, or custom:<level>,<breakdowns>:<metrics>)", tableName, strings.Join(entityTables, ", "))
+	}
+
+	accountIDs, err := s.resolveAccountIDs(ctx, tableAccountIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	// Reddit entity endpoints expose no server-side time filter, but most objects
@@ -305,9 +352,36 @@ func (s *RedditAdsSource) GetTable(ctx context.Context, req source.TableRequest)
 			return nil, fmt.Errorf("redditads source does not have a predefined schema; schema inference is required")
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, tableName, opts)
+			return s.read(ctx, tableName, accountIDs, opts)
 		},
 	}, nil
+}
+
+// parseEntityTableName splits "campaigns:acc1,acc2" into ("campaigns", ["acc1","acc2"]).
+// With no colon, the account IDs slice is empty.
+func parseEntityTableName(raw string) (string, []string) {
+	parts := strings.SplitN(raw, ":", 2)
+	if len(parts) == 2 {
+		return parts[0], splitAndTrim(parts[1], ",")
+	}
+	return parts[0], nil
+}
+
+// resolveAccountIDs prefers per-table account IDs (from "<table>:<ids>"); when
+// none are given it defaults to every ad account the authenticated user can
+// access, discovered once and cached.
+func (s *RedditAdsSource) resolveAccountIDs(ctx context.Context, tableAccountIDs []string) ([]string, error) {
+	if len(tableAccountIDs) > 0 {
+		return tableAccountIDs, nil
+	}
+	if len(s.accountIDs) == 0 {
+		ids, err := s.discoverAccountIDs(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to discover ad accounts: %w", err)
+		}
+		s.accountIDs = ids
+	}
+	return s.accountIDs, nil
 }
 
 func (s *RedditAdsSource) getCustomReportTable(tableName string) (source.SourceTable, error) {
@@ -337,7 +411,11 @@ func (s *RedditAdsSource) getCustomReportTable(tableName string) (source.SourceT
 			return nil, fmt.Errorf("redditads source does not have a predefined schema; schema inference is required")
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.readCustomReport(ctx, level, breakdowns, metrics, opts)
+			accountIDs, err := s.resolveAccountIDs(ctx, nil)
+			if err != nil {
+				return nil, err
+			}
+			return s.readCustomReport(ctx, accountIDs, level, breakdowns, metrics, opts)
 		},
 	}, nil
 }
@@ -346,7 +424,7 @@ func isValidEntityTable(table string) bool {
 	return slices.Contains(entityTables, table)
 }
 
-func (s *RedditAdsSource) read(ctx context.Context, table string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *RedditAdsSource) read(ctx context.Context, table string, accountIDs []string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -355,21 +433,21 @@ func (s *RedditAdsSource) read(ctx context.Context, table string, opts source.Re
 		var err error
 		switch table {
 		case "accounts":
-			err = s.readAccounts(ctx, opts, results)
+			err = s.readAccounts(ctx, accountIDs, opts, results)
 		case "campaigns":
-			err = s.readPerAccount(ctx, "/campaigns", "campaigns", opts, results)
+			err = s.readPerAccount(ctx, accountIDs, "/campaigns", "campaigns", opts, results)
 		case "ad_groups":
-			err = s.readPerAccount(ctx, "/ad_groups", "ad_groups", opts, results)
+			err = s.readPerAccount(ctx, accountIDs, "/ad_groups", "ad_groups", opts, results)
 		case "ads":
-			err = s.readPerAccount(ctx, "/ads", "ads", opts, results)
+			err = s.readPerAccount(ctx, accountIDs, "/ads", "ads", opts, results)
 		case "custom_audiences":
-			err = s.readPerAccount(ctx, "/custom_audiences", "custom_audiences", opts, results)
+			err = s.readPerAccount(ctx, accountIDs, "/custom_audiences", "custom_audiences", opts, results)
 		case "saved_audiences":
-			err = s.readPerAccount(ctx, "/saved_audiences", "saved_audiences", opts, results)
+			err = s.readPerAccount(ctx, accountIDs, "/saved_audiences", "saved_audiences", opts, results)
 		case "pixels":
-			err = s.readPerAccount(ctx, "/pixels", "pixels", opts, results)
+			err = s.readPerAccount(ctx, accountIDs, "/pixels", "pixels", opts, results)
 		case "funding_instruments":
-			err = s.readPerAccount(ctx, "/funding_instruments", "funding_instruments", opts, results)
+			err = s.readPerAccount(ctx, accountIDs, "/funding_instruments", "funding_instruments", opts, results)
 		default:
 			err = fmt.Errorf("unsupported table: %s", table)
 		}
@@ -569,11 +647,11 @@ func joinMapKeys(m map[string]bool) string {
 
 // --- entity table readers ---
 
-func (s *RedditAdsSource) readAccounts(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *RedditAdsSource) readAccounts(ctx context.Context, accountIDs []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[REDDITADS] reading accounts")
 
-	items := make([]map[string]any, 0, len(s.accountIDs))
-	for _, accountID := range s.accountIDs {
+	items := make([]map[string]any, 0, len(accountIDs))
+	for _, accountID := range accountIDs {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -615,7 +693,7 @@ func (s *RedditAdsSource) readAccounts(ctx context.Context, opts source.ReadOpti
 }
 
 // readPerAccount fetches a paginated sub-resource for each account in parallel.
-func (s *RedditAdsSource) readPerAccount(ctx context.Context, endpoint, label string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *RedditAdsSource) readPerAccount(ctx context.Context, accountIDs []string, endpoint, label string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[REDDITADS] reading %s", label)
 
 	sem := make(chan struct{}, workerCount)
@@ -623,7 +701,7 @@ func (s *RedditAdsSource) readPerAccount(ctx context.Context, endpoint, label st
 	var firstErr error
 
 	var wg sync.WaitGroup
-	for _, accountID := range s.accountIDs {
+	for _, accountID := range accountIDs {
 		select {
 		case <-ctx.Done():
 			mu.Lock()
@@ -735,7 +813,7 @@ func (s *RedditAdsSource) paginateEntity(ctx context.Context, accountID, endpoin
 
 // --- custom report reader ---
 
-func (s *RedditAdsSource) readCustomReport(ctx context.Context, level string, breakdowns, metrics []string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *RedditAdsSource) readCustomReport(ctx context.Context, accountIDs []string, level string, breakdowns, metrics []string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -756,7 +834,7 @@ func (s *RedditAdsSource) readCustomReport(ctx context.Context, level string, br
 		var firstErr error
 
 		var wg sync.WaitGroup
-		for _, accountID := range s.accountIDs {
+		for _, accountID := range accountIDs {
 			select {
 			case <-ctx.Done():
 				mu.Lock()
