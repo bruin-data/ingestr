@@ -474,6 +474,8 @@ func TestGetTable_AttributionTypesGuard(t *testing.T) {
 		{"creatives accepts attribution_types", "creatives?attribution_types=click,engaged_ad", false},
 		{"events rejects attribution_types", "events?attribution_types=click", true},
 		{"events still accepts app_token", "events?app_token=abc123", false},
+		{"rejects unknown attribution_types value", "campaigns?attribution_types=impresion", true},
+		{"rejects partially unknown attribution_types", "creatives?attribution_types=click,bogus", true},
 	}
 
 	for _, tt := range tests {
