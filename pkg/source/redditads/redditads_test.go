@@ -98,8 +98,8 @@ func TestParseURI(t *testing.T) {
 		},
 		{
 			name:      "token with special characters",
-			uri:       "redditads://?access_token=abc.DEF-123_456",
-			wantToken: "abc.DEF-123_456",
+			uri:       "redditads://?access_token=tok.A-1_2",
+			wantToken: "tok.A-1_2",
 		},
 	}
 
