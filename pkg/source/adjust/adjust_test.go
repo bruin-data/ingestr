@@ -69,26 +69,39 @@ func TestParseAdjustURI(t *testing.T) {
 	}
 }
 
-func TestParseTableAppToken(t *testing.T) {
+func TestParseTableSpec(t *testing.T) {
 	tests := []struct {
-		name          string
-		table         string
-		wantBase      string
-		wantAppTokens string
+		name            string
+		table           string
+		wantBase        string
+		wantAppTokens   string
+		wantAttribution string
+		wantErr         bool
 	}{
-		{"no app_token", "campaigns", "campaigns", ""},
-		{"single token", "campaigns:abc123", "campaigns", "abc123"},
-		{"multiple tokens", "creatives:abc123,def456", "creatives", "abc123,def456"},
-		{"events with token", "events:tok1", "events", "tok1"},
-		{"custom table untouched", "custom:day:installs", "custom:day:installs", ""},
-		{"custom with filters untouched", "custom:day:installs:app_token__in=abc", "custom:day:installs:app_token__in=abc", ""},
+		{name: "no app_token", table: "campaigns", wantBase: "campaigns"},
+		{name: "single token", table: "campaigns:abc123", wantBase: "campaigns", wantAppTokens: "abc123"},
+		{name: "multiple tokens", table: "creatives:abc123,def456", wantBase: "creatives", wantAppTokens: "abc123,def456"},
+		{name: "events with token", table: "events:tok1", wantBase: "events", wantAppTokens: "tok1"},
+		{name: "colon form is app token only", table: "creatives:click", wantBase: "creatives", wantAppTokens: "click"},
+		{name: "query attribution", table: "creatives?attribution_types=click,engaged_ad", wantBase: "creatives", wantAttribution: "click,engaged_ad"},
+		{name: "query token and attribution", table: "creatives?app_token=abc123&attribution_types=click", wantBase: "creatives", wantAppTokens: "abc123", wantAttribution: "click"},
+		{name: "query repeated keys", table: "campaigns?app_token=abc&app_token=def&attribution_types=click&attribution_types=impression", wantBase: "campaigns", wantAppTokens: "abc,def", wantAttribution: "click,impression"},
+		{name: "query unknown key", table: "campaigns?foo=bar", wantErr: true},
+		{name: "custom table untouched", table: "custom:day:installs", wantBase: "custom:day:installs"},
+		{name: "custom with filters untouched", table: "custom:day:installs:app_token__in=abc", wantBase: "custom:day:installs:app_token__in=abc"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			base, tokens := parseTableAppToken(tt.table)
+			base, tokens, attribution, err := parseTableSpec(tt.table)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
 			assert.Equal(t, tt.wantBase, base)
 			assert.Equal(t, tt.wantAppTokens, tokens)
+			assert.Equal(t, tt.wantAttribution, attribution)
 		})
 	}
 }
@@ -445,6 +458,34 @@ func TestGetTable_Strategies(t *testing.T) {
 			assert.Equal(t, tt.strategy, dst.TableStrategy)
 			assert.Equal(t, tt.wantPKs, dst.TablePrimaryKeys)
 			assert.Equal(t, tt.wantKey, dst.TableIncrementalKey)
+		})
+	}
+}
+
+func TestGetTable_AttributionTypesGuard(t *testing.T) {
+	s := NewAdjustSource()
+
+	tests := []struct {
+		name    string
+		table   string
+		wantErr bool
+	}{
+		{"campaigns accepts attribution_types", "campaigns?attribution_types=click", false},
+		{"creatives accepts attribution_types", "creatives?attribution_types=click,engaged_ad", false},
+		{"events rejects attribution_types", "events?attribution_types=click", true},
+		{"events still accepts app_token", "events?app_token=abc123", false},
+		{"unknown attribution_types value is left to Adjust", "campaigns?attribution_types=impresion", false},
+		{"custom accepts attribution_types via filters", "custom:day,campaign:installs:attribution_types=click,engaged_ad", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.GetTable(context.Background(), source.TableRequest{Name: tt.table})
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }
