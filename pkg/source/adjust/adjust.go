@@ -13,12 +13,17 @@ import (
 	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablespec"
 )
 
 const (
 	baseURL        = "https://automate.adjust.com/reports-service"
 	rateLimit      = 10
 	rateLimitBurst = 5
+
+	// defaultAttributionTypes pins campaigns/creatives to ingestr's historical
+	// behaviour; Adjust's API-side default changes (2026-07-13) to include all types.
+	defaultAttributionTypes = "click,engaged_ad"
 )
 
 var supportedTables = []string{
@@ -71,23 +76,59 @@ func (s *AdjustSource) Close(ctx context.Context) error {
 	return nil
 }
 
-func parseTableAppToken(table string) (baseName string, appTokens string) {
+// adjustParams is the URL-style query-parameter form of the source table and
+// the single source of truth for which parameters are accepted.
+type adjustParams struct {
+	AppToken         []string `mapstructure:"app_token"`
+	AttributionTypes []string `mapstructure:"attribution_types"`
+}
+
+// parseTableSpec parses a source table in URL-style form ("creatives?app_token=abc&attribution_types=click")
+// or the legacy "creatives:<app_token>" colon form (app token only); custom tables are returned verbatim.
+func parseTableSpec(table string) (baseName, appTokens, attributionTypes string, err error) {
 	if strings.HasPrefix(table, "custom:") {
-		return table, ""
+		return table, "", "", nil
 	}
+
+	var p adjustParams
+	path, hasParams, err := tablespec.Parse(table, &p, tablespec.WithListSeparator(","))
+	if err != nil {
+		return "", "", "", err
+	}
+	if hasParams {
+		return path, strings.Join(p.AppToken, ","), strings.Join(p.AttributionTypes, ","), nil
+	}
+
 	parts := strings.SplitN(table, ":", 2)
 	baseName = parts[0]
 	if len(parts) == 2 {
 		appTokens = parts[1]
 	}
-	return baseName, appTokens
+	return baseName, appTokens, "", nil
+}
+
+// resolveAttributionTypes returns the attribution_types to send (empty = let the
+// API decide). DEPRECATED(2026-07-13): to adopt Adjust's API default, change the
+// pinned return below to `return ""`; callers already skip the param when empty.
+func resolveAttributionTypes(attributionTypes string) string {
+	if attributionTypes == "" {
+		return defaultAttributionTypes
+	}
+	return attributionTypes
 }
 
 func (s *AdjustSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
-	tableName, appTokens := parseTableAppToken(req.Name)
+	tableName, appTokens, attributionTypes, err := parseTableSpec(req.Name)
+	if err != nil {
+		return nil, err
+	}
 
 	if !isValidTable(tableName) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", tableName, strings.Join(supportedTables, ", "))
+	}
+
+	if attributionTypes != "" && tableName != "campaigns" && tableName != "creatives" {
+		return nil, fmt.Errorf("attribution_types is only supported for the campaigns and creatives tables; for custom tables pass it in the filters section")
 	}
 
 	var primaryKeys []string
@@ -136,12 +177,12 @@ func (s *AdjustSource) GetTable(ctx context.Context, req source.TableRequest) (s
 			return nil, fmt.Errorf("adjust source does not have a predefined schema; schema inference is required")
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, tableName, appTokens, opts)
+			return s.read(ctx, tableName, appTokens, attributionTypes, opts)
 		},
 	}, nil
 }
 
-func (s *AdjustSource) read(ctx context.Context, table string, appTokens string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *AdjustSource) read(ctx context.Context, table string, appTokens, attributionTypes string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -152,9 +193,9 @@ func (s *AdjustSource) read(ctx context.Context, table string, appTokens string,
 		case table == "events":
 			err = s.readEvents(ctx, appTokens, opts, results)
 		case table == "campaigns":
-			err = s.readCampaigns(ctx, appTokens, opts, results)
+			err = s.readCampaigns(ctx, appTokens, attributionTypes, opts, results)
 		case table == "creatives":
-			err = s.readCreatives(ctx, appTokens, opts, results)
+			err = s.readCreatives(ctx, appTokens, attributionTypes, opts, results)
 		case strings.HasPrefix(table, "custom:"):
 			err = s.readCustom(ctx, table, appTokens, opts, results)
 		default:
@@ -280,7 +321,7 @@ var defaultMetrics = []string{
 	"all_revenue_total_d21",
 }
 
-func (s *AdjustSource) readCampaigns(ctx context.Context, appTokens string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *AdjustSource) readCampaigns(ctx context.Context, appTokens, attributionTypes string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[ADJUST] Fetching campaigns")
 
 	datePeriod, err := s.buildDatePeriod(&opts)
@@ -292,6 +333,10 @@ func (s *AdjustSource) readCampaigns(ctx context.Context, appTokens string, opts
 		SetQueryParam("dimensions", strings.Join(defaultDimensions, ",")).
 		SetQueryParam("metrics", strings.Join(defaultMetrics, ",")).
 		SetQueryParam("date_period", datePeriod)
+
+	if at := resolveAttributionTypes(attributionTypes); at != "" {
+		req.SetQueryParam("attribution_types", at)
+	}
 
 	if appTokens != "" {
 		req.SetQueryParam("app_token__in", appTokens)
@@ -332,7 +377,7 @@ var creativePrimaryKeys = []string{"campaign", "day", "app", "store_type", "chan
 
 var creativeDimensions = []string{"campaign", "day", "app", "app_token", "store_type", "channel", "country", "adgroup", "creative"}
 
-func (s *AdjustSource) readCreatives(ctx context.Context, appTokens string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *AdjustSource) readCreatives(ctx context.Context, appTokens, attributionTypes string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[ADJUST] Fetching creatives")
 
 	datePeriod, err := s.buildDatePeriod(&opts)
@@ -344,6 +389,10 @@ func (s *AdjustSource) readCreatives(ctx context.Context, appTokens string, opts
 		SetQueryParam("dimensions", strings.Join(creativeDimensions, ",")).
 		SetQueryParam("metrics", strings.Join(defaultMetrics, ",")).
 		SetQueryParam("date_period", datePeriod)
+
+	if at := resolveAttributionTypes(attributionTypes); at != "" {
+		req.SetQueryParam("attribution_types", at)
+	}
 
 	if appTokens != "" {
 		req.SetQueryParam("app_token__in", appTokens)
