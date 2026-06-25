@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -243,13 +244,7 @@ func (s *RedditAdsSource) getCustomReportTable(tableName string) (source.SourceT
 	levelIDField := levelIDFields[level]
 	primaryKeys := append([]string{levelIDField}, breakdowns...)
 
-	hasDateBreakdown := false
-	for _, b := range breakdowns {
-		if b == "date" {
-			hasDateBreakdown = true
-			break
-		}
-	}
+	hasDateBreakdown := slices.Contains(breakdowns, "date")
 
 	incrementalKey := ""
 	strategy := config.StrategyMerge
@@ -273,12 +268,7 @@ func (s *RedditAdsSource) getCustomReportTable(tableName string) (source.SourceT
 }
 
 func isValidEntityTable(table string) bool {
-	for _, t := range entityTables {
-		if t == table {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(entityTables, table)
 }
 
 func (s *RedditAdsSource) read(ctx context.Context, table string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -325,15 +315,15 @@ func jsonUseNumber(data []byte, v any) error {
 	return dec.Decode(v)
 }
 
-func extractItems(body map[string]interface{}) []map[string]interface{} {
-	dataRaw, ok := body["data"].([]interface{})
+func extractItems(body map[string]any) []map[string]any {
+	dataRaw, ok := body["data"].([]any)
 	if !ok {
 		return nil
 	}
 
-	items := make([]map[string]interface{}, 0, len(dataRaw))
+	items := make([]map[string]any, 0, len(dataRaw))
 	for _, d := range dataRaw {
-		if item, ok := d.(map[string]interface{}); ok {
+		if item, ok := d.(map[string]any); ok {
 			items = append(items, item)
 		}
 	}
@@ -343,12 +333,12 @@ func extractItems(body map[string]interface{}) []map[string]interface{} {
 // filterItemsByInterval keeps items whose incrementalKey timestamp falls within
 // [start, end]. Items missing the key are kept (so tables without the field are
 // unaffected). A no-op when no key or no interval is set.
-func filterItemsByInterval(items []map[string]interface{}, incrementalKey string, start, end *time.Time) []map[string]interface{} {
+func filterItemsByInterval(items []map[string]any, incrementalKey string, start, end *time.Time) []map[string]any {
 	if incrementalKey == "" || (start == nil && end == nil) {
 		return items
 	}
 
-	filtered := make([]map[string]interface{}, 0, len(items))
+	filtered := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		raw, ok := item[incrementalKey]
 		if !ok || raw == nil {
@@ -372,7 +362,7 @@ func filterItemsByInterval(items []map[string]interface{}, incrementalKey string
 	return filtered
 }
 
-func parseTimestamp(v interface{}) (time.Time, bool) {
+func parseTimestamp(v any) (time.Time, bool) {
 	switch t := v.(type) {
 	case time.Time:
 		return t, true
@@ -389,27 +379,27 @@ func parseTimestamp(v interface{}) (time.Time, bool) {
 // extractReportItems pulls the rows from a v3 report response, where the
 // records live under data.metrics (unlike entity endpoints, where data is the
 // array itself).
-func extractReportItems(body map[string]interface{}) []map[string]interface{} {
-	data, ok := body["data"].(map[string]interface{})
+func extractReportItems(body map[string]any) []map[string]any {
+	data, ok := body["data"].(map[string]any)
 	if !ok {
 		return nil
 	}
-	metricsRaw, ok := data["metrics"].([]interface{})
+	metricsRaw, ok := data["metrics"].([]any)
 	if !ok {
 		return nil
 	}
 
-	items := make([]map[string]interface{}, 0, len(metricsRaw))
+	items := make([]map[string]any, 0, len(metricsRaw))
 	for _, m := range metricsRaw {
-		if item, ok := m.(map[string]interface{}); ok {
+		if item, ok := m.(map[string]any); ok {
 			items = append(items, item)
 		}
 	}
 	return items
 }
 
-func getNextURL(body map[string]interface{}) string {
-	pagination, ok := body["pagination"].(map[string]interface{})
+func getNextURL(body map[string]any) string {
+	pagination, ok := body["pagination"].(map[string]any)
 	if !ok {
 		return ""
 	}
@@ -420,7 +410,7 @@ func getNextURL(body map[string]interface{}) string {
 	return nextURL
 }
 
-func convertMicrocurrency(items []map[string]interface{}, metrics []string) {
+func convertMicrocurrency(items []map[string]any, metrics []string) {
 	requested := make(map[string]bool)
 	for _, m := range metrics {
 		requested[strings.ToLower(m)] = true
@@ -507,7 +497,7 @@ func joinMapKeys(m map[string]bool) string {
 func (s *RedditAdsSource) readAccounts(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[REDDITADS] reading accounts")
 
-	items := make([]map[string]interface{}, 0, len(s.accountIDs))
+	items := make([]map[string]any, 0, len(s.accountIDs))
 	for _, accountID := range s.accountIDs {
 		select {
 		case <-ctx.Done():
@@ -524,12 +514,12 @@ func (s *RedditAdsSource) readAccounts(ctx context.Context, opts source.ReadOpti
 			return fmt.Errorf("redditads API /ad_accounts/%s returned status %d: %s", accountID, resp.StatusCode(), resp.String())
 		}
 
-		var body map[string]interface{}
+		var body map[string]any
 		if err := jsonUseNumber(resp.Body(), &body); err != nil {
 			return fmt.Errorf("failed to parse ad account response: %w", err)
 		}
 
-		if item, ok := body["data"].(map[string]interface{}); ok {
+		if item, ok := body["data"].(map[string]any); ok {
 			items = append(items, item)
 		}
 	}
@@ -561,7 +551,14 @@ func (s *RedditAdsSource) readPerAccount(ctx context.Context, endpoint, label st
 	for _, accountID := range s.accountIDs {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			mu.Lock()
+			if firstErr == nil {
+				firstErr = ctx.Err()
+			}
+			mu.Unlock()
+			// Stop spawning, but wait for already-running goroutines below so
+			// none send on results after the caller closes the channel.
+			goto done
 		default:
 		}
 
@@ -581,6 +578,7 @@ func (s *RedditAdsSource) readPerAccount(ctx context.Context, endpoint, label st
 		}(accountID)
 	}
 
+done:
 	wg.Wait()
 	return firstErr
 }
@@ -616,7 +614,7 @@ func (s *RedditAdsSource) paginateEntity(ctx context.Context, accountID, endpoin
 			return fmt.Errorf("redditads API %s returned status %d: %s", fullEndpoint, resp.StatusCode(), resp.String())
 		}
 
-		var body map[string]interface{}
+		var body map[string]any
 		if err := jsonUseNumber(resp.Body(), &body); err != nil {
 			return fmt.Errorf("failed to parse %s response: %w", label, err)
 		}
@@ -686,8 +684,14 @@ func (s *RedditAdsSource) readCustomReport(ctx context.Context, level string, br
 		for _, accountID := range s.accountIDs {
 			select {
 			case <-ctx.Done():
-				results <- source.RecordBatchResult{Err: ctx.Err()}
-				return
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = ctx.Err()
+				}
+				mu.Unlock()
+				// Stop spawning, but wait for in-flight goroutines below so none
+				// send on results after the deferred close.
+				goto done
 			default:
 			}
 
@@ -707,6 +711,7 @@ func (s *RedditAdsSource) readCustomReport(ctx context.Context, level string, br
 			}(accountID)
 		}
 
+	done:
 		wg.Wait()
 		if firstErr != nil {
 			results <- source.RecordBatchResult{Err: firstErr}
@@ -731,8 +736,8 @@ func (s *RedditAdsSource) fetchReport(ctx context.Context, accountID, level stri
 
 	// starts_at/ends_at must be hourly-aligned RFC3339 (YYYY-MM-DDTHH:00:00Z) — the
 	// API rejects any non-zero minute/second with 400. Truncate to the hour.
-	body := map[string]interface{}{
-		"data": map[string]interface{}{
+	body := map[string]any{
+		"data": map[string]any{
 			"breakdowns": reqBreakdowns,
 			"fields":     metrics,
 			"starts_at":  startDate.UTC().Truncate(time.Hour).Format(time.RFC3339),
@@ -757,7 +762,7 @@ func (s *RedditAdsSource) fetchReport(ctx context.Context, accountID, level stri
 		return fmt.Errorf("redditads API %s returned status %d: %s", endpoint, resp.StatusCode(), resp.String())
 	}
 
-	var respBody map[string]interface{}
+	var respBody map[string]any
 	if err := jsonUseNumber(resp.Body(), &respBody); err != nil {
 		return fmt.Errorf("failed to parse report response: %w", err)
 	}
