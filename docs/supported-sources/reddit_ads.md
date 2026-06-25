@@ -16,13 +16,17 @@ redditads://?access_token=<access_token>&account_ids=<account_ids>
 Reddit Ads requires an `access_token` and `account_ids` to retrieve data from the [Reddit Ads API v3](https://ads-api.reddit.com/docs/v3/). Please follow these steps to obtain the `access_token` and `account_ids`.
 
 ### Create a Reddit developer application to obtain an access token
-1. Go to [Reddit App Preferences](https://www.reddit.com/prefs/apps) and log in with your Reddit account.
-2. Click "create another app..." at the bottom of the page.
-3. Fill out the form:
-   - **Name**: Your application name
-   - **Type**: Select "web app"
-   - **Redirect URI**: A valid redirect URI for your OAuth flow (e.g., `http://localhost:8080/callback`)
-4. Click "create app" and note your **client_id** (shown under the app name) and **client_secret**.
+
+> [!IMPORTANT]
+> The Reddit Ads API only works with applications created through **Reddit Business Manager**. Legacy apps created at `reddit.com/prefs/apps` are **not** authorized for the Ads API — authorization succeeds but the token request fails with `403` when the `adsread` scope is requested.
+
+1. Go to the [Reddit Ads Dashboard](https://ads.reddit.com/) and log in with an account that has access to your ad accounts.
+2. Open **Business Manager** from the account menu, then select **Developer Applications**.
+3. Click **Create a new app** and fill out the form:
+   - **App name**: Your application name
+   - **Redirect uri**: `http://localhost:8080/callback`
+   - **Primary contact**: a business admin on the account
+4. Accept the Ads API Terms and click **Create App**, then open the app to find your **client_id** (App ID) and **client_secret**.
 
 #### Authorize your app and obtain access token
 1. Direct the user to the Reddit authorization URL:
@@ -48,18 +52,20 @@ Reddit Ads source allows ingesting the following sources into separate tables:
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 | ----- | -- | ------- | ------------ | ------- |
-| [accounts](https://ads-api.reddit.com/docs/v3/) | id | - | replace | Retrieves all ad accounts accessible by the authenticated user. |
-| [campaigns](https://ads-api.reddit.com/docs/v3/) | id | - | replace | Retrieves campaigns for each ad account. |
-| [ad_groups](https://ads-api.reddit.com/docs/v3/) | id | - | replace | Retrieves ad groups for each ad account. |
-| [ads](https://ads-api.reddit.com/docs/v3/) | id | - | replace | Retrieves ads for each ad account. |
-| [posts](https://ads-api.reddit.com/docs/v3/) | id | - | replace | Retrieves ad posts (creatives) for each ad account. |
-| [custom_audiences](https://ads-api.reddit.com/docs/v3/) | id | - | replace | Retrieves custom audiences for targeting. |
-| [saved_audiences](https://ads-api.reddit.com/docs/v3/) | id | - | replace | Retrieves saved audience configurations. |
-| [pixels](https://ads-api.reddit.com/docs/v3/) | id | - | replace | Retrieves conversion tracking pixels. |
-| [funding_instruments](https://ads-api.reddit.com/docs/v3/) | id | - | replace | Retrieves funding instruments (payment methods) for each ad account. |
-| [custom](https://ads-api.reddit.com/docs/v3/) | [level_id, breakdowns] | date | merge | Custom reports allow you to retrieve performance data based on specific levels, breakdowns, and metrics. |
+| accounts | id | modified_at | merge | Retrieves the ad accounts listed in `account_ids`. |
+| campaigns | id | modified_at | merge | Retrieves campaigns for each ad account. |
+| ad_groups | id | modified_at | merge | Retrieves ad groups for each ad account. |
+| ads | id | modified_at | merge | Retrieves ads for each ad account. |
+| custom_audiences | id | modified_at | merge | Retrieves custom audiences for targeting. |
+| saved_audiences | id | updated_at | merge | Retrieves saved audience configurations. |
+| pixels | id | modified_at | merge | Retrieves conversion tracking pixels. |
+| funding_instruments | id | - | replace | Retrieves funding instruments (payment methods) for each ad account. |
+| custom | [level_id, breakdowns] | date | merge | Custom reports of performance metrics by level, breakdowns, and metrics. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+> [!NOTE]
+> The entity tables (except `funding_instruments`) are filtered client-side on their modification timestamp (`modified_at`, or `updated_at` for `saved_audiences`) when `--interval-start`/`--interval-end` are provided, and use a `merge` write disposition keyed on `id`. With no interval, all records are loaded. `funding_instruments` has no modification timestamp, so it is always fully replaced.
 
 ### Example
 
